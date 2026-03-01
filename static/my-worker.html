@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Worker - Veo Web App</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        .container { max-width: 720px; margin: 0 auto; }
+        h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+        .subtitle { color: #888; margin-bottom: 2rem; font-size: 0.95rem; }
+        
+        .card {
+            background: #151515;
+            border: 1px solid #252525;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .card h2 { font-size: 1.1rem; margin-bottom: 0.75rem; }
+        .card p { color: #999; font-size: 0.9rem; line-height: 1.5; margin-bottom: 1rem; }
+        
+        .steps { counter-reset: step; }
+        .step {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.25rem;
+            align-items: flex-start;
+        }
+        .step-num {
+            background: #1a1a2e;
+            color: #6366f1;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8rem;
+            font-weight: 600;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+        .step-content { flex: 1; }
+        .step-content strong { display: block; margin-bottom: 0.25rem; }
+        .step-content span { color: #888; font-size: 0.85rem; }
+        
+        .code-block {
+            background: #0d0d0d;
+            border: 1px solid #222;
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 0.75rem 0;
+            position: relative;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+        }
+        .code-block code { color: #a5f3fc; white-space: pre-wrap; word-break: break-all; }
+        .code-block .copy-btn {
+            position: absolute;
+            top: 0.5rem;
+            right: 0.5rem;
+            background: #252525;
+            border: 1px solid #333;
+            color: #999;
+            padding: 0.3rem 0.6rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.75rem;
+        }
+        .code-block .copy-btn:hover { background: #333; color: #fff; }
+        
+        .tab-bar {
+            display: flex;
+            gap: 0;
+            margin-bottom: 0;
+        }
+        .tab {
+            padding: 0.5rem 1rem;
+            background: transparent;
+            border: 1px solid #252525;
+            border-bottom: none;
+            color: #888;
+            cursor: pointer;
+            font-size: 0.85rem;
+            border-radius: 8px 8px 0 0;
+        }
+        .tab.active {
+            background: #0d0d0d;
+            color: #fff;
+            border-color: #222;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        
+        .token-display {
+            background: #0d0d0d;
+            border: 1px solid #222;
+            border-radius: 8px;
+            padding: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin: 0.75rem 0;
+        }
+        .token-value {
+            font-family: monospace;
+            color: #fbbf24;
+            font-size: 0.9rem;
+        }
+        
+        .btn {
+            background: #6366f1;
+            color: white;
+            border: none;
+            padding: 0.6rem 1.2rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+        .btn:hover { background: #5558e6; }
+        .btn-sm { padding: 0.35rem 0.75rem; font-size: 0.8rem; }
+        .btn-danger { background: #ef4444; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn-outline {
+            background: transparent;
+            border: 1px solid #333;
+            color: #ccc;
+        }
+        .btn-outline:hover { background: #1a1a1a; }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 0.5rem;
+        }
+        .status-online { background: #22c55e; }
+        .status-offline { background: #666; }
+        
+        .token-list { list-style: none; }
+        .token-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid #1a1a1a;
+        }
+        .token-item:last-child { border-bottom: none; }
+        .token-meta { font-size: 0.8rem; color: #666; margin-top: 0.25rem; }
+        
+        .requirements {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.5rem;
+            margin: 1rem 0;
+        }
+        .req {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.85rem;
+            color: #999;
+        }
+        .req-icon { color: #22c55e; }
+        
+        .warning {
+            background: #1a1700;
+            border: 1px solid #423500;
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            font-size: 0.85rem;
+            color: #fbbf24;
+            margin: 1rem 0;
+        }
+
+        #newTokenDisplay {
+            display: none;
+            background: #0a1a0a;
+            border: 1px solid #1a4a1a;
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+        #newTokenDisplay .token-full {
+            font-family: monospace;
+            color: #4ade80;
+            font-size: 0.85rem;
+            word-break: break-all;
+            padding: 0.5rem;
+            background: #050f05;
+            border-radius: 4px;
+            margin: 0.5rem 0;
+        }
+        #newTokenDisplay .warning-text {
+            color: #fbbf24;
+            font-size: 0.8rem;
+        }
+        
+        @media (max-width: 600px) {
+            body { padding: 1rem; }
+            .requirements { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Run Your Own Worker</h1>
+        <p class="subtitle">Process Flow jobs on your computer using your own Google account</p>
+
+        <!-- Requirements -->
+        <div class="card">
+            <h2>Requirements</h2>
+            <div class="requirements">
+                <div class="req"><span class="req-icon">&#10003;</span> Google Chrome installed</div>
+                <div class="req"><span class="req-icon">&#10003;</span> Logged into Google in Chrome</div>
+                <div class="req"><span class="req-icon">&#10003;</span> Python 3.9+</div>
+                <div class="req"><span class="req-icon">&#10003;</span> ~200 MB disk space</div>
+            </div>
+        </div>
+
+        <!-- Token Management -->
+        <div class="card">
+            <h2>Worker Token</h2>
+            <p>Your worker uses this token to securely access only your jobs.</p>
+
+            <div id="tokenSection">
+                <ul class="token-list" id="tokenList">
+                    <li style="color: #666; padding: 1rem 0; text-align: center;">Loading tokens...</li>
+                </ul>
+            </div>
+
+            <div id="newTokenDisplay">
+                <strong style="color: #4ade80;">New token generated!</strong>
+                <div class="token-full" id="newTokenValue"></div>
+                <p class="warning-text">Copy this now — you won't see it again.</p>
+                <button class="btn btn-sm" onclick="copyNewToken()">Copy Token</button>
+            </div>
+
+            <div style="margin-top: 1rem;">
+                <button class="btn" onclick="generateToken()">Generate New Token</button>
+            </div>
+        </div>
+
+        <!-- Setup Instructions -->
+        <div class="card">
+            <h2>Quick Setup</h2>
+            <p>Open a terminal and paste the command for your system:</p>
+
+            <div class="tab-bar">
+                <button class="tab active" onclick="switchTab('windows')">Windows</button>
+                <button class="tab" onclick="switchTab('mac')">Mac / Linux</button>
+            </div>
+
+            <div id="tab-windows" class="tab-content active">
+                <div class="code-block">
+                    <code id="cmd-windows">powershell -c "irm https://veo-web-app-v3.onrender.com/api/user-worker/download/setup.ps1 | iex"</code>
+                    <button class="copy-btn" onclick="copyCommand('cmd-windows')">Copy</button>
+                </div>
+                <p style="font-size: 0.8rem; color: #666; margin-top: 0.5rem;">
+                    Right-click PowerShell → Run as Administrator if needed
+                </p>
+            </div>
+
+            <div id="tab-mac" class="tab-content">
+                <div class="code-block">
+                    <code id="cmd-mac">curl -sL https://veo-web-app-v3.onrender.com/api/user-worker/download/setup.sh | bash</code>
+                    <button class="copy-btn" onclick="copyCommand('cmd-mac')">Copy</button>
+                </div>
+            </div>
+
+            <p id="tokenHint" style="font-size: 0.85rem; color: #a78bfa; margin-top: 0.75rem; display: none;">
+                💡 Generate a token above — the command will auto-include it so you won't need to paste it during setup.
+            </p>
+        </div>
+
+        <!-- How It Works -->
+        <div class="card">
+            <h2>How It Works</h2>
+            <div class="steps">
+                <div class="step">
+                    <div class="step-num">1</div>
+                    <div class="step-content">
+                        <strong>Generate a token above</strong>
+                        <span>This links your worker to your account. The setup command auto-includes it.</span>
+                    </div>
+                </div>
+                <div class="step">
+                    <div class="step-num">2</div>
+                    <div class="step-content">
+                        <strong>Run the setup command</strong>
+                        <span>Installs Python packages, Playwright browser, and downloads the worker — all automatic. You'll pick which Chrome profile to use.</span>
+                    </div>
+                </div>
+                <div class="step">
+                    <div class="step-num">3</div>
+                    <div class="step-content">
+                        <strong>Select "Flow" as your method</strong>
+                        <span>In the main app's Settings card, set Method to <strong>Flow</strong>. Then submit your job as normal.</span>
+                    </div>
+                </div>
+                <div class="step">
+                    <div class="step-num">4</div>
+                    <div class="step-content">
+                        <strong>Worker processes your job</strong>
+                        <span>Your worker picks up the job, opens Google Flow, generates clips, and uploads the results back to the web app.</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="warning">
+                Your Chrome can stay open normally. The worker uses a copy of your Chrome profile, not the original.
+            </div>
+        </div>
+
+        <!-- Re-run options -->
+        <div class="card">
+            <h2>After Setup</h2>
+            <p>Your worker is installed at:</p>
+            <div style="margin-bottom:0.5rem;">
+                <code style="color: #a5f3fc;">Windows: C:\Users\YourName\veo-worker\</code><br>
+                <code style="color: #a5f3fc;">Mac/Linux: ~/veo-worker/</code>
+            </div>
+            
+            <div style="margin-top: 1rem;">
+                <strong style="font-size: 0.9rem;">Start worker (Windows):</strong>
+                <div class="code-block">
+                    <code>cd $HOME\veo-worker; python flow_worker.py --single</code>
+                </div>
+            </div>
+            
+            <div style="margin-top: 0.75rem;">
+                <strong style="font-size: 0.9rem;">Start worker (Mac/Linux):</strong>
+                <div class="code-block">
+                    <code>cd ~/veo-worker && python3 flow_worker.py --single</code>
+                </div>
+            </div>
+            
+            <div style="margin-top: 1rem;">
+                <strong style="font-size: 0.9rem;">Switch Chrome profile:</strong>
+                <div class="code-block">
+                    <code>cd ~/veo-worker && python setup_worker.py --reselect-profile</code>
+                </div>
+            </div>
+            
+            <div style="margin-top: 1rem;">
+                <strong style="font-size: 0.9rem;">Update worker:</strong>
+                <div class="code-block">
+                    <code>cd ~/veo-worker && python setup_worker.py --update</code>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '';  // Same origin
+
+        // Tab switching
+        function switchTab(tab) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('tab-' + tab).classList.add('active');
+        }
+
+        // Copy command
+        function copyCommand(id) {
+            const text = document.getElementById(id).textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                const btn = event.target;
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = 'Copy', 2000);
+            });
+        }
+
+        // Load tokens
+        async function loadTokens() {
+            try {
+                const resp = await fetch(API_BASE + '/api/user-worker/tokens', { credentials: 'include' });
+                if (!resp.ok) {
+                    if (resp.status === 401) {
+                        document.getElementById('tokenList').innerHTML = 
+                            '<li style="color: #ef4444; padding: 1rem 0;">Please log in first</li>';
+                        return;
+                    }
+                    throw new Error('Failed to load tokens');
+                }
+                const data = await resp.json();
+                renderTokens(data.tokens);
+            } catch (e) {
+                document.getElementById('tokenList').innerHTML = 
+                    '<li style="color: #666; padding: 1rem 0;">Could not load tokens</li>';
+            }
+        }
+
+        function renderTokens(tokens) {
+            const list = document.getElementById('tokenList');
+            if (!tokens.length) {
+                list.innerHTML = '<li style="color: #666; padding: 1rem 0; text-align: center;">No tokens yet. Generate one to get started.</li>';
+                document.getElementById('tokenHint').style.display = 'block';
+                return;
+            }
+            document.getElementById('tokenHint').style.display = 'none';
+            list.innerHTML = tokens.map(t => {
+                const lastSeen = t.last_seen 
+                    ? new Date(t.last_seen).toLocaleString()
+                    : 'Never';
+                const isOnline = t.last_seen && 
+                    (Date.now() - new Date(t.last_seen).getTime()) < 5 * 60 * 1000;
+                const statusClass = isOnline ? 'status-online' : 'status-offline';
+                const statusText = isOnline ? 'Online' : 'Last seen: ' + lastSeen;
+                const tokenPrefix = t.id.split('...')[0];
+                
+                return `
+                    <li class="token-item">
+                        <div>
+                            <div>
+                                <span class="status-dot ${statusClass}"></span>
+                                <strong>${t.name}</strong>
+                                <span style="color: #666; font-family: monospace; margin-left: 0.5rem;">${t.id}</span>
+                            </div>
+                            <div class="token-meta">${statusText}</div>
+                        </div>
+                        <button class="btn btn-sm btn-danger" id="revoke-${tokenPrefix}" onclick="revokeToken('${tokenPrefix}', this)">Revoke</button>
+                    </li>
+                `;
+            }).join('');
+        }
+
+        // Generate token
+        async function generateToken() {
+            try {
+                const resp = await fetch(API_BASE + '/api/user-worker/tokens/generate', {
+                    method: 'POST',
+                    credentials: 'include',
+                });
+                if (!resp.ok) throw new Error('Failed to generate token');
+                const data = await resp.json();
+                
+                // Show the full token (only shown once)
+                document.getElementById('newTokenValue').textContent = data.token;
+                document.getElementById('newTokenDisplay').style.display = 'block';
+                
+                // Update setup commands to include the token
+                updateSetupCommands(data.token);
+                
+                // Refresh list
+                loadTokens();
+            } catch (e) {
+                alert('Failed to generate token. Are you logged in?');
+            }
+        }
+
+        function updateSetupCommands(token) {
+            const base = 'https://veo-web-app-v3.onrender.com';
+            document.getElementById('cmd-windows').textContent = 
+                `$env:VEO_TOKEN='${token}'; irm ${base}/api/user-worker/download/setup.ps1 | iex`;
+            document.getElementById('cmd-mac').textContent = 
+                `VEO_TOKEN='${token}' bash -c "$(curl -sL ${base}/api/user-worker/download/setup.sh)"`;
+            document.getElementById('tokenHint').style.display = 'none';
+        }
+
+        function copyNewToken() {
+            const token = document.getElementById('newTokenValue').textContent;
+            navigator.clipboard.writeText(token).then(() => {
+                event.target.textContent = 'Copied!';
+                setTimeout(() => event.target.textContent = 'Copy Token', 2000);
+            });
+        }
+
+        // Revoke token
+        async function revokeToken(prefix, btn) {
+            if (!confirm('Revoke this token? Your worker will stop working until you generate a new one.')) return;
+            
+            // Disable button immediately
+            btn.disabled = true;
+            btn.textContent = 'Revoking...';
+            btn.style.opacity = '0.5';
+            
+            try {
+                const resp = await fetch(API_BASE + '/api/user-worker/tokens/' + prefix, {
+                    method: 'DELETE',
+                    credentials: 'include',
+                });
+                if (!resp.ok) throw new Error('Failed to revoke');
+                
+                // Remove the token from the list with animation
+                const item = btn.closest('.token-item');
+                if (item) {
+                    item.style.transition = 'opacity 0.3s';
+                    item.style.opacity = '0';
+                    setTimeout(() => loadTokens(), 300);
+                } else {
+                    loadTokens();
+                }
+            } catch (e) {
+                btn.disabled = false;
+                btn.textContent = 'Revoke';
+                btn.style.opacity = '1';
+                alert('Failed to revoke token');
+            }
+        }
+
+        // Init
+        loadTokens();
+    </script>
+</body>
+</html>
