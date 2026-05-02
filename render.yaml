@@ -1,0 +1,94 @@
+# Render.yaml - Render Deployment Configuration
+# https://render.com/docs/yaml-spec
+
+services:
+  - type: web
+    name: veo-studio
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    
+    # Instance configuration
+    #plan: starter  # $7/month - 512MB RAM, 0.5 CPU
+    plan: standard  # $25/month - 2GB RAM, 1 CPU (recommended for production)
+    
+    # Auto-deploy from main branch
+    branch: main
+    
+    # Health check — use / (serves static index.html, always fast)
+    # instead of /api/health which imports veo_generator and can be slow
+    # on a cold container. A fast health check helps Render mark the
+    # service healthy sooner after a deploy, shrinking the 502 window.
+    healthCheckPath: /
+    
+    # Environment variables (set these in Render dashboard for secrets)
+    envVars:
+      # Required: At least one Gemini API key
+      - key: GEMINI_API_KEY_1
+        sync: false  # Set in dashboard
+      
+      # Optional: Additional Gemini keys for load balancing
+      # - key: GEMINI_API_KEY_2
+      #   sync: false
+      
+      # Optional: OpenAI key for auto-split feature
+      - key: OPENAI_API_KEY
+        sync: false
+      
+      # Optional: Dedicated Gemini key for Nano Banana frame enhancement (continue mode)
+      - key: NANO_BANANA_API_KEY
+        sync: false
+      
+      # Optional: Replicate key for voice cloning (~$0.05/swap)
+      - key: REPLICATE_API_TOKEN
+        sync: false
+      
+      # Optional: ElevenLabs key for high-quality voice cloning
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      
+      # Optional: DeepFilterNet on Modal for AI noise reduction
+      # Default URL is hardcoded, only set this to override
+      # - key: DEEPFILTER_MODAL_URL
+      #   sync: false
+      
+      # Password protection (REQUIRED for private access)
+      - key: SITE_PASSWORD
+        sync: false  # Set in dashboard
+      
+      # Session configuration
+      - key: SESSION_SECRET
+        generateValue: true  # Auto-generate secure secret
+      - key: SESSION_DURATION_HOURS
+        value: "24"
+      
+      # Use secure cookies in production
+      - key: SECURE_COOKIES
+        value: "true"
+      
+      # Email alerts (optional)
+      - key: SMTP_EMAIL
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: ALERT_EMAIL
+        sync: false
+      
+      # Python settings
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      
+      # Job workers (parallel video generation)
+      # Keep at 2 to avoid Veo API rate limits
+      - key: MAX_JOB_WORKERS
+        value: "5"
+    
+    # Persistent disk for job data. Highly recommended: survives restarts
+    # and redeploys, so /app/data/images/ doesn't need to be re-fetched
+    # from R2 every time the container boots. Without this, every deploy
+    # triggers a lazy-rehydration burst for any variant a user accesses,
+    # competing with the server's ability to serve other requests. ~$0.25/mo
+    # for 1GB.
+    disk:
+      name: veo-data
+      mountPath: /app/data
+      sizeGB: 1

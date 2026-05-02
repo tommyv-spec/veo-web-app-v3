@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KavenoBuilder — User Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#09090F;--surface:#111118;--card:#16161F;--elevated:#1E1E2A;--border:#2A2A3A;
+    --accent:#7C6FFF;--accent2:#A78BFA;--teal:#2DD4BF;--rose:#FB7185;--amber:#FBBF24;
+    --green:#34D399;--text:#F0EFF8;--text-sec:#9B99B8;--text-dim:#5A5878;--r:10px;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);line-height:1.75;font-size:15px;}
+
+  .hero{position:relative;overflow:hidden;padding:80px 24px 64px;text-align:center;border-bottom:1px solid var(--border);}
+  .hero::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse 80% 60% at 50% 0%,rgba(124,111,255,0.18) 0%,transparent 70%),radial-gradient(ellipse 50% 40% at 80% 100%,rgba(45,212,191,0.08) 0%,transparent 60%);pointer-events:none;}
+  .hero-badge{display:inline-flex;align-items:center;gap:8px;background:rgba(124,111,255,0.12);border:1px solid rgba(124,111,255,0.3);border-radius:99px;padding:5px 14px;font-size:12px;font-weight:500;color:var(--accent2);letter-spacing:0.5px;text-transform:uppercase;margin-bottom:20px;}
+  .hero h1{font-family:'Syne',sans-serif;font-size:clamp(32px,6vw,56px);font-weight:800;line-height:1.1;background:linear-gradient(135deg,#C4B5FD 0%,#818CF8 40%,#2DD4BF 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:16px;}
+  .hero p{font-size:17px;color:var(--text-sec);max-width:560px;margin:0 auto 32px;line-height:1.7;}
+  .hero-flow{display:flex;align-items:center;justify-content:center;gap:0;flex-wrap:wrap;margin-top:32px;}
+  .hf-item{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 16px;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:var(--r);min-width:90px;}
+  .hf-icon{font-size:20px;}.hf-label{font-size:11px;font-weight:600;color:var(--text-sec);letter-spacing:0.3px;}
+  .hf-arrow{color:var(--text-dim);padding:0 8px;font-size:16px;}
+
+  .wrapper{display:flex;min-height:calc(100vh - 200px);}
+  .sidenav{width:240px;flex-shrink:0;position:sticky;top:0;height:100vh;overflow-y:auto;padding:32px 0 32px 24px;border-right:1px solid var(--border);background:var(--surface);}
+  .sidenav-title{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-dim);margin-bottom:16px;padding-right:24px;}
+  .sidenav a{display:flex;align-items:center;gap:10px;padding:7px 12px 7px 0;color:var(--text-sec);text-decoration:none;font-size:13px;border-radius:0 6px 6px 0;transition:color 0.15s;border-left:2px solid transparent;margin-left:-2px;line-height:1.4;}
+  .sidenav a:hover{color:var(--text);border-left-color:var(--accent);}
+  .sidenav .sn-num{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);width:18px;flex-shrink:0;}
+  .sidenav .sn-group{font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim);padding:16px 0 6px;}
+
+  .content{flex:1;min-width:0;padding:40px 48px 80px;max-width:860px;}
+  section{margin-bottom:64px;}
+  h2{font-family:'Syne',sans-serif;font-size:26px;font-weight:700;margin-bottom:20px;display:flex;align-items:center;gap:14px;padding-bottom:14px;border-bottom:1px solid var(--border);scroll-margin-top:32px;}
+  .h2-num{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:500;color:var(--accent2);background:rgba(124,111,255,0.1);border:1px solid rgba(124,111,255,0.25);padding:3px 8px;border-radius:6px;flex-shrink:0;}
+  h3{font-family:'Syne',sans-serif;font-size:17px;font-weight:600;color:var(--text);margin:28px 0 12px;}
+  h4{font-size:14px;font-weight:600;color:var(--text-sec);margin:18px 0 8px;text-transform:uppercase;letter-spacing:0.5px;}
+  p{color:var(--text-sec);margin-bottom:14px;}
+  strong{color:var(--text);font-weight:500;}
+  em{color:var(--accent2);font-style:normal;}
+  a{color:var(--accent2);}
+
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin:20px 0;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:18px;}
+  .card-icon{font-size:26px;margin-bottom:10px;}
+  .card h4{font-size:14px;color:var(--text);margin:0 0 6px;text-transform:none;letter-spacing:0;}
+  .card p{font-size:13px;margin:0;}
+
+  .tip,.warn,.info,.important{display:flex;gap:14px;padding:14px 18px;border-radius:var(--r);margin:16px 0;font-size:14px;line-height:1.6;}
+  .tip{background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.2);color:#6EE7B7;}
+  .warn{background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.2);color:#FDE68A;}
+  .info{background:rgba(124,111,255,0.08);border:1px solid rgba(124,111,255,0.2);color:#C4B5FD;}
+  .important{background:rgba(251,113,133,0.08);border:1px solid rgba(251,113,133,0.2);color:#FCA5A5;}
+  .callout-icon{font-size:18px;flex-shrink:0;margin-top:1px;}
+  .tip strong,.warn strong,.info strong,.important strong{color:inherit;}
+
+  .table-wrap{overflow-x:auto;margin:16px 0;border-radius:var(--r);border:1px solid var(--border);}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;}
+  th{background:var(--elevated);color:var(--text-sec);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;padding:10px 16px;text-align:left;white-space:nowrap;}
+  td{padding:10px 16px;border-top:1px solid var(--border);color:var(--text-sec);vertical-align:top;}
+  tr:hover td{background:rgba(255,255,255,0.02);}
+  .tag{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600;}
+  .tag-green{background:rgba(52,211,153,0.15);color:#34D399;}
+  .tag-amber{background:rgba(251,191,36,0.15);color:#FBBF24;}
+  .tag-rose{background:rgba(251,113,133,0.15);color:#FB7185;}
+  .tag-purple{background:rgba(124,111,255,0.15);color:#A78BFA;}
+  .tag-teal{background:rgba(45,212,191,0.15);color:#2DD4BF;}
+
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0;}
+  .cols .card ul{padding-left:16px;margin:0;}
+  .cols .card li{font-size:13px;color:var(--text-sec);margin-bottom:4px;}
+  @media(max-width:640px){.cols{grid-template-columns:1fr;}}
+
+  .steps{list-style:none;counter-reset:steps;padding:0;margin:16px 0;}
+  .steps li{counter-increment:steps;display:flex;gap:14px;padding:12px 0;border-bottom:1px solid rgba(42,42,58,0.6);font-size:14px;color:var(--text-sec);align-items:flex-start;}
+  .steps li::before{content:counter(steps);flex-shrink:0;width:26px;height:26px;background:var(--elevated);border:1px solid var(--border);border-radius:7px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:500;color:var(--accent2);margin-top:1px;}
+
+  code{font-family:'JetBrains Mono',monospace;font-size:12px;background:var(--elevated);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:#FDE68A;}
+  kbd{font-family:'JetBrains Mono',monospace;font-size:11px;background:var(--elevated);border:1px solid var(--border);border-radius:4px;padding:2px 7px;color:var(--text-sec);}
+
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle;}
+  .dot-green{background:#34D399;}.dot-amber{background:#FBBF24;}.dot-rose{background:#FB7185;}
+  .dot-purple{background:#7C6FFF;}.dot-dim{background:#5A5878;}
+
+  .footer{text-align:center;padding:40px 24px 60px;border-top:1px solid var(--border);color:var(--text-dim);font-size:12px;line-height:2;}
+  @media(max-width:900px){.sidenav{display:none;}.content{padding:32px 24px 60px;}}
+  @media(max-width:600px){.hero h1{font-size:28px;}h2{font-size:22px;}.hf-arrow{display:none;}}
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="hero-badge">Complete User Guide</div>
+  <h1>KavenoBuilder</h1>
+  <p>Turn photos and a dialogue script into AI-generated talking-head videos. Here's everything you need to know.</p>
+  <div class="hero-flow">
+    <div class="hf-item"><div class="hf-icon">📤</div><div class="hf-label">Upload</div></div>
+    <span class="hf-arrow">&#8594;</span>
+    <div class="hf-item"><div class="hf-icon">&#9999;&#65039;</div><div class="hf-label">Script</div></div>
+    <span class="hf-arrow">&#8594;</span>
+    <div class="hf-item"><div class="hf-icon">&#128640;</div><div class="hf-label">Generate</div></div>
+    <span class="hf-arrow">&#8594;</span>
+    <div class="hf-item"><div class="hf-icon">&#9989;</div><div class="hf-label">Review</div></div>
+    <span class="hf-arrow">&#8594;</span>
+    <div class="hf-item"><div class="hf-icon">&#128229;</div><div class="hf-label">Export</div></div>
+  </div>
+</div>
+
+<div class="wrapper">
+<nav class="sidenav">
+  <div class="sidenav-title">Contents</div>
+  <div class="sn-group">Overview</div>
+  <a href="#overview"><span class="sn-num">01</span> What It Does</a>
+  <a href="#setup"><span class="sn-num">02</span> First-Time Setup</a>
+  <div class="sn-group">The Workflow</div>
+  <a href="#images"><span class="sn-num">03</span> Upload Images</a>
+  <a href="#settings"><span class="sn-num">04</span> Settings</a>
+  <a href="#script"><span class="sn-num">05</span> Dialogue Script</a>
+  <a href="#generate"><span class="sn-num">06</span> Generate</a>
+  <a href="#review"><span class="sn-num">07</span> Review Clips</a>
+  <a href="#export"><span class="sn-num">08</span> Export</a>
+  <div class="sn-group">Modes</div>
+  <a href="#modes"><span class="sn-num">09</span> Single vs Multi-Image</a>
+  <a href="#storyboard"><span class="sn-num">10</span> Storyboard Mode</a>
+  <div class="sn-group">After Export</div>
+  <a href="#voice-swap"><span class="sn-num">11</span> Voice Swap</a>
+  <a href="#attach-clips"><span class="sn-num">12</span> Attach Clips</a>
+  <a href="#badges"><span class="sn-num">13</span> Job Badges</a>
+  <div class="sn-group">Reference</div>
+  <a href="#tips"><span class="sn-num">14</span> Tips</a>
+  <a href="#troubleshooting"><span class="sn-num">15</span> Troubleshooting</a>
+</nav>
+
+<div class="content">
+
+<section id="overview">
+  <h2><span class="h2-num">01</span> What It Does</h2>
+  <p>This platform takes a <strong>photo of a person</strong> and a <strong>dialogue script</strong> and produces AI-generated video clips where the subject appears to speak your words with natural lip-sync and head movement.</p>
+  <div class="cards">
+    <div class="card"><div class="card-icon">🎬</div><h4>Talking-Head Videos</h4><p>A single photo + script produces a realistic video of that person speaking.</p></div>
+    <div class="card"><div class="card-icon">🎭</div><h4>Multi-Scene Stories</h4><p>Multiple images + a full script creates transitions between different speakers or locations.</p></div>
+    <div class="card"><div class="card-icon">🌍</div><h4>Multi-Language</h4><p>English, Italian, Spanish, French, German — each with adapted speaking rates.</p></div>
+    <div class="card"><div class="card-icon">🎙️</div><h4>Voice Cloning</h4><p>After export, swap the AI voice with a real cloned voice via OpenVoice or ElevenLabs.</p></div>
+  </div>
+  <div class="tip"><span class="callout-icon">💡</span><div>The platform breaks your script into clips (~8s each), generates them in parallel, lets you review and approve, then combines everything into a final video.</div></div>
+</section>
+
+<section id="setup">
+  <h2><span class="h2-num">02</span> First-Time Setup</h2>
+  <h3>Choose Your Generation Method</h3>
+  <div class="cols">
+    <div class="card">
+      <h4 style="text-transform:none;letter-spacing:0;font-size:15px;color:#34D399;">🔑 API Keys</h4>
+      <ul><li>Uses the Gemini API directly</li><li>Faster — no worker needed</li><li>Requires Gemini API keys</li><li>Add multiple keys to avoid rate limits</li></ul>
+    </div>
+    <div class="card">
+      <h4 style="text-transform:none;letter-spacing:0;font-size:15px;color:#A78BFA;">🖥️ Flow (Browser)</h4>
+      <ul><li>Uses browser automation on your computer</li><li>No API keys needed</li><li>Requires running the Worker app</li><li>Your computer does the processing</li></ul>
+    </div>
+  </div>
+
+  <h3>Option A: API Keys</h3>
+  <ol class="steps">
+    <li>Click your <strong>profile avatar</strong> (top-right corner)</li>
+    <li>Select <strong>🔑 API Keys</strong> from the dropdown</li>
+    <li>Paste one or more keys — one per line for bulk add. Keys start with <code>AIzaSy...</code></li>
+    <li>Keys are validated automatically. Re-check All Keys to refresh statuses.</li>
+  </ol>
+  <div class="tip"><span class="callout-icon">💡</span><div>Get keys at <strong>aistudio.google.com/apikey</strong>. Add 3–5 keys so the platform can rotate between them and avoid rate limits.</div></div>
+  <div class="table-wrap"><table><thead><tr><th>Status</th><th>Meaning</th></tr></thead><tbody>
+    <tr><td><span class="dot dot-green"></span>Working</td><td>Valid and has quota</td></tr>
+    <tr><td><span class="dot dot-amber"></span>Rate Limited</td><td>Temporarily exhausted — platform skips and retries later</td></tr>
+    <tr><td><span class="dot dot-rose"></span>Invalid</td><td>Incorrect or revoked key</td></tr>
+  </tbody></table></div>
+
+  <h3>Option B: Flow Worker</h3>
+  <ol class="steps">
+    <li>Click <strong>🖥️ My Worker</strong> in the navigation bar</li>
+    <li>Set the number of <strong>Chrome Windows</strong> (accounts) — each runs in parallel for faster generation. Start with 1.</li>
+    <li>Click the big <strong>▶ Start</strong> button (the orb)</li>
+    <li>A <strong>.bat installer</strong> downloads automatically — double-click <strong>KavenoBuilder-Worker-Setup.bat</strong></li>
+    <li>Chrome opens — <strong>sign into your Google account</strong> (or select an existing logged-in profile)</li>
+    <li>The worker auto-connects and this page shows <strong>● Online</strong></li>
+    <li>Start generating jobs — the worker picks them up automatically</li>
+  </ol>
+  <div class="info"><span class="callout-icon">ℹ️</span><div><strong>Multi-account:</strong> Set 2+ Chrome Windows for parallel generation. Each window uses its own Google account. Sessions auto-refresh every 6 clips (golden restore) to prevent detection.</div></div>
+  <div class="warn"><span class="callout-icon">⚠️</span><div><strong>Keep the worker running</strong> while jobs process. Minimize Chrome but don't close it. The worker handles ghost detection, auto-redo, and HTTP downloads automatically.</div></div>
+</section>
+
+<section id="images">
+  <h2><span class="h2-num">03</span> Upload Images</h2>
+  <p>Drag and drop photos into the upload area, or click to browse. Accepted: <strong>PNG, JPG, WebP</strong>.</p>
+  <div class="table-wrap"><table><thead><tr><th>Images</th><th>Mode</th><th>What Happens</th></tr></thead><tbody>
+    <tr><td><span class="tag tag-teal">1 image</span></td><td><strong>Single Image Mode</strong></td><td>Same photo used for every clip. Best for single-speaker talking heads.</td></tr>
+    <tr><td><span class="tag tag-purple">2+ images</span></td><td><strong>Multi-Image Mode</strong></td><td>Unlocks Auto-Cycle and Storyboard for multi-scene content.</td></tr>
+  </tbody></table></div>
+  <div class="tip"><span class="callout-icon">💡</span><div>Well-lit, front-facing photos produce the most natural results. Clean or neutral backgrounds help the AI focus on the face.</div></div>
+</section>
+
+<section id="settings">
+  <h2><span class="h2-num">04</span> Settings</h2>
+  <div class="table-wrap"><table><thead><tr><th>Setting</th><th>Options</th><th>What It Does</th></tr></thead><tbody>
+    <tr><td><strong>Language</strong></td><td>EN, IT, ES, FR, DE</td><td>Affects auto-split word count and speaking rate per clip.</td></tr>
+    <tr><td><strong>Words per Line</strong></td><td>10–35 (default: ~21)</td><td>Words per auto-split clip. Lower for slow speakers, higher for fast.</td></tr>
+    <tr><td><strong>Duration</strong></td><td>4s / 6s / 8s</td><td>Clip length. <strong>8s strongly recommended</strong> — required for interpolation and 1080p.</td></tr>
+    <tr><td><strong>Aspect Ratio</strong></td><td>16:9 / 9:16</td><td>9:16 for TikTok/Reels/Shorts. 16:9 for YouTube/presentations.</td></tr>
+    <tr><td><strong>Resolution</strong></td><td>720p / 1080p</td><td>1080p requires 8s duration.</td></tr>
+    <tr><td><strong>Interpolation</strong></td><td>On / Off</td><td>Smooth motion between frames. Natural head movement and scene transitions. Requires 8s. <strong>Keep ON.</strong></td></tr>
+    <tr><td><strong>AI Prompts</strong></td><td>On / Off</td><td>ON = AI analyzes your image and writes optimized visual prompts. OFF = you write your own prompts.</td></tr>
+    <tr><td><strong>Method</strong></td><td>API / Flow</td><td>Which generation backend to use. See Setup section.</td></tr>
+  </tbody></table></div>
+  <h3>Context for AI (Optional)</h3>
+  <p>A text area below the toggles lets you give the AI extra context: speaker role, tone, setting, voice style. Example: <em>"Professional doctor, confident tone, medical office background."</em></p>
+  <div class="info"><span class="callout-icon">ℹ️</span><div><strong>Constraints are enforced automatically.</strong> Choosing 1080p locks duration to 8s. Enabling interpolation also requires 8s. You can't create an incompatible configuration.</div></div>
+  <h3>Generation Mode (Multi-Image Only)</h3>
+  <div class="table-wrap"><table><thead><tr><th>Mode</th><th>How It Works</th><th>Best For</th></tr></thead><tbody>
+    <tr><td><strong>🔀 Smart</strong></td><td>Odd clips first, then even clips use confirmed end-frames from neighbors</td><td>Most cases — fast AND smooth transitions</td></tr>
+    <tr><td><strong>⚡ Fast</strong></td><td>All clips simultaneously</td><td>Speed priority</td></tr>
+    <tr><td><strong>🔗 Safe</strong></td><td>Sequential — each clip uses previous clip's last frame</td><td>Maximum visual continuity</td></tr>
+  </tbody></table></div>
+</section>
+
+<section id="script">
+  <h2><span class="h2-num">05</span> Dialogue Script</h2>
+  <p>Type or paste the words your subject will speak. Each numbered line in the editor becomes one video clip.</p>
+  <h3>Auto-Split (Recommended)</h3>
+  <p>The ✂️ toggle is <strong>on by default</strong>. Paste a full paragraph and the platform automatically breaks it into clips at sentence boundaries, sized correctly for your language and speaking rate.</p>
+  <h3>Manual Mode</h3>
+  <p>Turn auto-split off and press <kbd>Enter</kbd> to define clip breaks yourself. Each line = one clip.</p>
+  <div class="warn"><span class="callout-icon">⚠️</span><div><strong>Line length matters.</strong> Too many words for the selected duration = audio gets cut off. The editor highlights problematic lines. Shorten those lines or increase the duration.</div></div>
+  <div class="tip"><span class="callout-icon">💡</span><div>Write the way people actually speak — contractions ("I'm", "don't"), natural sentence lengths, numbers spelled out ("twenty-five" not "25"). The AI needs speech patterns, not formal written text.</div></div>
+</section>
+
+<section id="generate">
+  <h2><span class="h2-num">06</span> Generate</h2>
+  <p>Click <strong>🚀 Start Generation</strong>. The platform validates your config, uploads reference frames to cloud storage, generates AI prompts (if enabled), then begins parallel clip processing.</p>
+  <div class="table-wrap"><table><thead><tr><th>Status</th><th>Meaning</th></tr></thead><tbody>
+    <tr><td><span class="dot dot-dim"></span>Pending</td><td>Waiting in queue</td></tr>
+    <tr><td><span class="dot dot-purple"></span>Generating</td><td>AI is actively creating this clip</td></tr>
+    <tr><td><span class="dot dot-green"></span>Completed</td><td>Done — ready for review</td></tr>
+    <tr><td><span class="dot dot-rose"></span>Failed</td><td>Something went wrong — can be retried</td></tr>
+    <tr><td><span class="dot dot-amber"></span>Redo Queued</td><td>Scheduled for regeneration</td></tr>
+  </tbody></table></div>
+  <div class="info"><span class="callout-icon">ℹ️</span><div>Each clip takes roughly <strong>1–3 minutes</strong>. Clips process in parallel — a 10-clip job finishes in roughly the time of 2–3 clips sequentially.</div></div>
+</section>
+
+<section id="review">
+  <h2><span class="h2-num">07</span> Review Clips</h2>
+  <p>Completed clips appear as cards with video previews. Watch each one and take action:</p>
+  <div class="table-wrap"><table><thead><tr><th>Button</th><th>What It Does</th></tr></thead><tbody>
+    <tr><td><strong>✓ Approve</strong></td><td>Marks as final. Green border appears. This clip is included in export.</td></tr>
+    <tr><td><strong>↻ Redo</strong></td><td>Regenerates (up to 5 attempts). Browse versions with ◀ ▶ and pick the best before approving.</td></tr>
+    <tr><td><strong>🗑 Delete</strong></td><td>Permanently removes this clip from the job.</td></tr>
+  </tbody></table></div>
+  <div class="tip"><span class="callout-icon">💡</span><div><strong>Don't wait for all clips to finish.</strong> Approve good ones immediately and Redo bad ones right away — redos process alongside remaining clips in parallel.</div></div>
+</section>
+
+<section id="export">
+  <h2><span class="h2-num">08</span> Export</h2>
+  <div class="cols">
+    <div class="card"><h4 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--text);">📥 Download All</h4><p>Downloads each approved clip as a separate MP4 for your own editing.</p></div>
+    <div class="card"><h4 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--text);">✂️ Export Final</h4><p>Merges all approved clips into one continuous video. Opens Export Settings dialog.</p></div>
+  </div>
+  <h3>Export Settings</h3>
+  <div class="table-wrap"><table><thead><tr><th>Setting</th><th>Default</th><th>What It Does</th></tr></thead><tbody>
+    <tr><td><strong>Trim Start Frames</strong></td><td>0</td><td>Frames cut from start of each clip. Removes static opening frames.</td></tr>
+    <tr><td><strong>Trim End Frames</strong></td><td>7</td><td>Frames cut from end of each clip (~0.3s at 24fps). Removes trailing artifacts and creates smoother clip joins.</td></tr>
+    <tr><td><strong>Smart Trim</strong></td><td>ON</td><td>Skips start-frame trimming for the first clip and for clips at scene cuts. Preserves natural video openings.</td></tr>
+  </tbody></table></div>
+  <h3>Remove Silence</h3>
+  <p>The <strong>🔇 Remove Silence</strong> toggle runs Voice Activity Detection on the video and cuts quiet gaps between words.</p>
+  <div class="table-wrap"><table><thead><tr><th>Control</th><th>Default</th><th>Effect</th></tr></thead><tbody>
+    <tr><td><strong>Trigger (min gap)</strong></td><td>0.3s</td><td>Only gaps longer than this are removed. Lower = more aggressive cutting.</td></tr>
+    <tr><td><strong>Keep (padding)</strong></td><td>0.2s</td><td>Silence preserved at each cut point for natural breath pauses.</td></tr>
+  </tbody></table></div>
+  <h3>Speed Up</h3>
+  <p>The <strong>⚡ Speed Up</strong> toggle increases playback speed from 1.01× to 1.50×. Makes content feel more energetic. <strong>1.10× is recommended</strong> — barely noticeable but shaves seconds off total runtime.</p>
+  <h3>Lineup Editor</h3>
+  <p>Click <strong>✏️ Lineup</strong> to open the drag-and-drop reorder interface. Rearrange clips before export without changing the original clip_index assignments. The custom order is saved and used by Export Final.</p>
+  <h3>Audio Enhancement</h3>
+  <div class="table-wrap"><table><thead><tr><th>Toggle</th><th>Default</th><th>What It Does</th></tr></thead><tbody>
+    <tr><td><strong>😂 Remove Laughter</strong></td><td>ON</td><td>Suppresses laughter artifacts and background noise using RNNoise. Adjustable strength (50–100%).</td></tr>
+    <tr><td><strong>🎛️ DeepFilterNet</strong></td><td>ON</td><td>Removes hiss and static while preserving voice clarity. Uses adaptive FFT denoising.</td></tr>
+    <tr><td><strong>🎚️ Voice Filter</strong></td><td>OFF</td><td>Compressor, noise gate, limiter. Can sound robotic — use only if audio needs heavy processing.</td></tr>
+    <tr><td><strong>📊 Loudness Norm</strong></td><td>ON</td><td>Normalizes volume to broadcast standard (-16 LUFS) for consistent playback.</td></tr>
+  </tbody></table></div>
+  <div class="info"><span class="callout-icon">ℹ️</span><div><strong>Settings are remembered.</strong> Your export settings are saved automatically so you don't need to re-configure on every export. The success banner after export shows exactly which settings were applied.</div></div>
+</section>
+
+<section id="modes">
+  <h2><span class="h2-num">09</span> Single vs Multi-Image Mode</h2>
+  <h3>Single Image (1 photo)</h3>
+  <p>The simplest path. Upload one image, write your script, generate. Every clip uses the same image. Perfect for monologue-style content — spokesperson, explainer, interview.</p>
+  <h3>Multi-Image (2+ photos)</h3>
+  <div class="cols">
+    <div class="card">
+      <h4 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--text);">🔄 Auto-Cycle</h4>
+      <ul><li>Images rotate round-robin through clips</li><li>Clip 1 → Image 1, Clip 2 → Image 2, etc.</li><li>Loops back after the last image</li><li>Easiest multi-image approach</li></ul>
+    </div>
+    <div class="card">
+      <h4 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--text);">🎬 Storyboard</h4>
+      <ul><li>Full manual control over scenes</li><li>Drag images into script to create scene breaks</li><li>Each scene spans multiple clips</li><li>Control clip mode and transitions per scene</li></ul>
+    </div>
+  </div>
+</section>
+
+<section id="storyboard">
+  <h2><span class="h2-num">10</span> Storyboard Mode</h2>
+  <p>Drag an image into the script to create a scene divider. All clips within that scene use that image as their visual reference.</p>
+  <h3>Clip Modes</h3>
+  <div class="table-wrap"><table><thead><tr><th>Mode</th><th>What Happens</th><th>Use When</th></tr></thead><tbody>
+    <tr><td><span class="tag tag-purple">BLEND</span></td><td>Every clip starts from the original photo</td><td>Most scenes — visually consistent</td></tr>
+    <tr><td><span class="tag tag-green">CONTINUE</span></td><td>Each clip starts from the last frame of the previous clip</td><td>Long monologues — subject pose carries over naturally</td></tr>
+    <tr><td><span class="tag tag-amber">FRESH</span></td><td>Each clip uses the original photo, no interpolation</td><td>Clips you plan to edit independently</td></tr>
+  </tbody></table></div>
+  <h3>Scene Transitions</h3>
+  <div class="cols">
+    <div class="card">
+      <h4 style="text-transform:none;letter-spacing:0;font-size:15px;color:#A78BFA;">🎬 BLEND TO</h4>
+      <p>Last clip of the previous scene smoothly morphs toward the next scene's image. Cinematic and smooth.</p>
+    </div>
+    <div class="card">
+      <h4 style="text-transform:none;letter-spacing:0;font-size:15px;color:#FB7185;">✂️ CUT TO</h4>
+      <p>Hard switch — no visual blending. Use when transitioning between very different people or settings.</p>
+    </div>
+  </div>
+  <div class="tip"><span class="callout-icon">💡</span><div>Start with BLEND mode + BLEND TO transitions for the smoothest results. Switch to CUT TO only when scenes are very different visually.</div></div>
+</section>
+
+<section id="voice-swap">
+  <h2><span class="h2-num">11</span> Voice Swap</h2>
+  <p>After export, the success banner shows a <strong>🎤 Voice</strong> button. Click it to replace the AI voice with a cloned real voice.</p>
+  <div class="cols">
+    <div class="card">
+      <h4 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--text);">🎙️ OpenVoice v2</h4>
+      <ul><li>Low cost (~$0.01/run)</li><li>Upload a voice sample or use approved clips as reference</li><li>Adjustable similarity and pitch normalization</li></ul>
+    </div>
+    <div class="card">
+      <h4 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--text);">🔊 ElevenLabs</h4>
+      <ul><li>Premium quality</li><li>Requires ElevenLabs API key + Voice ID</li><li>Fine-grained controls: stability, similarity, style</li><li><strong>Saved Voices:</strong> Save presets (name + key + settings) for one-click reuse</li></ul>
+    </div>
+  </div>
+  <div class="tip"><span class="callout-icon">💡</span><div>Use a 5–15 second clip of clean, noise-free speech as your voice reference. Cleaner reference audio = better clone quality.</div></div>
+</section>
+
+<section id="attach-clips">
+  <h2><span class="h2-num">12</span> Attach Clips (Prompt Jobs)</h2>
+  <p>Use <strong>📝 Prompts Only</strong> to create a job with dialogue lines and prompts — without generating videos. Then upload clips you generated externally.</p>
+  <ol class="steps">
+    <li>Create a job with <strong>Prompts Only</strong> backend — prompts are generated but no video.</li>
+    <li>In the prompts view, click <strong>📎 Attach Clips</strong>.</li>
+    <li>Drop your MP4 files into the upload zone.</li>
+    <li>Choose matching mode: <strong>🎤 By Voiceover</strong> (default, recommended) transcribes each clip and fuzzy-matches to your dialogue lines. <strong>📁 By Filename</strong> sorts alphabetically.</li>
+    <li>Click Attach — clips are uploaded to R2, matched to dialogue lines, and ready for review/export.</li>
+  </ol>
+  <div class="tip"><span class="callout-icon">💡</span><div><strong>Voiceover matching</strong> uses Whisper transcription and achieves 90–100% accuracy on Veo-generated clips. Always prefer this over filename mode.</div></div>
+</section>
+
+<section id="badges">
+  <h2><span class="h2-num">13</span> Job Badges &amp; Tracking</h2>
+  <p>The job list shows visual badges so you can see at a glance what's been done:</p>
+  <div class="table-wrap"><table><thead><tr><th>Badge</th><th>Meaning</th></tr></thead><tbody>
+    <tr><td>🎬 <span class="tag tag-green">green</span></td><td>Video has been exported at least once</td></tr>
+    <tr><td>🎤 <span class="tag tag-purple">purple</span></td><td>Voice has been cloned at least once</td></tr>
+    <tr><td><span class="tag tag-purple">FLOW</span></td><td>Generated via Flow worker</td></tr>
+    <tr><td><span class="tag tag-green">API</span></td><td>Generated via API keys</td></tr>
+    <tr><td><span class="tag tag-amber">PROMPT</span></td><td>Prompts only (no video generation)</td></tr>
+    <tr><td><span class="tag tag-teal">ASSEMBLE</span></td><td>Clips uploaded/attached externally</td></tr>
+  </tbody></table></div>
+</section>
+
+<section id="tips">
+  <h2><span class="h2-num">14</span> Tips &amp; Best Practices</h2>
+  <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">📸 Use the right image</h4><p>Well-lit, front-facing photos with clean backgrounds. Avoid heavy filters or unusual angles.</p></div>
+  <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">⏱️ Always use 8s + interpolation</h4><p>The single biggest quality improvement. 8s gives the AI room for natural speech motion. 4s clips often look mechanical.</p></div>
+  <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">🔑 Add multiple API keys</h4><p>3–5 keys let the platform rotate between them and process clips in parallel without hitting rate limits.</p></div>
+  <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">✍️ Write like you talk</h4><p>Contractions, natural sentence lengths, numbers as words ("twenty five"). The AI needs speech patterns, not written prose.</p></div>
+  <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">✅ Review as you go</h4><p>Approve good clips immediately and Redo bad ones right away — redos process in parallel with remaining clips.</p></div>
+  <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">✂️ Keep Smart Trim on</h4><p>Preserves natural openings for the first clip and scene cuts while trimming static frames at clip joins.</p></div>
+  <div class="card"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">🔇 Audio enhancement</h4><p>Keep Remove Laughter and DeepFilterNet ON for cleaner audio. Only enable Voice Filter if the audio specifically needs heavy compression.</p></div>
+</section>
+
+<section id="troubleshooting">
+  <h2><span class="h2-num">15</span> Troubleshooting</h2>
+  <div class="table-wrap"><table><thead><tr><th>Problem</th><th>Likely Cause</th><th>Fix</th></tr></thead><tbody>
+    <tr><td><strong>Can't start generation</strong></td><td>Missing images, empty script, or incompatible settings</td><td>Check: images uploaded, at least one dialogue line, settings compatible (1080p needs 8s)</td></tr>
+    <tr><td><strong>Clips fail (API mode)</strong></td><td>All keys rate-limited or invalid</td><td>Open API Keys → Re-check All Keys. Add more keys if all rate-limited.</td></tr>
+    <tr><td><strong>Job stuck on "pending"</strong></td><td>Worker not running (Flow mode)</td><td>Check your worker terminal. Go to 🖥️ My Worker to verify token is active.</td></tr>
+    <tr><td><strong>Worker "401 Unauthorized"</strong></td><td>Token expired or revoked</td><td>Generate a new token in 🖥️ My Worker, update your worker .env file.</td></tr>
+    <tr><td><strong>Clips stuck on "queued_for_flow"</strong></td><td>Worker disconnected or Chrome crashed</td><td>Restart the worker. Already-completed clips are not re-generated.</td></tr>
+    <tr><td><strong>Clip has no audio</strong></td><td>Dialogue line was too short or empty</td><td>Each line needs at least 3–4 words of meaningful dialogue.</td></tr>
+    <tr><td><strong>Export: "No approved clips"</strong></td><td>Clips not approved yet</td><td>Click ✓ Approve on each clip you want to include.</td></tr>
+    <tr><td><strong>Export: audio out of sync</strong></td><td>Old cached version served</td><td>Hard-refresh your browser (Ctrl+Shift+R) and try again.</td></tr>
+    <tr><td><strong>Redo fails immediately</strong></td><td>Reference frames not backed up</td><td>Check logs panel for storage errors. Can happen after server restarts on free-tier hosting.</td></tr>
+    <tr><td><strong>Voice swap sounds bad</strong></td><td>Poor reference audio</td><td>Use a clean, noise-free 5–15s voice sample. No background music or reverb.</td></tr>
+    <tr><td><strong>Images not uploading</strong></td><td>Wrong format or large file</td><td>Use PNG, JPG, or WebP. Reduce file size if uploads time out.</td></tr>
+  </tbody></table></div>
+  <div class="info" style="margin-top:24px;"><span class="callout-icon">ℹ️</span><div><strong>Checking logs:</strong> Every job has a Logs section at the bottom of the review panel. Expand it to see error messages and backend status updates. Always check here first when something goes wrong.</div></div>
+</section>
+
+</div>
+</div>
+
+<div class="footer">
+  <p>KavenoBuilder — User Guide</p>
+  <p>Powered by Google Veo &nbsp;&middot;&nbsp; API Keys or Flow Worker &nbsp;&middot;&nbsp; Voice Cloning via OpenVoice &amp; ElevenLabs</p>
+</div>
+</body>
+</html>

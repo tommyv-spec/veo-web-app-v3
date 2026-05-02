@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Worker — KavenoBuilder</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+    <style>
+        :root {
+            --bg-primary: #0F172A;
+            --bg-surface: #1E293B;
+            --bg-elevated: #334155;
+            --border-color: #334155;
+            --border-subtle: #475569;
+            --accent: #6366F1;
+            --accent2: #8B5CF6;
+            --accent-glow: rgba(99, 102, 241, 0.25);
+            --text-primary: #F8FAFC;
+            --text-secondary: #94A3B8;
+            --text-muted: #64748B;
+            --success: #10B981;
+            --success-glow: rgba(16, 185, 129, 0.25);
+            --warning: #F59E0B;
+            --error: #EF4444;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow-x: hidden;
+        }
+        body::before {
+            content: '';
+            position: fixed;
+            top: -40%; left: 50%; transform: translateX(-50%);
+            width: 800px; height: 800px;
+            background: radial-gradient(circle, rgba(99,102,241,0.06) 0%, transparent 70%);
+            pointer-events: none; z-index: 0;
+        }
+        .page {
+            position: relative; z-index: 1;
+            width: 100%; max-width: 520px;
+            padding: 40px 24px 48px;
+            display: flex; flex-direction: column; align-items: center;
+            min-height: 100vh;
+        }
+
+        /* Header */
+        .page-header { text-align: center; margin-bottom: 28px; }
+        .page-header h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 6px; }
+        .page-header p { font-size: 14px; color: var(--text-secondary); }
+
+        /* Orb */
+        .orb-container { position: relative; width: 180px; height: 180px; margin-bottom: 20px; flex-shrink: 0; }
+        .orb-glow {
+            position: absolute; inset: -20px; border-radius: 50%;
+            background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+            animation: glowPulse 3s ease-in-out infinite;
+            transition: background 0.6s ease;
+        }
+        .orb-container.online .orb-glow { background: radial-gradient(circle, var(--success-glow) 0%, transparent 70%); }
+        .orb {
+            position: relative; width: 100%; height: 100%; border-radius: 50%;
+            background: linear-gradient(135deg, var(--accent), var(--accent2));
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            border: 2px solid rgba(255,255,255,0.08);
+            box-shadow: 0 8px 32px rgba(99,102,241,0.3), inset 0 1px 0 rgba(255,255,255,0.1);
+        }
+        .orb:hover { transform: scale(1.04); box-shadow: 0 12px 40px rgba(99,102,241,0.4), inset 0 1px 0 rgba(255,255,255,0.15); }
+        .orb:active { transform: scale(0.97); }
+        .orb-container.online .orb { background: linear-gradient(135deg, #059669, var(--success)); box-shadow: 0 8px 32px rgba(16,185,129,0.3), inset 0 1px 0 rgba(255,255,255,0.1); cursor: default; }
+        .orb-container.online .orb:hover { transform: none; }
+        .orb-container.disabled .orb { cursor: default; opacity: 0.7; }
+        .orb-container.disabled .orb:hover, .orb-container.disabled .orb:active { transform: none; }
+        .orb-icon { font-size: 48px; line-height: 1; transition: opacity 0.3s ease; user-select: none; }
+        .orb-spinner {
+            position: absolute; inset: 6px; border-radius: 50%;
+            border: 3px solid transparent; border-top-color: rgba(255,255,255,0.8);
+            animation: spin 1s linear infinite; display: none;
+        }
+        .orb-container.loading .orb-spinner { display: block; }
+        .orb-container.loading .orb-icon { opacity: 0; }
+
+        /* Status */
+        .status-area { text-align: center; margin-bottom: 24px; min-height: 48px; }
+        .status-label { font-size: 18px; font-weight: 600; margin-bottom: 6px; letter-spacing: -0.01em; }
+        .status-sub { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
+        .status-sub a { color: var(--accent); text-decoration: none; }
+        .status-sub a:hover { text-decoration: underline; }
+
+        /* Steps (setup flow) */
+        .setup-steps {
+            width: 100%;
+            display: none;
+            flex-direction: column;
+            gap: 0;
+            animation: fadeUp 0.4s ease-out;
+        }
+        .setup-steps.visible { display: flex; }
+        .step-item {
+            display: flex; gap: 12px; align-items: flex-start;
+            padding: 10px 0;
+        }
+        .step-item + .step-item { border-top: 1px solid rgba(51,65,85,0.4); }
+        .step-num {
+            width: 26px; height: 26px; border-radius: 50%;
+            background: var(--bg-elevated); color: var(--text-muted);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 12px; font-weight: 600; flex-shrink: 0;
+        }
+        .step-item.active .step-num { background: var(--accent); color: white; }
+        .step-item.done .step-num { background: var(--success); color: white; }
+        .step-body { flex: 1; }
+        .step-title { font-size: 14px; font-weight: 500; margin-bottom: 2px; }
+        .step-desc { font-size: 12px; color: var(--text-muted); }
+
+        /* Cards & Dashboard */
+        .dashboard, .settings-area {
+            width: 100%;
+            display: none; flex-direction: column; gap: 10px;
+            animation: fadeUp 0.4s ease-out;
+        }
+        .settings-area { margin-bottom: 24px; }
+        .dashboard.visible, .settings-area.visible { display: flex; }
+
+        .card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 14px 18px;
+        }
+        .card-title { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+
+        .stat-row { display: flex; justify-content: space-between; align-items: center; }
+        .stat-label { font-size: 13px; color: var(--text-secondary); }
+        .stat-value { font-size: 13px; font-weight: 500; font-family: 'JetBrains Mono', monospace; }
+        .stat-row + .stat-row { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(51,65,85,0.5); }
+        .status-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: dotPulse 2s ease-in-out infinite; }
+
+        .progress-wrap { margin-top: 12px; }
+        .progress-info { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+        .progress-bar { width: 100%; height: 6px; background: var(--bg-elevated); border-radius: 3px; overflow: hidden; }
+        .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 3px; transition: width 0.6s ease; }
+
+        /* Settings controls */
+        .setting-row {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 6px 0;
+        }
+        .setting-label { font-size: 13px; color: var(--text-secondary); }
+        .setting-hint { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+        .counter {
+            display: flex; align-items: center; gap: 12px;
+        }
+        .counter-btn {
+            width: 32px; height: 32px; border-radius: 8px;
+            background: var(--bg-elevated); border: 1px solid var(--border-subtle);
+            color: var(--text-primary); font-size: 16px; font-weight: 500;
+            cursor: pointer; display: flex; align-items: center; justify-content: center;
+            transition: all 0.15s; font-family: inherit;
+        }
+        .counter-btn:hover { background: var(--accent); border-color: var(--accent); }
+        .counter-val {
+            font-size: 18px; font-weight: 600; min-width: 24px; text-align: center;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* Toggle switch */
+        .toggle-row {
+            display: flex; align-items: center; justify-content: space-between;
+            cursor: pointer; padding: 4px 0; user-select: none;
+        }
+        .toggle-label { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
+        .toggle-hint { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+        .toggle-track {
+            width: 40px; height: 22px; border-radius: 11px;
+            background: var(--bg-elevated); border: 1px solid var(--border-subtle);
+            position: relative; transition: all 0.2s; flex-shrink: 0; margin-left: 12px;
+        }
+        .toggle-thumb {
+            width: 16px; height: 16px; border-radius: 50%;
+            background: var(--text-muted); position: absolute;
+            top: 2px; left: 2px; transition: all 0.2s;
+        }
+        .toggle-track.on { background: var(--accent); border-color: var(--accent); }
+        .toggle-track.on .toggle-thumb { left: 20px; background: white; }
+
+        /* Action button (for update worker etc) */
+        .action-btn {
+            width: 100%; padding: 10px; font-size: 13px; font-weight: 500;
+            background: transparent; border: 1px solid var(--border-color);
+            color: var(--text-secondary); border-radius: 8px; cursor: pointer;
+            transition: all 0.15s; font-family: inherit; text-align: center;
+        }
+        .action-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+        /* Waiting dots */
+        .waiting-dots { display: inline-flex; gap: 4px; margin-left: 4px; }
+        .waiting-dots span {
+            width: 4px; height: 4px; border-radius: 50%;
+            background: var(--text-secondary);
+            animation: dotBounce 1.4s ease-in-out infinite;
+        }
+        .waiting-dots span:nth-child(2) { animation-delay: 0.2s; }
+        .waiting-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+        /* Footer */
+        .footer { margin-top: auto; padding-top: 24px; width: 100%; text-align: center; }
+        .toggle-advanced {
+            font-size: 12px; color: var(--text-muted); cursor: pointer;
+            background: none; border: none; padding: 8px 16px;
+            transition: color 0.2s; font-family: inherit;
+        }
+        .toggle-advanced:hover { color: var(--text-secondary); }
+        .advanced-panel { display: none; margin-top: 16px; text-align: left; }
+        .advanced-panel.visible { display: block; animation: fadeUp 0.3s ease-out; }
+        .advanced-panel .card { margin-bottom: 12px; }
+        .advanced-panel h3 { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+        .token-list { list-style: none; }
+        .token-item {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 8px 0; border-bottom: 1px solid rgba(51,65,85,0.4); font-size: 13px;
+        }
+        .token-item:last-child { border-bottom: none; }
+        .token-id { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); margin-left: 8px; }
+        .token-status { display: flex; align-items: center; gap: 6px; }
+
+        .btn-sm {
+            padding: 5px 12px; font-size: 12px; font-weight: 500;
+            border: 1px solid var(--border-color); background: transparent;
+            color: var(--text-secondary); border-radius: 6px; cursor: pointer;
+            transition: all 0.15s; font-family: inherit;
+        }
+        .btn-sm:hover { border-color: var(--error); color: var(--error); }
+        .btn-sm.btn-gen { border-color: var(--accent); color: var(--accent); }
+        .btn-sm.btn-gen:hover { background: var(--accent); color: white; }
+
+        .os-pills { display: flex; gap: 8px; justify-content: center; margin-bottom: 16px; }
+        .os-pill {
+            padding: 6px 16px; font-size: 13px; font-weight: 500;
+            background: var(--bg-surface); border: 1px solid var(--border-color);
+            border-radius: 20px; cursor: pointer; color: var(--text-secondary);
+            transition: all 0.2s; font-family: inherit;
+        }
+        .os-pill:hover { border-color: var(--border-subtle); color: var(--text-primary); }
+        .os-pill.active { background: var(--accent); border-color: var(--accent); color: white; }
+
+        .cmd-block {
+            background: #0B1120; border: 1px solid var(--border-color);
+            border-radius: 8px; padding: 12px 40px 12px 12px; position: relative;
+        }
+        .cmd-block code {
+            font-family: 'JetBrains Mono', monospace; font-size: 11px;
+            color: #93C5FD; word-break: break-all; white-space: pre-wrap; line-height: 1.5;
+        }
+        .cmd-copy {
+            position: absolute; top: 8px; right: 8px; padding: 3px 8px; font-size: 11px;
+            background: var(--bg-elevated); border: 1px solid var(--border-subtle);
+            color: var(--text-muted); border-radius: 4px; cursor: pointer; font-family: inherit;
+        }
+        .cmd-copy:hover { color: var(--text-primary); }
+
+        @keyframes glowPulse { 0%, 100% { opacity: 0.6; transform: scale(1); } 50% { opacity: 1; transform: scale(1.08); } }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes dotPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        @keyframes dotBounce { 0%, 80%, 100% { transform: translateY(0); } 40% { transform: translateY(-4px); } }
+        @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+        @media (max-width: 480px) {
+            .page { padding: 40px 16px 32px; }
+            .orb-container { width: 150px; height: 150px; }
+            .orb-icon { font-size: 40px; }
+        }
+    </style>
+</head>
+<body>
+<div class="page">
+
+    <div class="page-header">
+        <h1>My Worker</h1>
+        <p>Generate videos on your computer — free, no API keys</p>
+    </div>
+
+    <!-- Settings ABOVE the button -->
+    <div class="settings-area" id="settingsArea">
+        <div class="card">
+            <div class="card-title">Chrome Windows</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.5;">
+                Each window = one Google account generating clips in parallel.<br>
+                2 windows = 2× speed. Uses more CPU & RAM.<br>
+                Same or different Google accounts work.<br>
+                Sessions auto-refresh every 6 clips (golden restore).
+            </div>
+            <div style="display:flex;align-items:center;justify-content:center;gap:16px;">
+                <button class="counter-btn" onclick="changeAccounts(-1)">−</button>
+                <span class="counter-val" id="accountCount">1</span>
+                <button class="counter-btn" onclick="changeAccounts(1)">+</button>
+            </div>
+        </div>
+
+        <div class="card" id="sessionCard" style="display:none;">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+                <div>
+                    <div style="font-size:13px;font-weight:500;color:var(--text-primary);">Wipe saved login</div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:2px;" id="resetDesc">Off — will reuse your current Google login</div>
+                </div>
+                <div class="toggle-track" id="resetToggle" onclick="toggleReset()">
+                    <div class="toggle-thumb"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Orb -->
+    <div class="orb-container" id="orbContainer">
+        <div class="orb-glow"></div>
+        <div class="orb" id="orbBtn" onclick="onOrbClick()">
+            <div class="orb-spinner"></div>
+            <span class="orb-icon" id="orbIcon">▶</span>
+        </div>
+    </div>
+
+    <div class="status-area">
+        <div class="status-label" id="statusLabel">Checking…</div>
+        <div class="status-sub" id="statusSub"></div>
+    </div>
+
+    <!-- Progress steps (during setup) -->
+    <div class="setup-steps" id="setupSteps">
+        <div class="step-item" id="step1">
+            <div class="step-num">1</div>
+            <div class="step-body">
+                <div class="step-title">Downloading installer</div>
+                <div class="step-desc">Check your Downloads folder</div>
+            </div>
+        </div>
+        <div class="step-item" id="step2">
+            <div class="step-num">2</div>
+            <div class="step-body">
+                <div class="step-title">Open the downloaded file</div>
+                <div class="step-desc" id="step2desc">Double-click <strong>KavenoBuilder-Worker-Setup.bat</strong></div>
+            </div>
+        </div>
+        <div class="step-item" id="step2b" style="display:none;">
+            <div class="step-num" style="background:var(--warning);color:#000;font-size:11px;">⚠</div>
+            <div class="step-body">
+                <div class="step-title" style="color:var(--warning);">macOS Gatekeeper</div>
+                <div class="step-desc">If macOS blocks the file: <strong>System Settings → Privacy & Security</strong> → scroll down → click <strong>"Open Anyway"</strong> next to the blocked file message.</div>
+            </div>
+        </div>
+        <div class="step-item" id="step3">
+            <div class="step-num">3</div>
+            <div class="step-body">
+                <div class="step-title">Log into Google</div>
+                <div class="step-desc">Chrome opens — click <strong>"Continue without signing in"</strong> if prompted, then sign into your Google account on the Flow page</div>
+            </div>
+        </div>
+        <div class="step-item" id="step4">
+            <div class="step-num">4</div>
+            <div class="step-body">
+                <div class="step-title">Worker connects</div>
+                <div class="step-desc">This page updates automatically</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dashboard (online) -->
+    <div class="dashboard" id="dashboard">
+        <div class="card">
+            <div class="stat-row">
+                <span class="stat-label">Status</span>
+                <span class="status-badge"><span class="status-dot"></span> Online</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Last seen</span>
+                <span class="stat-value" id="dashLastSeen">—</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Version</span>
+                <span class="stat-value" id="dashVersion">—</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Accounts</span>
+                <span class="stat-value" id="dashAccounts">—</span>
+            </div>
+        </div>
+        <div class="card" id="jobCard" style="display:none;">
+            <div class="stat-row">
+                <span class="stat-label">Current job</span>
+                <span class="stat-value" id="dashJobId">—</span>
+            </div>
+            <div class="progress-wrap">
+                <div class="progress-info">
+                    <span>Generating clips</span>
+                    <span id="dashClipCount">0 / 0</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="dashProgress" style="width:0%"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+        <button class="toggle-advanced" onclick="toggleAdvanced(event)">Advanced ▾</button>
+        <div class="advanced-panel" id="advancedPanel">
+            <div class="card">
+                <h3>Worker Tokens</h3>
+                <ul class="token-list" id="tokenList">
+                    <li style="color:var(--text-muted);padding:8px 0;font-size:13px;">Loading…</li>
+                </ul>
+                <div style="margin-top:10px;">
+                    <button class="btn-sm btn-gen" onclick="generateToken()">New token</button>
+                </div>
+            </div>
+            <div class="card">
+                <h3>Worker Management</h3>
+                <div style="display:flex;flex-direction:column;gap:8px;">
+                    <button class="action-btn" onclick="downloadInstaller(userOS, {update:true})">
+                        Update worker script
+                    </button>
+                    <button class="action-btn" onclick="downloadInstaller(userOS, {reset:true})">
+                        Reset sessions &amp; re-login
+                    </button>
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:8px;line-height:1.4;">
+                    <strong>Update</strong> — re-downloads flow_worker.py (keeps sessions).<br>
+                    <strong>Reset</strong> — wipes Chrome sessions so you can log into a different Google account.
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:12px;line-height:1.5;padding-top:10px;border-top:1px solid rgba(51,65,85,0.3);">
+                    <strong style="color:var(--text-secondary);">Built-in reliability:</strong><br>
+                    • <strong>Golden restore</strong> — auto-refreshes Chrome session every 6 clips<br>
+                    • <strong>Ghost detection</strong> — catches silent submission failures<br>
+                    • <strong>Auto-redo</strong> — failed clips automatically re-queue<br>
+                    • <strong>HTTP downloads</strong> — clips download via direct URL (no browser needed)
+                </div>
+            </div>
+            <div class="card">
+                <h3>Terminal Setup</h3>
+                <div class="os-pills">
+                    <span class="os-pill active" onclick="selectManualOS('windows',this)">Windows</span>
+                    <span class="os-pill" onclick="selectManualOS('mac',this)">Mac / Linux</span>
+                </div>
+                <div class="cmd-block">
+                    <code id="manualCmd">—</code>
+                    <button class="cmd-copy" onclick="copyManualCmd(event)">Copy</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const API = '';
+let state = 'loading';
+let pollTimer = null;
+let userOS = (() => { const u = navigator.userAgent.toLowerCase(); return u.includes('win') ? 'windows' : u.includes('mac') ? 'mac' : 'linux'; })();
+let activeToken = null;
+let numAccounts = 1;
+let resetSessions = false;
+
+// ── Settings ─────────────────────────────────────────────────────
+
+function changeAccounts(delta) {
+    numAccounts = Math.max(1, Math.min(4, numAccounts + delta));
+    document.getElementById('accountCount').textContent = numAccounts;
+}
+
+function toggleReset() {
+    resetSessions = !resetSessions;
+    document.getElementById('resetToggle').classList.toggle('on', resetSessions);
+    document.getElementById('resetDesc').textContent = resetSessions
+        ? 'On — will delete saved login and ask you to sign in again'
+        : 'Off — will reuse your current Google login';
+}
+
+// ── State Machine ────────────────────────────────────────────────
+
+function setState(s, data) {
+    state = s;
+    const orb = document.getElementById('orbContainer');
+    const icon = document.getElementById('orbIcon');
+    const label = document.getElementById('statusLabel');
+    const sub = document.getElementById('statusSub');
+
+    orb.className = 'orb-container';
+    document.getElementById('dashboard').classList.remove('visible');
+    document.getElementById('settingsArea').classList.remove('visible');
+    document.getElementById('setupSteps').classList.remove('visible');
+
+    switch (s) {
+        case 'loading':
+            orb.classList.add('loading', 'disabled');
+            label.textContent = 'Checking…';
+            sub.innerHTML = '';
+            break;
+
+        case 'setup':
+            icon.textContent = '↓';
+            label.textContent = 'Install & Start';
+            sub.innerHTML = 'Click to download installer · No terminal needed';
+            document.getElementById('settingsArea').classList.add('visible');
+            break;
+
+        case 'installing':
+            orb.classList.add('loading', 'disabled');
+            label.innerHTML = 'Setting up<span class="waiting-dots"><span></span><span></span><span></span></span>';
+            sub.innerHTML = '';
+            document.getElementById('setupSteps').classList.add('visible');
+            // OS-specific step 2 content
+            const s2desc = document.getElementById('step2desc');
+            const s2b = document.getElementById('step2b');
+            if (userOS === 'mac' || userOS === 'linux') {
+                s2desc.innerHTML = 'Unzip and double-click <strong>KavenoBuilder-Worker-Setup.command</strong>';
+                s2b.style.display = '';
+            } else {
+                s2desc.innerHTML = 'Double-click <strong>KavenoBuilder-Worker-Setup.bat</strong>';
+                s2b.style.display = 'none';
+            }
+            setStep(1);
+            setTimeout(() => { if (state === 'installing') setStep(2); }, 2000);
+            startPolling(3000);
+            break;
+
+        case 'ready':
+            icon.textContent = '▶';
+            label.textContent = 'Start Worker';
+            sub.innerHTML = 'Click to download & launch';
+            document.getElementById('settingsArea').classList.add('visible');
+            break;
+
+        case 'online':
+            orb.classList.add('online');
+            icon.textContent = '●';
+            label.textContent = 'Worker Online';
+            sub.innerHTML = '';
+            document.getElementById('dashboard').classList.add('visible');
+            if (data) updateDashboard(data);
+            startPolling(8000);
+            break;
+    }
+}
+
+function setStep(n) {
+    for (let i = 1; i <= 4; i++) {
+        const el = document.getElementById('step' + i);
+        el.className = 'step-item' + (i < n ? ' done' : i === n ? ' active' : '');
+    }
+}
+
+function updateDashboard(data) {
+    if (data.last_seen) {
+        const s = Math.floor((Date.now() - new Date(data.last_seen + 'Z').getTime()) / 1000);
+        document.getElementById('dashLastSeen').textContent =
+            s < 10 ? 'just now' : s < 60 ? s + 's ago' : s < 3600 ? Math.floor(s/60) + 'm ago' : Math.floor(s/3600) + 'h ago';
+    }
+    document.getElementById('dashVersion').textContent = data.worker_version || '—';
+    document.getElementById('dashAccounts').textContent = data.accounts ? data.accounts + ' active' : '—';
+    const jc = document.getElementById('jobCard');
+    if (data.current_job) {
+        jc.style.display = '';
+        const j = data.current_job;
+        document.getElementById('dashJobId').textContent = j.id.substring(0, 8) + '…';
+        document.getElementById('dashClipCount').textContent = j.clips_completed + ' / ' + j.clips_total;
+        document.getElementById('dashProgress').style.width = (j.clips_total > 0 ? j.clips_completed / j.clips_total * 100 : 0) + '%';
+    } else { jc.style.display = 'none'; }
+}
+
+// ── Actions ──────────────────────────────────────────────────────
+
+function onOrbClick() {
+    if (state === 'setup') {
+        setState('installing');
+        downloadInstaller();
+    } else if (state === 'ready') {
+        setState('installing');
+        downloadInstaller();
+    }
+}
+
+function downloadInstaller(os, opts) {
+    os = os || userOS;
+    opts = opts || {};
+    const reset = opts.reset || resetSessions ? 1 : 0;
+    const update = opts.update ? 1 : 0;
+    const url = API + '/api/user-worker/download/installer?os=' + os
+        + '&accounts=' + numAccounts
+        + '&reset=' + reset
+        + '&update_only=' + update;
+    let iframe = document.getElementById('dlFrame');
+    if (!iframe) { iframe = document.createElement('iframe'); iframe.id = 'dlFrame'; iframe.style.display = 'none'; document.body.appendChild(iframe); }
+    iframe.src = url;
+}
+
+// ── Polling ──────────────────────────────────────────────────────
+
+function startPolling(ms) { stopPolling(); pollTimer = setInterval(checkStatus, ms); }
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+async function checkStatus() {
+    try {
+        const r = await fetch(API + '/api/user-worker/status', { credentials: 'include' });
+        if (!r.ok) return;
+        const d = await r.json();
+        
+        // Show worker error banner if present
+        if (d.worker_error) {
+            showWorkerError(d.worker_error);
+        } else {
+            hideWorkerError();
+        }
+        
+        if (d.online) {
+            if (state !== 'online') setState('online', d);
+            else updateDashboard(d);
+        } else if (state === 'online') {
+            setState('ready');
+        } else if (state === 'installing') {
+            // Check if token exists now (worker registered but not yet online)
+            if (d.has_tokens) setStep(3);
+        }
+    } catch (e) {}
+}
+
+function showWorkerError(err) {
+    let banner = document.getElementById('workerErrorBanner');
+    if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'workerErrorBanner';
+        banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;background:#dc2626;color:white;padding:14px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;box-shadow:0 2px 12px rgba(220,38,38,0.4);';
+        document.body.appendChild(banner);
+    }
+    const msg = err.error_type === 'not_ultra'
+        ? `⚠️ Account "${err.account_name}" does not have ULTRA access. Delete session folders (Reset Sessions) and restart with an ULTRA Google account.`
+        : `⚠️ Worker error: ${err.message}`;
+    banner.innerHTML = `<span>${msg}</span><button onclick="dismissWorkerError()" style="background:rgba(255,255,255,0.2);border:none;color:white;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap;">✕ Dismiss</button>`;
+    banner.style.display = 'flex';
+}
+
+function hideWorkerError() {
+    const banner = document.getElementById('workerErrorBanner');
+    if (banner) banner.style.display = 'none';
+}
+
+async function dismissWorkerError() {
+    hideWorkerError();
+    try { await fetch(API + '/api/user-worker/worker-error', { method: 'DELETE', credentials: 'include' }); } catch(e) {}
+}
+
+// ── Init ─────────────────────────────────────────────────────────
+
+async function init() {
+    setState('loading');
+    try {
+        // Fire status + tokens in parallel instead of sequential
+        const [r, _] = await Promise.all([
+            fetch(API + '/api/user-worker/status', { credentials: 'include' }),
+            loadTokens()
+        ]);
+        if (r.status === 401) {
+            document.getElementById('statusLabel').textContent = 'Please log in';
+            document.getElementById('statusSub').innerHTML = '<a href="/">Go to KavenoBuilder</a> and sign in first.';
+            document.getElementById('orbContainer').classList.add('disabled');
+            return;
+        }
+        if (!r.ok) throw 0;
+        const d = await r.json();
+        if (d.online) setState('online', d);
+        else if (d.has_tokens) setState('ready');
+        else setState('setup');
+        if (d.has_tokens) document.getElementById('sessionCard').style.display = '';
+        updateManualCmd();
+    } catch (e) { setState('setup'); updateManualCmd(); }
+    startPolling(state === 'online' ? 8000 : 10000);
+}
+
+// ── Tokens ───────────────────────────────────────────────────────
+
+async function loadTokens() {
+    try {
+        const r = await fetch(API + '/api/user-worker/tokens', { credentials: 'include' });
+        if (!r.ok) return;
+        const d = await r.json();
+        renderTokens(d.tokens);
+        if (d.tokens.length > 0) { activeToken = d.tokens[0].id; updateManualCmd(); }
+    } catch (e) {}
+}
+function renderTokens(tokens) {
+    const el = document.getElementById('tokenList');
+    if (!tokens.length) { el.innerHTML = '<li style="color:var(--text-muted);padding:8px 0;font-size:13px;text-align:center;">No tokens yet</li>'; return; }
+    el.innerHTML = tokens.map(t => {
+        const on = t.last_seen && (Date.now() - new Date(t.last_seen).getTime()) < 30000;
+        const dot = 'width:8px;height:8px;border-radius:50%;background:' + (on ? 'var(--success)' : 'var(--text-muted)') + ';' + (on ? 'animation:dotPulse 2s ease-in-out infinite;' : '');
+        return '<li class="token-item"><div class="token-status"><span style="' + dot + '"></span>' + t.name + '<span class="token-id">' + t.id + '</span></div><button class="btn-sm" onclick="revokeToken(\'' + t.id.split('...')[0] + '\')">Revoke</button></li>';
+    }).join('');
+}
+async function generateToken() {
+    try { const r = await fetch(API + '/api/user-worker/tokens/generate', { method: 'POST', credentials: 'include' }); if (!r.ok) throw 0; const d = await r.json(); activeToken = d.token; loadTokens(); updateManualCmd(); } catch (e) { alert('Failed. Are you logged in?'); }
+}
+async function revokeToken(prefix) {
+    if (!confirm('Revoke this token? Your worker will stop.')) return;
+    await fetch(API + '/api/user-worker/tokens/' + prefix, { method: 'DELETE', credentials: 'include' });
+    loadTokens();
+}
+
+// ── Manual cmd ───────────────────────────────────────────────────
+
+let manualOS = 'windows';
+function selectManualOS(os, el) { manualOS = os; document.querySelectorAll('.os-pill').forEach(p => p.classList.remove('active')); el.classList.add('active'); updateManualCmd(); }
+function updateManualCmd() {
+    const el = document.getElementById('manualCmd'), base = location.origin || 'https://kavenobuilder.com';
+    el.textContent = manualOS === 'windows'
+        ? (activeToken ? "$env:VEO_TOKEN='" + activeToken + "'; irm " + base + "/api/user-worker/download/setup.ps1 | iex" : "irm " + base + "/api/user-worker/download/setup.ps1 | iex")
+        : (activeToken ? "VEO_TOKEN='" + activeToken + "' bash -c \"$(curl -sL " + base + "/api/user-worker/download/setup.sh)\"" : "curl -sL " + base + "/api/user-worker/download/setup.sh | bash");
+}
+function copyManualCmd(e) { navigator.clipboard.writeText(document.getElementById('manualCmd').textContent).then(() => { e.target.textContent = 'Copied!'; setTimeout(() => e.target.textContent = 'Copy', 1500); }); }
+function toggleAdvanced(e) { const p = document.getElementById('advancedPanel'), v = p.classList.toggle('visible'); e.target.textContent = v ? 'Advanced ▴' : 'Advanced ▾'; }
+
+init();
+</script>
+</body>
+</html>

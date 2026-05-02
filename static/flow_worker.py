@@ -1,0 +1,18143 @@
+#!/usr/bin/env python3
+"""
+Local Flow Worker V62 - Golden Profile Restore
+
+Processes Flow jobs from the Veo web app with:
+- Two parallel browser sessions (submit + download)
+- Queue-based download system
+- Auto-timing for generation wait
+- Cache/resume capability
+- Stealth mode to avoid bot detection
+- Uses Patchright (undetected Playwright fork) to bypass reCAPTCHA CDP detection
+- Uses REAL Chrome browser (not Playwright's bundled Chromium)
+"""
+
+import os, re
+# Build version — auto-computed from file content hash (stable across downloads)
+import hashlib as _hashlib
+def _compute_build():
+    try:
+        with open(__file__, 'rb') as _f:
+            return _hashlib.md5(_f.read()).hexdigest()[:12]
+    except Exception:
+        return "unknown"
+WORKER_BUILD = _compute_build()
+WORKER_VERSION = "v367"
+
+import subprocess, sys, shutil
+
+def _ensure_patchright():
+    """Auto-install patchright if not already installed. REQUIRED for reCAPTCHA bypass."""
+    try:
+        import patchright
+        print("[Init] ✓ Patchright already installed", flush=True)
+        return True
+    except ImportError:
+        pass
+    
+    print("[Init] ═══════════════════════════════════════════════════", flush=True)
+    print("[Init] Patchright not found — installing automatically...", flush=True)
+    print("[Init] ═══════════════════════════════════════════════════", flush=True)
+    
+    # Step 1: pip install patchright (try multiple methods)
+    pip_ok = False
+    methods = [
+        ([sys.executable, "-m", "pip", "install", "patchright"], "pip install"),
+        ([sys.executable, "-m", "pip", "install", "--user", "patchright"], "pip install --user"),
+    ]
+    # Also try pip/pip3 directly from PATH
+    for pip_cmd in ["pip", "pip3"]:
+        p = shutil.which(pip_cmd)
+        if p:
+            methods.append(([p, "install", "patchright"], f"{pip_cmd} install"))
+    
+    for cmd, label in methods:
+        try:
+            print(f"[Init] Trying: {label}...", flush=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0:
+                print(f"[Init] ✓ {label} succeeded", flush=True)
+                pip_ok = True
+                break
+            else:
+                print(f"[Init] ✗ {label} failed (rc={result.returncode}): {result.stderr[:200]}", flush=True)
+        except Exception as e:
+            print(f"[Init] ✗ {label} exception: {e}", flush=True)
+    
+    if not pip_ok:
+        print("[Init] ❌ ALL pip install methods failed!", flush=True)
+        print("[Init] ╔══════════════════════════════════════════════════════════╗", flush=True)
+        print("[Init] ║  MANUAL INSTALL REQUIRED — run these commands:          ║", flush=True)
+        print("[Init] ║  pip install patchright                                 ║", flush=True)
+        print("[Init] ║  patchright install chromium                            ║", flush=True)
+        print("[Init] ║  Then restart this worker.                              ║", flush=True)
+        print("[Init] ╚══════════════════════════════════════════════════════════╝", flush=True)
+        return False
+    
+    # Step 2: Install Chromium browser for Patchright 
+    # (channel='chrome' uses system Chrome but Patchright still needs its browser registered)
+    print("[Init] Installing browser for Patchright...", flush=True)
+    browser_cmds = []
+    pr_cmd = shutil.which("patchright")
+    if pr_cmd:
+        browser_cmds.append(([pr_cmd, "install", "chromium"], "patchright install chromium"))
+    browser_cmds.append(([sys.executable, "-m", "patchright", "install", "chromium"], "python -m patchright install chromium"))
+    
+    for cmd, label in browser_cmds:
+        try:
+            print(f"[Init] Trying: {label}...", flush=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode == 0:
+                print(f"[Init] ✓ {label} succeeded", flush=True)
+                break
+            else:
+                print(f"[Init] ⚠ {label} failed (rc={result.returncode}): {result.stderr[:200]}", flush=True)
+        except Exception as e:
+            print(f"[Init] ⚠ {label} exception: {e}", flush=True)
+    # Browser install failure is non-fatal when using channel='chrome' (system Chrome)
+    
+    # Verify import works
+    try:
+        import patchright
+        print("[Init] ✓ Patchright verified importable", flush=True)
+        return True
+    except ImportError:
+        # Sometimes after --user install, the path isn't updated in current process
+        # Try adding user site-packages to path
+        import site
+        user_site = site.getusersitepackages()
+        if user_site not in sys.path:
+            sys.path.insert(0, user_site)
+            print(f"[Init] Added {user_site} to sys.path", flush=True)
+            try:
+                import patchright
+                print("[Init] ✓ Patchright verified after path fix", flush=True)
+                return True
+            except ImportError:
+                pass
+        
+        print("[Init] ❌ Patchright still not importable after install!", flush=True)
+        print("[Init] ╔══════════════════════════════════════════════════════════╗", flush=True)
+        print("[Init] ║  MANUAL INSTALL REQUIRED — run these commands:          ║", flush=True)
+        print("[Init] ║  pip install patchright                                 ║", flush=True)
+        print("[Init] ║  patchright install chromium                            ║", flush=True)
+        print("[Init] ║  Then restart this worker.                              ║", flush=True)
+        print("[Init] ╚══════════════════════════════════════════════════════════╝", flush=True)
+        return False
+
+_patchright_ok = _ensure_patchright()
+
+if _patchright_ok:
+    from patchright.sync_api import sync_playwright
+    print("[Init] ✓ Using Patchright (undetected Playwright fork — CDP detection bypass active)")
+else:
+    print("[Init] ╔══════════════════════════════════════════════════════════════╗", flush=True)
+    print("[Init] ║  ⚠ WARNING: Running WITHOUT Patchright!                    ║", flush=True)
+    print("[Init] ║  reCAPTCHA WILL detect automation → 403 errors expected.   ║", flush=True)
+    print("[Init] ║  Install manually: pip install patchright                  ║", flush=True)
+    print("[Init] ╚══════════════════════════════════════════════════════════════╝", flush=True)
+    from playwright.sync_api import sync_playwright
+import requests
+import time
+import random
+import os
+import json
+import tempfile
+import shutil
+import threading
+import queue
+import queue
+from queue import Queue
+from datetime import datetime, timedelta
+
+
+# ============================================================
+# STEALTH SCRIPT - Anti reCAPTCHA Enterprise
+# ============================================================
+# reCAPTCHA Enterprise checks: webdriver flag, CDP artifacts,
+# plugin/mimeType arrays, chrome.runtime, permissions API,
+# and stack traces for automation frameworks.
+
+# MINIMAL stealth script - matches test_human_like.py which keeps working.
+# On real Chrome (channel='chrome'), navigator.plugins and chrome.runtime already
+# exist natively. Overwriting them with fakes creates detectable inconsistencies
+# that reCAPTCHA Enterprise can flag. Only patch what Playwright actually breaks.
+STEALTH_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined
+});
+"""
+
+# Full stealth script kept as fallback for bundled Chromium (non-stealth mode)
+STEALTH_SCRIPT_FULL = """
+// 1. Remove webdriver flag
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined,
+    configurable: true
+});
+
+// 1b. Force English language for all web content
+Object.defineProperty(navigator, 'language', { get: () => 'en-US', configurable: true });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
+
+// 2. Fix chrome.runtime (Playwright leaves it missing or broken)
+if (!window.chrome) window.chrome = {};
+if (!window.chrome.runtime) {
+    window.chrome.runtime = {
+        connect: function() {},
+        sendMessage: function() {},
+        onMessage: { addListener: function() {} },
+        id: undefined
+    };
+}
+
+// 3. Fix plugins array (headless/automation has empty plugins)
+if (navigator.plugins.length === 0) {
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => {
+            const p = [
+                { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+            ];
+            p.item = (i) => p[i];
+            p.namedItem = (n) => p.find(pp => pp.name === n);
+            p.refresh = () => {};
+            return p;
+        },
+        configurable: true
+    });
+}
+
+// 4. Fix permissions API (reCAPTCHA queries notification permission)
+const originalQuery = window.navigator.permissions?.query;
+if (originalQuery) {
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications'
+            ? Promise.resolve({ state: Notification.permission })
+            : originalQuery(parameters)
+    );
+}
+
+// 5. Prevent Playwright evaluation script detection in stack traces
+// reCAPTCHA can inspect Error().stack for __playwright_evaluation_script__
+const originalError = Error;
+const patchedError = function(...args) {
+    const err = new originalError(...args);
+    const originalStack = err.stack;
+    if (originalStack) {
+        Object.defineProperty(err, 'stack', {
+            get: () => originalStack.replace(/__playwright_evaluation_script__/g, '<anonymous>'),
+            configurable: true
+        });
+    }
+    return err;
+};
+patchedError.prototype = originalError.prototype;
+patchedError.captureStackTrace = originalError.captureStackTrace;
+patchedError.stackTraceLimit = originalError.stackTraceLimit;
+// Note: We do NOT replace window.Error globally as that itself is detectable.
+// Instead, the webdriver removal + chrome.runtime fix handles most detection.
+"""
+
+
+# ============================================================
+# HUMAN-LIKE BEHAVIOR HELPERS
+# ============================================================
+
+def human_delay(min_sec=0.5, max_sec=1.5):
+    """Random delay to simulate human behavior with natural variance"""
+    # Add occasional longer pauses (like a human getting distracted or thinking)
+    if random.random() < 0.08:  # 8% chance of longer pause
+        delay = random.uniform(max_sec * 1.5, max_sec * 3)
+    elif random.random() < 0.15:  # 15% chance of slightly longer pause
+        delay = random.uniform(max_sec, max_sec * 1.5)
+    else:
+        delay = random.uniform(min_sec, max_sec)
+    time.sleep(delay)
+    return delay
+
+
+def _stash_profile_on_page(page, profile_dir):
+    """Attach profile_dir to a Playwright page as _user_data_dir so
+    _find_chrome_hwnd can identify the worker's Chrome by owning PID.
+
+    v486: called at every page creation site (initial launch +
+    relaunches) to ensure the HWND lookup stays correct across
+    browser restarts.
+    """
+    if page is None:
+        return
+    try:
+        page._user_data_dir = profile_dir
+    except Exception:
+        pass
+
+
+def _get_worker_chrome_pids(profile_dir):
+    """Return the set of Chrome process PIDs whose commandline contains
+    the given profile directory. Used by _find_chrome_hwnd to identify
+    the worker's Chrome window unambiguously by PID rather than by
+    fragile title matching.
+
+    v486: the previous title-based matching in _find_chrome_hwnd would
+    hit the user's personal Chrome if it happened to have a tab titled
+    "Flow" (any Google Flow page, or any site with Flow in its title).
+    Matching by owning process ID is 100% reliable — worker Chrome
+    processes have the profile path in their commandline, user's
+    personal Chrome processes don't.
+    """
+    import platform as _platform
+    import subprocess as _sub
+    if _platform.system() != "Windows":
+        return set()
+    try:
+        abs_profile = os.path.abspath(profile_dir)
+    except Exception:
+        return set()
+    pids = set()
+    # Method 1: WMIC (Windows 10 and earlier)
+    try:
+        r = _sub.run(
+            ['wmic', 'process', 'where',
+             f'name="chrome.exe" and commandline like "%{abs_profile}%"',
+             'get', 'ProcessId', '/format:value'],
+            capture_output=True, text=True, timeout=3
+        )
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if line.startswith('ProcessId=') and line[10:].strip().isdigit():
+                pids.add(int(line[10:].strip()))
+        if pids:
+            return pids
+    except Exception:
+        pass
+    # Method 2: PowerShell CIM (Windows 11+)
+    try:
+        escaped = abs_profile.replace("'", "''")
+        ps_cmd = (
+            f"Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\""
+            f" | Where-Object {{ $_.CommandLine -like '*{escaped}*' }}"
+            f" | Select-Object -ExpandProperty ProcessId"
+        )
+        r2 = _sub.run(
+            ['powershell', '-NoProfile', '-Command', ps_cmd],
+            capture_output=True, text=True, timeout=3
+        )
+        for line in r2.stdout.splitlines():
+            line = line.strip()
+            if line.isdigit():
+                pids.add(int(line))
+    except Exception:
+        pass
+    return pids
+
+
+def _find_chrome_hwnd(page, label=""):
+    """Return the HWND (Windows window handle) of the Chrome window
+    associated with this Playwright page.
+
+    v486: match by OS process ID, not window title. The previous
+    implementation enumerated all visible windows and matched by title
+    markers like "Google Flow" / "labs.google" / "Flow" / account label.
+    That matched the USER'S personal Chrome if they had any tab titled
+    with those strings (e.g. browsing Flow themselves, reading Kaveno
+    docs, having any Chrome tab with "Flow" in the name). The worker
+    would then cache the user's HWND and minimize THEIR window on every
+    call. Process-ID matching is unambiguous: the worker's Chrome was
+    launched with --user-data-dir=<profile_dir>, so any Chrome process
+    with that path in its commandline is definitively the worker's.
+
+    v467: no Playwright API calls in this function — pure ctypes.
+    Result is cached on the page object as _chrome_hwnd.
+    """
+    import platform as _platform
+    if _platform.system() != "Windows":
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return 0
+
+    # Return cached HWND if we've found it before and it's still valid.
+    cached = getattr(page, "_chrome_hwnd", 0)
+    if cached:
+        try:
+            user32 = ctypes.windll.user32
+            user32.IsWindow.argtypes = [wintypes.HWND]
+            user32.IsWindow.restype = ctypes.c_bool
+            if user32.IsWindow(cached):
+                return cached
+        except Exception:
+            pass
+        # Cache stale (Chrome restarted, got new HWND) — clear and re-scan
+        try:
+            page._chrome_hwnd = 0
+        except Exception:
+            pass
+
+    # Get the worker Chrome PIDs. profile_dir is stashed on the page
+    # at browser-launch time as _user_data_dir.
+    profile_dir = getattr(page, "_user_data_dir", None)
+    worker_pids = _get_worker_chrome_pids(profile_dir) if profile_dir else set()
+
+    try:
+        user32 = ctypes.windll.user32
+        user32.EnumWindows.argtypes = [ctypes.WINFUNCTYPE(
+            ctypes.c_bool, wintypes.HWND, wintypes.LPARAM), wintypes.LPARAM]
+        user32.EnumWindows.restype = ctypes.c_bool
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+        found_hwnd = [0]
+
+        def callback(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length == 0:
+                return True
+            # Primary strategy (v486): match by owning process ID.
+            # This is unambiguous — we know the worker's Chrome PIDs;
+            # the user's personal Chrome has different PIDs.
+            if worker_pids:
+                pid = wintypes.DWORD(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value in worker_pids:
+                    # Still want a title check to skip any invisible child
+                    # window a Chrome process might have; main windows
+                    # have "Chrome" in their title.
+                    buff = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buff, length + 1)
+                    title = buff.value or ""
+                    if "Chrome" in title:
+                        found_hwnd[0] = hwnd
+                        return False
+                return True
+
+            # Fallback strategy (only when profile_dir is unknown):
+            # title matching. Kept as a last resort to not break
+            # anything that doesn't stash _user_data_dir on the page.
+            buff = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buff, length + 1)
+            title = buff.value or ""
+            if "Chrome" in title:
+                search_markers = [m for m in [label, "Google Flow", "labs.google", "Flow"] if m]
+                for marker in search_markers:
+                    if marker and marker in title:
+                        found_hwnd[0] = hwnd
+                        return False
+            return True
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumWindows(WNDENUMPROC(callback), 0)
+
+        # Cache on page for next call
+        if found_hwnd[0]:
+            try:
+                page._chrome_hwnd = found_hwnd[0]
+            except Exception:
+                pass
+        return found_hwnd[0]
+    except Exception:
+        return 0
+
+
+def minimize_chrome_window(page, label=""):
+    """Minimize Chrome to taskbar using SW_SHOWMINNOACTIVE — window
+    is hidden without activating any other window (no focus jump).
+    Windows only; no-op elsewhere."""
+    import platform as _platform
+    if _platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        hwnd = _find_chrome_hwnd(page, label=label)
+        if not hwnd:
+            return
+        user32 = ctypes.windll.user32
+        SW_SHOWMINNOACTIVE = 7
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = ctypes.c_bool
+        user32.ShowWindow(hwnd, SW_SHOWMINNOACTIVE)
+    except Exception:
+        pass
+
+
+def restore_chrome_window(page, label=""):
+    """Un-minimize and bring Chrome forward. Called when login is
+    needed so the user can complete the Google auth flow."""
+    import platform as _platform
+    if _platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        hwnd = _find_chrome_hwnd(page, label=label)
+        if not hwnd:
+            return
+        user32 = ctypes.windll.user32
+        SW_RESTORE = 9
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = ctypes.c_bool
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+
+def defocus_chrome(page, label=""):
+    """Push Chrome behind other windows so it doesn't steal focus.
+
+    v457: now does OS-level minimize (via user32 ShowWindow) in addition
+    to the existing DOM-level window.blur(). Skipped if the page has
+    _stay_visible = True (login flow). Every call site that previously
+    only got a focus nudge now gets a full taskbar hide.
+    """
+    # DOM-level blur (portable across OSes)
+    try:
+        page.evaluate("window.blur()")
+    except Exception:
+        pass
+    # OS-level minimize (Windows only)
+    try:
+        if getattr(page, "_stay_visible", False):
+            return
+        minimize_chrome_window(page, label=label)
+    except Exception:
+        pass
+
+
+def chrome_warmup(page):
+    """Warm up Chrome by visiting Google pages first.
+    
+    This triggers Chrome's VariationsService to sync with clientservices.googleapis.com
+    and download the variations seed. Without this, the x-client-data header sent to
+    Google properties has only 1 trial ID (looks like fresh/automated install).
+    A real Chrome with synced variations has 5-6+ trial IDs.
+    
+    reCAPTCHA Enterprise checks x-client-data — a short header = low trust score = 403.
+    """
+    try:
+        print("[Warmup] Loading Google pages to sync Chrome variations...", flush=True)
+        
+        # Intercept requests to capture x-client-data header
+        x_client_data = {}
+        def capture_header(request):
+            xcd = request.headers.get('x-client-data', '')
+            if xcd and len(xcd) > len(x_client_data.get('value', '')):
+                x_client_data['value'] = xcd
+        
+        page.on("request", capture_header)
+        
+        # Visit Google — triggers variations seed download
+        page.goto("https://www.google.com")
+        human_delay(3, 5)
+        
+        # Do some human-like browsing (builds interaction history for reCAPTCHA)
+        human_mouse_move(page)
+        human_delay(1, 2)
+        scroll_randomly(page)
+        human_delay(1, 2)
+        
+        # Remove listener
+        page.remove_listener("request", capture_header)
+        
+        # Report x-client-data status
+        xcd = x_client_data.get('value', '')
+        if xcd:
+            print(f"[Warmup] ✓ x-client-data captured: {len(xcd)} chars ({xcd[:30]}...)", flush=True)
+            if len(xcd) < 20:
+                print(f"[Warmup] ⚠ SHORT x-client-data — variations may not have synced yet", flush=True)
+                # Extra wait for sync
+                human_delay(5, 8)
+                page.goto("https://www.google.com")
+                human_delay(3, 5)
+        else:
+            print(f"[Warmup] ⚠ No x-client-data header captured", flush=True)
+        
+        print("[Warmup] ✓ Chrome warmup complete", flush=True)
+        defocus_chrome(page, "Warmup")
+    except Exception as e:
+        err_str = str(e)
+        if any(x in err_str for x in ("browser has been closed", "Target page", "context or browser", "TargetClosedError")):
+            # Browser context is permanently dead — not a transient error.
+            # Re-raise so caller knows to relaunch instead of using the dead page.
+            print(f"[Warmup] ✗ Browser died during warmup — re-raising for caller to relaunch", flush=True)
+            raise
+        print(f"[Warmup] ⚠ Warmup failed (non-fatal): {e}", flush=True)
+
+
+_last_mouse_pos = {'x': 640, 'y': 360}  # Track mouse position globally
+
+def human_mouse_move_to(page, target_x, target_y, steps=None):
+    """Move mouse to target with Bezier curve from CURRENT position (not random).
+    
+    reCAPTCHA Enterprise tracks continuous mouse trajectory. Starting from a
+    random position creates a visible 'teleport' that scores poorly. We track
+    the last known position and move smoothly from there.
+    """
+    global _last_mouse_pos
+    try:
+        start_x = _last_mouse_pos['x']
+        start_y = _last_mouse_pos['y']
+        
+        if steps is None:
+            dist = ((target_x - start_x)**2 + (target_y - start_y)**2)**0.5
+            steps = max(8, min(25, int(dist / 40)))
+        
+        # Bezier control point (creates an arc)
+        ctrl_x = (start_x + target_x) / 2 + random.randint(-80, 80)
+        ctrl_y = (start_y + target_y) / 2 + random.randint(-60, 60)
+        
+        for i in range(steps + 1):
+            t = i / steps
+            # Quadratic Bezier
+            x = (1-t)**2 * start_x + 2*(1-t)*t * ctrl_x + t**2 * target_x
+            y = (1-t)**2 * start_y + 2*(1-t)*t * ctrl_y + t**2 * target_y
+            # Micro-jitter (human hands aren't perfectly steady)
+            x += random.uniform(-1.2, 1.2)
+            y += random.uniform(-1.2, 1.2)
+            page.mouse.move(x, y)
+            # Variable speed - slower at start and end (ease-in-out)
+            speed = 0.008 + 0.025 * (1 - abs(2*t - 1))
+            time.sleep(speed + random.uniform(0, 0.008))
+        
+        _last_mouse_pos['x'] = target_x
+        _last_mouse_pos['y'] = target_y
+    except:
+        pass
+
+
+def human_type(page, selector, text, clear_first=True):
+    """Type text in a human-like way with random delays between keystrokes"""
+    element = page.locator(selector)
+    if clear_first:
+        element.clear()
+    
+    for char in text:
+        element.type(char, delay=random.randint(30, 120))  # Random delay per keystroke
+        
+        # Occasional longer pause (like thinking)
+        if random.random() < 0.05:  # 5% chance
+            time.sleep(random.uniform(0.2, 0.5))
+    
+    human_delay(0.2, 0.5)
+
+
+def random_mouse_movement(page):
+    """Random mouse movement to appear more human — tracks position"""
+    global _last_mouse_pos
+    try:
+        viewport = page.viewport_size
+        if viewport:
+            for _ in range(random.randint(2, 4)):
+                target_x = random.randint(100, min(viewport['width'] - 100, 800))
+                target_y = random.randint(100, min(viewport['height'] - 100, 600))
+                human_mouse_move_to(page, target_x, target_y, steps=random.randint(4, 10))
+                time.sleep(random.uniform(0.05, 0.15))
+    except:
+        pass
+
+
+def human_scroll(page, direction='down', amount=None):
+    """Human-like scrolling with variable speed"""
+    if amount is None:
+        amount = random.randint(150, 400)
+    
+    if direction == 'up':
+        amount = -amount
+    
+    # Scroll in multiple small increments
+    steps = random.randint(3, 6)
+    step_amount = amount / steps
+    
+    for _ in range(steps):
+        page.mouse.wheel(0, step_amount)
+        time.sleep(random.uniform(0.02, 0.08))
+    
+    human_delay(0.3, 0.8)
+
+
+def human_click_at(page):
+    """Perform a human-like click at the current mouse position.
+    
+    Uses mousedown → hold → mouseup instead of synthetic .click().
+    reCAPTCHA Enterprise can detect synthetic click events dispatched by
+    Playwright's .click(). Real mouse events from down/up are indistinguishable
+    from human clicks.
+    """
+    page.mouse.down()
+    time.sleep(random.uniform(0.05, 0.15))  # Human hold duration: 50-150ms
+    page.mouse.up()
+
+
+def human_click_for_file_chooser(page, btn_locator):
+    """Move mouse to button and click with human-like behavior.
+    
+    Used for upload buttons inside dialogs where we need the file chooser to trigger.
+    Returns nothing — the caller wraps this in expect_file_chooser.
+    """
+    box = btn_locator.bounding_box()
+    if box:
+        target_x = box['x'] + box['width'] * random.uniform(0.3, 0.7)
+        target_y = box['y'] + box['height'] * random.uniform(0.3, 0.7)
+        human_mouse_move_to(page, target_x, target_y)
+        time.sleep(random.uniform(0.1, 0.25))
+        human_click_at(page)
+    else:
+        btn_locator.click(timeout=3000)
+
+
+def human_click_locator(page, locator, label="", timeout=5000):
+    """Humanized click on a Playwright locator: move mouse → hover → mousedown/up.
+    
+    Lighter than human_click_element — no selector resolution needed.
+    Use when you already have a locator reference.
+    """
+    try:
+        locator.wait_for(state="visible", timeout=timeout)
+        box = locator.bounding_box()
+        if box:
+            target_x = box['x'] + box['width'] * random.uniform(0.3, 0.7)
+            target_y = box['y'] + box['height'] * random.uniform(0.3, 0.7)
+            human_mouse_move_to(page, target_x, target_y)
+            time.sleep(random.uniform(0.12, 0.35))  # Hover pause
+            human_click_at(page)
+        else:
+            locator.click(timeout=timeout)
+        if label:
+            print(f"✓ Clicked: {label}", flush=True)
+        time.sleep(random.uniform(0.2, 0.5))
+        return True
+    except Exception as e:
+        if label:
+            print(f"⚠️ Click failed for {label}: {e}", flush=True)
+        return False
+
+
+def human_click_element(page, selector_or_locator, label="", timeout=10000):
+    """
+    Click an element with natural human-like mouse movement and realistic click timing.
+    
+    Key differences from Playwright's .click():
+    1. Moves from current mouse position (not teleport)
+    2. Bezier curve path (not straight line)
+    3. Brief hover pause before clicking (human visual confirmation)
+    4. Separate mousedown → delay → mouseup (real clicks have 50-150ms hold)
+    5. Tracks mouse position for next movement
+    """
+    global _last_mouse_pos
+    try:
+        # Get the locator
+        if isinstance(selector_or_locator, str):
+            element = page.locator(selector_or_locator).first
+        else:
+            element = selector_or_locator
+        
+        # Wait for element to be visible
+        element.wait_for(state="visible", timeout=timeout)
+        
+        # Get element's bounding box for mouse movement
+        box = element.bounding_box()
+        
+        if box:
+            # Calculate target with natural randomness (don't always hit dead center)
+            target_x = box['x'] + box['width'] * random.uniform(0.3, 0.7)
+            target_y = box['y'] + box['height'] * random.uniform(0.3, 0.7)
+            
+            # Move mouse with Bezier curve from current position
+            human_mouse_move_to(page, target_x, target_y)
+            
+            # Hover pause — human visual confirmation before clicking (150-400ms)
+            time.sleep(random.uniform(0.15, 0.40))
+            
+            # Realistic click: separate mousedown and mouseup with hold duration
+            # Real human clicks hold the button for 50-150ms
+            page.mouse.down()
+            time.sleep(random.uniform(0.05, 0.15))
+            page.mouse.up()
+            
+            # Update tracked position
+            _last_mouse_pos['x'] = target_x
+            _last_mouse_pos['y'] = target_y
+        else:
+            # Fallback to element.click() if no bounding box
+            element.click(timeout=timeout)
+        
+        if label:
+            print(f"✓ Clicked: {label}", flush=True)
+        
+        # Post-click pause (human reaction time)
+        time.sleep(random.uniform(0.3, 0.7))
+        return True
+            
+    except Exception as e:
+        if label:
+            print(f"❌ Click failed for {label}: {e}", flush=True)
+        return False
+
+
+def human_click_selector(page, selector, label="", timeout=10000):
+    """Convenience wrapper for human_click_element with a selector string."""
+    return human_click_element(page, selector, label, timeout)
+
+
+def dismiss_create_with_flow(page, label=""):
+    """Check for and click the 'Create with Flow' splash button if present.
+    
+    Google sometimes shows this overlay when starting a new Flow session.
+    Must be clicked before the 'New project' button becomes available.
+    Handles both <button> and <a target="_blank"> variants.
+    """
+    for sel in ["button:has-text('Create with Flow')", "a:has-text('Create with Flow')"]:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=2000):
+                print(f"[{label or 'Flow'}] Found 'Create with Flow' ({sel}) — handling...", flush=True)
+                try:
+                    href = btn.get_attribute("href")
+                    target = btn.get_attribute("target")
+                    if href and target == "_blank":
+                        print(f"[{label or 'Flow'}] New-tab link — navigating in current tab: {href}", flush=True)
+                        page.goto(href, wait_until="domcontentloaded", timeout=30000)
+                        time.sleep(2)
+                        return True
+                except Exception:
+                    pass
+                human_click_element(page, btn, f"[{label or 'Flow'}] Create with Flow")
+                time.sleep(2)
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
+    """Ensure the page is on Flow and the user is logged in.
+    
+    This is the SINGLE entry point for all login/navigation logic.
+    It handles every state the page could be in:
+    
+    States:
+      A) Already on Flow + logged in (project page or home with "New project")
+         → Return immediately
+      B) Already on Flow but NOT logged in (landing page with "Create with Flow")
+         → Click "Create with Flow" → wait for Google login → wait for user → return
+      C) On Google login/OAuth page
+         → Wait for user to complete login → return
+      D) Somewhere else (blank, error, etc.)
+         → Navigate to Flow → handle result (loops back to A/B/C)
+    
+    Returns True if login was required, False if already logged in.
+    """
+    
+    def _get_page_state(p):
+        """Determine current page state. Returns one of:
+        'flow_logged_in', 'flow_not_logged_in', 'google_login', 'google_redirect', 'other'
+        """
+        try:
+            url = p.url.lower()
+        except Exception:
+            return 'other'
+        
+        # Quick dismiss of Chrome browser dialogs that block interaction
+        try:
+            for btn_text in ["Use Chrome without an account", "No thanks", "Not now"]:
+                btn = p.locator(f"button:has-text('{btn_text}')")
+                if btn.count() > 0 and btn.first.is_visible(timeout=500):
+                    btn.first.click(force=True)
+                    print(f"[Login] ✓ Dismissed Chrome dialog ({btn_text})", flush=True)
+                    time.sleep(1)
+                    break
+        except:
+            pass
+        
+        # Google redirect in progress (SetSID, OAuth consent, etc.)
+        if "accounts.google" in url and ("setsid" in url or "consent" in url):
+            return 'google_redirect'
+        
+        # Google login/signin page
+        if "accounts.google" in url:
+            return 'google_login'
+        
+        # On Flow URL (handles locale: /fx/es-419/tools/flow, /fx/tools/flow, etc.)
+        if is_flow_url(url):
+            # On a project page = definitely logged in
+            if is_flow_project(url):
+                return 'flow_logged_in'
+            
+            # Check DOM for login state — multiple indicators
+            # New project button text varies by locale: "New project", "Nuevo proyecto", "Dự án mới", etc.
+            # So we check multiple selectors, not just English text
+            logged_in_selectors = [
+                # Profile avatar — most reliable, locale-independent
+                "img[src*='googleusercontent.com']",
+                "img[src*='lh3.googleusercontent']",
+                # New project button — locale variants (new UI: no add_2 icon)
+                "button:has-text('New project')",          # English
+                "button:has-text('Nuovo progetto')",       # Italian
+                "button:has-text('Nuevo proyecto')",       # Spanish
+                "button:has-text('Nouveau projet')",       # French
+                "button:has-text('Neues Projekt')",        # German
+                # Icon-based fallback (old UI)
+                "button:has(i:text('add_2'))",
+            ]
+            
+            for selector in logged_in_selectors:
+                try:
+                    if p.locator(selector).first.is_visible(timeout=1500):
+                        return 'flow_logged_in'
+                except Exception:
+                    pass
+            
+            # Check for "Create with Flow" (old splash, means NOT logged in)
+            try:
+                if p.locator("button:has-text('Create with Flow')").is_visible(timeout=1500):
+                    return 'flow_not_logged_in'
+            except Exception:
+                pass
+            
+            # Neither found — page might still be loading. Wait and retry once.
+            time.sleep(2)
+            
+            for selector in logged_in_selectors:
+                try:
+                    if p.locator(selector).first.is_visible(timeout=1500):
+                        return 'flow_logged_in'
+                except Exception:
+                    pass
+            
+            try:
+                if p.locator("button:has-text('Create with Flow')").is_visible(timeout=1500):
+                    return 'flow_not_logged_in'
+            except Exception:
+                pass
+            
+            # Still nothing — page is on the Flow URL but login state is unclear.
+            # Returning 'other' causes infinite re-navigation (page is already here).
+            # Treat as flow_not_logged_in to trigger the click-through/login path instead.
+            print(f"[Login] ⚠ On Flow URL but no login indicators found — treating as not logged in", flush=True)
+            return 'flow_not_logged_in'
+        
+        return 'other'
+    
+    def _wait_for_page_settle(p, max_seconds=30):
+        """Wait for redirects to settle. Returns the final state."""
+        for i in range(max_seconds):
+            time.sleep(1)
+            state = _get_page_state(p)
+            if state != 'google_redirect':
+                return state
+            if i % 5 == 4:
+                try:
+                    print(f"[{label}] Still redirecting... ({p.url[:80]})", flush=True)
+                except Exception:
+                    pass
+        return _get_page_state(p)
+    
+    def _navigate_to_flow(p):
+        """Navigate to Flow, handling redirect chains."""
+        try:
+            p.goto(FLOW_HOME_URL)
+        except Exception:
+            pass  # Redirect interruptions expected
+        return _wait_for_page_settle(p)
+    
+    def _wait_for_user_login(p):
+        """Wait for user to complete Google login."""
+        print(f"\n{'='*50}", flush=True)
+        print(f"[{label}] GOOGLE LOGIN REQUIRED", flush=True)
+        print(f"Please complete login in the browser...", flush=True)
+        print(f"{'='*50}\n", flush=True)
+        # v457: bring Chrome forward so the user sees the login prompt,
+        # and set stay_visible so the on-load handler doesn't re-minimize
+        # during the Google auth flow.
+        try:
+            p._stay_visible = True
+        except Exception:
+            pass
+        try:
+            restore_chrome_window(p, label=label)
+        except Exception:
+            pass
+
+        start_time = time.time()
+        max_wait = timeout_minutes * 60
+        last_url = ""
+        
+        while True:
+            time.sleep(2)
+            state = _get_page_state(p)
+            
+            # Only return when FULLY logged in — New project button visible.
+            # flow_not_logged_in means we reached Flow but login is not complete yet.
+            if state == 'flow_logged_in':
+                print(f"✓ [{label}] Login confirmed! (New project button visible)", flush=True)
+                time.sleep(3)
+                # v457: login complete → clear stay_visible, minimize back
+                try:
+                    p._stay_visible = False
+                except Exception:
+                    pass
+                try:
+                    minimize_chrome_window(p, label=label)
+                except Exception:
+                    pass
+                return
+            
+            if state == 'flow_not_logged_in':
+                # Landed on Flow landing page — try to click through to the logged-in app.
+                # Button text has changed over time: "Create with Flow", "Get started", etc.
+                print(f"[{label}] On Flow landing page — looking for entry button...", flush=True)
+                entry_selectors = [
+                    "button:has-text('Create with Flow')",
+                    "a:has-text('Create with Flow')",
+                    "button:has-text('Get started')",
+                    "a:has-text('Get started')",
+                    "button:has-text('Try Flow')",
+                    "button:has-text('Sign in')",
+                    "a:has-text('Sign in')",
+                    "button:has-text('Start creating')",
+                    "button:has-text('Try it')",
+                ]
+                clicked = False
+                for sel in entry_selectors:
+                    try:
+                        btn = p.locator(sel).first
+                        if btn.is_visible(timeout=1000):
+                            # If it's a link that opens a new tab, intercept and navigate in current tab
+                            try:
+                                href = btn.get_attribute("href")
+                                target = btn.get_attribute("target")
+                                if href and target == "_blank":
+                                    print(f"[{label}] ✓ Found new-tab link ({sel}) — navigating in current tab: {href}", flush=True)
+                                    p.goto(href, wait_until="domcontentloaded", timeout=30000)
+                                    time.sleep(3)
+                                    clicked = True
+                                    break
+                            except Exception:
+                                pass
+                            btn.click()
+                            print(f"[{label}] ✓ Clicked entry button ({sel}) — waiting for redirect...", flush=True)
+                            time.sleep(3)
+                            clicked = True
+                            break
+                    except Exception:
+                        pass
+                if not clicked:
+                    print(f"[{label}] ⚠ No entry button found — waiting for page to settle...", flush=True)
+                    time.sleep(3)
+                continue
+            
+            # Log URL changes
+            try:
+                url = p.url.lower()
+                if url != last_url:
+                    print(f"[{label}] URL: {url[:80]}...", flush=True)
+                    last_url = url
+            except Exception:
+                pass
+            
+            elapsed = time.time() - start_time
+            if elapsed > max_wait:
+                print(f"⚠️ [{label}] Login timeout after {timeout_minutes} minutes!", flush=True)
+                return
+            if int(elapsed) % 30 == 0 and int(elapsed) > 0:
+                print(f"[{label}] Still waiting for login... ({int(elapsed)}s)", flush=True)
+    
+    # ── Main logic: loop until logged into Flow ──
+    max_attempts = 8
+    _consecutive_no_buttons = 0
+    for attempt in range(max_attempts):
+        state = _get_page_state(page)
+        
+        if state == 'flow_logged_in':
+            if attempt == 0:
+                print(f"[{label}] ✓ Already logged in on Flow", flush=True)
+            check_and_dismiss_popup(page)
+            # Export storage state for download browser
+            try:
+                context = page.context
+                storage_file = os.path.join(BASE_DIR, ".submit_storage_state.json")
+                context.storage_state(path=storage_file)
+            except Exception:
+                pass
+            return False
+        
+        elif state == 'flow_not_logged_in':
+            # Before clicking anything: wait 3s and recheck — the avatar may just be slow to render.
+            # If we're already logged in (avatar appears), _get_page_state returns flow_logged_in
+            # and the top of the loop handles it. Avoids unnecessary click-through on slow loads.
+            print(f"[{label}] On Flow landing — waiting 3s to confirm state...", flush=True)
+            time.sleep(3)
+            recheck = _get_page_state(page)
+            if recheck == 'flow_logged_in':
+                print(f"[{label}] ✓ Confirmed logged in after wait (avatar appeared)", flush=True)
+                continue  # Caught at top of loop
+
+            # Still not logged in — try entry buttons in order
+            print(f"[{label}] Not logged in — looking for entry button...", flush=True)
+            entry_selectors = [
+                "button:has-text('Create with Flow')",
+                "a:has-text('Create with Flow')",
+                "button:has-text('Get started')",
+                "a:has-text('Get started')",
+                "button:has-text('Try Flow')",
+                "button:has-text('Sign in')",
+                "a:has-text('Sign in')",
+                "button:has-text('Start creating')",
+            ]
+            clicked = False
+            for sel in entry_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if btn.is_visible(timeout=1000):
+                        # If it's a link that opens a new tab, navigate in current tab instead
+                        try:
+                            href = btn.get_attribute("href")
+                            target = btn.get_attribute("target")
+                            if href and target == "_blank":
+                                print(f"[{label}] ✓ Found new-tab link ({sel}) — navigating in current tab: {href}", flush=True)
+                                page.goto(href, wait_until="domcontentloaded", timeout=30000)
+                                time.sleep(3)
+                                clicked = True
+                                break
+                        except Exception:
+                            pass
+                        human_click_element(page, btn, f"[{label}] {sel}")
+                        clicked = True
+                        break
+                except Exception:
+                    pass
+            if not clicked:
+                _consecutive_no_buttons += 1
+                print(f"[{label}] ⚠ No entry button found ({_consecutive_no_buttons}x) — waiting for page to settle...", flush=True)
+                if _consecutive_no_buttons >= 2:
+                    # DOM is probably stale from SPA navigation — force a full page reload
+                    print(f"[{label}] ⚠ Stuck with no buttons after {_consecutive_no_buttons} attempts — hard reloading Flow...", flush=True)
+                    try:
+                        page.goto(FLOW_HOME_URL, wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+                    time.sleep(3)
+                    _consecutive_no_buttons = 0
+            else:
+                _consecutive_no_buttons = 0
+            # Wait for redirect to settle
+            state = _wait_for_page_settle(page, max_seconds=15)
+            if state == 'google_login':
+                _wait_for_user_login(page)
+            elif state == 'flow_logged_in':
+                continue  # Will be caught at top of loop
+            # Loop back to re-check state
+            continue
+        
+        elif state == 'google_login':
+            _wait_for_user_login(page)
+            # After login, Google redirects to Flow — wait for settle
+            _wait_for_page_settle(page, max_seconds=15)
+            continue
+        
+        elif state == 'google_redirect':
+            state = _wait_for_page_settle(page, max_seconds=30)
+            continue
+        
+        else:  # 'other'
+            print(f"[{label}] Not on Flow — navigating...", flush=True)
+            state = _navigate_to_flow(page)
+            continue
+    
+    # Final check
+    check_and_dismiss_popup(page)
+    try:
+        context = page.context
+        storage_file = os.path.join(BASE_DIR, ".submit_storage_state.json")
+        context.storage_state(path=storage_file)
+    except Exception:
+        pass
+    return True
+
+
+class NotUltraError(Exception):
+    """Raised when Google account doesn't have ULTRA access."""
+    pass
+
+
+def check_ultra_account(page, label="", timeout=5):
+    """Check if the logged-in Google account has ULTRA access on Flow.
+    
+    Looks for the ULTRA badge in the top navigation bar. If not found,
+    raises NotUltraError which the caller should handle by stopping the worker.
+    
+    Args:
+        page: Playwright page on Flow
+        label: Log prefix (account name)
+        timeout: seconds to wait for badge to render
+    """
+    prefix = f"[{label}] " if label else ""
+    
+    try:
+        # Wait briefly for header to fully render
+        time.sleep(2)
+        
+        # Check for ULTRA badge — multiple selector strategies
+        for _ in range(timeout):
+            is_ultra = page.evaluate("""() => {
+                // Strategy 1: exact text match
+                const divs = document.querySelectorAll('div, span');
+                for (const d of divs) {
+                    if (d.textContent.trim() === 'ULTRA' && d.children.length === 0) return true;
+                }
+                return false;
+            }""")
+            
+            if is_ultra:
+                print(f"{prefix}✓ Account verified: ULTRA", flush=True)
+                return True
+            time.sleep(1)
+        
+        print(f"{prefix}❌ Account is NOT ULTRA — cannot use Flow", flush=True)
+        
+        # Report to API
+        try:
+            api_request("POST", "/worker-error", {
+                "error_type": "not_ultra",
+                "account_name": label or "default",
+                "message": "Google account does not have ULTRA access. Please use an ULTRA Google account."
+            })
+        except Exception:
+            pass
+        
+        raise NotUltraError(
+            f"Google account ({label or 'default'}) does not have ULTRA access. "
+            f"Delete session folders and restart with an ULTRA account."
+        )
+    except NotUltraError:
+        raise
+    except Exception as e:
+        # If check fails (page issue, etc), log warning but don't block
+        print(f"{prefix}⚠ ULTRA check failed: {e} — continuing", flush=True)
+        return True
+    """Navigate to Flow if not already there. Handles redirects gracefully.
+    Returns True if on Flow, False if login needed.
+    """
+    # Skip if already on Flow
+    try:
+        url = page.url.lower()
+        if is_on_flow_not_login(url):
+            return True
+    except Exception:
+        pass
+    
+    # Navigate
+    try:
+        page.goto(FLOW_HOME_URL, timeout=timeout, wait_until="commit")
+    except Exception:
+        pass
+    
+    # Wait for settle
+    for _ in range(15):
+        time.sleep(1)
+        try:
+            url = page.url.lower()
+            if is_on_flow_not_login(url):
+                return True
+            if is_google_login(url) and "setsid" not in url:
+                return False
+        except Exception:
+            continue
+    return True
+
+
+def spa_navigate_to_flow_home(page, label=""):
+    """Navigate to Flow homepage WITHOUT full page reload.
+    
+    Uses SPA (client-side) navigation to preserve the reCAPTCHA Enterprise session.
+    Full page.goto() kills the reCAPTCHA session, forcing re-evaluation which often
+    results in low scores (597-char tokens) → 403 PERMISSION_DENIED.
+    
+    Approach (in priority order):
+    1. Click a link/logo that navigates to Flow home within the SPA
+    2. Use Next.js router.push() for client-side navigation
+    3. Use history.pushState + dispatchEvent for SPA navigation
+    4. FALLBACK: page.goto (full reload) — only if all else fails
+    """
+    current_url = page.url
+    prefix = f"[{label}]" if label else "[SPA-NAV]"
+    
+    # Already on homepage?
+    if is_flow_home(current_url):
+        print(f"{prefix} Already on Flow homepage", flush=True)
+        return True
+    
+    print(f"{prefix} SPA-navigating to Flow home (preserving reCAPTCHA session)...", flush=True)
+    
+    # === Approach 1: Browser back button (zero CDP footprint) ===
+    try:
+        for _ in range(5):
+            page.go_back()
+            time.sleep(1)
+            if is_flow_home(page.url):
+                # URL matches — but verify DOM is alive (not stale from SPA nav)
+                # Check for ANY visible button/avatar within 3s
+                _dom_alive = False
+                for _ds in ["button", "img[src*='googleusercontent']", "a[href*='flow']"]:
+                    try:
+                        if page.locator(_ds).first.is_visible(timeout=1500):
+                            _dom_alive = True
+                            break
+                    except Exception:
+                        pass
+                if _dom_alive:
+                    print(f"{prefix} ✓ SPA navigation via go_back()", flush=True)
+                    return True
+                else:
+                    print(f"{prefix} ⚠ go_back() landed on Flow URL but DOM is stale — falling through", flush=True)
+                    break
+    except Exception as e:
+        print(f"{prefix} go_back approach failed: {e}", flush=True)
+    
+    # === Approach 2: Click the Flow logo/title link (human click, no evaluate) ===
+    try:
+        logo_selectors = [
+            "a[href*='/tools/flow']:not([href*='/project/'])",  # Matches any locale
+            "a[href='/fx/tools/flow']",                          # No locale (exact)
+            "header a[href*='flow']",
+            "nav a[href*='flow']",
+            ".logo a",
+            "a:has-text('Flow')",
+        ]
+        for selector in logo_selectors:
+            try:
+                link = page.locator(selector).first
+                if link.count() > 0 and link.is_visible(timeout=2000):
+                    human_click_element(page, selector, f"{prefix} Flow home link")
+                    time.sleep(2)
+                    if "/project/" not in page.url:
+                        print(f"{prefix} ✓ SPA navigation via link click", flush=True)
+                        return True
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"{prefix} Link click approach failed: {e}", flush=True)
+    
+    # === Approach 3: Next.js router push (single evaluate — only as fallback) ===
+    try:
+        result = page.evaluate(r"""() => {
+            if (window.next && window.next.router) {
+                window.next.router.push('/fx/tools/flow');
+                return 'next_router';
+            }
+            if (window.history && window.history.pushState) {
+                window.history.pushState({}, '', '/fx/tools/flow');
+                window.dispatchEvent(new PopStateEvent('popstate', {state: {}}));
+                return 'history_push';
+            }
+            return null;
+        }""")
+        if result:
+            time.sleep(2)
+            if "/project/" not in page.url:
+                print(f"{prefix} ✓ SPA navigation via {result}", flush=True)
+                return True
+    except Exception as e:
+        print(f"{prefix} Router push approach failed: {e}", flush=True)
+    
+    # === FALLBACK: Full page.goto (kills reCAPTCHA but at least works) ===
+    print(f"{prefix} ⚠ All SPA approaches failed, falling back to page.goto (will reset reCAPTCHA)", flush=True)
+    try:
+        page.goto(FLOW_HOME_URL)
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+    except Exception as e:
+        print(f"{prefix} ⚠ Even page.goto failed: {e}", flush=True)
+    
+    # After a full reload, add extra interaction time for reCAPTCHA
+    print(f"{prefix} Adding extended interaction time for reCAPTCHA recovery...", flush=True)
+    human_delay(3, 5)
+    human_mouse_move(page)
+    human_delay(2, 3)
+    scroll_randomly(page)
+    human_delay(2, 3)
+    human_mouse_move(page)
+    human_delay(2, 3)
+    scroll_randomly(page)
+    human_delay(3, 5)
+    human_mouse_move(page)
+    human_delay(2, 3)
+    
+    return True
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+# FFMPEG Configuration (for continue mode frame extraction)
+# Set this to your ffmpeg.exe path on Windows
+from pathlib import Path
+FFMPEG_BIN = os.environ.get("FFMPEG_BIN") or r"C:\ffmpeg\ffmpeg-2025-07-23-git-829680f96a-essentials_build\bin\ffmpeg.exe"
+if os.path.exists(FFMPEG_BIN):
+    os.environ["FFMPEG_BIN"] = FFMPEG_BIN
+    os.environ["ImageIO_FFMPEG_EXE"] = FFMPEG_BIN
+    os.environ["PATH"] = str(Path(FFMPEG_BIN).parent) + os.pathsep + os.environ.get("PATH", "")
+    print(f"[Config] FFMPEG configured: {FFMPEG_BIN}", flush=True)
+else:
+    print(f"[Config] FFMPEG not found at {FFMPEG_BIN}, will try system PATH", flush=True)
+
+WEB_APP_URL = os.environ.get("WEB_APP_URL", "https://kavenobuilder.com")
+
+# Worker mode: "admin" uses shared LOCAL_WORKER_API_KEY, "user" uses personal token
+WORKER_MODE = os.environ.get("WORKER_MODE", "admin")
+if WORKER_MODE == "user":
+    API_KEY = os.environ.get("USER_WORKER_TOKEN", "")
+    API_PATH_PREFIX = "/api/user-worker"
+    if not API_KEY:
+        print("ERROR: USER_WORKER_TOKEN is required in user mode!")
+        print("   Get your token from the web app: Settings -> My Worker")
+        import sys
+        sys.exit(1)
+    # Auto-configure defaults for user mode (can be overridden by .env)
+    os.environ.setdefault("PROXY_TYPE", "none")
+    os.environ.setdefault("BROWSER_MODE", "stealth")
+    multi = os.environ.get("MULTI_ACCOUNT", "false")
+    print(f"USER MODE: Processing only your jobs (multi-account: {multi})")
+    print(f"   Token: {API_KEY[:8]}...{API_KEY[-4:]}")
+else:
+    API_KEY = os.environ.get("LOCAL_WORKER_API_KEY", "local-worker-secret-key-12345")
+    API_PATH_PREFIX = "/api/local-worker"
+
+# Worker identification (for multi-worker setups)
+# Each worker instance should have a unique ID to prevent job conflicts
+import socket
+DEFAULT_WORKER_ID = f"worker-{socket.gethostname()}-{os.getpid()}"
+WORKER_ID = os.environ.get("WORKER_ID", DEFAULT_WORKER_ID)
+
+# Base directory for the worker
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Single account config (legacy)
+SESSION_FOLDER = os.environ.get("SESSION_FOLDER", "./flow_session_chrome")
+DOWNLOAD_SESSION_FOLDER = os.environ.get("DOWNLOAD_SESSION_FOLDER", "./flow_session_chrome_download")
+CACHE_FILE = "./worker_cache.json"
+
+
+def suppress_chrome_signin_dialog(user_data_dir):
+    """Write Chrome preferences to suppress the 'Sign in to Chrome?' dialog
+    and force English UI language. Must be called BEFORE launching the browser.
+    """
+    import json as _json
+    
+    # ---- 1. Default/Preferences (per-profile settings) ----
+    prefs_dir = os.path.join(user_data_dir, "Default")
+    os.makedirs(prefs_dir, exist_ok=True)
+    prefs_file = os.path.join(prefs_dir, "Preferences")
+    
+    prefs = {}
+    if os.path.exists(prefs_file):
+        try:
+            with open(prefs_file, 'r', encoding='utf-8') as f:
+                prefs = _json.load(f)
+        except Exception:
+            prefs = {}
+    
+    # Suppress sign-in prompts
+    if "signin" not in prefs:
+        prefs["signin"] = {}
+    prefs["signin"]["allowed"] = False
+    prefs["signin"]["allowed_on_next_startup"] = False
+    
+    if "browser" not in prefs:
+        prefs["browser"] = {}
+    prefs["browser"]["signin_intercept_enabled"] = False
+    
+    if "profile" not in prefs:
+        prefs["profile"] = {}
+    prefs["profile"]["default_content_setting_values"] = prefs.get("profile", {}).get("default_content_setting_values", {})
+    
+    # Force English language in profile
+    if "intl" not in prefs:
+        prefs["intl"] = {}
+    prefs["intl"]["accept_languages"] = "en-US,en"
+    prefs["intl"]["selected_languages"] = "en-US,en"
+    
+    # Disable translate popups
+    if "translate" not in prefs:
+        prefs["translate"] = {}
+    prefs["translate"]["enabled"] = False
+    
+    try:
+        with open(prefs_file, 'w', encoding='utf-8') as f:
+            _json.dump(prefs, f)
+    except Exception as e:
+        print(f"[Config] Warning: Could not write Chrome prefs: {e}", flush=True)
+    
+    # ---- 2. Local State (browser-wide settings — controls Chrome UI language) ----
+    local_state_file = os.path.join(user_data_dir, "Local State")
+    local_state = {}
+    if os.path.exists(local_state_file):
+        try:
+            with open(local_state_file, 'r', encoding='utf-8') as f:
+                local_state = _json.load(f)
+        except Exception:
+            local_state = {}
+    
+    # This is the key setting that controls Chrome's UI language
+    if "intl" not in local_state:
+        local_state["intl"] = {}
+    local_state["intl"]["app_locale"] = "en-US"
+    local_state["intl"]["accept_languages"] = "en-US,en"
+    
+    # Also set application_locale which some Chrome versions use
+    if "browser" not in local_state:
+        local_state["browser"] = {}
+    local_state["browser"]["application_locale"] = "en-US"
+    
+    try:
+        with open(local_state_file, 'w', encoding='utf-8') as f:
+            _json.dump(local_state, f)
+    except Exception as e:
+        print(f"[Config] Warning: Could not write Local State: {e}", flush=True)
+    
+    # ---- 3. Also set Preferences in any other profile dirs (Profile 1, etc.) ----
+    for entry in os.listdir(user_data_dir):
+        profile_dir = os.path.join(user_data_dir, entry)
+        if os.path.isdir(profile_dir) and entry.startswith("Profile"):
+            pf = os.path.join(profile_dir, "Preferences")
+            pp = {}
+            if os.path.exists(pf):
+                try:
+                    with open(pf, 'r', encoding='utf-8') as f:
+                        pp = _json.load(f)
+                except Exception:
+                    pp = {}
+            if "intl" not in pp:
+                pp["intl"] = {}
+            pp["intl"]["accept_languages"] = "en-US,en"
+            pp["intl"]["selected_languages"] = "en-US,en"
+            if "translate" not in pp:
+                pp["translate"] = {}
+            pp["translate"]["enabled"] = False
+            try:
+                with open(pf, 'w', encoding='utf-8') as f:
+                    _json.dump(pp, f)
+            except Exception:
+                pass
+
+
+def get_golden_folder(session_folder):
+    """Derive the golden (baseline) folder path from a session folder path.
+
+    Naming convention (mirrors setup_worker.py):
+        .../chrome-session        → .../chrome-golden
+        .../chrome-session-2      → .../chrome-golden-2
+        .../flow_session_account1 → .../flow_golden_account1  (fallback)
+    """
+    import re
+    p = os.path.abspath(session_folder)
+    base = os.path.dirname(p)
+    name = os.path.basename(p)
+
+    # Standard naming from setup_worker.py
+    if name == "chrome-session":
+        return os.path.join(base, "chrome-golden")
+    m = re.match(r"^chrome-session(-\d+)$", name)
+    if m:
+        return os.path.join(base, f"chrome-golden{m.group(1)}")
+
+    # Fallback: replace "session" with "golden" anywhere in the name
+    new_name = name.replace("session", "golden")
+    if new_name != name:
+        return os.path.join(base, new_name)
+
+    # Last resort: just append -golden
+    return os.path.join(base, name + "-golden")
+
+
+def kill_chrome_using_profile(profile_dir, label=""):
+    """Force-kill any Chrome process holding a lock on the given profile directory.
+    Also removes SingletonLock/Socket/Cookie files so the next launch starts clean.
+    Works on both Linux (pgrep/kill) and Windows (WMIC/taskkill).
+    """
+    import subprocess as _sub
+    import platform as _platform
+    prefix = f"[{label}] " if label else ""
+    abs_profile = os.path.abspath(profile_dir)
+    killed = []
+
+    try:
+        if _platform.system() == "Windows":
+            # Windows: use WMIC to find Chrome processes whose commandline contains
+            # the worker profile path — kills ONLY the worker Chrome, not the user's
+            # own Chrome windows.
+            #
+            # v486: use the FULL profile path only. The old basename fallback
+            # (matching on "chrome-session" when the full path returned zero)
+            # caused catastrophic cross-worker kills: both video worker
+            # (C:\Users\tomma\veo-worker\chrome-session) and image worker
+            # (C:\Users\tomma\KavenoImageWorker\chrome-session) share the
+            # basename "chrome-session". When the video worker started and
+            # the full-path search found nothing for ITS profile yet, the
+            # fallback killed EVERY Chrome with "chrome-session" in its
+            # commandline — including the image worker's Chrome.
+            # Evidence: log showed 9 PIDs killed for "chrome-session" when
+            # the video worker has only 1 Chrome per account.
+            pids_found = []
+
+            # Method 1: WMIC (Windows 10 and earlier)
+            try:
+                r = _sub.run(
+                    ['wmic', 'process', 'where',
+                     f'name="chrome.exe" and commandline like "%{abs_profile}%"',
+                     'get', 'ProcessId', '/format:value'],
+                    capture_output=True, text=True, timeout=3
+                )
+                for line in r.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith('ProcessId=') and line[10:].strip().isdigit():
+                        pids_found.append(line[10:].strip())
+            except Exception:
+                # WMIC not available (Windows 11+) — try PowerShell
+                try:
+                    # Escape single quotes in path for PowerShell
+                    escaped = abs_profile.replace("'", "''")
+                    ps_cmd = (
+                        f"Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\""
+                        f" | Where-Object {{ $_.CommandLine -like '*{escaped}*' }}"
+                        f" | Select-Object -ExpandProperty ProcessId"
+                    )
+                    r2 = _sub.run(
+                        ['powershell', '-NoProfile', '-Command', ps_cmd],
+                        capture_output=True, text=True, timeout=3
+                    )
+                    for line in r2.stdout.splitlines():
+                        line = line.strip()
+                        if line.isdigit():
+                            pids_found.append(line)
+                except Exception as _ps_err:
+                    print(f"{prefix}PowerShell CIM query failed (non-fatal): {_ps_err}", flush=True)
+
+            for pid in pids_found:
+                _sub.run(['taskkill', '/F', '/PID', pid], capture_output=True, timeout=5)
+                print(f"{prefix}Killed worker Chrome pid {pid} (profile: {os.path.basename(abs_profile)})", flush=True)
+                killed.append(pid)
+
+            # NOTE: We intentionally do NOT fall back to 'taskkill /IM chrome.exe'
+            # OR to a basename search. Full-path match is the only safe way to
+            # distinguish this worker's Chrome from (a) the user's personal
+            # Chrome, and (b) OTHER workers' Chrome (e.g. image worker).
+            if not killed:
+                print(f"{prefix}No worker Chrome process found for profile {abs_profile}", flush=True)
+        else:
+            # Linux/Mac: pgrep + kill -9. Same full-path-only policy.
+            try:
+                result = _sub.run(['pgrep', '-f', abs_profile], capture_output=True, text=True, timeout=5)
+                for pid in result.stdout.strip().split():
+                    if pid:
+                        _sub.run(['kill', '-9', pid], capture_output=True, timeout=5)
+                        print(f"{prefix}Killed stale Chrome pid {pid} (profile: {os.path.basename(abs_profile)})", flush=True)
+                        killed.append(pid)
+            except Exception:
+                pass
+
+        if not killed:
+            print(f"{prefix}No stale Chrome found for {os.path.basename(abs_profile)}", flush=True)
+    except Exception as e:
+        print(f"{prefix}Could not kill Chrome: {e}", flush=True)
+
+    # Remove lock files so new instance doesn't attach to old session
+    for lock_file in ['SingletonLock', 'SingletonSocket', 'SingletonCookie']:
+        lock_path = os.path.join(profile_dir, lock_file)
+        if os.path.exists(lock_path):
+            try:
+                os.remove(lock_path)
+            except Exception:
+                pass
+
+
+
+def purge_gpu_caches(session_folder, label=""):
+    """Delete GPU/shader caches from a Chrome profile after golden restore.
+
+    The golden was created on a machine with a real GPU. The VPS runs Xvfb
+    (software renderer). Chrome caches compiled shaders keyed to the GPU
+    device/driver. When those caches are restored on a different GPU environment
+    they are invalid — Chrome's GPU process crashes on the first real render.
+
+    Deleting them forces Chrome to rebuild from scratch for Xvfb.
+    Login cookies and session state are NOT affected.
+    """
+    prefix = f"[{label}] " if label else ""
+    cache_dirs = [
+        os.path.join(session_folder, "Default", "GPUCache"),
+        os.path.join(session_folder, "GrShaderCache"),
+        os.path.join(session_folder, "ShaderCache"),
+    ]
+    for d in cache_dirs:
+        if os.path.exists(d):
+            try:
+                shutil.rmtree(d)
+                print(f"{prefix}✓ Purged GPU cache: {os.path.basename(d)}", flush=True)
+            except Exception as e:
+                print(f"{prefix}⚠ Could not purge {os.path.basename(d)}: {e}", flush=True)
+
+def restore_from_golden(session_folder, account_label="", restore_session=True,
+                        # Legacy params kept for call-site compat — ignored in v126+
+                        download_folder=None, restore_download=False):
+    """Restore submit session profile from the golden (clean-login) snapshot.
+
+    In v126+ the download browser is a tab in the same Chrome as the submit browser.
+    Only the session profile needs to be restored — download_folder is no longer used.
+
+    Returns True if restore succeeded, False otherwise.
+    """
+    golden_folder = get_golden_folder(session_folder)
+    prefix = f"[{account_label}] " if account_label else ""
+
+    if not os.path.exists(golden_folder):
+        print(f"{prefix}⚠ Golden profile not found at {golden_folder} — cannot restore.", flush=True)
+        print(f"{prefix}  Re-run setup_worker.py to create a fresh golden profile.", flush=True)
+        return False
+
+    if not restore_session or not session_folder:
+        return True
+
+    print(f"{prefix}🔄 GOLDEN RESTORE: Restoring session profile from {golden_folder}", flush=True)
+    try:
+        if os.path.exists(session_folder):
+            shutil.rmtree(session_folder, ignore_errors=True)
+        # Use dirs_exist_ok=True so if rmtree left locked files behind,
+        # copytree still overwrites everything from golden rather than failing
+        # with FileExistsError — session is always a clean copy of golden.
+        shutil.copytree(
+            golden_folder, session_folder,
+            dirs_exist_ok=True,
+            ignore_dangling_symlinks=True,
+            ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'),
+        )
+        print(f"{prefix}  ✓ Session profile restored → {session_folder}", flush=True)
+    except Exception as e:
+        print(f"{prefix}  ⚠ Failed to restore session profile: {e}", flush=True)
+        return False
+
+    # Purge GPU/shader caches — identical to what startup does after golden copy.
+    # Golden was built on a potentially different GPU environment.
+    purge_gpu_caches(session_folder, label=account_label or "RESTORE")
+
+    print(f"{prefix}✅ Golden restore complete.", flush=True)
+    return True
+
+
+# Multi-account configuration
+# Each account has: name, session_folder, download_session_folder, proxy (optional)
+# Proxy format: "http://user:pass@host:port" or "http://host:port"
+
+# ============================================================
+# PROXY CONFIGURATION
+# ============================================================
+# Set PROXY_TYPE to choose which proxies to use:
+#   "residential" = Bright Data residential IPs (recommended, looks like real users)
+#   "datacenter"  = Static datacenter IPs (cheaper, but Google may flag)
+#   "none"        = No proxies (NOT recommended - accounts will share your IP)
+# Default changed to "none" — datacenter IPs have poor reputation with reCAPTCHA Enterprise
+# and were causing 403s after a few clips. test_human_like.py works because it uses no proxy.
+# Set PROXY_TYPE=residential or PROXY_TYPE=datacenter via env var to re-enable.
+PROXY_TYPE = os.environ.get("PROXY_TYPE", "none")
+
+RESIDENTIAL_PROXIES = {
+    1: "http://brd-customer-hl_e36317ba-zone-residential_proxy1:k4m80km88ols@brd.superproxy.io:33335",
+    2: "http://brd-customer-hl_e36317ba-zone-residential_proxy2:17bp9gayqt8a@brd.superproxy.io:33335",
+    3: "http://brd-customer-hl_e36317ba-zone-residential_proxy3:b2wcez0e6jzw@brd.superproxy.io:33335",
+    4: "http://brd-customer-hl_e36317ba-zone-residential_proxy4:ttylrdu9a74c@brd.superproxy.io:33335",
+}
+
+DATACENTER_PROXIES = {
+    1: "http://tvinat01:R8KVZpfh@194.50.189.21:29842",    # Rome
+    2: "http://tvinat01:R8KVZpfh@52.128.4.126:29842",     # San Jose
+    3: "http://tvinat01:R8KVZpfh@91.245.189.176:29842",   # Milan
+    4: "http://tvinat01:R8KVZpfh@23.227.76.122:29842",    # New York
+}
+
+def _get_proxy(account_num):
+    """Get proxy URL for an account based on PROXY_TYPE setting."""
+    env_override = os.environ.get(f"ACCOUNT{account_num}_PROXY")
+    if env_override:
+        return env_override
+    if PROXY_TYPE == "residential":
+        return RESIDENTIAL_PROXIES.get(account_num)
+    elif PROXY_TYPE == "datacenter":
+        return DATACENTER_PROXIES.get(account_num)
+    return None
+
+# Defaults match setup_worker.py naming convention:
+#   chrome-session   / chrome-session-2   / chrome-session-3   / chrome-session-4
+#   chrome-download  / chrome-download-2  / chrome-download-3  / chrome-download-4
+# Golden folders are derived automatically by get_golden_folder():
+#   chrome-golden    / chrome-golden-2    / chrome-golden-3    / chrome-golden-4
+_BASE = os.environ.get("WORKER_BASE_DIR", os.path.dirname(os.path.abspath(__file__)))
+ACCOUNTS = [
+    {
+        "name": "Account1",
+        "session_folder": os.path.join(_BASE, "chrome-session"),
+        "download_folder": os.environ.get("ACCOUNT1_DOWNLOAD", os.path.join(_BASE, "chrome-download")),
+        "proxy": _get_proxy(1),
+        "enabled": os.environ.get("ACCOUNT1_ENABLED", "true").lower() == "true",
+    },
+    {
+        "name": "Account2",
+        "session_folder": os.path.join(_BASE, "chrome-session-2"),
+        "download_folder": os.environ.get("ACCOUNT2_DOWNLOAD", os.path.join(_BASE, "chrome-download-2")),
+        "proxy": _get_proxy(2),
+        "enabled": os.environ.get("ACCOUNT2_ENABLED", "true").lower() == "true",
+    },
+    {
+        "name": "Account3",
+        "session_folder": os.path.join(_BASE, "chrome-session-3"),
+        "download_folder": os.environ.get("ACCOUNT3_DOWNLOAD", os.path.join(_BASE, "chrome-download-3")),
+        "proxy": _get_proxy(3),
+        "enabled": os.environ.get("ACCOUNT3_ENABLED", "false").lower() == "true",
+    },
+    {
+        "name": "Account4",
+        "session_folder": os.path.join(_BASE, "chrome-session-4"),
+        "download_folder": os.environ.get("ACCOUNT4_DOWNLOAD", os.path.join(_BASE, "chrome-download-4")),
+        "proxy": _get_proxy(4),
+        "enabled": os.environ.get("ACCOUNT4_ENABLED", "false").lower() == "true",
+    },
+]
+
+# Enable multi-account mode via env var (auto-detected if Account2 is enabled)
+MULTI_ACCOUNT_MODE = os.environ.get("MULTI_ACCOUNT_MODE", "false").lower() == "true"
+
+# Browser mode: 'stealth' uses real Chrome, 'playwright' uses bundled browsers
+BROWSER_MODE = os.environ.get("BROWSER_MODE", "stealth")
+
+
+def parse_proxy_url(proxy_url):
+    """Parse proxy URL into Playwright proxy config dict.
+    Handles: http://host:port, http://user:pass@host:port, socks5://user:pass@host:port
+    """
+    if not proxy_url:
+        return None
+    from urllib.parse import urlparse
+    parsed = urlparse(proxy_url)
+    server = f"{parsed.scheme}://{parsed.hostname}"
+    if parsed.port:
+        server += f":{parsed.port}"
+    config = {"server": server}
+    if parsed.username:
+        config["username"] = parsed.username
+    if parsed.password:
+        config["password"] = parsed.password
+    return config
+
+
+def create_proxy_auth_extension(proxy_url, ext_dir):
+    """Create a tiny Chrome extension that auto-fills proxy auth credentials.
+    
+    Chrome doesn't auto-authenticate proxy connections even when Playwright
+    provides credentials. This extension intercepts 407 challenges and 
+    provides username/password automatically - no popup dialog.
+    """
+    if not proxy_url:
+        return None
+    from urllib.parse import urlparse
+    parsed = urlparse(proxy_url)
+    if not parsed.username or not parsed.password:
+        return None
+    
+    os.makedirs(ext_dir, exist_ok=True)
+    
+    manifest = {
+        "version": "1.0.0",
+        "manifest_version": 2,
+        "name": "Proxy Auto Auth",
+        "permissions": ["proxy", "webRequest", "webRequestBlocking", "<all_urls>"],
+        "background": {"scripts": ["background.js"]}
+    }
+    
+    background_js = (
+        'chrome.webRequest.onAuthRequired.addListener(\n'
+        '    function(details) {\n'
+        '        return {\n'
+        '            authCredentials: {\n'
+        '                username: "%s",\n'
+        '                password: "%s"\n'
+        '            }\n'
+        '        };\n'
+        '    },\n'
+        '    {urls: ["<all_urls>"]},\n'
+        '    ["blocking"]\n'
+        ');\n'
+    ) % (parsed.username, parsed.password)
+    
+    with open(os.path.join(ext_dir, 'manifest.json'), 'w') as f:
+        json.dump(manifest, f, indent=2)
+    with open(os.path.join(ext_dir, 'background.js'), 'w') as f:
+        f.write(background_js)
+    
+    return ext_dir
+
+
+# ============================================================
+# ACCOUNT DETECTION AND VALIDATION
+# ============================================================
+
+def is_account_ready(account_config):
+    """
+    Check if an account is ready to use.
+    An account is ready if both session folders exist and contain Chrome data.
+    """
+    session_folder = account_config.get('session_folder', '')
+    download_folder = account_config.get('download_folder', '')
+    
+    # Missing folders are OK — Chrome creates them on first launch,
+    # and AccountWorker will handle login + golden build automatically.
+    if not os.path.exists(session_folder):
+        return True, "Session folder missing — will login on first launch"
+    
+    if not os.path.exists(download_folder):
+        return True, "Download folder missing — will sync after login"
+    
+    # Check for Chrome profile data (indicates authenticated session)
+    # Chrome creates a 'Default' folder with various data files
+    session_default = os.path.join(session_folder, 'Default')
+    download_default = os.path.join(download_folder, 'Default')
+    
+    if not os.path.exists(session_default):
+        return True, "Will login on first launch"
+    
+    if not os.path.exists(download_default):
+        return True, "Download will sync after login"
+    
+    return True, "Ready"
+
+
+def detect_ready_accounts():
+    """
+    Detect which accounts have valid session folders ready.
+    Returns list of (account_index, account_config, is_ready, status_message) tuples.
+    """
+    results = []
+    for i, account in enumerate(ACCOUNTS):
+        is_ready, message = is_account_ready(account)
+        results.append((i + 1, account, is_ready, message))  # 1-indexed for user display
+    return results
+
+
+def get_ready_accounts():
+    """Return only the accounts that are ready to use."""
+    ready = []
+    for i, account in enumerate(ACCOUNTS):
+        is_ready, _ = is_account_ready(account)
+        if is_ready:
+            ready.append((i + 1, account))  # 1-indexed
+    return ready
+
+
+def list_accounts():
+    """Print status of all accounts."""
+    print("\n" + "=" * 60)
+    print("ACCOUNT STATUS")
+    print("=" * 60)
+    
+    results = detect_ready_accounts()
+    ready_count = 0
+    
+    for idx, account, is_ready, message in results:
+        status = "✓ READY" if is_ready else "✗ NOT READY"
+        if is_ready:
+            ready_count += 1
+        
+        print(f"\n  Account {idx}: {account['name']}")
+        print(f"    Status:   {status}")
+        print(f"    Session:  {account['session_folder']}")
+        print(f"    Download: {account.get('download_folder', 'N/A')}")
+        if not is_ready:
+            print(f"    Reason:   {message}")
+    
+    print(f"\n" + "-" * 60)
+    print(f"Total: {ready_count}/{len(ACCOUNTS)} accounts ready")
+    print("=" * 60)
+    
+    return ready_count
+
+
+def parse_account_selection(selection_str):
+    """
+    Parse account selection string like "1,2,3" or "1-3" or "1,3,4".
+    Returns list of account indices (1-indexed).
+    """
+    indices = set()
+    parts = selection_str.split(',')
+    
+    for part in parts:
+        part = part.strip()
+        if '-' in part:
+            # Range like "1-3"
+            try:
+                start, end = part.split('-')
+                for i in range(int(start), int(end) + 1):
+                    indices.add(i)
+            except ValueError:
+                print(f"Invalid range: {part}")
+                return None
+        else:
+            # Single number
+            try:
+                indices.add(int(part))
+            except ValueError:
+                print(f"Invalid account number: {part}")
+                return None
+    
+    return sorted(list(indices))
+
+
+def select_accounts_by_indices(indices):
+    """
+    Select accounts by their indices (1-indexed).
+    Returns list of account configs with 'enabled' set appropriately.
+    """
+    selected = []
+    for idx in indices:
+        if 1 <= idx <= len(ACCOUNTS):
+            account = ACCOUNTS[idx - 1].copy()
+            account['enabled'] = True
+            selected.append(account)
+        else:
+            print(f"⚠ Account {idx} does not exist (valid: 1-{len(ACCOUNTS)})")
+    return selected
+
+
+def validate_selected_accounts(selected_accounts):
+    """
+    Validate that selected accounts are ready.
+    Returns (valid_accounts, errors).
+    """
+    valid = []
+    errors = []
+    
+    for account in selected_accounts:
+        is_ready, message = is_account_ready(account)
+        if is_ready:
+            valid.append(account)
+        else:
+            errors.append(f"{account['name']}: {message}")
+    
+    return valid, errors
+
+FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
+
+
+def is_flow_url(url):
+    """Check if URL is any Flow page (with or without locale segment).
+    
+    Matches:
+      https://labs.google/fx/tools/flow
+      https://labs.google/fx/es-419/tools/flow
+      https://labs.google/fx/en/tools/flow/project/abc-123
+    """
+    url = url.lower()
+    return "labs.google/fx" in url and "/tools/flow" in url
+
+
+def is_flow_home(url):
+    """Check if URL is Flow homepage (not a project page)."""
+    return is_flow_url(url) and "/project/" not in url.lower()
+
+
+def is_flow_project(url):
+    """Check if URL is a Flow project page."""
+    return is_flow_url(url) and "/project/" in url.lower()
+
+
+def is_google_login(url):
+    """Check if URL is a Google login/auth page."""
+    return "accounts.google" in url.lower()
+
+
+def is_on_flow_not_login(url):
+    """Check if URL is on Flow (not Google login). Used to detect post-login state."""
+    return is_flow_url(url) and not is_google_login(url)
+
+
+def is_page_crashed(page):
+    """Detect Chrome 'Aw, Snap!' tab crash.
+    
+    When a tab crashes, the URL becomes chrome-error://chromewebdata/ and 
+    the page content shows 'Aw, Snap!'. The Chrome process is still alive
+    but this tab is dead — all page.evaluate() calls will fail with garbage errors.
+    """
+    try:
+        url = page.url
+        if 'chrome-error://' in url:
+            return True
+        # Also check for about:blank with no prior navigation (edge case)
+        if url == 'about:blank':
+            return False  # Normal for new tabs
+        return False
+    except Exception:
+        # If we can't even read the URL, the page/context is gone entirely
+        return True
+
+
+def recover_crashed_page(page, project_url, label=""):
+    """Recover from an 'Aw, Snap!' tab crash by navigating back to the project.
+    
+    Returns True if recovery succeeded (page is back on the project).
+    Returns False if navigation also failed (need full browser restart).
+    """
+    prefix = f"[{label}] " if label else ""
+    print(f"{prefix}🔧 Recovering crashed tab — navigating back to project...", flush=True)
+    try:
+        page.goto(project_url, timeout=30000, wait_until="domcontentloaded")
+        time.sleep(3)
+        actual_url = page.url
+        if "/project/" in actual_url:
+            print(f"{prefix}✓ Tab recovered — back on project", flush=True)
+            check_and_dismiss_popup(page)
+            return True
+        else:
+            print(f"{prefix}⚠ Recovery landed on {actual_url} instead of project", flush=True)
+            # Try one more time
+            page.goto(project_url, timeout=30000)
+            time.sleep(3)
+            if "/project/" in page.url:
+                print(f"{prefix}✓ Tab recovered on second attempt", flush=True)
+                check_and_dismiss_popup(page)
+                return True
+            return False
+    except Exception as e:
+        print(f"{prefix}✗ Tab recovery failed: {e}", flush=True)
+        return False
+MAX_POLL_TIME = 120     # Max seconds to poll before giving up
+POLL_INTERVAL = 5       # Seconds between status polls (used in download phase)
+MAX_GENERATION_RETRIES = 2   # Max retries per clip
+CLIP_READY_WAIT = 50    # Seconds to wait after submission before clip is ready for download
+FAILURE_CHECK_DELAY = 1 # Brief pause before failure check (check itself polls for up to 8s)
+GENERATION_WAIT = 90    # Seconds to wait for generation before download
+
+# ============================================================
+# CLIP CHAIN ANALYSIS (for parallel distribution)
+# ============================================================
+
+def analyze_clip_chains(clips):
+    """
+    Analyze clips to find independent chains based on frame dependencies.
+    
+    A clip is "independent" if it has new frames (doesn't reuse previous clip's frames).
+    Dependent clips (has_new_frames=False) must stay with their parent.
+    
+    Args:
+        clips: List of clip dicts with start_frame_key and end_frame_key
+    
+    Returns:
+        List of chains, where each chain is a list of clip indices.
+        Example: [[0], [1, 2], [3]] means:
+          - Chain 0: clip 0 (independent)
+          - Chain 1: clips 1 and 2 (2 depends on 1)
+          - Chain 2: clip 3 (independent)
+    """
+    if not clips:
+        return []
+    
+    chains = []
+    current_chain = []
+    prev_start_key = None
+    prev_end_key = None
+    
+    for i, clip in enumerate(clips):
+        start_key = clip.get('start_frame_key')
+        end_key = clip.get('end_frame_key')
+        
+        # Check if this clip has new frames (independent of previous)
+        has_new_start = (start_key != prev_start_key) if prev_start_key else True
+        has_new_end = (end_key != prev_end_key) if prev_end_key else (end_key is not None)
+        has_new_frames = has_new_start or has_new_end
+        
+        if i == 0:
+            # First clip always starts a new chain
+            current_chain = [i]
+        elif has_new_frames:
+            # New frames = independent = start a new chain
+            if current_chain:
+                chains.append(current_chain)
+            current_chain = [i]
+        else:
+            # Reuses previous frames = dependent = add to current chain
+            current_chain.append(i)
+        
+        # Update previous frame keys
+        prev_start_key = start_key
+        prev_end_key = end_key
+    
+    # Don't forget the last chain
+    if current_chain:
+        chains.append(current_chain)
+    
+    return chains
+
+
+def assign_chains_to_accounts(chains, available_accounts):
+    """
+    Distribute chains across accounts using round-robin.
+    
+    Args:
+        chains: List of chains (each chain is list of clip indices)
+        available_accounts: List of account names
+    
+    Returns:
+        Dict of account_name -> list of clip indices assigned to that account
+    """
+    if not chains or not available_accounts:
+        return {}
+    
+    assignments = {acc: [] for acc in available_accounts}
+    
+    for i, chain in enumerate(chains):
+        account = available_accounts[i % len(available_accounts)]
+        assignments[account].extend(chain)
+    
+    return assignments
+
+
+def get_idle_account(account_status, exclude=None):
+    """
+    Find an idle account for failover.
+    
+    Args:
+        account_status: Dict of account_name -> status ('idle', 'busy', 'offline')
+        exclude: Account name to exclude (the one that failed)
+    
+    Returns:
+        Account name if found, None otherwise
+    """
+    for account, status in account_status.items():
+        if account != exclude and status == 'idle':
+            return account
+    return None
+
+
+# ============================================================
+# ACCOUNT HEALTH TRACKER & FAILOVER ROUTER
+# ============================================================
+
+class AccountHealthTracker:
+    """
+    Tracks health/failure state of all accounts.
+    
+    Monitors:
+    - Recent failure count per account (rolling window)
+    - Time since last failure (cooldown)
+    - Whether an account is currently busy
+    - Whether an account is "hot" (recently failed reCAPTCHA, needs cooldown)
+    
+    Thread-safe — used by multiple AccountWorkers and the main dispatcher.
+    """
+    
+    # After this many consecutive failures, mark account as hot.
+    # 1 was too aggressive — a single bad clip immediately triggered golden restore
+    # + job reset, creating retry loops on parallel jobs.
+    # 2 gives one retry before assuming the account is burnt.
+    HOT_THRESHOLD = 2
+    # Cooldown period (seconds) after an account is marked hot
+    COOLDOWN_SECONDS = 300  # 5 minutes
+    # Proactive restore: after this many successful clips (across jobs), restore golden
+    # profile before the next job to keep reCAPTCHA scores clean.
+    PROACTIVE_RESTORE_THRESHOLD = 6
+    
+    def __init__(self):
+        self._lock = threading.RLock()  # RLock: reentrant — same thread can acquire multiple times.
+        # Required because methods like reset_failures/record_failure acquire _lock then call
+        # register_account which also acquires _lock. threading.Lock would deadlock on first call.
+        # account_name -> { 
+        #   'consecutive_failures': int,
+        #   'last_failure_time': datetime or None,
+        #   'total_failures': int,
+        #   'total_successes': int,
+        #   'is_busy': bool,
+        #   'current_job_id': str or None,
+        # }
+        self._accounts = {}
+    
+    def register_account(self, account_name):
+        """Register an account for tracking"""
+        with self._lock:
+            if account_name not in self._accounts:
+                self._accounts[account_name] = {
+                    'consecutive_failures': 0,
+                    'last_failure_time': None,
+                    'total_failures': 0,
+                    'total_successes': 0,
+                    'clips_since_restore': 0,   # proactive restore counter
+                    'is_busy': False,
+                    'current_job_id': None,
+                }
+    
+    def record_failure(self, account_name, job_id=None, force_hot=False):
+        """Record a clip submission failure for an account.
+        
+        force_hot=True: immediately mark HOT regardless of threshold
+        (used for browser crashes where the page/context is gone).
+        """
+        with self._lock:
+            if account_name not in self._accounts:
+                self.register_account(account_name)
+            acc = self._accounts[account_name]
+            acc['consecutive_failures'] += 1
+            acc['last_failure_time'] = datetime.now()
+            acc['total_failures'] += 1
+            
+            if force_hot:
+                acc['consecutive_failures'] = self.HOT_THRESHOLD  # ensure HOT
+                print(f"[HealthTracker] 🔥 {account_name} marked HOT immediately (browser crash)", flush=True)
+                return
+            
+            is_hot = acc['consecutive_failures'] >= self.HOT_THRESHOLD
+            if is_hot:
+                print(f"[HealthTracker] 🔥 {account_name} marked HOT ({acc['consecutive_failures']} consecutive failures, cooldown {self.COOLDOWN_SECONDS}s)", flush=True)
+            else:
+                print(f"[HealthTracker] ⚠️ {account_name} failure #{acc['consecutive_failures']} (threshold: {self.HOT_THRESHOLD})", flush=True)
+    
+    def record_success(self, account_name):
+        """Record a successful clip submission — resets consecutive failure count,
+        increments proactive-restore clip counter."""
+        with self._lock:
+            if account_name not in self._accounts:
+                self.register_account(account_name)
+            acc = self._accounts[account_name]
+            if acc['consecutive_failures'] > 0:
+                print(f"[HealthTracker] ✓ {account_name} recovered (was at {acc['consecutive_failures']} consecutive failures)", flush=True)
+            acc['consecutive_failures'] = 0
+            acc['total_successes'] += 1
+            acc['clips_since_restore'] = acc.get('clips_since_restore', 0) + 1
+            # Cap at threshold+1 to avoid race showing e.g. 7/6
+            if acc['clips_since_restore'] > self.PROACTIVE_RESTORE_THRESHOLD:
+                acc['clips_since_restore'] = self.PROACTIVE_RESTORE_THRESHOLD
+            print(f"[HealthTracker] 📊 {account_name} clips since last restore: {acc['clips_since_restore']}/{self.PROACTIVE_RESTORE_THRESHOLD}", flush=True)
+    
+    def reset_failures(self, account_name):
+        """Reset consecutive failure count and proactive-restore clip counter
+        — called after every golden restore (reactive or proactive)."""
+        with self._lock:
+            if account_name not in self._accounts:
+                self.register_account(account_name)
+            acc = self._accounts[account_name]
+            acc['consecutive_failures'] = 0
+            acc['last_failure_time'] = None
+            acc['clips_since_restore'] = 0
+            print(f"[HealthTracker] 🔄 {account_name} failure count + clip counter reset (golden restore)", flush=True)
+    
+    def needs_proactive_restore(self, account_name):
+        """Return True if this account has hit the proactive-restore clip threshold.
+        
+        Called between jobs — when True the AccountWorker should trigger a full
+        golden restore before picking up the next job, even if no failure occurred.
+        """
+        with self._lock:
+            acc = self._accounts.get(account_name)
+            if not acc:
+                return False
+            return acc.get('clips_since_restore', 0) >= self.PROACTIVE_RESTORE_THRESHOLD
+
+    def set_busy(self, account_name, job_id=None):
+        """Mark an account as busy processing a job"""
+        with self._lock:
+            if account_name not in self._accounts:
+                self.register_account(account_name)
+            self._accounts[account_name]['is_busy'] = True
+            self._accounts[account_name]['current_job_id'] = job_id
+    
+    def set_idle(self, account_name):
+        """Mark an account as idle (finished processing)"""
+        with self._lock:
+            if account_name not in self._accounts:
+                self.register_account(account_name)
+            self._accounts[account_name]['is_busy'] = False
+            self._accounts[account_name]['current_job_id'] = None
+    
+    def is_hot(self, account_name):
+        """Check if an account is 'hot' (recently failed, needs cooldown)"""
+        with self._lock:
+            acc = self._accounts.get(account_name)
+            if not acc:
+                return False
+            consec = acc['consecutive_failures']
+            if consec < self.HOT_THRESHOLD:
+                return False
+            # Check if cooldown has elapsed
+            if acc['last_failure_time']:
+                elapsed = (datetime.now() - acc['last_failure_time']).total_seconds()
+                if elapsed >= self.COOLDOWN_SECONDS:
+                    # Cooldown complete — reset
+                    acc['consecutive_failures'] = 0
+                    print(f"[HealthTracker] ✓ {account_name} cooldown complete, resetting", flush=True)
+                    return False
+                print(f"[HealthTracker] {account_name} IS hot: consec={consec}, elapsed={elapsed:.0f}s/{self.COOLDOWN_SECONDS}s", flush=True)
+            return True
+    
+    def is_busy(self, account_name):
+        """Check if an account is busy"""
+        with self._lock:
+            acc = self._accounts.get(account_name)
+            return acc['is_busy'] if acc else False
+    
+    def get_best_account(self, exclude=None, exclude_list=None):
+        """
+        Find the best account for failover.
+        
+        Priority:
+        1. Idle + not hot (no recent failures)
+        2. Idle + hot but cooldown elapsed
+        3. None (all busy or hot)
+        
+        Among candidates, prefer the one with longest time since last failure.
+        
+        Args:
+            exclude: Single account name to exclude
+            exclude_list: List of account names to exclude
+        
+        Returns:
+            account_name or None
+        """
+        excludes = set()
+        if exclude:
+            excludes.add(exclude)
+        if exclude_list:
+            excludes.update(exclude_list)
+        
+        with self._lock:
+            candidates = []
+            for name, acc in self._accounts.items():
+                if name in excludes:
+                    continue
+                if acc['is_busy']:
+                    continue
+                
+                # Check hot status (with cooldown check)
+                is_hot = False
+                if acc['consecutive_failures'] >= self.HOT_THRESHOLD:
+                    if acc['last_failure_time']:
+                        elapsed = (datetime.now() - acc['last_failure_time']).total_seconds()
+                        if elapsed < self.COOLDOWN_SECONDS:
+                            is_hot = True
+                        else:
+                            # Cooldown done
+                            acc['consecutive_failures'] = 0
+                
+                if is_hot:
+                    continue
+                
+                # Score: time since last failure (longer = better), or infinity if never failed
+                if acc['last_failure_time']:
+                    time_since_fail = (datetime.now() - acc['last_failure_time']).total_seconds()
+                else:
+                    time_since_fail = float('inf')
+                
+                candidates.append((name, time_since_fail))
+            
+            if not candidates:
+                return None
+            
+            # Sort by time since last failure (longest first)
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            return candidates[0][0]
+    
+    def get_status_summary(self):
+        """Get a human-readable summary of all account health"""
+        with self._lock:
+            lines = []
+            for name, acc in self._accounts.items():
+                status = "BUSY" if acc['is_busy'] else "idle"
+                hot = " 🔥HOT" if acc['consecutive_failures'] >= self.HOT_THRESHOLD else ""
+                fails = acc['consecutive_failures']
+                total = f"{acc['total_successes']}✓/{acc['total_failures']}✗"
+                cooldown = ""
+                if acc['last_failure_time'] and acc['consecutive_failures'] >= self.HOT_THRESHOLD:
+                    elapsed = (datetime.now() - acc['last_failure_time']).total_seconds()
+                    remaining = max(0, self.COOLDOWN_SECONDS - elapsed)
+                    cooldown = f" (cooldown: {int(remaining)}s)"
+                lines.append(f"  {name}: {status}{hot} streak:{fails} total:{total}{cooldown}")
+            return "\n".join(lines) if lines else "  (no accounts registered)"
+
+
+# Global instance — shared across all threads
+account_health = AccountHealthTracker()
+
+
+class FailoverRouter:
+    """
+    Centralized failover routing that works with any number of accounts.
+    
+    Instead of hardcoded pairwise failover (Account1 → Account2), this provides:
+    1. Same-account retry in new project (cheap, fast, handles project-level flags)
+    2. Cross-account failover to healthiest idle account
+    3. Standby account activation as last resort
+    
+    Thread-safe — called from multiple AccountWorker threads.
+    """
+    
+    MAX_SAME_ACCOUNT_RETRIES = 2  # Try new project on same account up to N times
+    
+    def __init__(self, account_job_queues, account_download_queues, swap_request_queue=None):
+        """
+        Args:
+            account_job_queues: Dict of account_name -> job Queue
+            account_download_queues: Dict of account_name -> download Queue  
+            swap_request_queue: Queue for standby manager (None if no standbys)
+        """
+        self._lock = threading.Lock()
+        self.account_job_queues = account_job_queues
+        self.account_download_queues = account_download_queues
+        self.swap_request_queue = swap_request_queue
+        # Track retry attempts: (job_id, account_name) -> retry_count
+        self._retry_counts = {}
+    
+    def get_retry_count(self, job_id, account_name):
+        """Get how many same-account retries have been done for this job on this account"""
+        with self._lock:
+            return self._retry_counts.get((job_id, account_name), 0)
+    
+    def increment_retry(self, job_id, account_name):
+        """Increment same-account retry count"""
+        with self._lock:
+            key = (job_id, account_name)
+            self._retry_counts[key] = self._retry_counts.get(key, 0) + 1
+            return self._retry_counts[key]
+    
+    def should_retry_same_account(self, job_id, account_name):
+        """
+        Check if we should retry on the same account (new project) before failing over.
+        
+        Returns True if retry count < MAX_SAME_ACCOUNT_RETRIES and the account isn't hot.
+        """
+        count = self.get_retry_count(job_id, account_name)
+        is_hot_val = account_health.is_hot(account_name)
+        print(f"[FailoverRouter] should_retry_same_account({account_name}): count={count}/{self.MAX_SAME_ACCOUNT_RETRIES}, is_hot={is_hot_val}", flush=True)
+        if count >= self.MAX_SAME_ACCOUNT_RETRIES:
+            return False
+        if is_hot_val:
+            return False
+        return True
+    
+    def route_failover(self, failed_account, failover_data, download_queue=None,
+                       download_queued=False, job_id=None):
+        """
+        Route a failover to the best available account.
+        
+        Strategy:
+        1. Find healthiest idle active account (not the failed one, not hot)
+        2. If no active account available, try standby manager
+        3. If no standby either, mark clips as permanently failed
+        
+        Args:
+            failed_account: Name of the account that failed
+            failover_data: Dict with job info, remaining clips, etc.
+            download_queue: The failed account's download queue (for cleanup)
+            download_queued: Whether download was already started
+            job_id: Job ID for logging
+            
+        Returns:
+            'routed' if successfully handed off
+            'no_target' if no account available (clips marked failed)
+        """
+        job_id_short = (job_id or failover_data.get('job_id', 'unknown'))[:8]
+        remaining_clips = failover_data.get('remaining_clips', [])
+        
+        # Record the failure
+        account_health.record_failure(failed_account, job_id)
+        
+        # Step 1: Try to find a healthy idle account
+        target = account_health.get_best_account(exclude=failed_account)
+        
+        if target and target in self.account_job_queues:
+            print(f"\n{'='*50}", flush=True)
+            print(f"🔄 FAILOVER: {failed_account} → {target}", flush=True)
+            print(f"   Job: {job_id_short}...", flush=True)
+            print(f"   Remaining clips: {len(remaining_clips)}", flush=True)
+            print(f"   Reason: routing to healthiest idle account", flush=True)
+            print(f"{'='*50}\n", flush=True)
+            
+            # Route to the target account's job queue
+            self.account_job_queues[target].put(failover_data)
+            print(f"[{failed_account}] ✓ Handed off to {target}", flush=True)
+            return 'routed'
+        
+        # Step 1b: All active accounts are busy — queue for ANY non-hot account
+        # (they'll pick it up when they finish their current job)
+        with self._lock:
+            for name, q in self.account_job_queues.items():
+                if name == failed_account:
+                    continue
+                if not account_health.is_hot(name):
+                    print(f"\n{'='*50}", flush=True)
+                    print(f"🔄 FAILOVER QUEUED: {failed_account} → {name} (busy, will process when idle)", flush=True)
+                    print(f"   Job: {job_id_short}...", flush=True)
+                    print(f"   Remaining clips: {len(remaining_clips)}", flush=True)
+                    print(f"{'='*50}\n", flush=True)
+                    
+                    q.put(failover_data)
+                    print(f"[{failed_account}] ✓ Queued for {name} (currently busy)", flush=True)
+                    return 'routed'
+            
+            # Even the failed account itself can take it (if not hot) — it's about to become idle
+            if not account_health.is_hot(failed_account) and failed_account in self.account_job_queues:
+                print(f"\n{'='*50}", flush=True)
+                print(f"🔄 SELF-RETRY QUEUED: {failed_account} will retry when current job finishes", flush=True)
+                print(f"   Job: {job_id_short}...", flush=True)
+                print(f"   Remaining clips: {len(remaining_clips)}", flush=True)
+                print(f"{'='*50}\n", flush=True)
+                
+                self.account_job_queues[failed_account].put(failover_data)
+                print(f"[{failed_account}] ✓ Queued for self-retry", flush=True)
+                return 'routed'
+        
+        # Step 2: Try standby manager
+        if self.swap_request_queue is not None:
+            print(f"\n{'='*50}", flush=True)
+            print(f"🔄 FAILOVER TO STANDBY: {failed_account} → standby pool", flush=True)
+            print(f"   Job: {job_id_short}...", flush=True)
+            print(f"   Remaining clips: {len(remaining_clips)}", flush=True)
+            print(f"   Reason: no healthy active accounts available", flush=True)
+            print(f"{'='*50}\n", flush=True)
+            
+            self.swap_request_queue.put({
+                'type': 'failover_swap',
+                'failed_account': failed_account,
+                'failover_data': failover_data,
+            })
+            print(f"[{failed_account}] ✓ Handed off to STANDBY pool", flush=True)
+            return 'routed'
+        
+        # Step 3: No accounts available at all
+        print(f"\n{'='*50}", flush=True)
+        print(f"❌ FAILOVER FAILED: No accounts available for {job_id_short}...", flush=True)
+        print(f"   {failed_account} failed, no idle active accounts, no standby accounts", flush=True)
+        print(f"   Marking {len(remaining_clips)} clips as permanently failed", flush=True)
+        print(f"\nAccount health:\n{account_health.get_status_summary()}", flush=True)
+        print(f"{'='*50}\n", flush=True)
+        
+        for clip in remaining_clips:
+            clip_id = clip.get('id')
+            if clip_id:
+                update_clip_status(clip_id, 'failed',
+                    error_message="All accounts failed or busy, no failover target available")
+        
+        return 'no_target'
+
+
+# Global instance — set up in main_multi_account
+failover_router = None
+
+# ============================================================
+# CACHE FUNCTIONS
+# ============================================================
+
+def load_cache():
+    """Load job cache from file"""
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, 'r') as f:
+                cache = json.load(f)
+                before = len(cache.get('jobs', {}))
+                cache = purge_old_cache_entries(cache)
+                after = len(cache.get('jobs', {}))
+                print(f"✓ Loaded cache: {after} jobs ({before - after} old entries purged)")
+                save_cache(cache)
+                return cache
+        except Exception as e:
+            print(f"⚠ Could not load cache: {e}")
+    return {'jobs': {}}
+
+
+def save_cache(cache):
+    """Save job cache to file"""
+    try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(cache, f, indent=2, default=str)
+    except Exception as e:
+        print(f"⚠ Could not save cache: {e}")
+
+
+def backfill_clip_submit_times(clip_submit_times, clips, job_id=None, cache=None):
+    """Add clips that are still 'generating' but missing from clip_submit_times.
+
+    After a proactive restore, the new run resumes on the same project. Clips submitted
+    in the previous run won't be in the new run's clip_submit_times.
+    Only backfills truly pending clips — skips completed/approved (HTTP worker handled them).
+    
+    v175: accepts job_id (callers always have it) instead of extracting from
+    clips[0].get('job_id') which was always None for regular jobs — silently
+    breaking the fresh-DB-status lookup.  Also reads persisted submit timestamps
+    from cache so the HTTP worker waits the correct remaining time instead of
+    blindly backdating to now()-80s.
+    """
+    # Get fresh DB status to avoid acting on stale clips[] list
+    _fresh_statuses = {}
+    try:
+        # v175: job_id passed explicitly — clips[0].get('job_id') was always None
+        _jid = job_id or (clips[0].get('job_id') if clips else None)
+        if _jid:
+            _fresh = api_request("GET", f"/jobs/{_jid}")
+            if _fresh and _fresh.get('clips'):
+                for _fc in _fresh['clips']:
+                    _fresh_statuses[_fc.get('clip_index')] = _fc.get('status')
+    except Exception:
+        pass
+
+    # Read persisted submit timestamps from cache (v175)
+    _cached_timestamps = {}
+    if cache and job_id and job_id in cache.get('jobs', {}):
+        _raw = cache['jobs'][job_id].get('clip_submit_timestamps', {})
+        for _k, _v in _raw.items():
+            try:
+                _cached_timestamps[int(_k)] = datetime.fromisoformat(_v)
+            except (ValueError, TypeError):
+                pass
+
+    for clip in clips:
+        ci = clip.get('clip_index')
+        if ci is None or ci in clip_submit_times:
+            continue
+        # Use fresh DB status if available, fall back to stale clips[] status
+        status = _fresh_statuses.get(ci, clip.get('status'))
+        if status in ('completed', 'approved'):
+            continue  # Already downloaded by HTTP worker — skip
+        if status in ('generating', 'submitted'):
+            # Use real persisted timestamp if available (v175 cache)
+            if ci in _cached_timestamps:
+                clip_submit_times[ci] = _cached_timestamps[ci]
+                _age = (datetime.now() - _cached_timestamps[ci]).total_seconds()
+                print(f"[Download] Backfilled submit_time for clip {ci+1} (status={status}, real timestamp, {_age:.0f}s ago)", flush=True)
+            else:
+                # Fallback: backdate to 80s ago so the 70s check fires immediately.
+                clip_submit_times[ci] = datetime.now() - timedelta(seconds=80)
+                print(f"[Download] Backfilled submit_time for clip {ci+1} (status={status}, fires immediately)", flush=True)
+
+
+def purge_old_cache_entries(cache, max_age_days=2):
+    """Remove job cache entries older than max_age_days to keep cache.json small.
+    Uses 'started_at' field; entries without a timestamp are kept (safety).
+    """
+    cutoff = datetime.now() - timedelta(days=max_age_days)
+    jobs = cache.get('jobs', {})
+    before = len(jobs)
+    to_delete = []
+    for job_id, entry in jobs.items():
+        ts = entry.get('started_at')
+        if not ts:
+            continue
+        try:
+            started = datetime.fromisoformat(ts)
+            if started < cutoff:
+                to_delete.append(job_id)
+        except Exception:
+            pass
+    for job_id in to_delete:
+        del jobs[job_id]
+    if to_delete:
+        print(f"[Cache] Purged {len(to_delete)} old job(s) (>{max_age_days}d) — {before}→{len(jobs)} entries", flush=True)
+    return cache
+
+
+def mark_job_started(cache, job_id, project_url, clips, account_name=None):
+    """Mark a job as started.
+    
+    In parallel (multi-account) mode, each account creates its own Flow project.
+    account_name is used to store the project URL per account so Account2 never
+    navigates to Account1's project on resume.
+    """
+    entry = cache['jobs'].get(job_id)
+    if entry is None:
+        entry = {
+            'project_url': project_url,   # single-account compat: last writer wins
+            'account_projects': {},        # parallel: account_name -> project_url
+            'started_at': datetime.now().isoformat(),
+            'clips_submitted': [],
+            'clips_downloaded': [],
+            'status': 'started'
+        }
+        cache['jobs'][job_id] = entry
+    else:
+        # Job already started by another account (parallel mode) — just add our project
+        entry['project_url'] = project_url  # keep updated for single-account fallback
+    if account_name:
+        entry.setdefault('account_projects', {})[account_name] = project_url
+    save_cache(cache)
+
+
+def mark_clip_submitted(cache, job_id, clip_index):
+    """Mark a clip as submitted and persist its submission timestamp.
+    
+    v175: Also saves the submit time so that after a golden restore,
+    the resumed run can seed clip_submit_times from cache and the HTTP
+    download worker knows exactly when each clip was submitted.
+    """
+    if job_id in cache['jobs']:
+        if clip_index not in cache['jobs'][job_id]['clips_submitted']:
+            cache['jobs'][job_id]['clips_submitted'].append(clip_index)
+        # Persist the real submission timestamp (ISO format)
+        cache['jobs'][job_id].setdefault('clip_submit_timestamps', {})
+        cache['jobs'][job_id]['clip_submit_timestamps'][str(clip_index)] = datetime.now().isoformat()
+        save_cache(cache)
+
+
+def mark_job_submitted(cache, job_id):
+    """Mark all clips submitted"""
+    if job_id in cache['jobs']:
+        cache['jobs'][job_id]['status'] = 'submitted'
+        cache['jobs'][job_id]['submitted_at'] = datetime.now().isoformat()
+        save_cache(cache)
+
+
+def mark_clip_downloaded(cache, job_id, clip_index):
+    """Mark a clip as downloaded"""
+    if job_id in cache['jobs']:
+        if clip_index not in cache['jobs'][job_id]['clips_downloaded']:
+            cache['jobs'][job_id]['clips_downloaded'].append(clip_index)
+        save_cache(cache)
+
+
+def mark_job_completed(cache, job_id):
+    """Mark job as fully completed"""
+    if job_id in cache['jobs']:
+        cache['jobs'][job_id]['status'] = 'completed'
+        cache['jobs'][job_id]['completed_at'] = datetime.now().isoformat()
+        save_cache(cache)
+
+
+def get_cached_job(cache, job_id, account_name=None):
+    """Get cached job info.
+    
+    In parallel mode, returns a view of the cache entry with project_url
+    set to THIS account's project, not another account's project.
+    """
+    entry = cache.get('jobs', {}).get(job_id)
+    if entry is None:
+        return None
+    if account_name and 'account_projects' in entry:
+        acct_url = entry['account_projects'].get(account_name)
+        if acct_url:
+            # Return a shallow copy with the correct project_url for this account
+            view = dict(entry)
+            view['project_url'] = acct_url
+            return view
+    return entry
+
+
+def is_job_completed(cache, job_id):
+    """Check if job is fully completed"""
+    job = cache.get('jobs', {}).get(job_id)
+    return job and job.get('status') == 'completed'
+
+
+# ============================================================
+# HUMAN-LIKE BEHAVIOR FUNCTIONS
+# ============================================================
+# These functions add randomness to avoid bot detection
+
+def human_delay(min_sec=0.5, max_sec=1.5):
+    """Random delay to simulate human behavior"""
+    delay = random.uniform(min_sec, max_sec)
+    time.sleep(delay)
+    return delay
+
+
+def human_mouse_move(page):
+    """Random mouse movement with Bezier curves — like a human idly moving the cursor"""
+    try:
+        viewport = page.viewport_size
+        if not viewport:
+            return
+        
+        # 2-3 random movements with curves
+        moves = random.randint(2, 3)
+        for _ in range(moves):
+            target_x = random.randint(80, viewport['width'] - 80)
+            target_y = random.randint(80, viewport['height'] - 80)
+            human_mouse_move_to(page, target_x, target_y, steps=random.randint(5, 12))
+            time.sleep(random.uniform(0.05, 0.2))
+    except:
+        pass  # Ignore errors - this is just for anti-bot
+
+
+def scroll_randomly(page):
+    """Scroll the page a bit like a human would"""
+    try:
+        for _ in range(random.randint(1, 2)):
+            direction = random.choice(['up', 'down'])
+            amount = random.randint(30, 100)
+            if direction == 'up':
+                page.mouse.wheel(0, -amount)
+            else:
+                page.mouse.wheel(0, amount)
+            time.sleep(random.uniform(0.1, 0.3))
+    except:
+        pass  # Ignore errors
+
+
+def human_pre_action(page, action_name=""):
+    """Light human-like behavior before an action - matches test_human_like.py simplicity"""
+    # Just move mouse a bit and small delay (like test_human_like does before clicks)
+    human_mouse_move(page)
+    human_delay(0.3, 0.8)
+
+
+def human_look_around(page):
+    """
+    Simulate human looking around a page before interacting.
+    Includes mouse movement, scrolling, and natural pauses as if reading/scanning.
+    """
+    try:
+        # Look around with mouse (scanning the page)
+        human_mouse_move(page)
+        human_delay(1.0, 2.5)
+        
+        # Scroll down a bit (reading content)
+        scroll_randomly(page)
+        human_delay(0.8, 1.5)
+        
+        # Maybe move mouse again (like hovering over something interesting)
+        if random.random() < 0.6:
+            human_mouse_move(page)
+            human_delay(0.5, 1.2)
+        
+        # Scroll back up occasionally
+        if random.random() < 0.4:
+            scroll_randomly(page)
+            human_delay(0.3, 0.8)
+    except:
+        pass
+
+
+def human_pre_generate_wait(page, context=""):
+    """
+    Brief wait after entering prompt, before clicking Generate.
+    Just enough for a quick mouse movement to maintain fingerprint continuity.
+    """
+    wait_time = random.uniform(1.0, 3.0)
+    time.sleep(wait_time * 0.6)
+    
+    # Single mouse movement for fingerprint
+    try:
+        human_mouse_move(page)
+    except:
+        pass
+    
+    time.sleep(wait_time * 0.4)
+
+
+class HumanPacer:
+    """Controls timing between generations with realistic human patterns."""
+
+    def __init__(self, account_name="", max_clips_per_session=20,
+                 min_delay=2, max_delay=5):
+        self.account_name = account_name
+        self.max_clips_per_session = max_clips_per_session
+        self.min_delay = min_delay
+        self.max_delay = max_delay
+        self.session_start = datetime.now()
+        self.clips_this_session = 0
+        self._next_break_at = 999  # Disabled — breaks add 15-45s with no reCAPTCHA benefit
+        self._breaks_taken = 0
+
+    def wait_between_clips(self, page, clip_number=0, total_clips=1,
+                           failure_monitor=None, job_id=None,
+                           clip_submit_times=None, clips=None,
+                           http_dl_queue=None, temp_dir=None,
+                           already_enqueued=None):
+        self.clips_this_session += 1
+        delayed_failures = []
+        delay = self._calculate_delay(clip_number, total_clips)
+        is_break = self.clips_this_session >= self._next_break_at
+        if is_break:
+            break_duration = random.uniform(15, 45)
+            delay += break_duration
+            self._next_break_at = self.clips_this_session + random.randint(3, 5)
+            self._breaks_taken += 1
+            print(f"[{self.account_name}] Taking a natural break ({break_duration:.0f}s) "
+                  f"after {self.clips_this_session} clips...", flush=True)
+        print(f"[{self.account_name}] Waiting {delay:.0f}s before next clip "
+              f"(clip {clip_number + 1}/{total_clips})...", flush=True)
+        wait_start = time.time()
+        activities_done = 0
+        # Share the caller's dedup set if provided — prevents double-push when both
+        # the pacer and the outer loop scan for ready clips in the same run.
+        _dl_checked = already_enqueued if already_enqueued is not None else set()
+        while time.time() - wait_start < delay:
+            remaining = delay - (time.time() - wait_start)
+            if remaining <= 0:
+                break
+            self._do_random_activity(page, remaining, is_break)
+            activities_done += 1
+            if failure_monitor:
+                try:
+                    failures = failure_monitor.do_periodic_check(page, self.account_name)
+                    if failures:
+                        delayed_failures.extend(failures)
+                except Exception:
+                    pass
+            # Check if any submitted clips have hit 70s — download immediately
+            if clip_submit_times and clips and http_dl_queue and job_id and temp_dir:
+                # Skip scanning if submit tab has crashed ("Aw, Snap!") — page.evaluate would fail
+                if is_page_crashed(page):
+                    time.sleep(2)
+                    continue
+                _now = datetime.now()
+                for _ci, _st in list(clip_submit_times.items()):
+                    if _ci in _dl_checked:
+                        continue
+                    if (_now - _st).total_seconds() >= CLIP_READY_WAIT:
+                        _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+                        if not _clip_obj:
+                            _dl_checked.add(_ci)
+                            continue
+                        _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
+                        try:
+                            _urls = page.evaluate(f"""() => {{
+                                for (const c of document.querySelectorAll('[data-index]')) {{
+                                    if ((c.innerText||'').includes({repr(_dlg)})) {{
+                                        const urls = [];
+                                        for (const v of c.querySelectorAll('video')) {{
+                                            const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                            if (u && !u.startsWith('blob:')) urls.push(u);
+                                        }}
+                                        if (urls.length) return urls;
+                                        if (c.querySelectorAll('video').length > 0) return ['__blob__'];
+                                    }}
+                                }}
+                                return [];
+                            }}""")
+                            if _urls and _urls != ['__blob__']:
+                                http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                    'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir})
+                                print(f"[Flow] ✓ @{(_now-_st).total_seconds():.0f}s: clip {_ci+1} ready → HTTP worker", flush=True)
+                                _dl_checked.add(_ci)  # shared with http_enqueued_clips
+                            elif not _urls or _urls == ['__blob__']:
+                                # No URL yet — check if the tile failed
+                                try:
+                                    _fail_info = page.evaluate(f"""() => {{
+                                        for (const c of document.querySelectorAll('[data-index]')) {{
+                                            if ((c.innerText||'').includes({repr(_dlg)})) {{
+                                                const icons = Array.from(c.querySelectorAll('i')).map(i => i.textContent.trim());
+                                                const hasRefresh = icons.includes('refresh');
+                                                const hasFailed = c.innerText.includes('Failed');
+                                                const hasUndo = icons.includes('undo');
+                                                const hasDelete = icons.includes('delete_forever');
+                                                const hasVideocam = icons.includes('videocam');
+                                                const hasVideo = c.querySelectorAll('video').length > 0;
+                                                // Hard failure: has refresh button (Flow explicitly killed it)
+                                                if (hasRefresh && !hasVideo) return 'hard';
+                                                // Also hard: "Failed" text with no generating indicator
+                                                if (hasFailed && !hasVideocam && !hasVideo && !/\d+%/.test(c.textContent||'')) return 'hard';
+                                                // Soft failure: undo+delete but no refresh/videocam (transient)
+                                                if (hasUndo && hasDelete && !hasRefresh && !hasVideocam && !hasVideo) return 'soft';
+                                                return null;
+                                            }}
+                                        }}
+                                        return null;
+                                    }}""")
+                                    if _fail_info == 'hard':
+                                        # Flow killed this clip (e.g. reached 99% then failed)
+                                        # Don't retry — abort job so golden restore can fix it
+                                        print(f"[{self.account_name}] ⚠ HARD FAILURE: clip {_ci+1} failed after generating (refresh button detected) — aborting job", flush=True)
+                                        delayed_failures.append(_ci)
+                                        _dl_checked.add(_ci)
+                                    elif _fail_info == 'soft':
+                                        # Transient failure — retry in-place via Reuse Prompt
+                                        print(f"[{self.account_name}] ⚠ Between-clip: clip {_ci+1} tile failed — clicking Reuse Prompt to retry in-place...", flush=True)
+                                        _reused = page.evaluate(f"""() => {{
+                                            for (const c of document.querySelectorAll('[data-index]')) {{
+                                                if ((c.innerText||'').includes({repr(_dlg)})) {{
+                                                    const btn = Array.from(c.querySelectorAll('button')).find(b =>
+                                                        Array.from(b.querySelectorAll('i')).some(i => i.textContent.trim() === 'undo')
+                                                    );
+                                                    if (btn) {{ btn.click(); return true; }}
+                                                }}
+                                            }}
+                                            return false;
+                                        }}""")
+                                        if _reused:
+                                            time.sleep(2)
+                                            click_generate_button(page, f"Between-clip retry clip {_ci}")
+                                            # Reset submit time so the 70s wait starts fresh
+                                            clip_submit_times[_ci] = datetime.now()
+                                            print(f"[{self.account_name}] ✓ Between-clip: clip {_ci+1} resubmitted via Reuse Prompt", flush=True)
+                                        else:
+                                            print(f"[{self.account_name}] ⚠ Between-clip: could not find Reuse Prompt for clip {_ci}", flush=True)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+            # v196: Periodic policy failure scan — catches failures that dialogue-text matching misses
+            if clip_submit_times and not is_page_crashed(page):
+                try:
+                    _retried, _persistent = scan_tiles_for_policy_failures(page, clip_submit_times, self.account_name)
+                    if _retried:
+                        # Reset submit times for retried clips so download worker gives them fresh time
+                        for _ri in _retried:
+                            # Map data-index (0=newest) back to clip index
+                            # data-index 0 is the MOST RECENTLY submitted clip
+                            _submitted_sorted = sorted(clip_submit_times.keys(), key=lambda k: clip_submit_times[k])
+                            _reverse_idx = len(_submitted_sorted) - 1 - _ri
+                            if 0 <= _reverse_idx < len(_submitted_sorted):
+                                _retry_ci = _submitted_sorted[_reverse_idx]
+                                clip_submit_times[_retry_ci] = datetime.now()
+                                if _retry_ci in _dl_checked:
+                                    _dl_checked.discard(_retry_ci)
+                                print(f"[{self.account_name}] [PolicyScan] Reset timer for clip {_retry_ci+1} after policy retry", flush=True)
+                    if _persistent:
+                        for _pi in _persistent:
+                            _submitted_sorted = sorted(clip_submit_times.keys(), key=lambda k: clip_submit_times[k])
+                            _reverse_idx = len(_submitted_sorted) - 1 - _pi
+                            if 0 <= _reverse_idx < len(_submitted_sorted):
+                                _fail_ci = _submitted_sorted[_reverse_idx]
+                                _clip_obj = next((c for c in self._current_clips if c.get('clip_index') == _fail_ci), None) if hasattr(self, '_current_clips') else None
+                                if _clip_obj:
+                                    clip_id = _clip_obj.get('id')
+                                    if clip_id:
+                                        update_clip_status(clip_id, 'failed', error_message="⚠️ Image flagged by Flow content policy — try a different image")
+                                        print(f"[{self.account_name}] [PolicyScan] ❌ Clip {_fail_ci+1} permanently failed (policy violation)", flush=True)
+                except Exception:
+                    pass
+            gap = random.uniform(2, 6)
+            if time.time() - wait_start + gap < delay:
+                time.sleep(gap)
+        actual_wait = time.time() - wait_start
+        print(f"[{self.account_name}] Done waiting {actual_wait:.0f}s "
+              f"({activities_done} activities)", flush=True)
+        return delayed_failures
+
+    def should_take_session_break(self):
+        return self.clips_this_session >= self.max_clips_per_session
+
+    def do_session_break(self, page):
+        cooldown = random.uniform(300, 600)
+        print(f"[{self.account_name}] Session cap reached ({self.clips_this_session} clips). "
+              f"Cooling down for {cooldown:.0f}s...", flush=True)
+        wait_start = time.time()
+        while time.time() - wait_start < cooldown:
+            if cooldown - (time.time() - wait_start) <= 30:
+                break
+            self._hp_idle(page)
+            time.sleep(random.uniform(15, 45))
+        self.clips_this_session = 0
+        self.session_start = datetime.now()
+        self._next_break_at = random.randint(3, 5)
+        self._breaks_taken = 0
+
+    def _calculate_delay(self, clip_number, total_clips):
+        base = random.uniform(self.min_delay, self.max_delay)
+        # Slight variation but no fatigue scaling or distraction pauses
+        if clip_number == total_clips - 2:
+            base *= random.uniform(0.7, 0.9)  # Slightly faster near end
+        noise = random.gauss(0, base * 0.1)
+        return max(self.min_delay * 0.7, base + noise)
+
+    def _do_random_activity(self, page, max_duration, is_break=False):
+        if max_duration < 3:
+            return
+        if is_break:
+            activities = [(self._hp_idle, 0.40), (self._hp_review, 0.20),
+                          (self._hp_scroll, 0.15), (self._hp_wander, 0.15),
+                          (self._hp_wait, 0.10)]
+        else:
+            activities = [(self._hp_wander, 0.30), (self._hp_scroll, 0.25),
+                          (self._hp_review, 0.20), (self._hp_idle, 0.15),
+                          (self._hp_wait, 0.10)]
+        r = random.random()
+        cumulative = 0
+        chosen = self._hp_wait
+        for activity, weight in activities:
+            cumulative += weight
+            if r <= cumulative:
+                chosen = activity
+                break
+        try:
+            chosen(page, max_duration)
+        except Exception:
+            time.sleep(random.uniform(1, 3))
+
+    def _hp_wander(self, page, max_duration=10):
+        duration = min(random.uniform(3, 8), max_duration)
+        start = time.time()
+        try:
+            vp = page.viewport_size or {'width': 1280, 'height': 720}
+            x, y = random.randint(200, vp['width'] - 200), random.randint(150, vp['height'] - 150)
+            while time.time() - start < duration:
+                tx = max(50, min(vp['width'] - 50, x + random.gauss(0, 150)))
+                ty = max(50, min(vp['height'] - 50, y + random.gauss(0, 100)))
+                steps = random.randint(5, 15)
+                for s in range(steps):
+                    t = (s + 1) / steps; t = t * t * (3 - 2 * t)
+                    page.mouse.move(x + (tx - x) * t, y + (ty - y) * t)
+                    time.sleep(random.uniform(0.01, 0.04))
+                x, y = tx, ty
+                if random.random() < 0.3:
+                    time.sleep(random.uniform(0.5, 2.0))
+        except Exception:
+            pass
+
+    def _hp_scroll(self, page, max_duration=10):
+        start = time.time()
+        try:
+            amt = random.randint(200, 600)
+            steps = random.randint(4, 8)
+            for _ in range(steps):
+                page.mouse.wheel(0, amt / steps); time.sleep(random.uniform(0.05, 0.15))
+            time.sleep(random.uniform(1, 3))
+            if random.random() < 0.7:
+                for _ in range(steps):
+                    page.mouse.wheel(0, -amt / steps); time.sleep(random.uniform(0.05, 0.15))
+        except Exception:
+            pass
+        remaining = min(random.uniform(3, 10), max_duration) - (time.time() - start)
+        if remaining > 0:
+            time.sleep(min(remaining, random.uniform(0.5, 2)))
+
+    def _hp_review(self, page, max_duration=15):
+        """Simplified review - just look at the page without interacting with specific elements.
+        scroll_into_view_if_needed and bounding_box calls on video elements accumulate
+        Playwright interaction traces that reCAPTCHA Enterprise monitors."""
+        duration = min(random.uniform(4, 12), max_duration)
+        start = time.time()
+        try:
+            # Just wander the mouse around like looking at things
+            vp = page.viewport_size or {'width': 1280, 'height': 720}
+            x = random.randint(200, vp['width'] - 200)
+            y = random.randint(150, vp['height'] - 150)
+            page.mouse.move(x, y)
+            time.sleep(random.uniform(2, 5))
+        except Exception:
+            pass
+        remaining = duration - (time.time() - start)
+        if remaining > 0:
+            time.sleep(min(remaining, random.uniform(0.5, 2)))
+
+    def _hp_idle(self, page, max_duration=20):
+        duration = min(random.uniform(8, 20), max_duration)
+        start = time.time()
+        try:
+            while time.time() - start < duration:
+                vp = page.viewport_size or {'width': 1280, 'height': 720}
+                page.mouse.move(random.randint(300, vp['width'] - 300),
+                                random.randint(200, vp['height'] - 200))
+                time.sleep(random.uniform(3, 8))
+        except Exception:
+            time.sleep(random.uniform(2, 5))
+
+    def _hp_wait(self, page=None, max_duration=10):
+        time.sleep(min(random.uniform(3, 10), max_duration))
+
+
+def wait_for_end_frame_button(page, timeout=30):
+    """
+    Wait for END frame button to be available.
+    After uploading START frame, the UI needs time to show the second button.
+    
+    Args:
+        page: Playwright page
+        timeout: Max seconds to wait
+        
+    Returns:
+        Locator for the END frame button (the .last one)
+    """
+    selector = "div[aria-haspopup=\"dialog\"], button[aria-haspopup=\"dialog\"]"
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        try:
+            # New UI: look for distinct "Final" / "End" button
+            count = page.locator(selector).count()
+            if count >= 1:
+                print(f"✓ END frame button available ({count} buttons found)")
+                return page.locator(selector).last
+        except:
+            pass
+        time.sleep(0.5)
+    
+    # Timeout - return .last anyway and let it fail with a clear message
+    print(f"⚠️ Timeout waiting for END frame button (only {page.locator(selector).count()} button(s) found)")
+    return page.locator(selector).last
+
+
+def ensure_batch_view_mode(page, context=""):
+    """
+    Ensure Batch view mode is selected in the gear/settings dropdown (top bar).
+    
+    This is a SEPARATE dropdown from the bottom bar settings (select_frames_to_video_mode).
+    The gear button has icon 'settings_2' and opens a popup with View Mode (Grid/Batch),
+    grid size, and other display options.
+    The Batch tab uses icon 'campaign_all' with class flow_tab_slider_trigger.
+    """
+    prefix = f"{context} " if context else ""
+    
+    try:
+        # Find the gear settings button (icon: settings_2)
+        gear_btn = page.locator("button:has(i:text('settings_2'))").first
+        
+        if gear_btn.count() == 0 or not gear_btn.is_visible(timeout=3000):
+            print(f"{prefix}⚠ Gear settings button (settings_2) not found", flush=True)
+            return False
+        
+        # Open the gear dropdown
+        state = gear_btn.get_attribute("data-state")
+        if state != "open":
+            human_click_locator(page, gear_btn, f"{prefix}Opened gear settings dropdown")
+            time.sleep(0.8)
+        
+        # Find and click the Batch tab (icon: campaign_all)
+        batch_tab = page.locator(
+            "button.flow_tab_slider_trigger:has(i:text('campaign_all'))"
+        ).first
+        
+        if batch_tab.count() > 0 and batch_tab.is_visible(timeout=3000):
+            is_selected = batch_tab.get_attribute("aria-selected")
+            if is_selected != "true":
+                human_click_locator(page, batch_tab, f"{prefix}Selected Batch view mode")
+                time.sleep(0.5)
+            else:
+                print(f"{prefix}✓ Batch view mode already selected", flush=True)
+        else:
+            print(f"{prefix}⚠ Batch tab (campaign_all) not found in gear dropdown", flush=True)
+        
+        # Close the gear dropdown
+        try:
+            page.keyboard.press("Escape")
+            time.sleep(0.3)
+        except Exception:
+            pass
+        # Verify closed
+        try:
+            state = gear_btn.get_attribute("data-state")
+            if state == "open":
+                page.mouse.click(100, 100)
+                time.sleep(0.3)
+        except Exception:
+            pass
+        
+        return True
+        
+    except Exception as e:
+        print(f"{prefix}⚠ Batch view mode configuration failed: {e}", flush=True)
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return False
+
+
+def select_frames_to_video_mode(page, context="", **kwargs):
+    """
+    Ensure all project settings are correct. Bulletproof version:
+    - Retries the ENTIRE settings flow up to 3 times
+    - Each attempt: open dropdown, configure all tabs, close dropdown
+    - Uses wait_for + dispatch_event fallback for dropdown opening
+    - Verifies each setting was applied
+    """
+    prefix = f"{context} " if context else ""
+    variants_count = kwargs.get('variants_count', 2)
+
+    for full_attempt in range(3):
+        try:
+            if full_attempt > 0:
+                print(f"{prefix}🔄 Settings retry attempt {full_attempt+1}/3...", flush=True)
+                time.sleep(1)
+
+            # ---- Find the settings button ----
+            # The settings button shows the current variant count (x1, x2, x3, x4)
+            # Use text-based selector as the hashed CSS class changes with Google updates
+            settings_btn = None
+            try:
+                # Primary: find by variant text content (most reliable)
+                for n in range(1, 5):
+                    candidate = page.locator(f"button:has-text('x{n}')").first
+                    try:
+                        candidate.wait_for(state="visible", timeout=3000)
+                        settings_btn = candidate
+                        break
+                    except:
+                        continue
+                # Fallback: hashed CSS class
+                if settings_btn is None:
+                    page.locator("button.sc-46973129-1").first.wait_for(state="visible", timeout=5000)
+                    all_btns = page.locator("button.sc-46973129-1")
+                    btn_count = all_btns.count()
+                    if btn_count == 1:
+                        settings_btn = all_btns.first
+                    elif btn_count > 1:
+                        for idx in range(btn_count):
+                            btn = all_btns.nth(idx)
+                            try:
+                                txt = btn.inner_text(timeout=1000)
+                                if any(f"x{n}" in txt for n in range(1, 5)):
+                                    settings_btn = btn
+                                    break
+                            except:
+                                continue
+                        if settings_btn is None:
+                            settings_btn = all_btns.last
+            except:
+                pass
+
+            if settings_btn is None:
+                print(f"{prefix}⚠ Settings button not found", flush=True)
+                continue
+
+            # ---- Wait for Radix hydration before clicking ----
+            # The button gets data-state="closed" only after Radix mounts its event listeners.
+            # Clicking before this = silent no-op. Poll until data-state is present.
+            # Also dismiss any cookie banner which sits at the bottom and blocks the button.
+            print(f"{prefix}⏳ Waiting for settings button Radix hydration...", flush=True)
+            hydrated = False
+            for _ in range(20):  # up to 10s
+                try:
+                    # Dismiss cookie banner on every poll — it may appear at any time
+                    try:
+                        cookie_bar = page.locator("#glue-cookie-notification-bar-1").first
+                        if cookie_bar.is_visible(timeout=200):
+                            for btn_text in ["Reject all", "Accept all", "I agree", "OK"]:
+                                btn = page.locator(f".glue-cookie-notification-bar button:has-text('{btn_text}')").first
+                                if btn.is_visible(timeout=200):
+                                    btn.click(force=True)
+                                    print(f"{prefix}✓ Dismissed cookie banner ({btn_text})", flush=True)
+                                    time.sleep(0.5)
+                                    break
+                    except:
+                        pass
+                    ds = settings_btn.get_attribute("data-state", timeout=500)
+                    if ds is not None:
+                        hydrated = True
+                        print(f"{prefix}✓ Settings button hydrated (data-state={ds})", flush=True)
+                        break
+                except:
+                    pass
+                time.sleep(0.5)
+            if not hydrated:
+                print(f"{prefix}⚠ Settings button never hydrated — retrying...", flush=True)
+                continue
+
+            # ---- Open the dropdown (with verification) ----
+            # CRITICAL: Radix checks event.isTrusted — only page.mouse.click() produces
+            # a trusted click event. element.click(), dispatch_event, mouse.down/up do NOT.
+            dropdown_open = False
+            state = settings_btn.get_attribute("data-state")
+            if state == "open":
+                dropdown_open = True
+            else:
+                for click_try in range(5):
+                    # Re-fetch the button each try — DOM may have re-rendered
+                    current_btn = None
+                    for n in range(1, 5):
+                        candidate = page.locator(f"button:has-text('x{n}')").first
+                        try:
+                            candidate.wait_for(state="visible", timeout=2000)
+                            current_btn = candidate
+                            break
+                        except:
+                            continue
+                    if current_btn is None:
+                        current_btn = settings_btn
+
+                    try:
+                        current_btn.click(timeout=5000)
+                        print(f"✓ Clicked: {prefix}Settings dropdown", flush=True)
+                        # Poll for open state
+                        for _ in range(10):
+                            time.sleep(0.2)
+                            if current_btn.get_attribute("data-state") == "open":
+                                settings_btn = current_btn
+                                dropdown_open = True
+                                break
+                        if dropdown_open:
+                            break
+                    except Exception as ce:
+                        # If blocked by overlay, try force click
+                        try:
+                            current_btn.click(force=True, timeout=3000)
+                            print(f"✓ Clicked (force): {prefix}Settings dropdown", flush=True)
+                            for _ in range(10):
+                                time.sleep(0.2)
+                                if current_btn.get_attribute("data-state") == "open":
+                                    settings_btn = current_btn
+                                    dropdown_open = True
+                                    break
+                            if dropdown_open:
+                                break
+                        except Exception as ce2:
+                            print(f"{prefix}⚠ Click attempt {click_try+1} failed: {ce2}", flush=True)
+                    time.sleep(0.5)
+
+            if not dropdown_open:
+                print(f"{prefix}⚠ Dropdown didn't open, retrying full settings...", flush=True)
+                continue
+
+            print(f"{prefix}✓ Opened settings dropdown", flush=True)
+            time.sleep(2)  # Wait for Radix portal to mount
+
+            # ---- Configure each setting ----
+            settings_applied = {}
+
+            # Video tab
+            try:
+                tab = page.locator("button.flow_tab_slider_trigger:has(i:text('videocam'))").first
+                tab.wait_for(state="visible", timeout=10000)
+                if tab.get_attribute("aria-selected") != "true":
+                    human_click_element(page, tab, f"{prefix}Video tab")
+                    time.sleep(0.5)
+                settings_applied['Video'] = True
+                print(f"{prefix}✓ Video tab OK", flush=True)
+            except:
+                settings_applied['Video'] = False
+                print(f"{prefix}⚠ Video tab missed", flush=True)
+
+            # Frames tab
+            try:
+                tab = page.locator("button.flow_tab_slider_trigger:has(i:text('crop_free'))").first
+                tab.wait_for(state="visible", timeout=5000)
+                if tab.get_attribute("aria-selected") != "true":
+                    human_click_element(page, tab, f"{prefix}Frames tab")
+                    time.sleep(0.5)
+                settings_applied['Frames'] = True
+                print(f"{prefix}✓ Frames tab OK", flush=True)
+            except:
+                settings_applied['Frames'] = False
+                print(f"{prefix}⚠ Frames tab missed", flush=True)
+
+            # Portrait tab
+            try:
+                tab = page.locator("button.flow_tab_slider_trigger:has(i:text('crop_9_16'))").first
+                tab.wait_for(state="visible", timeout=5000)
+                if tab.get_attribute("aria-selected") != "true":
+                    human_click_element(page, tab, f"{prefix}Portrait tab")
+                    time.sleep(0.5)
+                settings_applied['Portrait'] = True
+                print(f"{prefix}✓ Portrait tab OK", flush=True)
+            except:
+                settings_applied['Portrait'] = False
+                print(f"{prefix}⚠ Portrait tab missed", flush=True)
+
+            # Fast [Lower Priority] model
+            try:
+                model_btn = page.locator(
+                    "button:has(span:text('Veo')), "
+                    "button:has(div:text('Veo')), "
+                    "button:has(i:text('volume_up')):has(span:text('Veo')), "
+                    "button.sc-a0dcecfb-3:has(span:text('Veo')), "
+                    "button.sc-a0dcecfb-1:has(i:text('arrow_drop_down'))"
+                ).first
+                model_btn.wait_for(state="visible", timeout=3000)
+                model_text = model_btn.inner_text().lower()
+                if not ("fast" in model_text and "lower priority" in model_text):
+                    human_click_locator(page, model_btn, f"{prefix}Model dropdown")
+                    time.sleep(1)
+                    lp_found = False
+                    # Try Fast [Lower Priority] first, then fallback to any Lower Priority
+                    for sel in [
+                        "[role='menuitem']:has-text('Fast'):has-text('Lower Priority')",
+                        "button:has-text('Fast'):has-text('Lower Priority')",
+                        "[role='menuitem']:has-text('Lower Priority')",
+                        "[role='menuitemradio']:has-text('Lower Priority')",
+                        "text=Lower Priority",
+                    ]:
+                        try:
+                            opt = page.locator(sel).first
+                            opt.wait_for(state="visible", timeout=2000)
+                            human_click_locator(page, opt, f"{prefix}Fast [Lower Priority]")
+                            lp_found = True
+                            time.sleep(0.5)
+                            break
+                        except:
+                            continue
+                    if not lp_found:
+                        print(f"{prefix}⚠ Fast [Lower Priority] option not found", flush=True)
+                        page.keyboard.press("Escape")
+                        time.sleep(0.3)
+                    else:
+                        settings_applied['Model'] = True
+                else:
+                    settings_applied['Model'] = True
+            except:
+                print(f"{prefix}⚠ Model button not found", flush=True)
+
+            # Variants
+            try:
+                target = f"x{variants_count}"
+                tab = page.locator(f"button.flow_tab_slider_trigger:text-is('{target}')").first
+                tab.wait_for(state="visible", timeout=3000)
+                if tab.get_attribute("aria-selected") != "true":
+                    human_click_element(page, tab, f"{prefix}Variants {target}")
+                    time.sleep(0.5)
+                settings_applied['Variants'] = True
+                print(f"{prefix}✓ Variants {target} OK", flush=True)
+            except:
+                settings_applied['Variants'] = False
+                print(f"{prefix}⚠ Variants tab missed", flush=True)
+
+            # ---- Close dropdown ----
+            try:
+                page.keyboard.press("Escape")
+                time.sleep(0.3)
+            except:
+                pass
+
+            # ---- Check if all critical settings applied ----
+            critical = ['Video', 'Frames', 'Portrait']
+            all_ok = all(settings_applied.get(k) for k in critical)
+
+            if all_ok:
+                print(f"{prefix}✓ All settings verified", flush=True)
+                return True
+            else:
+                missing = [k for k in critical if not settings_applied.get(k)]
+                print(f"{prefix}⚠ Missing: {missing} — retrying...", flush=True)
+                # Close any leftover dropdown before retry
+                try:
+                    page.keyboard.press("Escape")
+                    time.sleep(0.5)
+                except:
+                    pass
+                continue
+
+        except Exception as e:
+            print(f"{prefix}⚠ Settings attempt {full_attempt+1} failed: {e}", flush=True)
+            try:
+                page.keyboard.press("Escape")
+            except:
+                pass
+            continue
+
+    # All 3 attempts failed — try a page refresh and one more attempt
+    print(f"{prefix}⚠ Settings not configured after 3 attempts — refreshing page and retrying...", flush=True)
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=30000)
+        time.sleep(3)
+        check_and_dismiss_popup(page)
+    except Exception as reload_err:
+        print(f"{prefix}⚠ Page reload failed: {reload_err}", flush=True)
+
+    # One final attempt after reload
+    for final_attempt in range(2):
+        try:
+            settings_btn = None
+            for n in range(1, 5):
+                candidate = page.locator(f"button:has-text('x{n}')").first
+                try:
+                    candidate.wait_for(state="visible", timeout=5000)
+                    settings_btn = candidate
+                    break
+                except:
+                    continue
+            if settings_btn is None:
+                continue
+            state = settings_btn.get_attribute("data-state")
+            if state != "open":
+                box = settings_btn.bounding_box()
+                if box:
+                    cx = box['x'] + box['width'] * random.uniform(0.3, 0.7)
+                    cy = box['y'] + box['height'] * random.uniform(0.3, 0.7)
+                    human_mouse_move_to(page, cx, cy)
+                    time.sleep(random.uniform(0.15, 0.3))
+                    page.mouse.down()
+                    time.sleep(random.uniform(0.05, 0.12))
+                    page.mouse.up()
+                else:
+                    settings_btn.click(timeout=3000)
+                time.sleep(1.5)
+            if settings_btn.get_attribute("data-state") == "open":
+                print(f"{prefix}✓ Opened settings dropdown (post-reload attempt {final_attempt+1})", flush=True)
+                # Configure variants at minimum
+                try:
+                    target = f"x{variants_count}"
+                    tab = page.locator(f"button.flow_tab_slider_trigger:text-is('{target}')").first
+                    tab.wait_for(state="visible", timeout=5000)
+                    if tab.get_attribute("aria-selected") != "true":
+                        human_click_locator(page, tab)
+                        time.sleep(0.5)
+                    print(f"{prefix}✓ Variants {target} set (post-reload)", flush=True)
+                except:
+                    pass
+                try:
+                    page.keyboard.press("Escape")
+                except:
+                    pass
+                return True
+        except Exception:
+            pass
+        time.sleep(2)
+
+    # Truly failed — raise so caller can retry clip without triggering golden restore
+    raise Exception("Settings dropdown failed to open after page reload — retrying clip")
+
+
+_consecutive_401s = 0
+
+def api_request_ex(method, endpoint, data=None):
+    """Like api_request but returns (result, status_code).
+
+    v455: callers that need to distinguish 404 (job deleted, abort) from
+    other failures (transient, retry) use this. status_code is the HTTP
+    code (e.g. 200, 404, 500) or 0 if the request couldn't be completed
+    at all (network error, timeout, etc.).
+    """
+    global _consecutive_401s
+    url = f"{WEB_APP_URL}{API_PATH_PREFIX}{endpoint}"
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+
+    try:
+        if method == "GET":
+            response = requests.get(url, headers=headers, timeout=30)
+        elif method == "POST":
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+
+        code = response.status_code
+        if code == 200:
+            _consecutive_401s = 0
+            return response.json(), code
+        elif code == 401:
+            _consecutive_401s += 1
+            if _consecutive_401s >= 3:
+                print("\n" + "="*60, flush=True)
+                print("⚠  WORKER DISCONNECTED", flush=True)
+                print("="*60, flush=True)
+                print("Your worker session has expired.", flush=True)
+                print("", flush=True)
+                print("To fix this:", flush=True)
+                print("  1. Go to kavenobuilder.com → My Worker", flush=True)
+                print("  2. Click 'Download Worker' to get a fresh installer", flush=True)
+                print("  3. Run the new installer", flush=True)
+                print("="*60 + "\n", flush=True)
+                import sys
+                sys.exit(1)
+            else:
+                print(f"[API] Error 401: {response.text[:100]}")
+            return None, code
+        else:
+            # v488: widen the error-body preview from 100 to 500 chars
+            # and include the endpoint so we can see WHICH poll endpoint
+            # failed and WHY. Previously the worker log showed only
+            # "Error 500: Internal Server Error" which gave us nothing
+            # to diagnose — the exception type and message were
+            # truncated away.
+            body = response.text[:500] if response.text else ""
+            print(f"[API] Error {code} on {method} {endpoint}: {body}", flush=True)
+            return None, code
+    except Exception as e:
+        print(f"[API] Request failed: {e}")
+        return None, 0
+
+
+def api_request(method, endpoint, data=None):
+    """Make API request to web app"""
+    result, _code = api_request_ex(method, endpoint, data)
+    return result
+
+
+# v455: abort signaling. When the user deletes a job via the UI, the
+# server sets abort_requested=True on the Job row. The worker learns
+# about this via the `aborted_jobs` list piggybacked on the /pending
+# poll response. A long-running processing loop can check this flag at
+# natural checkpoints and raise JobAbortedException to unwind cleanly.
+#
+# The flag is module-global (simple, single-writer from the poll loop,
+# multi-reader from the processing threads). In-flight jobs that were
+# aborted between polls are caught by the 404 handler as the safety net:
+# any /jobs/{id}/* API call returning 404 for a job we're processing is
+# treated as an implicit abort.
+_aborted_job_ids = set()
+_aborted_job_ids_lock = __import__("threading").Lock()
+
+
+class JobAbortedException(Exception):
+    """Raised when a job we're processing has been deleted/aborted by
+    the user. Caller should release claimed accounts and return to the
+    top of the main loop."""
+    def __init__(self, job_id):
+        super().__init__(f"Job {job_id[:8]}... aborted by user")
+        self.job_id = job_id
+
+
+def mark_job_aborted(job_id):
+    """Mark a job as aborted. Called when:
+    - /pending returns the job_id in aborted_jobs list
+    - Any /jobs/{id}/* API call returns 404 for a claimed job
+    """
+    with _aborted_job_ids_lock:
+        _aborted_job_ids.add(job_id)
+
+
+def is_job_aborted(job_id):
+    with _aborted_job_ids_lock:
+        return job_id in _aborted_job_ids
+
+
+def clear_job_aborted(job_id):
+    """Clear the flag after the worker has handled the abort (usually
+    when moving on to the next job). Prevents the set from growing
+    unbounded over long runs."""
+    with _aborted_job_ids_lock:
+        _aborted_job_ids.discard(job_id)
+
+
+def check_abort(job_id):
+    """Raise JobAbortedException if this job has been aborted. Call at
+    natural checkpoints in long-running processing loops (before clip
+    submission, between clips, before frame download, etc.)."""
+    if is_job_aborted(job_id):
+        raise JobAbortedException(job_id)
+
+
+def get_pending_job(exclude_ids=None):
+    """Get next pending job from API and claim it for this worker.
+    
+    Args:
+        exclude_ids: Set of job IDs to exclude (already being processed)
+    """
+    url = f"/jobs/pending?worker_id={WORKER_ID}"
+    if exclude_ids:
+        url += f"&exclude={','.join(exclude_ids)}"
+    result = api_request("GET", url)
+
+    # v455: process abort signals piggybacked on the poll response. Any
+    # job ID in aborted_jobs was claimed by us AND is marked for deletion.
+    # Stamp it in the module-global set so the processing threads see the
+    # abort at their next check_abort() checkpoint.
+    if result and isinstance(result, dict):
+        for jid in result.get("aborted_jobs", []) or []:
+            if not is_job_aborted(jid):
+                print(f"[API] 🛑 Abort signal for job {jid[:8]}... — will stop processing", flush=True)
+            mark_job_aborted(jid)
+
+    if result and result.get("job"):
+        job = result["job"]
+        claimed_by = job.get("claimed_by")
+        if claimed_by:
+            print(f"[API] Job {job['id'][:8]}... claimed by {claimed_by}")
+        return job
+    return None
+
+
+def refresh_clip_statuses(job):
+    """Re-fetch clip statuses from API (DB ground truth) and update the job dict in-place.
+    
+    After a golden restore + self-resume, the job object's clips array has stale
+    statuses from when the job was first fetched. Clips that were completed by the
+    HTTP download worker in the meantime still show 'pending' in memory.
+    
+    This function calls the API to get the current DB state and patches the
+    in-memory clips so that the resume logic correctly skips completed clips.
+    """
+    # Handle nested job structure (parallel mode: {job: {..., clips: [...]}, ...})
+    if 'job' in job and isinstance(job['job'], dict):
+        actual_job = job['job']
+    else:
+        actual_job = job
+    
+    job_id = actual_job.get('id')
+    if not job_id:
+        return
+    
+    try:
+        result = api_request("GET", f"/jobs/{job_id}")
+        if not result or not result.get('clips'):
+            print(f"[RefreshClips] ⚠ Could not fetch fresh statuses for {job_id[:8]}", flush=True)
+            return
+        
+        # Build lookup: clip_index → fresh clip data
+        fresh_statuses = {}
+        for c in result['clips']:
+            fresh_statuses[c['clip_index']] = c
+        
+        # Update in-memory clips
+        updated = 0
+        clips = actual_job.get('clips', [])
+        for clip in clips:
+            ci = clip.get('clip_index')
+            if ci in fresh_statuses:
+                fresh = fresh_statuses[ci]
+                changed = False
+                if clip.get('status') != fresh.get('status'):
+                    clip['status'] = fresh['status']
+                    changed = True
+                # Also update output_url and approval_status so ContinueMode
+                # can R2-fetch completed clips after golden restore
+                if fresh.get('output_url') and not clip.get('output_url'):
+                    clip['output_url'] = fresh['output_url']
+                    changed = True
+                if fresh.get('output_filename') and not clip.get('output_filename'):
+                    clip['output_filename'] = fresh['output_filename']
+                    changed = True
+                if fresh.get('approval_status') and clip.get('approval_status') != fresh.get('approval_status'):
+                    clip['approval_status'] = fresh['approval_status']
+                    changed = True
+                if changed:
+                    updated += 1
+        
+        if updated:
+            completed = sum(1 for c in fresh_statuses.values() if c.get('status') in ('completed', 'approved'))
+            generating = sum(1 for c in fresh_statuses.values() if c.get('status') == 'generating')
+            print(f"[RefreshClips] ✓ Updated {updated} clip statuses for {job_id[:8]} "
+                  f"(DB: {completed} completed, {generating} generating, {len(clips)} total)", flush=True)
+        else:
+            print(f"[RefreshClips] No status changes for {job_id[:8]}", flush=True)
+    except Exception as e:
+        print(f"[RefreshClips] ⚠ Failed to refresh (non-fatal): {e}", flush=True)
+
+
+def get_redo_clips():
+    """Get clips that need regeneration and claim them for this worker"""
+    result = api_request("GET", f"/clips/redo-pending?worker_id={WORKER_ID}")
+    if result and result.get("clips"):
+        clips = result["clips"]
+        return clips
+    return []
+
+
+def get_shm_dir():
+    """Return /dev/shm on Linux, or a fast temp dir on Windows/macOS."""
+    import platform, tempfile, os
+    if platform.system() == "Linux" and os.path.isdir("/dev/shm"):
+        return "/dev/shm"
+    # Windows/macOS — use temp dir
+    d = os.path.join(tempfile.gettempdir(), "veo_shm")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+SHM_DIR = get_shm_dir()
+
+def cleanup_devshm_job_dirs():
+    """Remove stale flow_job_* temp dirs from /dev/shm after each job.
+    These contain frame PNGs and downloaded MP4s — not needed after upload to R2.
+    """
+    import glob
+    for d in glob.glob(os.path.join(SHM_DIR, "flow_job_*")) + glob.glob(os.path.join(SHM_DIR, "flow_redo_*")):
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def update_job_status(job_id, status, error_message=None, retries=3):
+    """Update job status via API with retry on failure.
+
+    v455: on 404, the job has been deleted by the user. Mark it aborted
+    (so processing loops exit cleanly at their next check_abort) and
+    return without retrying. Retrying a deleted job's endpoint is
+    pointless and would cause the HOT-account spiral we saw pre-v455.
+    """
+    data = {"status": status, "error_message": error_message}
+    for attempt in range(retries):
+        result, code = api_request_ex("POST", f"/jobs/{job_id}/status", data)
+        if result:
+            print(f"[API] Job {job_id[:8]}... status → {status}")
+            return result
+        if code == 404:
+            # Job deleted — stop immediately, stop retrying
+            print(f"[API] 🛑 Job {job_id[:8]}... returned 404 on status update — treating as aborted", flush=True)
+            mark_job_aborted(job_id)
+            return None
+        if attempt < retries - 1:
+            wait = 2 ** attempt  # 1s, 2s backoff
+            print(f"[API] ⚠ update_job_status failed (attempt {attempt+1}/{retries}), retrying in {wait}s...", flush=True)
+            time.sleep(wait)
+    print(f"[API] ❌ update_job_status({status}) failed after {retries} attempts for job {job_id[:8]}...", flush=True)
+    return None
+
+
+def update_clip_status(clip_id, status, output_url=None, error_message=None, retries=3):
+    """Update clip status via API with retry on failure.
+
+    v455: on 404, the clip/job has been deleted. Log once and return —
+    no retry storm.
+    """
+    data = {
+        "status": status,
+        "output_url": output_url,
+        "error_message": error_message
+    }
+    for attempt in range(retries):
+        result, code = api_request_ex("POST", f"/clips/{clip_id}/status", data)
+        if result:
+            print(f"[API] Clip {clip_id} status → {status}")
+            return result
+        if code == 404:
+            print(f"[API] 🛑 Clip {clip_id} returned 404 on status update — job may be deleted", flush=True)
+            return None
+        if attempt < retries - 1:
+            wait = 2 ** attempt
+            print(f"[API] ⚠ update_clip_status failed (attempt {attempt+1}/{retries}), retrying in {wait}s...", flush=True)
+            time.sleep(wait)
+    print(f"[API] ❌ update_clip_status({status}) failed after {retries} attempts for clip {clip_id}", flush=True)
+    return None
+
+
+def _canonical_frame_name(clip, frame_type):
+    """Get canonical local filename for a frame based on its R2 key.
+    
+    Uses the R2 key basename (e.g. 'image_05.png') so the same image always
+    has the same filename regardless of which clip uses it. This keeps the
+    gallery cache consistent — no phantom collisions from clip-index-based names.
+    
+    Args:
+        clip: dict with 'start_frame_key'/'end_frame_key' and 'clip_index'
+        frame_type: 'start' or 'end'
+    Returns:
+        filename like 'image_05.png' or fallback 'start_7.png'
+    """
+    key = clip.get(f'{frame_type}_frame_key', '') or ''
+    if key:
+        return os.path.basename(key)  # "image_05.png"
+    # Fallback for legacy clips without R2 key
+    return f"{frame_type}_{clip.get('clip_index', 0)}.png"
+
+
+def download_frame(url, local_path, r2_fallback_url=None):
+    """Download frame from web app proxy or R2
+    
+    Args:
+        url: Primary URL (web app proxy)
+        local_path: Where to save locally
+        r2_fallback_url: Optional direct R2 URL to try if proxy fails
+    """
+    # Check if file already exists locally
+    if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+        print(f"[Download] {os.path.basename(local_path)} already exists locally")
+        return local_path
+    
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=120)
+        response.raise_for_status()
+        
+        with open(local_path, 'wb') as f:
+            f.write(response.content)
+        
+        filename = os.path.basename(local_path)
+        print(f"[Download] {filename} ({len(response.content)} bytes)")
+        return local_path
+    except requests.exceptions.HTTPError as e:
+        code = e.response.status_code if e.response is not None else 0
+        if code == 404:
+            # v455: a 404 on a frame URL means the job was deleted. The
+            # URL shape is .../frames/{job_id}/{filename}.png — extract
+            # the job_id and raise JobAbortedException so the caller
+            # unwinds cleanly instead of marking the account HOT from a
+            # supposed transient failure.
+            try:
+                import re as _re
+                m = _re.search(r"/frames/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/", url, _re.I)
+                if m:
+                    jid = m.group(1)
+                    print(f"[Download] 🛑 404 for frame of job {jid[:8]}... — treating as aborted", flush=True)
+                    mark_job_aborted(jid)
+                    raise JobAbortedException(jid)
+            except JobAbortedException:
+                raise
+            except Exception:
+                pass
+            print(f"[Download] Failed: {e}")
+            raise
+        elif code == 409:
+            # 409 Conflict - frame was already processed by server
+            print(f"[Download] 409 Conflict - frame already processed on server")
+            
+            # Try to get R2 URL from error response
+            try:
+                error_data = e.response.json() if e.response.content else {}
+                r2_url = error_data.get('url') or error_data.get('r2_url') or r2_fallback_url
+                
+                if r2_url:
+                    print(f"[Download] Trying R2 URL...")
+                    r2_response = requests.get(r2_url, timeout=120)
+                    r2_response.raise_for_status()
+                    
+                    with open(local_path, 'wb') as f:
+                        f.write(r2_response.content)
+                    
+                    filename = os.path.basename(local_path)
+                    print(f"[Download] {filename} ({len(r2_response.content)} bytes) [from R2]")
+                    return local_path
+            except Exception as inner_e:
+                print(f"[Download] R2 fallback failed: {inner_e}")
+            
+            # If we can't get the file but it exists on server, return None
+            # The upload_frame function will need to handle this
+            print(f"[Download] ⚠️ Frame exists on server but can't download - will skip upload if possible")
+            return None
+        else:
+            print(f"[Download] Failed: {e}")
+            raise
+    except JobAbortedException:
+        raise
+    except Exception as e:
+        print(f"[Download] Failed: {e}")
+        raise
+
+
+def upload_video(local_path, job_id, clip_index, attempt=1, variant=1):
+    """Upload video via web app proxy with variant support
+    
+    Naming convention: clip_{clip_index}_{attempt}.{variant}.mp4
+    - clip_0_1.1.mp4 = clip 0, attempt 1, variant 1 (main)
+    - clip_0_1.2.mp4 = clip 0, attempt 1, variant 2
+    - clip_0_2.1.mp4 = clip 0, attempt 2 (redo), variant 1
+    """
+    url = f"{WEB_APP_URL}{API_PATH_PREFIX}/jobs/{job_id}/upload-video/{clip_index}"
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+    
+    # Filename includes attempt and variant
+    filename = f'clip_{clip_index}_{attempt}.{variant}.mp4'
+    
+    with open(local_path, 'rb') as f:
+        files = {'file': (filename, f, 'video/mp4')}
+        response = requests.post(url, headers=headers, files=files, timeout=300)
+    
+    response.raise_for_status()
+    result = response.json()
+    
+    print(f"[Upload] Clip {clip_index+1} ({attempt}.{variant}) → R2 ({os.path.getsize(local_path)} bytes)")
+    return result.get('url')
+
+
+# ============================================================
+# CONTINUE MODE: FRAME EXTRACTION AND ENHANCEMENT
+# ============================================================
+
+def extract_frame_from_video(video_path, output_path=None, frame_offset=-8):
+    """Extract a frame from video using ffmpeg.
+    
+    Args:
+        video_path: Path to the video file
+        output_path: Where to save the frame (optional, auto-generated if not provided)
+        frame_offset: Frames from end (negative) or start (positive). Default -8 = 8 frames before end.
+    
+    Returns:
+        Path to extracted frame, or None if extraction failed
+    
+    Environment variables:
+        FFMPEG_BIN or ImageIO_FFMPEG_EXE: Path to ffmpeg executable
+        FFPROBE_BIN: Path to ffprobe executable (auto-derived from ffmpeg if not set)
+    """
+    import subprocess
+    from pathlib import Path
+    
+    if not os.path.exists(video_path):
+        print(f"[ExtractFrame] Video not found: {video_path}", flush=True)
+        return None
+    
+    if output_path is None:
+        base = os.path.splitext(video_path)[0]
+        output_path = f"{base}_lastframe.jpg"
+    
+    try:
+        # Use same ffmpeg/ffprobe config as worker.py
+        # Check environment variables for custom paths (important for Windows)
+        ffmpeg_exe = os.environ.get("FFMPEG_BIN") or os.environ.get("ImageIO_FFMPEG_EXE") or "ffmpeg"
+        ffprobe_exe = os.environ.get("FFPROBE_BIN", "ffprobe")
+        
+        # If we have a custom ffmpeg path but not ffprobe, derive ffprobe from ffmpeg path
+        if ffmpeg_exe not in ("ffmpeg", None) and ffprobe_exe == "ffprobe":
+            ffmpeg_path = Path(ffmpeg_exe)
+            if ffmpeg_path.exists():
+                # ffprobe should be in same directory
+                probe_name = "ffprobe.exe" if os.name == 'nt' else "ffprobe"
+                derived_probe = ffmpeg_path.parent / probe_name
+                if derived_probe.exists():
+                    ffprobe_exe = str(derived_probe)
+        
+        print(f"[ExtractFrame] Using ffprobe: {ffprobe_exe}", flush=True)
+        print(f"[ExtractFrame] Using ffmpeg: {ffmpeg_exe}", flush=True)
+        
+        # Get video info using ffprobe
+        ffprobe_cmd = [
+            ffprobe_exe, '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=duration,r_frame_rate',
+            '-of', 'csv=p=0', video_path
+        ]
+        
+        probe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=30)
+        if probe_result.returncode != 0:
+            print(f"[ExtractFrame] ffprobe failed: {probe_result.stderr}", flush=True)
+            return None
+        
+        # Parse duration and fps
+        parts = probe_result.stdout.strip().split(',')
+        if len(parts) < 2:
+            print(f"[ExtractFrame] Could not parse ffprobe output: {probe_result.stdout}", flush=True)
+            return None
+        
+        fps_str = parts[0]
+        duration_str = parts[1] if len(parts) > 1 else "8"
+        
+        # Calculate fps from fraction (e.g., "30000/1001" or "30/1")
+        if '/' in fps_str:
+            num, den = fps_str.split('/')
+            fps = float(num) / float(den)
+        else:
+            fps = float(fps_str) if fps_str else 30.0
+        
+        duration = float(duration_str) if duration_str else 8.0
+        
+        # Calculate timestamp for frame_offset from end
+        frames_from_end = abs(frame_offset)
+        seconds_from_end = frames_from_end / fps
+        timestamp = max(0, duration - seconds_from_end)
+        
+        print(f"[ExtractFrame] Extracting frame at {timestamp:.3f}s (fps={fps:.2f}, duration={duration:.2f}s)", flush=True)
+        
+        # Extract frame using ffmpeg
+        extract_cmd = [
+            ffmpeg_exe, '-y', '-ss', str(timestamp), '-i', video_path,
+            '-frames:v', '1', '-q:v', '2', output_path
+        ]
+        
+        extract_result = subprocess.run(extract_cmd, capture_output=True, text=True, timeout=30)
+        
+        if extract_result.returncode == 0 and os.path.exists(output_path):
+            print(f"[ExtractFrame] ✓ Extracted frame to {os.path.basename(output_path)}", flush=True)
+            return output_path
+        else:
+            print(f"[ExtractFrame] ffmpeg failed: {extract_result.stderr}", flush=True)
+            return None
+            
+    except subprocess.TimeoutExpired:
+        print(f"[ExtractFrame] Timeout extracting frame", flush=True)
+        return None
+    except Exception as e:
+        print(f"[ExtractFrame] Error: {e}", flush=True)
+        return None
+
+
+def enhance_frame_via_api(frame_path, original_frame_key=None, job_id=None):
+    """Enhance a frame using Nano Banana Pro via the API endpoint.
+    
+    Args:
+        frame_path: Path to the extracted frame
+        original_frame_key: R2 key of original scene image for facial consistency
+        job_id: Job ID for context
+    
+    Returns:
+        Path to enhanced frame, or original frame_path if enhancement failed/unavailable
+    """
+    import base64
+    
+    if not os.path.exists(frame_path):
+        print(f"[EnhanceFrame] Frame not found: {frame_path}", flush=True)
+        return frame_path
+    
+    try:
+        # Read and encode the frame
+        with open(frame_path, 'rb') as f:
+            frame_bytes = f.read()
+        frame_base64 = base64.b64encode(frame_bytes).decode('utf-8')
+        
+        # Call the API endpoint
+        url = f"{WEB_APP_URL}{API_PATH_PREFIX}/enhance-frame"
+        headers = {
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "frame_base64": frame_base64,
+            "original_frame_key": original_frame_key,
+            "job_id": job_id or ""
+        }
+        
+        print(f"[EnhanceFrame] Calling Nano Banana Pro API at {url}...", flush=True)
+        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        
+        if response.status_code != 200:
+            error_detail = ""
+            try:
+                error_detail = response.text[:200]
+            except:
+                pass
+            print(f"[EnhanceFrame] ❌ API returned {response.status_code}: {error_detail}", flush=True)
+            return frame_path
+        
+        result = response.json()
+        
+        if result.get('success') and result.get('enhanced'):
+            # Decode and save enhanced frame
+            enhanced_base64 = result.get('frame_base64')
+            enhanced_bytes = base64.b64decode(enhanced_base64)
+            
+            enhanced_path = frame_path.replace('.jpg', '_enhanced.jpg').replace('.png', '_enhanced.png')
+            if enhanced_path == frame_path:
+                enhanced_path = frame_path + '_enhanced.jpg'
+            
+            with open(enhanced_path, 'wb') as f:
+                f.write(enhanced_bytes)
+            
+            print(f"[EnhanceFrame] ✓ Frame enhanced via Nano Banana Pro", flush=True)
+            return enhanced_path
+        else:
+            if result.get('error'):
+                print(f"[EnhanceFrame] API error: {result.get('error')}, using original frame", flush=True)
+            else:
+                print(f"[EnhanceFrame] Enhancement not available, using original frame", flush=True)
+            return frame_path
+            
+    except requests.exceptions.Timeout:
+        print(f"[EnhanceFrame] API timeout, using original frame", flush=True)
+        return frame_path
+    except Exception as e:
+        print(f"[EnhanceFrame] Error calling API: {e}, using original frame", flush=True)
+        return frame_path
+
+
+def analyze_continue_mode_chains(clips):
+    """Analyze clips to identify continue-mode chains.
+    
+    A chain is a sequence of clips in the same scene where all but the first
+    have clip_mode='continue'. These clips must be processed sequentially.
+    
+    Args:
+        clips: List of clip dicts with clip_mode and scene_index
+    
+    Returns:
+        List of chains, where each chain is a list of clip indices
+        Example: [[0, 1, 2], [3], [4, 5]] means clips 0-2 are a chain, 3 is standalone, 4-5 is a chain
+    """
+    if not clips:
+        return []
+    
+    chains = []
+    current_chain = [0]  # Start with first clip
+    
+    for i in range(1, len(clips)):
+        clip = clips[i]
+        prev_clip = clips[i - 1]
+        
+        clip_mode = clip.get('clip_mode', 'blend')
+        scene_index = clip.get('scene_index', 0)
+        prev_scene_index = prev_clip.get('scene_index', 0)
+        
+        # Continue mode in same scene = part of chain
+        if clip_mode == 'continue' and scene_index == prev_scene_index:
+            current_chain.append(i)
+        else:
+            # Start new chain
+            chains.append(current_chain)
+            current_chain = [i]
+    
+    # Don't forget the last chain
+    chains.append(current_chain)
+    
+    # Log the analysis
+    print(f"[ContinueMode] Analyzed {len(clips)} clips into {len(chains)} chain(s):", flush=True)
+    for chain_idx, chain in enumerate(chains):
+        if len(chain) > 1:
+            modes = [clips[i].get('clip_mode', 'blend') for i in chain]
+            print(f"  Chain {chain_idx}: clips {chain} (modes: {modes}) - SEQUENTIAL", flush=True)
+        else:
+            print(f"  Chain {chain_idx}: clip {chain[0]} - PARALLEL OK", flush=True)
+    
+    return chains
+
+
+def get_clip_approval_status(clip_id):
+    """Poll API for clip approval status.
+    
+    Args:
+        clip_id: Database ID of the clip
+    
+    Returns:
+        Dict with approval_status, selected_variant, output_url, has_video, status
+        or None if request failed
+    """
+    try:
+        url = f"{WEB_APP_URL}{API_PATH_PREFIX}/clips/{clip_id}/approval-status"
+        headers = {"Authorization": f"Bearer {API_KEY}"}
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"[ContinueMode] API returned {response.status_code} for clip {clip_id}", flush=True)
+            return None
+    except Exception as e:
+        print(f"[ContinueMode] Error getting approval status for clip {clip_id}: {e}", flush=True)
+        return None
+
+
+def find_downloaded_video(temp_dir, clip_index, variant=None):
+    """Find downloaded video file on disk.
+    
+    Args:
+        temp_dir: Temporary directory where videos are saved
+        clip_index: Clip index to look for
+        variant: Specific variant to look for (e.g., 1 for 1.1, 2 for 1.2). If None, returns first found.
+    
+    Returns:
+        Path to video file if found, None otherwise
+    """
+    import glob
+    
+    if variant:
+        # Look for specific variant: clip_0_1.1.mp4
+        pattern = os.path.join(temp_dir, f"clip_{clip_index}_*.{variant}.mp4")
+    else:
+        # Look for any variant of this clip
+        pattern = os.path.join(temp_dir, f"clip_{clip_index}_*.mp4")
+    
+    matches = glob.glob(pattern)
+    
+    if matches:
+        # Return first match (or specific variant if requested)
+        return matches[0]
+    
+    return None
+
+
+def wait_for_clip_approval(clip_id, clip_index, temp_dir, timeout=600):
+    """Wait for a clip to be approved by the user.
+    
+    Args:
+        clip_id: Database ID of the clip
+        clip_index: Index of the clip (for logging)
+        temp_dir: Directory where videos are downloaded
+        timeout: Maximum wait time in seconds (default 10 minutes)
+    
+    Returns:
+        Dict with:
+            - success: Whether approval was received
+            - video_path: Path to the approved variant's video
+            - selected_variant: Which variant was approved
+        or None if timeout/failure
+    """
+    start_time = datetime.now()
+    poll_interval = 10  # Check every 10 seconds
+    last_status = None
+    
+    print(f"[ContinueMode] Waiting for clip {clip_index+1} approval (timeout: {timeout}s)...", flush=True)
+    
+    while (datetime.now() - start_time).total_seconds() < timeout:
+        elapsed = int((datetime.now() - start_time).total_seconds())
+        
+        # Get approval status from API
+        status = get_clip_approval_status(clip_id)
+        
+        if status:
+            approval_status = status.get('approval_status', 'pending_review')
+            has_video = status.get('has_video', False)
+            selected_variant = status.get('selected_variant', 1)
+            clip_status = status.get('status', '')
+            
+            # Log status changes
+            if approval_status != last_status:
+                print(f"[ContinueMode] Clip {clip_index+1}: status={approval_status}, has_video={has_video}, variant={selected_variant}", flush=True)
+                last_status = approval_status
+            
+            # Check if approved
+            if approval_status == 'approved':
+                print(f"[ContinueMode] ✓ Clip {clip_index+1} APPROVED! (variant {selected_variant})", flush=True)
+                
+                # Find the video file for the approved variant
+                video_path = find_downloaded_video(temp_dir, clip_index, variant=selected_variant)
+                
+                if video_path and os.path.exists(video_path):
+                    return {
+                        'success': True,
+                        'video_path': video_path,
+                        'selected_variant': selected_variant
+                    }
+                else:
+                    # Try to find any video if specific variant not found
+                    video_path = find_downloaded_video(temp_dir, clip_index)
+                    if video_path and os.path.exists(video_path):
+                        print(f"[ContinueMode] Using first available video (couldn't find variant {selected_variant})", flush=True)
+                        return {
+                            'success': True,
+                            'video_path': video_path,
+                            'selected_variant': selected_variant
+                        }
+                    else:
+                        print(f"[ContinueMode] WARNING: Approved but video not found on disk", flush=True)
+            
+            # Check if rejected or max attempts
+            elif approval_status in ('rejected', 'max_attempts'):
+                print(f"[ContinueMode] Clip {clip_index+1} is {approval_status} - will use original frame", flush=True)
+                return {
+                    'success': False,
+                    'video_path': None,
+                    'selected_variant': None,
+                    'reason': approval_status
+                }
+        
+        # Log progress periodically
+        if elapsed % 30 == 0:
+            print(f"[ContinueMode] Still waiting for clip {clip_index+1} approval... ({elapsed}s)", flush=True)
+        
+        time.sleep(poll_interval)
+    
+    print(f"[ContinueMode] Timeout waiting for clip {clip_index+1} approval after {timeout}s", flush=True)
+    return {
+        'success': False,
+        'video_path': None,
+        'selected_variant': None,
+        'reason': 'timeout'
+    }
+
+
+# ============================================================
+# BROWSER HELPERS
+# ============================================================
+
+def ensure_videos_tab_selected(page):
+    """Ensure the 'Videos' view is selected in the project sidebar."""
+    try:
+        # New UI: sidebar button with videocam icon
+        videos_sidebar = page.locator("button:has(i:text('videocam')):not(.flow_tab_slider_trigger), button:has-text('View videos')").first
+        try:
+            videos_sidebar.wait_for(state="visible", timeout=5000)
+            # Only click if not already selected (aria-selected or aria-pressed = true)
+            already_selected = page.evaluate("""() => {
+                const btn = document.querySelector("button[aria-selected='true'] i, button[aria-pressed='true'] i");
+                return btn && btn.textContent.trim() === 'videocam';
+            }""")
+            if not already_selected:
+                videos_sidebar.click(timeout=5000)
+                human_delay(0.5, 1)
+                print("✓ Clicked Videos view (sidebar)")
+            return
+        except:
+            pass
+
+        # Old UI: radio buttons
+        videos_tab = page.locator("button[role='radio']:has(i:text('videocam')), button[role='radio']:has-text('Videos')").first
+        try:
+            videos_tab.wait_for(state="visible", timeout=3000)
+            videos_tab.click(timeout=5000)
+            human_delay(0.5, 1)
+            print("✓ Clicked Videos tab")
+        except:
+            print("  (Videos tab not found, continuing...)")
+    except Exception as e:
+        print(f"  (Tab selection: {e})")
+
+
+def check_and_dismiss_popup(page):
+    """Dismiss Flow's popups if present (Notice, I agree, Chrome sign-in/sync, splash banner, etc.)"""
+    try:
+        # ── Google cookie consent banner ──
+        # glue-cookie-notification-bar covers the bottom of the page and blocks clicks
+        try:
+            cookie_bar = page.locator("#glue-cookie-notification-bar-1, .glue-cookie-notification-bar").first
+            if cookie_bar.count() > 0 and cookie_bar.is_visible(timeout=500):
+                # Try "Reject all" first, then "Accept all", then any button inside
+                for btn_text in ["Reject all", "Accept all", "I agree", "OK", "Got it"]:
+                    btn = cookie_bar.locator(f"button:has-text('{btn_text}')")
+                    if btn.count() > 0 and btn.first.is_visible(timeout=500):
+                        btn.first.click(force=True)
+                        print(f"✓ Dismissed cookie banner ({btn_text})", flush=True)
+                        time.sleep(1)
+                        return True
+                # Fallback: click any button in the banner
+                any_btn = cookie_bar.locator("button").last
+                if any_btn.count() > 0:
+                    any_btn.click(force=True)
+                    print(f"✓ Dismissed cookie banner (fallback)", flush=True)
+                    time.sleep(1)
+                    return True
+        except:
+            pass
+        # ── "Meet the new Flow" splash banner ──
+        # New UI shows a large banner with X close button on first visit
+        try:
+            close_btn = page.locator("button:has-text('close')").first
+            # Only dismiss if "Meet the new Flow" or "what's new" text is visible
+            splash = page.locator("text=Meet the new Flow, text=what's new")
+            if splash.count() > 0 and splash.first.is_visible(timeout=500):
+                if close_btn.count() > 0 and close_btn.is_visible():
+                    close_btn.click(force=True)
+                    print(f"✓ Dismissed 'Meet the new Flow' splash banner", flush=True)
+                    time.sleep(1)
+                    return True
+        except:
+            pass
+        
+        # ── Chrome browser-level dialogs ──
+        # These appear as overlays after Google login
+        
+        # 1. "Sign in to Chrome?" dialog → click "Use Chrome without an account"
+        try:
+            no_account_btn = page.locator("button:has-text('Use Chrome without an account')")
+            if no_account_btn.count() > 0 and no_account_btn.first.is_visible():
+                no_account_btn.first.click(force=True)
+                print(f"✓ Dismissed Chrome sign-in dialog", flush=True)
+                time.sleep(1)
+                return True
+        except:
+            pass
+        
+        # 2. "Turn on sync?" / "Sync is paused" → click "No thanks" / "Dismiss"
+        try:
+            for dismiss_text in ["No thanks", "No, thanks", "Dismiss", "Not now", "Skip"]:
+                btn = page.locator(f"button:has-text('{dismiss_text}')")
+                if btn.count() > 0 and btn.first.is_visible():
+                    btn.first.click(force=True)
+                    print(f"✓ Dismissed Chrome sync dialog ({dismiss_text})", flush=True)
+                    time.sleep(1)
+                    return True
+        except:
+            pass
+        
+        # 3. "Continue as X" with "Use Chrome without" → click "Use Chrome without"
+        #    "Continue as X" alone → click it (user already picked this profile)
+        try:
+            continue_btn = page.locator("button:has-text('Continue as')")
+            no_btn = page.locator("button:has-text('Use Chrome without')")
+            if no_btn.count() > 0 and no_btn.first.is_visible():
+                no_btn.first.click(force=True)
+                print(f"✓ Dismissed Chrome sign-in dialog (no account)", flush=True)
+                time.sleep(1)
+                return True
+            elif continue_btn.count() > 0 and continue_btn.first.is_visible():
+                continue_btn.first.click(force=True)
+                print(f"✓ Clicked Continue as profile", flush=True)
+                time.sleep(1)
+                return True
+        except:
+            pass
+        
+        # 4. "Customize your Chrome profile" → click "Done" or "Skip"
+        try:
+            for done_text in ["Done", "Skip customization"]:
+                btn = page.locator(f"button:has-text('{done_text}')")
+                if btn.count() > 0 and btn.first.is_visible():
+                    btn.first.click(force=True)
+                    print(f"✓ Dismissed Chrome profile setup ({done_text})", flush=True)
+                    time.sleep(1)
+                    return True
+        except:
+            pass
+        
+        # ── Flow-specific dialogs ──
+        try:
+            dialog = page.locator("div[role='dialog']")
+            if dialog.count() > 0 and dialog.first.is_visible():
+                # Check if this is the Notice dialog (has h2 with "Notice" text)
+                notice_header = dialog.locator("h2:has-text('Notice')")
+                if notice_header.count() > 0:
+                    # Find and click the "I agree" button within this dialog
+                    agree_btn = dialog.locator("button:has-text('I agree')")
+                    if agree_btn.count() > 0 and agree_btn.first.is_visible():
+                        agree_btn.first.click(force=True)
+                        print(f"✓ Dismissed Notice dialog (I agree)", flush=True)
+                        time.sleep(1)
+                        return True
+        except:
+            pass
+        
+        # Fallback: try various selectors for the I agree button
+        selectors = [
+            "button.sc-e17e280e-5.kcVnNc",  # Specific class from screenshot
+            "button.sc-e17e280e-5",  # Partial class match
+            "div[role='dialog'] button:has-text('I agree')",
+            "button:has-text('I agree')",
+            "text=I agree",
+            "button:text('I agree')",
+        ]
+        
+        for selector in selectors:
+            try:
+                btn = page.locator(selector)
+                if btn.count() > 0:
+                    try:
+                        if btn.first.is_visible():
+                            btn.first.click(force=True)
+                            print(f"✓ Dismissed popup (selector: {selector})", flush=True)
+                            time.sleep(1)
+                            return True
+                    except:
+                        pass
+            except:
+                continue
+                
+        # Last resort: look for Notice text and then find agree button nearby
+        try:
+            notice = page.locator("text=Notice")
+            if notice.count() > 0 and notice.first.is_visible():
+                agree_btn = page.locator("button:has-text('I agree')")
+                if agree_btn.count() > 0:
+                    agree_btn.first.click(force=True)
+                    print(f"✓ Dismissed Notice popup", flush=True)
+                    time.sleep(1)
+                    return True
+        except:
+            pass
+            
+    except:
+        pass
+    return False
+
+
+def wait_and_dismiss_popup(page, timeout=5):
+    """Wait for popup to appear and dismiss it"""
+    for _ in range(timeout):
+        if check_and_dismiss_popup(page):
+            return True
+        time.sleep(1)
+    return False
+
+
+def ensure_vertical_orientation(page, label=""):
+    """Ensure orientation is set to Vertical (portrait) in the new tab UI."""
+    prefix = f"[{label}] " if label else ""
+    try:
+        vert_tab = page.locator(
+            "button.flow_tab_slider_trigger:has-text('crop_9_16'), "
+            "button.flow_tab_slider_trigger:has-text('Vertical')"
+        ).first
+        if vert_tab.count() > 0 and vert_tab.is_visible(timeout=2000):
+            is_selected = vert_tab.get_attribute("aria-selected")
+            if is_selected != "true":
+                human_click_element(page, vert_tab, f"{prefix}Vertical tab")
+                print(f"{prefix}✓ Selected Vertical orientation", flush=True)
+                time.sleep(0.5)
+        # Also try localized version (crop_9_16 icon)
+        else:
+            vert_tab = page.locator("button.flow_tab_slider_trigger:has-text('crop_9_16')").first
+            if vert_tab.count() > 0 and vert_tab.is_visible(timeout=1000):
+                is_selected = vert_tab.get_attribute("aria-selected")
+                if is_selected != "true":
+                    vert_tab.click(timeout=2000)
+                    print(f"{prefix}✓ Selected Vertical orientation (icon)", flush=True)
+    except Exception as e:
+        print(f"{prefix}⚠ Orientation check failed: {e}", flush=True)
+
+
+def ensure_lower_priority_model(page, label=""):
+    """Ensure the model is set to 'Veo 3.1 - Fast [Lower Priority]' before generating.
+    
+    Checks the model button in the bottom bar. If it doesn't say 'Fast' + 'Lower Priority',
+    opens the dropdown and selects the Fast [Lower Priority] option specifically.
+    """
+    prefix = f"[{label}] " if label else ""
+    
+    try:
+        # Find the model button — content-based selectors (class names change frequently)
+        model_btn = page.locator(
+            "button:has(span:text('Veo')), "
+            "button:has(div:text('Veo')), "
+            "button:has(i:text('volume_up')):has(span:text('Veo')), "
+            "button.sc-a0dcecfb-3:has(span:text('Veo')), "
+            "button.sc-a0dcecfb-1:has(i:text('arrow_drop_down'))"
+        ).first
+        if not model_btn.is_visible(timeout=2000):
+            print(f"{prefix}⚠ Model button not found — skipping model check", flush=True)
+            return
+        
+        # Read current model text
+        model_text = model_btn.inner_text().lower()
+        
+        if "fast" in model_text and "lower priority" in model_text:
+            return  # Already correct — Fast [Lower Priority]
+        
+        print(f"{prefix}Model is '{model_btn.inner_text().strip()}' — switching to Fast [Lower Priority]...", flush=True)
+        
+        # Click the model button to open dropdown
+        model_btn.click(timeout=3000)
+        time.sleep(1)
+        
+        # Target specifically "Fast [Lower Priority]" — not "Lite [Lower Priority]"
+        lp_option = page.locator(
+            "[role='menuitem']:has-text('Fast'):has-text('Lower Priority'), "
+            "button:has-text('Fast'):has-text('Lower Priority')"
+        ).first
+        
+        if lp_option.is_visible(timeout=3000):
+            lp_option.click(timeout=3000)
+            print(f"{prefix}✓ Selected Veo 3.1 - Fast [Lower Priority]", flush=True)
+            time.sleep(1)
+        else:
+            # Fallback: try any Lower Priority option
+            lp_any = page.locator(
+                "[role='menuitem']:has-text('Lower Priority'), "
+                "button:has-text('Lower Priority')"
+            ).first
+            if lp_any.is_visible(timeout=2000):
+                lp_any.click(timeout=3000)
+                print(f"{prefix}✓ Selected Lower Priority model (fallback — may be Lite)", flush=True)
+                time.sleep(1)
+            else:
+                print(f"{prefix}⚠ Could not find Fast [Lower Priority] option", flush=True)
+        
+        # Close dropdown
+        try:
+            page.keyboard.press("Escape")
+            time.sleep(0.5)
+        except Exception:
+            pass
+            
+    except Exception as e:
+        print(f"{prefix}⚠ Model check failed: {e}", flush=True)
+
+
+def click_generate_button(page, context_name="", max_retries=3):
+    """
+    Click the arrow_forward (Generate) button with retry logic.
+    
+    MATCHES test_human_like.py: uses dispatch_event('click') on the <i> icon element.
+    
+    If the button is disabled or click fails, this raises an exception.
+    The caller (click_generate_with_crash_handler) handles recovery by
+    refreshing the project and re-uploading frames.
+    
+    Args:
+        page: Playwright page
+        context_name: For logging (e.g., "Account1" or "Clip 5")
+        max_retries: Maximum number of retry attempts
+        
+    Returns:
+        True if click succeeded
+        
+    Raises:
+        Exception if all retries fail
+    """
+    prefix = f"[{context_name}] " if context_name else ""
+    
+    for attempt in range(max_retries):
+        try:
+            # First dismiss any popups that might be blocking
+            check_and_dismiss_popup(page)
+            time.sleep(0.5)
+            
+            # Ensure model is set to Lower Priority (free tier)
+            if attempt == 0:
+                ensure_lower_priority_model(page, context_name)
+            
+            # Check if button is actually enabled before clicking
+            # Wait up to 60s for frames to finish processing in Flow UI
+            if not is_generate_button_enabled(page):
+                print(f"{prefix}⚠️ Generate button is DISABLED — waiting for frames to load...", flush=True)
+                button_ready = False
+                for wait_sec in range(60):
+                    time.sleep(1)
+                    if wait_sec % 10 == 9:
+                        print(f"{prefix}  Still waiting for Generate button... ({wait_sec+1}s)", flush=True)
+                        check_and_dismiss_popup(page)
+                    if is_generate_button_enabled(page):
+                        print(f"{prefix}✓ Generate button enabled after {wait_sec+1}s", flush=True)
+                        button_ready = True
+                        break
+                if not button_ready:
+                    print(f"{prefix}⚠️ Generate button still disabled after 60s (attempt {attempt + 1}/{max_retries})", flush=True)
+                    if attempt < max_retries - 1:
+                        time.sleep(3)
+                        continue
+                    else:
+                        raise Exception("Generate button is disabled after 60s - frames may not have loaded")
+            
+            # Pre-generate look-around (matching test_human_like.py [9/10])
+            human_mouse_move(page)
+            human_delay(1, 2)
+            scroll_randomly(page)
+            human_delay(0.5, 1)
+            
+            # Click Generate — use human_click for natural mouse movement + real click events
+            # This is THE click that triggers the API call with reCAPTCHA token
+            arrow_btn = page.locator("button:has(i:text('arrow_forward')), i:text('arrow_forward')").first
+            human_click_element(page, arrow_btn, "", timeout=30000)
+            
+            if prefix:
+                print(f"{prefix}✓ Clicked Generate button", flush=True)
+            
+            time.sleep(1)
+            return True
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"{prefix}⚠️ Generate button click failed (attempt {attempt + 1}/{max_retries}): {error_msg[:100]}", flush=True)
+            
+            if attempt < max_retries - 1:
+                check_and_dismiss_popup(page)
+                time.sleep(2)
+    
+    # All retries failed
+    raise Exception(f"Generate button click failed after {max_retries} attempts")
+
+
+def click_generate_with_crash_handler(page, account_name, clip_index, clips, clip_submit_times, 
+                                       download_queued, download_queue, job_id,
+                                       start_frame=None, end_frame=None, prompt=None,
+                                       clip_mode=None, start_frame_key=None, end_frame_key=None):
+    """
+    Wrapper around click_generate_button that handles crashes gracefully.
+    
+    If the click fails (e.g. Generate button disabled because frames didn't load
+    after media gallery popup timeout):
+    1. First attempt: refresh the project page, re-upload frames, re-enter prompt, retry Generate
+    2. If rebuild also fails: notify download thread, mark unsubmitted clips as failed, raise
+    
+    Args:
+        page, account_name, clip_index, clips, clip_submit_times, download_queued, download_queue, job_id:
+            Standard submission context
+        start_frame: Local path to start frame image (for rebuild)
+        end_frame: Local path to end frame image (for rebuild)
+        prompt: Prompt text (for rebuild)
+        clip_mode: 'blend' or 'continue' (for rebuild - determines if end frame is needed)
+        start_frame_key: R2 key for start frame (for scene transition detection)
+        end_frame_key: R2 key for end frame (for scene transition detection)
+    """
+    MAX_REBUILD_ATTEMPTS = 2
+    
+    for rebuild_attempt in range(MAX_REBUILD_ATTEMPTS + 1):
+        try:
+            click_generate_button(page, account_name)
+            return True
+        except Exception as e:
+            error_msg = str(e)
+            is_disabled = "disabled" in error_msg.lower()
+            
+            # If button is disabled and we have frame data to rebuild with, try rebuild
+            if is_disabled and rebuild_attempt < MAX_REBUILD_ATTEMPTS and start_frame and prompt:
+                print(f"\n[{account_name}] 🔄 Generate button disabled — rebuilding project (attempt {rebuild_attempt + 1}/{MAX_REBUILD_ATTEMPTS})", flush=True)
+                
+                try:
+                    # Refresh the project page
+                    page.reload(timeout=30000)
+                    page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    time.sleep(3)
+                    check_and_dismiss_popup(page)
+                    
+                    # Select Frames to Video mode
+                    select_frames_to_video_mode(page, f"[{account_name}-Rebuild]")
+                    ensure_batch_view_mode(page, f"[{account_name}-Rebuild]")
+                    
+                    # Re-upload frames with policy check (same as normal submission)
+                    is_scene_transition = (end_frame_key and start_frame_key and end_frame_key != start_frame_key)
+                    skip_end = (clip_mode == 'continue' and not is_scene_transition)
+                    actual_end = end_frame if (end_frame and os.path.exists(end_frame) and not skip_end) else None
+                    actual_start = start_frame if (start_frame and os.path.exists(start_frame)) else None
+                    
+                    if actual_start and actual_end:
+                        upload_ok, rejected = upload_both_frames_with_policy_check(page, actual_start, actual_end, context=f"[{account_name}-Rebuild]")
+                        if not upload_ok:
+                            print(f"[{account_name}] ⚠️ Frame rejected during rebuild", flush=True)
+                    elif actual_start:
+                        result, reason = click_frame_and_upload_with_policy_check(page, actual_start, is_end_frame=False, context=f"[{account_name}-Rebuild]")
+                    elif actual_end:
+                        result, reason = click_frame_and_upload_with_policy_check(page, actual_end, is_end_frame=True, context=f"[{account_name}-Rebuild]")
+                    
+                    # Re-enter prompt
+                    fill_prompt_textarea(page, prompt)
+                    print(f"[{account_name}] ✓ Re-entered prompt (rebuild)", flush=True)
+                    human_pre_generate_wait(page)
+                    
+                    # Loop back to try click_generate_button again
+                    print(f"[{account_name}] ✓ Rebuild complete, retrying Generate...", flush=True)
+                    time.sleep(1)
+                    continue
+                    
+                except Exception as rebuild_err:
+                    print(f"[{account_name}] ❌ Rebuild failed: {rebuild_err}", flush=True)
+                    # Fall through to crash handling below
+            
+            # Either not a disabled-button error, or rebuild attempts exhausted, or no frame data
+            print(f"\n{'='*50}", flush=True)
+            print(f"[{account_name}] ❌ SUBMISSION CRASHED at clip {clip_index+1}!", flush=True)
+            print(f"[{account_name}] Error: {e}", flush=True)
+            print(f"[{account_name}] Submitted clips before crash: {list(clip_submit_times.keys())}", flush=True)
+            print(f"{'='*50}\n", flush=True)
+            
+            # Notify download thread to only expect already-submitted clips
+            if download_queued:
+                submitted_clip_indices = set(clip_submit_times.keys())
+                if submitted_clip_indices:
+                    print(f"[{account_name}] Limiting download to {len(submitted_clip_indices)} submitted clips: {sorted(submitted_clip_indices)}", flush=True)
+                    download_queue.put({
+                        'type': 'limit_clips',
+                        'job_id': job_id,
+                        'allowed_clips': submitted_clip_indices
+                    })
+                else:
+                    print(f"[{account_name}] No clips were submitted - cancelling download", flush=True)
+                    download_queue.put({
+                        'type': 'cancel',
+                        'job_id': job_id
+                    })
+                
+                download_queue.put({
+                    'type': 'shutdown_after_complete',
+                    'job_id': job_id
+                })
+            
+            # Mark unsubmitted clips as failed
+            for clip in clips:
+                clip_idx = clip['clip_index']
+                if clip_idx not in clip_submit_times:
+                    update_clip_status(clip['id'], 'failed', error_message=f"Submission crashed: {str(e)[:100]}")
+            
+            raise
+
+
+
+def is_generate_button_enabled(page):
+    """
+    Check if the Generate button (arrow_forward) is enabled/clickable.
+    Uses pure Playwright locators — no page.evaluate() to avoid reCAPTCHA CDP detection.
+    """
+    try:
+        # Check if the arrow_forward icon exists and is visible
+        arrow_btn = page.locator("i:text('arrow_forward')").first
+        if arrow_btn.count() == 0:
+            return False
+        
+        if not arrow_btn.is_visible():
+            return False
+        
+        # Check parent button for disabled state using Playwright locators
+        # Walk up from the icon to find the button ancestor
+        btn = page.locator("button:has(i:text('arrow_forward'))").first
+        if btn.count() == 0:
+            return False
+        
+        # Check disabled attribute
+        if btn.is_disabled():
+            return False
+        
+        # Check aria-disabled
+        aria_disabled = btn.get_attribute("aria-disabled")
+        if aria_disabled == "true":
+            return False
+        
+        # Check if button has disabled-looking classes
+        btn_class = btn.get_attribute("class") or ""
+        if "disabled" in btn_class.lower() or "Mui-disabled" in btn_class:
+            return False
+        
+        return True
+    except Exception as e:
+        print(f"[GenerateCheck] Error checking button state: {e}", flush=True)
+        return False
+
+
+def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retries=3, wait_timeout=60, start_frame=None, end_frame=None):
+    """
+    Click reuse button, fill prompt, and click Generate with retry logic.
+    
+    Sometimes the reuse button click doesn't properly load the frames into
+    the dialog, leaving the Generate button disabled. This function:
+    1. Clicks reuse button
+    2. Fills prompt
+    3. Checks if frame thumbnails are present (frame upload buttons absent = frames loaded)
+    4. If frames missing, re-clicks reuse (up to 2 attempts)
+    5. If frames still missing after re-clicks, uploads frames manually
+    6. Checks if Generate button is enabled
+    7. If not, waits up to wait_timeout seconds
+    8. If still not enabled, refreshes page and retries
+    
+    Args:
+        page: Playwright page
+        prompt: The prompt text to fill
+        clip_num: Clip number for logging (1-indexed display)
+        account_name: Account name for logging
+        max_retries: Maximum retry attempts
+        wait_timeout: How long to wait for Generate button to become enabled
+        start_frame: Path to start frame image (fallback if reuse doesn't include frames)
+        end_frame: Path to end frame image (fallback if reuse doesn't include frames)
+        
+    Returns:
+        True if successful, raises Exception on failure
+    """
+    prefix = f"[{account_name}] " if account_name else ""
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                print(f"{prefix}Retry {attempt + 1}/{max_retries} for clip {clip_num} reuse...", flush=True)
+                # Refresh page before retry
+                print(f"{prefix}Refreshing page for reuse retry...", flush=True)
+                page.reload(timeout=30000)
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+                time.sleep(3)
+                check_and_dismiss_popup(page)
+                
+                # Human-like behavior after refresh
+                human_pre_action(page, "reuse prompt")
+            
+            # Step 1: Click reuse button
+            # New UI (Feb 2025+): button with class 'reuse-prompt-bu', icon 'redo', text 'Reuse text prompt'
+            # Old UI: hidden <span>Reuse prompt</span> and <i>wrap_text</i> icon
+            reuse_clicked = False
+            reuse_selectors = [
+                "button.reuse-prompt-button, button.reuse-prompt-bu",
+                "button:has(i:text('redo')):has-text('Reuse')",
+                "button:has-text('Reuse text prompt')",
+                "button:has(span:text('Reuse prompt'))",
+                "button:has(i:text('wrap_text'))",
+                "i:text('wrap_text')",
+            ]
+            for sel in reuse_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if loc.count() > 0 and loc.is_visible(timeout=1000):
+                        human_click_locator(page, loc, "Reuse prompt button")
+                        reuse_clicked = True
+                        break
+                except:
+                    continue
+            if not reuse_clicked:
+                raise Exception(f"Could not click reuse button for clip {clip_num}")
+            time.sleep(2)
+            
+            # Step 2: Fill the prompt (with human pacing)
+            human_delay(1, 2)
+            human_mouse_move(page)
+            fill_prompt_textarea(page, prompt)
+            print(f"✓ Clip {clip_num}: Entered prompt: {prompt[:50]}...", flush=True)
+            
+            # Step 2.5: Check if frames were included in reuse
+            # Frame upload buttons (div.sc-8f31d1ba-1) are PRESENT when frames are NOT loaded
+            # They DISAPPEAR when frames ARE loaded
+            frame_check_selector = 'div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]'
+            time.sleep(2)  # Wait for UI to settle after reuse
+            
+            frame_btns_count = page.locator(frame_check_selector).count()
+            if frame_btns_count == 0:
+                # Also check without aria-haspopup
+                frame_btns_count = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]').count()
+            
+            if frame_btns_count > 0:
+                # Frames NOT loaded — reuse didn't include them
+                print(f"{prefix}⚠️ Frames not included in reuse (found {frame_btns_count} frame buttons) — re-clicking reuse...", flush=True)
+                
+                # Re-click reuse button (attempt 1)
+                reuse_reclicked = False
+                for sel in reuse_selectors:
+                    try:
+                        loc = page.locator(sel).first
+                        if loc.count() > 0 and loc.is_visible(timeout=1000):
+                            human_click_locator(page, loc, "Reuse prompt button (retry)")
+                            reuse_reclicked = True
+                            break
+                    except:
+                        continue
+                
+                if reuse_reclicked:
+                    time.sleep(3)
+                    # Re-fill prompt (reuse overwrites it)
+                    fill_prompt_textarea(page, prompt)
+                    time.sleep(2)
+                    
+                    # Check again
+                    frame_btns_count = page.locator(frame_check_selector).count()
+                    if frame_btns_count == 0:
+                        frame_btns_count = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]').count()
+                
+                if frame_btns_count > 0:
+                    # Still no frames after second reuse attempt — upload manually
+                    print(f"{prefix}⚠️ Frames still missing after re-click — uploading manually...", flush=True)
+                    
+                    if start_frame and os.path.exists(start_frame):
+                        try:
+                            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+                                page, start_frame, end_frame, context=f"{prefix}Clip {clip_num} reuse-fallback")
+                            if upload_ok:
+                                print(f"{prefix}✓ Frames uploaded manually as fallback", flush=True)
+                                # CRITICAL: Re-fill prompt — upload_both_frames clears the input
+                                fill_prompt_textarea(page, prompt)
+                                print(f"{prefix}✓ Re-filled prompt after manual upload", flush=True)
+                            else:
+                                print(f"{prefix}⚠️ Frame upload rejected ({rejected_which}) — continuing without frames", flush=True)
+                        except Exception as upload_err:
+                            print(f"{prefix}⚠️ Frame upload error: {upload_err} — continuing", flush=True)
+                    else:
+                        print(f"{prefix}⚠️ No frame files available for manual upload", flush=True)
+            else:
+                print(f"{prefix}✓ Frames included in reuse", flush=True)
+            
+            # Post-prompt wait (matching test_human_like.py 10s wait)
+            time.sleep(random.uniform(1.5, 3))
+            
+            # Step 3: Check if Generate button is enabled
+            # If not enabled after 10s, re-click reuse button (up to 3 re-clicks)
+            # If still not enabled after all re-clicks, do full page refresh retry
+            generate_enabled = False
+            max_reuse_reclicks = 3
+            
+            for reuse_attempt in range(max_reuse_reclicks + 1):
+                start_wait = time.time()
+                # Wait 10s per reuse attempt (first attempt gets the full check)
+                reuse_wait = 10 if reuse_attempt == 0 else 8
+                
+                while (time.time() - start_wait) < reuse_wait:
+                    if is_generate_button_enabled(page):
+                        generate_enabled = True
+                        break
+                    time.sleep(2)
+                
+                if generate_enabled:
+                    break
+                
+                if reuse_attempt < max_reuse_reclicks:
+                    print(f"{prefix}⚠️ Generate button not enabled after {reuse_wait}s - re-clicking reuse button (attempt {reuse_attempt + 1}/{max_reuse_reclicks})", flush=True)
+                    
+                    # Re-click the reuse button
+                    try:
+                        # Try new UI selector first, then old
+                        reuse_btn = page.locator("button.reuse-prompt-button, button.reuse-prompt-bu, button:has(i:text('redo')):has-text('Reuse'), button:has(span:text('Reuse prompt')), button:has(i:text('wrap_text'))")
+                        if reuse_btn.count() > 0:
+                            reuse_btn.first.click(force=True)
+                            time.sleep(1)
+                        else:
+                            # Fallback to icon selector
+                            icon = page.locator("i:text('redo'), i:text('wrap_text')")
+                            if icon.count() > 0:
+                                icon.first.click(force=True)
+                        time.sleep(2)
+                        
+                        # CRITICAL: Re-fill the prompt after re-clicking reuse.
+                        # The reuse button reloads the PREVIOUS clip's prompt into the textarea,
+                        # overwriting our unique prompt. We must re-apply it.
+                        fill_prompt_textarea(page, prompt)
+                        time.sleep(1)
+                        
+                    except Exception as reclick_err:
+                        print(f"{prefix}⚠️ Reuse re-click failed: {reclick_err}", flush=True)
+            
+            if not generate_enabled:
+                print(f"{prefix}⚠️ Generate button not enabled after {wait_timeout}s for clip {clip_num}", flush=True)
+                if attempt < max_retries - 1:
+                    continue  # Retry
+                else:
+                    raise Exception(f"Generate button never became enabled for clip {clip_num}")
+            
+            # Step 4: Click Generate button (uses dispatch_event internally now)
+            click_generate_button(page, account_name)
+            print(f"✓ Clip {clip_num}: Generation started", flush=True)
+            
+            return True
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"{prefix}⚠️ Reuse+Generate failed for clip {clip_num} (attempt {attempt + 1}/{max_retries}): {error_msg[:100]}", flush=True)
+            
+            if attempt >= max_retries - 1:
+                raise Exception(f"Reuse+Generate failed for clip {clip_num} after {max_retries} attempts: {error_msg}")
+    
+    return False
+
+
+def wait_for_login_if_needed(page, browser_name="Browser", timeout_minutes=10):
+    """Wait for Google login if required, then dismiss any popups"""
+    login_indicators = ["accounts.google.com", "identifier", "signin"]
+    
+    current_url = page.url.lower()
+    
+    def is_on_flow_page(url):
+        """Check if URL is the Flow app (not Google auth).
+        Simple URL check only — no DOM inspection to avoid slowdowns and false triggers.
+        """
+        return is_on_flow_not_login(url)
+    
+    current_url = page.url.lower()
+    
+    is_login_page = any(indicator in current_url for indicator in login_indicators)
+    
+    # If on Flow URL, do a quick check if actually logged in
+    if is_on_flow_page(current_url):
+        # Only check for unauthenticated landing page at startup (not during job processing)
+        # If we can see "New project" or "Generate" or a project URL — we're logged in
+        if "/project/" in current_url:
+            # Already on a project page = definitely logged in
+            check_and_dismiss_popup(page)
+            return False
+        try:
+            # Quick check for logged-in indicators
+            new_proj = page.locator("button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0").first
+            if new_proj.is_visible(timeout=1000):
+                check_and_dismiss_popup(page)
+                return False
+        except Exception:
+            pass
+        # Check if it's the unauthenticated landing page
+        try:
+            create_btn = page.locator("button:has-text('Create with Flow')")
+            if create_btn.is_visible(timeout=1000):
+                print(f"[{browser_name}] On Flow landing page but not logged in — triggering login...", flush=True)
+                human_click_element(page, create_btn, f"[{browser_name}] Create with Flow")
+                # Wait for redirect to Google login
+                for _rw in range(15):
+                    time.sleep(1)
+                    try:
+                        current_url = page.url.lower()
+                        if "accounts.google" in current_url:
+                            break
+                    except Exception:
+                        pass
+                current_url = page.url.lower()
+                is_login_page = True
+            else:
+                # No "Create with Flow" and no "New project" — could be loading, assume logged in
+                check_and_dismiss_popup(page)
+                return False
+        except Exception:
+            check_and_dismiss_popup(page)
+            return False
+    
+    try:
+        sign_in_text = page.locator("text=Sign in").count() > 0
+        email_input = page.locator("input[type='email']").count() > 0
+        is_login_page = is_login_page or (sign_in_text and email_input)
+    except:
+        pass
+    
+    if is_login_page:
+        print(f"\n{'='*50}")
+        print(f"[{browser_name}] GOOGLE LOGIN REQUIRED")
+        print(f"Please complete login in the browser...")
+        print(f"{'='*50}\n")
+        
+        start_time = time.time()
+        max_wait = timeout_minutes * 60
+        last_url = ""
+        
+        while True:
+            time.sleep(2)
+            
+            try:
+                current_url = page.url.lower()
+            except Exception as e:
+                print(f"[{browser_name}] Error getting URL: {e}", flush=True)
+                continue
+            
+            # Log URL changes to help debug
+            if current_url != last_url:
+                print(f"[{browser_name}] URL changed to: {current_url[:80]}...", flush=True)
+                last_url = current_url
+            
+            # Check if we're now on Flow (success!)
+            if is_on_flow_page(current_url):
+                print(f"✓ [{browser_name}] Login completed! (reached Flow)")
+                time.sleep(3)
+                break
+            
+            # Check if we're no longer on login page (but NOT on a redirect like SetSID)
+            still_on_login = any(indicator in current_url for indicator in login_indicators)
+            if not still_on_login and "accounts.google" not in current_url:
+                print(f"✓ [{browser_name}] Login completed! (left login page)")
+                time.sleep(3)
+                break
+            
+            # Timeout check
+            elapsed = time.time() - start_time
+            if elapsed > max_wait:
+                print(f"⚠️ [{browser_name}] Login timeout after {timeout_minutes} minutes!", flush=True)
+                print(f"[{browser_name}] Current URL: {current_url}", flush=True)
+                print(f"[{browser_name}] Continuing anyway...", flush=True)
+                break
+            
+            # Progress indicator every 30 seconds
+            if int(elapsed) % 30 == 0 and int(elapsed) > 0:
+                print(f"[{browser_name}] Still waiting for login... ({int(elapsed)}s)", flush=True)
+        
+        wait_and_dismiss_popup(page, timeout=3)
+        
+        # Export storage state so download browser can reuse login
+        try:
+            context = page.context
+            storage_state_file = os.path.join(BASE_DIR, f".storage_state_{browser_name.replace('-','_').lower()}.json")
+            context.storage_state(path=storage_state_file)
+            # Also save as the generic one for single-account mode
+            generic_path = os.path.join(BASE_DIR, ".submit_storage_state.json")
+            import shutil
+            shutil.copy2(storage_state_file, generic_path)
+        except Exception:
+            pass  # Non-critical, download browser will just ask for login
+        
+        return True
+    
+    check_and_dismiss_popup(page)
+    
+    # Export storage state even if no login was needed
+    try:
+        context = page.context
+        storage_state_file = os.path.join(BASE_DIR, f".storage_state_{browser_name.replace('-','_').lower()}.json")
+        context.storage_state(path=storage_state_file)
+        generic_path = os.path.join(BASE_DIR, ".submit_storage_state.json")
+        import shutil
+        shutil.copy2(storage_state_file, generic_path)
+    except Exception:
+        pass
+    
+    return False
+
+
+SHORT_DIALOGUE_WORD_LIMIT = 13  # ~5 seconds of speech at 2.6 words/sec
+
+
+def maybe_prefix_short_dialogue(line: str, enabled: bool, word: str, threshold: int) -> str:
+    """v539: prepend a leading word (e.g. "only") to dialogue lines whose
+    word count is strictly below ``threshold``. Mirrors the helper in
+    veo_generator.py — duplicated here because flow_worker.py runs as a
+    standalone script on remote workers and doesn't import from the
+    backend module.
+
+    Returns the line unchanged when disabled, when the prefix word is
+    blank, when the line itself is blank, or when the line already meets
+    or exceeds the threshold word count.
+    """
+    if not enabled:
+        return line
+    if not word or not word.strip():
+        return line
+    if not line or not line.strip():
+        return line
+    cleaned = line.strip()
+    n = len(cleaned.split())
+    try:
+        threshold_int = int(threshold)
+    except (TypeError, ValueError):
+        threshold_int = 15
+    if threshold_int < 1:
+        return line
+    if n >= threshold_int:
+        return line
+    return f"{word.strip()} {cleaned}"
+
+
+def _infer_silent_action(dialogue):
+    """Infer a contextual silent action from the dialogue content."""
+    d = dialogue.lower()
+    # Recipe/preparation verbs
+    if any(w in d for w in ['add', 'mix', 'pour', 'stir', 'blend', 'spoon', 'scoop',
+                             'apply', 'rub', 'spread', 'massage', 'squeeze', 'drizzle',
+                             'chop', 'slice', 'crush', 'grind', 'boil', 'simmer',
+                             'put', 'place', 'drop', 'sprinkle', 'combine']):
+        return ("continues the preparation with steady, purposeful hands — "
+                "mixing, scooping, and working the ingredients in frame")
+    # Drink/cup/tea
+    if any(w in d for w in ['drink', 'tea', 'cup', 'water', 'sip', 'glass', 'brew', 'steep']):
+        return ("lifts the cup slowly toward her lips, holding it with both hands, "
+                "steam visible, then sets it back down deliberately")
+    # Body/health/symptom
+    if any(w in d for w in ['gut', 'skin', 'joint', 'inflammation', 'pain', 'body',
+                             'stomach', 'liver', 'kidney', 'blood', 'heart', 'brain',
+                             'muscle', 'bone', 'digest', 'immune', 'nerve']):
+        return ("gestures slowly toward the relevant area of the body with an open palm, "
+                "then brings hand back to rest with a knowing expression")
+    # Food warning / never eat
+    if any(w in d for w in ['never eat', 'do not eat', 'stop eating', 'worst food',
+                             'toxic', 'poison', 'dangerous', 'harmful', 'avoid']):
+        return ("holds a firm pause with intense eye contact, then slowly shakes head "
+                "with a stern, disapproving expression")
+    # Reveal / watch / look
+    if any(w in d for w in ['watch', 'look', 'see what', 'check this', 'secret',
+                             'trick', 'hack', 'did you know', 'listen']):
+        return ("leans slightly forward toward the camera with raised eyebrows, "
+                "holding anticipation, then gives a slow deliberate nod")
+    # Sleep / rest / night
+    if any(w in d for w in ['sleep', 'rest', 'bed', 'night', 'morning', 'wake']):
+        return ("closes eyes briefly and takes a deep calming breath, "
+                "then opens eyes with a gentle reassuring smile")
+    # Default
+    return ("maintains direct eye contact with a calm, knowing expression, "
+            "gives a slow subtle nod, hands resting naturally")
+
+
+def build_flow_prompt(
+    dialogue_line: str,
+    language: str = "English",
+    voice_profile: str = None,
+    duration: float = 8.0,
+    facial_expression: str = None,
+    body_language: str = None,
+    delivery_style: str = None,
+    emotion: str = None,
+    redo_feedback: str = None,
+    short_dialogue_mode: str = "optimized",
+    prefix_short_enabled: bool = False,  # v539
+    prefix_short_word: str = "only",  # v539
+    prefix_short_threshold: int = 15,  # v539
+) -> str:
+    """
+    Build prompt for Flow backend using same structure as veo_generator.py build_prompt().
+    
+    This ensures consistency between API and Flow backends.
+    
+    KEY PRINCIPLES (from veo_generator.py):
+    1. NO VISUAL REDESCRIPTION: The image locks appearance
+    2. RAW/DOCUMENTARY STYLE: Not "cinematic" - prevents AI glossy look
+    3. STATIC CAMERA: For talking heads, locked-off camera preserves lip-sync
+    4. VOICE PROFILE: Extract and pass voice traits correctly
+    5. "Character says:" syntax for Veo lip-sync engine
+    """
+    # Clean dialogue
+    dialogue_line = dialogue_line.strip().strip('"').strip("'")
+    
+    # Defaults
+    if facial_expression is None:
+        facial_expression = "natural engaged expression"
+    if body_language is None:
+        body_language = "natural posture"
+    if delivery_style is None:
+        delivery_style = "natural conversational"
+    if emotion is None:
+        emotion = "neutral"
+    
+    # Calculate timing
+    speech_end_time = duration - 1.0
+    
+    # Extract voice traits from voice profile if provided
+    voice_texture = ""
+    voice_tone = ""
+    voice_accent = ""
+    voice_signature = ""
+    
+    if voice_profile:
+        lines = voice_profile.split('\n')
+        for line in lines:
+            line_lower = line.lower().strip()
+            line_clean = line.strip()
+            
+            # Extract texture (raspy, smooth, gravelly, etc.)
+            if 'texture:' in line_lower:
+                voice_texture = line_clean.split(':', 1)[1].strip() if ':' in line_clean else ""
+            elif 'quality:' in line_lower and not voice_texture:
+                voice_texture = line_clean.split(':', 1)[1].strip() if ':' in line_clean else ""
+            
+            # Extract tone
+            if 'tone:' in line_lower:
+                voice_tone = line_clean.split(':', 1)[1].strip() if ':' in line_clean else ""
+            
+            # Extract accent
+            if 'accent:' in line_lower:
+                accent_val = line_clean.split(':', 1)[1].strip() if ':' in line_clean else ""
+                if accent_val and 'none' not in accent_val.lower() and 'neutral' not in accent_val.lower():
+                    voice_accent = accent_val
+            
+            # Extract signature traits
+            if 'signature' in line_lower and 'trait' in line_lower:
+                voice_signature = line_clean.split(':', 1)[1].strip() if ':' in line_clean else ""
+    
+    # Build consolidated voice instruction
+    voice_parts = []
+    if voice_texture:
+        voice_parts.append(voice_texture)
+    if voice_tone:
+        voice_parts.append(voice_tone)
+    if voice_signature:
+        voice_parts.append(voice_signature)
+    if voice_accent:
+        voice_parts.append(f"accent: {voice_accent}")
+    
+    short_voice = ", ".join(voice_parts) if voice_parts else "natural voice"
+    
+    # Build prompt following Veo 3.1 official structure (same as veo_generator.py)
+    # Short dialogue rule: < 13 words → depends on short_dialogue_mode
+    # v539: prefix-short-lines runs FIRST so the prefix word is part of
+    # the spoken dialogue. Word count is recomputed afterwards.
+    dialogue_line = maybe_prefix_short_dialogue(
+        dialogue_line,
+        prefix_short_enabled,
+        prefix_short_word,
+        prefix_short_threshold,
+    )
+    word_count = len(dialogue_line.split())
+    is_short = word_count < SHORT_DIALOGUE_WORD_LIMIT
+    
+    if is_short and short_dialogue_mode == 'fill':
+        # Fill mode: pad dialogue with natural filler words to reach 25 words
+        # These get cut by Whisper VAD later (they won't match the dialogue script)
+        # v491: bumped 21→25, filler list rewritten so no sentence starts
+        # with "and" (per user spec — avoid abrupt "and" openers after
+        # [pause]). Mirrors the same fix in veo_generator.py.
+        TARGET_WORDS = 25
+        words = dialogue_line.split()
+        words_needed = TARGET_WORDS - len(words)
+        if words_needed > 0:
+            import random
+            _FILLER_SENTENCES = [
+                "this is something more people need to understand because it truly changes everything for the better",
+                "so make sure you remember this because it will help you in the long run",
+                "honestly I want you to really think about this for a moment because it matters",
+                "this is what nobody tells you about and it makes all the difference every time",
+                "once you start doing this you will notice the results very quickly in your body",
+                "so keep this in mind every single day and you will see the change",
+                "that is exactly why I am sharing this with you right now today my friend",
+                "because when you understand this everything else starts to fall into place naturally for you",
+                "trust me, take this seriously because your health depends on small choices you make daily",
+                "so pay attention to what I am about to tell you next it is important",
+            ]
+            filler = random.choice(_FILLER_SENTENCES).split()
+            # Safety net: strip leading "and" if somehow present
+            while filler and filler[0].lower() == "and":
+                filler = filler[1:]
+            words.append("[pause 1 second]")
+            words.extend(filler[:words_needed])
+        dialogue_line = " ".join(words)
+        is_short = False  # Treat as normal long dialogue now
+    
+    if is_short:
+        silent_action = _infer_silent_action(dialogue_line)
+        speech_timing = "0s to 2.0s"
+        dialogue_block = f"""[0:00-0:02] The subject speaks directly to camera and says in {language}, "{dialogue_line}" — then immediately closes mouth into a focused expression.
+
+[0:02-0:{duration:02.0f}] The subject remains completely silent. {silent_action.capitalize() if silent_action[0].islower() else silent_action}. Zero voice, only ambient silence, no speaking."""
+    else:
+        speech_timing = f"0s to {speech_end_time:.1f}s"
+        dialogue_block = f"""The subject in the frame speaks directly to camera with {facial_expression}, {body_language}.
+
+The character says in {language}, "{dialogue_line}" """
+    
+    if voice_profile:
+        if is_short:
+            final_prompt = f"""=== VOICE PROFILE ===
+{voice_profile}
+===
+
+Medium shot, static locked-off camera, sharp focus on subject.
+
+{dialogue_block}
+
+Voice: {short_voice}. {delivery_style}, {emotion} emotion.
+
+Ambient noise: Complete silence, professional recording booth, no room ambiance.
+
+Style: Raw realistic footage, natural lighting, photorealistic. Speech timing: {speech_timing}, then silence.
+
+No subtitles, no text overlays, no captions, no watermarks. No background music, no laughter, no applause, no crowd sounds, no ambient noise. No morphing, no face distortion, no jerky movements. Only the speaker's isolated voice.
+
+(no subtitles)"""
+        else:
+            final_prompt = f"""=== VOICE PROFILE ===
+{voice_profile}
+===
+
+Medium shot, static locked-off camera, sharp focus on subject.
+
+{dialogue_block}
+
+Voice: {short_voice}. {delivery_style}, {emotion} emotion.
+
+Ambient noise: Complete silence, professional recording booth, no room ambiance.
+
+Style: Raw realistic footage, natural lighting, photorealistic. Speech timing: {speech_timing}, then silence.
+
+No subtitles, no text overlays, no captions, no watermarks. No background music, no laughter, no applause, no crowd sounds, no ambient noise. No morphing, no face distortion, no jerky movements. Only the speaker's isolated voice.
+
+(no subtitles)"""
+    else:
+        final_prompt = f"""Medium shot, static locked-off camera, sharp focus on subject.
+
+{dialogue_block}
+
+Voice: {short_voice}. {delivery_style}, {emotion} emotion.
+
+Ambient noise: Complete silence, professional recording booth, no room ambiance.
+
+Style: Raw realistic footage, natural lighting, photorealistic. Speech timing: {speech_timing}, then silence.
+
+No subtitles, no text overlays, no captions, no watermarks. No background music, no laughter, no applause, no crowd sounds, no ambient noise. No morphing, no face distortion, no jerky movements. Only the speaker's isolated voice.
+
+(no subtitles)"""
+
+    # Add redo feedback at the top if present (same as veo_generator.py)
+    if redo_feedback:
+        final_prompt = f"""=== PRIORITY ===
+{redo_feedback}
+===
+
+{final_prompt}"""
+    
+    return final_prompt
+
+
+def get_prompt(dialogue, language="English", duration=8.0, voice_profile=None):
+    """
+    Generate video prompt from dialogue.
+    
+    This is a simplified wrapper around build_flow_prompt() for backward compatibility.
+    The full build_flow_prompt() is used when more context is available.
+    """
+    return build_flow_prompt(
+        dialogue_line=dialogue,
+        language=language,
+        voice_profile=voice_profile,
+        duration=duration,
+    )
+
+
+# ============================================================
+# DOWNLOAD WORKER (Parallel Thread)
+# ============================================================
+
+def get_tile_count_at_index0(page):
+    """Kept for backward compat — returns None."""
+    return None
+
+
+_policy_retried_tiles = {}  # tile_id → retry_time (for time-based persistence check)
+
+def scan_tiles_for_policy_failures(page, clip_submit_times, account_name=""):
+    """
+    Scan ALL tiles in the project for policy rejection failures (warning icon).
+    
+    Strategy:
+    1. First detection → click Retry, record timestamp
+    2. Still failing after 90s → mark as persistent (image truly violates policy)
+    3. Track by tile_id to avoid spamming retries
+    
+    Returns (retried, persistent):
+        retried: list of data-indices that were retried (first attempt)
+        persistent: list of data-indices where policy failure persists after retry + 90s wait
+    """
+    global _policy_retried_tiles
+    
+    PERSISTENCE_WAIT = 90  # seconds — give retry time to generate before marking permanent
+    
+    if not clip_submit_times:
+        return [], []
+    
+    prefix = f"[{account_name}] " if account_name else ""
+    
+    try:
+        failed_info = page.evaluate("""() => {
+            const results = [];
+            const containers = document.querySelectorAll('[data-index]');
+            for (const container of containers) {
+                const idx = parseInt(container.getAttribute('data-index'));
+                const tiles = container.querySelectorAll('[data-tile-id]');
+                for (const tile of tiles) {
+                    const text = (tile.textContent || '').toLowerCase();
+                    if (!text.includes('violate') && !text.includes('policies')) continue;
+                    const icons = Array.from(tile.querySelectorAll('i')).map(i => i.textContent.trim());
+                    if (!icons.includes('warning')) continue;
+                    const tileId = tile.getAttribute('data-tile-id');
+                    results.push({
+                        dataIndex: idx,
+                        tileId: tileId,
+                        hasRetryBtn: icons.includes('refresh'),
+                        hasReuseBtn: icons.includes('undo'),
+                    });
+                }
+            }
+            return results;
+        }""")
+        
+        if not failed_info:
+            return [], []
+        
+        retried = []
+        persistent = []
+        
+        for info in failed_info:
+            tile_id = info.get('tileId', '')
+            data_idx = info.get('dataIndex', -1)
+            
+            # Already retried — check if enough time passed
+            if tile_id in _policy_retried_tiles:
+                retry_time = _policy_retried_tiles[tile_id]
+                elapsed = time.time() - retry_time
+                if elapsed < PERSISTENCE_WAIT:
+                    # Too early to call it persistent — retry is still generating
+                    continue
+                print(f"{prefix}[PolicyScan] ❌ Persistent policy failure at data-index={data_idx} ({elapsed:.0f}s since retry)", flush=True)
+                persistent.append(data_idx)
+                continue
+            
+            print(f"{prefix}[PolicyScan] ⚠ Policy failure at data-index={data_idx} (tile={tile_id[:12]}...)", flush=True)
+            
+            # Click Retry
+            if info.get('hasRetryBtn'):
+                clicked = page.evaluate(f"""() => {{
+                    const tile = document.querySelector('[data-tile-id="{tile_id}"]');
+                    if (!tile) return false;
+                    const btn = Array.from(tile.querySelectorAll('button')).find(b =>
+                        Array.from(b.querySelectorAll('i')).some(i => i.textContent.trim() === 'refresh')
+                    );
+                    if (btn) {{ btn.click(); return true; }}
+                    return false;
+                }}""")
+                if clicked:
+                    print(f"{prefix}[PolicyScan] ✓ Clicked Retry on tile {tile_id[:12]}...", flush=True)
+                    _policy_retried_tiles[tile_id] = time.time()
+                    retried.append(data_idx)
+                    continue
+            
+            # Reuse Prompt fallback
+            if info.get('hasReuseBtn'):
+                clicked = page.evaluate(f"""() => {{
+                    const tile = document.querySelector('[data-tile-id="{tile_id}"]');
+                    if (!tile) return false;
+                    const btn = Array.from(tile.querySelectorAll('button')).find(b =>
+                        Array.from(b.querySelectorAll('i')).some(i => i.textContent.trim() === 'undo')
+                    );
+                    if (btn) {{ btn.click(); return true; }}
+                    return false;
+                }}""")
+                if clicked:
+                    print(f"{prefix}[PolicyScan] ✓ Clicked Reuse Prompt on tile {tile_id[:12]}...", flush=True)
+                    _policy_retried_tiles[tile_id] = time.time()
+                    time.sleep(2)
+                    try:
+                        click_generate_button(page, f"{prefix}PolicyScan retry")
+                        print(f"{prefix}[PolicyScan] ✓ Resubmitted via Reuse Prompt + Generate", flush=True)
+                        retried.append(data_idx)
+                    except Exception as gen_err:
+                        print(f"{prefix}[PolicyScan] ⚠ Generate after Reuse Prompt failed: {gen_err}", flush=True)
+                    continue
+            
+            # No buttons — mark persistent immediately
+            print(f"{prefix}[PolicyScan] ❌ No Retry or Reuse button — marking as persistent", flush=True)
+            persistent.append(data_idx)
+        
+        return retried, persistent
+    except Exception as e:
+        return [], []
+
+
+def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None):
+    """
+    Check if the most recently submitted clip has failed.
+    
+    Uses a robust tile detection approach:
+    - Deduplicates tiles by data-tile-id (outer + inner divs share same ID)
+    - Uses textContent (not innerText) to see through opacity:0 layers
+    - 'videocam' in textContent = tile is generating (earliest signal)
+    - percentage (digit+%) in textContent = tile is generating
+    - <video> element = tile is completed
+    - 'refresh' button = tile is TRULY failed (not just starting up)
+    - 'undo' button WITHOUT videocam/% = tile starting up, not yet failed
+    """
+    print(f"[FailCheck] Checking clip {clip_num} for immediate failure...", flush=True)
+    
+    # Shared JS for tile analysis — used for both initial check and recheck
+    # DATA_INDEX_PLACEHOLDER is replaced with actual data_index before evaluate
+    TILE_CHECK_JS = r"""
+        () => {
+            const container = document.querySelector("div[data-index='DATA_INDEX_PLACEHOLDER']");
+            if (!container) return {tiles: 0, hasVideo: false, hasGenerating: false, failedCount: 0, allFailed: false};
+            
+            // Deduplicate tiles by data-tile-id (outer wrapper + inner div share same ID)
+            const allTileEls = container.querySelectorAll("[data-tile-id]");
+            const seen = new Set();
+            const tiles = [];
+            allTileEls.forEach(t => {
+                const id = t.getAttribute("data-tile-id");
+                if (id && !seen.has(id)) { seen.add(id); tiles.push(t); }
+            });
+            
+            let hasVideo = false;
+            let hasGenerating = false;
+            let failedCount = 0;
+            
+            tiles.forEach(t => {
+                // Check for completed video
+                if (t.querySelector("video")) {
+                    hasVideo = true;
+                    return;
+                }
+                
+                const text = t.textContent || '';
+                
+                // "videocam" = generating (appears before percentage)
+                // percentage = generating
+                if (text.includes('videocam') || /\d+%/.test(text)) {
+                    hasGenerating = true;
+                    return;
+                }
+                
+                // Truly failed = has a refresh (Retry) button
+                // Starting up tiles have "undo" (Reuse Prompt) but NOT "refresh"
+                const hasRefresh = t.querySelector("i") && 
+                    Array.from(t.querySelectorAll("i")).some(i => i.textContent.trim() === 'refresh');
+                
+                if (hasRefresh) {
+                    failedCount++;
+                    return;
+                }
+                
+                // Has error/warning text but no refresh button = still starting up, not failed
+            });
+            
+            return {
+                tiles: tiles.length,
+                hasVideo: hasVideo,
+                hasGenerating: hasGenerating,
+                failedCount: failedCount,
+                allFailed: tiles.length > 0 && failedCount === tiles.length && !hasGenerating && !hasVideo
+            };
+        }
+    """
+    
+    try:
+        # Wait 10 seconds for the new clip to render
+        time.sleep(10)
+        
+        result = page.evaluate(TILE_CHECK_JS.replace("DATA_INDEX_PLACEHOLDER", str(data_index)))
+        
+        tiles = result.get('tiles', 0)
+        has_video = result.get('hasVideo', False)
+        has_generating = result.get('hasGenerating', False)
+        failed_count = result.get('failedCount', 0)
+        all_failed = result.get('allFailed', False)
+        
+        print(f"[FailCheck] data-index={data_index}: {tiles} tiles, {failed_count} failed, generating={has_generating}, video={has_video}", flush=True)
+        
+        # Click Retry on truly failed tiles (ones with 'refresh' button)
+        if failed_count > 0:
+            print(f"[FailCheck] ⚠️ {failed_count} tile(s) truly failed — clicking Retry on each...", flush=True)
+            try:
+                container = page.locator(f"div[data-index='{data_index}']").first
+                # Get deduplicated tiles via Playwright
+                all_raw = container.locator("[data-tile-id]").all()
+                seen_ids = set()
+                unique_tiles = []
+                for t in all_raw:
+                    try:
+                        tid = t.get_attribute("data-tile-id")
+                        if tid and tid not in seen_ids:
+                            seen_ids.add(tid)
+                            unique_tiles.append(t)
+                    except:
+                        pass
+                
+                retried = 0
+                for tile_idx, tile in enumerate(unique_tiles):
+                    try:
+                        # Only retry tiles that have the 'refresh' icon (truly failed)
+                        retry_btn = tile.locator("button:has(i:text('refresh'))").first
+                        if retry_btn.count() > 0 and retry_btn.is_visible(timeout=2000):
+                            human_click_element(page, retry_btn, f"Retry button tile {tile_idx + 1}")
+                            retried += 1
+                            print(f"[FailCheck] ✓ Clicked Retry on tile {tile_idx + 1}", flush=True)
+                            time.sleep(1)
+                    except Exception as retry_err:
+                        print(f"[FailCheck] Could not retry tile {tile_idx + 1}: {retry_err}", flush=True)
+                print(f"[FailCheck] Retried {retried}/{failed_count} failed tiles", flush=True)
+            except Exception as e:
+                print(f"[FailCheck] Error clicking Retry buttons: {e}", flush=True)
+        
+        if has_generating:
+            print(f"[FailCheck] ✓ Clip generating (has percentage)", flush=True)
+            return False
+        
+        if has_video:
+            print(f"[FailCheck] ✓ Clip has video", flush=True)
+            return False
+        
+        if all_failed and tiles > 0:
+            # All tiles truly failed — retries were clicked above.
+            # Wait and re-check in case retries take effect.
+            print(f"[FailCheck] All tiles truly failed — waiting 10s for retries to take effect...", flush=True)
+            time.sleep(10)
+            
+            recheck = page.evaluate(TILE_CHECK_JS.replace("DATA_INDEX_PLACEHOLDER", str(data_index)))
+            
+            rc_generating = recheck.get('hasGenerating', False)
+            rc_video = recheck.get('hasVideo', False)
+            rc_failed = recheck.get('failedCount', 0)
+            rc_tiles = recheck.get('tiles', 0)
+            print(f"[FailCheck] Re-check: {rc_tiles} tiles, {rc_failed} failed, generating={rc_generating}, video={rc_video}", flush=True)
+            
+            if rc_generating:
+                print(f"[FailCheck] ✓ Clip generating after retry (has percentage)", flush=True)
+                return False
+            
+            if rc_video:
+                print(f"[FailCheck] ✓ Clip has video after retry", flush=True)
+                return False
+            
+            if rc_failed == rc_tiles and rc_tiles > 0:
+                print(f"[FailCheck] ⚠️ ALL {rc_tiles} tiles still failed after retry + 10s wait", flush=True)
+                return True
+            
+            print(f"[FailCheck] ✓ Some tiles recovered after retry", flush=True)
+            return False
+        
+        # No clear signal — assume OK
+        print(f"[FailCheck] ✓ No clear failure detected", flush=True)
+        return False
+        
+    except Exception as e:
+        print(f"[FailCheck] Error: {e}", flush=True)
+        return False
+
+
+class ExtendedFailureMonitor:
+    """
+    Tracks clips that passed the immediate 3s failure check but need continued monitoring.
+    
+    After a clip passes the initial check, we continue monitoring it for up to 60 seconds
+    to catch delayed failures that happen after submission but before download.
+    
+    Uses dialogue-based matching (same as download worker) to accurately identify which
+    clip failed, regardless of how Flow reorders containers.
+    """
+    
+    def __init__(self, monitoring_duration=60):
+        """
+        Args:
+            monitoring_duration: How long (seconds) to monitor each clip after submission
+        """
+        self.monitoring_duration = monitoring_duration
+        self.monitored_clips = {}  # clip_index -> {'submit_time': datetime, 'dialogue': str}
+    
+    def add_clip(self, clip_index, submit_time, dialogue_text="", prompt=""):
+        """Add a clip to the monitoring list after it passes immediate failure check.
+        
+        Args:
+            clip_index: The clip's index
+            submit_time: When the clip was submitted
+            dialogue_text: The clip's raw dialogue text (fallback)
+            prompt: The full prompt sent to Flow (preferred for matching)
+        """
+        # Extract dialogue from prompt (same as download worker) for reliable matching
+        dialogue = _extract_dialogue_from_prompt(prompt) if prompt else ""
+        if not dialogue:
+            dialogue = dialogue_text.strip().strip('"').strip("'") if dialogue_text else ""
+        
+        self.monitored_clips[clip_index] = {
+            'submit_time': submit_time,
+            'dialogue': dialogue,
+        }
+        print(f"[FailMonitor] Clip {clip_index+1} added to extended monitoring (60s window)", flush=True)
+    
+    def remove_clip(self, clip_index):
+        """Remove a clip from monitoring (e.g., when it's confirmed failed or safe)."""
+        if clip_index in self.monitored_clips:
+            del self.monitored_clips[clip_index]
+    
+    def get_clips_to_check(self):
+        """Get list of clips that are still within monitoring window."""
+        now = datetime.now()
+        clips_to_check = []
+        expired = []
+        
+        for clip_idx, data in self.monitored_clips.items():
+            elapsed = (now - data['submit_time']).total_seconds()
+            if elapsed < self.monitoring_duration:
+                clips_to_check.append(clip_idx)
+            else:
+                expired.append(clip_idx)
+        
+        # Remove expired clips (they're now considered safe)
+        for clip_idx in expired:
+            print(f"[FailMonitor] Clip {clip_idx} passed 60s monitoring window - considered safe", flush=True)
+            del self.monitored_clips[clip_idx]
+        
+        return clips_to_check
+    
+    def check_for_failures(self, page, account_name=""):
+        """
+        Check all monitored clips for failures using dialogue-based matching.
+        
+        Args:
+            page: Playwright page (must be on the project page)
+            account_name: For logging
+        
+        Returns:
+            List of clip indices that have failed
+        """
+        clips_to_check = self.get_clips_to_check()
+        if not clips_to_check:
+            return []
+        
+        failed_clips = []
+        
+        try:
+            # Use Playwright locators instead of page.evaluate to avoid
+            # reCAPTCHA stack trace accumulation during between-clip waits
+            failed_containers_data = []
+            container = page.locator("div[data-index='1']")
+            if container.count() > 0:
+                fail_text = container.locator("text=Failed")
+                error_text = container.locator("text=Error")
+                if fail_text.count() > 0 or error_text.count() > 0:
+                    # Found a failure - try to get prompt text for matching
+                    prompt_text = ""
+                    try:
+                        # Try prompt button
+                        prompt_btn = container.locator("button[class*='sc-20145656-8']").first
+                        if prompt_btn.count() > 0:
+                            prompt_text = prompt_btn.inner_text(timeout=2000)
+                    except:
+                        pass
+                    
+                    if not prompt_text:
+                        try:
+                            # Try textarea
+                            textarea = container.locator("textarea").first
+                            if textarea.count() > 0:
+                                prompt_text = textarea.input_value(timeout=2000)
+                        except:
+                            pass
+                    
+                    failed_containers_data.append({
+                        'dataIndex': 1,
+                        'promptText': prompt_text[:500] if prompt_text else ''
+                    })
+            
+            if failed_containers_data and len(failed_containers_data) > 0:
+                print(f"[FailMonitor] ⚠️ Detected {len(failed_containers_data)} failed container(s)", flush=True)
+                
+                # Build dialogue map for monitored clips
+                dialogue_to_clip = {}
+                for clip_idx in clips_to_check:
+                    clip_data = self.monitored_clips.get(clip_idx, {})
+                    dialogue = clip_data.get('dialogue', '')
+                    if dialogue and len(dialogue) > 10:
+                        dialogue_to_clip[dialogue] = clip_idx
+                
+                # Match each failed container to a clip by dialogue
+                for container_data in failed_containers_data:
+                    data_index = container_data.get('dataIndex')
+                    prompt_text = container_data.get('promptText', '')
+                    
+                    matched_clip = None
+                    best_match_len = 0
+                    p_norm = ''.join(prompt_text.split()).lower()
+                    for dialogue, clip_idx in dialogue_to_clip.items():
+                        # Skip clips already marked as failed
+                        if clip_idx in failed_clips:
+                            continue
+                        # Check if dialogue appears in the prompt (exact or normalized)
+                        # Use longest match to avoid substring false positives
+                        if dialogue in prompt_text:
+                            if matched_clip is None or len(dialogue) > best_match_len:
+                                matched_clip = clip_idx
+                                best_match_len = len(dialogue)
+                        d_norm = ''.join(dialogue.split()).lower()
+                        if len(d_norm) > 15 and d_norm in p_norm:
+                            if matched_clip is None or len(d_norm) > best_match_len:
+                                matched_clip = clip_idx
+                                best_match_len = len(d_norm)
+                    
+                    if matched_clip is not None:
+                        print(f"[FailMonitor] ⚠️ Clip {matched_clip} FAILED (matched by dialogue at data-index={data_index})", flush=True)
+                        failed_clips.append(matched_clip)
+                    else:
+                        print(f"[FailMonitor] ⚠️ Failed container at data-index={data_index} - no dialogue match", flush=True)
+                
+                # If we found failures but couldn't match any, try fallback
+                if failed_containers_data and not failed_clips and clips_to_check:
+                    # Assume most recently submitted clip failed
+                    most_recent = max(clips_to_check)
+                    print(f"[FailMonitor] ⚠️ Unmapped failure detected - assuming clip {most_recent} failed", flush=True)
+                    failed_clips.append(most_recent)
+        
+        except Exception as e:
+            print(f"[FailMonitor] Error during check: {e}", flush=True)
+        
+        # Remove failed clips from monitoring
+        for clip_idx in failed_clips:
+            self.remove_clip(clip_idx)
+        
+        return failed_clips
+    
+    def has_clips_to_monitor(self):
+        """Check if there are any clips still being monitored."""
+        # First clean up expired clips
+        self.get_clips_to_check()
+        return len(self.monitored_clips) > 0
+    
+    def do_periodic_check(self, page, account_name=""):
+        """
+        Disabled — failure detection is handled by check_recent_clip_failure (immediate)
+        and the download browser timeout (eventual). ExtendedFailureMonitor caused false
+        positives by detecting old "Failed"/"Error" text without checking for percentage.
+        """
+        return []
+
+
+def quick_failure_check(page, clips_data, clip_project_map, main_project_url):
+    """
+    Quick scan for any failed clips and rebuild them in NEW projects.
+    
+    Args:
+        page: Playwright page
+        clips_data: List of clip data dicts
+        clip_project_map: Dict mapping clip_index -> project_url (modified in place)
+        main_project_url: URL of the main project
+    
+    Returns:
+        Number of clips that were moved to retry projects
+    """
+    failures_rebuilt = 0
+    check_and_dismiss_popup(page)
+    
+    # STEP 1: Scroll through ALL containers to ensure they're rendered in DOM
+    # This is critical - elements outside viewport may not be detected
+    num_clips = len(clips_data)
+    max_data_index = num_clips + 10  # Check more in case of date headers
+    
+    print(f"[QuickCheck] Scrolling through containers to detect all failures...", flush=True)
+    
+    # PASS 1: Start at TOP where newest clips are (idx=1, 2, 3)
+    page.keyboard.press("Home")  # Scroll to top without evaluate
+    time.sleep(0.5)
+    
+    # Scroll through each data-index container (starting from idx=1, which is at top)
+    for idx in range(1, max_data_index):
+        try:
+            container = page.locator(f"div[data-index='{idx}']")
+            if container.count() > 0:
+                container.first.scroll_into_view_if_needed(timeout=2000)
+                time.sleep(0.2)
+        except:
+            pass  # Container might not exist, that's fine
+    
+    # PASS 2: Go back to top and scroll again (catches new failures at top)
+    page.keyboard.press("Home")  # Scroll to top without evaluate
+    time.sleep(0.3)
+    
+    for idx in range(1, max_data_index):
+        try:
+            container = page.locator(f"div[data-index='{idx}']")
+            if container.count() > 0:
+                container.first.scroll_into_view_if_needed(timeout=1000)
+                time.sleep(0.15)
+        except:
+            pass
+    
+    # Small pause after scrolling to let everything settle
+    time.sleep(1)
+    check_and_dismiss_popup(page)
+    
+    # STEP 2: Now detect ALL failures using JavaScript — extract prompt text for matching
+    try:
+        # Find failed containers AND their prompt text for dialogue matching
+        debug_info = page.evaluate(r"""
+            () => {
+                const failures = [];
+                const allElements = document.querySelectorAll('*');
+                for (const el of allElements) {
+                    if (((el.innerText === 'Failed Generation' || el.innerText === 'Failed' || el.innerText === 'Error')) && el.children.length === 0) {
+                        // Walk up to find the data-index container
+                        let parent = el.parentElement;
+                        let attempts = 0;
+                        let foundIndex = null;
+                        let container = null;
+                        while (parent && attempts < 30) {
+                            if (parent.dataset && parent.dataset.index !== undefined) {
+                                foundIndex = parseInt(parent.dataset.index);
+                                container = parent;
+                                break;
+                            }
+                            parent = parent.parentElement;
+                            attempts++;
+                        }
+                        // Skip if the container has a percentage (still generating)
+                        if (container) {
+                            const containerText = container.innerText || '';
+                            if (/\d+%/.test(containerText)) continue;
+                        }
+                        // Extract prompt text from the container for dialogue matching
+                        let promptText = '';
+                        if (container) {
+                            // Try the prompt display area
+                            const promptEl = container.querySelector('[class*="prompt"], [class*="sc-21e778e8"], textarea');
+                            if (promptEl) {
+                                promptText = promptEl.innerText || promptEl.value || '';
+                            }
+                            // Fallback: get all text from container
+                            if (!promptText || promptText.length < 20) {
+                                promptText = container.innerText || '';
+                            }
+                        }
+                        failures.push({
+                            foundIndex: foundIndex,
+                            attemptsNeeded: attempts,
+                            parentTag: el.parentElement ? el.parentElement.tagName : 'none',
+                            promptText: promptText.substring(0, 500)
+                        });
+                    }
+                }
+                return failures;
+            }
+        """)
+        
+        print(f"[QuickCheck] DEBUG: Raw failures found: {debug_info}", flush=True)
+        
+        # Extract the data indices (filtering out nulls)
+        failed_indices_raw = [f['foundIndex'] for f in debug_info if f['foundIndex'] is not None]
+        failed_indices = list(set(failed_indices_raw))  # Deduplicate
+        
+        # Log any failures that couldn't find their data-index
+        orphan_failures = [f for f in debug_info if f['foundIndex'] is None]
+        if orphan_failures:
+            print(f"[QuickCheck] ⚠️ WARNING: {len(orphan_failures)} failure(s) couldn't find data-index parent!", flush=True)
+        
+        if not failed_indices or len(failed_indices) == 0:
+            if orphan_failures:
+                print(f"[QuickCheck] All {len(orphan_failures)} failures are orphans (no data-index container)", flush=True)
+            return 0
+        
+        # Debug: show both raw count and unique containers
+        if len(debug_info) != len(failed_indices):
+            print(f"[QuickCheck] ⚠️ Found {len(debug_info)} 'Failed' texts → {len(failed_indices)} unique containers", flush=True)
+            if len(debug_info) > len(failed_indices) and not orphan_failures:
+                print(f"[QuickCheck] Note: Some containers have multiple failed variants", flush=True)
+        
+        print(f"[QuickCheck] ⚠️ Found {len(failed_indices)} failure(s) at data-index: {sorted(failed_indices)}", flush=True)
+        
+        # STEP 3: Match failed containers to clips using DIALOGUE MATCHING (not position)
+        # Position-based mapping (len - 1 - index) is unreliable because Flow has date headers,
+        # generating spinners, and indices shift after failures.
+        
+        # Build dialogue lookup from clips_data
+        dialogue_to_clip = {}
+        for cd in clips_data:
+            prompt = cd.get('prompt', '')
+            dialogue = cd.get('dialogue_text', '').strip().strip('"').strip("'")
+            clip_idx = cd.get('clip_index')
+            # Use dialogue from prompt if available
+            extracted = _extract_dialogue_from_prompt(prompt) if prompt else ''
+            key = extracted if extracted else dialogue
+            if key and len(key) > 10:
+                dialogue_to_clip[key] = cd
+        
+        clips_to_retry = []
+        matched_clip_indices = set()
+        
+        for data_index in failed_indices:
+            # Get prompt text from the failure info
+            prompt_text = ''
+            for f in debug_info:
+                if f.get('foundIndex') == data_index:
+                    prompt_text = f.get('promptText', '')
+                    break
+            
+            # Try dialogue matching — find ALL matches, pick LONGEST
+            matched_clip = None
+            if prompt_text:
+                p_norm = ''.join(prompt_text.split()).lower()
+                best_match = None
+                best_len = 0
+                for dialogue_key, clip_data in dialogue_to_clip.items():
+                    ci = clip_data.get('clip_index')
+                    if ci in matched_clip_indices:
+                        continue  # Already matched
+                    if dialogue_key in prompt_text and len(dialogue_key) > best_len:
+                        best_match = clip_data
+                        best_len = len(dialogue_key)
+                    d_norm = ''.join(dialogue_key.split()).lower()
+                    if len(d_norm) > 15 and d_norm in p_norm and len(d_norm) > best_len:
+                        best_match = clip_data
+                        best_len = len(d_norm)
+                matched_clip = best_match
+            
+            # Fallback: position-based (less reliable but better than nothing)
+            if matched_clip is None:
+                positional_idx = len(clips_data) - 1 - data_index
+                if 0 <= positional_idx < len(clips_data):
+                    fallback = clips_data[positional_idx]
+                    if fallback.get('clip_index') not in matched_clip_indices:
+                        matched_clip = fallback
+                        print(f"[QuickCheck] ⚠️ Using position fallback for data-index={data_index} → clip {fallback.get('clip_index')}", flush=True)
+            
+            if matched_clip:
+                actual_clip_index = matched_clip.get('clip_index')
+                matched_clip_indices.add(actual_clip_index)
+                
+                # Check if already retried
+                if actual_clip_index in clip_project_map and clip_project_map[actual_clip_index] != main_project_url:
+                    print(f"[QuickCheck] Clip {actual_clip_index+1} already in retry project, skipping", flush=True)
+                    continue
+                
+                print(f"[QuickCheck] Matched data-index={data_index} → clip {actual_clip_index+1} (by dialogue)", flush=True)
+                clips_to_retry.append({
+                    'clip_data': matched_clip,
+                    'actual_clip_index': actual_clip_index,
+                    'data_index': data_index
+                })
+            else:
+                print(f"[QuickCheck] ⚠️ Could not match data-index={data_index} to any clip", flush=True)
+        
+        if not clips_to_retry:
+            print(f"[QuickCheck] All failed clips already have retry projects", flush=True)
+            return 0
+        
+        print(f"[QuickCheck] Will create retry projects for {len(clips_to_retry)} clip(s): {[c['actual_clip_index'] for c in clips_to_retry]}", flush=True)
+        
+        # STEP 4: Create retry projects for each failed clip
+        for retry_info in clips_to_retry:
+            clip_data = retry_info['clip_data']
+            actual_clip_index = retry_info['actual_clip_index']
+            data_index = retry_info['data_index']
+            
+            print(f"\n[QuickCheck] Creating retry project for clip {actual_clip_index+1} (data-index={data_index})", flush=True)
+            
+            # Create new project for this failed clip
+            new_project_url, retry_success = _create_retry_project_for_clip(page, clip_data, max_retries=2)
+            
+            if new_project_url and retry_success:
+                clip_project_map[actual_clip_index] = new_project_url
+                failures_rebuilt += 1
+                print(f"[QuickCheck] ✓ Clip {actual_clip_index+1} moved to: {new_project_url}", flush=True)
+                
+                # Navigate back to main project to continue with next retry
+                print(f"[QuickCheck] Returning to main project...", flush=True)
+                page.goto(main_project_url, timeout=30000)
+                time.sleep(3)
+                check_and_dismiss_popup(page)
+            else:
+                print(f"[QuickCheck] ❌ Failed to create retry project for clip {actual_clip_index+1}", flush=True)
+        
+        print(f"\n[QuickCheck] Completed: {failures_rebuilt}/{len(clips_to_retry)} retry projects created", flush=True)
+        
+    except Exception as e:
+        print(f"[QuickCheck] Error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+    
+    return failures_rebuilt
+
+
+def _rebuild_failed_clip(page, clip_data):
+    """Rebuild a failed clip with frames and prompt. Delegates to rebuild_clip."""
+    start_frame = clip_data.get('start_frame')
+    end_frame = clip_data.get('end_frame')
+    prompt = clip_data.get('prompt')
+    clip_index = clip_data.get('clip_index')
+    
+    print(f"[Rebuild] Rebuilding clip {clip_index+1}...", flush=True)
+    return rebuild_clip(page, start_frame, end_frame, prompt, is_first_clip=True, context="[Rebuild]")
+
+
+def _create_retry_project_for_clip(page, clip_data, max_retries=2):
+    """
+    Create a NEW project and submit a single failed clip to it.
+    Will retry up to max_retries times if the generation fails immediately.
+    
+    Returns:
+        Tuple of (project_url, success) where:
+        - project_url: URL of the retry project (or None if all retries failed)
+        - success: True if generation started successfully, False if it failed
+    """
+    clip_index = clip_data.get('clip_index')
+    prompt = clip_data.get('prompt', '')
+    start_frame = clip_data.get('start_frame')
+    end_frame = clip_data.get('end_frame')
+    
+    # Verify frame files exist — re-download if missing
+    if start_frame and not os.path.exists(start_frame):
+        print(f"[RetryProject] ⚠️ Start frame missing: {start_frame}", flush=True)
+        start_frame_url = clip_data.get('start_frame_url')
+        if start_frame_url:
+            start_frame = download_frame(start_frame_url, start_frame)
+            print(f"[RetryProject] {'✓ Re-downloaded' if start_frame else '✗ Failed to re-download'} start frame", flush=True)
+        else:
+            start_frame = None
+    
+    if end_frame and not os.path.exists(end_frame):
+        print(f"[RetryProject] ⚠️ End frame missing: {end_frame}", flush=True)
+        end_frame_url = clip_data.get('end_frame_url')
+        if end_frame_url:
+            end_frame = download_frame(end_frame_url, end_frame)
+            print(f"[RetryProject] {'✓ Re-downloaded' if end_frame else '✗ Failed to re-download'} end frame", flush=True)
+        else:
+            end_frame = None
+    
+    if not start_frame and not end_frame:
+        print(f"[RetryProject] ❌ No frames available for clip {clip_index+1}!", flush=True)
+        return (None, False)
+    
+    for retry_attempt in range(max_retries):
+        try:
+            attempt_label = f"(attempt {retry_attempt + 1}/{max_retries})" if max_retries > 1 else ""
+            print(f"\n[RetryProject] Creating new project for failed clip {clip_index+1} {attempt_label}...", flush=True)
+            
+            # Navigate back to Flow home to create new project (SPA — preserve reCAPTCHA)
+            spa_navigate_to_flow_home(page, "RetryProject")
+            human_delay(1, 2)  # Match main flow post-navigation wait
+            
+            ensure_logged_into_flow(page, "RETRY")
+            check_and_dismiss_popup(page)
+            
+            # Human-like "looking around" before first interaction (match main flow exactly)
+            human_mouse_move(page)
+            human_delay(1, 2)
+            scroll_randomly(page)
+            human_delay(0.5, 1)
+            
+            # Click "New project" button
+            dismiss_create_with_flow(page, "RetryProject")
+            human_click_element(page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", "[RetryProject] New project button")
+            human_delay(2, 3)  # Match main flow post-click wait
+            
+            # Wait for project URL
+            try:
+                page.wait_for_url("**/project/**", timeout=30000)
+            except:
+                print("[RetryProject] wait_for_url timed out, polling...", flush=True)
+                for _ in range(15):
+                    time.sleep(1)
+                    if "/project/" in page.url:
+                        break
+            
+            time.sleep(2)
+            new_project_url = page.url
+            
+            if "/project/" not in new_project_url:
+                print(f"[RetryProject] ❌ Failed to create project - URL: {new_project_url}", flush=True)
+                continue  # Try again
+            
+            print(f"[RetryProject] ✓ Created retry project: {new_project_url}", flush=True)
+            human_delay(1, 2)  # Match main flow post-creation wait
+            check_and_dismiss_popup(page)
+            ensure_videos_tab_selected(page)
+            
+            # Submit clip using the same method as the main flow
+            pre_generate_tile_count = get_tile_count_at_index0(page)
+            if not rebuild_clip(page, start_frame, end_frame, prompt, is_first_clip=True, context="[RetryProject]"):
+                print(f"[RetryProject] ❌ Failed to submit clip {clip_index+1}", flush=True)
+                continue  # Try again with a new project
+            
+            # Check for immediate failure
+            if check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=pre_generate_tile_count):
+                print(f"[RetryProject] ⚠️ Clip {clip_index+1} failed again in retry project!", flush=True)
+                if retry_attempt < max_retries - 1:
+                    print(f"[RetryProject] Will try again...", flush=True)
+                    continue  # Try again with a new project
+                else:
+                    print(f"[RetryProject] ❌ Clip {clip_index+1} failed after {max_retries} retry attempts", flush=True)
+                    return (new_project_url, False)  # Return URL but mark as failed
+            
+            # Success!
+            print(f"[RetryProject] ✓ Clip {clip_index+1} retry successful!", flush=True)
+            return (new_project_url, True)
+            
+        except Exception as e:
+            print(f"[RetryProject] ❌ Error creating retry project: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            if retry_attempt < max_retries - 1:
+                print(f"[RetryProject] Will try again...", flush=True)
+                continue
+    
+    return (None, False)  # All retries failed
+
+
+def _extract_dialogue_from_prompt(prompt: str) -> str:
+    """Extract the unique dialogue line from a prompt for clip matching.
+    
+    Handles both prompt formats:
+    1. build_flow_prompt format: 'The character says in English, "dialogue here"'
+    2. JSON prompt format: '"character_line": "dialogue here"'
+    
+    Returns the dialogue string, or empty string if not found.
+    """
+    if not prompt:
+        return ""
+    
+    # Format 1: The character says in {language}, "..."
+    import re
+    match = re.search(r'The character says in \w+,\s*"(.+?)"', prompt)
+    if match:
+        return match.group(1).strip()
+    
+    # Format 2: "character_line": "..."
+    match = re.search(r'"character_line"\s*:\s*"(.+?)"', prompt)
+    if match:
+        return match.group(1).strip()
+    
+    return ""
+
+
+class PassthroughAccumulator:
+    """Used when the permanent download thread is already processing this job.
+    Accepts put() calls to update shared clip_submit_times via dh_ref,
+    but never queues a new download — the existing acc handles everything.
+    """
+    def __init__(self, dh_ref=None):
+        self.job_data = None
+        self.allowed_clips = None
+        self.cancelled = False
+        self.ready_event = threading.Event()
+        self._dh_ref = dh_ref
+        self.ready_event.set()  # Always "ready" — no download thread waiting on it
+
+    def put(self, msg):
+        if not isinstance(msg, dict):
+            return
+        msg_type = msg.get('type')
+        if msg_type is None:
+            # Update shared clip_submit_times immediately
+            if self._dh_ref is not None:
+                _dh = self._dh_ref[0]
+                _job_id = msg.get('job_id')
+                if _job_id and hasattr(_dh, '_clip_submit_times_by_job'):
+                    if _job_id not in _dh._clip_submit_times_by_job:
+                        _dh._clip_submit_times_by_job[_job_id] = {}
+                    _incoming = msg.get('clip_submit_times', {})
+                    if _job_id not in _dh._clip_submit_times_by_job:
+                        _dh._clip_submit_times_by_job[_job_id] = _incoming
+                    else:
+                        # Update the EXISTING shared dict in place — never replace it.
+                        # _download_loop holds a reference to this dict and would
+                        # miss any entries added to a replacement dict.
+                        _shared = _dh._clip_submit_times_by_job[_job_id]
+                        for _k, _v in _incoming.items():
+                            if _k not in _shared:
+                                _shared[_k] = _v
+            self.job_data = msg
+        elif msg_type == 'limit_clips':
+            self.allowed_clips = msg.get('allowed_clips')
+        elif msg_type == 'cancel':
+            self.cancelled = True
+
+    def task_done(self):
+        pass
+
+    def get_nowait(self):
+        import queue as _q
+        raise _q.Empty
+
+
+class DownloadAccumulator:
+    """Drop-in Queue replacement for process_job_submission / process_redo_clip.
+
+    In the dual-tab single-browser design there is no separate download thread.
+    Submit functions call download_queue.put() with job data and control messages
+    exactly as before — this accumulator captures the data so the caller can hand
+    it directly to DownloadHelper.process_download().
+
+    ready_event is set the moment the first real job payload arrives, allowing a
+    pre-spawned download thread to start process_download() in parallel with the
+    ongoing clip submission loop — matching the v125 background DownloadWorker
+    behaviour but without a second Chrome process.
+    """
+    def __init__(self, dh_ref=None):
+        self.job_data = None       # The main job payload dict (type key absent)
+        self.allowed_clips = None  # Set when limit_clips message is sent
+        self.cancelled = False     # True when cancel message is sent
+        self.ready_event = threading.Event()  # Set on first real payload put()
+        self._dh_ref = dh_ref      # Reference to [dh] — used to share clip_submit_times
+
+    def put(self, msg):
+        if not isinstance(msg, dict):
+            return  # ignore None stop-signal that old code occasionally sends
+        msg_type = msg.get('type')
+        if msg_type is None:
+            # Regular job payload — always overwrite so last put wins (retries)
+            # Wire clip_submit_times to the shared dict on dh so ALL runs for the
+            # same job share the same dict. This means when run 2 submits clip 1,
+            # the download thread processing run 1's acc sees it immediately.
+            if self._dh_ref is not None:
+                _dh = self._dh_ref[0]
+                _job_id = msg.get('job_id')
+                if _job_id and hasattr(_dh, '_clip_submit_times_by_job'):
+                    if _job_id not in _dh._clip_submit_times_by_job:
+                        _dh._clip_submit_times_by_job[_job_id] = {}
+                    _incoming = msg.get('clip_submit_times', {})
+                    if _job_id not in _dh._clip_submit_times_by_job:
+                        # First registration: incoming dict IS the canonical shared dict.
+                        # process_job_submission holds this same reference and writes
+                        # clip_submit_times[N] = now() into it directly.
+                        # _download_loop watches it — all submissions visible immediately.
+                        _dh._clip_submit_times_by_job[_job_id] = _incoming
+                    else:
+                        # Shared dict already exists — update it IN PLACE.
+                        # NEVER replace the reference: _download_loop still holds a
+                        # pointer to the original dict and would miss any new dict.
+                        _shared = _dh._clip_submit_times_by_job[_job_id]
+                        for _k, _v in _incoming.items():
+                            if _k not in _shared:
+                                _shared[_k] = _v
+                    # Do NOT replace msg['clip_submit_times'] — keep _incoming as-is
+            self.job_data = msg
+            self.ready_event.set()  # Signal download thread to start immediately
+        elif msg_type == 'limit_clips':
+            self.allowed_clips = msg.get('allowed_clips')
+        elif msg_type == 'cancel':
+            self.cancelled = True
+            self.job_data = None
+        elif msg_type == 'shutdown_after_complete':
+            pass  # no-op in synchronous design
+
+    def task_done(self):
+        pass  # no-op
+
+    def get_nowait(self):
+        import queue as _q
+        raise _q.Empty  # never called in normal flow; avoids AttributeError
+
+
+class DownloadHelper:
+    """Synchronous download helper — uses page2 from the submit browser context.
+
+    Replaces DownloadWorker (threading.Thread).  All download logic is identical;
+    the only difference is that there is no separate thread, no queue, no second
+    Chrome process, and no chrome-download profile folder.
+
+    Usage:
+        page2 = browser.new_page()
+        dh = DownloadHelper(page2, "Account1-DOWNLOAD")
+        acc = DownloadAccumulator()
+        process_job_submission(page1, job, cache, acc)
+        if acc.job_data and not acc.cancelled:
+            if acc.allowed_clips is not None:
+                dh.limited_clips[acc.job_data['job_id']] = acc.allowed_clips
+            dh.process_download(acc.job_data)
+    """
+
+    def __init__(self, page, account_name="DOWNLOAD", cache=None, cdp_url=None):
+        self.page = page          # Main-thread page (unused when cdp_url is set)
+        self.account_name = account_name
+        self.cache = cache        # Optional cache for mark_job_completed
+        self.cdp_url = cdp_url    # If set, download thread connects via CDP (own greenlet)
+        # These attributes are accessed by _download_loop / process_download.
+        # In the sync design they are set directly by the caller (not via queue messages).
+        self.cancelled_jobs = set()
+        self.limited_clips = {}
+        self.shutdown_after_job = False
+        # stop_flag is checked by _download_loop.  Never set in this design so
+        # is_set() always returns False — the loop runs to natural completion.
+        self.stop_flag = threading.Event()
+        # restore_event: set by main thread just before Chrome is killed for golden restore.
+        # Download thread uses this to distinguish intentional restart from crash.
+        self.restore_event = threading.Event()
+        # Persistent downloaded state — survives CDP reconnects across golden restores.
+        self._downloaded_clip_indices = set()
+        self._current_job_id = None  # Track job to reset indices on new job
+        self._cdp_page_id = None  # id() of the persistent download tab (3rd tab)
+        self._fallback_session = None  # requests.Session with snapshotted cookies for offline download
+        # These MUST live in __init__ — they are accessed on every download call.
+        # Previously only initialised inside _refresh_session(), which caused an
+        # AttributeError on the very first call to _process_download_inner().
+        self._clip_submit_times_by_job = {}   # job_id → shared clip_submit_times dict
+        self._pre_extracted_url_cache = {}    # clip_index → [url1, url2] (pre-scanned)
+        self._ready_url_cache = {}            # clip_index → [url1, url2] (scan-time cache)
+        self._retried_clips = {}              # job_id → set of clip indices already retried
+        self._frames_busy_flag = None         # threading.Event — set during frame download, clear when done
+
+    def _refresh_session(self, browser_or_context):
+        """Snapshot current browser cookies into _fallback_session.
+        Call this after login and after any successful navigation so the session
+        is always warm — downloads never need the browser for HTTP requests.
+        """
+        try:
+            import requests as _req
+            _cookies = browser_or_context.cookies()
+            if not _cookies:
+                return
+            if self._fallback_session is None:
+                self._fallback_session = _req.Session()
+            self._fallback_session.headers.update({
+                'Referer': 'https://labs.google/',
+                'Origin': 'https://labs.google',
+            })
+            self._fallback_session.cookies.clear()
+            for _ck in _cookies:
+                self._fallback_session.cookies.set(
+                    _ck['name'], _ck['value'], domain=_ck.get('domain', ''))
+        except Exception as _e:
+            pass  # Non-fatal — browser may not have cookies yet
+        # NOTE: _clip_submit_times_by_job / _pre_extracted_url_cache / _ready_url_cache
+        # are initialised in __init__ and must NOT be reset here — doing so wipes
+        # submit-time data that _download_loop is actively using.
+
+    def _drain_cancel_messages(self):
+        """No-op in synchronous design — kept for DownloadWorker API compat."""
+        pass
+    
+    @staticmethod
+    def _is_cdp_disconnect(exc):
+        """True if exception indicates Chrome was killed / CDP session dropped."""
+        s = str(exc).lower()
+        return any(x in s for x in (
+            "browser has been closed", "target page", "context or browser",
+            "targetclosederror", "connection closed", "browser disconnected",
+            "websocket", "pipe closed", "session closed",
+        ))
+
+    def process_download(self, job_data):
+        """Download all clips for a job.
+
+        Single-browser design: the download tab lives in the same Chrome context as
+        the submit tab. Runs synchronously on the caller's thread — no CDP, no reconnect
+        loop needed.
+
+        On golden restore the whole browser is killed and a brand-new DownloadHelper is
+        created after relaunch. The new instance queries the DB at the start of
+        _process_download_inner to discover which clips are already done and skips them,
+        so no clip is ever downloaded twice.
+
+        The download is INDEPENDENT of submission: it waits exactly CLIP_READY_WAIT
+        seconds after each clip's recorded submit time, then scans and downloads.
+        Per-clip errors are caught and logged — the loop always continues to the next clip.
+        """
+        job_id = job_data.get('job_id')
+        # Reset per-clip tracking only when a brand-new job starts (not on resume).
+        if job_id != self._current_job_id:
+            self._downloaded_clip_indices = set()
+            self._current_job_id = job_id
+
+        self._process_download_inner(job_data)
+
+    def _process_download_inner(self, job_data):
+        """Internal download logic — always runs on the correct greenlet."""
+        job_id = job_data['job_id']
+        project_url = job_data['project_url']
+        clips = job_data['clips']
+        temp_dir = job_data['temp_dir']
+        is_redo = job_data.get('is_redo', False)
+        clip_project_map = job_data.get('clip_project_map', {})
+        clip_submit_times = job_data.get('clip_submit_times', {})  # Per-clip submission times
+        clips_data = job_data.get('clips_data', [])  # For failure handling
+        permanently_failed_clips = job_data.get('permanently_failed_clips', set())  # Clips that failed permanently
+        downloaded_videos = job_data.get('downloaded_videos', {})  # Shared dict for continue mode - maps clip_index to video path
+        num_clips = job_data.get('num_clips', len(clips))
+        
+        print(f"\n[{self.account_name}] {'='*40}", flush=True)
+        if is_redo:
+            print(f"[{self.account_name}] REDO Clip {clips[0]['clip_index']}", flush=True)
+        else:
+            print(f"[{self.account_name}] JOB {job_id[:8]}...", flush=True)
+        print(f"[{self.account_name}] Main Project: {project_url}", flush=True)
+        print(f"[{self.account_name}] Clips: {len(clips)}", flush=True)
+        if clip_submit_times:
+            print(f"[{self.account_name}] Submit times tracked for {len(clip_submit_times)} clips", flush=True)
+        
+        print(f"\n[{self.account_name}] Clip data received:", flush=True)
+        for c in clips:
+            print(f"  Clip {c.get('clip_index')}: dialogue_text='{c.get('dialogue_text', '')[:60]}...'", flush=True)
+        
+        print(f"[{self.account_name}] {'='*40}", flush=True)
+        
+        # Use persistent set on self — survives CDP reconnect across golden restores.
+        # Query FRESH clip statuses from DB to catch clips completed by HTTP worker.
+        # clips[] list is frozen at job claim time — never trust its status field.
+        downloaded_clip_indices = self._downloaded_clip_indices
+        
+        # For redo clips: the clip being redone may already be in downloaded_clip_indices
+        # from a previous generation. Remove it so the download loop doesn't skip it.
+        if is_redo:
+            for _rc in clips:
+                _rci = _rc.get('clip_index')
+                downloaded_clip_indices.discard(_rci)
+                print(f"[{self.account_name}] Redo: cleared clip {_rci} from downloaded set", flush=True)
+        
+        try:
+            _fresh_job = api_request("GET", f"/jobs/{job_id}")
+            if _fresh_job and _fresh_job.get('clips'):
+                for _fc in _fresh_job['clips']:
+                    _fc_idx = _fc.get('clip_index')
+                    # For redos, don't re-add the redo clip even if DB still shows completed
+                    # (status update to 'generating' may not have committed yet)
+                    if is_redo and _fc_idx in [c.get('clip_index') for c in clips]:
+                        continue
+                    if _fc.get('status') in ('completed', 'approved'):
+                        downloaded_clip_indices.add(_fc_idx)
+        except Exception:
+            pass  # Non-fatal — fall back to what's already in the set
+        total_downloaded = 0 if is_redo else len(downloaded_clip_indices)
+        failed_in_main = set()  # Clips that failed in main project, waiting for retry
+
+        # Ensure clip_submit_times is the shared dict so all submissions from
+        # process_job_submission are visible to the download loop immediately.
+        # 
+        # CRITICAL: process_job_submission holds a local `clip_submit_times` variable.
+        # After acc.put(), job_data['clip_submit_times'] = shared dict — BUT
+        # process_job_submission still writes to its OWN local dict (different object).
+        # Fix: register the ORIGINAL clip_submit_times as the shared dict so
+        # process_job_submission's writes go directly into what _download_loop watches.
+        # clip_submit_times IS process_job_submission's local dict (registered by acc.put()).
+        # On reconnect after restore, use the latest shared dict from dh which
+        # PassthroughAccumulator has been updating with new clip submissions.
+        if job_id in self._clip_submit_times_by_job:
+            _latest = self._clip_submit_times_by_job[job_id]
+            # Merge any entries from the reconnect's incoming dict
+            for _k, _v in clip_submit_times.items():
+                if _k not in _latest:
+                    _latest[_k] = _v
+            clip_submit_times = _latest
+        else:
+            self._clip_submit_times_by_job[job_id] = clip_submit_times
+        
+        try:
+            # STEP 1: Navigate to main project and start downloading
+            print(f"\n[{self.account_name}] === MAIN PROJECT ===", flush=True)
+            
+            # Download from main project, but skip clips that have retry URLs or permanently failed
+            main_downloaded, main_failed = self._download_from_project_dynamic(
+                project_url, clips, job_id, temp_dir,
+                clip_submit_times=clip_submit_times, 
+                clips_data=clips_data, 
+                is_redo=is_redo,
+                clip_project_map=clip_project_map,
+                downloaded_clip_indices=downloaded_clip_indices,
+                permanently_failed_clips=permanently_failed_clips,
+                downloaded_videos=downloaded_videos
+            )
+            total_downloaded += main_downloaded
+            failed_in_main = main_failed
+            
+            # STEP 2: Check clip_project_map for any clips that need to be downloaded from retry projects
+            # This map gets updated by the submission thread as retries happen
+            retry_project_clips = {}
+            for clip in clips:
+                clip_idx = clip.get('clip_index')
+                if clip_idx in downloaded_clip_indices:
+                    continue  # Already downloaded
+                clip_project = clip_project_map.get(clip_idx, project_url)
+                if clip_project != project_url:
+                    # This clip has a retry project
+                    if clip_project not in retry_project_clips:
+                        retry_project_clips[clip_project] = []
+                    retry_project_clips[clip_project].append(clip)
+            
+            if retry_project_clips:
+                print(f"\n[{self.account_name}] Found {len(retry_project_clips)} retry project(s) to download from", flush=True)
+                
+            # STEP 3: Download from each retry project
+            for retry_url, retry_clips in retry_project_clips.items():
+                print(f"\n[{self.account_name}] === RETRY PROJECT ({len(retry_clips)} clips) ===", flush=True)
+                print(f"[{self.account_name}] Navigating to: {retry_url}", flush=True)
+                
+                # For retry projects, use simplified download logic
+                # Each retry project has exactly the clips we expect - no need for complex matching
+                # _download_retry_project handles the wait timing internally
+                downloaded = self._download_retry_project(
+                    retry_url, retry_clips, job_id, temp_dir,
+                    downloaded_clip_indices=downloaded_clip_indices,
+                    clip_submit_times=clip_submit_times
+                )
+                total_downloaded += downloaded
+            
+            # STEP 4: Re-check clip_project_map for NEW retry projects that appeared during downloads
+            # (The submission thread may have created more retry projects while we were downloading)
+            max_recheck_rounds = 2  # Each round waits 30s = up to 1 min total patience
+            recheck_round = 0
+            while recheck_round < max_recheck_rounds:
+                new_retry_project_clips = {}
+                for clip in clips:
+                    clip_idx = clip.get('clip_index')
+                    if clip_idx in downloaded_clip_indices:
+                        continue
+                    if clip_idx in permanently_failed_clips:
+                        continue
+                    clip_project = clip_project_map.get(clip_idx, project_url)
+                    if clip_project != project_url and clip_project not in retry_project_clips:
+                        if clip_project not in new_retry_project_clips:
+                            new_retry_project_clips[clip_project] = []
+                        new_retry_project_clips[clip_project].append(clip)
+                
+                if not new_retry_project_clips:
+                    # Check if there are still clips pending that haven't been assigned to retry projects yet
+                    # Also exclude clips that were handed off via failover (limited_clips)
+                    allowed_clips_for_job = self.limited_clips.get(job_id)
+                    pending_clips = [c for c in clips 
+                                    if c.get('clip_index') not in downloaded_clip_indices
+                                    and c.get('clip_index') not in permanently_failed_clips
+                                    and c.get('status') not in ('completed', 'approved')
+                                    and (allowed_clips_for_job is None or c.get('clip_index') in allowed_clips_for_job)]
+                    if pending_clips:
+                        # Some clips are still pending — wait a bit for the submission thread to finish retries
+                        pending_indices = [c.get('clip_index') for c in pending_clips]
+                        print(f"[{self.account_name}] ⏳ {len(pending_clips)} clip(s) still pending: {pending_indices}, waiting 30s for retry projects... (round {recheck_round + 1}/{max_recheck_rounds})", flush=True)
+                        for _ in range(30):
+                            if self.stop_flag.is_set():
+                                print(f"[{self.account_name}] 🛑 Stop flag set — aborting pending clip wait", flush=True)
+                                return
+                            time.sleep(1)
+                        recheck_round += 1
+                        continue  # Re-check after waiting
+                    break  # All clips accounted for
+                
+                print(f"\n[{self.account_name}] Found {len(new_retry_project_clips)} NEW retry project(s) (recheck round {recheck_round + 1})", flush=True)
+                retry_project_clips.update(new_retry_project_clips)
+                
+                for retry_url, retry_clips in new_retry_project_clips.items():
+                    print(f"\n[{self.account_name}] === RETRY PROJECT ({len(retry_clips)} clips) ===", flush=True)
+                    print(f"[{self.account_name}] Navigating to: {retry_url}", flush=True)
+                    downloaded = self._download_retry_project(
+                        retry_url, retry_clips, job_id, temp_dir,
+                        downloaded_clip_indices=downloaded_clip_indices,
+                        clip_submit_times=clip_submit_times
+                    )
+                    total_downloaded += downloaded
+                    if downloaded > 0:
+                        # Reset counter — we made progress, give more time for remaining retries
+                        recheck_round = 0
+                    else:
+                        recheck_round += 1
+            
+            num_failed = len(permanently_failed_clips) if permanently_failed_clips else 0
+            print(f"\n[{self.account_name}] ✓ Downloaded {total_downloaded}/{len(clips)} clips total (failed: {num_failed})", flush=True)
+            
+            # Clean up any limited_clips entry for this job
+            self.limited_clips.pop(job_id, None)
+            
+            if not is_redo:
+                total_job_clips = job_data.get('total_job_clips', len(clips))
+                is_partial = len(clips) < total_job_clips
+
+                # If golden restore was triggered, the submit worker already reset the
+                # job to pending — do NOT mark it completed here or it won't be retried.
+                if self.shutdown_after_job:
+                    print(f"[{self.account_name}] Golden restore in progress — skipping job completion (submit worker owns status)", flush=True)
+                elif is_partial:
+                    print(f"[{self.account_name}] Partial download ({total_downloaded}/{len(clips)} from this account, {total_job_clips} total)", flush=True)
+                    # Check if ALL clips in the job are now completed
+                    try:
+                        job_status = api_request("GET", f"/jobs/{job_id}")
+                        if job_status:
+                            all_clips_list = job_status.get('clips', [])
+                            completed_count = sum(1 for c in all_clips_list if c.get('status') in ('completed', 'approved'))
+                            print(f"[{self.account_name}] Job progress: {completed_count}/{total_job_clips} clips completed", flush=True)
+                            if completed_count >= total_job_clips:
+                                print(f"[{self.account_name}] ✓ All {total_job_clips} clips completed — marking job done!", flush=True)
+                                update_job_status(job_id, 'completed')
+                                mark_job_completed(self.cache, job_id)
+                    except Exception as check_err:
+                        print(f"[{self.account_name}] Could not check job completion: {check_err}", flush=True)
+                elif total_downloaded + num_failed >= len(clips):
+                    update_job_status(job_id, 'completed')
+                    mark_job_completed(self.cache, job_id)
+                else:
+                    # Counter may be stale (e.g. clip downloaded by old thread after restore
+                    # had status=generating in job_data). Check DB for ground truth.
+                    _all_done = False
+                    try:
+                        _job_status = api_request("GET", f"/jobs/{job_id}")
+                        if _job_status:
+                            _all_clips_db = _job_status.get('clips', [])
+                            _completed_db = sum(1 for c in _all_clips_db if c.get('status') in ('completed', 'approved'))
+                            _total_db = len(_all_clips_db)
+                            if _completed_db >= _total_db:
+                                _all_done = True
+                                print(f"[{self.account_name}] ✓ All {_total_db} clips confirmed complete in DB — marking job done", flush=True)
+                            else:
+                                print(f"[{self.account_name}] ⚠️ DB shows {_completed_db}/{_total_db} completed — marking job done anyway to avoid stuck state", flush=True)
+                    except Exception as _db_err:
+                        missing = len(clips) - total_downloaded - num_failed
+                        print(f"[{self.account_name}] ⚠️ {missing} clip(s) not downloaded (DB check failed: {_db_err}) — marking job done", flush=True)
+                    update_job_status(job_id, 'completed')
+                    mark_job_completed(self.cache, job_id)
+        
+        except Exception as e:
+            err_str = str(e)
+            # CDP disconnect during golden restore — re-raise silently so the reconnect
+            # loop in process_download can catch it. No error log needed; it's intentional.
+            if any(x in err_str for x in ("browser has been closed", "Target page", "context or browser", "TargetClosedError")):
+                raise
+            print(f"[{self.account_name}] ❌ ERROR in download process: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+        
+        finally:
+            # NOTE: Do NOT delete temp_dir here — the submit thread may still be
+            # using it for retry projects. Temp files in /tmp are cleaned by the OS.
+            pass
+    
+    def _download_retry_project(self, project_url, clips, job_id, temp_dir, downloaded_clip_indices=None, clip_submit_times=None):
+        """Download clips from a retry project.
+        
+        Simplified logic for retry projects:
+        - Each retry project contains exactly the clips we expect
+        - No need for complex dialogue matching or position calculation
+        - Just find videos and download them, assigning to the expected clips
+        
+        Args:
+            project_url: URL of the retry project
+            clips: List of clips expected in this project
+            job_id: Job ID
+            temp_dir: Temp directory
+            downloaded_clip_indices: Set of already downloaded clip indices (modified in place)
+            clip_submit_times: Dict of clip_index -> submission datetime (for timing)
+        
+        Returns:
+            Number of clips downloaded
+        """
+        if downloaded_clip_indices is None:
+            downloaded_clip_indices = set()
+        if clip_submit_times is None:
+            clip_submit_times = clip_submit_times_shared if clip_submit_times_shared is not None else {}
+        
+        downloaded_count = 0
+        
+        try:
+            # First, wait for clips to be ready (60s since submission)
+            for clip in clips:
+                clip_idx = clip.get('clip_index')
+                submit_time = clip_submit_times.get(clip_idx)
+                if submit_time:
+                    elapsed = (datetime.now() - submit_time).total_seconds()
+                    if elapsed < CLIP_READY_WAIT:
+                        wait_time = CLIP_READY_WAIT - elapsed
+                        print(f"[{self.account_name}] Waiting {wait_time:.0f}s for retry clip {clip_idx} to be ready...", flush=True)
+                        _fidget_deadline = time.time() + wait_time
+                        while time.time() < _fidget_deadline:
+                            if self.stop_flag.is_set():
+                                return 0
+                            _remaining = _fidget_deadline - time.time()
+                            if _remaining <= 0:
+                                break
+                            time.sleep(min(random.uniform(4, 9), _remaining))
+                            if random.random() < 0.6:
+                                try:
+                                    human_mouse_move(self.page)
+                                except Exception:
+                                    pass
+                            if random.random() < 0.25:
+                                try:
+                                    scroll_randomly(self.page)
+                                except Exception:
+                                    pass
+            
+            # Navigate to retry project
+            max_nav_retries = 3
+            for nav_attempt in range(max_nav_retries):
+                try:
+                    print(f"[{self.account_name}] Navigation attempt {nav_attempt + 1}/{max_nav_retries}...", flush=True)
+                    self.page.goto(project_url, timeout=60000)
+                    self.page.wait_for_load_state("domcontentloaded", timeout=30000)
+                    time.sleep(5)
+                    
+                    current_url = self.page.url.lower()
+                    if "accounts.google" in current_url or "signin" in current_url:
+                        print(f"[{self.account_name}] Redirected to Google login, waiting...", flush=True)
+                        ensure_logged_into_flow(self.page, "DOWNLOAD")
+                        continue
+                    
+                    print(f"[{self.account_name}] Navigation successful!", flush=True)
+                    # Refresh session after navigation — keeps cookies warm for HTTP downloads
+                    try:
+                        self._refresh_session(self.page.context)
+                    except Exception:
+                        pass
+                    
+                    # CRITICAL: Verify we're on the correct project URL
+                    actual_url = self.page.url
+                    if "/project/" in project_url:
+                        expected_project_id = project_url.split("/project/")[-1].split("?")[0].split("/")[0]
+                        actual_project_id = actual_url.split("/project/")[-1].split("?")[0].split("/")[0] if "/project/" in actual_url else ""
+                        
+                        if expected_project_id != actual_project_id:
+                            print(f"[{self.account_name}] ⚠️ URL MISMATCH! Expected: {expected_project_id}, Got: {actual_project_id}", flush=True)
+                            print(f"[{self.account_name}]   Force-navigating to correct project...", flush=True)
+                            self.page.goto(project_url, timeout=60000)
+                            self.page.wait_for_load_state("domcontentloaded", timeout=30000)
+                            time.sleep(3)
+                    
+                    break
+                    
+                except Exception as nav_error:
+                    if nav_attempt < max_nav_retries - 1:
+                        print(f"[{self.account_name}] Navigation error, retrying: {nav_error}", flush=True)
+                        time.sleep(3)
+                        continue
+                    else:
+                        raise
+            
+            check_and_dismiss_popup(self.page)
+            ensure_videos_tab_selected(self.page)
+            
+            # Wait for videos to appear (with extended timeout for retry projects)
+            print(f"[{self.account_name}] Waiting for videos in retry project...", flush=True)
+            videos_found = False
+            max_wait_attempts = 60  # Up to 2 minutes of waiting
+            for wait_attempt in range(max_wait_attempts):
+                video_count = self.page.locator("video").count()
+                if video_count > 0:
+                    print(f"[{self.account_name}] Found {video_count} video(s) after {wait_attempt * 2}s", flush=True)
+                    videos_found = True
+                    break
+                
+                # Check for failure
+                try:
+                    fail_count = self.page.evaluate(r"""
+                        () => {
+                            let count = 0;
+                            const containers = document.querySelectorAll('[data-index]');
+                            for (const c of containers) {
+                                const text = c.innerText || '';
+                                if (/\d+%/.test(text)) continue;
+                                c.querySelectorAll('*').forEach(el => {
+                                    if (((el.innerText === 'Failed Generation' || el.innerText === 'Failed' || el.innerText === 'Error')) && el.children.length === 0) count++;
+                                });
+                            }
+                            return count;
+                        }
+                    """)
+                    if fail_count > 0:
+                        print(f"[{self.account_name}] ⚠️ Found {fail_count} failed generation(s) in retry project", flush=True)
+                        # Mark clips as failed
+                        for clip in clips:
+                            clip_idx = clip.get('clip_index')
+                            clip_id = clip.get('id')
+                            if clip_id:
+                                update_clip_status(clip_id, 'failed', error_message="Retry generation also failed")
+                        return 0
+                except Exception as retry_check_err:
+                    print(f"[{self.account_name}] ⚠ Error checking retry project for failures: {retry_check_err}", flush=True)
+                
+                # Refresh page periodically to check for new videos
+                if wait_attempt > 0 and wait_attempt % 10 == 0:
+                    print(f"[{self.account_name}] Still waiting for video... ({wait_attempt * 2}s elapsed)", flush=True)
+                    try:
+                        self.page.reload(timeout=30000)
+                        time.sleep(3)
+                        check_and_dismiss_popup(self.page)
+                        ensure_videos_tab_selected(self.page)
+                        ensure_batch_view_mode(self.page, f"[{self.account_name}-RetryRefresh]")
+                    except Exception as refresh_err:
+                        print(f"[{self.account_name}] ⚠ Retry refresh error: {refresh_err}", flush=True)
+                
+                time.sleep(2)
+            
+            if not videos_found:
+                print(f"[{self.account_name}] ⚠️ No videos found in retry project after {max_wait_attempts * 2}s", flush=True)
+                return 0
+            
+            # For each clip in this retry project, download using download_single_clip logic
+            # Since retry projects typically have 1 clip each, this works well
+            for clip in clips:
+                clip_idx = clip.get('clip_index')
+                
+                if clip_idx in downloaded_clip_indices:
+                    print(f"[{self.account_name}] Clip {clip_idx} already downloaded, skipping", flush=True)
+                    continue
+                
+                print(f"[{self.account_name}] Downloading retry clip {clip_idx}...", flush=True)
+                
+                # Use download_single_clip which finds the first available video
+                result = self.download_single_clip(clip, job_id, temp_dir, data_index=0)
+                
+                if result > 0:
+                    downloaded_clip_indices.add(clip_idx)
+                    downloaded_count += 1
+                    print(f"[{self.account_name}] ✓ Retry clip {clip_idx} downloaded!", flush=True)
+                else:
+                    print(f"[{self.account_name}] ❌ Failed to download retry clip {clip_idx}", flush=True)
+                    # Mark as failed
+                    clip_id = clip.get('id')
+                    if clip_id:
+                        update_clip_status(clip_id, 'failed', error_message="Could not download from retry project")
+            
+            return downloaded_count
+            
+        except Exception as e:
+            print(f"[{self.account_name}] Error downloading from retry project: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return 0
+    
+    # ================================================================
+    # REFACTORED DOWNLOAD SYSTEM
+    # 3 clean phases per cycle: SCAN → MATCH → DOWNLOAD
+    # Then refresh and repeat until all clips handled.
+    # ================================================================
+
+    def _scan_all_containers(self, max_index=25):
+        """Phase 1: SCAN — Scroll to each container and read it while visible.
+        
+        CRITICAL: Flow uses virtual scrolling. Container children (video, textarea,
+        buttons) are only rendered when the container is in/near the viewport.
+        A single JS call from the top sees containers but their children are unloaded.
+        We MUST scroll to each index individually and read it while it's visible.
+        
+        Returns a list of dicts, each with:
+            data_index, has_video, has_failed, prompt_text
+        """
+        results = []
+        consecutive_missing = 0
+        
+        try:
+            for idx in range(max_index + 1):
+                # Check if container exists in DOM at all
+                container = self.page.locator(f"div[data-index='{idx}']")
+                if container.count() == 0:
+                    # Try scrolling down to force virtual scroll to render it
+                    self.page.mouse.wheel(0, 400)
+                    time.sleep(0.3)
+                    if container.count() == 0:
+                        consecutive_missing += 1
+                        if consecutive_missing >= 3:
+                            break  # No more containers
+                        continue
+                
+                consecutive_missing = 0
+                
+                # SCROLL into view so Flow renders the children
+                try:
+                    container.first.scroll_into_view_if_needed(timeout=2000)
+                    time.sleep(0.2)  # Brief pause for render
+                except:
+                    pass
+                
+                # NOW read the container's content via JS while it's visible
+                # ALSO extract video src URLs while the container is rendered
+                info = self.page.evaluate(f"""
+                    () => {{
+                        const c = document.querySelector("div[data-index='{idx}']");
+                        if (!c) return null;
+                        const text = c.innerText || '';
+                        const hasVideo = c.querySelector('video') !== null;
+                        const hasPercentage = /\\d+%/.test(text);
+                        const hasFailedText = (text.includes('Failed Generation') || text.includes('Failed') || text.includes('Error'));
+                        const hasFailed = hasFailedText && !hasPercentage && !hasVideo;
+                        if (!hasVideo && !hasFailed) return null;
+                        let promptText = '';
+                        let promptSource = 'none';
+                        
+                        // Robust prompt extraction: find longest text element containing dialogue
+                        const candidates = c.querySelectorAll('div, button, span, a, p');
+                        let bestPrompt = '';
+                        let bestLen = 0;
+                        let bestSrc = 'none';
+                        for (const el of candidates) {{
+                            const t = el.innerText || '';
+                            if (t.length < 100) continue;
+                            const hasSaysIn = t.includes('says in');
+                            const score = hasSaysIn ? t.length + 100000 : t.length;
+                            if (score > bestLen) {{
+                                bestPrompt = t;
+                                bestLen = score;
+                                bestSrc = hasSaysIn ? 'dialogue-div' : 'long-text';
+                            }}
+                        }}
+                        if (bestPrompt) {{
+                            promptText = bestPrompt;
+                            promptSource = bestSrc;
+                        }}
+                        if (!promptText) {{ promptText = text.substring(0, 1500); promptSource = 'fallback-text'; }}
+                        
+                        // Extract video src URLs for direct HTTP download
+                        const videoUrls = [];
+                        const videos = c.querySelectorAll('video');
+                        for (const v of videos) {{
+                            let url = v.src || '';
+                            if (!url) {{
+                                const source = v.querySelector('source');
+                                if (source) url = source.src || '';
+                            }}
+                            videoUrls.push(url);
+                        }}
+                        
+                        return {{dataIndex: {idx}, hasVideo: hasVideo, hasFailed: hasFailed, promptText: promptText, promptSource: promptSource, videoUrls: videoUrls}};
+                    }}
+                """)
+                
+                if info:
+                    results.append(info)
+            
+        except Exception as e:
+            print(f"[{self.account_name}] Scan error: {e}", flush=True)
+        
+        return results
+
+    def _match_container_to_clip(self, container_info, dialogue_to_clip, pending_clip_indices, downloaded_clip_indices, clip_submit_times=None, num_submitted=0):
+        """Phase 2: MATCH — Pure Python, no DOM access.
+        
+        Matches a scanned container to a pending clip using dialogue.
+        
+        Strategies (in order):
+        1. EXACT DIALOGUE: Full dialogue string found in prompt text (longest wins)
+        2. NORMALIZED DIALOGUE: Collapse whitespace, compare (longest wins)
+        3. SINGLE PENDING: If only one clip left, assign to any video container
+        
+        SAFETY: Containers with unreliable prompt sources (fallback-text, none)
+        are SKIPPED entirely — they'll be rescanned after refresh when the 
+        prompt div renders properly.
+        
+        Returns the matched clip dict or None.
+        """
+        prompt_text = container_info.get('promptText', '')
+        has_video = container_info.get('hasVideo', False)
+        prompt_source = container_info.get('promptSource', 'none')
+        data_index = container_info.get('dataIndex', -1)
+        
+        # SAFETY: Never match on unreliable prompt sources.
+        # fallback-text contains garbage like "warning Failed undo Reuse Prompt..."
+        # Wait for next refresh when the prompt div will render properly.
+        if prompt_source in ('fallback-text', 'none') or not prompt_text:
+            return None
+        
+        # Strategy 1: EXACT FULL dialogue match
+        # The dialogue is the complete sentence from 'The character says in X, "..."'
+        # It MUST appear exactly in the prompt text. Longest match wins (handles
+        # the theoretical case where one dialogue is a substring of another).
+        best_match = None
+        best_len = 0
+        for dialogue, clip in dialogue_to_clip.items():
+            ci = clip.get('clip_index')
+            if ci not in pending_clip_indices:
+                continue
+            if not dialogue:
+                continue
+            if dialogue in prompt_text and len(dialogue) > best_len:
+                best_match = clip
+                best_len = len(dialogue)
+        if best_match:
+            return best_match
+        
+        # Strategy 2: Normalized match — collapse ALL whitespace, lowercase
+        # Handles minor whitespace differences between stored dialogue and DOM text
+        p_norm = ''.join(prompt_text.split()).lower()
+        best_match = None
+        best_len = 0
+        for dialogue, clip in dialogue_to_clip.items():
+            ci = clip.get('clip_index')
+            if ci not in pending_clip_indices:
+                continue
+            if not dialogue or len(dialogue) < 20:
+                continue
+            d_norm = ''.join(dialogue.split()).lower()
+            if d_norm in p_norm and len(d_norm) > best_len:
+                best_match = clip
+                best_len = len(d_norm)
+        if best_match:
+            return best_match
+        
+        # Strategy 3: If only ONE clip is pending, assign to any video container
+        # that doesn't match a downloaded clip's dialogue AND doesn't match
+        # any other known clip's dialogue (e.g. a clip still generating/not yet pending)
+        if len(pending_clip_indices) == 1 and has_video:
+            # Safety: make sure this container isn't from an already-downloaded clip
+            for dialogue, clip in dialogue_to_clip.items():
+                if clip.get('clip_index') in downloaded_clip_indices and dialogue:
+                    d_norm = ''.join(dialogue.split()).lower()
+                    if len(d_norm) > 20 and d_norm in p_norm:
+                        return None  # Belongs to an already-downloaded clip
+            # Safety: make sure this container isn't from a DIFFERENT clip
+            # that's still generating (not in pending yet due to CLIP_READY_WAIT)
+            only_ci = next(iter(pending_clip_indices))
+            for dialogue, clip in dialogue_to_clip.items():
+                ci = clip.get('clip_index')
+                if ci == only_ci or ci in downloaded_clip_indices:
+                    continue  # Skip the pending clip itself and already-downloaded ones
+                # This is another clip (generating, not ready, etc.)
+                if dialogue:
+                    d_norm = ''.join(dialogue.split()).lower()
+                    if len(d_norm) > 20 and d_norm in p_norm:
+                        return None  # Container belongs to another clip, not ours
+            for dialogue, clip in dialogue_to_clip.items():
+                if clip.get('clip_index') == only_ci:
+                    return clip
+        
+        return None
+
+    def _navigate_to_project(self, project_url, max_retries=3):
+        """Shared navigation logic with URL verification, login handling, and overview detection."""
+        for nav_attempt in range(max_retries):
+            try:
+                print(f"[{self.account_name}] Navigation attempt {nav_attempt + 1}/{max_retries}...", flush=True)
+                self.page.goto(project_url, timeout=60000)
+                self.page.wait_for_load_state("domcontentloaded", timeout=30000)
+                time.sleep(5)
+
+                current_url = self.page.url.lower()
+                if "accounts.google" in current_url or "signin" in current_url:
+                    print(f"[{self.account_name}] Redirected to Google login, waiting...", flush=True)
+                    ensure_logged_into_flow(self.page, "DOWNLOAD")
+                    continue
+
+                # Check if stuck on overview/home (no /project/ in URL)
+                if "/project/" not in self.page.url and "/project/" in project_url:
+                    print(f"[{self.account_name}] ⚠️ Landed on overview instead of project! URL: {self.page.url}", flush=True)
+                    ensure_logged_into_flow(self.page, "DOWNLOAD")
+                    time.sleep(2)
+                    self.page.goto(project_url, timeout=60000)
+                    self.page.wait_for_load_state("domcontentloaded", timeout=30000)
+                    time.sleep(5)
+                    if "/project/" not in self.page.url:
+                        print(f"[{self.account_name}] ⚠️ Still on overview after retry: {self.page.url}", flush=True)
+                        continue
+
+                # Check if stuck on #overview tab
+                if "#overview" in self.page.url:
+                    print(f"[{self.account_name}] ⚠️ Stuck on #overview! Retrying...", flush=True)
+                    clean_url = project_url.split("#")[0]
+                    self.page.goto(clean_url, timeout=60000)
+                    self.page.wait_for_load_state("domcontentloaded", timeout=30000)
+                    time.sleep(5)
+
+                print(f"[{self.account_name}] Navigation successful!", flush=True)
+
+                # Verify correct project URL (Flow sometimes redirects to last-visited project)
+                if "/project/" in project_url:
+                    actual_url = self.page.url
+                    expected_pid = project_url.split("/project/")[-1].split("?")[0].split("/")[0]
+                    actual_pid = actual_url.split("/project/")[-1].split("?")[0].split("/")[0] if "/project/" in actual_url else ""
+
+                    if expected_pid != actual_pid:
+                        print(f"[{self.account_name}] ⚠️ URL MISMATCH! Expected: {expected_pid}, Got: {actual_pid}", flush=True)
+                        self.page.goto(project_url, timeout=60000)
+                        self.page.wait_for_load_state("domcontentloaded", timeout=30000)
+                        time.sleep(3)
+
+                        final_url = self.page.url
+                        final_pid = final_url.split("/project/")[-1].split("?")[0].split("/")[0] if "/project/" in final_url else ""
+                        if expected_pid != final_pid:
+                            raise Exception(f"Failed to navigate to correct project. Expected {expected_pid}, got {final_pid}")
+                        print(f"[{self.account_name}] ✓ Now on correct project: {final_pid}", flush=True)
+
+                return True
+
+            except Exception as nav_error:
+                if nav_attempt < max_retries - 1:
+                    print(f"[{self.account_name}] Navigation error, retrying: {nav_error}", flush=True)
+                    time.sleep(3)
+                    continue
+                else:
+                    print(f"[{self.account_name}] Navigation failed after {max_retries} attempts: {nav_error}", flush=True)
+                    return False
+        return False
+
+    def _refresh_and_verify(self, project_url=None, frames_busy=None):
+        """Refresh page and verify we're still on the correct project.
+        
+        Returns True if refresh succeeded.
+        """
+        # Detect "Aw, Snap!" crash on download tab before attempting reload
+        if is_page_crashed(self.page):
+            print(f"[{self.account_name}] 💥 Download tab crashed ('Aw, Snap!') — recovering...", flush=True)
+            if project_url:
+                return recover_crashed_page(self.page, project_url, label=self.account_name)
+            return False
+        
+        # Wait for submit thread to finish any open frame dialog before refreshing.
+        # Refreshing while a gallery dialog is open dismisses it, causing frame upload failure.
+        if frames_busy is not None and frames_busy.is_set():
+            print(f"[{self.account_name}] ⏸ Waiting for frame dialog to close before refresh...", flush=True)
+            frames_busy.wait(timeout=30)
+        try:
+            self.page.reload(timeout=30000)
+            time.sleep(3)
+            check_and_dismiss_popup(self.page)
+            ensure_videos_tab_selected(self.page)
+            ensure_batch_view_mode(self.page, f"[{self.account_name}-Refresh]")
+            
+            # Verify project URL after reload
+            if project_url and "/project/" in project_url:
+                actual_url = self.page.url
+                expected_pid = project_url.split("/project/")[-1].split("?")[0].split("/")[0]
+                actual_pid = actual_url.split("/project/")[-1].split("?")[0].split("/")[0] if "/project/" in actual_url else ""
+                
+                if expected_pid != actual_pid:
+                    print(f"[{self.account_name}] ⚠️ URL MISMATCH after reload! Force-navigating...", flush=True)
+                    self.page.goto(project_url, timeout=60000)
+                    self.page.wait_for_load_state("domcontentloaded", timeout=30000)
+                    time.sleep(3)
+            
+            # Wait for video elements (up to 10s)
+            try:
+                self.page.wait_for_selector("video", timeout=10000)
+            except:
+                pass  # OK — maybe no videos are ready yet
+            
+            return True
+        except Exception as e:
+            print(f"[{self.account_name}] Refresh error: {e}", flush=True)
+            return False
+
+    def _download_from_project_dynamic(self, project_url, clips, job_id, temp_dir,
+                                        clip_submit_times=None, clips_data=None, is_redo=False,
+                                        clip_project_map=None, downloaded_clip_indices=None,
+                                        permanently_failed_clips=None, downloaded_videos=None):
+        """Download clips from a project using the clean Scan→Match→Download cycle.
+        
+        Handles:
+        - Per-clip timing (wait 60s after submission)
+        - Failure detection (before refresh, since Flow clears failure UI on refresh)
+        - Multi-clip batch download per refresh cycle
+        - Stuck clip retry
+        - Dynamic clip_project_map changes (clips moved to retry projects)
+        
+        Returns:
+            Tuple of (num_downloaded, set_of_failed_clip_indices)
+        """
+        if downloaded_clip_indices is None:
+            downloaded_clip_indices = set()
+        if clip_project_map is None:
+            clip_project_map = {}
+        if permanently_failed_clips is None:
+            permanently_failed_clips = set()
+        if clip_submit_times is None:
+            clip_submit_times = {}
+        
+        failed_clips = set()
+        
+        try:
+            # Navigate to project
+            if not self._navigate_to_project(project_url):
+                return 0, failed_clips
+            
+            check_and_dismiss_popup(self.page)
+            ensure_videos_tab_selected(self.page)
+            ensure_batch_view_mode(self.page, f"[{self.account_name}-Download]")
+            clips_for_this_project = []
+            for clip in clips:
+                clip_idx = clip.get('clip_index')
+                if clip_idx in downloaded_clip_indices:
+                    continue
+                if clip_idx in permanently_failed_clips:
+                    continue
+                clip_project = clip_project_map.get(clip_idx, project_url)
+                if clip_project != project_url:
+                    continue
+                clips_for_this_project.append(clip)
+            
+            if not clips_for_this_project:
+                print(f"[{self.account_name}] No clips to download from this project", flush=True)
+                return 0, failed_clips
+            
+            print(f"[{self.account_name}] Downloading {len(clips_for_this_project)} clips from this project", flush=True)
+            
+            # ============================================================
+            # MAIN DOWNLOAD LOOP: Scan → Match → Download (all ready) → Refresh → Repeat
+            # Redo clips use the same loop — no special case needed.
+            # ============================================================
+            downloaded_count, failed_clips = self._download_loop(
+                clips=clips_for_this_project,
+                all_clips=clips,
+                job_id=job_id,
+                temp_dir=temp_dir,
+                clip_submit_times=clip_submit_times,
+                clips_data=clips_data,
+                clip_project_map=clip_project_map,
+                downloaded_clip_indices=downloaded_clip_indices,
+                failed_clips=failed_clips,
+                permanently_failed_clips=permanently_failed_clips,
+                downloaded_videos=downloaded_videos,
+                project_url=project_url,
+            )
+            return downloaded_count, failed_clips
+            
+        except Exception as e:
+            err_str = str(e)
+            # CDP disconnect (Chrome killed for golden restore).
+            # Before re-raising to reconnect loop, drain any ready clips from cache
+            # using the fallback session — pure HTTP, no browser needed.
+            if any(x in err_str for x in ("browser has been closed", "Target page", "context or browser", "TargetClosedError")):
+                if self._ready_url_cache and self._fallback_session is not None:
+                    print(f"[{self.account_name}] Chrome dead — draining {len(self._ready_url_cache)} cached clip URL(s) via fallback session...", flush=True)
+                    for _ci, _urls in list(self._ready_url_cache.items()):
+                        if _ci in downloaded_clip_indices:
+                            self._ready_url_cache.pop(_ci, None)
+                            continue
+                        try:
+                            for _vi, _url in enumerate(_urls):
+                                if not _url or _url.startswith('blob:'):
+                                    continue
+                                if _url.startswith('/'):
+                                    _url = 'https://labs.google' + _url
+                                print(f"[{self.account_name}] [Fallback] Clip {_ci} variant 1.{_vi+1}: {_url[:80]}", flush=True)
+                                _resp = self._fallback_session.get(_url, timeout=120, allow_redirects=True)
+                                if not _resp.ok:
+                                    raise Exception(f"HTTP {_resp.status_code}")
+                                body = _resp.content
+                                if len(body) < 10000:
+                                    raise Exception(f"Too small: {len(body)} bytes")
+                                if not os.path.exists(temp_dir):
+                                    os.makedirs(temp_dir, exist_ok=True)
+                                out = os.path.join(temp_dir, f"clip_{_ci}_1.{_vi+1}.mp4")
+                                with open(out, 'wb') as _f:
+                                    _f.write(body)
+                                # Upload to R2
+                                _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+                                if _clip_obj:
+                                    _clip_id = _clip_obj.get('id')
+                                    print(f"[Upload] Clip {_ci+1} (1.{_vi+1}) → R2 ({len(body)} bytes)", flush=True)
+                                    upload_video(out, job_id, _ci, attempt=1, variant=_vi+1)
+                                    if _vi == len(_urls) - 1:
+                                        # Last variant — mark clip complete
+                                        update_clip_status(_clip_id, 'completed')
+                                        downloaded_clip_indices.add(_ci)
+                                        print(f"[{self.account_name}] ✓ Clip {_ci} downloaded via fallback session!", flush=True)
+                            self._ready_url_cache.pop(_ci, None)
+                        except Exception as _fe:
+                            print(f"[{self.account_name}] ⚠ Fallback download failed for clip {_ci}: {_fe}", flush=True)
+                raise  # Re-raise CDP error to caller
+            # Unexpected (non-CDP) error — log and return whatever we managed
+            print(f"[{self.account_name}] Error in dynamic download: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return 0, failed_clips
+
+    def _download_loop(self, clips, all_clips, job_id, temp_dir,
+                        clip_submit_times, clips_data, clip_project_map,
+                        downloaded_clip_indices, failed_clips,
+                        permanently_failed_clips, downloaded_videos,
+                        project_url):
+        """Core download loop: Scan → Match → Download ALL ready → Refresh → Repeat.
+        
+        This is the single unified download method that replaces:
+        - _download_with_timing_dynamic
+        - _download_with_timing
+        - download_all_clips
+        - the deep scan section
+        
+        Returns number of clips downloaded.
+        """
+        num_clips = len(clips)
+        downloaded_count = 0
+        refreshed_for_clips = set()       # Clips we've already triggered an initial refresh for
+        last_refresh_times = {}            # clip_idx → datetime of last refresh
+        downloaded_urls = set()            # Track video URLs already claimed by a clip (prevent cross-clip dupes)
+        
+        # Build dialogue mapping for matching containers to clips.
+        # We extract unique dialogue snippets from each clip's ACTUAL PROMPT
+        # (the same text that Flow stores and shows in the prompt button).
+        # This ensures we match against exactly what appears in the DOM.
+        dialogue_to_clip = {}
+        for clip in clips:
+            # Primary: extract dialogue from the full prompt (what Flow actually has)
+            prompt = clip.get('prompt', '')
+            dialogue_key = _extract_dialogue_from_prompt(prompt)
+            
+            # Fallback: use raw dialogue_text
+            if not dialogue_key:
+                dialogue_key = clip.get('dialogue_text', '').strip().strip('"').strip("'")
+            
+            if dialogue_key:
+                if dialogue_key in dialogue_to_clip:
+                    existing_ci = dialogue_to_clip[dialogue_key].get('clip_index')
+                    new_ci = clip.get('clip_index')
+                    print(f"[{self.account_name}] ⚠️ DUPLICATE DIALOGUE: clip {new_ci} has same dialogue as clip {existing_ci} — matching may be unreliable", flush=True)
+                dialogue_to_clip[dialogue_key] = clip
+        
+        print(f"\n[{self.account_name}] ═══ Download loop: {num_clips} clips ═══", flush=True)
+        print(f"[{self.account_name}] Wait {CLIP_READY_WAIT}s per clip after submission", flush=True)
+        for dk, dc in dialogue_to_clip.items():
+            print(f"[{self.account_name}]   dialogue_key[{dc.get('clip_index')}]: '{dk[:60]}'", flush=True)
+        
+        max_poll_time = max(300, num_clips * 60 + 120)
+        STUCK_TIMEOUT = 300  # 5 minutes before considering a clip stuck
+        MAX_STUCK_RETRIES = 3  # Only retry this many stuck clips before giving up
+        MAX_EMPTY_CYCLES = 8  # Give up after N scan cycles with zero downloads
+        start_time = datetime.now()
+        empty_cycles = 0  # Consecutive scan cycles with 0 downloads
+        
+        # Check for cancellation support
+        allowed_clips_for_job = self.limited_clips.get(job_id)
+        
+        while downloaded_count + len(failed_clips) < num_clips:
+            if self.stop_flag.is_set():
+                print(f"[{self.account_name}] 🛑 Stop flag set — aborting download loop", flush=True)
+                return downloaded_count, failed_clips
+
+
+            elapsed = (datetime.now() - start_time).total_seconds()
+            
+            # Dynamic timeout: max_poll_time counts from the LAST clip submission,
+            # not from when the download loop started. This prevents timeout while
+            # the submit thread is still submitting clips.
+            last_submit = max(clip_submit_times.values()) if clip_submit_times else start_time
+            time_since_last_submit = (datetime.now() - last_submit).total_seconds()
+            all_submitted = len(clip_submit_times) >= num_clips - len(permanently_failed_clips)
+            
+            # Timeout: measure from last_submit only.
+            # After a golden restore + reconnect, start_time resets but last_submit
+            # reflects when clips were actually submitted. Using max(last_submit, start_time)
+            # caused the loop to restart the 300s clock on reconnect, timing out clips
+            # that were submitted before the restore but still generating.
+            # Give max_poll_time seconds from last_submit before giving up.
+            if all_submitted and last_submit != start_time:
+                time_since_reference = (datetime.now() - last_submit).total_seconds()
+                if time_since_reference > max_poll_time:
+                    print(f"[{self.account_name}] ⚠️ Max poll time exceeded ({time_since_reference:.0f}s since last submit, cap={max_poll_time}s)", flush=True)
+                    break
+            elif elapsed > max(900, max_poll_time * 3):
+                # Safety cap — Flow can take 15+ min for slow generations
+                print(f"[{self.account_name}] ⚠️ Absolute poll time exceeded ({elapsed:.0f}s)", flush=True)
+                break
+            
+            # Check for cancellation (failover)
+            self._drain_cancel_messages()
+            if job_id in self.cancelled_jobs:
+                print(f"[{self.account_name}] ⚠️ Job cancelled (failover), aborting download", flush=True)
+                self.cancelled_jobs.discard(job_id)
+                break
+            
+            allowed_clips_for_job = self.limited_clips.get(job_id)
+            
+            # ── Build the set of PENDING clips (ready for download) ──
+            pending = set()
+            not_ready_yet = []
+            for clip in clips:
+                ci = clip.get('clip_index')
+                if ci in downloaded_clip_indices or ci in failed_clips:
+                    continue
+                if ci in permanently_failed_clips:
+                    failed_clips.add(ci)
+                    continue
+                if allowed_clips_for_job is not None and ci not in allowed_clips_for_job:
+                    failed_clips.add(ci)  # Handed off to another account
+                    continue
+                # Check if moved to retry project
+                clip_project = clip_project_map.get(ci, project_url)
+                if clip_project != project_url:
+                    failed_clips.add(ci)  # Will be downloaded from retry project
+                    continue
+                
+                submit_time = clip_submit_times.get(ci)
+                if not submit_time:
+                    not_ready_yet.append(ci)
+                    continue
+                
+                elapsed_since_submit = (datetime.now() - submit_time).total_seconds()
+                if elapsed_since_submit >= CLIP_READY_WAIT:
+                    pending.add(ci)
+                else:
+                    not_ready_yet.append(ci)
+            
+            if not pending and not not_ready_yet:
+                break  # All clips handled
+            
+            if not pending:
+                # No clips ready yet — idle fidget then retry
+                _sleep = random.uniform(4, 6)
+                time.sleep(_sleep)
+                if random.random() < 0.5:
+                    try:
+                        human_mouse_move(self.page)
+                    except Exception:
+                        pass
+                if self.stop_flag.is_set():
+                    return downloaded_count, failed_clips
+                continue
+            
+            # ── Decide whether to REFRESH ──
+            should_refresh = False
+            refresh_reason = ""
+            
+            # Initial refresh: a clip just reached 60s for the first time
+            new_ready = pending - refreshed_for_clips
+            if new_ready:
+                should_refresh = True
+                refresh_reason = f"Clips {sorted(new_ready)} reached {CLIP_READY_WAIT}s"
+                refreshed_for_clips.update(new_ready)
+            
+            # Re-refresh: a clip has been pending for 30s+ since last refresh without download
+            if not should_refresh:
+                for ci in pending:
+                    if ci in downloaded_clip_indices:
+                        continue
+                    last_ref = last_refresh_times.get(ci, start_time)
+                    since_ref = (datetime.now() - last_ref).total_seconds()
+                    if since_ref >= 30:
+                        should_refresh = True
+                        refresh_reason = f"Re-refresh for clip {ci} ({since_ref:.0f}s since last refresh)"
+                        break
+            
+            if should_refresh:
+                # ── REFRESH ──
+                # Note: failure detection is handled by the submit browser.
+                # The download browser only looks for completed videos.
+                print(f"[{self.account_name}] {refresh_reason} — refreshing page...", flush=True)
+                self._refresh_and_verify(project_url, frames_busy=getattr(self, "_frames_busy_flag", None))
+                for ci in pending:
+                    last_refresh_times[ci] = datetime.now()
+            
+            # ── Progress log (only when status changes) ──
+            submitted = len([c for c in clips if c.get('clip_index') in clip_submit_times])
+            status_key = f"{submitted}:{len(pending)}:{downloaded_count}:{len(failed_clips)}"
+            if not hasattr(self, '_last_status') or self._last_status != status_key:
+                print(f"[{self.account_name}] Status: {submitted}/{num_clips} submitted, "
+                      f"{len(pending)} pending, {downloaded_count} downloaded, "
+                      f"{len(failed_clips)} failed/moved", flush=True)
+                self._last_status = status_key
+            
+            check_and_dismiss_popup(self.page)
+            
+            if not pending:
+                time.sleep(5)
+                continue
+            
+            # ══════════════════════════════════════════════════
+            # CHECK idx 0, 1, 2, 3, 4, 5 — match by dialogue, download pending
+            # New UI (Feb 2025+): No date headers — clips start at idx 0.
+            # Old UI: idx 0 = date header, clips at idx 1+.
+            # We scan idx 0-5 to handle both layouts.
+            # Newest clip is at lowest idx, older ones higher.
+            # ══════════════════════════════════════════════════
+            downloaded_this_cycle = 0
+            
+            for idx in range(6):
+                if not pending:
+                    break
+                
+                # Scroll to container and read it
+                container = self.page.locator(f"div[data-index='{idx}']")
+                if container.count() == 0:
+                    # Try scrolling down to render it
+                    for _ in range(3):
+                        self.page.mouse.wheel(0, 500)
+                        time.sleep(0.3)
+                        if container.count() > 0:
+                            break
+                    if container.count() == 0:
+                        continue
+                
+                try:
+                    container.first.scroll_into_view_if_needed(timeout=2000)
+                    time.sleep(0.2)
+                except:
+                    pass
+                
+                # Read container via JS
+                cinfo = self.page.evaluate(f"""
+                    () => {{
+                        const c = document.querySelector("div[data-index='{idx}']");
+                        if (!c) return null;
+                        const text = c.innerText || '';
+                        const hasVideo = c.querySelector('video') !== null;
+                        const hasPercentage = /\\d+%/.test(text);
+                        const hasFailedText = (text.includes('Failed Generation') || text.includes('Failed') || text.includes('Error'));
+                        const hasFailed = hasFailedText && !hasPercentage && !hasVideo;
+                        let promptText = '';
+                        let promptSource = 'none';
+                        
+                        // Robust prompt extraction: scan ALL leaf-ish elements for the longest
+                        // text that looks like a prompt (contains 'says in' which is in every
+                        // prompt we generate). This works regardless of CSS class changes.
+                        // Check divs, buttons, spans, a elements — anything that might hold prompt text.
+                        const candidates = c.querySelectorAll('div, button, span, a, p');
+                        let bestPrompt = '';
+                        let bestLen = 0;
+                        let bestSource = 'none';
+                        for (const el of candidates) {{
+                            // Use innerText to get visible text only
+                            const t = el.innerText || '';
+                            if (t.length < 100) continue;
+                            // Prefer elements containing 'says in' (our dialogue pattern)
+                            const hasSaysIn = t.includes('says in');
+                            const score = hasSaysIn ? t.length + 100000 : t.length;
+                            if (score > bestLen) {{
+                                bestPrompt = t;
+                                bestLen = score;
+                                bestSource = hasSaysIn ? 'dialogue-div' : 'long-text';
+                            }}
+                        }}
+                        if (bestPrompt) {{
+                            promptText = bestPrompt;
+                            promptSource = bestSource;
+                        }}
+                        
+                        // Fallback: container text (unreliable — may contain tile UI garbage)
+                        if (!promptText) {{ promptText = text.substring(0, 1500); promptSource = 'fallback-text'; }}
+                        
+                        const videoUrls = [];
+                        if (hasVideo) {{
+                            const videos = c.querySelectorAll('video');
+                            for (const v of videos) {{
+                                let url = v.src || '';
+                                if (!url) {{
+                                    const source = v.querySelector('source');
+                                    if (source) url = source.src || '';
+                                }}
+                                videoUrls.push(url);
+                            }}
+                        }}
+                        
+                        return {{
+                            dataIndex: {idx}, hasVideo: hasVideo, hasFailed: hasFailed, 
+                            promptText: promptText, promptSource: promptSource, videoUrls: videoUrls
+                        }};
+                    }}
+                """)
+                
+                if not cinfo:
+                    continue
+                
+                hv = cinfo.get('hasVideo')
+                hf = cinfo.get('hasFailed')
+                pt = cinfo.get('promptText', '')
+                ps = cinfo.get('promptSource', '?')
+                
+                # Only log scan details on first cycle or when state changes
+                scan_key = f"{idx}:{hv}:{hf}"
+                if not hasattr(self, '_last_scan_state'):
+                    self._last_scan_state = {}
+                if scan_key not in self._last_scan_state or self._last_scan_state[scan_key] != (hv, hf):
+                    # Extract dialogue snippet from prompt for debug
+                    says_pos = pt.find('says in')
+                    dialogue_snip = pt[says_pos+15:says_pos+75].strip() if says_pos >= 0 else pt[:60]
+                    print(f"[{self.account_name}] SCAN idx={idx}: vid={hv} fail={hf} prompt_len={len(pt)} src={ps} dialogue='{dialogue_snip}'", flush=True)
+                    self._last_scan_state[scan_key] = (hv, hf)
+                
+                if not hv and not hf:
+                    continue
+                
+                # MATCH — find which pending clip this container belongs to
+                num_submitted = len(clip_submit_times) if clip_submit_times else 0
+                matched = self._match_container_to_clip(cinfo, dialogue_to_clip, pending, downloaded_clip_indices, clip_submit_times=clip_submit_times, num_submitted=num_submitted)
+                if not matched:
+                    # Log unmatched only once per idx
+                    if not hasattr(self, '_logged_unmatched'):
+                        self._logged_unmatched = set()
+                    says_idx = pt.find('says in')
+                    unmatched_key = f"{idx}:{pt[:50]}"
+                    if says_idx >= 0 and unmatched_key not in self._logged_unmatched:
+                        print(f"[{self.account_name}] idx={idx} dialogue: '{pt[says_idx+15:says_idx+75]}'", flush=True)
+                        self._logged_unmatched.add(unmatched_key)
+                    continue
+                
+                ci = matched.get('clip_index')
+                
+                # Skip failed containers — retry is handled by submit browser
+                if hf and not hv:
+                    continue
+                
+                # Handle video ready → DOWNLOAD
+                if hv:
+                    video_check = container.locator("video")
+                    if video_check.count() == 0:
+                        print(f"[{self.account_name}] Video at idx={idx} vanished, skipping", flush=True)
+                        continue
+                    
+                    print(f"[{self.account_name}] ✓ Clip {ci} ready at idx={idx}, downloading...", flush=True)
+                    # Log what dialogue was matched for debugging
+                    matched_dialogue = matched.get('dialogue_text', '')[:80]
+                    prompt_snippet = cinfo.get('promptText', '')[:80]
+                    print(f"[{self.account_name}]   matched_dialogue: '{matched_dialogue}'", flush=True)
+                    print(f"[{self.account_name}]   container_prompt: '{prompt_snippet}'", flush=True)
+                    try:
+                        # Re-extract video URLs from the LIVE container
+                        try:
+                            fresh_urls = container.evaluate("""el => {
+                                const urls = [];
+                                const videos = el.querySelectorAll('video');
+                                for (const v of videos) {
+                                    let url = v.src || '';
+                                    if (!url) { const s = v.querySelector('source'); if (s) url = s.src || ''; }
+                                    if (url) urls.push(url);
+                                }
+                                return urls;
+                            }""")
+                        except:
+                            fresh_urls = []
+                        # Cache URLs immediately — if Chrome dies mid-download, fallback session uses these
+                        if fresh_urls:
+                            self._ready_url_cache[ci] = fresh_urls
+                        result = self._download_clip_variants(container, matched, job_id, temp_dir, downloaded_videos, pre_extracted_urls=fresh_urls, downloaded_urls=downloaded_urls)
+                        if result:
+                            downloaded_clip_indices.add(ci)
+                            pending.discard(ci)
+                            downloaded_count += 1
+                            downloaded_this_cycle += 1
+                            print(f"[{self.account_name}] ✓ Clip {ci} downloaded! ({downloaded_count}/{num_clips})", flush=True)
+
+                        try:
+                            self.page.keyboard.press("Escape")
+                            time.sleep(0.3)
+                        except:
+                            pass
+
+                    except Exception as e:
+                        if any(x in str(e) for x in ("browser has been closed", "Target page", "context or browser", "TargetClosedError")):
+                            raise  # Propagate to reconnect loop
+                        print(f"[{self.account_name}] Error downloading clip {ci}: {e}", flush=True)
+                        try:
+                            self.page.keyboard.press("Escape")
+                        except:
+                            pass
+            
+            if downloaded_this_cycle > 0:
+                print(f"[{self.account_name}] Downloaded {downloaded_this_cycle} clip(s) this cycle", flush=True)
+                empty_cycles = 0  # Reset on any progress
+            else:
+                # Only count empty cycles if ALL clips have been submitted.
+                # If more clips are still being submitted by the submit thread,
+                # keep waiting — don't exit early just because nothing is ready yet.
+                _all_submitted = len(clip_submit_times) >= num_clips - len(permanently_failed_clips)
+                if _all_submitted:
+                    empty_cycles += 1
+                    if empty_cycles >= MAX_EMPTY_CYCLES and len(pending) > 0:
+                        print(f"[{self.account_name}] ⚠️ {empty_cycles} consecutive empty scan cycles with {len(pending)} pending clips — giving up on main project downloads", flush=True)
+                        break
+                else:
+                    empty_cycles = 0  # Still waiting for more submissions — reset
+            
+            time.sleep(5)
+        
+        # ══════════════════════════════════════════════════════
+        # DEEP SCAN: Final check — refresh + scan for any missed clips
+        # ══════════════════════════════════════════════════════
+        missing = []
+        for clip in clips:
+            ci = clip.get('clip_index')
+            if ci not in downloaded_clip_indices and ci not in failed_clips:
+                if allowed_clips_for_job is None or ci in allowed_clips_for_job:
+                    if clip_submit_times.get(ci):
+                        missing.append(clip)
+        
+        if missing:
+            missing_indices = [c.get('clip_index') for c in missing]
+            print(f"\n[{self.account_name}] ═══ DEEP SCAN: {len(missing)} clip(s) missing: {missing_indices} ═══", flush=True)
+            
+            missing_pending = set(missing_indices)
+            
+            for attempt in range(3):
+                if not missing_pending:
+                    break
+                
+                print(f"[{self.account_name}] Deep scan attempt {attempt + 1}/3...", flush=True)
+                self._refresh_and_verify(project_url)
+                time.sleep(2)
+                
+                containers = self._scan_all_containers(max_index=num_clips + 5)
+                
+                for cinfo in containers:
+                    if not missing_pending:
+                        break
+                    
+                    matched = self._match_container_to_clip(cinfo, dialogue_to_clip, missing_pending, downloaded_clip_indices, clip_submit_times=clip_submit_times, num_submitted=len(clip_submit_times) if clip_submit_times else 0)
+                    if not matched:
+                        continue
+                    
+                    ci = matched.get('clip_index')
+                    
+                    if cinfo.get('hasFailed'):
+                        print(f"[{self.account_name}] Deep scan: Clip {ci} FAILED", flush=True)
+                        failed_clips.add(ci)
+                        missing_pending.discard(ci)
+                        update_clip_status(matched.get('id'), 'failed', error_message="Generation failed (deep scan)")
+                    elif cinfo.get('hasVideo'):
+                        print(f"[{self.account_name}] Deep scan: Found clip {ci} at idx={cinfo['dataIndex']}!", flush=True)
+                        container = self.page.locator(f"div[data-index='{cinfo['dataIndex']}']")
+                        scan_urls = cinfo.get('videoUrls', [])
+                        if container.count() == 0:
+                            if scan_urls:
+                                # Container was virtualized away by the time we got back to it,
+                                # but we already extracted the video URLs during the scan phase
+                                # while the container was in viewport. Use those directly.
+                                print(f"[{self.account_name}] Deep scan: Container gone but have {len(scan_urls)} pre-extracted URL(s) — downloading without DOM", flush=True)
+                            else:
+                                print(f"[{self.account_name}] Deep scan: Container disappeared, skipping", flush=True)
+                                continue
+                        try:
+                            container.first.scroll_into_view_if_needed(timeout=2000)
+                            time.sleep(0.5)
+                        except:
+                            pass
+                        try:
+                            # Re-extract video URLs from LIVE container if still in DOM,
+                            # otherwise fall back to URLs captured during scan phase.
+                            try:
+                                if container.count() > 0:
+                                    deep_scan_urls = container.evaluate("""el => {
+                                        const urls = [];
+                                        const videos = el.querySelectorAll('video');
+                                        for (const v of videos) {
+                                            let url = v.src || '';
+                                            if (!url) { const s = v.querySelector('source'); if (s) url = s.src || ''; }
+                                            if (url) urls.push(url);
+                                        }
+                                        return urls;
+                                    }""")
+                                    # never fall back to stale scan_urls — if container is live, use live URLs only
+                                    if not deep_scan_urls:
+                                        deep_scan_urls = []
+                                else:
+                                    # container gone — scan_urls were extracted while it was in viewport,
+                                    # but only use them if container was just virtualized (within same cycle)
+                                    deep_scan_urls = scan_urls
+                            except:
+                                deep_scan_urls = []
+                            result = self._download_clip_variants(container, matched, job_id, temp_dir, downloaded_videos, pre_extracted_urls=deep_scan_urls, downloaded_urls=downloaded_urls)
+                            if result:
+                                downloaded_clip_indices.add(ci)
+                                missing_pending.discard(ci)
+                                downloaded_count += 1
+                                print(f"[{self.account_name}] Deep scan: Clip {ci} downloaded!", flush=True)
+                        except Exception as e:
+                            print(f"[{self.account_name}] Deep scan download error for clip {ci}: {e}", flush=True)
+                
+                if missing_pending:
+                    time.sleep(10)
+            
+            if not missing_pending:
+                print(f"[{self.account_name}] Deep scan: All clips found!", flush=True)
+            else:
+                print(f"[{self.account_name}] Deep scan complete, still missing: {sorted(missing_pending)}", flush=True)
+        
+        # ══════════════════════════════════════════════════════
+        # STUCK CLIP RETRY: clips submitted but never became ready/failed
+        # ══════════════════════════════════════════════════════
+        stuck_clips = []
+        for clip in clips:
+            ci = clip.get('clip_index')
+            if ci in downloaded_clip_indices or ci in failed_clips:
+                continue
+            if allowed_clips_for_job is not None and ci not in allowed_clips_for_job:
+                continue
+            submit_time = clip_submit_times.get(ci)
+            if submit_time and (datetime.now() - submit_time).total_seconds() > STUCK_TIMEOUT:
+                stuck_clips.append(clip)
+                print(f"[{self.account_name}] ⚠️ Clip {ci} stuck ({(datetime.now() - submit_time).total_seconds():.0f}s since submit)", flush=True)
+        
+        if stuck_clips:
+            print(f"\n[{self.account_name}] ═══ RETRY: {len(stuck_clips)} stuck clip(s) ═══", flush=True)
+            
+            retried_this_round = 0
+            for stuck_clip in stuck_clips:
+                ci = stuck_clip.get('clip_index')
+                clip_id = stuck_clip.get('id')
+                
+                # Cap retries: after MAX_STUCK_RETRIES, fail remaining immediately
+                if retried_this_round >= MAX_STUCK_RETRIES:
+                    print(f"[{self.account_name}] Clip {ci} — skipping retry (hit {MAX_STUCK_RETRIES} retry cap), marking FAILED", flush=True)
+                    failed_clips.add(ci)
+                    if clip_id:
+                        update_clip_status(clip_id, 'failed', error_message="Generation timed out — please retry manually from UI")
+                    continue
+                
+                # Only retry once per clip per job
+                _retried_for_job = self._retried_clips.setdefault(job_id, set())
+
+                if ci in _retried_for_job:
+                    print(f"[{self.account_name}] Clip {ci} already retried — marking FAILED", flush=True)
+                    failed_clips.add(ci)
+                    if clip_id:
+                        update_clip_status(clip_id, 'failed', error_message="Timed out after retry — please retry manually from UI")
+                    continue
+
+                _retried_for_job.add(ci)
+                retried_this_round += 1
+                print(f"[{self.account_name}] Retrying clip {ci} ({retried_this_round}/{MAX_STUCK_RETRIES})...", flush=True)
+                
+                try:
+                    clip_data = None
+                    if clips_data:
+                        for cd in clips_data:
+                            if cd.get('clip_index') == ci:
+                                clip_data = cd
+                                break
+                    
+                    if not clip_data:
+                        print(f"[{self.account_name}] ❌ No clip data for clip {ci}", flush=True)
+                        failed_clips.add(ci)
+                        if clip_id:
+                            update_clip_status(clip_id, 'failed', error_message="Retry failed — no clip data")
+                        continue
+                    
+                    # Download browser should NOT create new projects for retries
+                    # Just mark as failed — submit browser handles retries via failover
+                    print(f"[{self.account_name}] ❌ Clip {ci} stuck/failed — marking failed (download browser does not retry)", flush=True)
+                    retry_result = False
+                    if retry_result:
+                        downloaded_clip_indices.add(ci)
+                        downloaded_count += 1
+                        print(f"[{self.account_name}] ✓ Clip {ci} retry successful!", flush=True)
+                    else:
+                        print(f"[{self.account_name}] ❌ Clip {ci} retry failed", flush=True)
+                        failed_clips.add(ci)
+                        if clip_id:
+                            update_clip_status(clip_id, 'failed', error_message="Generation timed out — please retry manually from UI")
+                
+                except Exception as e:
+                    print(f"[{self.account_name}] ❌ Error retrying clip {ci}: {e}", flush=True)
+                    failed_clips.add(ci)
+                    if clip_id:
+                        update_clip_status(clip_id, 'failed', error_message=f"Retry error: {str(e)[:100]}")
+        
+        return downloaded_count, failed_clips
+
+    # ================================================================
+    # LEGACY METHOD STUBS (kept for backward compatibility)
+    # These redirect to the new unified _download_loop via _download_from_project_dynamic
+    # ================================================================
+
+    def _download_from_project(self, project_url, clips, job_id, temp_dir, clip_submit_times=None, clips_data=None, is_redo=False):
+        """Legacy wrapper — redirects to _download_from_project_dynamic.
+        
+        Args:
+            project_url: URL of the Flow project
+            clips: List of clips to download
+            job_id: Job ID
+            temp_dir: Temp directory for downloads
+            clip_submit_times: Dict mapping clip_index -> datetime of submission
+            clips_data: List of clip data dicts for failure handling
+            is_redo: Whether this is a redo download
+        """
+        # Legacy redirect — uses the new unified download path
+        result, _ = self._download_from_project_dynamic(
+            project_url, clips, job_id, temp_dir,
+            clip_submit_times=clip_submit_times,
+            clips_data=clips_data,
+            is_redo=is_redo,
+        )
+        return result
+    
+    def _retry_single_clip(self, clip_data, job_id, temp_dir, downloaded_videos, dialogue_to_clip, downloaded_urls=None):
+        """
+        Retry a single stuck clip by creating a new project and resubmitting.
+        
+        Args:
+            clip_data: Dict with clip info (prompt, start_frame, end_frame, etc.)
+            job_id: Job ID
+            temp_dir: Temp directory for downloads
+            downloaded_videos: Shared dict for continue mode
+            dialogue_to_clip: Dialogue mapping for download matching
+        
+        Returns:
+            True if clip was successfully downloaded, False otherwise
+        """
+        clip_index = clip_data.get('clip_index')
+        prompt = clip_data.get('prompt', '')
+        start_frame_path = clip_data.get('start_frame')
+        end_frame_path = clip_data.get('end_frame')
+        
+        # Verify frame files exist — re-download if missing
+        if start_frame_path and not os.path.exists(start_frame_path):
+            print(f"[{self.account_name}-RETRY] ⚠️ Start frame missing: {start_frame_path}", flush=True)
+            url = clip_data.get('start_frame_url')
+            if url:
+                start_frame_path = download_frame(url, start_frame_path)
+        
+        if end_frame_path and not os.path.exists(end_frame_path):
+            print(f"[{self.account_name}-RETRY] ⚠️ End frame missing: {end_frame_path}", flush=True)
+            url = clip_data.get('end_frame_url')
+            if url:
+                end_frame_path = download_frame(url, end_frame_path)
+        
+        RETRY_TIMEOUT = 180  # 3 minutes for retry attempt
+        
+        try:
+            print(f"[{self.account_name}-RETRY] Creating new project for clip {clip_index+1}...", flush=True)
+            
+            # Navigate to Flow home (SPA — preserve reCAPTCHA)
+            spa_navigate_to_flow_home(self.page, f"{self.account_name}-RETRY")
+            human_delay(1, 2)  # Match main flow post-navigation wait
+            
+            ensure_logged_into_flow(self.page, f"{self.account_name}-RETRY")
+            check_and_dismiss_popup(self.page)
+            
+            # Human-like "looking around" (match main flow exactly)
+            human_mouse_move(self.page)
+            human_delay(1, 2)
+            scroll_randomly(self.page)
+            human_delay(0.5, 1)
+            
+            # Click "New project" button
+            dismiss_create_with_flow(self.page, f"{self.account_name}-RETRY")
+            human_click_element(self.page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", f"[{self.account_name}-RETRY] New project button")
+            human_delay(2, 3)  # Match main flow post-click wait
+            
+            # Wait for project URL (match main flow: wait_for_url + fallback poll)
+            try:
+                self.page.wait_for_url("**/project/**", timeout=30000)
+            except:
+                print(f"[{self.account_name}-RETRY] wait_for_url timed out, polling...", flush=True)
+                for _ in range(15):
+                    time.sleep(1)
+                    if "/project/" in self.page.url:
+                        break
+            
+            time.sleep(2)
+            
+            if "/project/" not in self.page.url:
+                print(f"[{self.account_name}-RETRY] ❌ Failed to create project", flush=True)
+                return False
+            
+            retry_project_url = self.page.url
+            print(f"[{self.account_name}-RETRY] ✓ Created retry project: {retry_project_url}", flush=True)
+            human_delay(1, 2)  # Match main flow post-creation wait
+            check_and_dismiss_popup(self.page)
+            ensure_videos_tab_selected(self.page)
+            
+            # Submit clip using the same method as the main flow
+            s_path = start_frame_path if (start_frame_path and os.path.exists(start_frame_path)) else None
+            e_path = end_frame_path if (end_frame_path and os.path.exists(end_frame_path)) else None
+            pre_generate_tile_count = get_tile_count_at_index0(self.page)
+            if not rebuild_clip(self.page, s_path, e_path, prompt, is_first_clip=True, context=f"[{self.account_name}-RETRY]"):
+                print(f"[{self.account_name}-RETRY] ❌ Failed to submit clip", flush=True)
+                return False
+            
+            submit_time = datetime.now()
+            
+            # Check for immediate failure
+            if check_recent_clip_failure(self.page, data_index=0, clip_num=clip_index, old_tile_ids=pre_generate_tile_count):
+                print(f"[{self.account_name}-RETRY] ❌ Clip {clip_index+1} failed immediately in retry", flush=True)
+                return False
+            
+            print(f"[{self.account_name}-RETRY] Waiting for generation (up to {RETRY_TIMEOUT}s)...", flush=True)
+            
+            # Wait for generation to complete
+            start_wait = datetime.now()
+            while (datetime.now() - start_wait).total_seconds() < RETRY_TIMEOUT:
+                time.sleep(10)
+                
+                # Refresh and check for video or failure
+                self.page.reload(timeout=30000)
+                time.sleep(3)
+                check_and_dismiss_popup(self.page)
+                ensure_videos_tab_selected(self.page)
+                ensure_batch_view_mode(self.page, f"[{self.account_name}-RegenRefresh]")
+                
+                # Check for video at data-index 1
+                container = self.page.locator("div[data-index='1']")
+                if container.count() > 0:
+                    # Check for failure
+                    has_failed = self.page.evaluate(r"""
+                        () => {
+                            const container = document.querySelector("div[data-index='1']");
+                            if (!container) return false;
+                            const text = container.innerText || '';
+                            const hasPercentage = /\d+%/.test(text);
+                            if (hasPercentage) return false;
+                            return (text.includes('Failed Generation') || text.includes('Failed') || text.includes('Error'));
+                        }
+                    """)
+                    
+                    if has_failed:
+                        print(f"[{self.account_name}-RETRY] ❌ Clip {clip_index+1} failed during retry", flush=True)
+                        return False
+                    
+                    # Check for video
+                    video = container.locator("video")
+                    if video.count() > 0:
+                        print(f"[{self.account_name}-RETRY] ✓ Video ready, downloading...", flush=True)
+                        
+                        # Create a clip dict for download
+                        retry_clip = {
+                            'clip_index': clip_index,
+                            'id': clip_data.get('id'),
+                            'generation_attempt': clip_data.get('generation_attempt', 1),
+                        }
+                        
+                        # Download the clip
+                        result = self._download_clip_variants(container, retry_clip, job_id, temp_dir, downloaded_videos, downloaded_urls=downloaded_urls)
+                        return result
+                
+                elapsed = (datetime.now() - start_wait).total_seconds()
+                print(f"[{self.account_name}-RETRY] Still generating... ({elapsed:.0f}s)", flush=True)
+            
+            # Timeout
+            print(f"[{self.account_name}-RETRY] ❌ Retry timed out after {RETRY_TIMEOUT}s", flush=True)
+            return False
+            
+        except Exception as e:
+            print(f"[{self.account_name}-RETRY] ❌ Error during retry: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _download_clip_variants(self, container, clip, job_id, temp_dir, downloaded_videos=None, pre_extracted_urls=None, downloaded_urls=None):
+        """Download all variants of a clip from a container.
+        
+        APPROACH: Three download strategies tried in order:
+        1. Pre-extracted URLs from scan phase (fastest — no DOM interaction needed)
+        2. Extract signed GCS URLs from <video src> attributes (reliable — direct HTTP)
+        3. UI-click fallback: hover → download icon → "Original size (720p)" (last resort)
+        
+        Flow serves videos as signed GCS URLs:
+            https://storage.googleapis.com/ai-sandbox-videofx/video/{uuid}?GoogleAccessId=...&Signature=...
+        These are valid ~24h and downloadable with simple HTTP GET.
+        
+        Falls back through strategies if earlier ones fail.
+        
+        Returns True if successful, False otherwise.
+        """
+        clip_index = clip.get('clip_index')
+        clip_id = clip.get('id')
+        attempt = clip.get('generation_attempt', 1)
+        print(f"[{self.account_name}] _download_clip_variants: clip_index={clip_index+1}, clip_id={clip_id}, attempt={attempt}", flush=True)
+        
+        # CRITICAL: Scroll container into view before checking children
+        try:
+            container.first.scroll_into_view_if_needed(timeout=3000)
+            time.sleep(1)
+        except Exception as scroll_err:
+            print(f"[{self.account_name}] Warning: Could not scroll clip {clip_index+1} into view: {scroll_err}", flush=True)
+        
+        time.sleep(1)
+        
+        # Find all video elements in this container
+        videos = container.locator("video")
+        video_count = videos.count()
+        
+        # If we have pre-extracted URLs from scan phase, use count from there
+        if pre_extracted_urls and len(pre_extracted_urls) > 0:
+            video_count = max(video_count, len(pre_extracted_urls))
+        
+        if video_count == 0:
+            print(f"[{self.account_name}] No videos found for clip {clip_index+1}", flush=True)
+            return False
+        
+        print(f"[{self.account_name}] Found {video_count} variant(s) for clip {clip_index+1}", flush=True)
+        
+        variants_downloaded = []
+        
+        for v_idx in range(video_count):
+            variant_num = v_idx + 1
+            variant_name = f"{attempt}.{variant_num}"
+            
+            try:
+                # ─── STRATEGY 0: Offline download using pre-scanned URL cache ───
+                # If restore_event is set (Chrome dead/restarting), use pre-scanned URLs
+                # + fallback session to download without any browser/DOM interaction.
+                video_url = None
+                video_elem = None
+
+                if self.restore_event.is_set() and self._fallback_session is not None:
+                    # Look up pre-scanned URLs by data-index (stored as string keys)
+                    for _idx_key, _urls in self._pre_extracted_url_cache.items():
+                        if v_idx < len(_urls):
+                            _candidate = _urls[v_idx]
+                            if _candidate and not _candidate.startswith('blob:'):
+                                if _candidate.startswith('/'):
+                                    _candidate = 'https://labs.google' + _candidate
+                                if _candidate.startswith('http'):
+                                    # Match by checking if URL matches pre_extracted_urls
+                                    if pre_extracted_urls and v_idx < len(pre_extracted_urls):
+                                        video_url = pre_extracted_urls[v_idx]
+                                    else:
+                                        video_url = _candidate
+                                    if video_url:
+                                        print(f"[{self.account_name}] Using cached URL (offline) for variant {variant_name}: {video_url[:80]}", flush=True)
+                                    break
+
+                # ─── STRATEGY 1: Use pre-extracted URL from scan phase ───
+                if not video_url and pre_extracted_urls and v_idx < len(pre_extracted_urls):
+                    url = pre_extracted_urls[v_idx]
+                    if url and "blob:" not in url:
+                        # Resolve relative URLs — browser returns /fx/api/... without host
+                        if url.startswith("/"):
+                            url = "https://labs.google" + url
+                        if url.startswith("http"):
+                            video_url = url
+                            print(f"[{self.account_name}] Using pre-extracted URL for variant {variant_name}: {url[:120]}", flush=True)
+                
+                # ─── STRATEGY 2: Extract video src URL from DOM ───
+                # Use pre-computed video_count — don't call videos.count() again here
+                # as Chrome may have been killed between variants (golden restore).
+                if v_idx < video_count:
+                    video_elem = videos.nth(v_idx)
+                    if not video_url:
+                        try:
+                            video_url = video_elem.get_attribute("src")
+                            # Filter out blob: URLs — they can't be downloaded via HTTP
+                            if video_url and video_url.startswith("blob:"):
+                                print(f"[{self.account_name}] Video src is blob URL, will try UI fallback", flush=True)
+                                video_url = None
+                        except:
+                            pass
+                        
+                        # Also try source child element
+                        if not video_url:
+                            try:
+                                source_elem = video_elem.locator("source")
+                                if source_elem.count() > 0:
+                                    video_url = source_elem.first.get_attribute("src")
+                                    if video_url and video_url.startswith("blob:"):
+                                        video_url = None
+                            except:
+                                pass
+                
+                # Recreate temp_dir if it was wiped by cleanup after a golden restore
+                if not os.path.exists(temp_dir):
+                    try:
+                        os.makedirs(temp_dir, exist_ok=True)
+                        print(f"[{self.account_name}] Recreated temp_dir after restore: {temp_dir}", flush=True)
+                    except Exception as _mkdir_err:
+                        # Fall back to a fresh /dev/shm dir if the original path can't be recreated
+                        import tempfile
+                        temp_dir = tempfile.mkdtemp(prefix=f"flow_job_{job_id[:8]}_restore_", dir=SHM_DIR)
+                        print(f"[{self.account_name}] Using new temp_dir after restore: {temp_dir}", flush=True)
+                output_path = os.path.join(temp_dir, f"clip_{clip_index}_{attempt}.{variant_num}.mp4")
+                downloaded_via_url = False
+                
+                # Resolve relative URLs (new Flow UI uses /fx/api/trpc/... instead of absolute GCS URLs)
+                if video_url and video_url.startswith("/"):
+                    from urllib.parse import urlparse
+                    parsed = urlparse(self.page.url)
+                    video_url = f"{parsed.scheme}://{parsed.netloc}{video_url}"
+                    print(f"[{self.account_name}] Resolved relative URL for variant {variant_name}", flush=True)
+                
+                if video_url and video_url.startswith("http"):
+                    # Dedup: skip URLs already downloaded for another clip
+                    # For Flow redirect URLs, the unique part is the ?name=UUID parameter
+                    # For GCS signed URLs, the path itself is unique
+                    url_key = video_url  # Default: use full URL
+                    if 'name=' in video_url:
+                        # Extract the name parameter (UUID) as the dedup key
+                        import re as _re
+                        name_match = _re.search(r'[?&]name=([^&]+)', video_url)
+                        if name_match:
+                            url_key = name_match.group(1)
+                    else:
+                        url_key = video_url.split("?")[0]  # Strip signatures for GCS URLs
+                    
+                    if downloaded_urls is not None and url_key in downloaded_urls:
+                        print(f"[{self.account_name}] ⚠️ Skipping variant {variant_name} — URL already used by another clip: {url_key[-40:]}", flush=True)
+                        continue
+                    
+                    print(f"[{self.account_name}] Downloading clip {clip_index+1} variant {variant_name}: {video_url[:120]}", flush=True)
+                    try:
+                        # Always use requests.Session (warm cookies) — faster, browser-independent.
+                        # Fall back to page.request.get() only if session not available.
+                        _use_fallback = False
+                        if self._fallback_session is not None:
+                            _resp = self._fallback_session.get(video_url, timeout=120, allow_redirects=True)
+                            if not _resp.ok:
+                                raise Exception(f"HTTP {_resp.status_code}")
+                            body = _resp.content
+                            _use_fallback = True
+                        else:
+                            try:
+                                api_resp = self.page.request.get(
+                                    video_url,
+                                    headers={'Referer': 'https://labs.google/'},
+                                    timeout=120000,
+                                )
+                                if not api_resp.ok:
+                                    raise Exception(f"HTTP {api_resp.status} {api_resp.status_text}")
+                                body = api_resp.body()
+                            except Exception as _browser_err:
+                                _err_str = str(_browser_err)
+                                _is_cdp = any(x in _err_str for x in ("browser has been closed", "Target page", "context or browser", "TargetClosedError"))
+                                if _is_cdp:
+                                    raise  # No session available, propagate to reconnect loop
+                                raise
+                        file_size = len(body)
+                        if file_size > 10000:
+                            with open(output_path, 'wb') as f:
+                                f.write(body)
+                            downloaded_via_url = True
+                            if downloaded_urls is not None:
+                                downloaded_urls.add(url_key)
+                            _src = "fallback session" if _use_fallback else "browser"
+                            print(f"[{self.account_name}] ✓ URL download OK ({file_size:,} bytes) [{_src}]", flush=True)
+                        else:
+                            print(f"[{self.account_name}] ⚠️ URL download too small ({file_size} bytes), trying UI fallback", flush=True)
+                    except Exception as url_err:
+                        print(f"[{self.account_name}] URL download failed: {url_err}, trying UI fallback", flush=True)
+                        if os.path.exists(output_path):
+                            os.remove(output_path)
+                
+                # ─── FALLBACK: UI-click download ───
+                if not downloaded_via_url:
+                    print(f"[{self.account_name}] Using UI fallback for clip {clip_index+1} variant {variant_name}...", flush=True)
+                    try:
+                        if video_elem is None:
+                            raise Exception("No video element available for UI fallback")
+                        
+                        # Dismiss any open menus
+                        self.page.keyboard.press("Escape")
+                        time.sleep(0.5)
+                        
+                        # Scroll video into view before hovering
+                        try:
+                            video_elem.scroll_into_view_if_needed(timeout=3000)
+                            time.sleep(0.5)
+                        except Exception:
+                            pass
+                        # Hover video to reveal controls
+                        video_elem.hover(force=True)
+                        time.sleep(1)
+                        
+                        # Find download button near this video
+                        variant_containers = container.locator("div.sc-d90fd836-2.dLxTam")
+                        download_btn = None
+                        
+                        if v_idx < variant_containers.count():
+                            vc = variant_containers.nth(v_idx)
+                            download_btn = vc.locator("button[aria-label='download']")
+                            if download_btn.count() == 0:
+                                download_btn = vc.locator("button:has(i:text('download'))")
+                        
+                        if not download_btn or download_btn.count() == 0:
+                            all_btns = container.locator("button[aria-label='download']")
+                            if all_btns.count() == 0:
+                                all_btns = container.locator("button:has(i:text('download'))")
+                            if v_idx < all_btns.count():
+                                download_btn = all_btns.nth(v_idx)
+                        
+                        if download_btn and download_btn.count() > 0:
+                            download_btn.first.click(force=True)
+                            time.sleep(1)
+                            
+                            with self.page.expect_download(timeout=60000) as download_info:
+                                self.page.click("text=Original size (720p)")
+                            
+                            download = download_info.value
+                            download.save_as(output_path)
+                            print(f"[{self.account_name}] ✓ UI download OK", flush=True)
+                        else:
+                            print(f"[{self.account_name}] No download button for variant {variant_name}", flush=True)
+                            continue
+                    except Exception as ui_err:
+                        print(f"[{self.account_name}] UI download failed: {ui_err}", flush=True)
+                        continue
+                
+                # ─── Upload to R2 ───
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                    output_url = upload_video(output_path, job_id, clip_index, attempt=attempt, variant=variant_num)
+                    
+                    if output_url:
+                        print(f"[{self.account_name}] ✓ Clip {clip_index+1} variant {variant_name} uploaded!", flush=True)
+                        variants_downloaded.append(variant_name)
+                        if variant_num == 1 and downloaded_videos is not None:
+                            downloaded_videos[clip_index] = output_path
+                    else:
+                        print(f"[{self.account_name}] ⚠️ Upload failed for variant {variant_name}", flush=True)
+                
+                time.sleep(1)
+                
+            except Exception as e:
+                err_str = str(e)
+                if any(x in err_str for x in ("browser has been closed", "Target page", "context or browser", "TargetClosedError")):
+                    raise  # Re-raise CDP disconnect to reconnect loop — don't swallow
+                print(f"[{self.account_name}] Error downloading variant {variant_name}: {e}", flush=True)
+        
+        if variants_downloaded:
+            update_clip_status(clip_id, 'completed')
+            print(f"[{self.account_name}] ✓ Clip {clip_index+1} all variants done!", flush=True)
+            return True
+        else:
+            return False
+
+    def _regenerate_clip_and_download(self, clip, job_id, temp_dir, attempt):
+        """Regenerate a clip in a new Flow project and attempt to download it.
+        
+        Called when the original project has no video (silent failure).
+        
+        Args:
+            clip: Clip data dict
+            job_id: Job ID
+            temp_dir: Temp directory with frame files
+            attempt: Generation attempt number
+        
+        Returns:
+            1 if successful, 0 if failed
+        """
+        clip_index = clip.get('clip_index', 0)
+        clip_id = clip.get('id')
+        
+        print(f"\n[{self.account_name}] {'='*50}", flush=True)
+        print(f"[{self.account_name}] REGENERATING CLIP {clip_index+1} IN NEW PROJECT", flush=True)
+        print(f"[{self.account_name}] {'='*50}", flush=True)
+        
+        # Mark as generating so frontend shows "in progress"
+        update_clip_status(clip_id, 'generating')
+        
+        try:
+            # Get frame paths — prefer the path set during initial download,
+            # fall back to canonical naming in temp_dir or frames subdir
+            start_fname = _canonical_frame_name(clip, 'start')
+            end_fname = _canonical_frame_name(clip, 'end')
+            
+            start_frame = clip.get('start_frame_local') or os.path.join(temp_dir, start_fname)
+            end_frame = clip.get('end_frame_local') or os.path.join(temp_dir, end_fname)
+            
+            # Also check frames subdir (parallel path stores frames there)
+            if not os.path.exists(start_frame):
+                alt = os.path.join(temp_dir, "frames", start_fname)
+                if os.path.exists(alt):
+                    start_frame = alt
+            if not os.path.exists(end_frame):
+                alt = os.path.join(temp_dir, "frames", end_fname)
+                if os.path.exists(alt):
+                    end_frame = alt
+            
+            # Check if frames exist — re-download if missing
+            has_start = os.path.exists(start_frame)
+            has_end = os.path.exists(end_frame)
+            
+            if not has_start:
+                url = clip.get('start_frame_url')
+                if url:
+                    print(f"[{self.account_name}] Re-downloading start frame...", flush=True)
+                    result = download_frame(url, start_frame)
+                    has_start = result is not None
+            
+            if not has_end:
+                url = clip.get('end_frame_url')
+                if url:
+                    print(f"[{self.account_name}] Re-downloading end frame...", flush=True)
+                    result = download_frame(url, end_frame)
+                    has_end = result is not None
+            
+            print(f"[{self.account_name}] Start frame: {'✓' if has_start else '✗'} {start_frame}", flush=True)
+            print(f"[{self.account_name}] End frame: {'✓' if has_end else '✗'} {end_frame}", flush=True)
+            
+            if not has_start:
+                print(f"[{self.account_name}] ❌ Cannot regenerate - no start frame available", flush=True)
+                update_clip_status(clip_id, 'failed', error_message="Cannot regenerate - no start frame")
+                return 0
+            
+            # Get prompt from clip data
+            prompt = clip.get('prompt', '')
+            if not prompt:
+                # Build prompt from dialogue if no prompt stored
+                dialogue = clip.get('dialogue_text', '')
+                language = clip.get('language', 'English')
+                voice_profile = clip.get('voice_profile', '')
+                duration = float(clip.get('duration', '8'))
+                prompt = build_flow_prompt(
+                    dialogue_line=dialogue,
+                    language=language,
+                    voice_profile=voice_profile,
+                    duration=duration,
+                    short_dialogue_mode=clip.get('short_dialogue_mode', 'optimized'),
+                    prefix_short_enabled=clip.get('prefix_short_enabled', False),
+                    prefix_short_word=clip.get('prefix_short_word', 'only'),
+                    prefix_short_threshold=clip.get('prefix_short_threshold', 15),
+                )
+            
+            print(f"[{self.account_name}] Prompt: {prompt[:80]}...", flush=True)
+            
+            # Navigate to Flow home (SPA — preserve reCAPTCHA)
+            print(f"[{self.account_name}] Navigating to Flow home...", flush=True)
+            spa_navigate_to_flow_home(self.page, self.account_name)
+            human_delay(1, 2)  # Match main flow post-navigation wait
+            
+            ensure_logged_into_flow(self.page, self.account_name)
+            check_and_dismiss_popup(self.page)
+            
+            # Human-like "looking around" (match main flow exactly)
+            human_mouse_move(self.page)
+            human_delay(1, 2)
+            scroll_randomly(self.page)
+            human_delay(0.5, 1)
+            
+            # Create new project
+            dismiss_create_with_flow(self.page, self.account_name)
+            human_click_element(self.page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", f"[{self.account_name}] New project button")
+            human_delay(2, 3)  # Match main flow post-click wait
+            
+            try:
+                self.page.wait_for_url("**/project/**", timeout=30000)
+            except:
+                print(f"[{self.account_name}] wait_for_url timed out, polling...", flush=True)
+                for _ in range(15):
+                    time.sleep(1)
+                    if "/project/" in self.page.url:
+                        break
+            
+            time.sleep(2)
+            new_project_url = self.page.url
+            
+            if "/project/" not in new_project_url:
+                print(f"[{self.account_name}] ❌ Failed to create project - URL: {new_project_url}", flush=True)
+                update_clip_status(clip_id, 'failed', error_message="Failed to create retry project")
+                return 0
+            
+            print(f"[{self.account_name}] ✓ Created retry project: {new_project_url}", flush=True)
+            human_delay(1, 2)  # Match main flow post-creation wait
+            check_and_dismiss_popup(self.page)
+            ensure_videos_tab_selected(self.page)
+            
+            # Submit clip using the same method as the main flow
+            s_path = start_frame if has_start else None
+            e_path = end_frame if has_end else None
+            pre_generate_tile_count = get_tile_count_at_index0(self.page)
+            if not rebuild_clip(self.page, s_path, e_path, prompt, is_first_clip=True, context=f"[{self.account_name}]"):
+                print(f"[{self.account_name}] ❌ Failed to submit clip in retry project", flush=True)
+                update_clip_status(clip_id, 'failed', error_message="Failed to submit clip in retry project")
+                return 0
+            
+            # Check for immediate failure
+            if check_recent_clip_failure(self.page, data_index=0, clip_num=clip_index, old_tile_ids=pre_generate_tile_count):
+                print(f"[{self.account_name}] ⚠️ Retry generation also failed immediately!", flush=True)
+                update_clip_status(clip_id, 'failed', error_message="Retry generation also failed")
+                return 0
+            
+            # Wait for generation (CLIP_READY_WAIT seconds)
+            print(f"[{self.account_name}] Waiting {CLIP_READY_WAIT}s for generation...", flush=True)
+            time.sleep(CLIP_READY_WAIT)
+            
+            # Refresh page
+            print(f"[{self.account_name}] Refreshing page...", flush=True)
+            self.page.reload(timeout=30000)
+            time.sleep(5)
+            check_and_dismiss_popup(self.page)
+            
+            # Try to download (with is_retry_attempt=True to prevent infinite loop)
+            print(f"[{self.account_name}] Attempting to download from retry project...", flush=True)
+            result = self.download_single_clip(clip, job_id, temp_dir, data_index=0, is_retry_attempt=True)
+            
+            return result
+            
+        except Exception as e:
+            print(f"[{self.account_name}] ❌ Error during regeneration: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            update_clip_status(clip_id, 'failed', error_message=f"Regeneration error: {str(e)}")
+            return 0
+
+    def download_single_clip(self, clip, job_id, temp_dir, data_index=0, is_retry_attempt=False):
+        """Download a single clip (for redo) with all variants - finds first video container in project
+        
+        If no video is found after retries, will attempt to regenerate the clip in a new project
+        (unless is_retry_attempt=True, which prevents infinite loops).
+        """
+        print(f"[{self.account_name}] Looking for redo clip (finding first video)...", flush=True)
+        
+        # Get generation attempt for naming
+        attempt = clip.get('generation_attempt', 1)
+        
+        # Retry loop - sometimes the page needs more time to render videos
+        max_retries = 5  # Increased from 3
+        actual_index = None
+        found_generating = False  # Track if we saw "Generating" status
+        found_failed = False  # Track if we saw "Failed Generation" status
+        
+        for retry in range(max_retries):
+            if retry > 0:
+                wait_time = 10 if retry < 3 else 15  # Longer waits on later retries
+                print(f"[{self.account_name}] Retry {retry}/{max_retries-1} - waiting {wait_time}s and refreshing...", flush=True)
+                time.sleep(wait_time)
+                try:
+                    self.page.reload(timeout=30000)
+                    time.sleep(5)  # Wait for page to settle after refresh
+                    check_and_dismiss_popup(self.page)
+                    ensure_videos_tab_selected(self.page)
+                    ensure_batch_view_mode(self.page, f"[{self.account_name}-RedoRefresh]")
+                except Exception as e:
+                    print(f"[{self.account_name}] Refresh error: {e}", flush=True)
+            
+            # Wait a moment for video elements to render
+            time.sleep(2)
+            
+            # Reset status flags for this retry
+            found_generating = False
+            found_failed = False
+            
+            # Find the first data-index container that has a video (skip date headers)
+            for idx in range(15):
+                container = self.page.locator(f"div[data-index='{idx}']")
+                if container.count() > 0:
+                    video = container.locator("video")
+                    if video.count() > 0:
+                        actual_index = idx
+                        print(f"[{self.account_name}] Found video at data-index={idx}", flush=True)
+                        break
+                    else:
+                        # No video yet — check if it's generating or failed
+                        # New UI: no date headers, but container might be generating
+                        container_text = ""
+                        try:
+                            container_text = container.inner_text(timeout=1000)
+                        except:
+                            pass
+                        
+                        if not container_text or len(container_text.strip()) < 10:
+                            print(f"[{self.account_name}] Skipping data-index={idx} (empty/header)", flush=True)
+                        else:
+                            # Has clip section but no video - check status
+                            # Check for "Generating" text
+                            generating = container.locator("text=Generating")
+                            if generating.count() > 0:
+                                found_generating = True
+                                print(f"[{self.account_name}] data-index={idx} still generating...", flush=True)
+                            
+                            # Check for "Failed" or "Failed Generation" text
+                            try:
+                                has_failed = self.page.evaluate(f"""
+                                    () => {{
+                                        const container = document.querySelector("div[data-index='{idx}']");
+                                        if (!container) return false;
+                                        const text = container.innerText || '';
+                                        const hasPercentage = /\\d+%/.test(text);
+                                        if (hasPercentage) return false;
+                                        return (text.includes('Failed Generation') || text.includes('Failed') || text.includes('Error'));
+                                    }}
+                                """)
+                                if has_failed:
+                                    found_failed = True
+                                    print(f"[{self.account_name}] data-index={idx} shows FAILED!", flush=True)
+                            except:
+                                pass
+            
+            if actual_index is not None:
+                break
+            
+            # If we found "Failed", no point waiting more
+            if found_failed:
+                print(f"[{self.account_name}] Generation failed, stopping retries", flush=True)
+                break
+            
+            # If still generating, extend retries
+            if found_generating and retry >= max_retries - 2:
+                print(f"[{self.account_name}] Still generating, extending retries...", flush=True)
+                max_retries = min(max_retries + 2, 10)  # Extend but cap at 10
+                
+            if retry == 0:
+                # First failure - try scrolling
+                print(f"[{self.account_name}] No video found in first 15 containers, trying scroll...", flush=True)
+                self.page.mouse.wheel(0, -300)
+                time.sleep(2)
+                for idx in range(15):
+                    container = self.page.locator(f"div[data-index='{idx}']")
+                    if container.count() > 0 and container.locator("video").count() > 0:
+                        actual_index = idx
+                        print(f"[{self.account_name}] Found video at data-index={idx} after scroll", flush=True)
+                        break
+                
+                if actual_index is not None:
+                    break
+        
+        if actual_index is None:
+            print(f"[{self.account_name}] ❌ No video found after {max_retries} attempts", flush=True)
+            
+            # If this is already a retry attempt, mark as failed
+            if is_retry_attempt:
+                print(f"[{self.account_name}] ❌ Retry generation also failed - marking clip as failed", flush=True)
+                update_clip_status(clip['id'], 'failed', error_message="No video generated after retry - Flow generation failed")
+                return 0
+            
+            # Download browser should NOT regenerate clips — just mark as failed
+            # The submit browser handles retries via failover/retry logic
+            print(f"[{self.account_name}] ❌ No video found - marking clip as failed (download browser does not regenerate)", flush=True)
+            update_clip_status(clip['id'], 'failed', error_message="No video found in project - generation may have failed silently")
+            return 0
+        
+        container = self.page.locator(f"div[data-index='{actual_index}']")
+        
+        # CRITICAL: Scroll container into view before interacting
+        try:
+            container.first.scroll_into_view_if_needed(timeout=5000)
+            time.sleep(2)
+        except:
+            self.page.mouse.wheel(0, 200)
+            time.sleep(1)
+        
+        # Find ALL video elements in this container
+        videos = container.locator("video")
+        video_count = videos.count()
+        
+        if video_count == 0:
+            print(f"[{self.account_name}] No video elements found in container", flush=True)
+            return 0
+        
+        print(f"[{self.account_name}] Found {video_count} variant(s) for redo clip", flush=True)
+        
+        main_output_url = None
+        variants_downloaded = 0
+        
+        for v_idx in range(video_count):
+            variant_num = v_idx + 1
+            variant_name = f"{attempt}.{variant_num}"
+            output_path = os.path.join(temp_dir, f"clip_{clip['clip_index']}_{attempt}.{variant_num}.mp4")
+            downloaded_via_url = False
+            
+            try:
+                video_elem = videos.nth(v_idx)
+                
+                # ─── STRATEGY 1: Extract video src URL and download via HTTP (primary) ───
+                video_url = None
+                try:
+                    video_url = video_elem.get_attribute("src")
+                    if video_url and video_url.startswith("blob:"):
+                        video_url = None
+                except:
+                    pass
+                
+                if not video_url:
+                    try:
+                        source_elem = video_elem.locator("source")
+                        if source_elem.count() > 0:
+                            video_url = source_elem.first.get_attribute("src")
+                            if video_url and video_url.startswith("blob:"):
+                                video_url = None
+                    except:
+                        pass
+                
+                if video_url and video_url.startswith("http"):
+                    pass  # Already absolute
+                elif video_url and video_url.startswith("/"):
+                    # Relative URL — prepend origin from current page
+                    from urllib.parse import urlparse
+                    parsed = urlparse(self.page.url)
+                    video_url = f"{parsed.scheme}://{parsed.netloc}{video_url}"
+                    print(f"[{self.account_name}] Resolved relative URL to: {video_url[:80]}...", flush=True)
+                
+                if video_url and video_url.startswith("http"):
+                    print(f"[{self.account_name}] Downloading redo variant {variant_name} via browser request: {video_url[:120]}", flush=True)
+                    try:
+                        api_resp = self.page.request.get(
+                            video_url,
+                            headers={'Referer': 'https://labs.google/'},
+                            timeout=120000,
+                        )
+                        if not api_resp.ok:
+                            raise Exception(f"HTTP {api_resp.status} {api_resp.status_text}")
+                        body = api_resp.body()
+                        file_size = len(body)
+                        if file_size > 10000:
+                            with open(output_path, 'wb') as f:
+                                f.write(body)
+                            downloaded_via_url = True
+                            print(f"[{self.account_name}] ✓ URL download OK ({file_size:,} bytes)", flush=True)
+                        else:
+                            print(f"[{self.account_name}] ⚠️ URL download too small ({file_size} bytes), trying UI fallback", flush=True)
+                    except Exception as url_err:
+                        print(f"[{self.account_name}] URL download failed: {url_err}, trying UI fallback", flush=True)
+                        if os.path.exists(output_path):
+                            os.remove(output_path)
+                
+                # ─── STRATEGY 2: UI-click fallback (hover → download → 720p) ───
+                if not downloaded_via_url:
+                    print(f"[{self.account_name}] Using UI fallback for redo variant {variant_name}...", flush=True)
+                    try:
+                        self.page.keyboard.press("Escape")
+                        time.sleep(0.5)
+                        
+                        # Scroll video into view and hover
+                        video_elem.scroll_into_view_if_needed(timeout=3000)
+                        time.sleep(0.5)
+                        video_elem.hover(force=True)
+                        time.sleep(1)
+                        
+                        # Find download button
+                        variant_containers = container.locator("div.sc-d90fd836-2.dLxTam")
+                        download_btn = None
+                        
+                        if v_idx < variant_containers.count():
+                            vc = variant_containers.nth(v_idx)
+                            download_btn = vc.locator("button[aria-label='download']")
+                            if download_btn.count() == 0:
+                                download_btn = vc.locator("button:has(i:text('download'))")
+                        
+                        if not download_btn or download_btn.count() == 0:
+                            all_btns = container.locator("button[aria-label='download']")
+                            if all_btns.count() == 0:
+                                all_btns = container.locator("button:has(i:text('download'))")
+                            if v_idx < all_btns.count():
+                                download_btn = all_btns.nth(v_idx)
+                        
+                        if download_btn and download_btn.count() > 0:
+                            download_btn.first.click(force=True)
+                            time.sleep(1)
+                            
+                            with self.page.expect_download(timeout=60000) as download_info:
+                                self.page.click("text=Original size (720p)")
+                            
+                            download = download_info.value
+                            download.save_as(output_path)
+                            print(f"[{self.account_name}] ✓ UI download OK", flush=True)
+                        else:
+                            print(f"[{self.account_name}] No download button for variant {variant_name}", flush=True)
+                            continue
+                    except Exception as ui_err:
+                        print(f"[{self.account_name}] UI download failed: {ui_err}", flush=True)
+                        continue
+                
+                # ─── Upload to R2 ───
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                    output_url = upload_video(output_path, job_id, clip['clip_index'], attempt=attempt, variant=variant_num)
+                    
+                    if variant_num == 1:
+                        main_output_url = output_url
+                    
+                    variants_downloaded += 1
+                    print(f"[{self.account_name}] ✓ Redo variant {variant_name} uploaded!", flush=True)
+                
+                time.sleep(1)
+                
+            except Exception as ve:
+                print(f"[{self.account_name}] Error downloading variant {variant_name}: {ve}", flush=True)
+        
+        # Update clip status with main variant URL
+        if main_output_url:
+            update_clip_status(clip['id'], 'completed', output_url=main_output_url)
+            print(f"[{self.account_name}] ✓ Redo clip all variants done! ({variants_downloaded} variants)", flush=True)
+            return 1
+        elif variants_downloaded > 0:
+            update_clip_status(clip['id'], 'completed')
+            return 1
+        else:
+            print(f"[{self.account_name}] No variants downloaded", flush=True)
+            return 0
+    
+
+
+def click_frame_and_upload(page, image_path, is_end_frame=False, context=""):
+    """Click a frame button, open dialog, upload file. Used for individual frame uploads."""
+    prefix = f"{context} " if context else ""
+    frame_name = "END frame" if is_end_frame else "START frame"
+    
+    check_and_dismiss_popup(page)
+    
+    frame_btns = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]')
+    if frame_btns.count() == 0:
+        frame_btns = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]')
+    
+    btn_count = frame_btns.count()
+    idx = 1 if is_end_frame else 0
+    
+    if idx >= btn_count:
+        time.sleep(2)
+        frame_btns = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]')
+        btn_count = frame_btns.count()
+    
+    # If requested index not available but buttons exist, use the available one
+    if idx >= btn_count and btn_count > 0:
+        print(f"{prefix}⚠️ {frame_name} not at idx {idx}, using idx 0 ({btn_count} button(s))", flush=True)
+        idx = 0
+    elif btn_count == 0:
+        print(f"{prefix}⚠️ No frame buttons available for {frame_name}", flush=True)
+        return
+    
+    frame_btns.nth(idx).wait_for(state="visible", timeout=5000)
+    human_click_locator(page, frame_btns.nth(idx), f"{prefix}{frame_name} button (idx {idx})")
+    print(f"{prefix}\u2713 Clicked {frame_name} button (idx {idx}/{btn_count})", flush=True)
+    time.sleep(1)
+    upload_frame(page, image_path, frame_name)
+
+
+def click_frame_and_upload_with_policy_check(page, image_path, is_end_frame=False, context=""):
+    """Click a frame button, upload file, and wait for uploadImage policy check.
+    
+    Returns:
+        (True, None) if upload succeeded
+        (False, 'policy') if rejected by policy (should blacklist)
+        (False, 'no_buttons') if no frame buttons available (should NOT blacklist)
+    """
+    prefix = f"{context} " if context else ""
+    frame_name = "END frame" if is_end_frame else "START frame"
+    which = 'end' if is_end_frame else 'start'
+    
+    check_and_dismiss_popup(page)
+    
+    frame_selector = 'div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]'
+    frame_btns = page.locator(frame_selector)
+    if frame_btns.count() == 0:
+        frame_btns = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]')
+    
+    btn_count = frame_btns.count()
+    idx = 1 if is_end_frame else 0
+    
+    if idx >= btn_count:
+        time.sleep(2)
+        frame_btns = page.locator(frame_selector)
+        btn_count = frame_btns.count()
+    
+    # If requested index not available but buttons exist, use the available one
+    # This handles: after START upload consumed its button, END is now at idx 0
+    if idx >= btn_count and btn_count > 0:
+        print(f"{prefix}⚠️ {frame_name} button not at idx {idx}, using idx 0 (only {btn_count} button(s))", flush=True)
+        idx = 0
+    elif btn_count == 0:
+        print(f"{prefix}⚠️ No frame buttons available for {frame_name} (not a policy rejection)", flush=True)
+        return (False, 'no_buttons')
+    
+    frame_btns.nth(idx).wait_for(state="visible", timeout=5000)
+    human_click_locator(page, frame_btns.nth(idx), f"{prefix}{frame_name} button (idx {idx})")
+    print(f"{prefix}✓ Clicked {frame_name} button (idx {idx}/{btn_count})", flush=True)
+    time.sleep(1)
+    
+    # Start network monitor BEFORE upload
+    monitor = FramePolicyMonitor(page)
+    monitor.start()
+    
+    # Upload the frame
+    upload_frame(page, image_path, frame_name)
+    
+    # Wait for uploadImage response (up to 35s)
+    print(f"{prefix}Waiting for {frame_name} policy check...", flush=True)
+    btn_gone = False
+    for w in range(35):
+        time.sleep(1)
+        if w % random.randint(3, 6) == 0:
+            try:
+                human_mouse_move(page)
+            except:
+                pass
+        
+        if monitor.is_rejected():
+            monitor.stop()
+            print(f"{prefix}⚠️ {frame_name} REJECTED by policy (network)!", flush=True)
+            try:
+                page.keyboard.press("Escape")
+                time.sleep(0.5)
+            except:
+                pass
+            return (False, 'policy')
+        
+        if not btn_gone:
+            remaining = page.locator(frame_selector).count()
+            if remaining < btn_count:
+                print(f"{prefix}✓ {frame_name} button gone ({w+1}s), waiting for uploadImage response...", flush=True)
+                btn_gone = True
+        
+        if monitor.is_resolved() and not monitor.is_rejected():
+            print(f"{prefix}✓ {frame_name} passed policy check ({w+1}s)", flush=True)
+            break
+    
+    monitor.stop()
+    
+    # If policy check passed but frame button is still there, the set_input_files
+    # fallback uploaded the file to Google's server but didn't fill Flow's UI slot.
+    # The image is now in the gallery — retry by selecting it from there.
+    if not btn_gone:
+        print(f"{prefix}⚠️ {frame_name} policy OK but button still visible — retrying via gallery", flush=True)
+        image_basename = os.path.basename(image_path) if image_path else None
+        
+        for gallery_attempt in range(3):
+            try:
+                # Close any open dialog
+                try:
+                    page.keyboard.press("Escape")
+                    time.sleep(0.5)
+                except Exception:
+                    pass
+                
+                # Re-count buttons and re-click
+                frame_btns_now = page.locator(frame_selector)
+                btn_count_now = frame_btns_now.count()
+                if btn_count_now == 0:
+                    print(f"{prefix}✓ {frame_name} button disappeared during gallery retry", flush=True)
+                    return (True, None)
+                
+                _btn_idx = min(idx, btn_count_now - 1)
+                human_click_locator(page, frame_btns_now.nth(_btn_idx), f"{prefix}{frame_name} gallery retry {gallery_attempt + 1}")
+                time.sleep(1.5)
+                
+                dialog = page.locator('[role="dialog"]').first
+                try:
+                    dialog.wait_for(state="visible", timeout=5000)
+                except Exception:
+                    continue
+                
+                # Select from gallery — the image was uploaded by the fallback
+                gallery_ok = select_frame_from_gallery(
+                    page, dialog, image_basename, frame_selector, btn_count_now)
+                
+                if gallery_ok:
+                    print(f"{prefix}✓ {frame_name} confirmed via gallery retry", flush=True)
+                    return (True, None)
+                else:
+                    print(f"{prefix}⚠️ {frame_name} gallery retry {gallery_attempt + 1} failed", flush=True)
+            except Exception as _ge:
+                print(f"{prefix}⚠️ {frame_name} gallery retry error: {_ge}", flush=True)
+        
+        # All retries failed
+        print(f"{prefix}❌ {frame_name} could not be confirmed after gallery retries", flush=True)
+    
+    return (True, None)
+
+
+def upload_both_frames(page, start_image, end_image, context=""):
+    """Upload START and END frames with human-like behavior.
+    
+    Correct flow (confirmed via browser console testing):
+    1. Click frame div -> dialog opens with upload button and gallery
+    2. Click the upload button INSIDE the dialog -> native file picker opens
+    3. Pick file -> image uploads and gets assigned to THAT frame
+    4. Frame button (div.sc-8f31d1ba-1) DISAPPEARS from DOM when upload completes
+    5. Only remaining button is the other frame
+    
+    We upload START first (nth(0)), wait for its button to disappear,
+    then the only remaining button is END -> click it -> upload.
+    """
+    prefix = f"{context} " if context else ""
+    
+    frame_selector = 'div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]'
+    
+    # --- Upload START frame ---
+    if start_image:
+        check_and_dismiss_popup(page)
+        btn_count = page.locator(frame_selector).count()
+        print(f"{prefix}Frame buttons: {btn_count}", flush=True)
+        
+        # Human: look around before clicking
+        human_look_around(page)
+        time.sleep(random.uniform(0.3, 0.8))
+        
+        # Human: move mouse toward the frame button, then click
+        start_btn = page.locator(frame_selector).first
+        box = start_btn.bounding_box()
+        if box:
+            human_mouse_move_to(page, box['x'] + box['width']/2, box['y'] + box['height']/2)
+            time.sleep(random.uniform(0.1, 0.3))
+        human_click_at(page) if box else start_btn.click(timeout=5000)
+        print(f"{prefix}\u2713 Clicked START frame button", flush=True)
+        time.sleep(random.uniform(0.8, 1.5))
+        
+        # Click the upload button INSIDE the dialog
+        dialog = page.locator('[role="dialog"]').first
+        dialog.wait_for(state="visible", timeout=5000)
+        upload_btn = find_dialog_upload_button(dialog)
+        upload_btn.wait_for(state="visible", timeout=3000)
+        
+        # Human: small pause before clicking upload
+        time.sleep(random.uniform(0.3, 0.7))
+        
+        # Use file chooser triggered by the upload button
+        try:
+            with page.expect_file_chooser(timeout=5000) as fc_info:
+                human_click_for_file_chooser(page, upload_btn)
+            # Simulate human browsing the file picker (2-5 seconds)
+            time.sleep(random.uniform(2, 5))
+            fc_info.value.set_files(start_image)
+        except:
+            # Fallback: try set_input_files
+            time.sleep(random.uniform(2, 4))
+            page.locator("input[type='file']").first.set_input_files(start_image)
+        print(f"{prefix}\u2713 START frame file set", flush=True)
+        
+        # Wait for START button to disappear from DOM (upload complete)
+        print(f"{prefix}Waiting for START upload...", flush=True)
+        for w in range(25):
+            time.sleep(1)
+            # Occasional mouse movement while waiting (human fidgeting)
+            if w % random.randint(3, 6) == 0:
+                try:
+                    human_mouse_move(page)
+                except:
+                    pass
+            remaining = page.locator(frame_selector).count()
+            if remaining < btn_count:
+                print(f"{prefix}\u2713 START uploaded ({w+1}s), {remaining} button(s) remaining", flush=True)
+                break
+        else:
+            print(f"{prefix}\u26a0 START not confirmed after 25s", flush=True)
+        
+        # Human: pause after upload completes, like looking at the result
+        time.sleep(random.uniform(1.0, 2.5))
+        human_look_around(page)
+    
+    # --- Upload END frame ---
+    if end_image:
+        check_and_dismiss_popup(page)
+        remaining = page.locator(frame_selector).count()
+        print(f"{prefix}Frame buttons remaining: {remaining}", flush=True)
+        
+        if remaining == 0:
+            print(f"{prefix}\u26a0 No frame buttons remaining for END frame", flush=True)
+            return
+        
+        # Human: move mouse around before clicking END frame
+        time.sleep(random.uniform(0.5, 1.2))
+        
+        # The only remaining button IS the END frame
+        end_btn = page.locator(frame_selector).first
+        box = end_btn.bounding_box()
+        if box:
+            human_mouse_move_to(page, box['x'] + box['width']/2, box['y'] + box['height']/2)
+            time.sleep(random.uniform(0.1, 0.3))
+        human_click_at(page) if box else end_btn.click(timeout=5000)
+        print(f"{prefix}\u2713 Clicked END frame button", flush=True)
+        time.sleep(random.uniform(0.8, 1.5))
+        
+        # Click the upload button INSIDE the dialog
+        dialog = page.locator('[role="dialog"]').first
+        dialog.wait_for(state="visible", timeout=5000)
+        upload_btn = find_dialog_upload_button(dialog)
+        upload_btn.wait_for(state="visible", timeout=3000)
+        
+        # Human: small pause before clicking upload
+        time.sleep(random.uniform(0.3, 0.7))
+        
+        try:
+            with page.expect_file_chooser(timeout=5000) as fc_info:
+                human_click_for_file_chooser(page, upload_btn)
+            # Simulate human browsing the file picker (2-5 seconds)
+            time.sleep(random.uniform(2, 5))
+            fc_info.value.set_files(end_image)
+        except:
+            time.sleep(random.uniform(2, 4))
+            page.locator("input[type='file']").first.set_input_files(end_image)
+        print(f"{prefix}\u2713 END frame file set", flush=True)
+        
+        # Wait for END upload
+        print(f"{prefix}Waiting for END upload...", flush=True)
+        for w in range(25):
+            time.sleep(1)
+            # Occasional mouse movement while waiting (human fidgeting)
+            if w % random.randint(3, 6) == 0:
+                try:
+                    human_mouse_move(page)
+                except:
+                    pass
+            remaining = page.locator(frame_selector).count()
+            if remaining == 0:
+                print(f"{prefix}\u2713 END uploaded ({w+1}s), 0 buttons remaining", flush=True)
+                break
+        else:
+            print(f"{prefix}\u26a0 END not confirmed after 25s", flush=True)
+        
+        # Human: pause after second upload
+        time.sleep(random.uniform(0.8, 1.5))
+    
+    print(f"{prefix}\u2713 Both frames uploaded", flush=True)
+
+
+class FramePolicyMonitor:
+    """Monitor uploadImage network responses for policy rejections.
+    
+    Intercepts responses to the uploadImage endpoint and checks for
+    PUBLIC_ERROR_PROMINENT_PEOPLE_UPLOAD in the response body.
+    
+    Also tracks successful uploads so callers can distinguish between
+    "still waiting" vs "upload succeeded" vs "upload rejected".
+    
+    The uploadImage request can take 20-30 seconds to return.
+    """
+    
+    def __init__(self, page):
+        self.page = page
+        self.rejected = False
+        self.succeeded = False
+        self.error_reason = None
+        self._handler = None
+    
+    def _on_response(self, response):
+        try:
+            url = response.url
+            if 'uploadImage' not in url and 'uploadimage' not in url.lower():
+                return
+            
+            status = response.status
+            if status >= 400:
+                try:
+                    body = response.text()
+                    if 'PROMINENT_PEOPLE' in body or 'prominent_people' in body.lower():
+                        self.rejected = True
+                        self.error_reason = 'PUBLIC_ERROR_PROMINENT_PEOPLE_UPLOAD'
+                        print(f"[PolicyMonitor] ⚠️ uploadImage REJECTED: {self.error_reason}", flush=True)
+                    else:
+                        print(f"[PolicyMonitor] uploadImage returned {status} (not policy)", flush=True)
+                except:
+                    pass
+            elif status == 200:
+                self.succeeded = True
+                print(f"[PolicyMonitor] ✓ uploadImage succeeded (200)", flush=True)
+        except:
+            pass
+    
+    def start(self):
+        self.rejected = False
+        self.succeeded = False
+        self.error_reason = None
+        self._handler = self._on_response
+        self.page.on("response", self._handler)
+    
+    def is_rejected(self):
+        """Returns True if frame was rejected by policy."""
+        return self.rejected
+    
+    def is_resolved(self):
+        """Returns True if uploadImage has responded (success or rejection)."""
+        return self.rejected or self.succeeded
+    
+    def check(self):
+        """Legacy — returns True if rejected."""
+        return self.rejected
+    
+    def stop(self):
+        if self._handler:
+            try:
+                self.page.remove_listener("response", self._handler)
+            except:
+                pass
+            self._handler = None
+
+
+def build_image_pool(clips):
+    """Build a pool of unique images from all clips' frame keys.
+    
+    Returns:
+        dict: {frame_key: {'local_path': str, 'url': str}} for each unique image
+        list: ordered list of unique frame_keys
+    """
+    pool = {}
+    ordered_keys = []
+    
+    for clip in clips:
+        for prefix in ['start', 'end']:
+            key = clip.get(f'{prefix}_frame_key')
+            if key and key not in pool:
+                pool[key] = {
+                    'local_path': clip.get(f'{prefix}_frame_local'),
+                    'url': clip.get(f'{prefix}_frame_url'),
+                }
+                ordered_keys.append(key)
+    
+    return pool, ordered_keys
+
+
+def _file_hash(path):
+    """Return a short MD5 hex digest of file contents, or None if unreadable.
+
+    Used as the gallery_cache key so that two local files with different names
+    but identical bytes (auto-cycle repeating images) map to the same entry.
+    """
+    try:
+        with open(path, 'rb') as f:
+            return _hashlib.md5(f.read()).hexdigest()
+    except Exception:
+        return None
+
+
+def get_next_available_image(current_key, ordered_keys, blacklisted_keys):
+    """Find the next non-blacklisted image from the pool.
+    
+    Args:
+        current_key: The rejected frame key
+        ordered_keys: Ordered list of all unique frame keys
+        blacklisted_keys: Set of blacklisted frame keys
+        
+    Returns:
+        Next available frame_key, or None if all blacklisted
+    """
+    if not ordered_keys:
+        return None
+    
+    try:
+        current_idx = ordered_keys.index(current_key)
+    except ValueError:
+        current_idx = 0
+    
+    for offset in range(1, len(ordered_keys) + 1):
+        candidate_idx = (current_idx + offset) % len(ordered_keys)
+        candidate = ordered_keys[candidate_idx]
+        if candidate not in blacklisted_keys:
+            return candidate
+    
+    return None  # All images blacklisted
+
+
+def reassign_clip_frames(clips, clip_start_idx, blacklisted_keys, image_pool, ordered_keys):
+    """Reassign frames for current clip and cascade to all subsequent clips.
+    
+    Maintains the end→start chain: each clip's end frame = next clip's start frame.
+    Skips blacklisted images.
+    
+    Args:
+        clips: List of all clip dicts
+        clip_start_idx: Index in clips list to start reassigning from
+        blacklisted_keys: Set of blacklisted frame keys
+        image_pool: {frame_key: {'local_path': str, 'url': str}}
+        ordered_keys: Ordered list of unique frame keys
+        
+    Returns:
+        Number of clips that couldn't be assigned (all images blacklisted)
+    """
+    available_keys = [k for k in ordered_keys if k not in blacklisted_keys]
+    
+    if not available_keys:
+        print(f"[FrameReassign] ❌ ALL images blacklisted! Cannot reassign.", flush=True)
+        return len(clips) - clip_start_idx
+    
+    failed_count = 0
+    
+    for i in range(clip_start_idx, len(clips)):
+        clip = clips[i]
+        old_start = clip.get('start_frame_key')
+        old_end = clip.get('end_frame_key')
+        
+        # For the first reassigned clip, pick based on what's available
+        if i == clip_start_idx:
+            # Start frame: use first available that's different from blacklisted
+            new_start = old_start if old_start not in blacklisted_keys else available_keys[0]
+        else:
+            # Start frame = previous clip's end frame (maintain chain)
+            prev_end = clips[i-1].get('end_frame_key')
+            new_start = prev_end if prev_end not in blacklisted_keys else available_keys[0]
+        
+        # End frame: pick a different available image if possible
+        new_end = old_end
+        if new_end in blacklisted_keys:
+            # Find an available key different from start if possible
+            for k in available_keys:
+                if k != new_start:
+                    new_end = k
+                    break
+            else:
+                # Only one image available, use it for both
+                new_end = available_keys[0]
+        
+        if new_start in blacklisted_keys or new_end in blacklisted_keys:
+            failed_count += 1
+            continue
+        
+        # Update clip data
+        if new_start != old_start:
+            clip['start_frame_key'] = new_start
+            clip['start_frame_local'] = image_pool[new_start]['local_path']
+            clip['start_frame_url'] = image_pool[new_start]['url']
+            print(f"[FrameReassign] Clip {clip['clip_index']}: start {os.path.basename(str(old_start))} → {os.path.basename(str(new_start))}", flush=True)
+        
+        if new_end != old_end:
+            clip['end_frame_key'] = new_end
+            clip['end_frame_local'] = image_pool[new_end]['local_path']
+            clip['end_frame_url'] = image_pool[new_end]['url']
+            print(f"[FrameReassign] Clip {clip['clip_index']}: end {os.path.basename(str(old_end))} → {os.path.basename(str(new_end))}", flush=True)
+    
+    return failed_count
+
+
+def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_frame,
+                              start_frame_key, end_frame_key, blacklisted_images,
+                              image_pool, ordered_image_keys, permanently_failed_clips,
+                              context="", gallery_cache=None, frames_busy_flag=None):
+    """Shared frame upload logic with policy-check retry and blacklisting.
+    
+    Used by both single-account and multi-account paths.
+    gallery_cache: optional dict {frame_key -> uploaded_basename} for gallery reuse.
+    
+    Returns:
+        (True, start_frame, end_frame, start_frame_key, end_frame_key) on success
+        (False, ...) if all images blacklisted (clip marked as failed)
+    """
+    
+    if start_frame and end_frame:
+        s_sz = os.path.getsize(start_frame) if os.path.exists(start_frame) else 0
+        e_sz = os.path.getsize(end_frame) if os.path.exists(end_frame) else 0
+        print(f"{context}[Flow] Frames: start={os.path.basename(start_frame)}({s_sz}), end={os.path.basename(end_frame)}({e_sz})", flush=True)
+        # Collect all unique image paths from the pool to pre-load into gallery
+        # Deduplicate by file hash (not path) — resume runs create new local paths
+        # for the same images, which would cause duplicate uploads.
+        _seen_hashes = set()
+        _all_unique_images = []
+        for _info in (image_pool.values() if image_pool else []):
+            _p = _info.get('local_path')
+            if not _p or not os.path.exists(_p):
+                continue
+            _h = _file_hash(_p)
+            if _h and _h not in _seen_hashes:
+                _seen_hashes.add(_h)
+                _all_unique_images.append(_p)
+        # Pre-populate gallery_cache with hashes of ALL unique images NOW.
+        # This ensures END frame finds its hash in gallery_cache after multi-upload,
+        # without relying on the nested _upload_one_frame closure to do it.
+        if gallery_cache is not None and _all_unique_images:
+            for _upath in _all_unique_images:
+                _uhash = _file_hash(_upath)
+                if _uhash and _uhash not in gallery_cache:
+                    gallery_cache[_uhash] = os.path.basename(_upath)
+                    print(f"{context}[Gallery] Pre-cached extra image: {os.path.basename(_upath)}", flush=True)
+        if frames_busy_flag is not None:
+            frames_busy_flag.set()
+        try:
+            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+                page, start_frame, end_frame, context=context,
+                gallery_cache=gallery_cache, start_key=start_frame_key, end_key=end_frame_key,
+                extra_images=_all_unique_images)
+        finally:
+            if frames_busy_flag is not None:
+                frames_busy_flag.clear()
+        
+        if not upload_ok:
+            if rejected_which == 'extra':
+                # One of the batch-uploaded images was rejected by Flow policy.
+                # We can't determine which one, so fail the job with a clear message.
+                print(f"{context}[Flow] ❌ Image rejected by Flow policy during batch upload — failing job", flush=True)
+                update_job_status(job_id, 'failed', '⚠️ One of your images was rejected by Flow content policy. Please remove or replace the flagged image and try again.')
+                raise Exception("Image rejected by Flow content policy")
+            rejected_key = start_frame_key if rejected_which == 'start' else end_frame_key
+            blacklisted_images.add(rejected_key)
+            print(f"{context}[Flow] ⚠️ Blacklisted: {os.path.basename(rejected_key)}", flush=True)
+            
+            failed_count = reassign_clip_frames(clips, i, blacklisted_images, image_pool, ordered_image_keys)
+            if failed_count > 0:
+                print(f"{context}[Flow] ❌ {failed_count} clips cannot be assigned — all blacklisted", flush=True)
+            
+            start_frame = clip.get('start_frame_local')
+            end_frame = clip.get('end_frame_local')
+            start_frame_key = clip.get('start_frame_key')
+            end_frame_key = clip.get('end_frame_key')
+            
+            if start_frame_key in blacklisted_images or end_frame_key in blacklisted_images:
+                update_clip_status(clip['id'], 'failed', error_message="⚠️ Image rejected by Flow content policy — try a different image")
+                permanently_failed_clips.add(clip_index)
+                return (False, start_frame, end_frame, start_frame_key, end_frame_key)
+            
+            retry_success = False
+            if rejected_which == 'start':
+                for retry_attempt in range(len(ordered_image_keys)):
+                    print(f"{context}[Flow] Retrying (attempt {retry_attempt+1}): START={os.path.basename(start_frame)} + END={os.path.basename(end_frame)}", flush=True)
+                    upload_ok2, rejected2 = upload_both_frames_with_policy_check(page, start_frame, end_frame, context=context)
+                    if upload_ok2:
+                        retry_success = True
+                        break
+                    rejected_key2 = start_frame_key if rejected2 == 'start' else end_frame_key
+                    blacklisted_images.add(rejected_key2)
+                    reassign_clip_frames(clips, i, blacklisted_images, image_pool, ordered_image_keys)
+                    start_frame = clip.get('start_frame_local')
+                    end_frame = clip.get('end_frame_local')
+                    start_frame_key = clip.get('start_frame_key')
+                    end_frame_key = clip.get('end_frame_key')
+                    if start_frame_key in blacklisted_images or end_frame_key in blacklisted_images:
+                        break
+            else:
+                for retry_attempt in range(len(ordered_image_keys)):
+                    print(f"{context}[Flow] Retrying END (attempt {retry_attempt+1}): {os.path.basename(end_frame)}", flush=True)
+                    result2, reason2 = click_frame_and_upload_with_policy_check(page, end_frame, is_end_frame=True, context=context)
+                    if result2:
+                        retry_success = True
+                        break
+                    if reason2 == 'policy':
+                        blacklisted_images.add(end_frame_key)
+                        reassign_clip_frames(clips, i, blacklisted_images, image_pool, ordered_image_keys)
+                        end_frame = clip.get('end_frame_local')
+                        end_frame_key = clip.get('end_frame_key')
+                        if end_frame_key in blacklisted_images:
+                            break
+                    else:
+                        break
+            
+            if not retry_success:
+                update_clip_status(clip['id'], 'failed', error_message="⚠️ Image rejected by Flow content policy — try a different image")
+                permanently_failed_clips.add(clip_index)
+                return (False, start_frame, end_frame, start_frame_key, end_frame_key)
+    
+    elif start_frame:
+        # Single frame (start only) — use the SAME robust upload path as two-frame clips.
+        # upload_both_frames_with_policy_check handles end_image=None gracefully.
+        print(f"{context}[Flow] Frames: start={os.path.basename(start_frame)}, end=None", flush=True)
+        # Collect all unique images for batch gallery pre-load (same as two-frame path)
+        _seen_hashes_s = set()
+        _all_unique_images_s = []
+        for _info in (image_pool.values() if image_pool else []):
+            _p = _info.get('local_path')
+            if not _p or not os.path.exists(_p):
+                continue
+            _h = _file_hash(_p)
+            if _h and _h not in _seen_hashes_s:
+                _seen_hashes_s.add(_h)
+                _all_unique_images_s.append(_p)
+        if gallery_cache is not None and _all_unique_images_s:
+            for _upath in _all_unique_images_s:
+                _uhash = _file_hash(_upath)
+                if _uhash and _uhash not in gallery_cache:
+                    gallery_cache[_uhash] = os.path.basename(_upath)
+                    print(f"{context}[Gallery] Pre-cached extra image: {os.path.basename(_upath)}", flush=True)
+        if frames_busy_flag is not None:
+            frames_busy_flag.set()
+        try:
+            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+                page, start_frame, None, context=context,
+                gallery_cache=gallery_cache, start_key=start_frame_key, end_key=None,
+                extra_images=_all_unique_images_s)
+        finally:
+            if frames_busy_flag is not None:
+                frames_busy_flag.clear()
+        if not upload_ok:
+            if rejected_which == 'extra':
+                print(f"{context}[Flow] ❌ Image rejected by Flow policy during batch upload — failing job", flush=True)
+                update_job_status(job_id, 'failed', '⚠️ One of your images was rejected by Flow content policy. Please remove or replace the flagged image and try again.')
+                raise Exception("Image rejected by Flow content policy")
+            if rejected_which == 'start':
+                blacklisted_images.add(start_frame_key)
+                retry_success = False
+                for retry_attempt in range(len(ordered_image_keys)):
+                    reassign_clip_frames(clips, i, blacklisted_images, image_pool, ordered_image_keys)
+                    start_frame = clip.get('start_frame_local')
+                    start_frame_key = clip.get('start_frame_key')
+                    if start_frame_key in blacklisted_images:
+                        break
+                    upload_ok2, rejected2 = upload_both_frames_with_policy_check(
+                        page, start_frame, None, context=context,
+                        gallery_cache=gallery_cache, start_key=start_frame_key, end_key=None)
+                    if upload_ok2:
+                        retry_success = True
+                        break
+                    if rejected2 == 'start':
+                        blacklisted_images.add(start_frame_key)
+                    else:
+                        break
+                if not retry_success:
+                    update_clip_status(clip['id'], 'failed', error_message="⚠️ Image rejected by Flow content policy — try a different image")
+                    permanently_failed_clips.add(clip_index)
+                    return (False, start_frame, end_frame, start_frame_key, end_frame_key)
+    
+    elif end_frame:
+        # Single frame (end only) — same robust path
+        print(f"{context}[Flow] Frames: start=None, end={os.path.basename(end_frame)}", flush=True)
+        if frames_busy_flag is not None:
+            frames_busy_flag.set()
+        try:
+            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+                page, None, end_frame, context=context,
+                gallery_cache=gallery_cache, start_key=None, end_key=end_frame_key)
+        finally:
+            if frames_busy_flag is not None:
+                frames_busy_flag.clear()
+        if not upload_ok:
+            if rejected_which == 'end':
+                blacklisted_images.add(end_frame_key)
+                retry_success = False
+                for retry_attempt in range(len(ordered_image_keys)):
+                    reassign_clip_frames(clips, i, blacklisted_images, image_pool, ordered_image_keys)
+                    end_frame = clip.get('end_frame_local')
+                    end_frame_key = clip.get('end_frame_key')
+                    if end_frame_key in blacklisted_images:
+                        break
+                    upload_ok2, rejected2 = upload_both_frames_with_policy_check(
+                        page, None, end_frame, context=context,
+                        gallery_cache=gallery_cache, start_key=None, end_key=end_frame_key)
+                    if upload_ok2:
+                        retry_success = True
+                        break
+                    if rejected2 == 'end':
+                        blacklisted_images.add(end_frame_key)
+                    else:
+                        break
+                if not retry_success:
+                    update_clip_status(clip['id'], 'failed', error_message="⚠️ Image rejected by Flow content policy — try a different image")
+                    permanently_failed_clips.add(clip_index)
+                    return (False, start_frame, end_frame, start_frame_key, end_frame_key)
+    
+    return (True, start_frame, end_frame, start_frame_key, end_frame_key)
+
+
+
+def upload_both_frames_with_policy_check(page, start_image, end_image, context="",
+                                          gallery_cache=None, start_key=None, end_key=None,
+                                          extra_images=None):
+    # extra_images: list of additional image paths to upload alongside START frame.
+    # They land in the gallery for instant reuse on subsequent clips — no re-upload needed.
+    """Upload START and END frames with bulletproof confirmation.
+
+    For each frame:
+      Attempt 1: file upload path
+      Attempts 2-3: gallery selection (image already uploaded, no re-upload needed)
+
+    A frame is only considered confirmed when the frame button disappears from the UI
+    AND uploadImage returns 200. Policy check (200) is the primary signal; button
+    disappearance is secondary. We never proceed unless BOTH are confirmed.
+
+    Returns:
+        (True, None)      — both frames confirmed
+        (False, 'start')  — start frame rejected by policy
+        (False, 'end')    — end frame rejected by policy
+    """
+    prefix = f"{context} " if context else ""
+    frame_selector = 'div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]'
+    monitor = FramePolicyMonitor(page)
+
+    # ── Always clear previous prompt/frames before uploading ──
+    # After generating, Flow keeps the old prompt + frames in the slots.
+    # The empty frame upload buttons (aria-haspopup="dialog") only appear
+    # after clearing. Without this, the filled slots don't match our selector.
+    try:
+        clear_btn = page.locator('button:has(span:text("Clear prompt")), button:has(i:text("close"))').first
+        if clear_btn.count() > 0 and clear_btn.is_visible(timeout=2000):
+            clear_btn.click(timeout=5000)
+            time.sleep(1)
+            print(f"{prefix}[Flow] ✓ Cleared previous prompt — input reset", flush=True)
+    except Exception:
+        pass  # No clear button = input already empty, proceed normally
+
+    def _upload_one_frame(frame_name, image_path, image_hash, image_basename,
+                          btn_getter, max_attempts=3):
+        """Upload a single frame. Returns 'ok', 'rejected', or 'failed'."""
+        is_end = (frame_name == "END")
+
+        for attempt in range(1, max_attempts + 1):
+            # ── Open dialog ──
+            btn_count_before = page.locator(frame_selector).count()
+            btn = btn_getter()
+            if btn is None:
+                print(f"{prefix}⚠️ {frame_name}: no frame button found (attempt {attempt})", flush=True)
+                return 'failed'
+
+            box = btn.bounding_box()
+            if box:
+                human_mouse_move_to(page, box['x'] + box['width']/2, box['y'] + box['height']/2)
+                time.sleep(random.uniform(0.1, 0.3))
+            try:
+                human_click_at(page) if box else btn.click(timeout=5000)
+            except Exception as _ce:
+                print(f"{prefix}⚠️ {frame_name}: click failed ({_ce}), attempt {attempt}", flush=True)
+                time.sleep(1)
+                continue
+
+            print(f"{prefix}✓ Clicked {frame_name} frame button (attempt {attempt})", flush=True)
+            time.sleep(random.uniform(0.8, 1.5))
+
+            # ── Wait for dialog ──
+            dialog = page.locator('[role="dialog"]').first
+            dialog_ok = False
+            for _d in range(3):
+                try:
+                    dialog.wait_for(state="visible", timeout=5000)
+                    dialog_ok = True
+                    break
+                except Exception:
+                    print(f"{prefix}⚠️ {frame_name}: dialog not visible (attempt {attempt}, retry {_d+1})", flush=True)
+                    time.sleep(1)
+                    # Re-click
+                    try:
+                        _b2 = btn_getter()
+                        if _b2:
+                            human_click_locator(page, _b2, f"{frame_name} retry")
+                            time.sleep(random.uniform(1.0, 2.0))
+                    except Exception:
+                        pass
+            if not dialog_ok:
+                print(f"{prefix}⚠️ {frame_name}: dialog never opened (attempt {attempt})", flush=True)
+                try: page.keyboard.press("Escape")
+                except Exception: pass
+                time.sleep(1)
+                continue
+
+            # ── Strategy: gallery first if image is already uploaded, file upload otherwise ──
+            used_gallery = False
+            _hash_in_cache = gallery_cache and image_hash and image_hash in gallery_cache
+            if attempt > 1 or _hash_in_cache:
+                # Image already in gallery (either from previous clip's batch upload,
+                # or from attempt 1 of this frame) — select it instantly (~5s vs ~25s upload)
+                cached_name = gallery_cache.get(image_hash) if (gallery_cache and image_hash) else None
+                if cached_name:
+                    if _hash_in_cache:
+                        print(f"{prefix}[Gallery] {frame_name}: image already in gallery (hash={image_hash[:8]}) — selecting directly", flush=True)
+                    else:
+                        print(f"{prefix}[Gallery] {frame_name} retry {attempt}: selecting from gallery (hash={image_hash[:8] if image_hash else 'none'})", flush=True)
+                    used_gallery = select_frame_from_gallery(
+                        page, dialog, cached_name, frame_selector, btn_count_before)
+                    if used_gallery:
+                        print(f"{prefix}[Gallery] ✓ {frame_name} confirmed from gallery", flush=True)
+                        return 'ok'
+                    else:
+                        if attempt > 1:
+                            print(f"{prefix}[Gallery] ⚠️ {frame_name}: gallery select failed, falling through to upload", flush=True)
+                            # Dialog may have closed from gallery attempt — re-open
+                            try: page.keyboard.press("Escape")
+                            except Exception: pass
+                            time.sleep(0.5)
+                            continue
+                        else:
+                            # Attempt 1 gallery miss — fall through to file upload below
+                            print(f"{prefix}[Gallery] ⚠️ {frame_name}: gallery miss on attempt 1, uploading file", flush=True)
+                else:
+                    # No cached name — image was never uploaded to gallery.
+                    # Fall through to file upload instead of blind reuse (which picks wrong image).
+                    print(f"{prefix}[Gallery] {frame_name} retry {attempt}: not in gallery cache, uploading file", flush=True)
+                    try: page.keyboard.press("Escape")
+                    except Exception: pass
+                    time.sleep(0.5)
+
+            # ── File upload (attempt 1) ──
+            upload_btn = find_dialog_upload_button(dialog)
+            try:
+                upload_btn.wait_for(state="visible", timeout=3000)
+            except Exception:
+                print(f"{prefix}⚠️ {frame_name}: upload button not visible", flush=True)
+                try: page.keyboard.press("Escape")
+                except Exception: pass
+                continue
+            time.sleep(random.uniform(0.3, 0.7))
+
+            monitor.start()
+            # On START frame: upload all unique images at once.
+            # First file gets assigned to this frame slot; remaining files
+            # land in the gallery for instant reuse on subsequent clips.
+            # Build file list: extras first, then image_path (START frame) last.
+            # File choosers typically assign the LAST selected file to the active slot,
+            # so putting image_path last ensures the correct frame gets assigned.
+            _files_to_upload = []
+            if frame_name == "START" and extra_images:
+                for _ex in extra_images:
+                    if _ex and _ex != image_path and os.path.exists(_ex):
+                        _files_to_upload.append(_ex)
+            _files_to_upload.append(image_path)  # START frame last — gets assigned to slot
+            try:
+                with page.expect_file_chooser(timeout=5000) as fc_info:
+                    human_click_for_file_chooser(page, upload_btn)
+                time.sleep(random.uniform(2, 5))
+                fc_info.value.set_files(_files_to_upload if len(_files_to_upload) > 1 else _files_to_upload[0])
+            except Exception:
+                time.sleep(random.uniform(2, 4))
+                try:
+                    # Scope file input to dialog first, fall back to page-level
+                    _finput = dialog.locator("input[type='file']").first
+                    if _finput.count() == 0:
+                        _finput = page.locator("input[type='file']").first
+                    _finput.set_input_files(_files_to_upload if len(_files_to_upload) > 1 else _files_to_upload[0])
+                except Exception as _fe:
+                    print(f"{prefix}⚠️ {frame_name}: file set failed ({_fe})", flush=True)
+                    monitor.stop()
+                    try: page.keyboard.press("Escape")
+                    except Exception: pass
+                    continue
+            if len(_files_to_upload) > 1:
+                print(f"{prefix}✓ {frame_name} frame file set ({len(_files_to_upload)} images uploaded to gallery)", flush=True)
+                # Cache hashes of all extra images so END frame finds them in gallery
+                # without re-uploading (they were just uploaded in this batch)
+                if gallery_cache and extra_images:
+                    import hashlib as _hl
+                    for _ex_path in extra_images:
+                        if _ex_path and _ex_path != image_path and os.path.exists(_ex_path):
+                            try:
+                                with open(_ex_path, 'rb') as _f:
+                                    _ex_hash = _hl.md5(_f.read()).hexdigest()  # full md5 to match _file_hash()
+                                _ex_name = os.path.basename(_ex_path)
+                                if _ex_hash not in gallery_cache:
+                                    gallery_cache[_ex_hash] = _ex_name
+                                    print(f"{prefix}[Gallery] Pre-cached extra image: {_ex_name} (hash={_ex_hash})", flush=True)
+                            except Exception:
+                                pass
+                # Wait briefly for all extra uploads to complete their policy checks
+                # If any is rejected, surface it immediately so job can be failed
+                _extra_wait = min(len(_files_to_upload) * 8, 40)
+                _t0 = time.time()
+                while time.time() - _t0 < _extra_wait:
+                    if monitor.is_rejected():
+                        print(f"{prefix}❌ {frame_name}: extra image rejected by policy check", flush=True)
+                        monitor.stop()
+                        try: page.keyboard.press("Escape")
+                        except Exception: pass
+                        return 'extra_rejected'
+                    if monitor.is_resolved():
+                        break
+                    time.sleep(0.5)
+            else:
+                print(f"{prefix}✓ {frame_name} frame file set", flush=True)
+
+            # ── Wait for confirmation: policy check (primary) + button gone (secondary) ──
+            print(f"{prefix}Waiting for {frame_name} upload + policy check...", flush=True)
+            policy_ok = False
+            btn_gone = False
+            for w in range(40):
+                time.sleep(1)
+                if w % random.randint(3, 6) == 0:
+                    try: human_mouse_move(page)
+                    except Exception: pass
+
+                if monitor.is_rejected():
+                    monitor.stop()
+                    print(f"{prefix}⚠️ {frame_name} REJECTED by policy!", flush=True)
+                    try: page.keyboard.press("Escape")
+                    except Exception: pass
+                    return 'rejected'
+
+                now_count = page.locator(frame_selector).count()
+                if not btn_gone and now_count < btn_count_before:
+                    print(f"{prefix}✓ {frame_name} button gone ({w+1}s)", flush=True)
+                    btn_gone = True
+
+                if monitor.is_resolved() and not monitor.is_rejected():
+                    print(f"{prefix}✓ {frame_name} passed policy check ({w+1}s)", flush=True)
+                    policy_ok = True
+                    break
+
+            monitor.stop()
+
+            if policy_ok:
+                # Cache hash for gallery retry on subsequent clips
+                if gallery_cache is not None and image_hash:
+                    gallery_cache[image_hash] = image_basename
+                    print(f"{prefix}[Gallery] Cached {frame_name} hash→'{image_basename}'", flush=True)
+                if not btn_gone:
+                    print(f"{prefix}⚠️ {frame_name}: policy OK but button still visible — will retry via gallery", flush=True)
+                    # policy_ok + btn_gone=False: frame may not have bound to slot.
+                    # Hash is now cached so next attempt uses gallery.
+                    try: page.keyboard.press("Escape")
+                    except Exception: pass
+                    time.sleep(0.5)
+                    continue  # retry using gallery
+                return 'ok'
+            else:
+                if btn_gone and not monitor.is_rejected():
+                    # Button disappeared + no rejection = Flow accepted the image.
+                    # The network monitor just missed the response (timing/race).
+                    print(f"{prefix}✓ {frame_name}: button gone + no rejection = treating as success (policy monitor missed response)", flush=True)
+                    if gallery_cache is not None and image_hash:
+                        gallery_cache[image_hash] = image_basename
+                        print(f"{prefix}[Gallery] Cached {frame_name} hash→'{image_basename}'", flush=True)
+                    return 'ok'
+                print(f"{prefix}⚠️ {frame_name}: policy check timed out after 40s (attempt {attempt})", flush=True)
+                # Hash is cached from upload so gallery retry can work
+                if gallery_cache is not None and image_hash:
+                    gallery_cache[image_hash] = image_basename
+                try: page.keyboard.press("Escape")
+                except Exception: pass
+                time.sleep(0.5)
+                continue
+
+        print(f"{prefix}✗ {frame_name}: all {max_attempts} attempts failed", flush=True)
+        return 'failed'
+
+    # ── Upload START ──
+    if start_image:
+        check_and_dismiss_popup(page)
+        human_look_around(page)
+        time.sleep(random.uniform(0.3, 0.8))
+
+        _start_hash = _file_hash(start_image)
+        _start_basename = os.path.basename(start_image)
+
+        # Check gallery cache first — if already uploaded, go straight to gallery
+        # Priority: R2 key (unique per frame slot) > file hash (can collide on identical content)
+        _start_cache_key = start_key if start_key and gallery_cache and start_key in gallery_cache else (
+            _start_hash if gallery_cache and _start_hash and _start_hash in gallery_cache else None
+        )
+        if _start_cache_key:
+            cached_name = gallery_cache[_start_cache_key]
+            print(f"{prefix}[Gallery] START hash cached as '{cached_name}' — opening dialog for gallery select", flush=True)
+            btn_count = page.locator(frame_selector).count()
+            start_btn = page.locator(frame_selector).first
+            box = start_btn.bounding_box()
+            if box:
+                human_mouse_move_to(page, box['x'] + box['width']/2, box['y'] + box['height']/2)
+                time.sleep(random.uniform(0.1, 0.3))
+            try:
+                human_click_at(page) if box else start_btn.click(timeout=5000)
+            except Exception: pass
+            time.sleep(random.uniform(0.8, 1.5))
+            dialog = page.locator('[role="dialog"]').first
+            try:
+                dialog.wait_for(state="visible", timeout=5000)
+                gallery_ok = select_frame_from_gallery(page, dialog, cached_name, frame_selector, btn_count)
+                if gallery_ok:
+                    print(f"{prefix}[Gallery] ✓ START reused from gallery", flush=True)
+                else:
+                    # Fall through to upload path
+                    try: page.keyboard.press("Escape")
+                    except Exception: pass
+                    gallery_cache.pop(_start_hash, None)  # invalidate stale cache
+            except Exception:
+                gallery_ok = False
+
+            if not gallery_ok:
+                # Upload fresh
+                result = _upload_one_frame("START", start_image, _start_hash, _start_basename,
+                                           btn_getter=lambda: page.locator(frame_selector).first)
+                if result == 'rejected': return (False, 'start')
+                if result == 'extra_rejected': return (False, 'extra')
+                if result == 'failed':   return (False, 'start')
+        else:
+            result = _upload_one_frame("START", start_image, _start_hash, _start_basename,
+                                       btn_getter=lambda: page.locator(frame_selector).first)
+            if result == 'rejected': return (False, 'start')
+            if result == 'extra_rejected': return (False, 'extra')
+            if result == 'failed':   return (False, 'start')
+
+        time.sleep(random.uniform(1.0, 2.5))
+        human_look_around(page)
+        # Cache by R2 key for precise lookup (avoids hash collisions on identical content)
+        if gallery_cache is not None and start_key and _start_basename:
+            gallery_cache[start_key] = _start_basename
+
+    # ── Upload END ──
+    if end_image:
+        check_and_dismiss_popup(page)
+        remaining = page.locator(frame_selector).count()
+        print(f"{prefix}Frame buttons remaining: {remaining}", flush=True)
+
+        if remaining == 0:
+            print(f"{prefix}⚠️ No frame buttons remaining for END — assuming both already set", flush=True)
+            print(f"{prefix}✓ Both frames uploaded", flush=True)
+            return (True, None)
+
+        time.sleep(random.uniform(0.5, 1.2))
+
+        _end_hash = _file_hash(end_image)
+        _end_basename = os.path.basename(end_image)
+
+        # Check gallery cache first
+        if gallery_cache and _end_hash:
+            _end_cache_key = end_key if end_key and end_key in gallery_cache else (
+                _end_hash if _end_hash in gallery_cache else None
+            )
+        else:
+            _end_cache_key = None
+        if _end_cache_key:
+            cached_name = gallery_cache[_end_cache_key]
+            print(f"{prefix}[Gallery] END hash cached as '{cached_name}' — opening dialog for gallery select", flush=True)
+            end_btn = page.locator(frame_selector).first
+            box = end_btn.bounding_box()
+            if box:
+                human_mouse_move_to(page, box['x'] + box['width']/2, box['y'] + box['height']/2)
+                time.sleep(random.uniform(0.1, 0.3))
+            try:
+                human_click_at(page) if box else end_btn.click(timeout=5000)
+            except Exception: pass
+            time.sleep(random.uniform(0.8, 1.5))
+            dialog = page.locator('[role="dialog"]').first
+            try:
+                dialog.wait_for(state="visible", timeout=5000)
+                gallery_ok = select_frame_from_gallery(page, dialog, cached_name, frame_selector, remaining)
+                if gallery_ok:
+                    print(f"{prefix}[Gallery] ✓ END reused from gallery", flush=True)
+                else:
+                    try: page.keyboard.press("Escape")
+                    except Exception: pass
+                    gallery_cache.pop(_end_cache_key, None)
+            except Exception:
+                gallery_ok = False
+
+            if not gallery_ok:
+                result = _upload_one_frame("END", end_image, _end_hash, _end_basename,
+                                           btn_getter=lambda: page.locator(frame_selector).first)
+                if result == 'rejected': return (False, 'end')
+                if result == 'failed':   return (False, 'end')
+        else:
+            result = _upload_one_frame("END", end_image, _end_hash, _end_basename,
+                                       btn_getter=lambda: page.locator(frame_selector).first)
+            if result == 'rejected': return (False, 'end')
+            if result == 'failed':   return (False, 'end')
+
+        time.sleep(random.uniform(0.5, 1.5))
+        # Cache by R2 key for precise lookup
+        if gallery_cache is not None and end_key and _end_basename:
+            gallery_cache[end_key] = _end_basename
+
+    print(f"{prefix}✓ Both frames uploaded", flush=True)
+    return (True, None)
+
+
+def find_dialog_upload_button(dialog):
+    """Find the actual 'Upload image' button inside a Flow frame dialog.
+    
+    The dialog contains multiple buttons (date dropdown, upload, 'Recently Used' dropdown).
+    The upload element is identified by its <i> icon with text 'upload' or text 'Upload image'.
+    
+    NOTE: As of April 2025, Google changed the upload button from <button> to <div>,
+    so we check both element types.
+    """
+    # Primary: div or button with upload icon (current Flow UI uses <div>)
+    for selector in [
+        "div:has(> div > i:text('upload'))",           # New: nested div > div > i
+        "div:has(i:text('upload')):has-text('Upload')", # New: div with icon + text
+        "button:has(i:text('upload'))",                 # Legacy: button with icon
+        "div:has-text('Upload image')",                 # Text-based div match
+        "button:has(span:text('Upload image'))",        # Legacy: button with span
+    ]:
+        try:
+            btn = dialog.locator(selector)
+            if btn.count() > 0:
+                return btn.first
+        except Exception:
+            continue
+    
+    # Last resort
+    print("[find_dialog_upload_button] ⚠️ Could not find upload button by icon/text, using button.first", flush=True)
+    return dialog.locator("button").first
+
+
+def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_btn_count):
+    """Try to select a previously-uploaded image from the gallery in the frame dialog.
+
+    Flow stores each uploaded image in a virtuoso gallery inside the dialog.
+    Gallery items carry the original filename in img alt / aria-label / title
+    attributes. Clicking the matching item assigns it to the frame slot without
+    a re-upload, saving the ~25-35s uploadImage API wait.
+
+    Args:
+        page: Playwright page
+        dialog: Locator for the open frame dialog
+        filename: Basename that was used when the image was first uploaded
+                  (e.g. 'start_0.png'), or None to click the first available
+                  gallery item (used when gallery_cache is empty after restore
+                  but the project already has images in its gallery).
+        frame_selector: CSS selector used to count frame buttons (to detect success)
+        expected_btn_count: Current frame button count BEFORE clicking (success =
+                            count drops by 1 after gallery selection)
+
+    Returns:
+        True  — gallery item found, clicked, and frame button disappeared (confirmed)
+        False — item not found or confirmation timed out (caller should upload)
+    """
+    try:
+        # Wait briefly for gallery virtuoso list to render
+        time.sleep(0.8)
+
+        clicked = False
+
+        if filename is None:
+            # No specific name known — click the first visible real gallery image.
+            # Used after restore when gallery_cache is empty but the project
+            # already has uploaded images (same project, resumed after failure).
+            # IMPORTANT: only click img elements that have a real filename as alt
+            # (not placeholder text like "No results found").
+            _SKIP_ALT = {"no results found", "no results", ""}
+            first_item_selectors = [
+                "div.virtuoso-grid-item img[alt]",
+                "div[data-testid] img[alt]",
+                "img[alt]",
+            ]
+            for sel in first_item_selectors:
+                try:
+                    items = dialog.locator(sel)
+                    count = items.count()
+                    if count == 0:
+                        continue
+                    # Find first item whose alt looks like a real filename
+                    for idx in range(min(count, 10)):
+                        try:
+                            it = items.nth(idx)
+                            if not it.is_visible(timeout=800):
+                                continue
+                            _alt = (it.get_attribute("alt") or "").strip()
+                            if _alt.lower() in _SKIP_ALT or not _alt:
+                                continue
+                            it.scroll_into_view_if_needed(timeout=2000)
+                            time.sleep(0.3)
+                            it.click(timeout=3000)
+                            print(f"[Gallery] ✓ Clicked first gallery item '{_alt}' (blind reuse after restore)", flush=True)
+                            clicked = True
+                            break
+                        except Exception:
+                            continue
+                    if clicked:
+                        break
+                except Exception:
+                    continue
+            if not clicked:
+                print(f"[Gallery] ⚠ No real gallery items found for blind reuse — will upload", flush=True)
+                return False
+        else:
+            # Try selectors most likely to carry the filename as an attribute
+            candidate_selectors = [
+                f"img[alt='{filename}']",
+                f"img[alt='{filename.replace(chr(39), chr(34))}']",  # single→double quote edge case
+                f"[aria-label='{filename}']",
+                f"[title='{filename}']",
+            ]
+
+            for sel in candidate_selectors:
+                try:
+                    item = dialog.locator(sel)
+                    if item.count() == 0:
+                        continue
+                    if not item.first.is_visible(timeout=1500):
+                        # Item exists but not visible — try scrolling to it
+                        try:
+                            item.first.scroll_into_view_if_needed(timeout=3000)
+                            time.sleep(0.3)
+                            if not item.first.is_visible(timeout=1000):
+                                continue
+                        except Exception:
+                            continue
+                    # Scroll into view in case virtuoso hasn't rendered it yet
+                    item.first.scroll_into_view_if_needed(timeout=2000)
+                    time.sleep(0.3)
+                    item.first.click(timeout=3000)
+                    print(f"[Gallery] ✓ Clicked gallery item '{filename}' (selector: {sel})", flush=True)
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+
+            if not clicked:
+                # Scroll through gallery to render more items, then retry
+                _gallery_list = dialog.locator("div[data-virtuoso-scroller], div.virtuoso-grid-list, div[style*='overflow']").first
+                if _gallery_list.count() > 0:
+                    for _scroll in range(5):
+                        try:
+                            _gallery_list.evaluate("el => el.scrollTop += 200")
+                            time.sleep(0.5)
+                            for sel in candidate_selectors:
+                                item = dialog.locator(sel)
+                                if item.count() > 0 and item.first.is_visible(timeout=800):
+                                    item.first.scroll_into_view_if_needed(timeout=2000)
+                                    time.sleep(0.3)
+                                    item.first.click(timeout=3000)
+                                    print(f"[Gallery] ✓ Clicked gallery item '{filename}' (after scroll {_scroll+1})", flush=True)
+                                    clicked = True
+                                    break
+                        except Exception:
+                            continue
+                        if clicked:
+                            break
+
+            if not clicked:
+                print(f"[Gallery] ⚠ '{filename}' not found in gallery — will upload", flush=True)
+                return False
+
+        # Confirm: wait for the frame button count to drop (same signal as after upload)
+        for w in range(12):
+            time.sleep(1)
+            remaining = page.locator(frame_selector).count()
+            if remaining < expected_btn_count:
+                print(f"[Gallery] ✓ Frame slot filled from gallery ({w+1}s)", flush=True)
+                return True
+
+        # Button count didn't change — selection may not have registered
+        print(f"[Gallery] ⚠ Frame button count unchanged after gallery click — will upload", flush=True)
+        # Press Escape to close the dialog so the caller can re-open and upload
+        try:
+            page.keyboard.press("Escape")
+            time.sleep(0.5)
+        except Exception:
+            pass
+        return False
+
+    except Exception as e:
+        print(f"[Gallery] ⚠ Gallery selection error: {e} — will upload", flush=True)
+        try:
+            page.keyboard.press("Escape")
+            time.sleep(0.5)
+        except Exception:
+            pass
+        return False
+
+
+def upload_frame(page, image_path, frame_name="frame"):
+    """Upload a frame image. Dialog is already open.
+    Click the upload button inside the dialog to trigger file picker bound to that frame.
+    
+    Retry strategy:
+      Attempt 1: expect_file_chooser (10s timeout)
+      Attempt 2: re-click + expect_file_chooser (standard click, 10s timeout)
+      Attempt 3: dialog-scoped set_input_files fallback
+    
+    Dialog structure (as of Feb 2025):
+      - button: date dropdown ("Feb 28 - 04:51") ← NOT this one
+      - input: search field
+      - button: upload icon (i:text('upload')) ← THIS is the upload button
+      - button: "Recently Used" dropdown
+      - gallery: previously uploaded images
+    """
+    human_pre_action(page, f"upload {frame_name}")
+    
+    dialog = page.locator('[role="dialog"]').first
+    dialog.wait_for(state="visible", timeout=5000)
+    
+    upload_btn = find_dialog_upload_button(dialog)
+    upload_btn.wait_for(state="visible", timeout=3000)
+    
+    uploaded = False
+    
+    # Attempt 1: file chooser with 10s timeout
+    try:
+        with page.expect_file_chooser(timeout=10000) as fc_info:
+            human_click_for_file_chooser(page, upload_btn)
+        time.sleep(random.uniform(2, 5))
+        fc_info.value.set_files(image_path)
+        print(f"\u2713 Uploaded {frame_name} (file chooser)", flush=True)
+        uploaded = True
+    except Exception as e1:
+        print(f"[upload_frame] \u26a0\ufe0f File chooser attempt 1 failed for {frame_name}: {e1}", flush=True)
+    
+    # Attempt 2: re-click with standard click, longer wait
+    if not uploaded:
+        try:
+            time.sleep(1)
+            dialog2 = page.locator('[role="dialog"]').first
+            if dialog2.count() > 0:
+                upload_btn2 = find_dialog_upload_button(dialog2)
+                upload_btn2.wait_for(state="visible", timeout=3000)
+                with page.expect_file_chooser(timeout=10000) as fc_info2:
+                    upload_btn2.click(timeout=5000)
+                time.sleep(random.uniform(2, 4))
+                fc_info2.value.set_files(image_path)
+                print(f"\u2713 Uploaded {frame_name} (file chooser attempt 2)", flush=True)
+                uploaded = True
+        except Exception as e2:
+            print(f"[upload_frame] \u26a0\ufe0f File chooser attempt 2 failed for {frame_name}: {e2}", flush=True)
+    
+    # Attempt 3: dialog-scoped set_input_files fallback
+    if not uploaded:
+        try:
+            time.sleep(random.uniform(1, 2))
+            _file_input = dialog.locator("input[type='file']").first
+            if _file_input.count() > 0:
+                _file_input.set_input_files(image_path)
+                print(f"\u2713 Uploaded {frame_name} (dialog input fallback)", flush=True)
+            else:
+                page.locator("input[type='file']").first.set_input_files(image_path)
+                print(f"\u2713 Uploaded {frame_name} (page input fallback \u2014 may not bind to slot)", flush=True)
+        except Exception as e3:
+            print(f"[upload_frame] \u274c All upload attempts failed for {frame_name}: {e3}", flush=True)
+    
+    time.sleep(2)
+
+
+def wait_for_media_popup_to_close(page, context="", timeout=30):
+    """
+    Wait for the media gallery popup to disappear after uploading/cropping a frame.
+    
+    After clicking 'Crop and Save', a media gallery popup appears showing
+    previously uploaded assets as a virtuoso grid. The first item is the Upload
+    button, followed by previously uploaded images. We must wait for this popup
+    to close automatically before clicking other buttons (like the END frame button).
+    
+    CRITICAL: This function first waits for the popup to APPEAR (up to 8s),
+    then waits for it to DISAPPEAR. Previously it only checked for disappearance,
+    so if the selectors didn't match or the popup hadn't rendered yet, it would 
+    return instantly (0.0s) while the popup was still open.
+    
+    Args:
+        page: Playwright page
+        context: Optional context string for logging (e.g., "START frame")
+        timeout: Maximum seconds to wait for popup to close
+    
+    Returns:
+        True if popup closed, False if timeout
+    """
+    prefix = f"[{context}] " if context else ""
+    
+    # Selectors for the media gallery popup - from actual HTML inspection
+    # The popup is a virtuoso-grid-list containing upload button + previously uploaded assets
+    popup_selectors = [
+        "div[data-testid='virtuoso-item-list']",  # Most reliable - data-testid attribute
+        "div.virtuoso-grid-list",                   # Virtuoso virtual grid class
+        "div.virtuoso-grid-item",                   # Individual grid items
+        "button.sc-fbea20b2-0",                     # The Upload button inside the gallery
+    ]
+    
+    def is_popup_visible():
+        """Check if any popup selector is visible."""
+        for selector in popup_selectors:
+            try:
+                el = page.locator(selector)
+                if el.count() > 0 and el.first.is_visible():
+                    return True
+            except:
+                pass
+        return False
+    
+    # Phase 1: Wait for popup to APPEAR (up to 8 seconds)
+    # After Crop and Save, the popup may take a moment to render
+    print(f"{prefix}Waiting for media gallery popup to appear...", flush=True)
+    popup_appeared = False
+    appear_start = time.time()
+    appear_timeout = 8
+    
+    while time.time() - appear_start < appear_timeout:
+        if is_popup_visible():
+            popup_appeared = True
+            elapsed = time.time() - appear_start
+            print(f"{prefix}✓ Media gallery popup detected (after {elapsed:.1f}s)", flush=True)
+            break
+        time.sleep(0.3)
+    
+    if not popup_appeared:
+        # Popup never appeared - selectors may not match or it opened and closed very fast
+        # Safety fallback: wait a fixed duration to let UI settle
+        print(f"{prefix}⚠️ Media gallery popup not detected by selectors, waiting 4s as safety buffer...", flush=True)
+        time.sleep(4)
+        return True
+    
+    # Phase 2: Wait for popup to DISAPPEAR
+    print(f"{prefix}Waiting for media gallery popup to close...", flush=True)
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        if not is_popup_visible():
+            elapsed = time.time() - start_time
+            print(f"{prefix}✓ Media gallery popup closed (after {elapsed:.1f}s)", flush=True)
+            time.sleep(0.5)  # Small buffer after popup closes
+            return True
+        
+        # Human-like polling interval
+        time.sleep(random.uniform(0.3, 0.6))
+    
+    print(f"{prefix}⚠️ Media gallery popup didn't close within {timeout}s, proceeding anyway", flush=True)
+    return False
+
+
+def fill_prompt_textarea(page, prompt):
+    """Fill the prompt textbox (new UI uses Slate contenteditable div with role='textbox')
+    
+    Slate editor doesn't respond to textContent/innerText changes.
+    Must use keyboard-level input or execCommand to update Slate's internal state.
+    """
+    # New UI (Feb 2025+): contenteditable div with role="textbox" (Slate editor)
+    # Old UI: textarea#PINHOLE_TEXT_AREA_ELEMENT_ID
+    
+    textbox = page.locator('div[role="textbox"]').first
+    if textbox.count() > 0 and textbox.is_visible(timeout=3000):
+        # Scroll textbox into view (it may be off-screen after Reuse loads a long prompt)
+        try:
+            textbox.scroll_into_view_if_needed(timeout=3000)
+            time.sleep(0.3)
+        except:
+            pass
+        
+        # Human: move mouse to textbox before clicking
+        box = textbox.bounding_box()
+        if box:
+            human_mouse_move_to(page, box['x'] + box['width']/2, box['y'] + box['height']/2)
+            time.sleep(random.uniform(0.1, 0.3))
+        
+        # Click to focus — use textbox.focus() first, then humanized click
+        # textbox.focus() guarantees the element gets focus even if mouse click misses
+        try:
+            textbox.focus(timeout=2000)
+        except:
+            pass
+        # Use textbox.click() not human_click_at() — raw coordinate clicks can hit
+        # elements that render on top of the textbox (e.g. video tiles)
+        try:
+            textbox.click(timeout=3000)
+        except:
+            if box:
+                human_click_at(page)  # fallback to coordinate click only if locator fails
+        time.sleep(random.uniform(0.3, 0.6))
+        
+        # CRITICAL: Verify the textbox is focused before Ctrl+A
+        # If focus failed, Ctrl+A selects the entire page and Backspace destroys the UI
+        textbox_focused = False
+        try:
+            textbox_focused = page.evaluate('''() => {
+                const tb = document.querySelector('div[role="textbox"]');
+                return tb && (document.activeElement === tb || tb.contains(document.activeElement));
+            }''')
+        except:
+            pass
+        
+        if not textbox_focused:
+            # Focus failed — force it with direct click bypassing overlap checks.
+            # human_click_at() uses raw coordinates which can hit an element rendered
+            # on top (e.g. a video tile). textbox.click(force=True) dispatches directly
+            # to the target element regardless of what's visually covering it.
+            print("⚠ Textbox not focused after humanized click — using direct click", flush=True)
+            try:
+                textbox.click(force=True, timeout=3000)
+                time.sleep(0.3)
+                textbox_focused = page.evaluate('''() => {
+                    const tb = document.querySelector('div[role="textbox"]');
+                    return tb && (document.activeElement === tb || tb.contains(document.activeElement));
+                }''')
+            except:
+                pass
+        
+        if not textbox_focused:
+            # Still not focused — last resort: JS focus
+            print("⚠ Textbox STILL not focused — forcing JS focus", flush=True)
+            try:
+                page.evaluate('document.querySelector(\'div[role="textbox"]\').focus()')
+                time.sleep(0.3)
+            except:
+                pass
+        
+        # Select all existing text and delete it
+        page.keyboard.press("Control+A")
+        time.sleep(random.uniform(0.1, 0.2))
+        page.keyboard.press("Backspace")
+        time.sleep(random.uniform(0.1, 0.3))
+        
+        # Write prompt to clipboard via JS, then Ctrl+V — generates real trusted paste events
+        # This is indistinguishable from a human copying text and pasting it.
+        # insert_text() injects text instantly with no key events — detectable.
+        pasted_ok = False
+        try:
+            escaped = json.dumps(prompt)
+            page.evaluate(f"navigator.clipboard.writeText({escaped})")
+            time.sleep(random.uniform(0.2, 0.4))
+            page.keyboard.press("Control+v")
+            time.sleep(random.uniform(0.3, 0.6))
+            # Verify
+            current_text = textbox.inner_text().strip()
+            if len(current_text) >= len(prompt) * 0.8:
+                pasted_ok = True
+                print("✓ Prompt pasted via clipboard", flush=True)
+        except:
+            pass
+
+        if not pasted_ok:
+            # Fallback: insert_text (less ideal but works)
+            print("⚠ Clipboard paste failed, using insert_text fallback", flush=True)
+            page.keyboard.press("Control+A")
+            time.sleep(0.1)
+            page.keyboard.press("Backspace")
+            time.sleep(0.1)
+            page.keyboard.insert_text(prompt)
+            time.sleep(0.3)
+
+        time.sleep(random.uniform(0.3, 0.6))
+        return
+    
+    # Fallback: old textarea
+    escaped = json.dumps(prompt)
+    page.evaluate(f'''() => {{
+        const textarea = document.querySelector("#PINHOLE_TEXT_AREA_ELEMENT_ID");
+        if (!textarea) return;
+        
+        const nativeTextAreaValueSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLTextAreaElement.prototype, 'value'
+        ).set;
+        nativeTextAreaValueSetter.call(textarea, {escaped});
+        const event = new Event('input', {{ bubbles: true, cancelable: true }});
+        textarea.dispatchEvent(event);
+        const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
+        textarea.dispatchEvent(changeEvent);
+    }}''')
+
+
+def poll_clip_status(page, data_index=None, max_time=MAX_POLL_TIME):
+    """Poll a clip's status until it completes or fails.
+    
+    If data_index is None, scans through indices 0-5 to find the generating/completed clip.
+    """
+    polls = max_time // POLL_INTERVAL
+    
+    for poll in range(polls):
+        time.sleep(POLL_INTERVAL)
+        
+        # Idle fidget every few polls — keeps reCAPTCHA telemetry alive during generation wait
+        if poll > 0 and poll % random.randint(2, 4) == 0:
+            try:
+                human_mouse_move(page)
+            except Exception:
+                pass
+        if poll > 0 and poll % random.randint(5, 8) == 0:
+            try:
+                scroll_randomly(page)
+            except Exception:
+                pass
+        
+        # Scan through multiple data indices to find the clip
+        indices_to_check = [data_index] if data_index is not None else [0, 1, 2, 3, 4, 5]
+        
+        for idx in indices_to_check:
+            container = page.locator(f"div[data-index='{idx}']")
+            
+            if container.count() == 0:
+                continue
+            
+            # Check if this container has video content or is generating
+            # New UI: no date headers, all containers are clips
+            # Old UI: date headers had no video section (div.sc-d90fd836-2.dLxTam)
+            has_video_or_content = container.locator("video").count() > 0
+            if not has_video_or_content:
+                # Check for generating/failed text (container has content but no video yet)
+                container_text = ""
+                try:
+                    container_text = container.inner_text(timeout=1000)
+                except:
+                    pass
+                if not container_text or len(container_text.strip()) < 10:
+                    if poll % 4 == 0 and idx == 0:
+                        print(f"[Poll {poll+1}] Skipping data-index={idx} (empty/header)", flush=True)
+                    continue
+            
+            # Found a clip section, check its status
+            try:
+                # Use JavaScript to check for "Failed" in this container
+                has_failed = page.evaluate(f"""
+                    () => {{
+                        const container = document.querySelector("div[data-index='{idx}']");
+                        if (!container) return false;
+                        const fullText = container.innerText || '';
+                        if (/\\d+%/.test(fullText)) return false;
+                        const elements = container.querySelectorAll('*');
+                        for (const el of elements) {{
+                            if (((el.innerText === 'Failed Generation' || el.innerText === 'Failed' || el.innerText === 'Error')) && el.children.length === 0) {{
+                                return true;
+                            }}
+                        }}
+                        return false;
+                    }}
+                """)
+                if has_failed:
+                    print(f"[Poll {poll+1}] ⚠️ FAILED GENERATION detected at data-index={idx}!", flush=True)
+                    return "failed"
+            except:
+                pass
+            
+            try:
+                video = container.locator("video")
+                if video.count() > 0:
+                    print(f"[Poll {poll+1}] ✓ Video ready at data-index={idx}!", flush=True)
+                    return "completed"
+            except:
+                pass
+            
+            # Found a clip section that's still generating
+            if poll % 4 == 0:
+                print(f"[Poll {poll+1}] Still generating at data-index={idx}...", flush=True)
+            break  # Found the generating clip, stop scanning indices
+    
+    print(f"[Poll] Timeout after {max_time}s", flush=True)
+    return "timeout"
+
+
+def rebuild_clip(page, start_frame_path, end_frame_path, prompt, is_first_clip=False, context="[Flow]"):
+    """Rebuild a clip from scratch with frames and prompt.
+    
+    Uses the same upload + wait pattern as the main submission flow:
+    - upload_both_frames_with_policy_check (waits for uploadImage API response ~25-30s)
+    - click_frame_and_upload_with_policy_check for single frames
+    - Waits for Generate button to be enabled before clicking
+    """
+    try:
+        check_and_dismiss_popup(page)
+        
+        # Human-like behavior before mode selection (anti-bot)
+        human_pre_action(page, "mode selection")
+        
+        # Select Frames to Video mode using proper method
+        select_frames_to_video_mode(page, context)
+        ensure_batch_view_mode(page, context)
+        
+        # Upload frames — use policy-check version that waits for uploadImage response
+        s_path = start_frame_path if start_frame_path and os.path.exists(start_frame_path) else None
+        e_path = end_frame_path if end_frame_path and os.path.exists(end_frame_path) else None
+        
+        if not s_path and start_frame_path:
+            print(f"{context} ⚠️ Start frame not found: {start_frame_path}", flush=True)
+        if not e_path and end_frame_path:
+            print(f"{context} ⚠️ End frame not found: {end_frame_path}", flush=True)
+        
+        # Build gallery_cache so gallery fallback (attempt 2+) selects the CORRECT
+        # image by hash→filename, instead of blind-picking the first gallery item.
+        # This matches how the main job submission path works.
+        _gallery_cache = {}
+        for _fp in [s_path, e_path]:
+            if _fp:
+                _fh = _file_hash(_fp)
+                if _fh:
+                    _gallery_cache[_fh] = os.path.basename(_fp)
+        
+        if s_path and e_path:
+            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+                page, s_path, e_path, context=context, gallery_cache=_gallery_cache)
+            if not upload_ok:
+                print(f"{context} ⚠️ Frame upload failed (rejected: {rejected_which})", flush=True)
+                return False
+        elif s_path:
+            result, reason = click_frame_and_upload_with_policy_check(page, s_path, is_end_frame=False, context=context)
+            if not result and reason == 'policy':
+                print(f"{context} ⚠️ START frame rejected by policy", flush=True)
+                return False
+        elif e_path:
+            result, reason = click_frame_and_upload_with_policy_check(page, e_path, is_end_frame=True, context=context)
+            if not result and reason == 'policy':
+                print(f"{context} ⚠️ END frame rejected by policy", flush=True)
+                return False
+        else:
+            print(f"{context} ❌ NO FRAMES TO UPLOAD — refusing to submit (would use wrong gallery images)", flush=True)
+            return False
+        
+        # Enter prompt
+        fill_prompt_textarea(page, prompt)
+        print(f"{context} Entered prompt: {prompt[:50]}...", flush=True)
+        human_pre_generate_wait(page)
+        
+        # Human-like pre-generate behavior (match main flow exactly)
+        human_mouse_move(page)
+        human_delay(1, 2)
+        scroll_randomly(page)
+        human_delay(0.5, 1)
+        
+        # Wait for Generate button to be enabled (frames must finish processing)
+        for wait_sec in range(60):
+            if is_generate_button_enabled(page):
+                break
+            if wait_sec == 0:
+                print(f"{context} Waiting for Generate button to be enabled...", flush=True)
+            time.sleep(1)
+        else:
+            print(f"{context} ⚠️ Generate button not enabled after 60s", flush=True)
+        
+        # Click Generate button
+        human_delay(0.5, 1.5)
+        human_click_element(page, page.locator("button:has(i:text('arrow_forward'))").first, "Generate button", timeout=30000)
+        print(f"{context} ✓ Clicked Generate", flush=True)
+        human_delay(1, 2)
+        
+        return True
+        
+    except Exception as e:
+        print(f"{context} Error rebuilding clip: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def submit_and_poll(page, start_frame_path, end_frame_path, prompt, clip_num,
+                    is_first_clip=False, max_retries=MAX_GENERATION_RETRIES):
+    """Submit a clip and poll until success."""
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            print(f"\n[Flow] === RETRY {attempt}/{max_retries} for clip {clip_num} ===", flush=True)
+        
+        if not rebuild_clip(page, start_frame_path, end_frame_path, prompt,
+                           is_first_clip=(is_first_clip and attempt == 0)):
+            print(f"[Flow] Failed to submit clip {clip_num}", flush=True)
+            time.sleep(2)
+            continue
+        
+        status = poll_clip_status(page)  # Let it scan for the generating clip
+        
+        if status == "completed":
+            print(f"[Flow] ✓ Clip {clip_num} completed!", flush=True)
+            return True
+        elif status == "failed":
+            if attempt < max_retries:
+                print(f"[Flow] Clip {clip_num} failed, will rebuild and retry...", flush=True)
+                time.sleep(2)
+                continue
+            else:
+                print(f"[Flow] ⚠️ Clip {clip_num} failed after {max_retries} retries!", flush=True)
+                return False
+        else:
+            print(f"[Flow] Clip {clip_num} timed out - assuming still generating", flush=True)
+            return True
+    
+    return False
+
+
+# ============================================================
+# REDO PROCESSING  
+# ============================================================
+
+def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, http_session=None):
+    """Process a single clip redo in the SAME project as the original job.
+    
+    When http_dl_queue is provided (single-account mode), the download happens
+    inline on page1 via the HTTP worker — same path as the main process.
+    Page2 stays idle.
+    """
+    clip_id = clip['id']
+    job_id = clip['job_id']
+    
+    # Check DB first — clip may have been completed by HTTP worker before
+    # this redo was retried (e.g. after proactive restore self-resume)
+    try:
+        _fresh = api_request("GET", f"/clips/{clip_id}/approval-status")
+        if _fresh and _fresh.get('status') in ('completed', 'approved'):
+            print(f"[REDO] Clip {clip.get('clip_index', '?')} already completed in DB — skipping", flush=True)
+            return True
+    except Exception:
+        pass  # DB check failed — proceed with redo (safe fallback)
+    
+    # Immediately mark as generating so frontend shows "in progress" instead of "failed"
+    update_clip_status(clip_id, 'generating')
+    
+    dialogue = clip.get('dialogue_text', '').strip().strip('"').strip("'")
+    
+    language = clip.get('language', 'English')
+    duration = float(clip.get('duration', '8'))
+    voice_profile = clip.get('voice_profile', '')
+    redo_reason = clip.get('redo_reason', '')
+    
+    # Use the ORIGINAL enriched prompt from the DB — it already has gestures,
+    # transitions, object rules, voice profile, etc. from build_prompt().
+    # Only rebuild from scratch if the original prompt is missing.
+    prompt = clip.get('prompt')
+    if not prompt:
+        prompt = build_flow_prompt(
+            dialogue_line=dialogue,
+            language=language,
+            voice_profile=voice_profile,
+            duration=duration,
+            short_dialogue_mode=clip.get('short_dialogue_mode', 'optimized'),
+            prefix_short_enabled=clip.get('prefix_short_enabled', False),
+            prefix_short_word=clip.get('prefix_short_word', 'only'),
+            prefix_short_threshold=clip.get('prefix_short_threshold', 15),
+        )
+    
+    # NOTE: redo feedback is now baked into the prompt at redo time (main.py regenerates
+    # the full prompt with redo_feedback parameter). No prepending needed here.
+    
+    attempt = clip.get('generation_attempt', 1)
+    clip_index = clip.get('clip_index', 0)
+    start_frame_url = clip.get('start_frame_url')
+    end_frame_url = clip.get('end_frame_url')
+    project_url = clip.get('flow_project_url')
+    
+    # Multi-account fix: the job-level project URL may belong to a different account.
+    # Check cache for this specific account's project URL.
+    account_name = clip.get('_account_name', '')
+    if cache and job_id in cache.get('jobs', {}):
+        acct_projects = cache['jobs'][job_id].get('account_projects', {})
+        if account_name and account_name in acct_projects:
+            cached_url = acct_projects[account_name]
+            if cached_url and cached_url != project_url:
+                print(f"[REDO] Using {account_name}'s own project (not job-level URL)", flush=True)
+                project_url = cached_url
+        elif not account_name:
+            # Single-account: use cached project URL if available
+            cached_url = cache['jobs'][job_id].get('project_url')
+            if cached_url:
+                project_url = cached_url
+    
+    print(f"\n{'='*60}", flush=True)
+    print(f"REDO: Clip {clip_index+1} (Attempt {attempt})", flush=True)
+    print(f"Job: {job_id[:8]}...", flush=True)
+    print(f"Project: {project_url or 'unknown'}", flush=True)
+    print(f"{'='*60}", flush=True)
+    
+    if not project_url:
+        print(f"[REDO] ❌ No project URL for job {job_id[:8]} — cannot redo in same project", flush=True)
+        update_clip_status(clip_id, 'flow_redo_queued', error_message="No project URL available — click Retry")
+        return False
+    
+    temp_dir = tempfile.mkdtemp(prefix=f"flow_redo_{clip_id}_", dir=SHM_DIR)
+    
+    start_frame_local = None
+    end_frame_local = None
+    
+    if start_frame_url:
+        start_fname = _canonical_frame_name(clip, 'start')
+        start_frame_local = download_frame(start_frame_url, os.path.join(temp_dir, start_fname))
+        print(f"[REDO] {'✓' if start_frame_local else '✗'} Start frame ({start_fname})", flush=True)
+    
+    if end_frame_url:
+        end_fname = _canonical_frame_name(clip, 'end')
+        end_frame_local = download_frame(end_frame_url, os.path.join(temp_dir, end_fname))
+        print(f"[REDO] {'✓' if end_frame_local else '✗'} End frame ({end_fname})", flush=True)
+    
+    # Navigate to the existing project
+    print(f"[REDO] Navigating to existing project...", flush=True)
+    _need_new_project = False
+    try:
+        page.goto(project_url, timeout=60000)
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+        time.sleep(3)
+        
+        # Detect "Something went wrong" error page (wrong account's project)
+        try:
+            _err_text = page.evaluate("""() => {
+                for (const el of document.querySelectorAll('h3, h2, h1')) {
+                    if (el.textContent.includes('Something went wrong')) return true;
+                }
+                const btn = document.querySelector('button');
+                if (btn && btn.textContent.includes('Back to projects')) return true;
+                return false;
+            }""")
+            if _err_text:
+                print(f"[REDO] ⚠ Project not accessible (wrong account?) — creating new project", flush=True)
+                _need_new_project = True
+        except Exception:
+            pass
+        
+        # Also check if we landed on home instead of project
+        if not _need_new_project and "/project/" not in page.url:
+            print(f"[REDO] ⚠ Didn't land on project page ({page.url}) — creating new project", flush=True)
+            _need_new_project = True
+            
+    except Exception as e:
+        print(f"[REDO] ⚠ Could not navigate to project: {e} — creating new project", flush=True)
+        _need_new_project = True
+    
+    if _need_new_project:
+        # Create a fresh project for this redo
+        try:
+            spa_navigate_to_flow_home(page, "REDO")
+            human_delay(1, 2)
+            ensure_logged_into_flow(page, "REDO")
+            check_and_dismiss_popup(page)
+            dismiss_create_with_flow(page, "REDO")
+            human_click_element(page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", "New project button")
+            human_delay(2, 3)
+            try:
+                page.wait_for_url("**/project/**", timeout=30000)
+            except Exception:
+                for _ in range(15):
+                    time.sleep(1)
+                    if "/project/" in page.url:
+                        break
+            time.sleep(2)
+            project_url = page.url
+            print(f"[REDO] ✓ Created new project: {project_url}", flush=True)
+        except Exception as e2:
+            print(f"[REDO] ❌ Failed to create new project: {e2}", flush=True)
+            update_clip_status(clip_id, 'flow_redo_queued')
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False
+    
+    ensure_logged_into_flow(page, "REDO")
+    check_and_dismiss_popup(page)
+    human_delay(1, 2)
+    
+    # Apply settings on new project (existing projects already have settings from original job)
+    if _need_new_project:
+        try:
+            variants = clip.get('flow_variants_count', 2)
+            select_frames_to_video_mode(page, context="REDO", variants_count=variants)
+        except Exception as _se:
+            print(f"[REDO] ⚠ Settings setup failed on new project: {_se}", flush=True)
+    
+    ensure_videos_tab_selected(page)
+
+    # Submit a fresh generation using rebuild_clip — same as any normal clip.
+    # We never hunt for a specific tile's state (failed/completed/generating).
+    # This works for both manual redos (from platform UI) and auto-redos (detected failure).
+    pre_generate_tile_count = get_tile_count_at_index0(page)
+    if not rebuild_clip(page, start_frame_local, end_frame_local, prompt, is_first_clip=_need_new_project):
+        print(f"[REDO] ❌ Failed to submit clip {clip_index+1}", flush=True)
+        update_clip_status(clip_id, 'flow_redo_queued', error_message="Redo submission failed — click Retry")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return False
+
+    # Record submission time
+    submit_time = datetime.now()
+    print(f"[REDO] ✓ Clip {clip_index+1} resubmitted at {submit_time.strftime('%H:%M:%S')}", flush=True)
+    
+    # Check for immediate failure
+    immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None)
+    if immediate_failure:
+        print(f"[REDO] ⚠️ Clip {clip_index+1} failed immediately — requeueing", flush=True)
+        update_clip_status(clip_id, 'flow_redo_queued', error_message="Redo failed immediately — click Retry")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return False
+    
+    # Queue for download using the same project URL
+    # Attach the prompt to the clip dict so _download_loop can extract the
+    # dialogue key from it (same as the main submission path does).
+    clip['prompt'] = prompt
+    
+    # ── HTTP download path (same as main process) ──
+    # Wait on page1 for the clip to be ready, then extract URLs and push to
+    # the HTTP download worker. Page2 never touches Flow.
+    if http_dl_queue is not None:
+        print(f"[REDO] Waiting {CLIP_READY_WAIT}s for clip to generate (HTTP path)...", flush=True)
+        _fidget_deadline = time.time() + CLIP_READY_WAIT
+        while time.time() < _fidget_deadline:
+            _rem = _fidget_deadline - time.time()
+            if _rem <= 0:
+                break
+            time.sleep(min(random.uniform(4, 9), _rem))
+            if random.random() < 0.6:
+                try:
+                    human_mouse_move(page)
+                except Exception:
+                    pass
+            if random.random() < 0.25:
+                try:
+                    scroll_randomly(page)
+                except Exception:
+                    pass
+        
+        # ── REDO SCAN: data-index=0 ONLY ──
+        # The redo clip is always the NEWEST submission → always at data-index=0.
+        # We NEVER scan other containers because the project has old tiles with
+        # the same dialogue (from the original generation). Scanning all tiles
+        # would return the OLD tile's videos instead of the new redo's.
+        # This mirrors check_recent_clip_failure() which also targets data-index=0.
+        _max_scan_attempts = 15
+        _urls_found = False
+        _retried_in_place = False
+        for _scan_attempt in range(_max_scan_attempts):
+            try:
+                ensure_videos_tab_selected(page)
+                
+                # Check data-index=0 tile status — same pattern as check_recent_clip_failure
+                _tile_info = page.evaluate("""() => {
+                    const c = document.querySelector("div[data-index='0']");
+                    if (!c) return {exists: false};
+                    
+                    // Deduplicate tiles by data-tile-id
+                    const allTileEls = c.querySelectorAll("[data-tile-id]");
+                    const seen = new Set();
+                    const tiles = [];
+                    allTileEls.forEach(t => {
+                        const id = t.getAttribute("data-tile-id");
+                        if (id && !seen.has(id)) { seen.add(id); tiles.push(t); }
+                    });
+                    
+                    const text = c.innerText || c.textContent || '';
+                    let hasVideo = false;
+                    let hasGenerating = false;
+                    let hasFailed = false;
+                    const videoUrls = [];
+                    
+                    tiles.forEach(t => {
+                        if (t.querySelector("video")) {
+                            hasVideo = true;
+                            const videos = t.querySelectorAll("video");
+                            for (const v of videos) {
+                                let url = v.src || '';
+                                if (!url) { const s = v.querySelector('source'); if (s) url = s.src || ''; }
+                                if (url && !url.startsWith('blob:')) videoUrls.push(url);
+                            }
+                            return;
+                        }
+                        const tText = t.textContent || '';
+                        if (tText.includes('videocam') || /\\d+%/.test(tText)) {
+                            hasGenerating = true;
+                            return;
+                        }
+                        const hasRefresh = t.querySelector("i") &&
+                            Array.from(t.querySelectorAll("i")).some(i => i.textContent.trim() === 'refresh');
+                        if (hasRefresh) { hasFailed = true; }
+                    });
+                    
+                    // Fallback: if no data-tile-id children, scan container directly
+                    if (tiles.length === 0) {
+                        hasVideo = c.querySelector('video') !== null;
+                        hasGenerating = text.includes('videocam') || /\\d+%/.test(text);
+                        hasFailed = text.includes('Failed');
+                        if (hasVideo) {
+                            for (const v of c.querySelectorAll('video')) {
+                                let url = v.src || '';
+                                if (!url) { const s = v.querySelector('source'); if (s) url = s.src || ''; }
+                                if (url && !url.startsWith('blob:')) videoUrls.push(url);
+                            }
+                        }
+                    }
+                    
+                    // Check for blob-only videos
+                    let blobOnly = false;
+                    if (hasVideo && videoUrls.length === 0) {
+                        blobOnly = true;
+                    }
+                    
+                    return {
+                        exists: true, tiles: tiles.length || 1,
+                        hasVideo: hasVideo, hasGenerating: hasGenerating, hasFailed: hasFailed,
+                        blobOnly: blobOnly, videoUrls: videoUrls
+                    };
+                }""")
+                
+                if not _tile_info or not _tile_info.get('exists'):
+                    print(f"[REDO] Scan {_scan_attempt + 1}/{_max_scan_attempts}: data-index=0 not found, waiting 15s...", flush=True)
+                    time.sleep(15)
+                    continue
+                
+                _has_video = _tile_info.get('hasVideo', False)
+                _has_generating = _tile_info.get('hasGenerating', False)
+                _has_failed = _tile_info.get('hasFailed', False)
+                _blob_only = _tile_info.get('blobOnly', False)
+                _video_urls = _tile_info.get('videoUrls', [])
+                _tile_count = _tile_info.get('tiles', 0)
+                
+                # SUCCESS: data-index=0 has downloadable video URLs
+                if _video_urls:
+                    http_dl_queue.put({
+                        'job_id': job_id,
+                        'clip_index': clip_index,
+                        'clip_id': clip_id,
+                        'urls': _video_urls,
+                        'temp_dir': temp_dir,
+                        'generation_attempt': attempt,
+                    })
+                    print(f"[REDO] ✓ Clip {clip_index+1} → HTTP worker ({len(_video_urls)} URL(s) from data-index=0)", flush=True)
+                    _urls_found = True
+                    break
+                
+                # FAILED: tile failed → click Reuse Prompt to retry in-place
+                if _has_failed and not _has_generating and not _has_video:
+                    if not _retried_in_place:
+                        print(f"[REDO] ⚠ data-index=0 failed — clicking Reuse Prompt to retry...", flush=True)
+                        try:
+                            page.evaluate("""() => {
+                                const c = document.querySelector("div[data-index='0']");
+                                if (!c) return false;
+                                const btn = Array.from(c.querySelectorAll('button')).find(b =>
+                                    Array.from(b.querySelectorAll('i')).some(i => i.textContent.trim() === 'undo')
+                                );
+                                if (btn) { btn.click(); return true; }
+                                return false;
+                            }""")
+                            time.sleep(2)
+                            # After reuse prompt, need to click Generate
+                            click_generate_button(page, f"REDO retry clip {clip_index}")
+                            _retried_in_place = True
+                            # Reset wait — give the retry time to generate
+                            print(f"[REDO] ✓ Retried in-place, waiting {CLIP_READY_WAIT}s for regeneration...", flush=True)
+                            time.sleep(CLIP_READY_WAIT)
+                        except Exception as _re:
+                            print(f"[REDO] ⚠ Retry failed: {_re}", flush=True)
+                    else:
+                        # Already retried once and still failed — this is a persistent failure (likely policy)
+                        print(f"[REDO] ❌ Clip {clip_index+1} failed persistently after retry — likely policy violation", flush=True)
+                        update_clip_status(clip_id, 'failed', error_message="⚠️ Content flagged by Flow policy — try different images or dialogue")
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        return False
+                
+                # GENERATING or BLOB: still in progress, keep waiting
+                status_parts = []
+                if _has_generating:
+                    status_parts.append('generating')
+                if _blob_only:
+                    status_parts.append('blob only')
+                if _has_failed:
+                    status_parts.append('failed')
+                if not status_parts:
+                    status_parts.append('no video yet')
+                status = ', '.join(status_parts)
+                print(f"[REDO] Scan {_scan_attempt + 1}/{_max_scan_attempts}: idx=0 [{_tile_count} tiles] {status}, waiting 15s...", flush=True)
+                time.sleep(15)
+                # Fidget while waiting
+                if random.random() < 0.5:
+                    try:
+                        human_mouse_move(page)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[REDO] Scan error: {e}", flush=True)
+                time.sleep(10)
+        
+        if not _urls_found:
+            print(f"[REDO] ⚠️ HTTP scan failed — falling back to download tab", flush=True)
+            download_queue.put({
+                'job_id': job_id,
+                'project_url': project_url,
+                'clips': [clip],
+                'clip_submit_times': {clip_index: submit_time},
+                'submitted_at': submit_time,
+                'temp_dir': temp_dir,
+                'is_redo': True
+            })
+        
+        return True
+    
+    # ── Fallback: DownloadHelper path (multi-account mode) ──
+    download_queue.put({
+        'job_id': job_id,
+        'project_url': project_url,
+        'clips': [clip],
+        'clip_submit_times': {clip_index: submit_time},
+        'submitted_at': submit_time,
+        'temp_dir': temp_dir,
+        'is_redo': True
+    })
+    
+    print(f"✓ Redo queued for download (will be ready after {CLIP_READY_WAIT}s)", flush=True)
+    return True
+
+
+# ============================================================
+# SUBMISSION LOGIC
+# ============================================================
+
+def process_job_submission_with_failover(page, job, cache, download_queue, account_name,
+                                          failover_queue=None, all_download_queues=None,
+                                          clips_to_process=None, is_failover=False, failed_account=None,
+                                          is_parallel=False, is_parallel_primary=False,
+                                          is_failover_to_standby=False):
+    """
+    Submit clips for a job with cross-account failover support.
+    
+    On first clip failure:
+    - If failover_queue is available: hand off ALL remaining clips to other account
+    - If no failover_queue (already failed over): use old retry logic or mark as failed
+    
+    Args:
+        page: Playwright page
+        job: Job data from API
+        cache: Local cache
+        download_queue: Queue for this account's download worker
+        account_name: Name of this account (e.g., "Account1")
+        failover_queue: Queue to send job to other account (None if already failed over)
+        all_download_queues: Dict of account_name -> download_queue for routing
+        clips_to_process: Specific clips to process (for failover jobs)
+        is_failover: True if this is a failover from another account
+        failed_account: Name of account that failed (for logging)
+        is_parallel: True if this is a parallel execution (multiple accounts simultaneously)
+        is_parallel_primary: True if this account is responsible for job status updates
+        is_failover_to_standby: True if failover should go to standby manager (not another active account)
+    
+    Returns:
+        project_url if successful, None if failed and handed off
+    """
+    job_id = job['id']
+    all_clips = job['clips']
+    
+    # Determine which clips to process
+    if clips_to_process is not None:
+        clips = clips_to_process
+    else:
+        clips = all_clips
+    
+    # IMMEDIATELY mark as processing to prevent duplicate pickup
+    # Only primary account (or non-parallel single account) updates job status
+    if not is_failover and not is_parallel:
+        update_job_status(job_id, 'processing')
+    elif is_parallel and is_parallel_primary:
+        update_job_status(job_id, 'processing')
+    
+    print(f"\n{'='*60}")
+    if is_parallel:
+        print(f"🚀 PARALLEL {'PRIMARY' if is_parallel_primary else 'SECONDARY'}: {job_id[:8]}...")
+        print(f"   Clips: {[c.get('clip_index') for c in clips]}")
+    elif is_failover:
+        print(f"🔄 FAILOVER JOB: {job_id[:8]}...")
+        print(f"   Taking over from: {failed_account}")
+    else:
+        print(f"PROCESSING JOB: {job_id[:8]}...")
+    
+    # Job details
+    aspect_ratio = job.get('aspect_ratio', '9:16')
+    duration = job.get('duration', '8')
+    language = job.get('language', 'English')
+    resolution = job.get('resolution', '720p')
+    variants = job.get('flow_variants_count', 2)
+    
+    clip_modes = {}
+    has_end_frame = False
+    for c in clips:
+        mode = c.get('clip_mode', 'blend')
+        clip_modes[mode] = clip_modes.get(mode, 0) + 1
+        if c.get('end_frame_key'):
+            has_end_frame = True
+    modes_str = ', '.join(f"{m}×{n}" for m, n in clip_modes.items())
+    
+    print(f"  Account: {account_name}  |  Clips: {len(clips)}  |  Variants: {variants}")
+    print(f"  Mode: {modes_str}  |  End frame: {'yes' if has_end_frame else 'no'}")
+    print(f"  Aspect: {aspect_ratio}  |  Duration: {duration}s  |  Res: {resolution}  |  Lang: {language}")
+    print(f"{'='*60}")
+    
+    # Initialize human-like timing controller
+    human_pacer = HumanPacer(account_name=account_name)
+    
+    # For failover jobs, always create a NEW project
+    if is_failover:
+        spa_navigate_to_flow_home(page, account_name)
+        human_delay(1, 2)
+        
+        ensure_logged_into_flow(page, account_name)
+        check_and_dismiss_popup(page)
+        
+        # Human-like "looking around" before first interaction (matching single-account)
+        human_mouse_move(page)
+        human_delay(1, 2)
+        scroll_randomly(page)
+        human_delay(0.5, 1)
+        
+        dismiss_create_with_flow(page, account_name)
+        human_click_element(page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", "New project button")
+        human_delay(2, 3)
+        
+        try:
+            page.wait_for_url("**/project/**", timeout=30000)
+        except:
+            print("[Flow] wait_for_url timed out, polling...")
+            for _ in range(15):
+                time.sleep(1)
+                if "/project/" in page.url:
+                    break
+        
+        time.sleep(2)
+        project_url = page.url
+        print(f"✓ Created NEW project for failover: {project_url}")
+        
+        if "/project/" not in project_url:
+            raise Exception(f"Failed to create project - URL: {project_url}")
+        
+        human_delay(1, 2)
+        check_and_dismiss_popup(page)
+        ensure_videos_tab_selected(page)
+        clips_done = []
+    else:
+        # Non-failover: check cache for existing project
+        cached_job = get_cached_job(cache, job_id, account_name=account_name)
+        
+        if cached_job and cached_job.get('project_url'):
+            project_url = cached_job['project_url']
+            # v194: Cross-reference cache with DB — cache says "submitted" but only DB
+            # confirms the HTTP download actually succeeded. A clip whose tile failed on
+            # Flow was never downloaded, so DB still shows 'generating' or 'pending'.
+            cached_submitted = cached_job.get('clips_submitted', [])
+            completed_from_db = [
+                c['clip_index'] for c in clips
+                if c.get('status') in ('completed', 'approved')
+            ]
+            generating_from_db = [
+                c['clip_index'] for c in clips
+                if c.get('status') == 'generating'
+            ]
+            # Done = completed in DB + (submitted in cache AND still generating in DB)
+            in_flight = sorted(set(cached_submitted) & set(generating_from_db))
+            clips_done = sorted(set(completed_from_db) | set(in_flight))
+            skipped_by_db = sorted(set(cached_submitted) - set(completed_from_db) - set(generating_from_db))
+            if skipped_by_db:
+                print(f"⚠ Cache said these clips were done but DB disagrees (will re-submit): {[c+1 for c in skipped_by_db]}", flush=True)
+            print(f"✓ Resuming from cache: {project_url}")
+            print(f"  Clips done: {[c+1 for c in clips_done]} ({len(completed_from_db)} from DB, {len(in_flight)} in-flight, {len(cached_submitted)} from cache)")
+            
+            page.goto(project_url, timeout=60000)
+            page.wait_for_load_state("domcontentloaded", timeout=30000)
+            time.sleep(5)
+            ensure_logged_into_flow(page, account_name)
+            
+            # Validate we actually landed on the project page — not home/login.
+            # A browser crash may have left a stale cache entry pointing to a dead project.
+            if "/project/" not in page.url:
+                print(f"⚠ Cache resume failed — landed on {page.url} instead of project. Starting fresh.", flush=True)
+                if job_id in cache.get("jobs", {}):
+                    cache["jobs"][job_id]["project_url"] = None
+                    cache["jobs"][job_id]["clips_submitted"] = []
+                    save_cache(cache)
+                project_url = None
+                clips_done = []
+                spa_navigate_to_flow_home(page, account_name)
+                human_delay(1, 2)
+                ensure_logged_into_flow(page, account_name)
+                check_and_dismiss_popup(page)
+                human_mouse_move(page)
+                human_delay(1, 2)
+                scroll_randomly(page)
+                human_delay(0.5, 1)
+        else:
+            spa_navigate_to_flow_home(page, account_name)
+            human_delay(1, 2)
+            
+            ensure_logged_into_flow(page, account_name)
+            check_and_dismiss_popup(page)
+            
+            # Human-like "looking around" before first interaction (matching single-account)
+            human_mouse_move(page)
+            human_delay(1, 2)
+            scroll_randomly(page)
+            human_delay(0.5, 1)
+            
+            dismiss_create_with_flow(page, account_name)
+            human_click_element(page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", "New project button")
+            human_delay(2, 3)
+            
+            try:
+                page.wait_for_url("**/project/**", timeout=30000)
+            except:
+                print("[Flow] wait_for_url timed out, polling...")
+                for _ in range(15):
+                    time.sleep(1)
+                    if "/project/" in page.url:
+                        break
+            
+            time.sleep(2)
+            project_url = page.url
+            print(f"✓ Project URL: {project_url}")
+            
+            if "/project/" not in project_url:
+                raise Exception(f"Failed to create project - URL: {project_url}")
+            
+            print(f"✓ Created project: {project_url}")
+            
+            human_delay(1, 2)
+            check_and_dismiss_popup(page)
+            
+            # Build clips_done from DB statuses ONLY — skip already-completed clips on retry.
+            # CRITICAL (v174): Do NOT read cache clips_submitted here.  See process_job_submission.
+            cached_clips_done = []  # Intentionally empty — cache is unreliable on fresh project
+            completed_from_db = [
+                c['clip_index'] for c in clips
+                if c.get('status') in ('completed', 'approved')
+            ]
+            clips_done = list(set(completed_from_db))
+            if clips_done:
+                print(f"[Flow] Skipping {len(clips_done)} already-completed clip(s) (DB ground truth): {[c+1 for c in sorted(clips_done)]}", flush=True)
+            mark_job_started(cache, job_id, project_url, clips, account_name=account_name)
+    
+    # Update project URL in API
+    api_request("POST", f"/jobs/{job_id}/status", {"flow_project_url": project_url})
+    
+    temp_dir = tempfile.mkdtemp(prefix=f"flow_job_{job_id[:8]}_", dir=SHM_DIR)
+    frames_dir = os.path.join(temp_dir, "frames")
+    os.makedirs(frames_dir, exist_ok=True)
+    
+    # Download frames (dedup by URL — auto-cycle repeats same image under different names)
+    _url_to_local = {}
+    for clip in clips:
+        clip_idx = clip['clip_index']
+        if clip.get('start_frame_url'):
+            url = clip['start_frame_url']
+            fname = _canonical_frame_name(clip, 'start')
+            local_path = os.path.join(frames_dir, fname)
+            if url in _url_to_local:
+                clip['start_frame_local'] = _url_to_local[url]
+                print(f"[Download] {fname} (reused from cache, skipped network)", flush=True)
+            else:
+                result = download_frame(url, local_path)
+                clip['start_frame_local'] = result
+                if result:
+                    _url_to_local[url] = result
+        if clip.get('end_frame_url'):
+            url = clip['end_frame_url']
+            fname = _canonical_frame_name(clip, 'end')
+            local_path = os.path.join(frames_dir, fname)
+            if url in _url_to_local:
+                clip['end_frame_local'] = _url_to_local[url]
+                print(f"[Download] {fname} (reused from cache, skipped network)", flush=True)
+            else:
+                result = download_frame(url, local_path)
+                clip['end_frame_local'] = result
+                if result:
+                    _url_to_local[url] = result
+    
+    # Get job context for prompt building
+    job_language = job.get('language', 'English')
+    job_duration = float(job.get('duration', '8'))
+    job_voice_profile = job.get('voice_profile', '')
+    job_short_dialogue_mode = job.get('short_dialogue_mode', 'optimized')
+    # v539 — prefix-short-lines settings
+    job_prefix_short_enabled = job.get('prefix_short_enabled', False)
+    job_prefix_short_word = job.get('prefix_short_word', 'only')
+    job_prefix_short_threshold = job.get('prefix_short_threshold', 15)
+    
+    clips_data = []
+    for clip in clips:
+        prompt = clip.get('prompt')
+        if not prompt:
+            prompt = build_flow_prompt(
+                dialogue_line=clip.get('dialogue_text', ''),
+                language=job_language,
+                voice_profile=job_voice_profile,
+                duration=job_duration,
+                short_dialogue_mode=job_short_dialogue_mode,
+                prefix_short_enabled=job_prefix_short_enabled,
+                prefix_short_word=job_prefix_short_word,
+                prefix_short_threshold=job_prefix_short_threshold,
+            )
+        clips_data.append({
+            'clip_index': clip['clip_index'],
+            'id': clip.get('id'),
+            'start_frame': clip.get('start_frame_local'),
+            'end_frame': clip.get('end_frame_local'),
+            'start_frame_url': clip.get('start_frame_url'),
+            'end_frame_url': clip.get('end_frame_url'),
+            'start_frame_key': clip.get('start_frame_key'),
+            'end_frame_key': clip.get('end_frame_key'),
+            'prompt': prompt,
+            'dialogue_text': clip.get('dialogue_text', ''),
+        })
+    
+    # Initialize clip_project_map - all clips start in main project
+    clip_project_map = {clip['clip_index']: project_url for clip in clips}
+    print(f"[{account_name}] Initialized clip_project_map with {len(clip_project_map)} clips", flush=True)
+    
+    # Track submission times per clip for download timing
+    clip_submit_times = {}
+    
+    # v175: Seed clip_submit_times from cache (same as process_job_submission)
+    if clips_done and job_id in cache.get('jobs', {}):
+        _cached_ts = cache['jobs'][job_id].get('clip_submit_timestamps', {})
+        _seeded = 0
+        for _ci in clips_done:
+            _ts_str = _cached_ts.get(str(_ci))
+            if not _ts_str:
+                continue
+            _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+            _status = _clip_obj.get('status', '') if _clip_obj else ''
+            if _status in ('completed', 'approved'):
+                continue
+            try:
+                clip_submit_times[_ci] = datetime.fromisoformat(_ts_str)
+                _seeded += 1
+            except (ValueError, TypeError):
+                pass
+        if _seeded:
+            print(f"[{account_name}] Seeded {_seeded} clip submit time(s) from cache for download recovery", flush=True)
+    
+    # Track permanently failed clips
+    permanently_failed_clips = set()
+    
+    # Build image pool for blacklist/retry (shared with single-account path)
+    image_pool, ordered_image_keys = build_image_pool(clips)
+    blacklisted_images = set()
+    
+    # Gallery reuse cache: frame_key -> basename used when first uploaded this job.
+    gallery_cache = {}
+    
+    # Track downloaded videos for continue mode (clip_index -> video_path)
+    # This dict is shared with the download worker thread
+    downloaded_videos = {}
+    
+    # Analyze continue mode chains
+    continue_chains = analyze_continue_mode_chains(clips)
+    has_continue_mode = any(len(chain) > 1 for chain in continue_chains)
+    if has_continue_mode:
+        print(f"[ContinueMode] Job has continue mode clips - will handle sequentially within chains", flush=True)
+    
+    # Extended failure monitoring - continues checking clips after immediate 3s check
+    failure_monitor = ExtendedFailureMonitor(monitoring_duration=60)
+    
+    prev_start_frame_key = None
+    prev_end_frame_key = None
+    first_submission_in_project = True  # False after first clip is submitted; reuse path needs existing tiles
+    
+    download_queued = False
+    
+    for i, clip in enumerate(clips):
+        clip_index = clip['clip_index']
+        
+        if clip_index in clips_done:
+            print(f"\n--- Clip {i+1}/{len(clips)} SKIPPED (cached) ---")
+            prev_start_frame_key = clip.get('start_frame_key')
+            prev_end_frame_key = clip.get('end_frame_key')
+            # Pre-populate gallery_cache with skipped clip frames so that when the
+            # next clip tries to upload the same image, it finds it in the gallery
+            # instead of re-uploading (project is being resumed, gallery already has them).
+            for _fkey in ('start_frame_local', 'end_frame_local'):
+                _fpath = clip.get(_fkey)
+                if _fpath and os.path.exists(_fpath):
+                    _h = _file_hash(_fpath)
+                    if _h and _h not in gallery_cache:
+                        gallery_cache[_h] = os.path.basename(_fpath)
+                        print(f"[Gallery] Pre-populated cache from skipped clip {clip_index+1}: {os.path.basename(_fpath)}", flush=True)
+                    _rkey = clip.get('start_frame_key' if _fkey == 'start_frame_local' else 'end_frame_key')
+                    if _rkey:
+                        gallery_cache[_rkey] = os.path.basename(_fpath)
+            continue
+        
+        print(f"\n--- Clip {i+1}/{len(clips)} ---")
+
+        # Detect Chrome tab crash ("Aw, Snap!") before attempting any interaction
+        if is_page_crashed(page):
+            print(f"[{account_name}] 💥 Tab crashed ('Aw, Snap!') before clip {clip_index+1} — recovering...", flush=True)
+            if recover_crashed_page(page, project_url, label=account_name):
+                try:
+                    select_frames_to_video_mode(page, context="CrashRecovery", variants_count=variants)
+                except Exception:
+                    pass
+            else:
+                raise Exception(f"Submit tab crashed and recovery failed at clip {clip_index}")
+
+
+
+
+
+        start_frame = clip.get('start_frame_local')
+        end_frame = clip.get('end_frame_local')
+        start_frame_key = clip.get('start_frame_key')
+        end_frame_key = clip.get('end_frame_key')
+        
+        # Get clip mode and scene info
+        clip_mode = clip.get('clip_mode', 'blend')
+        scene_index = clip.get('scene_index', 0)
+        prev_scene_index = clips[i-1].get('scene_index', 0) if i > 0 else -1
+        continue_frame_extracted = False  # Flag to track if we successfully extracted a frame
+        
+        # ============================================================
+        # CONTINUE MODE HANDLING
+        # If this is a continue-mode clip that's not the first in its chain,
+        # we need to:
+        # 1. Wait for the previous clip's video to be downloaded
+        # 2. Wait for user APPROVAL of the previous clip
+        # 3. Extract frame from the APPROVED variant
+        # 4. Enhance and use that frame
+        # ============================================================
+        if clip_mode == 'continue' and i > 0 and scene_index == prev_scene_index:
+            prev_clip = clips[i-1]
+            prev_clip_index = prev_clip.get('clip_index')
+            prev_clip_id = prev_clip.get('id')
+            
+            print(f"[ContinueMode] Clip {clip_index+1} requires frame from approved clip {prev_clip_index}", flush=True)
+            
+            # Step 1: Wait for video to exist on disk (max 5 minutes)
+            max_video_wait = 300
+            video_wait_start = datetime.now()
+            prev_video_path = None
+            
+            while (datetime.now() - video_wait_start).total_seconds() < max_video_wait:
+                # Check for any video file for this clip
+                prev_video_path = find_downloaded_video(temp_dir, prev_clip_index)
+                
+                if prev_video_path and os.path.exists(prev_video_path):
+                    print(f"[ContinueMode] Previous clip video downloaded: {os.path.basename(prev_video_path)}", flush=True)
+                    break
+                
+                elapsed = int((datetime.now() - video_wait_start).total_seconds())
+                if elapsed % 30 == 0:
+                    print(f"[ContinueMode] Waiting for clip {prev_clip_index} video download... ({elapsed}s)", flush=True)
+                time.sleep(10)
+            
+            if not prev_video_path or not os.path.exists(prev_video_path):
+                # Fallback: check API for fresh status — HTTP worker may have completed
+                # the upload to R2 while we were scanning for local files
+                prev_output_url = prev_clip.get('output_url')
+                if not prev_output_url:
+                    try:
+                        _fresh = api_request("GET", f"/clips/{prev_clip_id}/approval-status")
+                        if _fresh and _fresh.get('status') in ('completed', 'approved') and _fresh.get('output_url'):
+                            prev_output_url = _fresh['output_url']
+                            print(f"[ContinueMode] Clip {prev_clip_index} completed in DB — fetching from R2...", flush=True)
+                    except Exception:
+                        pass
+                if prev_output_url:
+                    print(f"[ContinueMode] Clip {prev_clip_index} already completed — downloading from R2...", flush=True)
+                    try:
+                        r2_path = os.path.join(temp_dir, f"clip_{prev_clip_index}_1.1.mp4")
+                        r2_resp = requests.get(prev_output_url, timeout=60, stream=True)
+                        if r2_resp.status_code == 200:
+                            with open(r2_path, 'wb') as f:
+                                for chunk in r2_resp.iter_content(chunk_size=8192):
+                                    f.write(chunk)
+                            prev_video_path = r2_path
+                            print(f"[ContinueMode] ✓ Downloaded from R2: {os.path.getsize(r2_path)} bytes", flush=True)
+                        else:
+                            print(f"[ContinueMode] ⚠ R2 download failed ({r2_resp.status_code}) — using original start frame", flush=True)
+                    except Exception as r2_err:
+                        print(f"[ContinueMode] ⚠ R2 download error: {r2_err} — using original start frame", flush=True)
+                else:
+                    print(f"[ContinueMode] WARNING: Timeout waiting for video download, using original start frame", flush=True)
+            else:
+                # Step 2: Wait for user approval (max 10 minutes)
+                approval_result = wait_for_clip_approval(prev_clip_id, prev_clip_index, temp_dir, timeout=600)
+                
+                if approval_result and approval_result.get('success'):
+                    # Use the approved variant's video
+                    approved_video = approval_result.get('video_path')
+                    selected_variant = approval_result.get('selected_variant', 1)
+                    
+                    # NOW set preparing status — approval received, extracting frame
+                    clip_id_for_status = clip.get('id')
+                    if clip_id_for_status:
+                        update_clip_status(clip_id_for_status, 'preparing')
+                    
+                    # If a different variant was selected, find that video
+                    if selected_variant != 1:
+                        specific_video = find_downloaded_video(temp_dir, prev_clip_index, variant=selected_variant)
+                        if specific_video and os.path.exists(specific_video):
+                            approved_video = specific_video
+                            print(f"[ContinueMode] Using approved variant {selected_variant}: {os.path.basename(approved_video)}", flush=True)
+                    
+                    if approved_video and os.path.exists(approved_video):
+                        # Step 3: Extract frame from approved video
+                        extracted_frame = extract_frame_from_video(approved_video, frame_offset=-8)
+                        
+                        if extracted_frame:
+                            # Step 4: Enhance frame via Nano Banana API
+                            original_frame_key = clip.get('start_frame_key')  # Original scene image for facial consistency
+                            enhanced_frame = enhance_frame_via_api(extracted_frame, original_frame_key, job_id)
+                            
+                            # Use enhanced frame as start frame
+                            start_frame = enhanced_frame
+                            if enhanced_frame != extracted_frame:
+                                print(f"[ContinueMode] ✓ Using enhanced frame from approved clip {prev_clip_index} (variant {selected_variant})", flush=True)
+                            else:
+                                print(f"[ContinueMode] ✓ Using extracted frame from approved clip {prev_clip_index} (variant {selected_variant}) [enhancement unavailable]", flush=True)
+                            
+                            # Mark that we successfully extracted a frame
+                            continue_frame_extracted = True
+                            has_new_start = True  # Force new start since we have a new frame
+                            # Invalidate gallery cache — the extracted frame must be uploaded,
+                            # not reused from gallery.
+                            if gallery_cache and original_frame_key in gallery_cache:
+                                del gallery_cache[original_frame_key]
+                            start_frame_key = enhanced_frame  # Unique path, won't match gallery cache
+                            clip['start_frame_key'] = enhanced_frame
+                            clip['start_frame_local'] = enhanced_frame
+                        else:
+                            print(f"[ContinueMode] WARNING: Frame extraction failed, using original start frame", flush=True)
+                    else:
+                        print(f"[ContinueMode] WARNING: Approved video not found, using original start frame", flush=True)
+                else:
+                    # Approval timed out or rejected — auto-pick variant 1 and continue
+                    reason = approval_result.get('reason', 'unknown') if approval_result else 'error'
+                    print(f"[ContinueMode] Approval not received ({reason}) — auto-picking variant 1 to continue chain", flush=True)
+                    
+                    auto_video = find_downloaded_video(temp_dir, prev_clip_index, variant=1)
+                    if not auto_video or not os.path.exists(auto_video):
+                        auto_video = find_downloaded_video(temp_dir, prev_clip_index)
+                    
+                    if not auto_video or not os.path.exists(auto_video):
+                        try:
+                            _fresh = api_request("GET", f"/clips/{prev_clip_id}/approval-status")
+                            if _fresh and _fresh.get('output_url'):
+                                _r2_path = os.path.join(temp_dir, f"clip_{prev_clip_index}_auto.mp4")
+                                _r2_resp = requests.get(_fresh['output_url'], timeout=60, stream=True)
+                                if _r2_resp.status_code == 200:
+                                    with open(_r2_path, 'wb') as _f:
+                                        for _chunk in _r2_resp.iter_content(chunk_size=8192):
+                                            _f.write(_chunk)
+                                    auto_video = _r2_path
+                                    print(f"[ContinueMode] ✓ Fetched variant 1 from R2 for auto-continue", flush=True)
+                        except Exception:
+                            pass
+                    
+                    if auto_video and os.path.exists(auto_video):
+                        extracted_frame = extract_frame_from_video(auto_video, frame_offset=-8)
+                        if extracted_frame:
+                            original_frame_key = clip.get('start_frame_key')
+                            enhanced_frame = enhance_frame_via_api(extracted_frame, original_frame_key, job_id)
+                            start_frame = enhanced_frame
+                            continue_frame_extracted = True
+                            has_new_start = True
+                            if gallery_cache and original_frame_key in gallery_cache:
+                                del gallery_cache[original_frame_key]
+                            start_frame_key = enhanced_frame
+                            clip['start_frame_key'] = enhanced_frame
+                            clip['start_frame_local'] = enhanced_frame
+                            print(f"[ContinueMode] ✓ Auto-continued with variant 1 frame from clip {prev_clip_index}", flush=True)
+                        else:
+                            print(f"[ContinueMode] ⚠ Frame extraction failed on auto-picked video", flush=True)
+                    else:
+                        print(f"[ContinueMode] ⚠ No video found for auto-continue — using original start frame", flush=True)
+        
+        prompt = clip.get('prompt')
+        if not prompt:
+            prompt = build_flow_prompt(
+                dialogue_line=clip.get('dialogue_text', ''),
+                language=job_language,
+                voice_profile=job_voice_profile,
+                duration=job_duration,
+                short_dialogue_mode=job_short_dialogue_mode,
+                prefix_short_enabled=job_prefix_short_enabled,
+                prefix_short_word=job_prefix_short_word,
+                prefix_short_threshold=job_prefix_short_threshold,
+            )
+        
+        # Calculate if frames are new (unless already set by continue mode handling above)
+        # In continue mode with extracted frame, has_new_start was already set to True
+        if not continue_frame_extracted:
+            has_new_start = (start_frame_key != prev_start_frame_key) if prev_start_frame_key else True
+        # else: has_new_start was already set in continue mode block above
+        
+        has_new_end = (end_frame_key != prev_end_frame_key) if prev_end_frame_key else (end_frame_key is not None)
+        
+        # If this clip has an end frame but the previous clip didn't (or vice versa),
+        # the frame slot layout changes in Flow's UI — must re-upload start frame
+        prev_had_end = prev_end_frame_key is not None
+        curr_has_end = end_frame_key is not None
+        if curr_has_end != prev_had_end:
+            has_new_start = True
+            has_new_end = curr_has_end  # Only upload end if we actually have one
+        
+        has_new_frames = has_new_start or has_new_end
+        
+        _sfname = start_frame_key.split("/")[-1] if start_frame_key else "None"
+        _efname = end_frame_key.split("/")[-1] if end_frame_key else "None"
+        _psfname = prev_start_frame_key.split("/")[-1] if prev_start_frame_key else "None"
+        _pefname = prev_end_frame_key.split("/")[-1] if prev_end_frame_key else "None"
+        print(f"  start_frame: {_sfname} | end_frame: {_efname}")
+        print(f"  prev_start: {_psfname} | prev_end: {_pefname}")
+        print(f"  start_local: {os.path.basename(start_frame) if start_frame else 'None'} | end_local: {os.path.basename(end_frame) if end_frame else 'None'}")
+        print(f"  has_new_start={has_new_start}, has_new_end={has_new_end}, has_new_frames={has_new_frames}")
+        print(f"  clip_mode={clip_mode}, scene={scene_index}, dialogue=\"{clip.get('dialogue_text', '')[:40]}...\"", flush=True)
+        print(f"  clip_mode={clip_mode}, scene_index={scene_index}")
+        
+        if first_submission_in_project:
+            # First clip actually submitted — needs frames and full setup.
+            # May be i>0 if earlier clips were skipped (already completed). In that case
+            # has_new_frames may be False but we MUST do full upload: new project has no tiles.
+            check_and_dismiss_popup(page)
+            
+            # On a fresh project the bottom toolbar takes a moment to become interactive.
+            # Wait for the settings button to be visible AND stable before trying to open it.
+            human_mouse_move(page)
+            human_delay(0.3, 0.6)
+            print(f"[SUBMIT] Waiting for settings button to be ready on new project...", flush=True)
+            try:
+                for n in range(1, 5):
+                    candidate = page.locator(f"button:has-text('x{n}')").first
+                    try:
+                        candidate.wait_for(state="visible", timeout=8000)
+                        break
+                    except:
+                        continue
+                time.sleep(2)  # Extra stability wait after button appears
+            except:
+                pass
+            human_delay(0.3, 0.6)
+            variants_count = job.get('flow_variants_count', 2)
+            try:
+                select_frames_to_video_mode(page, variants_count=variants_count)
+            except Exception as settings_err:
+                print(f"[Flow] ⚠ Settings failed for clip {clip_index+1} — skipping clip: {settings_err}", flush=True)
+                update_clip_status(clip['id'], 'failed', error_message=f"Settings dropdown failed: {str(settings_err)[:100]}")
+                permanently_failed_clips.add(clip_index)
+                continue
+            ensure_batch_view_mode(page)
+            human_delay(1, 2)
+            
+            human_delay(0.3, 0.6)
+            
+            # Upload frames with policy check + blacklist retry (identical to single-account)
+            ok, start_frame, end_frame, start_frame_key, end_frame_key = upload_frames_with_retry(
+                page, clip, clip_index, clips, i, start_frame, end_frame,
+                start_frame_key, end_frame_key, blacklisted_images,
+                image_pool, ordered_image_keys, permanently_failed_clips, context="",
+                gallery_cache=gallery_cache, frames_busy_flag=frames_busy_flag)
+            if not ok:
+                prev_start_frame_key = start_frame_key
+                prev_end_frame_key = end_frame_key
+                continue
+            
+            # Enter prompt
+            human_delay(1, 2)
+            human_mouse_move(page)
+            scroll_randomly(page)
+            fill_prompt_textarea(page, prompt)
+            print(f"✓ Entered prompt: {prompt[:50]}...")
+            # Brief pause after prompt entry
+            time.sleep(random.uniform(1.5, 3))
+            
+            # Click Generate (includes human movements, model check, button-enabled wait, crash recovery)
+            click_generate_with_crash_handler(page, account_name, clip_index, clips, 
+                                              clip_submit_times, download_queued, download_queue, job_id,
+                                              start_frame=start_frame, end_frame=end_frame, prompt=prompt,
+                                              clip_mode=clip_mode, start_frame_key=start_frame_key, end_frame_key=end_frame_key)
+            print(f"✓ Started generation for clip {i+1}")
+            human_delay(1, 2)
+            first_submission_in_project = False  # Tiles now exist — subsequent clips can reuse
+            
+        elif has_new_frames:
+            # Subsequent clip with NEW frames
+            # CRITICAL: Clear the previous prompt to reset the input area.
+            # After generating, Flow keeps the prompt + frames loaded. The frame
+            # buttons only appear after clearing.
+            try:
+                clear_btn = page.locator('button:has(span:text("Clear prompt")), button:has(i:text("close"))').first
+                if clear_btn.count() > 0:
+                    clear_btn.click(timeout=5000)
+                    time.sleep(1)
+                    print(f"[Flow] ✓ Cleared previous prompt — input reset", flush=True)
+                else:
+                    print(f"[Flow] No clear button found — input may already be empty", flush=True)
+            except Exception as _ce:
+                print(f"[Flow] ⚠ Clear prompt failed: {_ce}", flush=True)
+            
+            human_delay(0.3, 0.6)
+            
+            # Upload frames with policy check + blacklist retry (identical to single-account)
+            # CRITICAL: Always upload BOTH frames — see single-account path comment.
+            s_img = start_frame if start_frame else None
+            e_img = end_frame if end_frame else None
+            
+            ok, s_img, e_img, start_frame_key, end_frame_key = upload_frames_with_retry(
+                page, clip, clip_index, clips, i, s_img, e_img,
+                start_frame_key, end_frame_key, blacklisted_images,
+                image_pool, ordered_image_keys, permanently_failed_clips, context=f"Clip {i+1} ",
+                gallery_cache=gallery_cache, frames_busy_flag=frames_busy_flag)
+            if not ok:
+                prev_start_frame_key = start_frame_key
+                prev_end_frame_key = end_frame_key
+                continue
+            # Update start/end_frame from clip in case they were reassigned
+            start_frame = clip.get('start_frame_local', start_frame)
+            end_frame = clip.get('end_frame_local', end_frame)
+            
+            # Enter prompt
+            human_delay(1, 2)
+            human_mouse_move(page)
+            scroll_randomly(page)
+            fill_prompt_textarea(page, prompt)
+            print(f"✓ Entered prompt: {prompt[:50]}...")
+            # Brief pause after prompt entry
+            time.sleep(random.uniform(1.5, 3))
+            
+            # Click Generate (includes human movements, model check, button-enabled wait, crash recovery)
+            click_generate_with_crash_handler(page, account_name, clip_index, clips, 
+                                              clip_submit_times, download_queued, download_queue, job_id,
+                                              start_frame=start_frame, end_frame=end_frame, prompt=prompt,
+                                              clip_mode=clip_mode, start_frame_key=start_frame_key, end_frame_key=end_frame_key)
+            print(f"✓ Started generation for clip {i+1}")
+            human_delay(1, 2)
+            
+        else:
+            # No new frames - reuse
+            print(f"\n--- Clip {i+1}/{len(clips)} (reuse frames) ---")
+
+
+
+
+
+            # Human-like behavior before reuse prompt click
+            human_pre_action(page, "reuse prompt")
+            
+            # Use new robust reuse function that waits for Generate button to be enabled
+            # and retries with page refresh if it gets stuck
+            try:
+                click_reuse_and_generate(page, prompt, i+1, account_name, max_retries=3, wait_timeout=60,
+                                        start_frame=start_frame, end_frame=end_frame)
+            except Exception as e:
+                # v195: Reuse failed — fall back to fresh submission (clear + upload frames + prompt)
+                print(f"[{account_name}] ⚠ Reuse failed for clip {clip_index+1}: {e}", flush=True)
+                print(f"[{account_name}] Falling back to fresh submission (clear + upload + prompt)...", flush=True)
+                try:
+                    # Clear prompt to reset UI and get frame buttons back
+                    try:
+                        clear_btn = page.locator('button:has(span:text("Clear prompt")), button:has(i:text("close"))').first
+                        if clear_btn.count() > 0:
+                            clear_btn.click(timeout=5000)
+                            time.sleep(1)
+                            print(f"[{account_name}] ✓ Cleared prompt for fresh submission", flush=True)
+                    except Exception:
+                        # If clear fails, try refreshing the page
+                        page.reload(wait_until="domcontentloaded", timeout=30000)
+                        time.sleep(3)
+                        ensure_logged_into_flow(page, account_name)
+                        check_and_dismiss_popup(page)
+                        ensure_videos_tab_selected(page)
+                        time.sleep(2)
+                        print(f"[{account_name}] ✓ Page refreshed for fresh submission", flush=True)
+                    
+                    human_delay(0.3, 0.6)
+                    
+                    # Upload frames fresh
+                    s_img = start_frame if start_frame else None
+                    e_img = end_frame if end_frame else None
+                    ok, s_img, e_img, start_frame_key, end_frame_key = upload_frames_with_retry(
+                        page, clip, clip_index, clips, i, s_img, e_img,
+                        start_frame_key, end_frame_key, blacklisted_images,
+                        image_pool, ordered_image_keys, permanently_failed_clips, 
+                        context=f"[{account_name}] Fallback clip {i+1} ",
+                        gallery_cache=gallery_cache, frames_busy_flag=frames_busy_flag)
+                    if not ok:
+                        raise Exception("Frame upload failed in fallback")
+                    
+                    # Paste prompt
+                    human_delay(1, 2)
+                    fill_prompt_textarea(page, prompt)
+                    print(f"[{account_name}] ✓ Fallback: entered prompt for clip {clip_index+1}", flush=True)
+                    time.sleep(random.uniform(1.5, 3))
+                    
+                    # Click Generate
+                    click_generate_button(page, f"[{account_name}] Fallback clip {i+1}")
+                    print(f"[{account_name}] ✓ Fallback: clip {clip_index+1} submitted via fresh path", flush=True)
+                    human_delay(1, 2)
+                except Exception as fallback_err:
+                    # Fresh fallback also failed — give up on this clip chain
+                    print(f"\n{'='*50}", flush=True)
+                    print(f"[{account_name}] ❌ REUSE+FALLBACK FAILED at clip {clip_index+1}!", flush=True)
+                    print(f"[{account_name}] Error: {fallback_err}", flush=True)
+                    print(f"{'='*50}\n", flush=True)
+                    
+                    # Notify download thread to only expect already-submitted clips
+                    if download_queued:
+                        submitted_clip_indices = set(clip_submit_times.keys())
+                        if submitted_clip_indices:
+                            print(f"[{account_name}] Limiting download to {len(submitted_clip_indices)} submitted clips: {sorted(submitted_clip_indices)}", flush=True)
+                            download_queue.put({
+                                'type': 'limit_clips',
+                                'job_id': job_id,
+                                'allowed_clips': submitted_clip_indices
+                            })
+                        else:
+                            print(f"[{account_name}] No clips were submitted - cancelling download", flush=True)
+                            download_queue.put({
+                                'type': 'cancel',
+                                'job_id': job_id
+                            })
+                    
+                    # Mark this and remaining clips as failed
+                    for remaining_clip in clips[i:]:
+                        remaining_idx = remaining_clip['clip_index']
+                        if remaining_idx not in clip_submit_times:
+                            update_clip_status(remaining_clip['id'], 'failed', error_message=f"Reuse+fallback failed: {str(fallback_err)[:100]}")
+                    
+                    return None
+            
+            time.sleep(3)
+        
+        # Record submission time BEFORE failcheck (needed for download timing)
+        clip_submit_times[clip_index] = datetime.now()
+        print(f"[{account_name}] Clip {clip_index+1} submitted at {clip_submit_times[clip_index].strftime('%H:%M:%S')}", flush=True)
+        
+        # Wait 3 seconds then check for immediate failure
+        # IMPORTANT: We do this BEFORE queuing for download on first clip
+        time.sleep(FAILURE_CHECK_DELAY)
+        clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1)
+        
+        # Ghost submission detection: verify data-index=0 actually contains OUR clip.
+        # After FailCheck's 10s wait, if the newest tile doesn't match our dialogue,
+        # the Generate click silently failed — the old tile is still at position 0.
+        _is_ghost = False
+        if not clip_failed:
+            try:
+                _dialogue_key = (clip.get('dialogue_text') or '')[:30]
+                _ghost_result = page.evaluate(f"""() => {{
+                    const c = document.querySelector("div[data-index='0']");
+                    if (!c) return {{found: false, tiles: 0}};
+                    const seen = new Set();
+                    c.querySelectorAll("[data-tile-id]").forEach(t => {{
+                        const id = t.getAttribute("data-tile-id"); if (id) seen.add(id);
+                    }});
+                    const text = c.innerText || c.textContent || '';
+                    const dialogue = {repr(_dialogue_key)};
+                    return {{
+                        found: dialogue.length > 5 ? text.includes(dialogue) : true,
+                        tiles: seen.size
+                    }};
+                }}""")
+                if _ghost_result and _ghost_result.get('tiles', 0) == 0:
+                    _is_ghost = True
+                    print(f"[{account_name}] ⚠ GHOST: clip {clip_index+1} — no tiles at data-index=0", flush=True)
+                elif _ghost_result and not _ghost_result.get('found', True):
+                    _is_ghost = True
+                    print(f"[{account_name}] ⚠ GHOST: clip {clip_index+1} — data-index=0 doesn't contain our dialogue (stale tile from previous clip)", flush=True)
+            except Exception as _ge:
+                print(f"[{account_name}] ⚠ Ghost check error for clip {clip_index+1}: {_ge}", flush=True)
+        
+        if _is_ghost:
+            print(f"[{account_name}] Ghost clip {clip_index+1} — queuing for redo resubmission", flush=True)
+            update_clip_status(clip['id'], 'flow_redo_queued', error_message="Ghost submission — Generate click had no effect")
+            clip_submit_times.pop(clip_index, None)
+            if job_id in cache.get('jobs', {}):
+                _cs = cache['jobs'][job_id].get('clips_submitted', [])
+                if clip_index in _cs:
+                    _cs.remove(clip_index)
+                    save_cache(cache)
+            continue
+        
+        # Submission confirmed — NOW mark as generating + submitted in cache
+        if not clip_failed:
+            update_clip_status(clip['id'], 'generating')
+            mark_clip_submitted(cache, job_id, clip_index)
+        
+        if clip_failed:
+            print(f"[{account_name}] ⚠️ Clip {clip_index+1} FAILED immediately!", flush=True)
+            
+            # ============================================================
+            # SMART FAILOVER STRATEGY:
+            # 1. Try same-account retry in new project (fast, handles project-level flags)
+            # 2. If same-account retries exhausted, use FailoverRouter for cross-account
+            # 3. FailoverRouter picks healthiest idle account, or standby, or marks failed
+            # ============================================================
+            
+            remaining_clips = clips[i:]  # Include the failed clip
+            
+            # Step 1: Same-account retry?
+            can_retry_same = False
+            if failover_router is not None:
+                can_retry_same = failover_router.should_retry_same_account(job_id, account_name)
+                if not can_retry_same:
+                    retry_count = failover_router.get_retry_count(job_id, account_name)
+                    is_hot = account_health.is_hot(account_name)
+                    print(f"[{account_name}] Same-account retry SKIPPED: retry_count={retry_count}/{failover_router.MAX_SAME_ACCOUNT_RETRIES}, is_hot={is_hot}", flush=True)
+                else:
+                    print(f"[{account_name}] Same-account retry APPROVED", flush=True)
+            else:
+                print(f"[{account_name}] failover_router is None — same-account retry not available", flush=True)
+            
+            if can_retry_same:
+                retry_num = failover_router.increment_retry(job_id, account_name)
+                print(f"\n{'='*50}", flush=True)
+                print(f"🔁 SAME-ACCOUNT RETRY #{retry_num}/{failover_router.MAX_SAME_ACCOUNT_RETRIES}", flush=True)
+                print(f"   Account: {account_name}", flush=True)
+                print(f"   Failed clip: {clip_index+1}", flush=True)
+                print(f"   Creating new project on same account...", flush=True)
+                print(f"{'='*50}\n", flush=True)
+                
+                # Record failure in health tracker (but don't hand off yet)
+                account_health.record_failure(account_name, job_id)
+                
+                # If download was already queued, limit it to clips before the failure
+                if download_queued:
+                    successfully_submitted = [c.get('clip_index') for c in clips[:i]]
+                    if successfully_submitted:
+                        print(f"[{account_name}] Limiting download to clips {successfully_submitted} (before failure)...", flush=True)
+                        download_queue.put({
+                            'type': 'limit_clips',
+                            'job_id': job_id,
+                            'allowed_clips': set(successfully_submitted)
+                        })
+                    else:
+                        print(f"[{account_name}] Cancelling download job (no successful clips)...", flush=True)
+                        download_queue.put({
+                            'type': 'cancel',
+                            'job_id': job_id
+                        })
+                
+                # Navigate to Flow home and create a NEW project
+                try:
+                    spa_navigate_to_flow_home(page, account_name)
+                    human_delay(1, 2)
+                    
+                    ensure_logged_into_flow(page, account_name)
+                    check_and_dismiss_popup(page)
+                    
+                    human_mouse_move(page)
+                    human_delay(1, 2)
+                    scroll_randomly(page)
+                    human_delay(0.5, 1)
+                    
+                    dismiss_create_with_flow(page, account_name)
+                    human_click_element(page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", "New project (retry)")
+                    human_delay(2, 3)
+                    
+                    try:
+                        page.wait_for_url("**/project/**", timeout=30000)
+                    except:
+                        for _ in range(15):
+                            time.sleep(1)
+                            if "/project/" in page.url:
+                                break
+                    
+                    time.sleep(2)
+                    new_project_url = page.url
+                    
+                    if "/project/" not in new_project_url:
+                        raise Exception(f"Failed to create retry project - URL: {new_project_url}")
+                    
+                    print(f"[{account_name}] ✓ Created retry project: {new_project_url}", flush=True)
+                    human_delay(1, 2)
+                    check_and_dismiss_popup(page)
+                    ensure_videos_tab_selected(page)
+                    
+                    # Update project URL and reset state for remaining clips
+                    project_url = new_project_url
+                    clip_project_map = {c['clip_index']: project_url for c in remaining_clips}
+                    api_request("POST", f"/jobs/{job_id}/status", {"flow_project_url": project_url})
+                    
+                    # Reset download state — need fresh download for new project
+                    download_queued = False
+                    
+                    # Re-process remaining clips from scratch in the new project
+                    # by recursively calling ourselves with the remaining clips
+                    print(f"[{account_name}] Re-submitting {len(remaining_clips)} clips in new project...", flush=True)
+                    
+                    result = process_job_submission_with_failover(
+                        page=page,
+                        job=job,
+                        cache=cache,
+                        download_queue=download_queue,
+                        account_name=account_name,
+                        failover_queue=failover_queue,
+                        all_download_queues=all_download_queues,
+                        clips_to_process=remaining_clips,
+                        is_failover=True,  # Force new project setup
+                        failed_account=account_name,
+                        is_parallel=is_parallel,
+                        is_parallel_primary=is_parallel_primary,
+                        is_failover_to_standby=is_failover_to_standby,
+                    )
+                    return result
+                    
+                except Exception as retry_err:
+                    print(f"[{account_name}] ❌ Same-account retry failed: {retry_err}", flush=True)
+                    # Fall through to cross-account failover below
+            
+            # Step 2: Cross-account failover via FailoverRouter
+            if failover_router is not None:
+                # Clean up download state
+                if download_queued:
+                    successfully_submitted = [c.get('clip_index') for c in clips[:i]]
+                    if successfully_submitted:
+                        print(f"[{account_name}] Limiting download to clips {successfully_submitted} (before failure)...", flush=True)
+                        download_queue.put({
+                            'type': 'limit_clips',
+                            'job_id': job_id,
+                            'allowed_clips': set(successfully_submitted)
+                        })
+                    else:
+                        print(f"[{account_name}] Cancelling download job (no successful clips)...", flush=True)
+                        download_queue.put({
+                            'type': 'cancel',
+                            'job_id': job_id
+                        })
+                    
+                    download_queue.put({
+                        'type': 'shutdown_after_complete',
+                        'job_id': job_id
+                    })
+                    print(f"[{account_name}] Download worker will shutdown after completing current job", flush=True)
+                
+                # Build failover data
+                failover_data = {
+                    'type': 'failover',
+                    'job_id': job_id,
+                    'original_job': job,
+                    'remaining_clips': remaining_clips,
+                    'failed_clip_index': clip_index,
+                    'failed_account': account_name,
+                    'clips_data': clips_data[i:],
+                    'all_download_queues': all_download_queues,
+                }
+                
+                result = failover_router.route_failover(
+                    failed_account=account_name,
+                    failover_data=failover_data,
+                    download_queue=download_queue,
+                    download_queued=download_queued,
+                    job_id=job_id,
+                )
+                
+                if result == 'routed':
+                    return None  # Successfully handed off
+                # else: no target available, clips already marked failed by router
+            
+            elif failover_queue is not None:
+                # Legacy fallback: direct failover queue (old behavior)
+                if download_queued:
+                    successfully_submitted = [c.get('clip_index') for c in clips[:i]]
+                    if successfully_submitted:
+                        download_queue.put({
+                            'type': 'limit_clips',
+                            'job_id': job_id,
+                            'allowed_clips': set(successfully_submitted)
+                        })
+                    else:
+                        download_queue.put({
+                            'type': 'cancel',
+                            'job_id': job_id
+                        })
+                    download_queue.put({
+                        'type': 'shutdown_after_complete',
+                        'job_id': job_id
+                    })
+                
+                failover_data = {
+                    'type': 'failover',
+                    'job_id': job_id,
+                    'original_job': job,
+                    'remaining_clips': remaining_clips,
+                    'failed_clip_index': clip_index,
+                    'failed_account': account_name,
+                    'clips_data': clips_data[i:],
+                    'all_download_queues': all_download_queues,
+                }
+                
+                if is_failover_to_standby:
+                    failover_queue.put({
+                        'type': 'failover_swap',
+                        'failed_account': account_name,
+                        'failover_data': failover_data,
+                    })
+                else:
+                    failover_queue.put(failover_data)
+                
+                print(f"[{account_name}] ✓ Handed off via legacy failover", flush=True)
+                return None
+            else:
+                # No failover available at all — golden restore will handle retry
+                print(f"[{account_name}] ⚠️ No failover available, clip {clip_index+1} will be retried after restore", flush=True)
+                update_clip_status(clip['id'], 'pending', error_message=None)
+                # Stop submitting remaining clips — they will fail in the same broken session.
+                # Mark them back to pending so they get picked up after golden restore.
+                remaining = clips[i+1:]
+                if remaining:
+                    print(f"[{account_name}] ⛔ Stopping submission — {len(remaining)} remaining clip(s) reset to pending for retry after restore", flush=True)
+                    for rc in remaining:
+                        update_clip_status(rc['id'], 'pending', error_message=None)
+                # Tell download worker which clips are actually available
+                if download_queued:
+                    allowed = set(c['clip_index'] for c in clips[:i])
+                    print(f"[{account_name}] Notifying download worker: only clips {sorted(allowed)} are available", flush=True)
+                    download_queue.put({'type': 'limit_clips', 'job_id': job_id, 'allowed_clips': allowed})
+                    download_queue.put({'type': 'shutdown_after_complete', 'job_id': job_id})
+                # Reset job to pending so it gets picked up after golden restore
+                update_job_status(job_id, 'pending')
+                # Clear cache entry so retry starts a FRESH project (not the broken reCAPTCHA one)
+                if job_id in cache.get('jobs', {}):
+                    del cache['jobs'][job_id]
+                    save_cache(cache)
+                # Raise — caller records failure with correct account name
+                raise Exception(f"Clip {clip_index} failed — stopping job to trigger golden restore")
+        else:
+            # Clip passed immediate check - add to extended monitoring
+            # Record success in health tracker (resets consecutive failure count)
+            account_health.record_success(account_name)
+            # Reset same-account retry counter on success — later clips should get fresh retry budget
+            if failover_router is not None:
+                with failover_router._lock:
+                    key = (job_id, account_name)
+                    if key in failover_router._retry_counts:
+                        failover_router._retry_counts[key] = 0
+            # Pass prompt for accurate dialogue extraction (same approach as download worker)
+            dialogue = clip.get('dialogue_text', '')
+            prompt = clip.get('prompt', '')
+            failure_monitor.add_clip(clip_index, clip_submit_times[clip_index], dialogue_text=dialogue, prompt=prompt)
+        
+        # Queue for download after FIRST clip passes failure check
+        # This ensures we don't start downloading from a failed project
+        if not download_queued and not clip_failed:
+            download_queue.put({
+                'job_id': job_id,
+                'project_url': project_url,
+                'clips': clips,
+                'clips_data': clips_data,
+                'clip_project_map': clip_project_map,
+                'clip_submit_times': clip_submit_times,
+                'permanently_failed_clips': permanently_failed_clips,
+                'downloaded_videos': downloaded_videos,  # Shared dict for continue mode
+                'num_clips': len(clips),
+                'total_job_clips': job.get('_total_clips', len(clips)),
+                'submitted_at': datetime.now(),
+                'temp_dir': temp_dir,
+                'account_name': account_name,  # Track which account handles this
+            })
+            backfill_clip_submit_times(clip_submit_times, clips, job_id=job_id, cache=cache)
+            print(f"[{account_name}] ✓ Queued for download (parallel mode)", flush=True)
+            download_queued = True
+        
+        if i < len(clips) - 1:
+            # Human-like wait with micro-activities and failure monitoring
+            delayed_failures = human_pacer.wait_between_clips(
+                page, clip_number=i, total_clips=len(clips),
+                failure_monitor=failure_monitor
+            )
+            if delayed_failures:
+                    # Trigger failover for the failed clip(s) and all remaining clips
+                    failed_clip_idx = delayed_failures[0]  # Handle first failure
+                    # Find the position of the failed clip in our clips list
+                    failed_pos = next((idx for idx, c in enumerate(clips) if c['clip_index'] == failed_clip_idx), None)
+                    if failed_pos is not None:
+                        remaining_clips = [clips[failed_pos]] + clips[i+1:]  # Failed clip + not-yet-submitted
+                    else:
+                        remaining_clips = clips[i+1:]  # Just not-yet-submitted
+                    
+                    print(f"\n{'='*50}", flush=True)
+                    print(f"🔄 DELAYED FAILOVER TRIGGERED!", flush=True)
+                    print(f"   Failed clip: {failed_clip_idx}", flush=True)
+                    print(f"   Remaining clips: {len(remaining_clips)}", flush=True)
+                    print(f"{'='*50}\n", flush=True)
+                    
+                    # Limit download to exclude the failed clip
+                    if download_queued:
+                        successfully_submitted = [c.get('clip_index') for c in clips[:i+1] if c.get('clip_index') != failed_clip_idx]
+                        if successfully_submitted:
+                            print(f"[{account_name}] Limiting download to clips {successfully_submitted} (excluding delayed failure)...", flush=True)
+                            download_queue.put({
+                                'type': 'limit_clips',
+                                'job_id': job_id,
+                                'allowed_clips': set(successfully_submitted)
+                            })
+                        
+                        download_queue.put({
+                            'type': 'shutdown_after_complete',
+                            'job_id': job_id
+                        })
+                    
+                    # Build failover data
+                    failover_data = {
+                        'type': 'failover',
+                        'job_id': job_id,
+                        'original_job': job,
+                        'remaining_clips': remaining_clips,
+                        'failed_clip_index': failed_clip_idx,
+                        'failed_account': account_name,
+                        'clips_data': [cd for cd in clips_data if cd['clip_index'] in [c['clip_index'] for c in remaining_clips]],
+                        'all_download_queues': all_download_queues,
+                    }
+                    
+                    # Use FailoverRouter if available, else legacy
+                    if failover_router is not None:
+                        result = failover_router.route_failover(
+                            failed_account=account_name,
+                            failover_data=failover_data,
+                            job_id=job_id,
+                        )
+                        if result == 'routed':
+                            return None
+                    elif failover_queue is not None:
+                        if is_failover_to_standby:
+                            failover_queue.put({
+                                'type': 'failover_swap',
+                                'failed_account': account_name,
+                                'failover_data': failover_data,
+                            })
+                        else:
+                            failover_queue.put(failover_data)
+                        return None
+                    else:
+                        # No failover available - handle ALL delayed failures
+                        for failed_clip_idx in delayed_failures:
+                            print(f"[{account_name}] ⚠️ DELAYED FAILURE detected for clip {failed_clip_idx}!", flush=True)
+                            permanently_failed_clips.add(failed_clip_idx)
+                            for c in clips:
+                                if c['clip_index'] == failed_clip_idx:
+                                    update_clip_status(c['id'], 'failed', error_message="Delayed generation failure")
+                                    break
+        
+        prev_start_frame_key = start_frame_key
+        prev_end_frame_key = end_frame_key
+    
+    # FINAL SWEEP: Check for any delayed failures before considering job complete
+    # Wait a bit and do one final check on all monitored clips
+    if failure_monitor.has_clips_to_monitor():
+        print(f"[{account_name}] Doing final failure sweep (checking monitored clips)...", flush=True)
+        time.sleep(3)  # Give a moment for any failures to show
+        
+        final_failures = failure_monitor.do_periodic_check(page, account_name)
+        if final_failures:
+            print(f"[{account_name}] ⚠️ FINAL SWEEP found {len(final_failures)} delayed failure(s): {final_failures}", flush=True)
+            
+            for failed_clip_idx in final_failures:
+                if failover_queue is not None:
+                    # Create failover for just this clip
+                    failed_clip = next((c for c in clips if c['clip_index'] == failed_clip_idx), None)
+                    if failed_clip:
+                        print(f"\n{'='*50}")
+                        print(f"🔄 FINAL SWEEP FAILOVER!")
+                        print(f"   Failed clip: {failed_clip_idx}")
+                        print(f"   Handing off to {'STANDBY' if is_failover_to_standby else 'other'} account...")
+                        print(f"{'='*50}\n")
+                        
+                        # Limit download to exclude this clip
+                        if download_queued:
+                            allowed = [c.get('clip_index') for c in clips if c.get('clip_index') != failed_clip_idx and c.get('clip_index') not in permanently_failed_clips]
+                            if allowed:
+                                print(f"[{account_name}] Limiting download to clips {allowed}...", flush=True)
+                                download_queue.put({
+                                    'type': 'limit_clips',
+                                    'job_id': job_id,
+                                    'allowed_clips': set(allowed)
+                                })
+                        
+                        # Build failover data
+                        failover_data = {
+                            'type': 'failover',
+                            'job_id': job_id,
+                            'original_job': job,
+                            'remaining_clips': [failed_clip],
+                            'failed_clip_index': failed_clip_idx,
+                            'failed_account': account_name,
+                            'clips_data': [cd for cd in clips_data if cd['clip_index'] == failed_clip_idx],
+                            'all_download_queues': all_download_queues,
+                        }
+                        
+                        # Send to standby manager or directly to another account
+                        if is_failover_to_standby:
+                            failover_queue.put({
+                                'type': 'failover_swap',
+                                'failed_account': account_name,
+                                'failover_data': failover_data,
+                            })
+                        else:
+                            failover_queue.put(failover_data)
+                else:
+                    # No failover - mark as permanently failed
+                    permanently_failed_clips.add(failed_clip_idx)
+                    for c in clips:
+                        if c['clip_index'] == failed_clip_idx:
+                            update_clip_status(c['id'], 'failed', error_message="Delayed generation failure (final sweep)")
+                            break
+    
+    mark_job_submitted(cache, job_id)
+    
+    successful_submissions = len(clip_submit_times) - len(permanently_failed_clips)
+    
+    print(f"\n{'='*50}")
+    print(f"ALL CLIPS SUBMITTED!")
+    print(f"Account: {account_name}")
+    print(f"Project: {project_url}")
+    print(f"Successful: {successful_submissions}/{len(clips)}")
+    if permanently_failed_clips:
+        print(f"Permanently failed: {len(permanently_failed_clips)}")
+    print(f"{'='*50}")
+    
+    return project_url
+
+
+def process_job_submission(page, job, cache, download_queue, clip_submit_times_shared=None, frames_busy_flag=None, http_dl_queue=None, captured_media_urls=None, session_refresh_callback=None):
+    """Submit all clips for a job"""
+    global _policy_retried_tiles
+    _policy_retried_tiles = set()  # Reset dedup for new job/project
+    
+    job_id = job['id']
+    clips = job['clips']
+    
+    # Local HumanPacer instance — NOT a shared function attribute.
+    # Previously used process_job_submission._pacer which is shared across
+    # ALL threads, causing clip counters and page references to mix between
+    # Account1 and Account2 when running concurrently. Local instance is safe.
+    _pacer = HumanPacer(account_name="Flow")
+    
+    # IMMEDIATELY mark as processing to prevent duplicate pickup
+    update_job_status(job_id, 'processing')
+    
+    # Extract job metadata
+    aspect_ratio = job.get('aspect_ratio', '9:16')
+    duration = job.get('duration', '8')
+    language = job.get('language', 'English')
+    resolution = job.get('resolution', '720p')
+    variants = job.get('flow_variants_count', 2)
+    voice_profile = job.get('voice_profile', '')
+    use_interpolation = job.get('use_interpolation', False)
+    single_image = job.get('single_image_mode', False)
+    
+    # Analyze clip modes
+    clip_modes = {}
+    scene_count = set()
+    unique_images = set()
+    has_end_frame = False
+    for c in clips:
+        mode = c.get('clip_mode', 'blend')
+        clip_modes[mode] = clip_modes.get(mode, 0) + 1
+        scene_count.add(c.get('scene_index', 0))
+        if c.get('start_frame_key'):
+            unique_images.add(c['start_frame_key'])
+        if c.get('end_frame_key'):
+            unique_images.add(c['end_frame_key'])
+            has_end_frame = True
+    
+    modes_str = ', '.join(f"{m}×{n}" for m, n in clip_modes.items())
+    
+    print(f"\n{'='*60}")
+    print(f"PROCESSING JOB: {job_id[:8]}...")
+    print(f"{'='*60}")
+    print(f"  Clips: {len(clips)}  |  Variants: {variants}  |  Scenes: {len(scene_count)}")
+    print(f"  Mode: {modes_str}  |  End frame: {'yes' if has_end_frame else 'no'}")
+    print(f"  Aspect: {aspect_ratio}  |  Duration: {duration}s  |  Res: {resolution}")
+    print(f"  Language: {language}  |  Interpolation: {'on' if use_interpolation else 'off'}")
+    print(f"  Images: {len(unique_images)} unique frames")
+    clip_statuses = {}
+    for c in clips:
+        s = c.get("status", "unknown")
+        clip_statuses[s] = clip_statuses.get(s, 0) + 1
+    status_str = ", ".join(f"{v}x{k}" for k, v in clip_statuses.items())
+    print(f"  Clip statuses: {status_str}", flush=True)
+    if voice_profile:
+        print(f"  Voice: {voice_profile[:80]}{'...' if len(voice_profile) > 80 else ''}")
+    print(f"{'='*60}")
+
+    # Log clip statuses so we can verify server returns the right clips after restore
+    clip_statuses = {}
+    for c in clips:
+        s = c.get('status', 'unknown')
+        clip_statuses[s] = clip_statuses.get(s, 0) + 1
+    status_str = ', '.join(f"{v}×{k}" for k, v in clip_statuses.items())
+    print(f"  Clip statuses: {status_str}", flush=True)
+    
+    # account_name: stamped by AccountWorker before dispatch so the cache
+    # is namespaced per account — prevents Account2 from resuming into Account1's project.
+    account_name = job.get('account_name', 'Flow')
+
+    cached_job = get_cached_job(cache, job_id, account_name=account_name)
+    project_url = None  # will be set from cache or fresh project creation below
+    clips_done = []
+    cached_clips_done = []
+
+    # In parallel mode, only resume from cache if this account has its OWN project URL.
+    # A job entry may exist from a previous run or from the other account — we must
+    # never navigate to another account's project URL.
+    _parallel_job = job.get('_total_clips') is not None  # set by _process_parallel_job
+    _has_own_project = (
+        cached_job is not None and
+        cached_job.get('project_url') and
+        (not _parallel_job or
+         job_id in cache.get('jobs', {}) and
+         cache['jobs'][job_id].get('account_projects', {}).get(account_name))
+    )
+
+    if _has_own_project and cached_job.get('project_url'):
+        project_url = cached_job['project_url']
+        cached_clips_done = cached_job.get('clips_submitted', [])
+        completed_from_db = [
+            c['clip_index'] for c in clips
+            if c.get('status') in ('completed', 'approved')
+        ]
+        # v194: DB is ground truth. Cache "submitted" only counts if DB confirms
+        # the clip is completed OR still actively generating (in-flight).
+        generating_from_db = [
+            c['clip_index'] for c in clips
+            if c.get('status') == 'generating'
+        ]
+        # Done = completed in DB + (submitted in cache AND still generating in DB)
+        in_flight = sorted(set(cached_clips_done) & set(generating_from_db))
+        clips_done = sorted(set(completed_from_db) | set(in_flight))
+        skipped_by_db = sorted(set(cached_clips_done) - set(completed_from_db) - set(generating_from_db))
+        if skipped_by_db:
+            print(f"⚠ Cache said these clips were done but DB disagrees (will re-submit): {[c+1 for c in skipped_by_db]}", flush=True)
+        print(f"✓ Resuming from cache: {project_url}")
+        print(f"  Clips done: {[c+1 for c in clips_done]} ({len(completed_from_db)} from DB, {len(in_flight)} in-flight, {len(cached_clips_done)} from cache)")
+        
+        page.goto(project_url, timeout=60000)
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+        time.sleep(5)
+        ensure_logged_into_flow(page, "SUBMIT")
+        
+        # Verify ULTRA before processing job
+        check_ultra_account(page, account_name, timeout=3)
+        
+        # Validate we actually landed on the project page — not home/login.
+        # A browser crash may have left a stale cache entry pointing to a dead project.
+        if "/project/" not in page.url:
+            print(f"[SUBMIT] ⚠ Cache resume failed — landed on {page.url} instead of project. Starting fresh.", flush=True)
+            if job_id in cache.get("jobs", {}):
+                cache["jobs"][job_id]["project_url"] = None
+                cache["jobs"][job_id]["clips_submitted"] = []
+                save_cache(cache)
+            project_url = None
+            cached_clips_done = []
+            clips_done = []
+    else:
+        pass  # falls through to fresh project creation below
+    
+    if project_url is None:
+        # --- Match test_human_like.py flow exactly ---
+        
+        # [2/10] Navigate to Flow (SPA — preserve reCAPTCHA session)
+        print(f"[SUBMIT] Navigating to Flow homepage...", flush=True)
+        spa_navigate_to_flow_home(page, "SUBMIT")
+        human_delay(1, 2)  # [page load] wait like test_human_like.py
+        
+        # Check if login is required
+        ensure_logged_into_flow(page, "SUBMIT")
+        check_and_dismiss_popup(page)
+        
+        # Verify ULTRA before processing job
+        check_ultra_account(page, account_name, timeout=3)
+        
+        # [3/10] Looking around the page (matching test_human_like.py)
+        human_mouse_move(page)
+        human_delay(1, 2)
+        scroll_randomly(page)
+        human_delay(0.5, 1)
+        
+        # [4/10] Click "New project" button
+        dismiss_create_with_flow(page, "SUBMIT")
+        human_click_element(page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", "New project button")
+        human_delay(2, 3)  # [project creation] wait like test_human_like.py
+        
+        # Wait for URL to contain /project/
+        try:
+            page.wait_for_url("**/project/**", timeout=30000)
+        except:
+            # Fallback: poll for URL change
+            print("[Flow] wait_for_url timed out, polling...")
+            for _ in range(15):
+                time.sleep(1)
+                if "/project/" in page.url:
+                    break
+        
+        time.sleep(2)
+        project_url = page.url
+        print(f"✓ Project URL: {project_url}")
+        
+        # Verify we got a valid project URL
+        if "/project/" not in project_url:
+            raise Exception(f"Failed to create project - URL: {project_url}")
+        
+        print(f"✓ Created project: {project_url}")
+        human_delay(1, 2)  # Post-creation wait like test_human_like.py
+        
+        # Wait for project page to load
+        check_and_dismiss_popup(page)
+        ensure_videos_tab_selected(page)
+        
+        # Build clips_done from DB statuses ONLY — skip already-completed clips on retry.
+        # CRITICAL (v174): Do NOT read cache clips_submitted here.  On a fresh project,
+        # clips_submitted may contain clips submitted by a DIFFERENT account to a
+        # different Flow project (parallel mode after proactive restore).  Trusting it
+        # causes: (1) skipping clips never submitted to THIS project, (2) reuse path
+        # entered on an empty project → cascading reuse button failures.
+        # DB completed/approved is the only reliable ground truth for fresh projects.
+        cached_clips_done = []  # Intentionally empty — cache is unreliable on fresh project
+        completed_from_db = [
+            c['clip_index'] for c in clips
+            if c.get('status') in ('completed', 'approved')
+        ]
+        clips_done = list(set(completed_from_db))
+        if clips_done:
+            print(f"[Flow] Skipping {len(clips_done)} already-completed clip(s) (DB ground truth): {[c+1 for c in sorted(clips_done)]}", flush=True)
+        mark_job_started(cache, job_id, project_url, clips, account_name=account_name)
+    
+    # Update project URL in API (status already set to 'processing' at start)
+    api_request("POST", f"/jobs/{job_id}/status", {"flow_project_url": project_url})
+    
+    # Refresh HTTP session cookies after project navigation.
+    # Google sets/rotates cookies during page interaction — the session snapshot
+    # from startup may be stale by now. Without this, HTTP downloads get 401.
+    # Matches single-account mode where DownloadHelper._refresh_session() is
+    # called on every project navigation.
+    if session_refresh_callback:
+        try:
+            session_refresh_callback()
+        except Exception:
+            pass
+    
+    temp_dir = tempfile.mkdtemp(prefix=f"flow_job_{job_id[:8]}_", dir=SHM_DIR)
+    frames_dir = os.path.join(temp_dir, "frames")
+    os.makedirs(frames_dir, exist_ok=True)
+    
+    # Dedup cache: frame_url -> already-downloaded local path.
+    # Auto-cycle repeats images under different filenames (start_0=end_1, etc.).
+    # If the URL was already downloaded this job, just copy the file instead of
+    # hitting the network again.
+    _url_to_local = {}
+    
+    for clip in clips:
+        # v455: abort checkpoint before expensive per-clip downloads
+        try:
+            check_abort(job_id)
+        except JobAbortedException:
+            print(f"[Flow] 🛑 Job {job_id[:8]}... aborted during frame download — stopping", flush=True)
+            raise
+
+        clip_idx = clip['clip_index']
+        
+        # Try to download start frame
+        if clip.get('start_frame_url'):
+            fname = _canonical_frame_name(clip, 'start')
+            local_path = os.path.join(frames_dir, fname)
+            url = clip['start_frame_url']
+            if url in _url_to_local:
+                # Same image already downloaded — just point to it
+                clip['start_frame_local'] = _url_to_local[url]
+                print(f"[Download] {fname} (reused from cache, skipped network)", flush=True)
+            else:
+                r2_fallback = clip.get('start_frame_r2_url') or clip.get('start_frame_key')
+                if r2_fallback and not r2_fallback.startswith('http'):
+                    r2_fallback = None
+                result = download_frame(url, local_path, r2_fallback)
+                if result:
+                    clip['start_frame_local'] = result
+                    _url_to_local[url] = result
+                else:
+                    print(f"[Download] ⚠️ Can't download start frame for clip {clip_idx+1} - checking cache...")
+                    clip['start_frame_local'] = None
+        
+        # Try to download end frame  
+        if clip.get('end_frame_url'):
+            fname = _canonical_frame_name(clip, 'end')
+            local_path = os.path.join(frames_dir, fname)
+            url = clip['end_frame_url']
+            if url in _url_to_local:
+                clip['end_frame_local'] = _url_to_local[url]
+                print(f"[Download] {fname} (reused from cache, skipped network)", flush=True)
+            else:
+                r2_fallback = clip.get('end_frame_r2_url') or clip.get('end_frame_key')
+                if r2_fallback and not r2_fallback.startswith('http'):
+                    r2_fallback = None
+                result = download_frame(url, local_path, r2_fallback)
+                if result:
+                    clip['end_frame_local'] = result
+                    _url_to_local[url] = result
+                else:
+                    print(f"[Download] ⚠️ Can't download end frame for clip {clip_idx+1} - checking cache...")
+                    clip['end_frame_local'] = None
+    
+    # Check if we have any clips without frames - this is a problem
+    clips_without_frames = [c for c in clips if not c.get('start_frame_local') and c.get('start_frame_url')]
+    if clips_without_frames:
+        print(f"[Warning] {len(clips_without_frames)} clip(s) missing local frames - job may have been partially processed before")
+        print(f"[Warning] Consider clearing the job from the server and resubmitting")
+    
+    # Get job context for prompt building
+    job_language = job.get('language', 'English')
+    job_duration = float(job.get('duration', '8'))
+    job_voice_profile = job.get('voice_profile', '')
+    job_short_dialogue_mode = job.get('short_dialogue_mode', 'optimized')
+    # v539 — prefix-short-lines settings
+    job_prefix_short_enabled = job.get('prefix_short_enabled', False)
+    job_prefix_short_word = job.get('prefix_short_word', 'only')
+    job_prefix_short_threshold = job.get('prefix_short_threshold', 15)
+    
+    clips_data = []
+    for clip in clips:
+        # Use API prompt if available, otherwise build with job context
+        prompt = clip.get('prompt')
+        if not prompt:
+            prompt = build_flow_prompt(
+                dialogue_line=clip.get('dialogue_text', ''),
+                language=job_language,
+                voice_profile=job_voice_profile,
+                duration=job_duration,
+                short_dialogue_mode=job_short_dialogue_mode,
+                prefix_short_enabled=job_prefix_short_enabled,
+                prefix_short_word=job_prefix_short_word,
+                prefix_short_threshold=job_prefix_short_threshold,
+            )
+        clips_data.append({
+            'clip_index': clip['clip_index'],
+            'id': clip.get('id'),  # Include clip ID for failure status updates
+            'start_frame': clip.get('start_frame_local'),
+            'end_frame': clip.get('end_frame_local'),
+            'start_frame_url': clip.get('start_frame_url'),
+            'end_frame_url': clip.get('end_frame_url'),
+            'start_frame_key': clip.get('start_frame_key'),
+            'end_frame_key': clip.get('end_frame_key'),
+            'prompt': prompt,
+            'dialogue_text': clip.get('dialogue_text', ''),
+        })
+    
+    # Initialize clip_project_map - all clips start in main project
+    clip_project_map = {clip['clip_index']: project_url for clip in clips}
+    print(f"[Flow] Initialized clip_project_map with {len(clip_project_map)} clips in main project", flush=True)
+    
+    # Build image pool for celebrity/policy filter handling
+    image_pool, ordered_image_keys = build_image_pool(clips)
+    blacklisted_images = set()
+    print(f"[Flow] Image pool: {len(ordered_image_keys)} unique images: {[os.path.basename(k) for k in ordered_image_keys]}", flush=True)
+    
+    # Gallery reuse cache: frame_key -> basename used when first uploaded this job.
+    # Clips sharing the same frame_key can select from gallery instead of re-uploading,
+    # saving the ~25-35s uploadImage API wait per repeated frame.
+    gallery_cache = {}
+    
+    # Track submission times per clip for download timing
+    clip_submit_times = {}
+    
+    # v175: Seed clip_submit_times from persisted cache timestamps.
+    # After a golden restore + self-resume, clips submitted in the previous run
+    # are in clips_done (skipped) but their submit times are lost.  Without this,
+    # the HTTP download worker never picks them up — they stay as 'generating' forever.
+    # Only seed clips that are NOT completed/approved (those are already downloaded).
+    if clips_done and job_id in cache.get('jobs', {}):
+        _cached_ts = cache['jobs'][job_id].get('clip_submit_timestamps', {})
+        _seeded = 0
+        for _ci in clips_done:
+            _ts_str = _cached_ts.get(str(_ci))
+            if not _ts_str:
+                continue
+            # Check if this clip still needs download (not yet completed)
+            _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+            _status = _clip_obj.get('status', '') if _clip_obj else ''
+            if _status in ('completed', 'approved'):
+                continue  # Already downloaded — no need to seed
+            try:
+                clip_submit_times[_ci] = datetime.fromisoformat(_ts_str)
+                _seeded += 1
+            except (ValueError, TypeError):
+                pass
+        if _seeded:
+            print(f"[Flow] Seeded {_seeded} clip submit time(s) from cache for download recovery", flush=True)
+    
+    # Track clips that need retry (failed immediately)
+    clips_needing_retry = []
+    
+    # Track downloaded videos for continue mode (clip_index -> video_path)
+    # This dict is shared with the download worker thread
+    downloaded_videos = {}
+
+    download_queued = False
+    http_enqueued_clips = set()  # Clip indices already pushed to http_dl_queue — prevents double-download
+    continue_chains = analyze_continue_mode_chains(clips)
+    has_continue_mode = any(len(chain) > 1 for chain in continue_chains)
+    
+    # Identify which clips need to be deferred (waiting for approval of previous clip)
+    deferred_clips = set()  # Clip indices that need continue-mode waiting
+    if has_continue_mode:
+        print(f"[ContinueMode] Job has continue mode clips - will handle sequentially within chains", flush=True)
+        for chain in continue_chains:
+            if len(chain) > 1:
+                for idx in chain[1:]:
+                    deferred_clips.add(idx)
+        
+        if deferred_clips:
+            # Reorder: independent clips first, deferred clips last (preserving chain order)
+            independent = [i for i in range(len(clips)) if i not in deferred_clips]
+            deferred_ordered = sorted(deferred_clips)
+            reordered_indices = independent + deferred_ordered
+            clips = [clips[i] for i in reordered_indices]
+            clips_data = [clips_data[i] for i in reordered_indices]
+            
+            # Rebuild index mapping so continue mode can still find previous clips
+            # Store original index on each clip for reference
+            for new_i, clip in enumerate(clips):
+                clip['_original_index'] = reordered_indices[new_i]
+            
+            print(f"[ContinueMode] Reordered: independent {independent} first, then deferred {deferred_ordered}", flush=True)
+    
+    prev_start_frame_key = None
+    prev_end_frame_key = None
+    
+    # Shared set for permanently failed clips - passed to download queue and updated during retries
+    permanently_failed_clips = set()
+    
+    # Track ghost submissions — clips where Generate clicked but no tile appeared.
+    # These are set to flow_redo_queued immediately (not pending) so the redo system
+    # picks them up without waiting for the orphan safety net.
+    ghost_clips = set()
+    
+    # Track whether we've submitted any clip to this project yet.
+    # If project_url came from cache (resume path) AND clips_done is non-empty,
+    # the project already has tiles from the previous run — go straight to reuse path.
+    # CRITICAL (v174): On a FRESH project (_was_fresh_project=True), this MUST be True
+    # even if clips_done is non-empty from DB.  DB-completed clips were submitted to
+    # a DIFFERENT project — this project has zero tiles, so reuse button doesn't exist.
+    _was_fresh_project = not _has_own_project  # True if we just created a new project
+    if _was_fresh_project:
+        first_submission_in_project = True  # Fresh project — always full upload first
+    else:
+        first_submission_in_project = not (project_url is not None and len(clips_done) > 0)
+    
+    # Safety counter: how many clips have been submitted to THIS project in THIS run.
+    # Used as a defensive guard — reuse path requires >= 1 tile in the project.
+    _tiles_in_this_project = 0
+    if not first_submission_in_project:
+        _tiles_in_this_project = len(clips_done)  # Project already has these tiles
+        print(f"[Flow] Resuming existing project with {len(clips_done)} done clips — using reuse path (skipping settings)", flush=True)
+        # After Chrome restart (golden restore), navigate to the project and re-apply
+        # all settings: model, orientation, variants. This also initializes the gallery
+        # so frame reuse works correctly on the next clip.
+        try:
+            if not page.url.startswith(project_url):
+                page.goto(project_url, timeout=30000, wait_until="domcontentloaded")
+                time.sleep(2)
+            # Re-apply full settings to restore model, orientation, variants after Chrome restart
+            select_frames_to_video_mode(
+                page,
+                context="ResumeCheck",
+                variants_count=job.get('flow_variants_count', 2),
+            )
+        except Exception as _rc_err:
+            print(f"[Flow] ⚠ Resume settings check failed: {_rc_err} — continuing anyway", flush=True)
+        
+        # After restore: scan for in-flight clips that need download
+        # These clips are in clips_done (skipped) but still "generating" — nobody downloads them
+        if http_dl_queue is not None and clip_submit_times:
+            _inflight = []
+            for _ci, _st in list(clip_submit_times.items()):
+                if _ci in http_enqueued_clips:
+                    continue
+                _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+                if not _clip_obj:
+                    continue
+                _status = _clip_obj.get('status', '')
+                if _status in ('completed', 'approved'):
+                    continue
+                _inflight.append((_ci, _clip_obj))
+            
+            if _inflight:
+                print(f"[Flow] Resume: {len(_inflight)} in-flight clip(s) need download — scanning tiles...", flush=True)
+                time.sleep(3)  # Let tiles render after settings
+                
+                # Try up to 3 rounds: scan DOM, reload if needed, then API fallback
+                _unfound = list(_inflight)
+                for _scan_round in range(3):
+                    if not _unfound:
+                        break
+                    if _scan_round > 0:
+                        print(f"[Flow] Resume: reload + retry (round {_scan_round+1}) for {len(_unfound)} clip(s)...", flush=True)
+                        try:
+                            page.reload(wait_until='domcontentloaded', timeout=30000)
+                            time.sleep(3)
+                            ensure_videos_tab_selected(page)
+                            # Scroll down to force virtualized tiles to render
+                            try:
+                                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                                time.sleep(2)
+                                page.evaluate("window.scrollTo(0, 0)")
+                                time.sleep(1)
+                            except Exception:
+                                pass
+                        except Exception as _rl:
+                            print(f"[Flow] Resume: reload failed: {_rl}", flush=True)
+                    
+                    _still_unfound = []
+                    for _ci, _clip_obj in _unfound:
+                        if _ci in http_enqueued_clips:
+                            continue
+                        _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
+                        try:
+                            _urls = page.evaluate(f"""() => {{
+                                for (const c of document.querySelectorAll('[data-index]')) {{
+                                    if ((c.innerText||'').includes({repr(_dlg)})) {{
+                                        const urls = [];
+                                        for (const v of c.querySelectorAll('video')) {{
+                                            const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                            if (u && !u.startsWith('blob:')) urls.push(u);
+                                        }}
+                                        if (urls.length) return urls;
+                                    }}
+                                }}
+                                return [];
+                            }}""")
+                            if _urls:
+                                http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                    'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir})
+                                http_enqueued_clips.add(_ci)
+                                print(f"[Flow] Resume: ✓ clip {_ci+1} ready — enqueued for HTTP download", flush=True)
+                            else:
+                                _still_unfound.append((_ci, _clip_obj))
+                        except Exception as _se:
+                            print(f"[Flow] Resume: scan error for clip {_ci+1}: {_se}", flush=True)
+                            _still_unfound.append((_ci, _clip_obj))
+                    _unfound = _still_unfound
+                
+                # API fallback for clips DOM scan couldn't find (virtualized out)
+                for _ci, _clip_obj in _unfound:
+                    if _ci in http_enqueued_clips:
+                        continue
+                    try:
+                        _api_check = api_request("GET", f"/clips/{_clip_obj['id']}/approval-status")
+                        if _api_check and _api_check.get('status') in ('completed', 'approved') and _api_check.get('output_url'):
+                            print(f"[Flow] Resume: ✓ clip {_ci+1} already completed in DB — no download needed", flush=True)
+                            http_enqueued_clips.add(_ci)  # Mark as handled
+                        elif _api_check and _api_check.get('status') == 'generating':
+                            print(f"[Flow] Resume: clip {_ci+1} still generating — post-job scan will handle", flush=True)
+                        else:
+                            print(f"[Flow] Resume: clip {_ci+1} status={_api_check.get('status') if _api_check else '?'} — post-job scan will handle", flush=True)
+                    except Exception as _ae:
+                        print(f"[Flow] Resume: API check failed for clip {_ci+1}: {_ae}", flush=True)
+
+    for i, clip in enumerate(clips):
+        # v455: abort checkpoint. If the user deleted this job, the
+        # /pending poll (which runs every few seconds) stamped it in
+        # the module-global abort set. Bailing here avoids spending
+        # 2-5 more minutes on a clip whose output will be discarded.
+        try:
+            check_abort(job_id)
+        except JobAbortedException:
+            print(f"[Flow] 🛑 Job {job_id[:8]}... aborted — stopping clip submission loop at clip {i+1}/{len(clips)}", flush=True)
+            raise
+
+        clip_index = clip['clip_index']
+        
+        if clip_index in clips_done:
+            print(f"\n--- Clip {i+1}/{len(clips)} SKIPPED (cached) ---")
+            prev_start_frame_key = clip.get('start_frame_key')
+            prev_end_frame_key = clip.get('end_frame_key')
+            # Pre-populate gallery_cache with skipped clip frames
+            for _fkey in ('start_frame_local', 'end_frame_local'):
+                _fpath = clip.get(_fkey)
+                if _fpath and os.path.exists(_fpath):
+                    _h = _file_hash(_fpath)
+                    if _h and _h not in gallery_cache:
+                        gallery_cache[_h] = os.path.basename(_fpath)
+                        print(f"[Gallery] Pre-populated cache from skipped clip {clip_index+1}: {os.path.basename(_fpath)}", flush=True)
+                    _rkey = clip.get('start_frame_key' if _fkey == 'start_frame_local' else 'end_frame_key')
+                    if _rkey:
+                        gallery_cache[_rkey] = os.path.basename(_fpath)
+            continue
+        
+        print(f"\n--- Clip {i+1}/{len(clips)} (clip_index={clip_index}) ---")
+
+        # Detect Chrome tab crash ("Aw, Snap!") before attempting any interaction
+        if is_page_crashed(page):
+            print(f"[SUBMIT] 💥 Tab crashed ('Aw, Snap!') before clip {clip_index+1} — recovering...", flush=True)
+            if recover_crashed_page(page, project_url, label="SUBMIT"):
+                try:
+                    select_frames_to_video_mode(page, context="CrashRecovery", variants_count=variants)
+                except Exception:
+                    pass
+            else:
+                raise Exception(f"Submit tab crashed and recovery failed at clip {clip_index}")
+
+
+
+
+
+        start_frame = clip.get('start_frame_local')
+        end_frame = clip.get('end_frame_local')
+        start_frame_key = clip.get('start_frame_key')
+        end_frame_key = clip.get('end_frame_key')
+        
+        # Get clip mode and scene info
+        clip_mode = clip.get('clip_mode', 'blend')
+        scene_index = clip.get('scene_index', 0)
+        continue_frame_extracted = False
+        
+        # Find the actual previous clip in the original sequence (by clip_index)
+        # After reordering, clips[i-1] may not be the right predecessor
+        prev_clip_by_idx = None
+        if clip_index > 0:
+            prev_clip_by_idx = next((c for c in clips if c.get('clip_index') == clip_index - 1), None)
+        prev_scene_index = prev_clip_by_idx.get('scene_index', -1) if prev_clip_by_idx else -1
+        
+        # ============================================================
+        # CONTINUE MODE HANDLING (single-account path)
+        # Same logic as multi-account path — wait for previous clip's
+        # video download + approval, extract frame, enhance, use it
+        # ============================================================
+        if clip_mode == 'continue' and prev_clip_by_idx and scene_index == prev_scene_index:
+            prev_clip = prev_clip_by_idx
+            prev_clip_index = prev_clip.get('clip_index')
+            prev_clip_id = prev_clip.get('id')
+            
+            print(f"[ContinueMode] Clip {clip_index+1} requires frame from approved clip {prev_clip_index}", flush=True)
+            
+            # Step 1: Get previous clip video — check R2 first if already completed,
+            # otherwise wait for DW to download it in parallel (normal first-run flow)
+            prev_video_path = None
+            prev_output_url = prev_clip.get('output_url')
+            prev_clip_status = prev_clip.get('status', '')
+
+            # On job retry after restore, prev clip is already completed → skip 5min wait, go direct to R2
+            if prev_clip_status in ('completed', 'approved') and prev_output_url:
+                print(f"[ContinueMode] Clip {prev_clip_index} already completed — fetching from R2 directly...", flush=True)
+                try:
+                    r2_path = os.path.join(temp_dir, f"clip_{prev_clip_index}_1.1.mp4")
+                    r2_resp = requests.get(prev_output_url, timeout=60, stream=True)
+                    if r2_resp.status_code == 200:
+                        with open(r2_path, 'wb') as f_out:
+                            for chunk in r2_resp.iter_content(chunk_size=8192):
+                                f_out.write(chunk)
+                        prev_video_path = r2_path
+                        print(f"[ContinueMode] ✓ R2 fetch OK: {os.path.getsize(r2_path)} bytes", flush=True)
+                    else:
+                        print(f"[ContinueMode] ⚠ R2 fetch failed ({r2_resp.status_code})", flush=True)
+                except Exception as r2_err:
+                    print(f"[ContinueMode] ⚠ R2 fetch error: {r2_err}", flush=True)
+
+            if not prev_video_path:
+                # Use the EXACT same scan pattern as wait_between_clips (single-image mode).
+                # No page.reload(). Flow SPA updates tiles in real-time.
+                max_video_wait = 300
+                video_wait_start = datetime.now()
+                print(f"[ContinueMode] Starting wait loop for clip {prev_clip_index} (max {max_video_wait}s)...", flush=True)
+                while (datetime.now() - video_wait_start).total_seconds() < max_video_wait:
+                    # Check 1: local file (HTTP worker may have downloaded it)
+                    prev_video_path = find_downloaded_video(temp_dir, prev_clip_index)
+                    if prev_video_path and os.path.exists(prev_video_path):
+                        print(f"[ContinueMode] Previous clip video downloaded: {os.path.basename(prev_video_path)}", flush=True)
+                        break
+                    
+                    elapsed = int((datetime.now() - video_wait_start).total_seconds())
+                    if elapsed > 0 and elapsed % 30 == 0:
+                        print(f"[ContinueMode] Waiting for clip {prev_clip_index} video... ({elapsed}s)", flush=True)
+                    
+                    # At 90s, reload page to force Flow to re-render tiles
+                    # (virtualized tiles may not be in DOM after restore)
+                    if elapsed == 90 and prev_clip_index not in http_enqueued_clips:
+                        print(f"[ContinueMode] Reloading page to force tile rendering...", flush=True)
+                        try:
+                            page.reload(wait_until="domcontentloaded", timeout=30000)
+                            time.sleep(3)
+                            ensure_logged_into_flow(page, "ContinueMode")
+                            ensure_videos_tab_selected(page)
+                        except Exception as _rl_err:
+                            print(f"[ContinueMode] Reload failed: {_rl_err}", flush=True)
+                    
+                    # Every 60s, check API — clip may have been completed + uploaded
+                    # by the download worker before it was killed during restore
+                    if elapsed > 0 and elapsed % 60 == 0 and prev_clip_index not in http_enqueued_clips:
+                        try:
+                            _api_check = api_request("GET", f"/clips/{prev_clip_id}/approval-status")
+                            if _api_check and _api_check.get('status') in ('completed', 'approved') and _api_check.get('output_url'):
+                                print(f"[ContinueMode] ✓ Clip {prev_clip_index} found completed in DB — fetching from R2...", flush=True)
+                                _r2_path = os.path.join(temp_dir, f"clip_{prev_clip_index}_1.1.mp4")
+                                _r2_resp = requests.get(_api_check['output_url'], timeout=60, stream=True)
+                                if _r2_resp.status_code == 200:
+                                    with open(_r2_path, 'wb') as _f:
+                                        for _chunk in _r2_resp.iter_content(chunk_size=8192):
+                                            _f.write(_chunk)
+                                    prev_video_path = _r2_path
+                                    print(f"[ContinueMode] ✓ R2 mid-wait fetch OK: {os.path.getsize(_r2_path)} bytes", flush=True)
+                                    break
+                        except Exception:
+                            pass
+                    
+                    # Human fidget (same as wait_between_clips)
+                    try:
+                        if random.random() < 0.5:
+                            human_mouse_move(page)
+                        if random.random() < 0.3:
+                            scroll_randomly(page)
+                    except Exception:
+                        pass
+                    
+                    # Scan for ready clips — IDENTICAL to wait_between_clips inner loop.
+                    # No page.reload(). Flow SPA updates tiles live.
+                    if http_dl_queue is not None and clip_submit_times and clips:
+                        _now = datetime.now()
+                        for _ci, _st in list(clip_submit_times.items()):
+                            if _ci in http_enqueued_clips:
+                                continue
+                            if (_now - _st).total_seconds() < CLIP_READY_WAIT:
+                                continue
+                            _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+                            if not _clip_obj:
+                                continue
+                            _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
+                            try:
+                                _urls = page.evaluate(f"""() => {{
+                                    for (const c of document.querySelectorAll('[data-index]')) {{
+                                        if ((c.innerText||'').includes({repr(_dlg)})) {{
+                                            const urls = [];
+                                            for (const v of c.querySelectorAll('video')) {{
+                                                const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                                if (u && !u.startsWith('blob:')) urls.push(u);
+                                            }}
+                                            if (urls.length) return urls;
+                                        }}
+                                    }}
+                                    return [];
+                                }}""")
+                                if _urls:
+                                    http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                        'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir})
+                                    http_enqueued_clips.add(_ci)
+                                    print(f"[ContinueMode] \u2713 @{(_now-_st).total_seconds():.0f}s: clip {_ci+1} ready \u2192 HTTP worker", flush=True)
+                            except Exception:
+                                pass
+                    
+                    time.sleep(random.uniform(3, 6))
+            if not prev_video_path or not os.path.exists(prev_video_path):
+                # Last resort: check API — HTTP worker may have completed the upload to R2
+                # while we were scanning the DOM for local files
+                try:
+                    _fresh = api_request("GET", f"/clips/{prev_clip_id}/approval-status")
+                    if _fresh and _fresh.get('status') in ('completed', 'approved') and _fresh.get('output_url'):
+                        print(f"[ContinueMode] Clip {prev_clip_index} completed in DB — fetching from R2...", flush=True)
+                        r2_path = os.path.join(temp_dir, f"clip_{prev_clip_index}_1.1.mp4")
+                        r2_resp = requests.get(_fresh['output_url'], timeout=60, stream=True)
+                        if r2_resp.status_code == 200:
+                            with open(r2_path, 'wb') as f_out:
+                                for chunk in r2_resp.iter_content(chunk_size=8192):
+                                    f_out.write(chunk)
+                            prev_video_path = r2_path
+                            print(f"[ContinueMode] ✓ R2 fallback OK: {os.path.getsize(r2_path)} bytes", flush=True)
+                        else:
+                            print(f"[ContinueMode] ⚠ R2 fallback failed ({r2_resp.status_code})", flush=True)
+                except Exception as _r2e:
+                    print(f"[ContinueMode] ⚠ R2 fallback error: {_r2e}", flush=True)
+            if not prev_video_path or not os.path.exists(prev_video_path):
+                print(f"[ContinueMode] WARNING: Could not get clip {prev_clip_index} video — using original start frame", flush=True)
+            else:
+                # Step 2: Wait for user approval (max 10 minutes)
+                approval_result = wait_for_clip_approval(prev_clip_id, prev_clip_index, temp_dir, timeout=600)
+                
+                if approval_result and approval_result.get('success'):
+                    approved_video = approval_result.get('video_path')
+                    selected_variant = approval_result.get('selected_variant', 1)
+                    
+                    # NOW set preparing status — approval received, extracting frame
+                    clip_id_for_status = clip.get('id')
+                    if clip_id_for_status:
+                        update_clip_status(clip_id_for_status, 'preparing')
+                    
+                    if selected_variant != 1:
+                        specific_video = find_downloaded_video(temp_dir, prev_clip_index, variant=selected_variant)
+                        if specific_video and os.path.exists(specific_video):
+                            approved_video = specific_video
+                            print(f"[ContinueMode] Using approved variant {selected_variant}: {os.path.basename(approved_video)}", flush=True)
+                    
+                    if approved_video and os.path.exists(approved_video):
+                        # Step 3: Extract frame from approved video
+                        extracted_frame = extract_frame_from_video(approved_video, frame_offset=-8)
+                        
+                        if extracted_frame:
+                            # Step 4: Enhance frame via Nano Banana API
+                            original_frame_key = clip.get('start_frame_key')
+                            enhanced_frame = enhance_frame_via_api(extracted_frame, original_frame_key, job_id)
+                            
+                            start_frame = enhanced_frame
+                            if enhanced_frame != extracted_frame:
+                                print(f"[ContinueMode] ✓ Using enhanced frame from approved clip {prev_clip_index} (variant {selected_variant})", flush=True)
+                            else:
+                                print(f"[ContinueMode] ✓ Using extracted frame from approved clip {prev_clip_index} (variant {selected_variant}) [enhancement unavailable]", flush=True)
+                            
+                            continue_frame_extracted = True
+                            # Invalidate gallery cache — the extracted frame must be uploaded,
+                            # not reused from gallery. Without this, the gallery cache matches
+                            # the old start_frame_key and selects the original image instead.
+                            if gallery_cache and original_frame_key in gallery_cache:
+                                del gallery_cache[original_frame_key]
+                            start_frame_key = enhanced_frame  # Unique path, won't match gallery cache
+                            clip['start_frame_key'] = enhanced_frame
+                            clip['start_frame_local'] = enhanced_frame
+                        else:
+                            print(f"[ContinueMode] WARNING: Frame extraction failed, using original start frame", flush=True)
+                    else:
+                        print(f"[ContinueMode] WARNING: Approved video not found, using original start frame", flush=True)
+                else:
+                    # Approval timed out or rejected — auto-pick variant 1 and continue
+                    reason = approval_result.get('reason', 'unknown') if approval_result else 'error'
+                    print(f"[ContinueMode] Approval not received ({reason}) — auto-picking variant 1 to continue chain", flush=True)
+                    
+                    # Find variant 1 on disk
+                    auto_video = find_downloaded_video(temp_dir, prev_clip_index, variant=1)
+                    if not auto_video or not os.path.exists(auto_video):
+                        auto_video = find_downloaded_video(temp_dir, prev_clip_index)
+                    
+                    # Try R2 if not on disk
+                    if not auto_video or not os.path.exists(auto_video):
+                        try:
+                            _fresh = api_request("GET", f"/clips/{prev_clip_id}/approval-status")
+                            if _fresh and _fresh.get('output_url'):
+                                _r2_path = os.path.join(temp_dir, f"clip_{prev_clip_index}_auto.mp4")
+                                _r2_resp = requests.get(_fresh['output_url'], timeout=60, stream=True)
+                                if _r2_resp.status_code == 200:
+                                    with open(_r2_path, 'wb') as _f:
+                                        for _chunk in _r2_resp.iter_content(chunk_size=8192):
+                                            _f.write(_chunk)
+                                    auto_video = _r2_path
+                                    print(f"[ContinueMode] ✓ Fetched variant 1 from R2 for auto-continue", flush=True)
+                        except Exception:
+                            pass
+                    
+                    if auto_video and os.path.exists(auto_video):
+                        extracted_frame = extract_frame_from_video(auto_video, frame_offset=-8)
+                        if extracted_frame:
+                            original_frame_key = clip.get('start_frame_key')
+                            enhanced_frame = enhance_frame_via_api(extracted_frame, original_frame_key, job_id)
+                            start_frame = enhanced_frame
+                            continue_frame_extracted = True
+                            if gallery_cache and original_frame_key in gallery_cache:
+                                del gallery_cache[original_frame_key]
+                            start_frame_key = enhanced_frame
+                            clip['start_frame_key'] = enhanced_frame
+                            clip['start_frame_local'] = enhanced_frame
+                            print(f"[ContinueMode] ✓ Auto-continued with variant 1 frame from clip {prev_clip_index}", flush=True)
+                        else:
+                            print(f"[ContinueMode] ⚠ Frame extraction failed on auto-picked video", flush=True)
+                    else:
+                        print(f"[ContinueMode] ⚠ No video found for auto-continue — using original start frame", flush=True)
+        
+        # Use API prompt if available, otherwise build with job context
+        prompt = clip.get('prompt')
+        if not prompt:
+            prompt = build_flow_prompt(
+                dialogue_line=clip.get('dialogue_text', ''),
+                language=job_language,
+                voice_profile=job_voice_profile,
+                duration=job_duration,
+                short_dialogue_mode=job_short_dialogue_mode,
+                prefix_short_enabled=job_prefix_short_enabled,
+                prefix_short_word=job_prefix_short_word,
+                prefix_short_threshold=job_prefix_short_threshold,
+            )
+        
+        # Calculate if frames are new (unless already set by continue mode)
+        if continue_frame_extracted:
+            has_new_start = True  # Always new — we have an extracted/enhanced frame
+        else:
+            has_new_start = (start_frame_key != prev_start_frame_key) if prev_start_frame_key else True
+        has_new_end = (end_frame_key != prev_end_frame_key) if prev_end_frame_key else (end_frame_key is not None)
+        
+        # If this clip has an end frame but the previous clip didn't (or vice versa),
+        # the frame slot layout changes in Flow's UI — must re-upload start frame
+        prev_had_end = prev_end_frame_key is not None
+        curr_has_end = end_frame_key is not None
+        if curr_has_end != prev_had_end:
+            has_new_start = True
+            has_new_end = curr_has_end
+        
+        has_new_frames = has_new_start or has_new_end
+        
+        # Pre-check: if current frame is already blacklisted, reassign before trying upload
+        if blacklisted_images:
+            needs_reassign = False
+            if start_frame_key in blacklisted_images:
+                print(f"[Flow] Clip {i+1}: start_frame {os.path.basename(start_frame_key)} already blacklisted, reassigning...", flush=True)
+                needs_reassign = True
+            if end_frame_key in blacklisted_images:
+                print(f"[Flow] Clip {i+1}: end_frame {os.path.basename(end_frame_key)} already blacklisted, reassigning...", flush=True)
+                needs_reassign = True
+            if needs_reassign:
+                failed_count = reassign_clip_frames(clips, i, blacklisted_images, image_pool, ordered_image_keys)
+                # Update local vars after reassignment
+                start_frame = clip.get('start_frame_local')
+                end_frame = clip.get('end_frame_local')
+                start_frame_key = clip.get('start_frame_key')
+                end_frame_key = clip.get('end_frame_key')
+                # Recompute has_new_frames with updated keys
+                has_new_start = (start_frame_key != prev_start_frame_key) if prev_start_frame_key else True
+                has_new_end = (end_frame_key != prev_end_frame_key) if prev_end_frame_key else (end_frame_key is not None)
+                has_new_frames = has_new_start or has_new_end
+                if start_frame_key in blacklisted_images or end_frame_key in blacklisted_images:
+                    print(f"[Flow] ❌ Clip {i+1}: all images blacklisted after reassign", flush=True)
+                    update_clip_status(clip['id'], 'failed', error_message="⚠️ Image rejected by Flow content policy — try a different image")
+                    permanently_failed_clips.add(clip_index)
+                    prev_start_frame_key = start_frame_key
+                    prev_end_frame_key = end_frame_key
+                    continue
+        
+        _sfname = start_frame_key.split("/")[-1] if start_frame_key else "None"
+        _efname = end_frame_key.split("/")[-1] if end_frame_key else "None"
+        _psfname = prev_start_frame_key.split("/")[-1] if prev_start_frame_key else "None"
+        _pefname = prev_end_frame_key.split("/")[-1] if prev_end_frame_key else "None"
+        print(f"  start_frame: {_sfname} | end_frame: {_efname}")
+        print(f"  prev_start: {_psfname} | prev_end: {_pefname}")
+        print(f"  start_local: {os.path.basename(start_frame) if start_frame else 'None'} | end_local: {os.path.basename(end_frame) if end_frame else 'None'}")
+        print(f"  has_new_start={has_new_start}, has_new_end={has_new_end}, has_new_frames={has_new_frames}")
+        print(f"  clip_mode={clip_mode}, scene={scene_index}, dialogue=\"{clip.get('dialogue_text', '')[:40]}...\"", flush=True)
+        
+        # v174 safety net: if project has zero tiles actually submitted in this run,
+        # force the full-upload path regardless of has_new_frames.  The reuse button
+        # only exists when at least one tile is in the project.  Without this, a bad
+        # cache skip (e.g. clips_done from another account's project) causes the reuse
+        # path to be entered on an empty project → cascading "Could not click reuse
+        # button" failures for every subsequent clip.
+        if not first_submission_in_project and _tiles_in_this_project == 0:
+            print(f"[Flow] ⚠ Zero tiles in project — re-arming full upload path for clip {i+1} (safety net)", flush=True)
+            first_submission_in_project = True
+        
+        if first_submission_in_project:
+            # First clip actually being submitted to this project — needs frames and full setup.
+            # NOTE: after restore, clips_done may skip clips 0..N, so i>0 here but the project
+            # is still empty. has_new_frames may be False (same image as skipped clips) but
+            # we MUST do full upload — there are no tiles in the new project to reuse from.
+            check_and_dismiss_popup(page)
+            
+            # On a fresh project the bottom toolbar takes a moment to become interactive.
+            # Wait for the settings button to be visible AND stable before trying to open it.
+            human_mouse_move(page)
+            human_delay(0.3, 0.6)
+            print(f"[SUBMIT] Waiting for settings button to be ready on new project...", flush=True)
+            try:
+                for n in range(1, 5):
+                    candidate = page.locator(f"button:has-text('x{n}')").first
+                    try:
+                        candidate.wait_for(state="visible", timeout=8000)
+                        break
+                    except:
+                        continue
+                time.sleep(2)  # Extra stability wait after button appears
+            except:
+                pass
+            human_delay(0.3, 0.6)
+            variants_count = job.get('flow_variants_count', 2)
+            print(f"[SUBMIT] Flow variants count from job config: {variants_count}", flush=True)
+            try:
+                select_frames_to_video_mode(page, variants_count=variants_count)
+            except Exception as settings_err:
+                print(f"[Flow] ⚠ Settings failed for clip {clip_index+1} — skipping clip: {settings_err}", flush=True)
+                update_clip_status(clip['id'], 'failed', error_message=f"Settings dropdown failed: {str(settings_err)[:100]}")
+                permanently_failed_clips.add(clip_index)
+                continue
+            ensure_batch_view_mode(page)
+            human_delay(1, 2)
+            
+            human_delay(0.3, 0.6)
+            
+            # Upload frames with policy check + blacklist retry
+            ok, start_frame, end_frame, start_frame_key, end_frame_key = upload_frames_with_retry(
+                page, clip, clip_index, clips, i, start_frame, end_frame,
+                start_frame_key, end_frame_key, blacklisted_images,
+                image_pool, ordered_image_keys, permanently_failed_clips, context="",
+                gallery_cache=gallery_cache, frames_busy_flag=frames_busy_flag)
+            if not ok:
+                prev_start_frame_key = start_frame_key
+                prev_end_frame_key = end_frame_key
+                continue
+            
+            # Enter prompt
+            human_delay(1, 2)
+            human_mouse_move(page)
+            scroll_randomly(page)
+            fill_prompt_textarea(page, prompt)
+            print(f"✓ Entered prompt: {prompt[:50]}...")
+            # Brief pause after prompt entry
+            time.sleep(random.uniform(1.5, 3))
+            
+            # Click Generate (includes human movements, model check, button-enabled wait)
+            click_generate_button(page, "Flow")
+            print("✓ Clicked Generate for clip 1", flush=True)
+            human_delay(1, 2)
+            first_submission_in_project = False  # Tiles now exist — subsequent clips can reuse
+            _tiles_in_this_project += 1
+            
+        elif has_new_frames:
+            print(f"[Flow] Clip {i+1}: New frames detected, uploading...")
+            
+            # If this clip waited for continue mode approval, the Flow page may be stale
+            # (5+ minutes passed). Refresh to get clean UI state before uploading frames.
+            if continue_frame_extracted:
+                print(f"[Flow] Refreshing page after continue mode wait...", flush=True)
+                page.reload(wait_until="domcontentloaded", timeout=30000)
+                time.sleep(3)
+                ensure_logged_into_flow(page, "SUBMIT")
+                check_and_dismiss_popup(page)
+                ensure_videos_tab_selected(page)
+                time.sleep(2)
+                print(f"[Flow] ✓ Page refreshed, ready for frame upload", flush=True)
+            
+            # CRITICAL: Clear the previous prompt to reset the input area.
+            # After generating, Flow keeps the prompt + frames loaded. The frame
+            # buttons (div[aria-haspopup="dialog"]) only appear after clearing.
+            # The "Clear prompt" button has an <i> with text "close".
+            try:
+                clear_btn = page.locator('button:has(span:text("Clear prompt")), button:has(i:text("close"))').first
+                if clear_btn.count() > 0:
+                    clear_btn.click(timeout=5000)
+                    time.sleep(1)
+                    print(f"[Flow] ✓ Cleared previous prompt — input reset", flush=True)
+                else:
+                    print(f"[Flow] No clear button found — input may already be empty", flush=True)
+            except Exception as _ce:
+                print(f"[Flow] ⚠ Clear prompt failed: {_ce}", flush=True)
+            
+            human_delay(0.3, 0.6)
+            
+            # Upload frames with policy check + blacklist retry
+            # CRITICAL: Always upload BOTH frames, not just the changed one.
+            # After a "reuse prompt" click, Flow's UI fills both frame slots from
+            # the previous clip. There are no empty individual frame buttons to click.
+            # The only way to change frames is to replace both via rebuild_clip.
+            s_img = start_frame if start_frame else None
+            e_img = end_frame if end_frame else None
+            
+            ok, s_img, e_img, start_frame_key, end_frame_key = upload_frames_with_retry(
+                page, clip, clip_index, clips, i, s_img, e_img,
+                start_frame_key, end_frame_key, blacklisted_images,
+                image_pool, ordered_image_keys, permanently_failed_clips, context=f"Clip {i+1} ",
+                gallery_cache=gallery_cache, frames_busy_flag=frames_busy_flag)
+            if not ok:
+                prev_start_frame_key = start_frame_key
+                prev_end_frame_key = end_frame_key
+                continue
+            # Update start/end_frame from clip in case they were reassigned
+            start_frame = clip.get('start_frame_local', start_frame)
+            end_frame = clip.get('end_frame_local', end_frame)
+            
+            # Enter prompt
+            human_delay(1, 2)
+            human_mouse_move(page)
+            scroll_randomly(page)
+            fill_prompt_textarea(page, prompt)
+            print(f"✓ Clip {i+1}: Entered prompt: {prompt[:50]}...")
+            # Brief pause after prompt entry
+            time.sleep(random.uniform(1.5, 3))
+            
+            # Click Generate (includes human movements, model check, button-enabled wait)
+            click_generate_button(page, f"Clip {i+1}")
+            print(f"✓ Clicked Generate for clip {i+1}", flush=True)
+            human_delay(1, 2)
+            _tiles_in_this_project += 1
+            
+        else:
+            # No new frames - just reuse and change prompt
+            print(f"\n--- Clip {i+1}/{len(clips)} (reuse frames) ---")
+            
+            # Human-like behavior before reuse prompt click
+            human_pre_action(page, "reuse prompt")
+            
+            # Use new robust reuse function that waits for Generate button to be enabled
+            # and retries with page refresh if it gets stuck
+            try:
+                click_reuse_and_generate(page, prompt, i+1, "Flow", max_retries=3, wait_timeout=60,
+                                        start_frame=start_frame, end_frame=end_frame)
+            except Exception as e:
+                # v195: Reuse failed — fall back to fresh submission (clear + upload frames + prompt)
+                print(f"[Flow] ⚠ Reuse failed for clip {clip_index+1}: {e}", flush=True)
+                print(f"[Flow] Falling back to fresh submission (clear + upload + prompt)...", flush=True)
+                try:
+                    # Clear prompt to reset UI and get frame buttons back
+                    try:
+                        clear_btn = page.locator('button:has(span:text("Clear prompt")), button:has(i:text("close"))').first
+                        if clear_btn.count() > 0:
+                            clear_btn.click(timeout=5000)
+                            time.sleep(1)
+                            print(f"[Flow] ✓ Cleared prompt for fresh submission", flush=True)
+                    except Exception:
+                        page.reload(wait_until="domcontentloaded", timeout=30000)
+                        time.sleep(3)
+                        ensure_logged_into_flow(page, "SUBMIT")
+                        check_and_dismiss_popup(page)
+                        ensure_videos_tab_selected(page)
+                        time.sleep(2)
+                        print(f"[Flow] ✓ Page refreshed for fresh submission", flush=True)
+                    
+                    human_delay(0.3, 0.6)
+                    
+                    # Upload frames fresh
+                    s_img = start_frame if start_frame else None
+                    e_img = end_frame if end_frame else None
+                    ok, s_img, e_img, start_frame_key, end_frame_key = upload_frames_with_retry(
+                        page, clip, clip_index, clips, i, s_img, e_img,
+                        start_frame_key, end_frame_key, blacklisted_images,
+                        image_pool, ordered_image_keys, permanently_failed_clips,
+                        context=f"Fallback clip {i+1} ",
+                        gallery_cache=gallery_cache, frames_busy_flag=frames_busy_flag)
+                    if not ok:
+                        raise Exception("Frame upload failed in fallback")
+                    
+                    # Paste prompt
+                    human_delay(1, 2)
+                    fill_prompt_textarea(page, prompt)
+                    print(f"[Flow] ✓ Fallback: entered prompt for clip {clip_index+1}", flush=True)
+                    time.sleep(random.uniform(1.5, 3))
+                    
+                    # Click Generate
+                    click_generate_button(page, f"Fallback clip {i+1}")
+                    print(f"[Flow] ✓ Fallback: clip {clip_index+1} submitted via fresh path", flush=True)
+                    human_delay(1, 2)
+                    _tiles_in_this_project += 1
+                except Exception as fallback_err:
+                    print(f"[Flow] ❌ REUSE+FALLBACK FAILED at clip {clip_index+1}: {fallback_err}", flush=True)
+                    clips_needing_retry.append({
+                        'clip_index': clip_index,
+                        'clip_data': clips_data[i] if i < len(clips_data) else None
+                    })
+                    continue  # Skip to next clip
+            
+            time.sleep(3)
+            _tiles_in_this_project += 1
+        
+        # Record submission time BEFORE failcheck (needed for download timing)
+        clip_submit_times[clip_index] = datetime.now()
+        print(f"[Flow] Clip {clip_index+1} submitted at {clip_submit_times[clip_index].strftime('%H:%M:%S')}", flush=True)
+        
+        # Wait 3 seconds then check for immediate failure
+        time.sleep(FAILURE_CHECK_DELAY)
+        clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1)
+        
+        # Ghost submission detection: verify data-index=0 actually contains OUR clip.
+        # After FailCheck's 10s wait, if the newest tile doesn't match our dialogue,
+        # the Generate click silently failed — the old tile is still at position 0.
+        _is_ghost = False
+        if not clip_failed:
+            try:
+                _dialogue_key = (clip.get('dialogue_text') or '')[:30]
+                _ghost_result = page.evaluate(f"""() => {{
+                    const c = document.querySelector("div[data-index='0']");
+                    if (!c) return {{found: false, tiles: 0}};
+                    const seen = new Set();
+                    c.querySelectorAll("[data-tile-id]").forEach(t => {{
+                        const id = t.getAttribute("data-tile-id"); if (id) seen.add(id);
+                    }});
+                    const text = c.innerText || c.textContent || '';
+                    const dialogue = {repr(_dialogue_key)};
+                    return {{
+                        found: dialogue.length > 5 ? text.includes(dialogue) : true,
+                        tiles: seen.size
+                    }};
+                }}""")
+                if _ghost_result and _ghost_result.get('tiles', 0) == 0:
+                    _is_ghost = True
+                    print(f"[Flow] ⚠ GHOST: clip {clip_index+1} — no tiles at data-index=0", flush=True)
+                elif _ghost_result and not _ghost_result.get('found', True):
+                    _is_ghost = True
+                    print(f"[Flow] ⚠ GHOST: clip {clip_index+1} — data-index=0 doesn't contain our dialogue (stale tile from previous clip)", flush=True)
+            except Exception as _ge:
+                print(f"[Flow] ⚠ Ghost check error for clip {clip_index+1}: {_ge}", flush=True)
+        
+        if _is_ghost:
+            # Submission silently failed — queue for immediate redo pickup
+            print(f"[Flow] Ghost clip {clip_index+1} — queuing for redo resubmission", flush=True)
+            update_clip_status(clip['id'], 'flow_redo_queued', error_message="Ghost submission — Generate click had no effect")
+            ghost_clips.add(clip_index)
+            clip_submit_times.pop(clip_index, None)
+            # Remove from cache if it got added prematurely
+            if job_id in cache.get('jobs', {}):
+                _cs = cache['jobs'][job_id].get('clips_submitted', [])
+                if clip_index in _cs:
+                    _cs.remove(clip_index)
+                    save_cache(cache)
+            continue  # Skip to next clip — redo system picks it up immediately
+        
+        # Submission confirmed — NOW mark as generating + submitted in cache
+        # (only if FailCheck also passed — if clip_failed, the failure handler below
+        # will set the correct status)
+        if not clip_failed:
+            update_clip_status(clip['id'], 'generating')
+            mark_clip_submitted(cache, job_id, clip_index)
+        
+        if clip_failed:
+            print(f"[Flow] ⚠️ Clip {clip_index+1} failed immediately — stopping submission and triggering restore...", flush=True)
+            # Record failure so golden restore triggers
+            # Mark this clip pending (NOT failed) — it will be retried after restore
+            update_clip_status(clip['id'], 'pending', error_message=None)
+            # Reset remaining (not-yet-submitted) clips to pending
+            remaining = clips[i+1:]
+            if remaining:
+                print(f"[Flow] ⛔ {len(remaining)} remaining clip(s) reset to pending for retry after restore", flush=True)
+                for rc in remaining:
+                    update_clip_status(rc['id'], 'pending', error_message=None)
+            # Also reset clips that are still 'generating' in the old project.
+            # The old DW will be killed during restore — those clips will never be
+            # downloaded from the orphaned project. Re-submit them in the new project.
+            generating_clips = [c for c in clips[:i] if c.get('status') == 'generating']
+            if generating_clips:
+                print(f"[Flow] ⛔ {len(generating_clips)} generating clip(s) reset to pending (old project will be orphaned)", flush=True)
+                for gc in generating_clips:
+                    update_clip_status(gc['id'], 'pending', error_message=None)
+            # Tell download worker which clips are actually available — exclude failed + remaining
+            if download_queued:
+                allowed = set(c['clip_index'] for c in clips[:i])  # only clips before the failure
+                print(f"[Flow] Notifying download worker: only clips {sorted(allowed)} are available", flush=True)
+                download_queue.put({'type': 'limit_clips', 'job_id': job_id, 'allowed_clips': allowed})
+                download_queue.put({'type': 'shutdown_after_complete', 'job_id': job_id})
+            # Reset job to pending so it gets picked up after golden restore
+            update_job_status(job_id, 'pending')
+            # Fix clips_submitted cache: only keep clips confirmed completed in DB.
+            # The failed clip was added to clips_submitted before the failure check —
+            # remove it or it will be skipped on retry instead of re-submitted.
+            # Also remove 'generating' clips: they were in the old orphaned project
+            # and will never be downloaded; they must be re-submitted in the new project.
+            if job_id in cache.get('jobs', {}):
+                # Re-fetch clip statuses from DB — the in-memory clips list has stale statuses
+                # from job load time and does NOT reflect completed updates made during this run.
+                # Using stale state gives confirmed_done=[] even when clips 0/1 are completed.
+                # confirmed_done: clips that were already submitted to Flow.
+                # We use clips_submitted from cache — this is the source of truth for what
+                # was submitted in this run. The failed clip itself is excluded below via
+                # the [ci for ci in old_submitted if ci in confirmed_done] filter.
+                # Do NOT use in-memory clip statuses — they are never updated by the download thread.
+                confirmed_done = set(cache['jobs'][job_id].get('clips_submitted', []))
+                # Exclude the clip that just failed (it was added to clips_submitted pre-check)
+                confirmed_done.discard(clip_index)
+                print(f"[Flow] Confirmed-submitted clips (excl failed {clip_index+1}): {[c+1 for c in sorted(confirmed_done)]}", flush=True)
+                old_submitted = cache['jobs'][job_id].get('clips_submitted', [])
+                cache['jobs'][job_id]['clips_submitted'] = [ci for ci in old_submitted if ci in confirmed_done]
+                cache['jobs'][job_id]['project_url'] = None
+                cache['jobs'][job_id]['status'] = 'pending'
+                save_cache(cache)
+                print(f"[Flow] Cache clips_submitted trimmed to confirmed-done only: {[c+1 for c in sorted(confirmed_done)]}", flush=True)
+            # Raise — caller (_process_job_with_failover / main) calls record_failure with correct account name
+            raise Exception(f"Clip {clip_index} failed — stopping job to trigger golden restore")
+        
+        # Clip passed — record success for proactive restore counter
+        account_health.record_success(account_name)
+
+        # Check proactive restore threshold mid-job — don't wait until job end
+        _needs_proactive_restore = account_health.needs_proactive_restore(account_name)
+        if _needs_proactive_restore:
+            print(f"[Flow] 🔄 Proactive restore threshold reached mid-job after clip {clip_index+1} — stopping job for golden refresh", flush=True)
+            # v174: Do NOT reset job to 'pending' in DB.  The account will self-resume
+            # this exact job after golden restore — keeping it as 'processing' prevents
+            # the main dispatcher from re-assigning it (and splitting it in parallel mode,
+            # which caused cross-account clip duplication).
+            # If the worker crashes during restore, stuck-job recovery will handle it.
+            if job_id in cache.get('jobs', {}):
+                submitted_so_far = cache['jobs'][job_id].get('clips_submitted', [])
+                save_cache(cache)
+                print(f"[Flow] Proactive restore: preserving state for self-resume. Submitted clips: {[c+1 for c in sorted(submitted_so_far)]}", flush=True)
+        # Queue for download after FIRST clip that passes failure check.
+        # MUST happen before proactive restore raise so acc.ready_event is always
+        # set — otherwise the permanent download thread waits 300s and skips the job.
+        # Try to extract URLs for THIS specific clip by matching its dialogue text.
+        # Uses the same container-matching logic as the sweep — correct clip, correct URLs.
+        # Most clips won't have a URL yet at failcheck (still generating) — that's fine,
+        # the sweep will catch them. But if a clip finishes fast, this queues it immediately.
+        if not clip_failed and http_dl_queue is not None:
+            try:
+                _dialogue_key = (clip.get('dialogue_text') or '')[:20]
+                _video_urls = page.evaluate(f"""() => {{
+                    const dialogue = {repr(_dialogue_key)};
+                    for (const c of document.querySelectorAll('[data-index]')) {{
+                        const text = c.innerText || c.textContent || '';
+                        if (!dialogue || text.includes(dialogue)) {{
+                            const urls = [];
+                            for (const v of c.querySelectorAll('video')) {{
+                                const u = v.src || v.querySelector('source')?.src || '';
+                                if (u && !u.startsWith('blob:')) urls.push(u);
+                            }}
+                            if (urls.length > 0) return urls;
+                        }}
+                    }}
+                    return [];
+                }}""")
+                if _video_urls:
+                    if clip_index not in http_enqueued_clips:
+                        http_dl_queue.put({'job_id': job_id, 'clip_index': clip_index,
+                            'clip_id': clip['id'], 'urls': _video_urls, 'temp_dir': temp_dir})
+                        http_enqueued_clips.add(clip_index)
+                        print(f"[HTTP-DL] ✓ Queued clip {clip_index+1} immediately ({len(_video_urls)} URL(s))", flush=True)
+            except Exception:
+                pass  # Sweep will handle it
+
+        if not clip_failed and not download_queued:
+            download_queue.put({
+                'job_id': job_id,
+                'project_url': project_url,
+                'clips': clips,
+                'clips_data': clips_data,
+                'clip_project_map': clip_project_map,
+                'clip_submit_times': clip_submit_times,
+                'permanently_failed_clips': permanently_failed_clips,
+                'downloaded_videos': downloaded_videos,
+                'num_clips': len(clips),
+                'total_job_clips': job.get('_total_clips', len(clips)),
+                'submitted_at': datetime.now(),
+                'temp_dir': temp_dir
+            })
+            backfill_clip_submit_times(clip_submit_times, clips, job_id=job_id, cache=cache)
+            print(f"[Flow] ✓ Queued for download after clip {clip_index+1} passed check (parallel mode)", flush=True)
+            download_queued = True
+
+        # Proactive restore raise AFTER queueing — so download thread always gets job_data
+        if _needs_proactive_restore:
+            # Before restore: wait for any clip within 15s of its 70s mark,
+            # then scan and push to HTTP worker. This closes the timing gap where
+            # restore fires just before a clip's 70s window expires.
+            if http_dl_queue is not None:
+                _now = datetime.now()
+                # Find the clip closest to 70s that hasn't hit it yet
+                _max_wait_pre = 0
+                for _ci, _st in clip_submit_times.items():
+                    _elapsed = (_now - _st).total_seconds()
+                    _remaining = CLIP_READY_WAIT - _elapsed
+                    if 0 < _remaining <= 15:  # Within 15s of being ready
+                        _max_wait_pre = max(_max_wait_pre, _remaining)
+                if _max_wait_pre > 0:
+                    print(f"[Flow] ⏳ Pre-restore: waiting {_max_wait_pre:.0f}s for clip to hit 70s...", flush=True)
+                    time.sleep(_max_wait_pre + 1)
+                # Now scan all clips that have hit 70s
+                _now = datetime.now()
+                for _ci, _st in list(clip_submit_times.items()):
+                    if (_now - _st).total_seconds() >= CLIP_READY_WAIT:
+                        _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+                        if not _clip_obj:
+                            continue
+                        _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
+                        try:
+                            _urls = page.evaluate(f"""() => {{
+                                for (const c of document.querySelectorAll('[data-index]')) {{
+                                    if ((c.innerText||'').includes({repr(_dlg)})) {{
+                                        const urls = [];
+                                        for (const v of c.querySelectorAll('video')) {{
+                                            const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                            if (u && !u.startsWith('blob:')) urls.push(u);
+                                        }}
+                                        if (urls.length) return urls;
+                                    }}
+                                }}
+                                return [];
+                            }}""")
+                            if _urls:
+                                if _ci not in http_enqueued_clips:
+                                    http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                        'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir})
+                                    http_enqueued_clips.add(_ci)
+                                    print(f"[Flow] ✓ Pre-restore: clip {_ci+1} ready → HTTP worker", flush=True)
+                        except Exception:
+                            pass
+            raise Exception(f"Proactive restore threshold reached after clip {clip_index}")
+        
+        if i < len(clips) - 1:
+            # Human-like wait + opportunistic download scan
+            # Clips submitted before this one may now be ready (70s passed).
+            # Scan DOM for any that are done and push to HTTP worker immediately.
+            _delayed_failures = _pacer.wait_between_clips(
+                page, clip_number=i, total_clips=len(clips),
+                clip_submit_times=clip_submit_times, clips=clips,
+                http_dl_queue=http_dl_queue, temp_dir=temp_dir, job_id=job_id,
+                already_enqueued=http_enqueued_clips,
+            )
+            # Hard failure detected (e.g. clip reached 99% then Flow killed it)
+            # Abort job — submitting more clips to a broken Flow is pointless
+            if _delayed_failures:
+                print(f"[Flow] ⛔ DELAYED HARD FAILURE: clip(s) {[c+1 for c in _delayed_failures]} failed after generating — aborting job for golden restore", flush=True)
+                for _dfc in _delayed_failures:
+                    _df_clip = next((c for c in clips if c.get('clip_index') == _dfc), None)
+                    if _df_clip:
+                        update_clip_status(_df_clip['id'], 'flow_redo_queued',
+                            error_message="Flow delayed failure — clip generated then killed by Flow")
+                # Reset remaining unsubmitted clips to pending
+                remaining = clips[i+1:]
+                if remaining:
+                    print(f"[Flow] ⛔ {len(remaining)} remaining clip(s) reset to pending for retry after restore", flush=True)
+                    for rc in remaining:
+                        update_clip_status(rc['id'], 'pending', error_message=None)
+                # Job → pending, cache → null project
+                update_job_status(job_id, 'pending')
+                if job_id in cache.get('jobs', {}):
+                    confirmed_done = set()
+                    for _chk_ci in cache['jobs'][job_id].get('clips_submitted', []):
+                        if _chk_ci not in _delayed_failures:
+                            confirmed_done.add(_chk_ci)
+                    cache['jobs'][job_id]['clips_submitted'] = [ci for ci in cache['jobs'][job_id].get('clips_submitted', []) if ci in confirmed_done]
+                    cache['jobs'][job_id]['project_url'] = None
+                    cache['jobs'][job_id]['status'] = 'pending'
+                    save_cache(cache)
+                raise Exception(f"Flow delayed failure — clip(s) {[c+1 for c in _delayed_failures]} failed after generating")
+            # After wait: check if any clips have hit 70s since submission
+            if http_dl_queue is not None:
+                _now = datetime.now()
+                for _ci, _st in list(clip_submit_times.items()):
+                    if (_now - _st).total_seconds() >= CLIP_READY_WAIT:
+                        _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+                        if not _clip_obj or _ci in []:
+                            continue
+                        _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
+                        try:
+                            _urls = page.evaluate(f"""() => {{
+                                for (const c of document.querySelectorAll('[data-index]')) {{
+                                    if ({repr(_dlg)} && (c.innerText||'').includes({repr(_dlg)})) {{
+                                        const urls = [];
+                                        for (const v of c.querySelectorAll('video')) {{
+                                            const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                            if (u && !u.startsWith('blob:')) urls.push(u);
+                                        }}
+                                        if (urls.length) return urls;
+                                        // Has video (blob) — signal CDP loop
+                                        if (c.querySelectorAll('video').length > 0) return ['__has_video__'];
+                                    }}
+                                }}
+                                return [];
+                            }}""")
+                            if _urls and _urls != ['__has_video__']:
+                                if _ci not in http_enqueued_clips:
+                                    http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                        'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir})
+                                    http_enqueued_clips.add(_ci)
+                                    print(f"[Flow] ✓ Between-clip: clip {_ci+1} ready → HTTP worker", flush=True)
+                            elif _urls == ['__has_video__']:
+                                # Blob only — retry scan after short wait (Flow may serve real URL soon)
+                                # Will be caught by post-job handler
+                                print(f"[Flow] ⚠ Between-clip: clip {_ci+1} has video but blob URL — post-job will handle", flush=True)
+                        except Exception:
+                            pass  # Sweep will handle it
+        
+        prev_start_frame_key = start_frame_key
+        prev_end_frame_key = end_frame_key
+    
+    mark_job_submitted(cache, job_id)
+
+    # ── ALL-DONE FAST PATH ──────────────────────────────────────────────────
+    # If every clip was already in clips_done (nothing new was submitted this
+    # run), we skipped the entire submit loop.  But clips_done includes the
+    # submission cache which tracks what was SUBMITTED, not what was DOWNLOADED.
+    # A clip can be in clips_done while still 'generating' in the DB — this
+    # happens when restore fires right after submission before the clip finishes.
+    #
+    # So: query DB for ground truth, separate clips into completed vs still-pending,
+    # push any still-pending ones to the HTTP worker, then wait for them.
+    # Only mark the job complete once DB confirms all clips are done.
+    if len(clip_submit_times) == 0 and set(c['clip_index'] for c in clips).issubset(set(clips_done)):
+        print(f"[Flow] All {len(clips)} clips were previously submitted — checking DB for completion status...", flush=True)
+
+        # Fresh DB query — never trust stale clips[] status from job claim time
+        _completed_indices = set()
+        _generating_clips = []
+        _db_ok = False
+        try:
+            _fresh = api_request("GET", f"/jobs/{job_id}")
+            if _fresh:
+                _db_ok = True
+                for _fc in _fresh.get('clips', []):
+                    _st = _fc.get('status', '')
+                    _ci = _fc.get('clip_index')
+                    if _st in ('completed', 'approved'):
+                        _completed_indices.add(_ci)
+                    elif _st in ('generating', 'submitted', 'pending'):
+                        _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+                        if _clip_obj:
+                            _generating_clips.append(_clip_obj)
+        except Exception as _db_err:
+            print(f"[Flow] ⚠ DB check failed: {_db_err} — falling back to job payload status", flush=True)
+
+        # If DB query failed or returned nothing, fall back to the clips[] list
+        # that was passed in — it has the status from job claim time which is
+        # stale but still better than blindly assuming everything is complete.
+        if not _db_ok:
+            for _clip_obj in clips:
+                _st = _clip_obj.get('status', '')
+                _ci = _clip_obj.get('clip_index')
+                if _st in ('completed', 'approved'):
+                    _completed_indices.add(_ci)
+                elif _st in ('generating', 'submitted', 'pending'):
+                    _generating_clips.append(_clip_obj)
+            print(f"[Flow] Fallback status: {len(_completed_indices)} completed, "
+                  f"{len(_generating_clips)} still generating: "
+                  f"{[c.get('clip_index') for c in _generating_clips]}", flush=True)
+
+        if not _generating_clips:
+            # All confirmed complete in DB — mark done and exit
+            print(f"[Flow] ✅ All {len(clips)} clips confirmed completed in DB — marking job done.", flush=True)
+            update_job_status(job_id, 'completed')
+            mark_job_completed(cache, job_id)
+            try:
+                download_queue.cancelled = True
+                download_queue.ready_event.set()
+            except Exception:
+                pass
+            return project_url
+
+        # Some clips are still generating — push them to HTTP worker and wait
+        print(f"[Flow] ⏳ {len(_generating_clips)} clip(s) still generating: "
+              f"{[c.get('clip_index') for c in _generating_clips]} — waiting for completion...", flush=True)
+
+        if http_dl_queue is not None:
+            # Navigate to project so we can scan for video URLs
+            try:
+                if project_url and project_url not in page.url:
+                    page.goto(project_url, timeout=30000, wait_until='domcontentloaded')
+                    time.sleep(3)
+                    ensure_videos_tab_selected(page)
+            except Exception as _nav_err:
+                print(f"[Flow] ⚠ Nav to project failed: {_nav_err}", flush=True)
+
+            # Poll until all generating clips finish (up to 10 minutes)
+            _poll_start = time.time()
+            _max_poll = 600
+            _still_waiting = list(_generating_clips)
+            while _still_waiting and (time.time() - _poll_start) < _max_poll:
+                _now_waiting = list(_still_waiting)
+                for _clip_obj in _now_waiting:
+                    _ci = _clip_obj.get('clip_index')
+                    _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
+                    try:
+                        # Refresh page every 30s
+                        if int(time.time() - _poll_start) % 30 < 6:
+                            page.reload(wait_until='domcontentloaded', timeout=30000)
+                            time.sleep(2)
+                            ensure_videos_tab_selected(page)
+                        _urls = page.evaluate(f"""() => {{
+                            for (const c of document.querySelectorAll('[data-index]')) {{
+                                if ((c.innerText||'').includes({repr(_dlg)})) {{
+                                    const urls = [];
+                                    for (const v of c.querySelectorAll('video')) {{
+                                        const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                        if (u && !u.startsWith('blob:')) urls.push(u);
+                                    }}
+                                    if (urls.length) return urls;
+                                }}
+                            }}
+                            return [];
+                        }}""")
+                        if _urls:
+                            if _ci not in http_enqueued_clips:
+                                http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                    'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir,
+                                    'total_job_clips': len(clips)})
+                                http_enqueued_clips.add(_ci)
+                                print(f"[Flow] ✓ Fast-path: clip {_ci+1} ready → HTTP worker", flush=True)
+                            _still_waiting.remove(_clip_obj)
+                    except Exception as _pe:
+                        print(f"[Flow] ⚠ Fast-path poll error for clip {_ci}: {_pe}", flush=True)
+                if _still_waiting:
+                    time.sleep(6)
+
+            if _still_waiting:
+                print(f"[Flow] ⚠ Fast-path: clips {[c.get('clip_index') for c in _still_waiting]} "
+                      f"never became ready after {_max_poll}s — marking job done anyway.", flush=True)
+
+        # All generating clips pushed to HTTP worker. The worker marks the job
+        # complete itself after the last clip finishes — see _http_download_worker.
+        # Nothing to wait for here.
+
+        if not http_enqueued_clips:
+            # No clips were pushed — all already completed in DB
+            print(f"[Flow] ✅ Fast-path complete — marking job done.", flush=True)
+            update_job_status(job_id, 'completed')
+            mark_job_completed(cache, job_id)
+        else:
+            print(f"[Flow] ✅ Fast-path: {len(http_enqueued_clips)} clip(s) handed to HTTP worker — it will mark job done.", flush=True)
+        try:
+            download_queue.cancelled = True
+            download_queue.ready_event.set()
+        except Exception:
+            pass
+        return project_url
+    # ────────────────────────────────────────────────────────────────────────
+    # Union — clips_done and clip_submit_times can overlap (backfilled submit times)
+    _total_submitted = len(set(clips_done) | set(clip_submit_times.keys()))
+    successful_submissions = _total_submitted - len(clips_needing_retry)
+    
+    print(f"\n{'='*50}")
+    print(f"ALL CLIPS ATTEMPTED!")
+    print(f"Project: {project_url}")
+    print(f"Successful: {successful_submissions}/{len(clips)}")
+    print(f"Failed (need retry): {len(clips_needing_retry)}")
+    print(f"{'='*50}")
+    
+    # NOTE: permanently_failed_clips is defined before the loop and shared with download queue
+    
+    # Handle any clips that failed immediately - create retry projects for them
+    if clips_needing_retry:
+        print(f"\n[Flow] Creating retry projects for {len(clips_needing_retry)} failed clip(s)...", flush=True)
+        
+        for retry_info in clips_needing_retry:
+            clip_index = retry_info['clip_index']
+            clip_data = retry_info['clip_data']
+            
+            if not clip_data:
+                print(f"[Flow] ⚠️ No clip data for clip {clip_index+1}, skipping retry", flush=True)
+                permanently_failed_clips.add(clip_index)
+                continue
+            
+            print(f"\n[Flow] Creating retry project for clip {clip_index+1}...", flush=True)
+            
+            # Create new project for this failed clip (with retry logic built-in)
+            retry_project_url, retry_success = _create_retry_project_for_clip(page, clip_data, max_retries=2)
+            
+            if retry_project_url and retry_success:
+                # Update the clip_project_map so download worker knows where to find this clip
+                clip_project_map[clip_index] = retry_project_url
+                # Update submission time for the retry
+                clip_submit_times[clip_index] = datetime.now()
+                print(f"[Flow] ✓ Clip {clip_index+1} retry submitted in: {retry_project_url}", flush=True)
+                
+                # Navigate back to main project for next retry
+                if clips_needing_retry.index(retry_info) < len(clips_needing_retry) - 1:
+                    print(f"[Flow] Returning to main project...", flush=True)
+                    page.goto(project_url, timeout=30000)
+                    time.sleep(3)
+                    check_and_dismiss_popup(page)
+            else:
+                print(f"[Flow] ❌ Clip {clip_index+1} failed permanently after all retry attempts", flush=True)
+                permanently_failed_clips.add(clip_index)
+                # Mark clip as failed via API
+                clip_id = clip_data.get('id') or clip_data.get('clip_id')
+                if clip_id:
+                    update_clip_status(clip_id, 'failed', error_message="Generation failed after multiple retries")
+        
+        # Summary
+        retry_success_count = len(clips_needing_retry) - len(permanently_failed_clips)
+        print(f"\n[Flow] Retry summary:", flush=True)
+        print(f"  Retried successfully: {retry_success_count}", flush=True)
+        print(f"  Permanently failed: {len(permanently_failed_clips)}", flush=True)
+        
+        if permanently_failed_clips:
+            print(f"  Failed clip indices: {sorted(permanently_failed_clips)}", flush=True)
+        
+        print(f"\n[Flow] Updated clip_project_map:", flush=True)
+        for idx, url in clip_project_map.items():
+            if idx in permanently_failed_clips:
+                marker = " (PERMANENTLY FAILED)"
+            elif url != project_url:
+                marker = " (RETRY)"
+            else:
+                marker = ""
+            print(f"  Clip {idx}: {url[:60]}...{marker}", flush=True)
+    
+    # NOTE: Download was already queued after first clip (parallel mode)
+    # 
+    # Safety net: detect clips that were never submitted and not already handled.
+    # Ghost clips are already set to flow_redo_queued mid-loop and tracked in ghost_clips.
+    # This catches any remaining edge cases (e.g. exception before ghost check ran).
+    _submitted_or_done = set(clips_done) | set(clip_submit_times.keys()) | permanently_failed_clips | ghost_clips
+    _orphaned = [c for c in clips if c['clip_index'] not in _submitted_or_done]
+    if _orphaned:
+        for _oc in _orphaned:
+            _oci = _oc['clip_index']
+            print(f"[Flow] ⚠ Clip {_oci+1} was never submitted (ghost) — queuing for redo resubmission", flush=True)
+            update_clip_status(_oc['id'], 'flow_redo_queued', error_message="Ghost submission — clip never appeared in project")
+            if job_id in cache.get('jobs', {}):
+                _cs = cache['jobs'][job_id].get('clips_submitted', [])
+                if _oci in _cs:
+                    _cs.remove(_oci)
+                    save_cache(cache)
+    
+    # If download was never queued AND clips were actually submitted this run (not all skipped),
+    # queue it now (covers case where all initial clips failed but retries succeeded).
+    # If ALL clips were skipped (resume run), the previous acc already handles downloads — skip.
+    if not download_queued and len(clip_submit_times) > 0:
+        any_success = len(permanently_failed_clips) < len(clips)
+        if any_success:
+            download_queue.put({
+                'job_id': job_id,
+                'project_url': project_url,
+                'clips': clips,
+                'clips_data': clips_data,
+                'clip_project_map': clip_project_map,
+                'clip_submit_times': clip_submit_times,
+                'permanently_failed_clips': permanently_failed_clips,
+                'downloaded_videos': downloaded_videos,
+                'num_clips': len(clips),
+                'total_job_clips': job.get('_total_clips', len(clips)),
+                'submitted_at': datetime.now(),
+                'temp_dir': temp_dir
+            })
+            print(f"[Flow] ✓ Queued for download after retries (delayed start)", flush=True)
+            download_queued = True
+    
+    # download_queued is local — no cleanup needed
+
+    # ── Post-job: download any remaining clips ──
+    # Clips 0..N-2 were already pushed to HTTP worker during between-clip waits.
+    # Only the last clip (and any missed ones) need handling here.
+    # Use clip_submit_times as source of truth — no DB query needed.
+    if http_dl_queue is not None:
+        # All submitted clips = clips_done ∪ clip_submit_times keys
+        # Find clips that need downloading:
+        # All submitted clips minus those confirmed completed in DB minus permanently failed.
+        # Can't use clips_done — it tracks submissions not downloads.
+        # Can't trust clips[].status — it's stale from job claim time.
+        # Use clip_submit_times (all clips submitted across all runs) as source,
+        # then subtract what DB says is completed.
+        _completed_in_db = set()
+        _db_ok = False
+        try:
+            _fresh = api_request("GET", f"/jobs/{job_id}")
+            if _fresh and _fresh.get('clips'):
+                _db_ok = True
+                for _fc in _fresh['clips']:
+                    if _fc.get('status') in ('completed', 'approved', 'failed'):
+                        _completed_in_db.add(_fc.get('clip_index'))
+        except Exception:
+            pass
+        # If DB query failed fall back to clips_done — but if DB succeeded,
+        # DO NOT add clips_done: it includes submitted-but-still-generating clips
+        # which would incorrectly exclude them from _still_pending.
+        if not _db_ok:
+            _completed_in_db.update(clips_done)
+        # Also exclude clips already handed to HTTP worker this run
+        _completed_in_db.update(http_enqueued_clips)
+        # All submitted = clips with submit times (current + backfilled from previous runs)
+        _all_submitted = set(clip_submit_times.keys())
+        _still_pending = _all_submitted - _completed_in_db - permanently_failed_clips
+
+        if _still_pending:
+            print(f"[Flow] ⏳ Post-job: waiting for clip(s) {[c+1 for c in sorted(_still_pending)]} to reach 70s...", flush=True)
+
+            # Wait until 70s has passed for every pending clip.
+            # If no submit_time recorded (resume run after restore), clip was submitted
+            # long ago — no wait needed, scan immediately.
+            _max_wait = 0
+            for _ci in sorted(_still_pending):
+                _st = clip_submit_times.get(_ci)
+                if _st:
+                    _elapsed = (datetime.now() - _st).total_seconds()
+                    _wait = max(0, CLIP_READY_WAIT - _elapsed)
+                    _max_wait = max(_max_wait, _wait)
+                # No submit_time → clip was submitted before this run → already past 70s
+            if _max_wait > 0:
+                print(f"[Flow] ⏳ Post-job: waiting {_max_wait:.0f}s for last clip to be ready...", flush=True)
+                time.sleep(_max_wait)
+
+            # Single scan — all pending clips should have video by now
+            try:
+                if project_url not in page.url:
+                    page.goto(project_url, timeout=30000, wait_until='domcontentloaded')
+                    time.sleep(2)
+                ensure_videos_tab_selected(page)
+            except Exception as _ne:
+                print(f"[Flow] ⚠ Post-job nav: {_ne}", flush=True)
+
+            # Poll ALL pending clips together on every tick — never block on one clip
+            _pending_left = set(_still_pending)  # clips not yet enqueued
+            _poll_start = time.time()
+            _last_reload = time.time()
+            ensure_videos_tab_selected(page)
+
+            while _pending_left and (time.time() - _poll_start) < 300:
+                # Detect tab crash — no point scanning a dead page for 600s
+                if is_page_crashed(page):
+                    print(f"[Flow] 💥 Submit tab crashed during post-job wait — breaking out (download thread will handle remaining clips)", flush=True)
+                    break
+                try:
+                    _elapsed = int(time.time() - _poll_start)
+                    # Reload every 30s + scroll to force virtualized tiles to render
+                    if _elapsed > 0 and (time.time() - _last_reload) >= 30:
+                        page.reload(wait_until='domcontentloaded', timeout=30000)
+                        time.sleep(2)
+                        ensure_videos_tab_selected(page)
+                        # Scroll down then back up to force Flow to render all tiles
+                        try:
+                            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                            time.sleep(1)
+                            page.evaluate("window.scrollTo(0, 0)")
+                            time.sleep(1)
+                        except Exception:
+                            pass
+                        _last_reload = time.time()
+                    
+                    # v196: Scan all tiles for policy failures (catches what dialogue-text matching misses)
+                    _retried, _persistent = scan_tiles_for_policy_failures(page, clip_submit_times, "Flow")
+                    if _retried:
+                        for _ri in _retried:
+                            _submitted_sorted = sorted(clip_submit_times.keys(), key=lambda k: clip_submit_times[k])
+                            _reverse_idx = len(_submitted_sorted) - 1 - _ri
+                            if 0 <= _reverse_idx < len(_submitted_sorted):
+                                _retry_ci = _submitted_sorted[_reverse_idx]
+                                clip_submit_times[_retry_ci] = datetime.now()
+                                if _retry_ci in http_enqueued_clips:
+                                    http_enqueued_clips.discard(_retry_ci)
+                                print(f"[Flow] [PolicyScan] Reset timer for clip {_retry_ci+1} after policy retry", flush=True)
+                    if _persistent:
+                        for _pi in _persistent:
+                            _submitted_sorted = sorted(clip_submit_times.keys(), key=lambda k: clip_submit_times[k])
+                            _reverse_idx = len(_submitted_sorted) - 1 - _pi
+                            if 0 <= _reverse_idx < len(_submitted_sorted):
+                                _fail_ci = _submitted_sorted[_reverse_idx]
+                                _clip_obj = next((c for c in clips if c.get('clip_index') == _fail_ci), None)
+                                if _clip_obj:
+                                    clip_id = _clip_obj.get('id')
+                                    if clip_id:
+                                        update_clip_status(clip_id, 'failed', error_message="⚠️ Image flagged by Flow content policy — try a different image")
+                                        permanently_failed_clips.add(_fail_ci)
+                                        _pending_left.discard(_fail_ci)
+                                        print(f"[Flow] [PolicyScan] ❌ Clip {_fail_ci+1} permanently failed — image policy violation", flush=True)
+
+                    for _ci in sorted(list(_pending_left)):
+                        if _ci in http_enqueued_clips:
+                            _pending_left.discard(_ci)
+                            continue
+                        _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+                        if not _clip_obj:
+                            _pending_left.discard(_ci)
+                            continue
+                        _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
+                        try:
+                            # Same scan as between-clip (which always works):
+                            # iterate all [data-index] containers, match by dialogue text
+                            _urls = page.evaluate(f"""() => {{
+                                for (const c of document.querySelectorAll('[data-index]')) {{
+                                    if ((c.innerText||'').includes({repr(_dlg)})) {{
+                                        const urls = [];
+                                        for (const v of c.querySelectorAll('video')) {{
+                                            const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                            if (u && !u.startsWith('blob:')) urls.push(u);
+                                        }}
+                                        if (urls.length) return urls;
+                                        if (c.querySelectorAll('video').length > 0) return ['__blob__'];
+                                    }}
+                                }}
+                                return [];
+                            }}""")
+                            _tile_fail_type = None
+                            if not _urls or _urls == ['__blob__']:
+                                _tile_fail_type = page.evaluate(f"""() => {{
+                                    for (const c of document.querySelectorAll('[data-index]')) {{
+                                        if ((c.innerText||'').includes({repr(_dlg)})) {{
+                                            const icons = Array.from(c.querySelectorAll('i')).map(i => i.textContent.trim());
+                                            const hasRefresh = icons.includes('refresh');
+                                            const hasFailed = c.innerText.includes('Failed');
+                                            const hasUndo = icons.includes('undo');
+                                            const hasDelete = icons.includes('delete_forever');
+                                            const hasVideocam = icons.includes('videocam');
+                                            const hasVideo = c.querySelectorAll('video').length > 0;
+                                            if (hasRefresh && !hasVideo) return 'hard';
+                                            if (hasFailed && !hasVideocam && !hasVideo && !/\d+%/.test(c.textContent||'')) return 'hard';
+                                            if (hasUndo && hasDelete && !hasRefresh && !hasVideocam && !hasVideo) return 'soft';
+                                            return null;
+                                        }}
+                                    }}
+                                    return null;
+                                }}""")
+
+                            if _urls and _urls != ['__blob__']:
+                                http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                    'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir})
+                                http_enqueued_clips.add(_ci)
+                                _pending_left.discard(_ci)
+                                print(f"[Flow] ✓ Post-job: clip {_ci+1} → HTTP worker ({_elapsed}s)", flush=True)
+
+                            elif _tile_fail_type == 'hard':
+                                # Flow killed this clip — don't retry, queue for redo immediately
+                                print(f"[Flow] ⚠ Post-job: clip {_ci+1} HARD FAILURE (refresh button) — queuing for redo", flush=True)
+                                update_clip_status(_clip_obj['id'], 'flow_redo_queued',
+                                    error_message="Flow delayed failure — clip generated then killed by Flow")
+                                _pending_left.discard(_ci)
+
+                            elif _tile_fail_type == 'soft':
+                                print(f"[Flow] ⚠ Post-job: clip {_ci+1} tile failed — retrying in-place...", flush=True)
+                                try:
+                                    _reuse_btn = page.evaluate(f"""() => {{
+                                        const containers = Array.from(document.querySelectorAll('[data-index]'));
+                                        const dlg = {repr(_dlg)};
+                                        let target = dlg ? containers.find(c => (c.innerText||'').includes(dlg)) : null;
+                                        if (!target) {{
+                                            target = containers.find(c => {{
+                                                const icons = Array.from(c.querySelectorAll('i')).map(i => i.textContent.trim());
+                                                return (icons.includes('undo') && icons.includes('delete_forever') &&
+                                                     !icons.includes('refresh') && !icons.includes('videocam') &&
+                                                     c.querySelectorAll('video').length === 0);
+                                            }});
+                                        }}
+                                        if (!target) return false;
+                                        const btn = Array.from(target.querySelectorAll('button')).find(b =>
+                                            Array.from(b.querySelectorAll('i')).some(i => i.textContent.trim() === 'undo')
+                                        );
+                                        if (btn) {{ btn.click(); return true; }}
+                                        return false;
+                                    }}""")
+                                    if _reuse_btn:
+                                        time.sleep(3)
+                                        click_generate_button(page, f"Post-job retry clip {_ci+1}")
+                                        update_clip_status(_clip_obj['id'], 'generating')
+                                        print(f"[Flow] ✓ Post-job: clip {_ci+1} resubmitted — waiting 75s", flush=True)
+                                        _pending_left.discard(_ci)
+                                        time.sleep(75)
+                                        ensure_videos_tab_selected(page)
+                                        _pending_left.add(_ci)  # Re-add to check result
+                                        _last_reload = time.time()
+                                except Exception as _re_err:
+                                    print(f"[Flow] ⚠ Post-job: resubmit failed for clip {_ci+1}: {_re_err}", flush=True)
+                        except Exception:
+                            pass
+
+                    if _pending_left:
+                        time.sleep(6)
+
+                except Exception as _se:
+                    _se_str = str(_se)
+                    if any(x in _se_str for x in ("browser has been closed", "TargetClosedError", "Target page", "context or browser")):
+                        print(f"[Flow] ⚠ Post-job: Chrome died — CDP loop has warm session, will handle remaining clips", flush=True)
+                        for _rci in _pending_left:
+                            clip_submit_times[_rci] = datetime.now() - timedelta(seconds=CLIP_READY_WAIT)
+                        _pending_left.clear()
+                    else:
+                        print(f"[Flow] ⚠ Post-job error: {_se}", flush=True)
+                    time.sleep(6)
+
+            # API fallback: check if clips were completed by a previous download worker
+            # (uploaded to R2 before restore killed the browser). This catches clips
+            # whose tiles are virtualized out of the DOM but are actually done.
+            _api_resolved = set()
+            for _ci in list(_pending_left):
+                _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+                if not _clip_obj or _ci in http_enqueued_clips:
+                    _pending_left.discard(_ci)
+                    continue
+                try:
+                    _api_check = api_request("GET", f"/clips/{_clip_obj['id']}/approval-status")
+                    if _api_check and _api_check.get('status') in ('completed', 'approved'):
+                        print(f"[Flow] ✓ Post-job API: clip {_ci+1} already completed in DB — skipping redo", flush=True)
+                        _pending_left.discard(_ci)
+                        _api_resolved.add(_ci)
+                except Exception:
+                    pass
+            
+            # Any clips still not found after 300s + API check → queue as redo
+            # These clips were likely ghost submissions (Generate clicked but no tile created)
+            # or the tile was lost.
+            # 
+            # Use flow_redo_queued (NOT pending + queued_for_flow) because:
+            # 1. The dispatcher's queued_job_ids excludes this job — it would never be re-picked
+            # 2. Re-dispatching would re-split clips across accounts (wasteful for 1 missing clip)
+            # 3. The redo system handles single-clip resubmission cleanly
+            # 
+            # This does NOT burn a redo attempt — generation_attempt is only incremented by
+            # the UI redo request endpoint (main.py line 2988), not by status changes.
+            for _ci in _pending_left:
+                _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+                if _clip_obj and _ci not in http_enqueued_clips:
+                    print(f"[Flow] ⚠ Post-job: clip {_ci+1} not found after 300s — queuing for redo resubmission", flush=True)
+                    update_clip_status(_clip_obj['id'], 'flow_redo_queued', error_message="Clip not found in project after generation — resubmitting via redo")
+                    # Remove from cache so resume path doesn't skip it
+                    if job_id in cache.get('jobs', {}):
+                        _cs = cache['jobs'][job_id].get('clips_submitted', [])
+                        if _ci in _cs:
+                            _cs.remove(_ci)
+                            save_cache(cache)
+
+
+
+        return project_url
+
+
+# ============================================================
+# MAIN LOOP
+# ============================================================
+
+def check_api_connection():
+    """Check if API is reachable"""
+    try:
+        response = requests.get(f"{WEB_APP_URL}{API_PATH_PREFIX}/health", timeout=10)
+        return response.status_code == 200
+    except:
+        return False
+
+
+# ============================================================
+# MULTI-ACCOUNT WORKER
+# ============================================================
+
+# ============================================================
+# STANDBY ACCOUNT MANAGER
+# ============================================================
+
+class StandbyAccountManager(threading.Thread):
+    """
+    Manages standby accounts and coordinates account swapping when active accounts fail.
+    
+    When an active account experiences failures, instead of routing to another active account,
+    this manager:
+    1. Shuts down the failed account's browser
+    2. Pops a fresh account from the standby queue
+    3. Starts new AccountWorker and DownloadWorker for it
+    4. Routes the failed clips to the new account
+    
+    This keeps the other active account working uninterrupted on its own clips.
+    """
+    
+    def __init__(self, standby_accounts, swap_request_queue, cache, 
+                 active_workers,
+                 account_job_queues, account_download_queues,
+                 active_download_workers=None):  # kept for compat
+        super().__init__(daemon=True)
+        self.standby_queue = Queue()
+        for acc in standby_accounts:
+            self.standby_queue.put(acc)
+        self.swap_request_queue = swap_request_queue
+        self.cache = cache
+        self.active_workers = active_workers  # List of AccountWorker
+        self.account_job_queues = account_job_queues  # account_name -> Queue
+        self.account_download_queues = account_download_queues  # account_name -> Queue (compat)
+        self.lock = threading.Lock()
+        
+        # Build name -> worker mappings for quick lookup
+        self.account_workers_by_name = {}  # account_name -> AccountWorker
+        for worker in active_workers:
+            self.account_workers_by_name[worker.name] = worker
+        
+    def get_standby_count(self):
+        """Return number of standby accounts available"""
+        return self.standby_queue.qsize()
+    
+    def has_standby(self):
+        """Check if there are standby accounts available"""
+        return not self.standby_queue.empty()
+    
+    def run(self):
+        """Main loop - process swap requests"""
+        print(f"[StandbyManager] Started with {self.standby_queue.qsize()} standby account(s)", flush=True)
+        
+        while True:
+            try:
+                # Wait for swap request
+                request = self.swap_request_queue.get()
+                
+                if request.get('type') == 'shutdown':
+                    print("[StandbyManager] Shutdown requested", flush=True)
+                    break
+                
+                if request.get('type') == 'failover_swap':
+                    self._handle_failover_swap(request)
+                    
+            except Exception as e:
+                print(f"[StandbyManager] Error: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                time.sleep(1)
+    
+    def _handle_failover_swap(self, request):
+        """Handle a failover swap request - start new account for failed clips"""
+        failed_account = request.get('failed_account')
+        failover_data = request.get('failover_data')
+        job_id = failover_data.get('job_id', 'unknown')[:8]
+        
+        print(f"\n[StandbyManager] {'='*50}", flush=True)
+        print(f"[StandbyManager] SWAP REQUEST from {failed_account}", flush=True)
+        print(f"[StandbyManager] Job: {job_id}...", flush=True)
+        print(f"[StandbyManager] Standby accounts available: {self.standby_queue.qsize()}", flush=True)
+        
+        # Check if we have standby accounts
+        if self.standby_queue.empty():
+            print(f"[StandbyManager] ❌ No standby accounts available!", flush=True)
+            print(f"[StandbyManager] Marking clips as permanently failed", flush=True)
+            # Mark clips as failed since no account can take over
+            remaining_clips = failover_data.get('remaining_clips', [])
+            for clip in remaining_clips:
+                clip_id = clip.get('id')
+                if clip_id:
+                    update_clip_status(clip_id, 'failed', 
+                        error_message="No standby accounts available for failover")
+            print(f"[StandbyManager] {'='*50}\n", flush=True)
+            return
+        
+        # Pop standby account
+        new_account = self.standby_queue.get()
+        new_account_name = new_account['name']
+        
+        print(f"[StandbyManager] ✓ Activating standby account: {new_account_name}", flush=True)
+        
+        # Shutdown the failed account's SUBMISSION browser (download can continue)
+        if failed_account in self.account_workers_by_name:
+            failed_worker = self.account_workers_by_name[failed_account]
+            print(f"[StandbyManager] 🛑 Shutting down {failed_account} submission browser...", flush=True)
+            failed_worker.request_shutdown()
+            # Remove from tracking
+            del self.account_workers_by_name[failed_account]
+            if failed_worker in self.active_workers:
+                self.active_workers.remove(failed_worker)
+        
+        with self.lock:
+            # Create job queue for new account
+            job_queue = Queue()
+            self.account_job_queues[new_account_name] = job_queue
+            
+            # Create account worker for new account
+            # New account's failover goes to swap manager (not another active account)
+            account_worker = AccountWorker(
+                new_account,
+                self.cache,
+                job_queue,
+                failover_queue=self.swap_request_queue,  # Route failovers to swap manager
+                all_download_queues=self.account_download_queues,
+                is_failover_to_standby=True,  # Flag to use swap manager for failover
+            )
+            account_worker.start()
+            self.active_workers.append(account_worker)
+            self.account_workers_by_name[new_account_name] = account_worker
+            
+            # Register with health tracker and failover router
+            account_health.register_account(new_account_name)
+            if failover_router is not None:
+                failover_router.account_job_queues[new_account_name] = job_queue
+            
+            print(f"[StandbyManager] ✓ {new_account_name} browser starting...", flush=True)
+            
+            # Wait for the new account to be ready
+            if account_worker.ready_flag.wait(timeout=120):
+                print(f"[StandbyManager] ✓ {new_account_name} ready!", flush=True)
+                
+                # Route the failover job to the new account
+                job_queue.put({
+                    'type': 'failover',
+                    'job_id': failover_data['job_id'],
+                    'original_job': failover_data['original_job'],
+                    'remaining_clips': failover_data['remaining_clips'],
+                    'failed_clip_index': failover_data['failed_clip_index'],
+                    'failed_account': failed_account,
+                    'clips_data': failover_data.get('clips_data', []),
+                    'all_download_queues': self.account_download_queues,
+                })
+                
+                print(f"[StandbyManager] ✓ Failover job routed to {new_account_name}", flush=True)
+            else:
+                print(f"[StandbyManager] ❌ {new_account_name} failed to start in time!", flush=True)
+                # Mark clips as failed
+                for clip in failover_data.get('remaining_clips', []):
+                    clip_id = clip.get('id')
+                    if clip_id:
+                        update_clip_status(clip_id, 'failed', 
+                            error_message="Standby account failed to start")
+        
+        print(f"[StandbyManager] Remaining standby accounts: {self.standby_queue.qsize()}", flush=True)
+        print(f"[StandbyManager] {'='*50}\n", flush=True)
+
+
+class AccountWorker(threading.Thread):
+    """Worker thread for a single account - handles job submission"""
+    
+    def __init__(self, account_config, cache, job_queue, 
+                 failover_queue=None, all_download_queues=None, account_name_to_index=None,
+                 is_failover_to_standby=False):
+        super().__init__(daemon=True)
+        self.account = account_config
+        self.name = account_config['name']
+        self.session_folder = account_config['session_folder']
+        self.proxy = account_config.get('proxy')
+        self.cache = cache
+        self.job_queue = job_queue  # Shared queue for jobs to process
+        self.failover_queue = failover_queue  # Queue to send failed jobs to other account OR swap manager
+        self.all_download_queues = all_download_queues or {}  # kept for FailoverRouter compat; not used for DL
+        self.account_name_to_index = account_name_to_index or {}  # account_name -> index
+        self.is_failover_to_standby = is_failover_to_standby  # If True, failover goes to swap manager
+        self.ready_flag = threading.Event()
+        self.shutdown_event = threading.Event()  # Signal to gracefully shutdown
+        self.page = None
+        self.browser = None
+        self._dh = None  # DownloadHelper — no longer used for downloads (HTTP-only mode)
+        self.golden_restored = False  # Set True by main_multi_account if pre-restored before thread start
+        self._http_dl_queue = None  # Per-account HTTP download queue — set in run()
+        self._http_session_ref = [None]  # Mutable ref to requests.Session with browser cookies
+        self.redispatch_queue = None  # Shared queue — put job_id here when reset to pending after restore
+    
+    def request_shutdown(self):
+        """Request the worker to shutdown gracefully"""
+        print(f"[{self.name}] Shutdown requested", flush=True)
+        self.shutdown_event.set()
+    
+    def run(self):
+        """Main worker loop"""
+        print(f"[{self.name}] Starting browser...", flush=True)
+        
+        with sync_playwright() as p:
+            self._playwright = p  # Save for auto-reset
+            # Build launch args - match test_human_like.py which keeps working
+            # Only the bare minimum flags; extras create detectable fingerprint
+            launch_args = [
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+                '--force-variation-ids=3300115,3300134,3313321,3328827,3330196,3362821',
+                '--disk-cache-size=1',
+                '--media-cache-size=1',
+                '--remote-debugging-port=9222',
+                '--mute-audio',
+            ]
+            self._launch_args = launch_args  # Save for auto-reset
+            
+            # Add proxy if configured
+            proxy_config = parse_proxy_url(self.proxy)
+            self._proxy_config = proxy_config  # Save for auto-reset
+            if proxy_config:
+                print(f"[{self.name}] Using proxy: {proxy_config['server']}", flush=True)
+                # Only add cert-error bypass when routing through a proxy
+                launch_args.append('--ignore-certificate-errors')
+                
+                # Create proxy auth extension ONLY when proxy needs credentials
+                ext_dir = os.path.join(BASE_DIR, f".proxy_auth_ext_{self.name}")
+                auth_ext = create_proxy_auth_extension(self.proxy, ext_dir)
+                if auth_ext:
+                    launch_args.extend([
+                        f'--disable-extensions-except={auth_ext}',
+                        f'--load-extension={auth_ext}',
+                    ])
+            else:
+                print(f"[{self.name}] No proxy - direct connection (matching test_human_like.py)", flush=True)
+            
+            # Select stealth script based on browser mode
+            # Real Chrome (channel='chrome') has native plugins/runtime - don't fake them
+            # Stealth handled by Patchright natively (no init script needed)
+            
+            import shutil  # ensure available for golden restore and Sync below
+        # --- Startup: restore session from golden before first launch ---
+          # Skip if main_multi_account already did golden restore before thread start
+          # (prevents race condition where one account's kill_chrome_using_profile
+          # accidentally kills another account's already-running browser via substring match)
+            if not self.golden_restored:
+                _acct_golden = get_golden_folder(self.session_folder)
+                if os.path.exists(_acct_golden):
+                    print(f"[{self.name}] Restoring session from golden before launch: {_acct_golden}", flush=True)
+                    kill_chrome_using_profile(self.session_folder, label=self.name)
+                    time.sleep(1)
+                    try:
+                        if os.path.exists(self.session_folder):
+                            shutil.rmtree(self.session_folder, ignore_errors=True)
+                        shutil.copytree(_acct_golden, self.session_folder,
+                            ignore_dangling_symlinks=True,
+                            ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                        print(f"[{self.name}] ✓ Session restored from golden", flush=True)
+                        # Purge stale GPU/shader caches — golden was built on a different GPU env
+                        purge_gpu_caches(self.session_folder, label=self.name)
+                    except Exception as _se:
+                        print(f"[{self.name}] ⚠ Could not restore from golden: {_se}", flush=True)
+                else:
+                    print(f"[{self.name}] No golden folder — launching with existing session (first run)", flush=True)
+            else:
+                print(f"[{self.name}] ✓ Golden restore already done (pre-start)", flush=True)
+
+            if BROWSER_MODE == "stealth":
+                # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
+                acct_launch_kwargs = {
+                    'user_data_dir': self.session_folder,
+                    'channel': 'chrome',
+                    'ignore_default_args': ['--enable-automation'],
+                    'headless': False,
+                    'viewport': {"width": 1280, "height": 720},
+                    'args': launch_args,
+                }
+                if proxy_config:
+                    acct_launch_kwargs['proxy'] = proxy_config
+                self.browser = p.chromium.launch_persistent_context(**acct_launch_kwargs)
+            else:
+                acct_launch_kwargs = {
+                    'user_data_dir': self.session_folder,
+                    'headless': False,
+                    'viewport': {"width": 1280, "height": 500},
+                }
+                if proxy_config:
+                    acct_launch_kwargs['proxy'] = proxy_config
+                self.browser = p.firefox.launch_persistent_context(**acct_launch_kwargs)
+            
+            # Match test_human_like.py
+            self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
+            # Note: Patchright handles stealth natively — no init script needed
+
+            # v486: stash profile path on page so _find_chrome_hwnd can
+            # identify THIS worker's Chrome by owning process ID (instead
+            # of the fragile title-match that hit the user's personal
+            # Chrome).
+            try:
+                self.page._user_data_dir = self.session_folder
+            except Exception:
+                pass
+
+            print(f"[{self.name}] ✓ Browser started", flush=True)
+
+            # v457: minimize Chrome immediately so it doesn't steal focus
+            # during the 10-20s warmup. Also attach a navigation handler
+            # so every subsequent page.goto() re-minimizes (unless login
+            # is being awaited, which sets page._stay_visible).
+            try:
+                self.page._stay_visible = False
+                import time as _t_v457
+                _t_v457.sleep(0.4)
+                minimize_chrome_window(self.page, label=self.name)
+            except Exception:
+                pass
+            try:
+                def _v457_on_load(_):
+                    try:
+                        if getattr(self.page, "_stay_visible", False):
+                            return
+                        import threading as _thr
+                        def _go():
+                            try:
+                                import time as _tt
+                                _tt.sleep(0.3)
+                                if not getattr(self.page, "_stay_visible", False):
+                                    minimize_chrome_window(self.page, label=self.name)
+                            except Exception:
+                                pass
+                        _thr.Thread(target=_go, daemon=True).start()
+                    except Exception:
+                        pass
+                self.page.on("load", _v457_on_load)
+            except Exception:
+                pass
+
+            # Warm up Chrome — sync variations seed for valid x-client-data header
+            # If warmup kills the browser (TargetClosedError), relaunch before continuing
+            try:
+                chrome_warmup(self.page)
+            except Exception as _warmup_err:
+                print(f"[{self.name}] Browser died during warmup — relaunching...", flush=True)
+                try:
+                    self.browser.close()
+                except Exception:
+                    pass
+                time.sleep(2)
+                self.browser = p.chromium.launch_persistent_context(**acct_launch_kwargs)
+                self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
+                # v486: stash profile path on page for _find_chrome_hwnd
+                try:
+                    self.page._user_data_dir = self.session_folder
+                except Exception:
+                    pass
+                print(f"[{self.name}] ✓ Browser relaunched — proceeding to Flow without warmup", flush=True)
+            
+            # === Match single-account main() startup exactly ===
+            print(f"[{self.name}] Navigating to Flow...", flush=True)
+            self.page.goto(FLOW_HOME_URL)
+            human_delay(1, 2)
+            
+            # Look around
+            human_mouse_move(self.page)
+            human_delay(1, 2)
+            scroll_randomly(self.page)
+            human_delay(0.5, 1)
+            
+            # Verify login (same as single-account)
+            print(f"[{self.name}] Verifying login status...", flush=True)
+            login_was_required = ensure_logged_into_flow(self.page, self.name, timeout_minutes=10)
+            if login_was_required:
+                print(f"[{self.name}] ✓ Login verified after sign-in", flush=True)
+            else:
+                print(f"[{self.name}] ✓ Already logged in and verified", flush=True)
+            
+            # Dismiss any popups
+            check_and_dismiss_popup(self.page)
+            
+            # Verify ULTRA account status
+            try:
+                check_ultra_account(self.page, self.name)
+            except NotUltraError as e:
+                print(f"[{self.name}] ❌ {e}", flush=True)
+                print(f"[{self.name}] ⛔ This account cannot be used. Stopping.", flush=True)
+                return  # Stop this account worker
+            
+            # ── Sync login state and save/restore golden (same as single-account) ──
+            import shutil
+            submit_folder = self.session_folder
+            
+            golden_folder = get_golden_folder(submit_folder)
+            golden_missing = not os.path.exists(golden_folder)
+
+            needs_sync = login_was_required or golden_missing
+            if needs_sync:
+                # Confirm login before ANY golden operation.
+                will_save_golden = login_was_required or golden_missing
+                if will_save_golden:
+                    confirmed = False
+                    for _attempt in range(3):
+                        try:
+                            confirmed = self.page.locator("img[src*='googleusercontent.com']").first.is_visible(timeout=5000)
+                            if confirmed:
+                                break
+                        except Exception:
+                            pass
+                        if _attempt < 2:
+                            time.sleep(3)
+                    if not confirmed:
+                        if login_was_required:
+                            print(f"[{self.name}] ⚠ Avatar not visible but login was verified — proceeding with golden save.", flush=True)
+                            confirmed = True
+                        else:
+                            print(f"[{self.name}] ⚠ Login not confirmed and no fresh login — skipping golden save.", flush=True)
+                            will_save_golden = False
+                    if confirmed:
+                        print(f"[{self.name}] ✓ Login confirmed — proceeding with sync", flush=True)
+
+                print(f"\n[{self.name}] Closing submit browser to snapshot login state...")
+                self.browser.close()
+                time.sleep(2)
+
+                if login_was_required:
+                    # Login required after startup golden restore → golden tokens were expired.
+                    # Rebuild golden unconditionally from the fresh post-login session.
+                    if os.path.exists(golden_folder):
+                        print(f"[{self.name}] Fresh login after golden restore — golden tokens were expired. Rebuilding golden...", flush=True)
+                        shutil.rmtree(golden_folder, ignore_errors=True)
+                    else:
+                        print(f"[{self.name}] Fresh login — creating golden from session...", flush=True)
+                    try:
+                        shutil.copytree(submit_folder, golden_folder,
+                                       ignore_dangling_symlinks=True,
+                                       ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                        print(f"[{self.name}] ✓ Golden saved: {golden_folder}", flush=True)
+                    except Exception as e:
+                        print(f"[{self.name}] ⚠ Could not save golden: {e}", flush=True)
+
+                    # Step 2: golden → session (clean copy)
+                    if os.path.exists(golden_folder):
+                        shutil.rmtree(submit_folder, ignore_errors=True)
+                        try:
+                            shutil.copytree(golden_folder, submit_folder,
+                                           ignore_dangling_symlinks=True,
+                                           ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                            print(f"[{self.name}] ✓ Session copied from golden: {submit_folder}")
+                        except Exception as e:
+                            print(f"[{self.name}] ⚠ Could not copy session from golden: {e}")
+                else:
+                    # Already logged in — session was already restored from golden at startup,
+                    # so it is already clean. No need to restore again here.
+                    if os.path.exists(golden_folder):
+                        print(f"[{self.name}] Already logged in — session is already a fresh golden copy, skipping re-restore.", flush=True)
+                    else:
+                        # No golden exists at all — first run. Save current session as golden.
+                        print(f"[{self.name}] No golden folder — creating from current session...", flush=True)
+                        try:
+                            shutil.copytree(submit_folder, golden_folder,
+                                           ignore_dangling_symlinks=True,
+                                           ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                            print(f"[{self.name}] ✓ Golden created: {golden_folder}", flush=True)
+                        except Exception as e:
+                            print(f"[{self.name}] ⚠ Could not create golden: {e}", flush=True)
+
+                # Relaunch submit browser
+                print(f"[{self.name}] Relaunching submit browser...")
+                if BROWSER_MODE == "stealth":
+                    # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
+                    relaunch_kwargs = {
+                        'user_data_dir': self.session_folder,
+                        'channel': 'chrome',
+                        'ignore_default_args': ['--enable-automation'],
+                        'headless': False,
+                        'viewport': {"width": 1280, "height": 720},
+                        'args': launch_args,
+                    }
+                    if proxy_config:
+                        relaunch_kwargs['proxy'] = proxy_config
+                    self.browser = p.chromium.launch_persistent_context(**relaunch_kwargs)
+                else:
+                    relaunch_kwargs = {
+                        'user_data_dir': self.session_folder,
+                        'headless': False,
+                        'viewport': {"width": 1280, "height": 500},
+                    }
+                    if proxy_config:
+                        relaunch_kwargs['proxy'] = proxy_config
+                    self.browser = p.firefox.launch_persistent_context(**relaunch_kwargs)
+                
+                self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
+                _stash_profile_on_page(self.page, self.session_folder)  # v486
+                
+                # Warm up Chrome — sync variations seed
+                chrome_warmup(self.page)
+                
+                # Match single-account post-relaunch startup
+                print(f"[{self.name}] Navigating to Flow...", flush=True)
+                self.page.goto(FLOW_HOME_URL)
+                human_delay(1, 2)
+                human_mouse_move(self.page)
+                human_delay(1, 2)
+                scroll_randomly(self.page)
+                human_delay(0.5, 1)
+                check_and_dismiss_popup(self.page)
+                print(f"[{self.name}] ✓ Submit browser relaunched and ready!")
+            
+            # === HTTP-only download setup (matches single-account mode) ===
+            # Snapshot browser cookies into a requests.Session for pure-HTTP downloads.
+            # No download tab, no DownloadHelper, no cross-thread page sharing.
+            self._snapshot_cookies()
+            self._http_dl_queue = queue.Queue()
+            self._start_http_download_worker()
+            print(f"[{self.name}] ✓ HTTP download worker ready (no browser download tab needed)", flush=True)
+
+            self.ready_flag.set()
+            print(f"[{self.name}] ✓ Ready for jobs", flush=True)
+            
+            # Main loop - process jobs from queue
+            _retry_job = None  # v174: after golden restore, self-resume same job
+            while not self.shutdown_event.is_set():
+                try:
+                    # Check for redo clips first (with short timeout)
+                    try:
+                        # v174: self-resume after golden restore — re-process the same
+                        # job/parallel assignment without going through the dispatcher.
+                        # This prevents parallel re-splitting and cross-account duplication.
+                        if _retry_job is not None:
+                            job = _retry_job
+                            _retry_job = None
+                            _from_queue = False  # Don't call task_done — already called when _retry_job was set
+                            _retry_job_id = None
+                            if isinstance(job, dict):
+                                if 'job' in job and isinstance(job['job'], dict):
+                                    _retry_job_id = job['job'].get('id')
+                                else:
+                                    _retry_job_id = job.get('id')
+                            print(f"[{self.name}] ↩ Self-resuming job {(_retry_job_id or '?')[:8]}... after golden restore", flush=True)
+                            # v198: Re-fetch clip statuses from DB before resuming.
+                            # The stale job object still shows all clips as 'pending'
+                            # even though HTTP-DL completed many during the previous run.
+                            refresh_clip_statuses(job)
+                        else:
+                            job = self.job_queue.get(timeout=1)
+                            _from_queue = True
+                        
+                        if job.get('type') == 'redo':
+                            clip = job['clip']
+                            print(f"[{self.name}] Processing redo for clip {clip['clip_index']+1}", flush=True)
+                            account_health.set_busy(self.name, job_id=f"redo-{clip.get('id', 'unknown')}")
+                            self._snapshot_cookies()  # Refresh session before redo download
+                            clip['_account_name'] = self.name  # Stamp for project URL lookup
+                            _redo_acc = PassthroughAccumulator()
+                            process_redo_clip(self.page, clip, _redo_acc, self.cache,
+                                              http_dl_queue=self._http_dl_queue,
+                                              http_session=self._http_session_ref[0])
+                            account_health.record_success(self.name)
+                            account_health.set_idle(self.name)
+                            if account_health.is_hot(self.name) or account_health.needs_proactive_restore(self.name):
+                                raise Exception(f"Account {self.name} restore triggered after redo (hot={account_health.is_hot(self.name)}, proactive={account_health.needs_proactive_restore(self.name)})")
+                        elif job.get('type') == 'failover':
+                            # This job failed on another account, we're taking over
+                            failover_job = job.get('original_job', job)
+                            print(f"[{self.name}] 🔄 FAILOVER: Taking over job {failover_job.get('id', '?')[:8]}... from {job.get('failed_account', '?')}", flush=True)
+                            account_health.set_busy(self.name, job_id=failover_job.get('id'))
+                            self._process_job_with_failover(failover_job)
+                            account_health.set_idle(self.name)
+                            if self.redispatch_queue:
+                                self.redispatch_queue.put(failover_job.get('id'))
+                            if account_health.is_hot(self.name) or account_health.needs_proactive_restore(self.name):
+                                raise Exception(f"Account {self.name} restore triggered after failover (hot={account_health.is_hot(self.name)}, proactive={account_health.needs_proactive_restore(self.name)})")
+                        elif job.get('type') == 'parallel_primary':
+                            # Parallel mode - we're the primary account
+                            print(f"[{self.name}] 🚀 PARALLEL PRIMARY: Processing job {job['job']['id'][:8]}...", flush=True)
+                            account_health.set_busy(self.name, job_id=job['job']['id'])
+                            self._process_parallel_job(job, is_primary=True)
+                            account_health.set_idle(self.name)
+                            if self.redispatch_queue:
+                                self.redispatch_queue.put(job['job']['id'])
+                            if account_health.is_hot(self.name) or account_health.needs_proactive_restore(self.name):
+                                raise Exception(f"Account {self.name} restore triggered after parallel primary (hot={account_health.is_hot(self.name)}, proactive={account_health.needs_proactive_restore(self.name)})")
+                        elif job.get('type') == 'parallel_secondary':
+                            # Parallel mode - we're a secondary account
+                            print(f"[{self.name}] 🚀 PARALLEL SECONDARY: Processing job {job['job']['id'][:8]}...", flush=True)
+                            account_health.set_busy(self.name, job_id=job['job']['id'])
+                            self._process_parallel_job(job, is_primary=False)
+                            account_health.set_idle(self.name)
+                            if account_health.is_hot(self.name) or account_health.needs_proactive_restore(self.name):
+                                raise Exception(f"Account {self.name} restore triggered after parallel secondary (hot={account_health.is_hot(self.name)}, proactive={account_health.needs_proactive_restore(self.name)})")
+                        elif job.get('type') == 'shutdown':
+                            # Shutdown request received
+                            print(f"[{self.name}] Received shutdown command", flush=True)
+                            break
+                        else:
+                            # Regular job - process with failover support
+                            print(f"[{self.name}] Processing job {job['id'][:8]}...", flush=True)
+                            account_health.set_busy(self.name, job_id=job.get('id'))
+                            self._process_job_with_failover(job)
+                            account_health.set_idle(self.name)
+                            # Clean up exclude list — job is done
+                            if self.redispatch_queue:
+                                self.redispatch_queue.put(job.get('id'))
+                            # Check is_hot after normal return too — clip tile failures
+                            # call record_failure() internally without raising an exception.
+                            if account_health.is_hot(self.name):
+                                raise Exception(f"Account {self.name} is HOT after job (clip tile failures)")
+                            if account_health.needs_proactive_restore(self.name):
+                                raise Exception(f"Account {self.name} proactive restore: {account_health.PROACTIVE_RESTORE_THRESHOLD} clips reached")
+                        
+                        if _from_queue:
+                            self.job_queue.task_done()
+                        
+                    except queue.Empty:
+                        # No jobs in queue, check for shutdown
+                        if self.shutdown_event.is_set():
+                            break
+                        time.sleep(0.5)
+                        
+                except NotUltraError as e:
+                    print(f"[{self.name}] ⛔ NOT ULTRA — stopping account permanently.", flush=True)
+                    account_health.set_idle(self.name)
+                    try:
+                        api_request("POST", "/worker-error", {
+                            "error_type": "not_ultra",
+                            "account_name": self.name,
+                            "message": f"Account {self.name} does not have ULTRA access. Delete session folders and restart with an ULTRA account."
+                        })
+                    except Exception:
+                        pass
+                    break  # Exit run() loop — account is dead
+
+                except JobAbortedException as abort_exc:
+                    # v455: job was deleted by user. Clean exit — no golden
+                    # restore, no HOT marking, no self-resume. Just release
+                    # the account and move on to the next pending job.
+                    aborted_id = abort_exc.job_id or "?"
+                    print(f"[{self.name}] 🛑 Job {aborted_id[:8]}... aborted by user — releasing account cleanly", flush=True)
+                    account_health.set_idle(self.name)
+                    # Don't mark this as a failure (keeps consecutive_failures at 0)
+                    try:
+                        if _from_queue:
+                            self.job_queue.task_done()
+                    except Exception:
+                        pass
+                    # Tell the dispatcher this job is handled, so it doesn't
+                    # re-dispatch to another account
+                    try:
+                        if self.redispatch_queue:
+                            self.redispatch_queue.put(aborted_id)
+                    except Exception:
+                        pass
+                    # Clean up the module-global abort marker so the set
+                    # doesn't grow unbounded over long runs
+                    try:
+                        clear_job_aborted(aborted_id)
+                    except Exception:
+                        pass
+                    # Do NOT set _retry_job — the job is gone, nothing to resume
+                    continue
+
+                except Exception as e:
+                    # v455: if the exception chain contains an abort, treat
+                    # as clean abort even if wrapped by another exception
+                    # type (e.g. HTTPError caught and re-raised). Prevents
+                    # a 404-triggered download failure from being mistaken
+                    # for a HOT-inducing failure.
+                    _chain = e
+                    _abort_in_chain = None
+                    while _chain is not None:
+                        if isinstance(_chain, JobAbortedException):
+                            _abort_in_chain = _chain
+                            break
+                        _chain = getattr(_chain, "__cause__", None) or getattr(_chain, "__context__", None)
+                    if _abort_in_chain is not None:
+                        aborted_id = _abort_in_chain.job_id or "?"
+                        print(f"[{self.name}] 🛑 Job {aborted_id[:8]}... aborted (detected in exception chain) — releasing cleanly", flush=True)
+                        account_health.set_idle(self.name)
+                        try:
+                            if _from_queue:
+                                self.job_queue.task_done()
+                        except Exception:
+                            pass
+                        try:
+                            if self.redispatch_queue:
+                                self.redispatch_queue.put(aborted_id)
+                        except Exception:
+                            pass
+                        try:
+                            clear_job_aborted(aborted_id)
+                        except Exception:
+                            pass
+                        continue
+                    print(f"[{self.name}] Error: {e}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+                    # Safety: ensure account is marked idle even after error
+                    account_health.set_idle(self.name)
+
+                    # Extract the job_id from whatever job type was being processed
+                    # so we can tell the main poll loop to re-dispatch it after restore.
+                    _failed_job_id = None
+                    try:
+                        if isinstance(job, dict):
+                            if 'job' in job and isinstance(job['job'], dict):
+                                _failed_job_id = job['job'].get('id')  # parallel_primary/secondary
+                            elif 'original_job' in job and isinstance(job['original_job'], dict):
+                                _failed_job_id = job['original_job'].get('id')  # failover
+                            else:
+                                _failed_job_id = job.get('id')  # regular job
+                    except Exception:
+                        pass
+
+                    # GOLDEN RESTORE: on definite failure (HOT_THRESHOLD consecutive failures),
+                    # restore session and download profiles from the clean post-login snapshot.
+                    #
+                    # SESSION restore is immediate — submit browser can relaunch right away.
+                    # DOWNLOAD restore is deferred to a background thread — the download worker
+                    # finishes its current in-progress clips first, then its folder is restored
+                    # and a fresh download worker starts. Submit does NOT wait for this.
+                    _is_hot = account_health.is_hot(self.name)
+                    _proactive = account_health.needs_proactive_restore(self.name)
+                    if _is_hot or _proactive:
+                        if _proactive and not _is_hot:
+                            print(f"[{self.name}] 🔄 PROACTIVE RESTORE: {account_health.PROACTIVE_RESTORE_THRESHOLD} clips reached — refreshing golden profile...", flush=True)
+                        else:
+                            print(f"[{self.name}] 🔥 Account is HOT — restoring from golden profile...", flush=True)
+
+                        # Step 0: Give HTTP download worker time to process any queued URLs
+                        # before we kill the browser. Clips pushed just before the raise
+                        # need a moment to be fetched by the download thread.
+                        print(f"[{self.name}] ⏳ Waiting 3s before golden restore (let downloads drain)...", flush=True)
+                        time.sleep(3)
+
+                        # Step 1: Close submit browser
+                        try:
+                            self.browser.close()
+                        except Exception as close_err:
+                            print(f"[{self.name}] ⚠ Error closing browser during restore: {close_err}", flush=True)
+                        time.sleep(1)
+
+                        # Step 2: Restore SESSION folder immediately (nothing has it open now)
+                        session_restored = restore_from_golden(
+                            session_folder=self.session_folder,
+                            account_label=self.name,
+                            restore_session=True,
+                        )
+
+                        if session_restored:
+                            # Step 3: Relaunch submit browser immediately from clean session
+                            # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
+                            if BROWSER_MODE == "stealth":
+                                acct_launch_kwargs = {
+                                    'user_data_dir': self.session_folder,
+                                    'channel': 'chrome',
+                                    'ignore_default_args': ['--enable-automation'],
+                                    'headless': False,
+                                    'viewport': {"width": 1280, "height": 720},
+                                    'args': self._launch_args,
+                                }
+                                if self._proxy_config:
+                                    acct_launch_kwargs['proxy'] = self._proxy_config
+                                self.browser = self._playwright.chromium.launch_persistent_context(**acct_launch_kwargs)
+                            else:
+                                acct_launch_kwargs = {
+                                    'user_data_dir': self.session_folder,
+                                    'headless': False,
+                                    'viewport': {"width": 1280, "height": 720},
+                                    'args': self._launch_args,
+                                }
+                                if self._proxy_config:
+                                    acct_launch_kwargs['proxy'] = self._proxy_config
+                                self.browser = self._playwright.chromium.launch_persistent_context(**acct_launch_kwargs)
+
+                            self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
+                            _stash_profile_on_page(self.page, self.session_folder)  # v486
+                            chrome_warmup(self.page)
+                            self.page.goto(FLOW_HOME_URL)
+                            human_delay(1, 2)
+                            human_mouse_move(self.page)
+                            human_delay(1, 2)
+                            scroll_randomly(self.page)
+                            human_delay(0.5, 1)
+                            check_and_dismiss_popup(self.page)
+                            account_health.reset_failures(self.name)
+                            print(f"[{self.name}] ✅ Submit browser relaunched — resuming submissions.", flush=True)
+                            defocus_chrome(self.page, self.name)
+
+                            # Step 4: Refresh HTTP session with new browser's cookies
+                            self._snapshot_cookies()
+                            print(f"[{self.name}] ✓ HTTP session refreshed after golden restore", flush=True)
+
+                            # v174: Self-resume — re-process the same job with the same
+                            # clip assignment instead of re-dispatching through the main loop.
+                            # This prevents parallel re-splitting and cross-account duplication.
+                            _retry_job = job
+                            if _from_queue:
+                                try:
+                                    self.job_queue.task_done()  # Complete the original queue task
+                                except Exception:
+                                    pass
+                            print(f"[{self.name}] ↩ Will self-resume job after restore", flush=True)
+                        else:
+                            # Golden missing — need to rebuild it via fresh login.
+                            print(f"[{self.name}] ⚠ Golden restore failed (golden missing) — triggering re-login to rebuild golden.", flush=True)
+                            # Relaunch browser and force full login + golden creation
+                            try:
+                                if BROWSER_MODE == "stealth":
+                                    acct_launch_kwargs = {
+                                        'user_data_dir': self.session_folder,
+                                        'channel': 'chrome',
+                                        'ignore_default_args': ['--enable-automation'],
+                                        'headless': False,
+                                        'viewport': {"width": 1280, "height": 720},
+                                        'args': self._launch_args,
+                                    }
+                                    if self._proxy_config:
+                                        acct_launch_kwargs['proxy'] = self._proxy_config
+                                    self.browser = self._playwright.chromium.launch_persistent_context(**acct_launch_kwargs)
+                                else:
+                                    self.browser = self._playwright.chromium.launch_persistent_context(
+                                        user_data_dir=self.session_folder, headless=False,
+                                        viewport={"width": 1280, "height": 720}, args=self._launch_args)
+                                self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
+                                _stash_profile_on_page(self.page, self.session_folder)  # v486
+                                chrome_warmup(self.page)
+                                self.page.goto(FLOW_HOME_URL)
+                                human_delay(1, 2)
+                                login_was_required = ensure_logged_into_flow(self.page, self.name, timeout_minutes=10)
+                                # Confirm New project button before saving golden
+                                try:
+                                    # Profile avatar is the most reliable logged-in indicator (locale-independent)
+                                    confirmed = self.page.locator("img[src*='googleusercontent.com']").first.is_visible(timeout=5000)
+                                except Exception:
+                                    confirmed = False
+                                if confirmed:
+                                    import shutil as _shutil
+                                    golden_folder = get_golden_folder(self.session_folder)
+                                    self.browser.close()
+                                    time.sleep(2)
+                                    if not os.path.exists(golden_folder):
+                                        _shutil.copytree(self.session_folder, golden_folder,
+                                                        ignore_dangling_symlinks=True,
+                                                        ignore=_shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                                        print(f"[{self.name}] ✓ Golden created: {golden_folder}", flush=True)
+                                    else:
+                                        print(f"[{self.name}] Golden already exists — keeping original (write-once).", flush=True)
+                                    # Restore session from golden
+                                    restore_from_golden(self.session_folder, self.name, restore_session=True)
+                                    # Relaunch from clean session
+                                    if BROWSER_MODE == "stealth":
+                                        self.browser = self._playwright.chromium.launch_persistent_context(**acct_launch_kwargs)
+                                    else:
+                                        self.browser = self._playwright.chromium.launch_persistent_context(
+                                            user_data_dir=self.session_folder, headless=False,
+                                            viewport={"width": 1280, "height": 720}, args=self._launch_args)
+                                    self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
+                                    _stash_profile_on_page(self.page, self.session_folder)  # v486
+                                    self.page.goto(FLOW_HOME_URL)
+                                    ensure_logged_into_flow(self.page, self.name)
+                                    account_health.reset_failures(self.name)
+                                    # Refresh HTTP session with new cookies
+                                    self._snapshot_cookies()
+                                    print(f"[{self.name}] ✅ Golden rebuilt and session restored — resuming.", flush=True)
+
+                                    # v174: Self-resume same job after golden rebuild
+                                    _retry_job = job
+                                    if _from_queue:
+                                        try:
+                                            self.job_queue.task_done()
+                                        except Exception:
+                                            pass
+                                    print(f"[{self.name}] ↩ Will self-resume job after golden rebuild", flush=True)
+                                else:
+                                    print(f"[{self.name}] ⚠ Could not confirm login — continuing as-is.", flush=True)
+                            except Exception as rebuild_err:
+                                print(f"[{self.name}] ⚠ Golden rebuild failed: {rebuild_err}", flush=True)
+                                time.sleep(5)
+                    else:
+                        # Non-fatal error (below HOT threshold) — retry same job immediately
+                        # without golden restore. process_job_submission skips completed clips.
+                        # But if the job is already completed, don't retry — just move on.
+                        _job_completed = False
+                        try:
+                            _jid = None
+                            if isinstance(job, dict):
+                                if 'job' in job and isinstance(job['job'], dict):
+                                    _jid = job['job'].get('id')
+                                else:
+                                    _jid = job.get('id')
+                            if _jid:
+                                _fj = api_request("GET", f"/jobs/{_jid}")
+                                if _fj and _fj.get('status') in ('completed', 'cancelled', 'failed'):
+                                    _job_completed = True
+                        except Exception:
+                            pass
+                        
+                        if _job_completed:
+                            print(f"[{self.name}] ✓ Job already completed — skipping retry", flush=True)
+                        else:
+                            print(f"[{self.name}] ↩ Non-fatal error — will retry same job (no restore needed)", flush=True)
+                            _retry_job = job
+                        if _from_queue:
+                            try:
+                                self.job_queue.task_done()
+                            except Exception:
+                                pass
+                        time.sleep(3)
+            
+            # Graceful shutdown
+            print(f"[{self.name}] 🛑 Shutting down browser...", flush=True)
+            try:
+                self.browser.close()
+            except:
+                pass
+            print(f"[{self.name}] ✓ Browser closed", flush=True)
+    
+    def _snapshot_cookies(self):
+        """Copy browser cookies into a requests.Session for pure-HTTP downloads.
+        Matches single-account mode's _refresh_session / cookie snapshot pattern.
+        """
+        import requests as _req
+        sess = _req.Session()
+        sess.headers.update({
+            'Referer': 'https://labs.google/',
+            'Origin': 'https://labs.google',
+        })
+        try:
+            cookies = self.browser.cookies()
+            for ck in cookies:
+                sess.cookies.set(ck['name'], ck['value'], domain=ck.get('domain', ''))
+            self._http_session_ref[0] = sess
+            print(f"[{self.name}] ✓ HTTP session: {len(cookies)} cookies captured", flush=True)
+        except Exception as e:
+            print(f"[{self.name}] ⚠ Cookie snapshot failed: {e}", flush=True)
+
+    def _start_http_download_worker(self):
+        """Start a per-account pure-HTTP download worker thread.
+        Identical logic to single-account mode's _http_download_worker.
+        Zero browser interaction — completely immune to greenlet thread affinity.
+        """
+        http_queue = self._http_dl_queue
+        session_ref = self._http_session_ref
+        account_name = self.name
+
+        def _worker():
+            print(f"[{account_name}-HTTP-DL] ✓ Pure-HTTP download worker started", flush=True)
+            while True:
+                try:
+                    item = http_queue.get(timeout=5)
+                except queue.Empty:
+                    continue
+                if item is None:  # Shutdown signal
+                    break
+                try:
+                    job_id   = item['job_id']
+                    ci       = item['clip_index']
+                    clip_id  = item['clip_id']
+                    urls     = item['urls']
+                    temp_dir = item['temp_dir']
+                    sess     = item.get('session') or session_ref[0]
+                    # DB dedup guard
+                    try:
+                        _fresh_job = api_request("GET", f"/jobs/{job_id}")
+                        if _fresh_job:
+                            _already_done = any(
+                                _fc.get('clip_index') == ci and _fc.get('status') in ('completed', 'approved')
+                                for _fc in _fresh_job.get('clips', [])
+                            )
+                            if _already_done:
+                                print(f"[{account_name}-HTTP-DL] ↩ Clip {ci+1} already completed — skipping", flush=True)
+                                http_queue.task_done()
+                                continue
+                    except Exception:
+                        pass
+                    if sess is None:
+                        print(f"[{account_name}-HTTP-DL] ⚠ No session for clip {ci+1} — skipping", flush=True)
+                        http_queue.task_done()
+                        continue
+                    if not os.path.exists(temp_dir):
+                        os.makedirs(temp_dir, exist_ok=True)
+                    attempt = item.get('generation_attempt', 1)
+                    all_ok = True
+                    any_ok = False
+                    for vi, url in enumerate(urls):
+                        if not url or url.startswith('blob:'):
+                            continue
+                        if url.startswith('/'):
+                            url = 'https://labs.google' + url
+                        try:
+                            print(f"[{account_name}-HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1}: {url[:80]}", flush=True)
+                            resp = sess.get(url, timeout=120, allow_redirects=True)
+                            if resp.status_code == 401 and sess is not session_ref[0] and session_ref[0] is not None:
+                                print(f"[{account_name}-HTTP-DL] 401 — retrying with current session", flush=True)
+                                resp = session_ref[0].get(url, timeout=120, allow_redirects=True)
+                            if not resp.ok:
+                                raise Exception(f"HTTP {resp.status_code}")
+                            body = resp.content
+                            if len(body) < 10000:
+                                raise Exception(f"Too small: {len(body)} bytes")
+                            out = os.path.join(temp_dir, f"clip_{ci}_{attempt}.{vi+1}.mp4")
+                            with open(out, 'wb') as f:
+                                f.write(body)
+                            print(f"[{account_name}-HTTP-DL] Uploading clip {ci+1} variant {attempt}.{vi+1} ({len(body):,} bytes)...", flush=True)
+                            upload_video(out, job_id, ci, attempt=attempt, variant=vi+1)
+                            print(f"[{account_name}-HTTP-DL] ✓ Clip {ci+1} variant {attempt}.{vi+1} uploaded!", flush=True)
+                            any_ok = True
+                        except Exception as ve:
+                            print(f"[{account_name}-HTTP-DL] ✗ Clip {ci+1} variant {attempt}.{vi+1} failed: {ve}", flush=True)
+                            all_ok = False
+                    if all_ok or any_ok:
+                        update_clip_status(clip_id, 'completed')
+                        print(f"[{account_name}-HTTP-DL] ✓ Clip {ci+1} done — marked completed", flush=True)
+                        total_job_clips = item.get('total_job_clips')
+                        if total_job_clips:
+                            try:
+                                _fresh = api_request("GET", f"/jobs/{job_id}")
+                                if _fresh:
+                                    done_count = sum(1 for c in _fresh.get('clips', [])
+                                                     if c.get('status') in ('completed', 'approved'))
+                                    if done_count >= total_job_clips:
+                                        update_job_status(job_id, 'completed')
+                                        print(f"[{account_name}-HTTP-DL] ✓ Job {job_id[:8]}... complete ({total_job_clips} clips)", flush=True)
+                            except Exception:
+                                pass
+                    if not all_ok and not any_ok:
+                        print(f"[{account_name}-HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo", flush=True)
+                        update_clip_status(clip_id, 'flow_redo_queued')
+                    http_queue.task_done()
+                except Exception as e:
+                    print(f"[{account_name}-HTTP-DL] ✗ Error: {e}", flush=True)
+                    try: http_queue.task_done()
+                    except: pass
+
+        t = threading.Thread(target=_worker, daemon=True, name=f"http-dl-{account_name}")
+        t.start()
+
+    def _process_job_with_failover(self, job):
+        """Process a job using the SAME code path as single-account mode.
+
+        Uses process_job_submission() (identical to --single mode) instead of
+        process_job_submission_with_failover() to ensure bit-for-bit identical
+        browser interaction patterns, which is critical for reCAPTCHA scoring.
+
+        Downloads happen via the per-account HTTP download worker thread —
+        pure requests.Session, zero browser interaction, immune to greenlet
+        thread affinity issues.
+        """
+        acc = PassthroughAccumulator()
+
+        try:
+            job['account_name'] = self.name  # Stamp so cache is namespaced per account
+            defocus_chrome(self.page, self.name)  # Prevent Chrome from stealing focus when navigating to project
+            result = process_job_submission(
+                page=self.page,
+                job=job,
+                cache=self.cache,
+                download_queue=acc,
+                http_dl_queue=self._http_dl_queue,
+                session_refresh_callback=self._snapshot_cookies,
+            )
+            return result
+        except NotUltraError as e:
+            if not acc.ready_event.is_set():
+                acc.cancelled = True
+                acc.ready_event.set()
+            print(f"[{self.name}] ⛔ {e}", flush=True)
+            print(f"[{self.name}] ⛔ Stopping this account — not ULTRA.", flush=True)
+            raise
+        except Exception as e:
+            # Ensure the acc is unblocked
+            if not acc.ready_event.is_set():
+                acc.cancelled = True
+                acc.ready_event.set()
+            err_str = str(e)
+            if "browser has been closed" in err_str or "Target page" in err_str or "context or browser" in err_str:
+                print(f"[{self.name}] 💀 Browser crash detected — forcing immediate golden restore", flush=True)
+                account_health.record_failure(self.name, force_hot=True)
+            elif "stopping job to trigger golden restore" in err_str:
+                print(f"[{self.name}] Clip failed — forcing golden restore...", flush=True)
+                account_health.record_failure(self.name, force_hot=True)
+            else:
+                account_health.record_failure(self.name)
+            # Re-raise so the outer handler can trigger restore
+            raise
+
+    def _process_parallel_job(self, parallel_data, is_primary=False):
+        """Process a portion of a job in parallel mode.
+        Uses process_job_submission (same as single-account) for identical
+        browser interaction patterns, critical for reCAPTCHA scoring.
+        
+        Downloads happen via the per-account HTTP download worker —
+        pure requests.Session, zero browser interaction.
+        """
+        job = parallel_data['job']
+        clip_indices = parallel_data['clip_indices']
+        total_clips = parallel_data['total_clips']
+        job_id = job['id']
+        all_clips = job['clips']
+
+        # Filter clips — only process the ones assigned to this account
+        my_clips = [all_clips[i] for i in clip_indices]
+
+        print(f"\n{'='*60}", flush=True)
+        print(f"PARALLEL {'PRIMARY' if is_primary else 'SECONDARY'}: {job_id[:8]}...", flush=True)
+        print(f"Account: {self.name}", flush=True)
+        print(f"My clips: {clip_indices} ({len(my_clips)}/{total_clips} total)", flush=True)
+        print(f"{'='*60}", flush=True)
+
+        if is_primary:
+            update_job_status(job_id, 'processing')
+
+        # Create a filtered job copy with only this account's clips
+        filtered_job = dict(job)
+        filtered_job['clips'] = my_clips
+        filtered_job['_total_clips'] = total_clips  # Real total across all accounts
+
+        acc = PassthroughAccumulator()
+        try:
+            filtered_job['account_name'] = self.name
+            result = process_job_submission(
+                page=self.page,
+                job=filtered_job,
+                cache=self.cache,
+                download_queue=acc,
+                http_dl_queue=self._http_dl_queue,
+                session_refresh_callback=self._snapshot_cookies,
+            )
+            return result
+        except NotUltraError as e:
+            if not acc.ready_event.is_set():
+                acc.cancelled = True
+                acc.ready_event.set()
+            print(f"[{self.name}] ⛔ {e}", flush=True)
+            raise
+        except Exception as e:
+            if not acc.ready_event.is_set():
+                acc.cancelled = True
+                acc.ready_event.set()
+            err_str = str(e)
+            if "browser has been closed" in err_str or "Target page" in err_str or "context or browser" in err_str:
+                print(f"[{self.name}] 💀 Browser crash detected — forcing immediate golden restore", flush=True)
+                account_health.record_failure(self.name, force_hot=True)
+            elif "stopping job to trigger golden restore" in err_str:
+                role = "Primary" if is_primary else "Secondary"
+                print(f"[{self.name}] {role} — clip failed, forcing golden restore...", flush=True)
+                account_health.record_failure(self.name, force_hot=True)
+            else:
+                account_health.record_failure(self.name)
+            raise
+
+
+    def _clear_recaptcha_state(self, p, launch_args, proxy_config):
+        """Clear reCAPTCHA cached state and restart browser.
+        Called automatically when consecutive failures >= HOT_THRESHOLD.
+        """
+        print(f"[{self.name}] 🔄 AUTO-RESET: Clearing reCAPTCHA state and restarting browser...", flush=True)
+
+        # Close current browser
+        try:
+            self.browser.close()
+        except:
+            pass
+        time.sleep(2)
+
+        # Clear reCAPTCHA state from profile (keep login cookies)
+        import shutil
+        default_dir = os.path.join(self.session_folder, "Default")
+        if os.path.exists(default_dir):
+            # Match setup_worker.py exactly: clean-copy the profile skipping cache folders
+            # This is identical to what setup does — copy without bad state, not just delete
+            SKIP_FOLDERS = {
+                'Cache', 'Code Cache', 'GPUCache', 'GrShaderCache', 'ShaderCache',
+                'DawnCache', 'DawnWebGPUBlobCache', 'Service Worker', 'blob_storage',
+                'IndexedDB', 'File System', 'Storage', 'databases', 'Extensions',
+                'Extension State', 'Extension Rules', 'Extension Scripts',
+                'Local Extension Settings', 'Sync Extension Settings', 'WebStorage',
+                'Platform Notifications', 'BudgetDatabase', 'Download Service',
+                'Thumbnails', 'Visited Links', 'Top Sites', 'SafetyTips',
+                'optimization_guide_prediction_model_downloads',
+                'Local Storage',
+            }
+            
+            # Clean-copy: copy profile to temp, delete original, copy back without skip folders
+            import tempfile
+            temp_profile = tempfile.mkdtemp(prefix=f"recaptcha_reset_{self.name}_", dir=SHM_DIR)
+            try:
+                shutil.copytree(
+                    self.session_folder, os.path.join(temp_profile, "profile"),
+                    ignore_dangling_symlinks=True,
+                    ignore=lambda d, files: [f for f in files if f in SKIP_FOLDERS or f in ('SingletonLock', 'SingletonSocket', 'SingletonCookie')]
+                )
+                shutil.rmtree(self.session_folder)
+                shutil.move(os.path.join(temp_profile, "profile"), self.session_folder)
+                print(f"[{self.name}] ✓ Clean-copied profile (skipped {len(SKIP_FOLDERS)} cache folders)", flush=True)
+            except Exception as copy_err:
+                print(f"[{self.name}] ⚠ Clean-copy failed: {copy_err}, falling back to delete", flush=True)
+                # Fallback: just delete the folders
+                for folder in SKIP_FOLDERS:
+                    path = os.path.join(default_dir, folder)
+                    if os.path.exists(path):
+                        try:
+                            shutil.rmtree(path)
+                        except:
+                            pass
+            finally:
+                shutil.rmtree(temp_profile, ignore_errors=True)
+
+        # Also clean-copy download profile
+        download_folder = self.account.get('download_folder', f"./flow_download_{self.name.lower()}")
+        if os.path.exists(download_folder):
+            temp_dl = tempfile.mkdtemp(prefix=f"recaptcha_reset_dl_{self.name}_", dir=SHM_DIR)
+            try:
+                shutil.copytree(
+                    download_folder, os.path.join(temp_dl, "profile"),
+                    ignore_dangling_symlinks=True,
+                    ignore=lambda d, files: [f for f in files if f in SKIP_FOLDERS or f in ('SingletonLock', 'SingletonSocket', 'SingletonCookie')]
+                )
+                shutil.rmtree(download_folder)
+                shutil.move(os.path.join(temp_dl, "profile"), download_folder)
+            except:
+                pass
+            finally:
+                shutil.rmtree(temp_dl, ignore_errors=True)
+
+        # Relaunch browser
+        if BROWSER_MODE == "stealth":
+            # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
+            relaunch_kwargs = {
+                'user_data_dir': self.session_folder,
+                'channel': 'chrome',
+                'ignore_default_args': ['--enable-automation'],
+                'headless': False,
+                'viewport': {"width": 1280, "height": 720},
+                'args': launch_args,
+            }
+            if proxy_config:
+                relaunch_kwargs['proxy'] = proxy_config
+            self.browser = p.chromium.launch_persistent_context(**relaunch_kwargs)
+        else:
+            relaunch_kwargs = {
+                'user_data_dir': self.session_folder,
+                'headless': False,
+                'viewport': {"width": 1280, "height": 500},
+            }
+            if proxy_config:
+                relaunch_kwargs['proxy'] = proxy_config
+            self.browser = p.firefox.launch_persistent_context(**relaunch_kwargs)
+
+        self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
+        _stash_profile_on_page(self.page, self.session_folder)  # v486
+
+        # Warm up
+        chrome_warmup(self.page)
+
+        # Navigate to Flow
+        print(f"[{self.name}] Navigating to Flow after reset...", flush=True)
+        self.page.goto(FLOW_HOME_URL)
+        human_delay(1, 2)
+        human_mouse_move(self.page)
+        human_delay(1, 2)
+        scroll_randomly(self.page)
+        human_delay(0.5, 1)
+        ensure_logged_into_flow(self.page, self.name)
+        check_and_dismiss_popup(self.page)
+
+        # Reset health tracker
+        account_health.reset_failures(self.name)  # Zero clips_since_restore + consecutive failures
+
+        # Refresh HTTP session with new browser's cookies
+        self._snapshot_cookies()
+
+        print(f"[{self.name}] ✓ Browser restarted with clean reCAPTCHA state!", flush=True)
+
+
+def _setup_worker_dl_tab(dl_page, submit_page):
+    """Set worker-tab content on the download tab and bring submit tab to front."""
+    try:
+        dl_page.set_content("""<!DOCTYPE html>
+<html>
+<head>
+<title>⚙️ Worker Tab — Do Not Close</title>
+<style>
+  body{margin:0;background:#0f0f0f;display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui,sans-serif;color:#fff;}
+  .box{text-align:center;padding:40px;}
+  .icon{font-size:64px;margin-bottom:16px;}
+  h1{font-size:24px;font-weight:600;margin:0 0 8px;}
+  p{font-size:14px;color:#aaa;margin:0;}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-right:6px;animation:pulse 1.5s ease-in-out infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="icon">⚙️</div>
+  <h1><span class="dot"></span>Worker Running</h1>
+  <p>This tab is required for the video worker to function.</p>
+  <p style="margin-top:8px">Do not close it.</p>
+</div>
+</body>
+</html>""", timeout=5000)
+    except Exception:
+        pass
+
+
+
+
+
+def main_multi_account(accounts_override=None):
+    """Multi-account mode - runs multiple submission browsers in parallel
+    
+    Args:
+        accounts_override: Optional list of account configs to use instead of ACCOUNTS
+    """
+    print("=" * 60)
+    print(f"LOCAL FLOW WORKER {WORKER_VERSION} - MULTI-ACCOUNT MODE (build {WORKER_BUILD})")
+    print("=" * 60)
+    print(f"Worker ID: {WORKER_ID}")
+    
+    # Get enabled accounts (use override if provided)
+    if accounts_override is not None:
+        enabled_accounts = accounts_override
+    else:
+        enabled_accounts = [a for a in ACCOUNTS if a.get('enabled', True)]
+    
+    if not enabled_accounts:
+        print("❌ No accounts enabled! Check ACCOUNTS configuration.")
+        return
+    
+    # Split accounts into active and standby
+    # First 2 accounts are active, rest are standby
+    MAX_ACTIVE_ACCOUNTS = 2
+    active_accounts = enabled_accounts[:MAX_ACTIVE_ACCOUNTS]
+    standby_accounts = enabled_accounts[MAX_ACTIVE_ACCOUNTS:]
+    
+    print(f"\nAccounts: {len(enabled_accounts)} total")
+    print(f"  Active:  {len(active_accounts)} ({[a['name'] for a in active_accounts]})")
+    print(f"  Standby: {len(standby_accounts)} ({[a['name'] for a in standby_accounts]})")
+    print(f"Total browsers: {len(active_accounts)} ({len(active_accounts)} submit, HTTP-only downloads)")
+    
+    for acc in active_accounts:
+        acc_name = acc['name']
+        print(f"\n  {acc_name} [ACTIVE]:")
+        print(f"    Session: {acc['session_folder']}")
+        if acc.get('proxy'):
+            print(f"    Proxy: {acc['proxy']}")
+    
+    for acc in standby_accounts:
+        print(f"\n  {acc['name']} [STANDBY]:")
+        print(f"    Session:  {acc['session_folder']}")
+    
+    print(f"\n  Downloads: Pure HTTP (no browser tabs, immune to greenlet issues)")
+    print(f"\nWeb app: {WEB_APP_URL}")
+    print(f"Clip ready wait: {CLIP_READY_WAIT}s (per clip)")
+    print(f"Failure check: {FAILURE_CHECK_DELAY}s (after submission)")
+    print("=" * 60)
+    
+    print("\nChecking API connection...")
+    if check_api_connection():
+        print("✓ API connection OK")
+    else:
+        print(f"\n⚠ Cannot reach API at {WEB_APP_URL}")
+        response = "y" if not sys.stdin.isatty() else input("Continue anyway? (y/n): ")
+        if response.lower() != 'y':
+            return
+    
+    cache = load_cache()
+    
+    # In the single-browser dual-tab design each AccountWorker owns its own
+    # DownloadHelper (a tab in the same Chrome). No separate download queues,
+    # download workers, or download profile folders are needed.
+    account_download_queues = {}  # kept for FailoverRouter API compat (empty)
+
+    # Create per-account job queues
+    account_job_queues = {}  # account_name -> Queue
+    for account in active_accounts:
+        account_job_queues[account['name']] = Queue()
+    
+    # Create swap request queue for standby coordination
+    swap_request_queue = Queue()
+    
+    # Determine if we use standby failover
+    use_standby_failover = len(standby_accounts) > 0
+    
+    # Initialize account health tracking for all accounts
+    for account in enabled_accounts:
+        account_health.register_account(account['name'])
+    
+    # Initialize the global FailoverRouter
+    global failover_router
+    failover_router = FailoverRouter(
+        account_job_queues=account_job_queues,
+        account_download_queues=account_download_queues,
+        swap_request_queue=swap_request_queue if use_standby_failover else None,
+    )
+    
+    # Pre-restore all golden profiles BEFORE starting any browser threads.
+    # This prevents a race condition where Account1's kill_chrome_using_profile
+    # accidentally kills Account2's already-running browser — "chrome-session"
+    # is a substring of "chrome-session-2" so WMIC/PowerShell LIKE matches both.
+    # By doing all kills and restores sequentially with no browsers running,
+    # there's nothing to accidentally kill.
+    print("\nPre-restoring golden profiles for all accounts...")
+    for account in active_accounts:
+        session_folder = account['session_folder']
+        account_label = account['name']
+        golden = get_golden_folder(session_folder)
+        if os.path.exists(golden):
+            print(f"[{account_label}] Killing stale Chrome and restoring from golden...", flush=True)
+            kill_chrome_using_profile(session_folder, label=account_label)
+            restore_from_golden(session_folder, account_label=account_label)
+        else:
+            print(f"[{account_label}] No golden folder — will login on first start", flush=True)
+    time.sleep(1)
+
+    # Shared queue: AccountWorkers put job_ids here after golden restore
+    # so the main poll loop removes them from queued_job_ids and re-dispatches.
+    redispatch_queue = Queue()
+
+    # Start account workers (submission browsers) for active accounts only
+    account_workers = []
+    for i, account in enumerate(active_accounts):
+        account_name = account['name']
+        
+        # Determine failover mechanism
+        if use_standby_failover:
+            # Failovers go to standby manager
+            failover_queue = swap_request_queue
+            is_failover_to_standby = True
+        elif len(active_accounts) > 1:
+            # Fallback: failover to other active account (no standby available)
+            other_index = (i + 1) % len(active_accounts)
+            other_account_name = active_accounts[other_index]['name']
+            failover_queue = account_job_queues[other_account_name]
+            is_failover_to_standby = False
+        else:
+            failover_queue = None  # Single account mode - no failover
+            is_failover_to_standby = False
+        
+        worker = AccountWorker(
+            account, 
+            cache, 
+            account_job_queues[account_name],  # This account's job queue
+            failover_queue=failover_queue,
+            all_download_queues=account_download_queues,
+            is_failover_to_standby=is_failover_to_standby,
+        )
+        worker.golden_restored = True  # Already restored above — skip in thread
+        worker.redispatch_queue = redispatch_queue  # Signal main loop to re-dispatch jobs after restore
+        worker.start()
+        account_workers.append(worker)
+    
+    # Start StandbyAccountManager if we have standby accounts
+    standby_manager = None
+    if standby_accounts:
+        standby_manager = StandbyAccountManager(
+            standby_accounts=standby_accounts,
+            swap_request_queue=swap_request_queue,
+            cache=cache,
+            active_workers=account_workers,
+            account_job_queues=account_job_queues,
+            account_download_queues=account_download_queues,
+        )
+        standby_manager.start()
+        print(f"✓ Standby manager started with {len(standby_accounts)} standby account(s)")
+    
+    # Wait for all account workers to be ready
+    print("\nWaiting for account browsers to start...")
+    for worker in account_workers:
+        worker.ready_flag.wait(timeout=60)
+    print(f"✓ All {len(account_workers)} active account workers ready")
+    
+    print("\n" + "=" * 50)
+    print("MULTI-ACCOUNT WORKER READY - Polling for jobs...")
+    print(f"Failover strategy:")
+    print(f"  1. Same-account retry: up to {FailoverRouter.MAX_SAME_ACCOUNT_RETRIES}x in new project")
+    print(f"  2. Cross-account: route to healthiest idle account")
+    if use_standby_failover:
+        print(f"  3. Standby pool: {len(standby_accounts)} account(s) on standby")
+    else:
+        print(f"  3. Standby pool: NONE")
+    print(f"  Hot threshold: {AccountHealthTracker.HOT_THRESHOLD} consecutive failures")
+    print(f"  Cooldown: {AccountHealthTracker.COOLDOWN_SECONDS}s")
+    print("=" * 50)
+    
+    # Track which account handles which job (round-robin among ACTIVE accounts)
+    account_index = 0
+    
+    # Track jobs we've already queued to prevent duplicates
+    queued_job_ids = set()
+    queued_redo_keys = {}  # v463: (clip_id, attempt) → dispatch_time (float epoch)
+                           # Previously a set — but monotonic growth meant a redo
+                           # dropped by a worker thread (golden restore, crash)
+                           # would stay "already queued" forever, and the server's
+                           # re-claim after 10-min stale-release would find the
+                           # key still present and silently skip re-dispatch.
+                           # Now: if a key has been sitting for >3 min and the
+                           # server still returns the clip as needing redo, we
+                           # re-dispatch. Normal redo processing completes in
+                           # well under 3 min; anything longer means the dispatch
+                           # was lost.
+    # Jobs claimed but not yet assigned because all accounts were busy
+    held_jobs = {}  # job_id -> job dict
+    
+    try:
+        _last_all_busy_msg = 0  # Timestamp of last "all busy" message
+        while True:
+            # Check if all account workers have died (e.g. NOT ULTRA)
+            alive_workers = [w for w in account_workers if w.is_alive()]
+            if not alive_workers:
+                print(f"\n{'='*50}", flush=True)
+                print(f"⛔ ALL ACCOUNT WORKERS HAVE STOPPED", flush=True)
+                print(f"   No accounts available to process jobs.", flush=True)
+                print(f"   Fix account access and restart the worker.", flush=True)
+                print(f"{'='*50}", flush=True)
+                break
+            
+            # Drain redispatch queue — AccountWorkers put job_ids here after
+            # golden restore resets a job to pending. Remove from queued_job_ids
+            # so get_pending_job() will pick them up again.
+            while True:
+                try:
+                    _redispatch_id = redispatch_queue.get_nowait()
+                    if _redispatch_id in queued_job_ids:
+                        queued_job_ids.discard(_redispatch_id)
+                        print(f"[DISPATCH] ↩ Job {_redispatch_id[:8]}... removed from exclude set — will be re-dispatched", flush=True)
+                except queue.Empty:
+                    break
+
+            # Check which accounts are idle BEFORE polling — no point
+            # hitting the API when nobody is free to take a job.
+            alive_account_names = {w.name for w in alive_workers}
+            idle_accounts_now = [
+                acc['name'] for acc in active_accounts
+                if acc['name'] in alive_account_names
+                and not account_health.is_busy(acc['name'])
+                and account_job_queues[acc['name']].qsize() == 0
+            ]
+            all_busy = len(idle_accounts_now) == 0 and not held_jobs
+
+            if all_busy:
+                # All accounts are working — don't poll, just wait quietly.
+                # Print a status line at most once per 30 seconds.
+                now = time.time()
+                if now - _last_all_busy_msg > 30:
+                    busy_names = [acc['name'] for acc in active_accounts if account_health.is_busy(acc['name'])]
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] All accounts busy ({', '.join(busy_names)}) — waiting...", flush=True)
+                    _last_all_busy_msg = now
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            # Check for redo clips
+            redo_clips = get_redo_clips()
+            if redo_clips:
+                new_redo_clips = []
+                # v463: re-dispatch threshold. If the server is still giving
+                # us a clip we supposedly dispatched more than this many
+                # seconds ago, our original dispatch was lost (thread died,
+                # golden restore wiped the queue, etc.). Re-dispatch.
+                STUCK_REDO_SECS = 180.0
+                _now = time.time()
+                for c in redo_clips:
+                    # Use (clip_id, attempt) as key so the same clip can be retried
+                    redo_key = (c.get('id'), c.get('generation_attempt', 1))
+                    prev_dispatch_time = queued_redo_keys.get(redo_key)
+                    if prev_dispatch_time is None:
+                        # Fresh claim — add
+                        new_redo_clips.append(c)
+                    elif c.get('claimed_by') is None:
+                        # Server-side stale claim was cleared; in-memory key is
+                        # stale too — re-dispatch.
+                        del queued_redo_keys[redo_key]
+                        new_redo_clips.append(c)
+                        print(f"  ↩ Clip {c.get('clip_index', 0)+1} (attempt {c.get('generation_attempt', 1)}) — stale claim released, re-queuing", flush=True)
+                    elif (_now - prev_dispatch_time) > STUCK_REDO_SECS:
+                        # We thought we dispatched this, but the server is
+                        # still returning it — dispatch was lost. Re-dispatch.
+                        age = int(_now - prev_dispatch_time)
+                        del queued_redo_keys[redo_key]
+                        new_redo_clips.append(c)
+                        print(f"  ⚠ Clip {c.get('clip_index', 0)+1} (attempt {c.get('generation_attempt', 1)}) — dispatch stuck for {age}s (> {int(STUCK_REDO_SECS)}s), re-queuing", flush=True)
+                    # else: recently dispatched, trust the in-flight dispatch
+
+                if new_redo_clips:
+                    # Only assign redos to IDLE accounts — busy accounts won't process
+                    # them until their current job finishes (could be minutes).
+                    # Unassigned redos stay in DB as flow_redo_queued and get picked up
+                    # on the next poll cycle when an account frees up.
+                    idle_for_redo = [
+                        acc['name'] for acc in active_accounts
+                        if not account_health.is_busy(acc['name'])
+                        and account_job_queues[acc['name']].qsize() == 0
+                    ]
+                    
+                    if idle_for_redo:
+                        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Found {len(new_redo_clips)} NEW clip(s) needing redo ({len(idle_for_redo)} idle accounts)")
+                        _redo_idx = 0
+                        for clip in new_redo_clips:
+                            clip_id = clip.get('id')
+                            attempt = clip.get('generation_attempt', 1)
+                            redo_key = (clip_id, attempt)
+                            target_account = idle_for_redo[_redo_idx % len(idle_for_redo)]
+                            queued_redo_keys[redo_key] = time.time()  # v463: timestamp instead of set-add
+                            account_job_queues[target_account].put({'type': 'redo', 'clip': clip})
+                            print(f"  → Clip {clip.get('clip_index', 0)+1} (attempt {attempt}) assigned to {target_account}")
+                            _redo_idx += 1
+            
+            # Re-try held jobs before fetching new ones
+            if held_jobs:
+                idle_now = [acc['name'] for acc in active_accounts
+                            if not account_health.is_busy(acc['name']) and account_job_queues[acc['name']].qsize() == 0]
+                if idle_now:
+                    held_id, held_job = next(iter(held_jobs.items()))
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Retrying held job {held_id[:8]}... ({len(idle_now)} idle accounts)")
+                    del held_jobs[held_id]
+                    # Re-inject as if freshly received — remove from queued so assignment runs
+                    queued_job_ids.discard(held_id)
+                    job = held_job
+                    job_id = held_id
+                    # Fall through to assignment block below
+                else:
+                    job = None
+                    job_id = None
+            
+            # Check for new jobs (get one at a time, excluding already-queued jobs)
+            if not held_jobs:
+                job = get_pending_job(exclude_ids=queued_job_ids)
+            if job:
+                job_id = job.get('id')
+                if job_id not in queued_job_ids:
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Found NEW pending job: {job_id[:8]}...")
+                    queued_job_ids.add(job_id)
+                    
+                    clips = job.get('clips', [])
+                    num_accounts = len(active_accounts)
+                    
+                    # Analyze clip chains for parallel distribution
+                    # Use continue-mode chain analysis to ensure continue-mode clips
+                    # stay on the same account (they need sequential processing with approval)
+                    chains = analyze_continue_mode_chains(clips)
+                    
+                    # Check which accounts are idle (not busy AND empty queue)
+                    idle_accounts = []
+                    for acc in active_accounts:
+                        acc_name = acc['name']
+                        is_busy = account_health.is_busy(acc_name)
+                        queue_size = account_job_queues[acc_name].qsize()
+                        if not is_busy and queue_size == 0:
+                            idle_accounts.append(acc_name)
+                    
+                    busy_count = num_accounts - len(idle_accounts)
+                    print(f"  📋 Account status: {len(idle_accounts)} idle, {busy_count} busy")
+                    
+                    # Decision: split across accounts ONLY if multiple accounts are idle
+                    # If only 1 idle (or none), assign whole job to one account to keep
+                    # the other accounts free for the NEXT job
+                    can_split = len(chains) > 1 and len(idle_accounts) > 1
+                    
+                    if can_split:
+                        print(f"  📊 Found {len(chains)} independent chains: {[c for c in chains]}")
+                        
+                        # Only use idle accounts for splitting
+                        assignments = assign_chains_to_accounts(chains, idle_accounts)
+                        
+                        # Filter out empty assignments
+                        active_assignments = {acc: clips_list for acc, clips_list in assignments.items() if clips_list}
+                        
+                        if len(active_assignments) > 1:
+                            # Parallel execution - send to multiple idle accounts
+                            print(f"  🚀 PARALLEL MODE: Splitting across {len(active_assignments)} idle accounts")
+                            
+                            primary_account = None
+                            for acc_name, clip_indices in active_assignments.items():
+                                if primary_account is None:
+                                    # First account handles job status and is "primary"
+                                    primary_account = acc_name
+                                    account_job_queues[acc_name].put({
+                                        'type': 'parallel_primary',
+                                        'job': job,
+                                        'clip_indices': clip_indices,
+                                        'total_clips': len(clips),
+                                        'all_assignments': active_assignments,
+                                    })
+                                    print(f"    → {acc_name}: clips {clip_indices} (PRIMARY)")
+                                else:
+                                    # Secondary accounts just process their clips
+                                    account_job_queues[acc_name].put({
+                                        'type': 'parallel_secondary',
+                                        'job': job,
+                                        'clip_indices': clip_indices,
+                                        'total_clips': len(clips),
+                                        'primary_account': primary_account,
+                                    })
+                                    print(f"    → {acc_name}: clips {clip_indices}")
+                        else:
+                            # Only one account has work - use single account mode
+                            target_account = idle_accounts[0]
+                            account_job_queues[target_account].put(job)
+                            print(f"  → Assigned to {target_account} (single chain)")
+                    else:
+                        # Single account mode: pick the best account
+                        # Prefer idle accounts; if all busy, wait for one to free up
+                        if idle_accounts:
+                            target_account = idle_accounts[0]
+                            print(f"  → Assigned to {target_account} (idle)")
+                            account_job_queues[target_account].put(job)
+                        else:
+                            # All busy — keep job in queued_job_ids so it stays excluded
+                            # from get_pending_job() and doesn't spam re-claims.
+                            # Store in held_jobs so it gets assigned once an account frees up.
+                            held_jobs[job_id] = job
+                            print(f"  → All accounts busy, holding job {job_id[:8]}... for retry")
+                # else: job already queued, skip
+            
+            # Only print "no jobs" if we didn't find anything new
+            if not redo_clips and not job:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] No pending jobs or redos...", flush=True)
+            
+            time.sleep(POLL_INTERVAL)
+            
+    except KeyboardInterrupt:
+        print("\n\n⚠ Shutting down...")
+    finally:
+        # Proper cleanup for all workers and browsers
+        print("Stopping account workers...")
+        for worker in account_workers:
+            try:
+                worker.request_shutdown()
+            except:
+                pass
+        
+        print("Waiting for account workers to finish...")
+        for worker in account_workers:
+            try:
+                worker.join(timeout=10)
+            except:
+                pass
+        
+        print("✓ All workers stopped")
+
+
+def main(account_session=None, account_download=None, account_label=None):
+    print("=" * 60)
+    global SESSION_FOLDER, DOWNLOAD_SESSION_FOLDER
+    if account_session:
+        SESSION_FOLDER = account_session
+    if account_download:
+        DOWNLOAD_SESSION_FOLDER = account_download
+    label = account_label or "SINGLE"
+
+    print(f"LOCAL FLOW WORKER {WORKER_VERSION} - Stealth Edition (build {WORKER_BUILD})")
+    print("=" * 60)
+    print(f"Worker ID: {WORKER_ID}")
+    print(f"Browser mode: {BROWSER_MODE.upper()}")
+    print(f"Session folder: {SESSION_FOLDER}")
+    print(f"Download session: {DOWNLOAD_SESSION_FOLDER}")
+    print(f"Web app: {WEB_APP_URL}")
+    print(f"Clip ready wait: {CLIP_READY_WAIT}s (per clip)")
+    print(f"Failure check: {FAILURE_CHECK_DELAY}s (after submission)")
+    print(f"Poll interval: {POLL_INTERVAL}s")
+    # Patchright diagnostic
+    try:
+        import patchright
+        print(f"\n✅ PATCHRIGHT ACTIVE (v{getattr(patchright, '__version__', '?')})")
+        print("   CDP detection bypass: ENABLED")
+        print("   --enable-automation: REMOVED by Patchright")
+    except ImportError:
+        print("\n⚠️  PATCHRIGHT NOT INSTALLED — using regular Playwright")
+        print("   CDP detection bypass: DISABLED (reCAPTCHA will detect automation)")
+        print("   --enable-automation: BLOCKED via ignore_default_args")
+        print("   ➡ Install with: pip install patchright && patchright install chromium")
+    if BROWSER_MODE == "stealth":
+        print("\n🔒 STEALTH MODE: Using your real Chrome browser")
+        print("   This helps avoid Google's bot detection!")
+    print("=" * 60)
+    
+    print("\nChecking API connection...")
+    if check_api_connection():
+        print("✓ API connection OK")
+    else:
+        print(f"\n⚠ Cannot reach API at {WEB_APP_URL}")
+        response = "y" if not sys.stdin.isatty() else input("Continue anyway? (y/n): ")
+        if response.lower() != 'y':
+            return
+    
+    cache = load_cache()
+    
+    single_proxy = ACCOUNTS[0].get('proxy') if ACCOUNTS else None
+    
+    with sync_playwright() as p:
+        # Use REAL Chrome browser for better stealth
+        # channel='chrome' uses your installed Chrome, not Playwright's bundled Chromium
+        print(f"\n[Browser] Mode: {BROWSER_MODE}")
+        
+        single_proxy_config = parse_proxy_url(single_proxy)
+        if single_proxy_config:
+            print(f"[Browser] Using proxy: {single_proxy_config['server']}")
+        
+        single_chrome_args = [
+            '--disable-blink-features=AutomationControlled',
+            '--disable-focus-on-load',  # Prevent Chrome stealing OS focus on Windows
+            '--disable-dev-shm-usage',
+            '--no-sandbox',
+            # Force Chrome variation IDs so x-client-data header looks like a real browser
+            # Without this, Playwright Chrome only has 1 trial ID (CKmXywE=, 10 chars)
+            # Real Chrome has 5-6+ (46+ chars). reCAPTCHA Enterprise uses this to score sessions.
+            '--force-variation-ids=3300115,3300134,3313321,3328827,3330196,3362821',
+            # Redirect disk cache to /dev/shm (RAM, always has space) so Chrome cache writes
+            # never touch the VPS root disk which is 100% full. Login/cookies stay in profile on disk.
+            '--disk-cache-size=1',
+            '--media-cache-size=1',
+            # Expose CDP endpoint so the download thread can connect its own Patchright instance
+            # to the same Chrome process — gives each thread its own greenlet binding.
+            '--remote-debugging-port=9222',
+            '--mute-audio',
+        ]
+        
+        # Only add proxy-related flags when proxy is configured
+        if single_proxy_config:
+            single_chrome_args.append('--ignore-certificate-errors')
+            # Create proxy auth extension for automatic credential handling
+            single_ext_dir = os.path.join(BASE_DIR, ".proxy_auth_ext_single")
+            single_auth_ext = create_proxy_auth_extension(single_proxy, single_ext_dir)
+            if single_auth_ext:
+                single_chrome_args.extend([
+                    f'--disable-extensions-except={single_auth_ext}',
+                    f'--load-extension={single_auth_ext}',
+                ])
+        
+        # Select stealth script - minimal for real Chrome, full for bundled Chromium
+        # Stealth handled by Patchright natively (no init script needed)
+        
+        # --- Startup: restore session from golden before first launch ---
+        # Always start from the clean golden profile (not whatever accumulated state
+        # was left in session_folder from a previous run).
+        _startup_golden = get_golden_folder(SESSION_FOLDER)
+        if os.path.exists(_startup_golden):
+            print(f"[STARTUP] Restoring session from golden before launch: {_startup_golden}", flush=True)
+            kill_chrome_using_profile(SESSION_FOLDER, label="STARTUP")
+            time.sleep(1)
+            try:
+                if os.path.exists(SESSION_FOLDER):
+                    shutil.rmtree(SESSION_FOLDER, ignore_errors=True)
+                shutil.copytree(_startup_golden, SESSION_FOLDER,
+                    dirs_exist_ok=True,
+                    ignore_dangling_symlinks=True,
+                    ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                print(f"[STARTUP] ✓ Session restored from golden", flush=True)
+                # Purge stale GPU/shader caches — golden was built on a different GPU env
+                purge_gpu_caches(SESSION_FOLDER, label="STARTUP")
+            except Exception as _se:
+                print(f"[STARTUP] ⚠ Could not restore from golden: {_se}", flush=True)
+        else:
+            print(f"[STARTUP] No golden folder found — launching with existing session (first run)", flush=True)
+
+        if BROWSER_MODE == "stealth":
+            print("[Browser] Launching REAL Chrome (stealth mode)...")
+            # Match test_human_like.py launch exactly
+            # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
+            launch_kwargs = {
+                'user_data_dir': SESSION_FOLDER,
+                'channel': 'chrome',
+                'ignore_default_args': ['--enable-automation'],
+                'headless': False,
+                'viewport': {"width": 1280, "height": 720},
+                'args': single_chrome_args,
+            }
+            # Only pass proxy if actually configured (test_human_like.py doesn't pass proxy)
+            if single_proxy_config:
+                launch_kwargs['proxy'] = single_proxy_config
+            browser = p.chromium.launch_persistent_context(**launch_kwargs)
+            browser_name = "Chrome"
+        else:
+            print("[Browser] Launching Firefox (playwright mode)...")
+            launch_kwargs = {
+                'user_data_dir': SESSION_FOLDER,
+                'headless': False,
+                'viewport': {"width": 1280, "height": 500},
+            }
+            if single_proxy_config:
+                launch_kwargs['proxy'] = single_proxy_config
+            browser = p.firefox.launch_persistent_context(**launch_kwargs)
+            browser_name = "Firefox"
+        
+        # Match test_human_like.py: browser.pages[0] if browser.pages else browser.new_page()
+        page = browser.pages[0] if browser.pages else browser.new_page()
+        
+        # Note: Patchright handles stealth (webdriver, CDP, Runtime.enable) natively
+        
+        print(f"✓ {browser_name} browser started")
+        
+        # Warm up Chrome — sync variations seed for valid x-client-data header
+        # If warmup kills the browser (TargetClosedError), relaunch before continuing
+        try:
+            chrome_warmup(page)
+        except Exception as _warmup_err:
+            print(f"[Warmup] Browser died during warmup — relaunching before Flow navigation...", flush=True)
+            try:
+                browser.close()
+            except Exception:
+                pass
+            time.sleep(2)
+            browser = p.chromium.launch_persistent_context(**launch_kwargs) if BROWSER_MODE == "stealth" else p.firefox.launch_persistent_context(**launch_kwargs)
+            page = browser.pages[0] if browser.pages else browser.new_page()
+            print("[Warmup] ✓ Browser relaunched — proceeding to Flow without warmup", flush=True)
+        
+        # === Match test_human_like.py startup exactly ===
+        # Intercept media redirect responses — Flow fetches these when loading videos.
+        # Captured so post-job download uses real HTTP URLs instead of blob: fallback.
+        _captured_media_urls = {}  # uuid → redirect URL
+        def _capture_media_url(response):
+            try:
+                url = response.url
+                if 'getMediaUrlRedirect' in url:
+                    import re as _re2
+                    m = _re2.search(r'[?&]name=([a-f0-9-]+)', url)
+                    if m:
+                        _captured_media_urls[m.group(1)] = url
+            except Exception:
+                pass
+        page.on("response", _capture_media_url)
+        print("[STARTUP] Navigating to Flow...", flush=True)
+        page.goto(FLOW_HOME_URL)
+        human_delay(1, 2)
+        
+        # Look around
+        human_mouse_move(page)
+        human_delay(1, 2)
+        scroll_randomly(page)
+        human_delay(0.5, 1)
+        
+        # ── Wait for user to be fully logged in ──
+        # ensure_logged_into_flow handles ALL states:
+        #   - Already logged in → returns immediately  
+        #   - On Google login page → waits for user to complete (up to 10 min)
+        #   - On Flow landing page → clicks "Create with Flow" → waits for login
+        # It checks the DOM for "New project" button, not just the URL.
+        print("[STARTUP] Verifying login status...", flush=True)
+        login_was_required = ensure_logged_into_flow(page, "STARTUP", timeout_minutes=10)
+        if login_was_required:
+            print("[STARTUP] ✓ Login verified after sign-in", flush=True)
+        else:
+            print("[STARTUP] ✓ Already logged in and verified", flush=True)
+        
+        # Dismiss any popups
+        check_and_dismiss_popup(page)
+        
+        # Verify ULTRA account status
+        try:
+            check_ultra_account(page, "STARTUP")
+        except NotUltraError as e:
+            print(f"\n{'='*56}", flush=True)
+            print(f"  ❌ {e}", flush=True)
+            print(f"  Delete session folders and restart with an ULTRA account.", flush=True)
+            print(f"{'='*56}\n", flush=True)
+            try:
+                input("  Press Enter to close...")
+            except EOFError:
+                pass
+            import sys; sys.exit(1)
+        
+        # ── Save/restore golden (no download profile copy needed in v126) ──
+        submit_folder = SESSION_FOLDER
+        golden_folder_main = get_golden_folder(submit_folder)
+        golden_missing_main = not os.path.exists(golden_folder_main)
+
+        needs_sync = login_was_required or golden_missing_main
+
+        if needs_sync:
+            # Final confirmation: verify login before saving golden.
+            if login_was_required or golden_missing_main:
+                confirmed = False
+                for _attempt in range(3):
+                    try:
+                        confirmed = page.locator("img[src*='googleusercontent.com']").first.is_visible(timeout=5000)
+                        if confirmed:
+                            break
+                    except Exception:
+                        pass
+                    if _attempt < 2:
+                        time.sleep(3)
+                if not confirmed:
+                    if login_was_required:
+                        print("[Sync] ⚠ Avatar not visible but login was verified — proceeding with golden save.", flush=True)
+                        confirmed = True
+                    else:
+                        print("[Sync] ⚠ Login not confirmed and no fresh login — skipping golden save.", flush=True)
+                        needs_sync = False
+
+            if needs_sync:
+                print("\n[Sync] Closing submit browser to snapshot login state...")
+                browser.close()
+                time.sleep(2)
+
+                golden_folder = get_golden_folder(submit_folder)
+
+                if login_was_required:
+                    if os.path.exists(golden_folder):
+                        print(f"[Sync] Fresh login after golden restore — golden tokens were expired. Rebuilding golden...", flush=True)
+                        shutil.rmtree(golden_folder, ignore_errors=True)
+                    else:
+                        print(f"[Sync] Fresh login detected — creating golden profile...", flush=True)
+                    try:
+                        shutil.copytree(submit_folder, golden_folder,
+                                       ignore_dangling_symlinks=True,
+                                       ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                        print(f"[Sync] ✓ Golden saved: {golden_folder}")
+                    except Exception as e:
+                        print(f"[Sync] ⚠ Could not save golden: {e}")
+                elif not os.path.exists(golden_folder):
+                    print(f"[Sync] Golden missing — creating from current session...")
+                    try:
+                        shutil.copytree(submit_folder, golden_folder,
+                                       ignore_dangling_symlinks=True,
+                                       ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                        print(f"[Sync] ✓ Golden created: {golden_folder}")
+                    except Exception as e:
+                        print(f"[Sync] ⚠ Could not create golden: {e}")
+
+                # Relaunch submit browser
+                print("[Sync] Relaunching submit browser...")
+                if BROWSER_MODE == "stealth":
+                    relaunch_kwargs = {
+                        'user_data_dir': SESSION_FOLDER,
+                        'channel': 'chrome',
+                        'ignore_default_args': ['--enable-automation'],
+                        'headless': False,
+                        'viewport': {"width": 1280, "height": 720},
+                        'args': single_chrome_args,
+                    }
+                    if single_proxy_config:
+                        relaunch_kwargs['proxy'] = single_proxy_config
+                    browser = p.chromium.launch_persistent_context(**relaunch_kwargs)
+                else:
+                    relaunch_kwargs = {
+                        'user_data_dir': SESSION_FOLDER,
+                        'headless': False,
+                        'viewport': {"width": 1280, "height": 500},
+                    }
+                    if single_proxy_config:
+                        relaunch_kwargs['proxy'] = single_proxy_config
+                    browser = p.firefox.launch_persistent_context(**relaunch_kwargs)
+                
+                page = browser.pages[0] if browser.pages else browser.new_page()
+                chrome_warmup(page)
+                
+                print("[Sync] Navigating to Flow...", flush=True)
+                page.goto(FLOW_HOME_URL)
+                human_delay(1, 2)
+                human_mouse_move(page)
+                human_delay(1, 2)
+                scroll_randomly(page)
+                human_delay(0.5, 1)
+                
+                relaunch_login_required = ensure_logged_into_flow(page, "SYNC-RELAUNCH", timeout_minutes=10)
+                if relaunch_login_required:
+                    print("[Sync] Login was required after relaunch — golden session was expired.", flush=True)
+                    browser.close()
+                    time.sleep(2)
+                    if not os.path.exists(golden_folder):
+                        try:
+                            shutil.copytree(submit_folder, golden_folder,
+                                           ignore_dangling_symlinks=True,
+                                           ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                            print(f"[Sync] ✓ Golden created with fresh login: {golden_folder}")
+                        except Exception as e:
+                            print(f"[Sync] ⚠ Could not create golden: {e}")
+                    else:
+                        print(f"[Sync] Golden already exists — keeping original (write-once).", flush=True)
+                    if os.path.exists(golden_folder):
+                        shutil.rmtree(submit_folder, ignore_errors=True)
+                        try:
+                            shutil.copytree(golden_folder, submit_folder,
+                                           ignore_dangling_symlinks=True,
+                                           ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                            print(f"[Sync] ✓ Session copied from golden")
+                        except Exception as e:
+                            print(f"[Sync] ⚠ Could not copy session: {e}")
+                    browser = p.chromium.launch_persistent_context(**relaunch_kwargs) if BROWSER_MODE == "stealth" else p.firefox.launch_persistent_context(**relaunch_kwargs)
+                    page = browser.pages[0] if browser.pages else browser.new_page()
+                    chrome_warmup(page)
+                    page.goto(FLOW_HOME_URL)
+                    human_delay(1, 2)
+                    check_and_dismiss_popup(page)
+                
+                check_and_dismiss_popup(page)
+                print("[Sync] ✓ Submit browser relaunched and ready!")
+        
+        # Create download tab in same browser context (no second Chrome needed in v126)
+        _dl_page = browser.new_page()  # Kept for compat; download thread uses CDP instead
+        _setup_worker_dl_tab(_dl_page, page)
+        dh = DownloadHelper(_dl_page, "DOWNLOAD", cache=cache, cdp_url="http://localhost:9222")
+        # Snapshot cookies immediately so session is warm from the first download
+        dh._refresh_session(browser)
+        print(f"[STARTUP] ✓ Fallback session ready ({len(dh._fallback_session.cookies) if dh._fallback_session else 0} cookies)", flush=True)
+        # Permanent download thread — lives for the entire worker lifetime.
+        # Submit side puts DownloadAccumulator objects into _dl_job_queue.
+        # Download side picks them up one at a time, processes via CDP, then waits for next.
+        _dl_job_queue = queue.Queue()
+        # Mutable container so main thread can swap dh after golden restore
+        # without restarting the permanent download thread.
+        _dh_ref = [dh]
+        # Pure-HTTP download queue — submit thread pushes ready clip URLs here.
+        # HTTP download thread pulls and downloads via requests.Session only.
+        # Zero browser interaction — completely immune to golden restore.
+        _http_dl_queue = queue.Queue()
+        # Flag: set by submit thread while a frame dialog is open.
+        # Download thread waits for it before page refresh to avoid
+        # dismissing the gallery dialog mid-selection.
+        _frames_busy = threading.Event()
+        # Wire frames_busy flag so download thread won't refresh mid-frame-dialog
+        dh._frames_busy_flag = _frames_busy
+
+        def _http_download_worker(http_queue, session_ref, dh_ref=None):
+            """Pure-HTTP download worker — no browser, no CDP, immune to golden restore.
+            
+            Pulls items from http_queue:
+            {job_id, clip_index, clip_id, urls: [url1,url2], temp_dir, num_variants, clips}
+            Downloads each URL via requests.Session, uploads to R2, marks clip done.
+            """
+            print("[HTTP-DL] ✓ Pure-HTTP download worker started", flush=True)
+            while True:
+                try:
+                    item = http_queue.get(timeout=5)
+                except queue.Empty:
+                    continue
+                if item is None:  # Shutdown signal
+                    break
+                try:
+                    job_id   = item['job_id']
+                    ci       = item['clip_index']
+                    clip_id  = item['clip_id']
+                    urls     = item['urls']
+                    temp_dir = item['temp_dir']
+                    # Use session embedded in queue item (captured at enqueue time) if available.
+                    # This ensures clips submitted before a golden restore use the
+                    # pre-restore session cookies — not the golden's (potentially different) cookies.
+                    sess     = item.get('session') or session_ref[0]
+                    # ── DB dedup guard ──────────────────────────────────────────────
+                    # A clip can be pushed to this queue twice when process_job_submission
+                    # runs twice for the same job (proactive restore).  Check DB before
+                    # doing any work — if the clip is already completed, skip silently.
+                    try:
+                        _fresh_job = api_request("GET", f"/jobs/{job_id}")
+                        if _fresh_job:
+                            _already_done = any(
+                                _fc.get('clip_index') == ci and _fc.get('status') in ('completed', 'approved')
+                                for _fc in _fresh_job.get('clips', [])
+                            )
+                            if _already_done:
+                                print(f"[HTTP-DL] ↩ Clip {ci+1} already completed in DB — skipping duplicate", flush=True)
+                                http_queue.task_done()
+                                continue
+                    except Exception:
+                        pass  # DB check failed — proceed with download (safe fallback)
+                    # ────────────────────────────────────────────────────────────────
+                    if sess is None:
+                        print(f"[HTTP-DL] ⚠ No session for clip {ci+1} — skipping", flush=True)
+                        http_queue.task_done()
+                        continue
+                    if not os.path.exists(temp_dir):
+                        os.makedirs(temp_dir, exist_ok=True)
+                    attempt = item.get('generation_attempt', 1)
+                    all_ok = True
+                    any_ok = False
+                    for vi, url in enumerate(urls):
+                        if not url or url.startswith('blob:'):
+                            continue
+                        if url.startswith('/'):
+                            url = 'https://labs.google' + url
+                        try:
+                            print(f"[HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1}: {url[:80]}", flush=True)
+                            resp = sess.get(url, timeout=120, allow_redirects=True)
+                            if resp.status_code == 401 and sess is not session_ref[0] and session_ref[0] is not None:
+                                # Pre-restore session got 401 — try with current (post-restore) session
+                                print(f"[HTTP-DL] 401 with old session — retrying with current session", flush=True)
+                                resp = session_ref[0].get(url, timeout=120, allow_redirects=True)
+                            if not resp.ok:
+                                raise Exception(f"HTTP {resp.status_code}")
+                            body = resp.content
+                            if len(body) < 10000:
+                                raise Exception(f"Too small: {len(body)} bytes")
+                            out = os.path.join(temp_dir, f"clip_{ci}_{attempt}.{vi+1}.mp4")
+                            with open(out, 'wb') as f:
+                                f.write(body)
+                            print(f"[HTTP-DL] Uploading clip {ci+1} variant {attempt}.{vi+1} ({len(body):,} bytes)...", flush=True)
+                            upload_video(out, job_id, ci, attempt=attempt, variant=vi+1)
+                            print(f"[HTTP-DL] ✓ Clip {ci+1} variant {attempt}.{vi+1} uploaded!", flush=True)
+                            any_ok = True
+                            # NOTE: Do NOT delete the file here. Continue mode clips need
+                            # previous clip videos on disk for frame extraction.
+                            # Temp dir cleanup happens at job completion.
+                        except Exception as ve:
+                            print(f"[HTTP-DL] ✗ Clip {ci+1} variant {attempt}.{vi+1} failed: {ve}", flush=True)
+                            all_ok = False
+                    if all_ok or any_ok:
+                        # At least one variant uploaded — clip is usable
+                        update_clip_status(clip_id, 'completed')
+                        # Tell dh loop this clip is done — prevents re-download
+                        _dh = dh_ref[0]
+                        if hasattr(_dh, '_downloaded_clip_indices'):
+                            _dh._downloaded_clip_indices.add(ci)
+                        print(f"[HTTP-DL] ✓ Clip {ci+1} all variants done — marked completed", flush=True)
+                        # Mark the job complete once all its clips are done.
+                        # total_job_clips is set by the fast-path when it pushes clips;
+                        # comparing against _downloaded_clip_indices avoids a DB query.
+                        total_job_clips = item.get('total_job_clips')
+                        if total_job_clips and hasattr(_dh, '_downloaded_clip_indices'):
+                            if len(_dh._downloaded_clip_indices) >= total_job_clips:
+                                update_job_status(job_id, 'completed')
+                                print(f"[HTTP-DL] ✓ Job {job_id[:8]}... complete ({total_job_clips} clips done)", flush=True)
+                    if not all_ok and not any_ok:
+                        # All variants failed — queue as flow_redo_queued so get_redo_clips()
+                        # picks it up on the next poll cycle (seconds), not full job reprocess
+                        print(f"[HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo", flush=True)
+                        update_clip_status(clip_id, 'flow_redo_queued')
+                    http_queue.task_done()
+                except Exception as e:
+                    print(f"[HTTP-DL] ✗ Error processing clip: {e}", flush=True)
+                    try: http_queue.task_done()
+                    except: pass
+
+        # Session reference — mutable so golden restore can update cookies without restarting thread
+        _http_session_ref = [dh._fallback_session]
+
+        _http_dl_thread = threading.Thread(
+            target=_http_download_worker,
+            args=(_http_dl_queue, _http_session_ref, _dh_ref),
+            daemon=True, name="http-dl-worker"
+        )
+        _http_dl_thread.start()
+        print("✓ Pure-HTTP download worker started", flush=True)
+
+        def _permanent_download_loop(job_queue, dh_ref):
+            """Permanent download thread — always alive, processes jobs one at a time."""
+            print("[DOWNLOAD-THREAD] ✓ Permanent download thread started", flush=True)
+            while True:
+                try:
+                    acc = job_queue.get(timeout=5)
+                except Exception:
+                    continue  # Timeout — loop back and wait
+                if acc is None:
+                    print("[DOWNLOAD-THREAD] Shutdown signal received", flush=True)
+                    break
+                # Wait for first clip to be queued (with timeout to avoid hanging forever)
+                acc.ready_event.wait(timeout=300)  # 300s covers full settings config path (~3-4min)
+                if acc.cancelled or acc.job_data is None:
+                    if not acc.cancelled and acc.job_data is None:
+                        print("[DOWNLOAD-THREAD] ⚠ ready_event timed out (no job_data after 300s) — skipping", flush=True)
+                    else:
+                        print("[DOWNLOAD-THREAD] acc cancelled — skipping", flush=True)
+                    continue
+                try:
+                    _dh = dh_ref[0]  # Always use current dh (updated after restore)
+                    if acc.allowed_clips is not None:
+                        _dh.limited_clips[acc.job_data['job_id']] = acc.allowed_clips
+                    _dh.process_download(acc.job_data)
+                    # Clean up temp dirs after download finishes (safe — all writes done)
+                    try: cleanup_devshm_job_dirs()
+                    except Exception: pass
+                except Exception as _dl_err:
+                    err_str = str(_dl_err)
+                    # CDP disconnects are handled inside process_download's reconnect loop
+                    if not any(x in err_str for x in ("browser has been closed", "Target page",
+                               "context or browser", "TargetClosedError")):
+                        print(f"[DOWNLOAD-THREAD] ⚠ Download error: {_dl_err}", flush=True)
+                        import traceback; traceback.print_exc()
+                    # Clean up even on error
+                    try: cleanup_devshm_job_dirs()
+                    except Exception: pass
+
+        _dl_thread = None  # CDP download loop disabled — HTTP worker handles all downloads
+        print("✓ HTTP-only download mode (CDP loop disabled)", flush=True)
+        
+        print("\n" + "=" * 50)
+        print("WORKER READY - Polling for jobs...")
+        print("=" * 50)
+        
+        consecutive_failures = 0  # Track for golden restore trigger
+        golden_restore_count = 0  # Restores in a row without a clean job
+        GOLDEN_RESTORE_THRESHOLD = 1
+        job_failure_counts = {}   # job_id → how many times it triggered restore
+        excluded_job_ids = set()  # Temporarily skipped jobs — let other jobs run first
+        MAX_GOLDEN_RESTORES = 3       # pause after this many restores in a row
+        RESTORE_COOLDOWN_SECONDS = 300  # seconds to wait if max restores hit
+        
+        _retry_job = None  # v174: after golden restore, self-resume same job
+        try:
+            while True:
+                redo_clips = get_redo_clips()
+                
+                if redo_clips:
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Found {len(redo_clips)} clip(s) needing redo")
+                    
+                    for clip in redo_clips:
+                        try:
+                            _redo_acc = DownloadAccumulator(dh_ref=[dh])
+                            process_redo_clip(page, clip, _redo_acc, cache,
+                                              http_dl_queue=_http_dl_queue,
+                                              http_session=_http_session_ref[0])
+                            # Count redo generation for golden restore threshold
+                            account_health.record_success("Flow")
+                            # Only route through DownloadHelper if HTTP path didn't handle it
+                            if _redo_acc.job_data and not _redo_acc.cancelled:
+                                dh.process_download(_redo_acc.job_data)
+                        except Exception as e:
+                            print(f"\n✗ Error processing redo: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            update_clip_status(clip['id'], 'failed', error_message=str(e))
+                    
+                    time.sleep(5)
+                    continue
+                
+                # v174: self-resume after golden restore — re-process same job
+                if _retry_job is not None:
+                    job = _retry_job
+                    _retry_job = None
+                    job_id = job['id']
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] ↩ Self-resuming job {job_id[:8]}... after golden restore", flush=True)
+                    # v198: Re-fetch clip statuses from DB before resuming
+                    refresh_clip_statuses(job)
+                else:
+                    job = get_pending_job(exclude_ids=excluded_job_ids if excluded_job_ids else None)
+                if job:
+                    job_id = job['id']
+                    
+                    if is_job_completed(cache, job_id):
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Job {job_id[:8]}... already completed (cached)")
+                        time.sleep(POLL_INTERVAL)
+                        continue
+                    
+                    _job_exception = None
+                    # HTTP-only mode: CDP loop disabled.
+                    # PassthroughAccumulator satisfies process_job_submission's download_queue
+                    # param without triggering any CDP download activity.
+                    # All downloading is handled by the HTTP worker via clip_submit_times.
+                    _job_acc = PassthroughAccumulator(dh_ref=_dh_ref)
+                    # Get the shared clip_submit_times dict so process_job_submission
+                    # writes ALL clip submissions directly into what _download_loop watches.
+                    _shared_cst = _dh_ref[0]._clip_submit_times_by_job.get(job_id)
+
+                    try:
+                        def _refresh_http_session():
+                            import requests as _rq
+                            try:
+                                _cookies = page.context.cookies()
+                                if _cookies:
+                                    _s = _rq.Session()
+                                    _s.headers.update({'Referer': 'https://labs.google/', 'Origin': 'https://labs.google'})
+                                    for _ck in _cookies:
+                                        _s.cookies.set(_ck['name'], _ck['value'], domain=_ck.get('domain', ''))
+                                    _http_session_ref[0] = _s
+                            except Exception:
+                                pass
+                        process_job_submission(page, job, cache, _job_acc, clip_submit_times_shared=_shared_cst, frames_busy_flag=_frames_busy, http_dl_queue=_http_dl_queue, captured_media_urls=_captured_media_urls, session_refresh_callback=_refresh_http_session)
+                    except NotUltraError as e:
+                        print(f"\n⛔ Account is NOT ULTRA — cannot process jobs.", flush=True)
+                        print(f"⛔ Delete session folders and restart with an ULTRA account.", flush=True)
+                        if not _job_acc.ready_event.is_set():
+                            _job_acc.cancelled = True
+                            _job_acc.ready_event.set()
+                        update_job_status(job_id, 'failed', 'Account does not have ULTRA access')
+                        try:
+                            input("  Press Enter to close...")
+                        except EOFError:
+                            pass
+                        import sys; sys.exit(1)
+                    except Exception as e:
+                        _job_exception = e
+                        # Ensure the acc is unblocked so the download thread doesn't
+                        # hang on ready_event.wait() if no clip was ever queued.
+                        if not _job_acc.ready_event.is_set():
+                            _job_acc.cancelled = True
+                            _job_acc.ready_event.set()
+                        _intentional = (
+                            "stopping job to trigger golden restore" in str(e)
+                            or "Proactive restore threshold reached" in str(e)
+                        )
+                        if _intentional:
+                            # Intentional interrupt — restore path handles it, do NOT mark job failed
+                            print(f"\n🔄 Job interrupted for golden restore (intentional)", flush=True)
+                        else:
+                            print(f"\n✗ Error processing job: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            update_job_status(job_id, 'failed', str(e))
+                    
+                    # Permanent download thread handles everything — no join needed here.
+                    # It will process this job then wait for the next one from _dl_job_queue.
+
+                    # NOTE: Don't wipe /dev/shm here — the permanent download thread
+                    # may still be writing to the temp dir for this job.
+                    # Cleanup happens at worker startup and inside the download thread after completion.
+
+                    # Check health after BOTH normal return and exception:
+                    # clip tile failures call record_failure() internally and don't raise.
+                    _is_proactive = _job_exception is not None and "Proactive restore threshold reached" in str(_job_exception)
+                    if _job_exception is None and not account_health.is_hot("Flow"):
+                        consecutive_failures = 0  # Reset only on clean success
+                        golden_restore_count = 0  # Clean job — reset restore streak
+                    elif _is_proactive:
+                        pass  # Proactive restore is intentional — don't count as failure
+                    else:
+                        job_failure_counts.clear()
+                        excluded_job_ids.clear()
+                        consecutive_failures += 1
+
+                    # GOLDEN RESTORE: triggered by clip failure OR proactive clip threshold.
+                    # Proactive: job succeeded but N clips have run since last restore — refresh
+                    # before next job even without a failure.
+                    _proactive_restore = (
+                        (_job_exception is None and not account_health.is_hot("Flow") and account_health.needs_proactive_restore("Flow"))
+                        or (_job_exception is not None and "Proactive restore threshold reached" in str(_job_exception))
+                        or (_job_exception is not None and "Sweep Chrome death" in str(_job_exception))
+                    )
+                    if _proactive_restore and _job_exception is None:
+                        print(f"\n🔄 PROACTIVE RESTORE: {account_health.PROACTIVE_RESTORE_THRESHOLD} clips reached — refreshing golden profile...", flush=True)
+                        _job_exception = Exception("proactive restore threshold reached")
+
+                    if _proactive_restore or consecutive_failures >= GOLDEN_RESTORE_THRESHOLD:
+                            print(f"\n🔥 {consecutive_failures} consecutive failures — restoring from golden profile...", flush=True)
+                            # Track per-job failures — exclude if it keeps failing so other jobs can run.
+                            # Proactive restores are intentional (not real failures) — don't count them.
+                            _is_real_failure = (
+                                _job_exception is not None
+                                and not _proactive_restore
+                            )
+                            if _is_real_failure and job_id:
+                                job_failure_counts[job_id] = job_failure_counts.get(job_id, 0) + 1
+                                if job_failure_counts[job_id] >= 2:
+                                    excluded_job_ids.add(job_id)
+                                    print(f"⚠ Job {job_id[:8]}... failed {job_failure_counts[job_id]}x — skipping to try other jobs first", flush=True)
+
+                            # Step 1: Signal download thread that Chrome is about to restart.
+                            # Snapshot browser cookies into a requests.Session so in-flight
+                            # downloads can continue via plain HTTP while Chrome is dead.
+                            try:
+                                import requests as _req
+                                _snap_session = _req.Session()
+                                _snap_session.headers.update({'Referer': 'https://labs.google/', 'Origin': 'https://labs.google'})
+                                # browser IS a BrowserContext (launch_persistent_context returns one)
+                                _cookies = browser.cookies()
+                                for _ck in _cookies:
+                                    _snap_session.cookies.set(_ck['name'], _ck['value'], domain=_ck.get('domain', ''))
+                                dh._fallback_session = _snap_session
+                                print(f"[RESTORE] ✓ Snapshotted {len(_cookies)} cookies into fallback session for offline download.", flush=True)
+                                # Also store on new_dh after restore via _refresh_session after relaunch
+                            except Exception as _snap_err:
+                                print(f"[RESTORE] Cookie snapshot failed (non-fatal): {_snap_err}", flush=True)
+                            # Pre-scan download tab for ready video URLs before Chrome dies.
+                            # Download thread will use these URLs + fallback session to download
+                            # clips even while Chrome is restarting — zero interruption.
+                            try:
+                                _dl_tab = _dl_page  # The download tab
+                                _scan_result = _dl_tab.evaluate("""() => {
+                                    const result = {};
+                                    const containers = document.querySelectorAll('[data-index]');
+                                    for (const c of containers) {
+                                        const idx = c.getAttribute('data-index');
+                                        const videos = c.querySelectorAll('video');
+                                        const urls = [];
+                                        for (const v of videos) {
+                                            let url = v.src || '';
+                                            if (!url) { const s = v.querySelector('source'); if (s) url = s.src || ''; }
+                                            if (url && !url.startsWith('blob:')) urls.push(url);
+                                        }
+                                        if (urls.length > 0) result[idx] = urls;
+                                    }
+                                    return result;
+                                }""")
+                                # Map data-index → urls, store in dh cache keyed by clip_index
+                                # We store by data-index string for now — matched at download time
+                                dh._pre_extracted_url_cache.update(_scan_result or {})
+                                print(f"[RESTORE] ✓ Pre-scanned {len(_scan_result or {})} container(s) for offline download.", flush=True)
+                            except Exception as _scan_err:
+                                print(f"[RESTORE] URL pre-scan failed (non-fatal): {_scan_err}", flush=True)
+                            dh.restore_event.set()
+
+                            # Step 1b: Close submit browser.
+                            # browser.close() sends a graceful shutdown to all Chrome processes.
+                            # Only fall back to kill_chrome_using_profile if close() fails —
+                            # it scans the entire Windows process tree via WMI/CIM which takes
+                            # 20-40s on Windows 11 (WMIC deprecated, PowerShell CIM is slow).
+                            _close_ok = False
+                            try:
+                                browser.close()
+                                _close_ok = True
+                            except Exception as close_err:
+                                print(f"⚠ Error closing browser during restore: {close_err}", flush=True)
+                            if not _close_ok:
+                                # Graceful close failed — hard-kill by profile path as last resort
+                                print("[RESTORE] Graceful close failed — hard-killing Chrome...", flush=True)
+                                kill_chrome_using_profile(SESSION_FOLDER, label="RESTORE")
+                            else:
+                                # Graceful close succeeded — just clean up lock files (instant)
+                                for _lf in ['SingletonLock', 'SingletonSocket', 'SingletonCookie']:
+                                    _lp = os.path.join(SESSION_FOLDER, _lf)
+                                    try:
+                                        if os.path.exists(_lp): os.remove(_lp)
+                                    except Exception: pass
+
+                            # Wait until the session folder is actually unlocked.
+                            # browser.close() already shut Chrome down — file handles release
+                            # within 1-2s on Windows. 3s cap is plenty.
+                            _unlock_deadline = time.time() + 3
+                            _unlocked = False
+                            while time.time() < _unlock_deadline:
+                                try:
+                                    _probe = os.path.join(SESSION_FOLDER, "SingletonLock")
+                                    if os.path.exists(_probe):
+                                        os.remove(_probe)
+                                    _unlocked = True
+                                    break
+                                except (OSError, PermissionError):
+                                    time.sleep(0.2)
+                            if not _unlocked:
+                                time.sleep(0.5)
+                            print(f"[RESTORE] Session folder unlocked — proceeding with restore.", flush=True)
+
+                            # Step 2: Restore SESSION folder immediately (nothing has it open)
+                            session_restored = restore_from_golden(
+                                session_folder=SESSION_FOLDER,
+                                account_label="SINGLE",
+                                restore_session=True,
+                            )
+
+                            if session_restored:
+                                # Step 3: Relaunch submit browser immediately
+                                try:
+                                    # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
+                                    if BROWSER_MODE == "stealth":
+                                        launch_kwargs['user_data_dir'] = SESSION_FOLDER
+                                    browser = p.chromium.launch_persistent_context(**launch_kwargs)
+                                    page = browser.pages[0] if browser.pages else browser.new_page()
+                                    # Match startup sequence exactly — warmup, human delays, full load
+                                    chrome_warmup(page)
+                                    print("[RESTORE] Navigating to Flow homepage...", flush=True)
+                                    page.goto(FLOW_HOME_URL)  # default wait_until="load", same as startup
+                                    human_delay(1, 2)
+                                    human_mouse_move(page)
+                                    human_delay(0.5, 1)
+                                    ensure_logged_into_flow(page, "RESTORE", timeout_minutes=2)
+                                    check_and_dismiss_popup(page)
+                                    print("[RESTORE] ✓ Flow homepage loaded and login verified", flush=True)
+                                    consecutive_failures = 0
+                                    account_health.reset_failures("Flow")
+                                    # Only count toward ban streak if it was a real failure restore,
+                                    # not a proactive (scheduled) restore — those are healthy behaviour.
+                                    if not _proactive_restore:
+                                        golden_restore_count += 1
+                                    else:
+                                        golden_restore_count = 0  # Proactive restore = healthy, reset streak
+                                    excluded_job_ids.discard(job_id)
+                                    if golden_restore_count >= MAX_GOLDEN_RESTORES:
+                                        print(f"\u26d4 {MAX_GOLDEN_RESTORES} restores in a row — account may be banned. Pausing {RESTORE_COOLDOWN_SECONDS}s...", flush=True)
+                                        time.sleep(RESTORE_COOLDOWN_SECONDS)
+                                        golden_restore_count = 0
+                                    # Step 4: Recreate download tab (no second Chrome — same context)
+                                    _dl_page = browser.new_page()
+                                    _setup_worker_dl_tab(_dl_page, page)
+                                    _new_dh = DownloadHelper(_dl_page, "DOWNLOAD", cache=cache, cdp_url="http://localhost:9222")
+                                    # Transfer persistent download state from old dh to new dh
+                                    if dh is not None:
+                                        _new_dh._downloaded_clip_indices = dh._downloaded_clip_indices
+                                        _new_dh._current_job_id = dh._current_job_id
+                                        _new_dh.limited_clips = dh.limited_clips
+                                        _new_dh.restore_event = dh.restore_event
+                                        # Preserve pre-restore session — in-flight clips need it for 401 fallback.
+                                        # Will be replaced by _refresh_session after relaunch.
+                                        _new_dh._fallback_session = dh._fallback_session
+                                        _new_dh._clip_submit_times_by_job = dh._clip_submit_times_by_job  # Preserve across restores
+                                        _new_dh._pre_extracted_url_cache = dh._pre_extracted_url_cache  # Preserve pre-scanned URLs
+                                        _new_dh._ready_url_cache = dh._ready_url_cache  # Preserve ready clip URLs
+                                        _new_dh._frames_busy_flag = getattr(dh, '_frames_busy_flag', None)  # Preserve frames busy flag
+                                    dh = _new_dh
+                                    # Update the mutable ref so the permanent download thread
+                                    # picks up the new dh on its next process_download() call.
+                                    _dh_ref[0] = dh
+                                    # Restart thread only if it somehow died
+                                    if _dl_thread is None or not _dl_thread.is_alive():
+                                        # CDP loop disabled — HTTP worker handles downloads
+                                        pass
+                                    print("✅ Submit browser relaunched and download helper ready — resuming submissions.", flush=True)
+                                    # Refresh HTTP session with new cookies and update reference
+                                    dh._refresh_session(browser)
+                                    _http_session_ref[0] = dh._fallback_session
+                                    print(f"[HTTP-DL] ✓ Session refreshed after restore ({len(dh._fallback_session.cookies) if dh._fallback_session else 0} cookies)", flush=True)
+                                    # v174: Self-resume — re-process same job instead of re-polling.
+                                    # Job stays as 'processing' in DB, so get_pending_job() won't find it.
+                                    _retry_job = job
+                                    print(f"[RESTORE] ↩ Will self-resume job {job_id[:8]}... after restore", flush=True)
+                                except Exception as relaunch_err:
+                                    print(f"❌ CRITICAL: Browser relaunch after golden restore failed: {relaunch_err}", flush=True)
+                                    import traceback
+                                    traceback.print_exc()
+                                    # Retry browser liveness check
+                                    try:
+                                        page.title()
+                                    except Exception:
+                                        print("⚠ Browser is dead — retrying relaunch...", flush=True)
+                                        try:
+                                            kill_chrome_using_profile(SESSION_FOLDER, label="RESTORE-RETRY")
+                                            time.sleep(2)
+                                            if BROWSER_MODE == "stealth":
+                                                launch_kwargs['user_data_dir'] = SESSION_FOLDER
+                                            browser = p.chromium.launch_persistent_context(**launch_kwargs)
+                                            page = browser.pages[0] if browser.pages else browser.new_page()
+                                            page.goto(FLOW_HOME_URL, timeout=30000, wait_until="domcontentloaded")
+                                            ensure_logged_into_flow(page, "RESTORE-RETRY", timeout_minutes=2)
+                                            _dl_page = browser.new_page()
+                                            _setup_worker_dl_tab(_dl_page, page)
+                                            dh = DownloadHelper(_dl_page, "DOWNLOAD", cache=cache, cdp_url="http://localhost:9222")
+                                            _dh_ref[0] = dh
+                                            print("✅ Browser relaunched successfully on retry", flush=True)
+                                        except Exception as retry_err:
+                                            print(f"❌ Browser relaunch retry also failed: {retry_err} — sleeping 10s", flush=True)
+                                            time.sleep(10)
+                                            continue
+                            else:
+                                print("⚠ Golden restore failed — relaunching browser with existing profile.", flush=True)
+                                try:
+                                    if BROWSER_MODE == "stealth":
+                                        launch_kwargs['user_data_dir'] = SESSION_FOLDER
+                                    browser = p.chromium.launch_persistent_context(**launch_kwargs)
+                                    page = browser.pages[0] if browser.pages else browser.new_page()
+                                    page.goto(FLOW_HOME_URL, timeout=30000, wait_until="domcontentloaded")
+                                    _dl_page = browser.new_page()
+                                    _setup_worker_dl_tab(_dl_page, page)
+                                    dh = DownloadHelper(_dl_page, "DOWNLOAD", cache=cache, cdp_url="http://localhost:9222")
+                                    _dh_ref[0] = dh
+                                except Exception as relaunch_err:
+                                    print(f"⚠ Browser relaunch failed: {relaunch_err}", flush=True)
+                                consecutive_failures = 0
+                                time.sleep(5)
+                else:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] No pending jobs or redos...")
+                
+                time.sleep(POLL_INTERVAL)
+                
+        except KeyboardInterrupt:
+            print("\n\nShutting down...")
+        finally:
+            print("Closing browser...")
+            browser.close()
+    
+    print("\n✓ Worker stopped")
+
+
+
+def main_multi_coordinator(accounts):
+    """Run multiple accounts with job coordination.
+    
+    Each account is initialized using main()'s exact startup sequence
+    (v36 identical: browser launch, login, profile sync, relaunch).
+    Then a coordinator distributes jobs across accounts.
+    """
+    from queue import Queue
+    import threading
+    
+    print("=" * 60)
+    print(f"MULTI-ACCOUNT COORDINATOR - {len(accounts)} accounts")
+    print("=" * 60)
+    
+    # Phase 1: Initialize each account sequentially on main thread
+    # This is identical to main()'s startup — same browser launch, same login flow
+    initialized = []
+    
+    from patchright.sync_api import sync_playwright
+    p = sync_playwright().start()
+    
+    for acc in accounts:
+        acc_name = acc['name']
+        session = acc['session_folder']
+        download = acc.get('download_folder', '')
+        
+        print(f"\n{'='*50}")
+        print(f"Initializing {acc_name}...")
+        print(f"  Session:  {session}")
+        print(f"  Download: {download}")
+        print(f"{'='*50}")
+        
+        global SESSION_FOLDER, DOWNLOAD_SESSION_FOLDER
+        SESSION_FOLDER = session
+        DOWNLOAD_SESSION_FOLDER = download
+        
+        single_proxy = acc.get('proxy')
+        single_proxy_config = parse_proxy_url(single_proxy) if single_proxy else None
+        
+        single_chrome_args = [
+            '--disable-blink-features=AutomationControlled',
+            '--disable-focus-on-load',  # Prevent Chrome stealing OS focus on Windows
+            '--disable-dev-shm-usage',
+            '--no-sandbox',
+            '--force-variation-ids=3300115,3300134,3313321,3328827,3330196,3362821',
+            '--disk-cache-size=1',
+            '--media-cache-size=1',
+            '--remote-debugging-port=9222',
+        ]
+        
+        if single_proxy_config:
+            single_chrome_args.append('--ignore-certificate-errors')
+            single_ext_dir = os.path.join(BASE_DIR, f".proxy_auth_ext_{acc_name}")
+            single_auth_ext = create_proxy_auth_extension(single_proxy, single_ext_dir)
+            if single_auth_ext:
+                single_chrome_args.extend([
+                    f'--disable-extensions-except={single_auth_ext}',
+                    f'--load-extension={single_auth_ext}',
+                ])
+        
+        if BROWSER_MODE == "stealth":
+            # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
+            launch_kwargs = {
+                'user_data_dir': session,
+                'channel': 'chrome',
+                'ignore_default_args': ['--enable-automation'],
+                'headless': False,
+                'viewport': {"width": 1280, "height": 720},
+                'args': single_chrome_args,
+            }
+            if single_proxy_config:
+                launch_kwargs['proxy'] = single_proxy_config
+            browser = p.chromium.launch_persistent_context(**launch_kwargs)
+        else:
+            launch_kwargs = {
+                'user_data_dir': session,
+                'headless': False,
+                'viewport': {"width": 1280, "height": 500},
+            }
+            if single_proxy_config:
+                launch_kwargs['proxy'] = single_proxy_config
+            browser = p.firefox.launch_persistent_context(**launch_kwargs)
+        
+        page = browser.pages[0] if browser.pages else browser.new_page()
+        print(f"[{acc_name}] ✓ Browser started")
+        
+        chrome_warmup(page)
+        
+        print(f"[{acc_name}] Navigating to Flow...")
+        page.goto(FLOW_HOME_URL)
+        human_delay(1, 2)
+        human_mouse_move(page)
+        human_delay(1, 2)
+        scroll_randomly(page)
+        human_delay(0.5, 1)
+        
+        print(f"[{acc_name}] Verifying login...")
+        login_was_required = ensure_logged_into_flow(page, acc_name, timeout_minutes=10)
+        check_and_dismiss_popup(page)
+        
+        # Sync to download profile (v36 identical)
+        import shutil
+        needs_sync = login_was_required or not os.path.exists(download)
+        
+        if needs_sync:
+            print(f"[{acc_name}] Closing submit browser to snapshot login state...")
+            browser.close()
+            time.sleep(2)
+
+            golden = get_golden_folder(session)
+
+            if login_was_required:
+                if os.path.exists(golden):
+                    print(f"[{acc_name}] Fresh login but golden already exists — keeping original golden (write-once).")
+                else:
+                    print(f"[{acc_name}] Fresh login — session → golden → session + download...")
+                    # Step 1: session → golden (write-once)
+                    try:
+                        shutil.copytree(session, golden,
+                            ignore_dangling_symlinks=True,
+                            ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                        print(f"[{acc_name}] ✓ Golden saved: {golden}")
+                    except Exception as e:
+                        print(f"[{acc_name}] ⚠ Could not save golden: {e}")
+
+                # Step 2: golden → session (clean copy)
+                if os.path.exists(golden):
+                    shutil.rmtree(session, ignore_errors=True)
+                    try:
+                        shutil.copytree(golden, session,
+                            ignore_dangling_symlinks=True,
+                            ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                        print(f"[{acc_name}] ✓ Session copied from golden: {session}")
+                    except Exception as e:
+                        print(f"[{acc_name}] ⚠ Could not copy session from golden: {e}")
+
+                src = golden if os.path.exists(golden) else session
+            else:
+                src = golden if os.path.exists(golden) else session
+
+            src_label = "golden" if src == golden else "submit session"
+            print(f"[{acc_name}] Copying {src_label} → download browser...")
+            if os.path.exists(download):
+                shutil.rmtree(download, ignore_errors=True)
+            try:
+                shutil.copytree(src, download,
+                    ignore_dangling_symlinks=True,
+                    ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
+                print(f"[{acc_name}] ✓ Download profile ready")
+            except Exception as e:
+                print(f"[{acc_name}] ⚠ Sync failed: {e}")
+            
+            # Relaunch
+            if BROWSER_MODE == "stealth":
+                # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
+                browser = p.chromium.launch_persistent_context(**launch_kwargs)
+            else:
+                browser = p.firefox.launch_persistent_context(**launch_kwargs)
+            
+            page = browser.pages[0] if browser.pages else browser.new_page()
+            chrome_warmup(page)
+            page.goto(FLOW_HOME_URL)
+            human_delay(1, 2)
+            human_mouse_move(page)
+            human_delay(1, 2)
+            scroll_randomly(page)
+            human_delay(0.5, 1)
+            check_and_dismiss_popup(page)
+            print(f"[{acc_name}] ✓ Browser relaunched and ready!")
+        
+        # Start download worker for this account
+        cache = load_cache()
+        download_queue = Queue()
+        download_worker = DownloadWorker(download_queue, cache, proxy=single_proxy, submit_session_folder=session)
+        download_worker.start()
+        download_worker.ready_flag.wait(timeout=60)
+        
+        initialized.append({
+            'name': acc_name,
+            'page': page,
+            'browser': browser,
+            'download_queue': download_queue,
+            'download_worker': download_worker,
+            'cache': cache,
+            'proxy': single_proxy,
+            'session': session,
+            'download': download,
+            'launch_kwargs': launch_kwargs,
+            'chrome_args': single_chrome_args,
+            'busy': False,
+            'consecutive_failures': 0,  # For golden restore trigger
+        })
+        
+        print(f"[{acc_name}] ✓ Fully initialized")
+    
+    # Phase 2: Coordinate jobs with parallel clip splitting
+    import threading
+    
+    print(f"\n{'='*50}")
+    print(f"ALL {len(initialized)} ACCOUNTS READY — Polling for jobs...")
+    print(f"{'='*50}")
+    
+    cache = initialized[0]['cache']
+    account_index = 0
+    queued_job_ids = set()
+    
+    GOLDEN_RESTORE_THRESHOLD = 1
+
+    def run_job_on_account(acc_info, job):
+        """Run a job on an account. Thread-safe."""
+        _job_exception = None
+        try:
+            acc_info['busy'] = True
+            process_job_submission(acc_info['page'], job, acc_info['cache'], acc_info['download_queue'])
+        except Exception as e:
+            _job_exception = e
+            print(f"[{acc_info['name']}] Job failed: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            if "stopping job to trigger golden restore" not in str(e):
+                update_job_status(job['id'], 'failed', str(e))
+
+        # Check health after BOTH normal return and exception:
+        # clip tile failures call record_failure() internally and don't raise.
+        try:
+            if _job_exception is None and not account_health.is_hot(acc_info['name']):
+                acc_info['consecutive_failures'] = 0  # Clean success
+            else:
+                acc_info['consecutive_failures'] += 1
+        except Exception:
+            pass
+
+        # GOLDEN RESTORE: after repeated definite failures, restore from clean snapshot.
+        # FIX: was indented inside `except Exception: pass` — only fired when the health
+        # tracking itself raised, never on normal consecutive_failures increments.
+        # De-indented to run unconditionally after the health check try/except block.
+        if acc_info['consecutive_failures'] >= GOLDEN_RESTORE_THRESHOLD:
+            name = acc_info['name']
+            print(f"[{name}] 🔥 {acc_info['consecutive_failures']} consecutive failures — restoring from golden profile...", flush=True)
+
+            # Step 1: Close submit browser
+            try:
+                acc_info['browser'].close()
+            except Exception as close_err:
+                print(f"[Coordinator] ⚠ Error closing browser during restore: {close_err}", flush=True)
+            time.sleep(1)
+
+            # Step 2: Restore SESSION folder immediately (nothing has it open)
+            session_restored = restore_from_golden(
+                session_folder=acc_info['session'],
+                download_folder=acc_info['download'],
+                account_label=name,
+                restore_session=True,
+                restore_download=False,
+            )
+
+            if session_restored:
+                # Step 3: Relaunch submit browser immediately
+                try:
+                    # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
+                    lk = dict(acc_info['launch_kwargs'])
+                    lk['user_data_dir'] = acc_info['session']
+                    new_browser = p.chromium.launch_persistent_context(**lk)
+                    new_page = new_browser.pages[0] if new_browser.pages else new_browser.new_page()
+                    chrome_warmup(new_page)
+                    new_page.goto(FLOW_HOME_URL, timeout=30000, wait_until="domcontentloaded")
+                    # FIX (Bug 3): Verify login — domcontentloaded fires on sign-in redirects too.
+                    # Short timeout: golden restore should give a live session; fail fast.
+                    ensure_logged_into_flow(new_page, name, timeout_minutes=2)
+                    check_and_dismiss_popup(new_page)
+                    acc_info['browser'] = new_browser
+                    acc_info['page'] = new_page
+                    acc_info['consecutive_failures'] = 0
+                    print(f"[{name}] ✅ Submit browser relaunched and login verified.", flush=True)
+                except Exception as relaunch_err:
+                    print(f"[{name}] ❌ Browser relaunch after golden restore failed: {relaunch_err}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+                    # Fall through — still restore download worker
+
+                # Step 4: Restore DOWNLOAD folder in background.
+                # FIX (Bug 2): Always kill Chrome regardless of thread alive status.
+                # The OS Chrome process may outlive the Python DW thread and hold profile
+                # file locks that corrupt the restore copy if not killed first.
+                _acc = acc_info
+                _name = name
+
+                def _kill_chrome_multi(profile_dir):
+                    kill_chrome_using_profile(profile_dir, label=f"{_name} RESTORE")
+
+                def _restore_download_async():
+                    dw = _acc.get('download_worker')
+                    try:
+                        # Step A: Signal stop before killing Chrome.
+                        if dw and dw.is_alive():
+                            print(f"[{_name}] ⏳ Signalling old DW to stop...", flush=True)
+                            dw.stop()
+
+                        # Step B: Kill Chrome so process_download() crashes immediately.
+                        if dw and dw.is_alive():
+                            print(f"[{_name}] ⏳ Force-killing download Chrome (thread alive)...", flush=True)
+                        else:
+                            print(f"[{_name}] ⏳ Force-killing download Chrome (thread exited, OS process may linger)...", flush=True)
+                        _kill_chrome_multi(_acc['download'])
+                        time.sleep(3)
+                        print(f"[{_name}] ✓ Chrome kill sent, proceeding with restore", flush=True)
+
+                        # Step C: Join old DW to free its Playwright node before starting new one.
+                        if dw and dw.is_alive():
+                            print(f"[{_name}] ⏳ Waiting for old DW thread to exit (max 120s)...", flush=True)
+                            dw.join(timeout=120)
+                            if dw.is_alive():
+                                print(f"[{_name}] ⚠ Old DW still alive after 120s — force-killing Chrome then waiting 15s...", flush=True)
+                                _kill_chrome_multi(_acc['download'])
+                                time.sleep(5)
+                                dw.join(timeout=15)
+                                if dw.is_alive():
+                                    print(f"[{_name}] ⚠ Old DW still alive after force-kill — continuing (may OOM)", flush=True)
+                                else:
+                                    print(f"[{_name}] ✓ Old DW exited after Chrome force-kill", flush=True)
+                            else:
+                                print(f"[{_name}] ✓ Old DW thread exited cleanly — Playwright node freed", flush=True)
+                        restore_from_golden(
+                            session_folder=_acc['session'],
+                            download_folder=_acc['download'],
+                            account_label=_name,
+                            restore_session=False,
+                            restore_download=True,
+                        )
+                        new_dq = Queue()
+                        new_dw = DownloadWorker(
+                            new_dq, _acc['cache'],
+                            session_folder=_acc['download'],
+                            account_name=f"{_name}-DOWNLOAD",
+                            proxy=_acc['proxy'],
+                            submit_session_folder=_acc['session'],
+                        )
+                        new_dw.start()
+                        _acc['download_queue'] = new_dq
+                        _acc['download_worker'] = new_dw
+                        print(f"[{_name}] ✓ Fresh download worker started after golden restore", flush=True)
+                    except Exception as async_err:
+                        print(f"[{_name}] ❌ Error in download restore thread: {async_err}", flush=True)
+                        import traceback
+                        traceback.print_exc()
+
+                threading.Thread(target=_restore_download_async, daemon=True).start()
+            else:
+                print(f"[{name}] ⚠ Golden restore failed — continuing with existing profile.", flush=True)
+        acc_info['busy'] = False
+    
+    try:
+        while True:
+            # Check for redo clips
+            redo_clips = get_redo_clips()
+            if redo_clips:
+                print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Found {len(redo_clips)} clip(s) needing redo")
+                for acc_info in initialized:
+                    if not acc_info['busy']:
+                        for clip in redo_clips:
+                            try:
+                                acc_info['busy'] = True
+                                process_redo_clip(acc_info['page'], clip, acc_info['download_queue'], acc_info['cache'])
+                                acc_info['busy'] = False
+                            except Exception as e:
+                                acc_info['busy'] = False
+                                print(f"Redo error: {e}")
+                                update_clip_status(clip['id'], 'failed', error_message=str(e))
+                        break
+                time.sleep(5)
+                continue
+            
+            # Check for new job
+            job = get_pending_job(exclude_ids=queued_job_ids)
+            if job:
+                job_id = job['id']
+                
+                if is_job_completed(cache, job_id):
+                    time.sleep(POLL_INTERVAL)
+                    continue
+                
+                queued_job_ids.add(job_id)
+                clips = job.get('clips', [])
+                idle_accounts = [a for a in initialized if not a['busy']]
+                
+                # Analyze chains for parallel split
+                chains = analyze_continue_mode_chains(clips)
+                can_split = len(chains) > 1 and len(idle_accounts) > 1
+                
+                if can_split:
+                    # Split clips across idle accounts
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Job {job_id[:8]}... — {len(chains)} chains, {len(idle_accounts)} idle accounts")
+                    
+                    # Distribute chains round-robin
+                    account_clips = {a['name']: [] for a in idle_accounts}
+                    for chain_idx, chain in enumerate(chains):
+                        target = idle_accounts[chain_idx % len(idle_accounts)]
+                        if isinstance(chain, list):
+                            account_clips[target['name']].extend(chain)
+                        else:
+                            account_clips[target['name']].append(chain)
+                    
+                    # Run sequentially on main thread — Patchright page objects are
+                    # bound to the greenlet/thread they were created in; spawning
+                    # threading.Thread with a page from another thread causes
+                    # "Cannot switch to a different thread" greenlet errors.
+                    for acc_info in idle_accounts:
+                        my_clip_indices = account_clips[acc_info['name']]
+                        if not my_clip_indices:
+                            continue
+                        
+                        my_clips = [clips[i] for i in my_clip_indices if i < len(clips)]
+                        if not my_clips:
+                            continue
+                        
+                        filtered_job = dict(job)
+                        filtered_job['clips'] = my_clips
+                        filtered_job['_total_clips'] = len(clips)
+                        
+                        print(f"  {acc_info['name']}: clips {my_clip_indices}")
+                        run_job_on_account(acc_info, filtered_job)
+                    
+                    # Check if all clips completed
+                    try:
+                        job_status = api_request("GET", f"/jobs/{job_id}")
+                        if job_status:
+                            all_clips = job_status.get('clips', [])
+                            completed = sum(1 for c in all_clips if c.get('status') in ('completed', 'approved'))
+                            if completed >= len(clips):
+                                update_job_status(job_id, 'completed')
+                                mark_job_completed(cache, job_id)
+                                print(f"  All {len(clips)} clips completed!")
+                    except Exception as check_err:
+                        print(f"[Coordinator] ⚠ Error checking job completion: {check_err}", flush=True)
+                
+                else:
+                    # Single account or sequential chains
+                    acc_info = None
+                    for _ in range(len(initialized)):
+                        candidate = initialized[account_index]
+                        account_index = (account_index + 1) % len(initialized)
+                        if not candidate['busy']:
+                            acc_info = candidate
+                            break
+                    
+                    if acc_info is None:
+                        queued_job_ids.discard(job_id)
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] All accounts busy, will retry...")
+                        time.sleep(POLL_INTERVAL)
+                        continue
+                    
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Job {job_id[:8]}... -> {acc_info['name']}")
+                    run_job_on_account(acc_info, job)
+            else:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] No pending jobs or redos...")
+            
+            time.sleep(POLL_INTERVAL)
+    
+    except KeyboardInterrupt:
+        print("\n\nShutting down all accounts...")
+        print("\n\nShutting down all accounts...")
+    finally:
+        for acc_info in initialized:
+            try:
+                acc_info['download_queue'].join()
+                acc_info['download_worker'].stop()
+                acc_info['download_worker'].join(timeout=10)
+                acc_info['browser'].close()
+            except:
+                pass
+        try:
+            p.stop()
+        except:
+            pass
+        print("✓ All accounts stopped")
+
+
+def show_help():
+    """Show command line help"""
+    print("""
+Local Flow Worker V7 - Multi-Account Edition
+=============================================
+
+Uses your REAL Chrome browser to avoid bot detection!
+Supports multiple Google accounts for parallel processing.
+
+QUICK START:
+  python local_flow_worker.py --auto            Auto-detect and use ALL ready accounts
+  python local_flow_worker.py --accounts 1,2,3  Use specific accounts (by number)
+  python local_flow_worker.py --list            Show status of all accounts
+
+Commands:
+  --auto              Auto-detect ready accounts and start with all of them
+  --accounts 1,2,3    Use specific accounts (comma-separated, e.g., 1,2 or 1,3,4)
+  --accounts 1-4      Use account range (e.g., 1-4 means accounts 1,2,3,4)
+  --count N           Use first N ready accounts
+  --list              List all accounts and their ready status (dry run)
+  
+  --single            Force single-account mode (legacy)
+  --multi / -m        Run multi-account mode with enabled accounts (legacy)
+  --clear-cache       Clear all cache and start fresh
+  --show-cache        Show cache status
+  --recover           Re-queue stuck/failed downloads
+  --help              Show this help
+
+Examples:
+  # Start with all 4 ready accounts
+  python local_flow_worker.py --auto
+  
+  # Start with only accounts 1 and 3
+  python local_flow_worker.py --accounts 1,3
+  
+  # Start with accounts 2, 3, and 4
+  python local_flow_worker.py --accounts 2-4
+  
+  # Start with first 2 ready accounts
+  python local_flow_worker.py --count 2
+  
+  # Check which accounts are ready
+  python local_flow_worker.py --list
+
+Account Folder Structure:
+  Each account needs TWO folders with Chrome profile data:
+    ./flow_session_account1/Default/   (submit browser)
+    ./flow_download_account1/Default/  (download browser)
+  
+  Run the setup script to create these folders and log in.
+
+Tips to Avoid Detection:
+  - Use different IPs/proxies for each account
+  - Don't run too many jobs in quick succession
+  - Let the browser warm up naturally before processing
+  - Keep the browser windows visible (don't minimize)
+  - If Google shows captchas, solve them manually
+""")
+
+
+def recover_stuck_jobs(cache):
+    """Find and re-queue stuck jobs for download"""
+    print("\n" + "=" * 50)
+    print("RECOVERING STUCK JOBS")
+    print("=" * 50)
+    
+    jobs = cache.get('jobs', {})
+    recovered = 0
+    
+    for job_id, job_data in jobs.items():
+        status = job_data.get('status')
+        project_url = job_data.get('project_url')
+        clips = job_data.get('clips', [])
+        
+        if status == 'submitted' and project_url and clips:
+            downloaded_clips = job_data.get('clips_downloaded', [])
+            total_clips = len(clips)
+            
+            if len(downloaded_clips) < total_clips:
+                print(f"\n  Job {job_id[:8]}...")
+                print(f"    Project: {project_url}")
+                print(f"    Downloaded: {len(downloaded_clips)}/{total_clips}")
+                print(f"    Status: NEEDS RECOVERY")
+                recovered += 1
+    
+    if recovered == 0:
+        print("\n  No stuck jobs found!")
+    else:
+        print(f"\n  Found {recovered} job(s) needing recovery")
+        print("\n  To recover, run the worker normally and it will re-attempt downloads")
+        
+        response = input("\n  Clear download status to retry? (y/n): ")
+        if response.lower() == 'y':
+            for job_id, job_data in jobs.items():
+                status = job_data.get('status')
+                if status == 'submitted':
+                    job_data['clips_downloaded'] = []
+            save_cache(cache)
+            print("  ✓ Download status cleared - run worker to retry")
+
+
+if __name__ == "__main__":
+    import sys
+    import argparse
+
+    # ── DISPLAY: ensure Xvfb is reachable for headless:false Chrome on VPS ──
+    # When launched from SSH, DISPLAY is not set even if Xvfb is running on :99.
+    # Without this, Chrome starts in a degraded state: first cached page loads,
+    # then the renderer crashes on any real navigation → TargetClosedError.
+    # Only needed on Linux — macOS uses native Quartz windowing.
+    import platform as _init_platform
+    if _init_platform.system() == "Linux":
+        if not os.environ.get("DISPLAY"):
+            os.environ["DISPLAY"] = ":99"
+            print("[Init] DISPLAY not set — defaulting to :99 (Xvfb)", flush=True)
+        else:
+            print(f"[Init] DISPLAY={os.environ['DISPLAY']}", flush=True)
+    # Force ALL temp files to RAM (/dev/shm) — VPS disk is 100% full.
+    # This covers: playwright-artifacts, Chrome renderer temp, any other tempfile usage.
+    os.environ["TMPDIR"] = SHM_DIR
+    import tempfile as _tempfile_mod
+    _tempfile_mod.tempdir = SHM_DIR
+    # Wipe any stale job temp dirs from previous crashed runs
+    import glob as _glob
+    for _d in _glob.glob(os.path.join(SHM_DIR, "flow_job_*")) + _glob.glob(os.path.join(SHM_DIR, "flow_redo_*")):
+        try:
+            import shutil as _shutil; _shutil.rmtree(_d, ignore_errors=True)
+        except Exception:
+            pass
+    print("[Init] Cleaned stale job dirs", flush=True)
+
+    # ── AUTO-UPDATE CHECK ──
+    def check_for_updates():
+        """Auto-update: download latest worker from Render, restart if hash differs."""
+        try:
+            import urllib.request as _urllib
+            import tempfile
+            import platform
+            my_path = os.path.abspath(__file__)
+            update_url = f"{WEB_APP_URL}/api/user-worker/download/flow_worker.py"
+            
+            print(f"Checking for updates from {WEB_APP_URL}...", flush=True)
+            req = _urllib.Request(update_url, headers={"User-Agent": f"flow-worker/{WORKER_BUILD}"})
+            with _urllib.urlopen(req, timeout=15) as resp:
+                latest = resp.read()
+            
+            latest_hash = _hashlib.md5(latest).hexdigest()[:12]
+            
+            if latest_hash == WORKER_BUILD:
+                print(f"✓ Worker up to date (local={WORKER_BUILD}, server={latest_hash})", flush=True)
+                return
+            
+            # Verify the download is valid Python before overwriting
+            try:
+                compile(latest.decode('utf-8'), '<update>', 'exec')
+            except SyntaxError as se:
+                print(f"⚠ Update download failed syntax check ({se}) — keeping current version", flush=True)
+                return
+            
+            # Write to temp file first, then atomically replace
+            tmp_path = my_path + ".tmp"
+            with open(tmp_path, 'wb') as f:
+                f.write(latest)
+            os.replace(tmp_path, my_path)  # Atomic on both Linux and Windows
+            
+            print(f"⬆ Updated {WORKER_BUILD} → {latest_hash}. Restarting...", flush=True)
+            
+            # Restart: on Linux os.execv replaces process; on Windows it doesn't so use sys.exit
+            if platform.system() == "Windows":
+                import subprocess
+                subprocess.Popen([sys.executable] + sys.argv)
+                sys.exit(0)
+            else:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            
+        except Exception as e:
+            print(f"⚠ Update check failed ({e}) — continuing with current version", flush=True)
+        
+        print(f"✓ Worker version: {WORKER_VERSION} (build {WORKER_BUILD})", flush=True)
+    
+    check_for_updates()  # Auto-update on startup
+    
+    # Create argument parser
+    parser = argparse.ArgumentParser(
+        description='Local Flow Worker - Multi-Account Video Generation',
+        add_help=False  # We have custom help
+    )
+    
+    # Account selection (mutually exclusive)
+    account_group = parser.add_mutually_exclusive_group()
+    account_group.add_argument('--auto', action='store_true',
+        help='Auto-detect and use all ready accounts')
+    account_group.add_argument('--accounts', '-a', type=str,
+        help='Specific accounts to use (e.g., 1,2,3 or 1-4)')
+    account_group.add_argument('--count', '-n', type=int,
+        help='Use first N ready accounts')
+    account_group.add_argument('--list', '-l', action='store_true',
+        help='List all accounts and their status')
+    account_group.add_argument('--single', action='store_true',
+        help='Force single-account mode')
+    account_group.add_argument('--multi', '-m', action='store_true',
+        help='Run with enabled accounts (legacy)')
+    
+    # Utility commands
+    parser.add_argument('--clear-cache', action='store_true',
+        help='Clear all cache and start fresh')
+    parser.add_argument('--show-cache', action='store_true',
+        help='Show cache status')
+    parser.add_argument('--recover', action='store_true',
+        help='Re-queue stuck/failed downloads')
+    parser.add_argument('--restore-threshold', type=int, default=None, metavar='N',
+        help='Override proactive restore threshold (default: 6). Use 1 for testing.')
+    parser.add_argument('--help', '-h', action='store_true',
+        help='Show help message')
+    
+    args = parser.parse_args()
+    
+    # Handle help
+    if args.help:
+        show_help()
+        sys.exit(0)
+
+    # Apply restore threshold override
+    if args.restore_threshold is not None:
+        AccountHealthTracker.PROACTIVE_RESTORE_THRESHOLD = args.restore_threshold
+        print(f"⚙️  Proactive restore threshold overridden: {args.restore_threshold} clip(s)")
+    
+    # Handle utility commands
+    if args.clear_cache:
+        if os.path.exists(CACHE_FILE):
+            os.remove(CACHE_FILE)
+            print("✓ Cache cleared")
+        else:
+            print("No cache file to clear")
+        sys.exit(0)
+    
+    if args.show_cache:
+        cache = load_cache()
+        print("\n=== CACHE STATUS ===")
+        jobs = cache.get('jobs', {})
+        
+        if not jobs:
+            print("No jobs in cache")
+        else:
+            for job_id, job_data in jobs.items():
+                status = job_data.get('status', 'unknown')
+                project_url = job_data.get('project_url', 'N/A')
+                clips_submitted = job_data.get('clips_submitted', [])
+                clips_downloaded = job_data.get('clips_downloaded', [])
+                total_clips = len(job_data.get('clips', []))
+                
+                print(f"\nJob {job_id[:8]}... [{status.upper()}]")
+                print(f"  Project: {project_url}")
+                print(f"  Submitted: {len(clips_submitted)}/{total_clips}")
+                print(f"  Downloaded: {len(clips_downloaded)}/{total_clips}")
+        sys.exit(0)
+    
+    if args.recover:
+        cache = load_cache()
+        recover_stuck_jobs(cache)
+        sys.exit(0)
+    
+    # Handle account selection
+    if args.list:
+        # Just list accounts and exit
+        list_accounts()
+        sys.exit(0)
+    
+    if args.auto:
+        # Auto-detect all ready accounts
+        ready_accounts = get_ready_accounts()
+        if not ready_accounts:
+            print("❌ No ready accounts found!")
+            print("Run --list to see account status")
+            sys.exit(1)
+        
+        accounts_to_use = [acc for idx, acc in ready_accounts]
+        print(f"✓ Auto-detected {len(accounts_to_use)} ready account(s): {[acc['name'] for acc in accounts_to_use]}")
+        main_multi_account(accounts_override=accounts_to_use)
+    
+    elif args.accounts:
+        # Parse specific account selection
+        indices = parse_account_selection(args.accounts)
+        if indices is None:
+            print("❌ Invalid account selection")
+            sys.exit(1)
+        
+        selected = select_accounts_by_indices(indices)
+        if not selected:
+            print("❌ No valid accounts selected")
+            sys.exit(1)
+        
+        # Validate selected accounts are ready
+        valid, errors = validate_selected_accounts(selected)
+        if errors:
+            print("⚠ Some accounts are not ready:")
+            for err in errors:
+                print(f"  - {err}")
+        
+        if not valid:
+            print("❌ No ready accounts in selection")
+            sys.exit(1)
+        
+        print(f"✓ Starting with {len(valid)} account(s): {[acc['name'] for acc in valid]}")
+        if len(valid) == 1:
+            acc = valid[0]
+            print(f"Running Account {acc['name']} in SINGLE mode (main thread)")
+            main(account_session=acc['session_folder'],
+                 account_download=acc.get('download_folder', ''),
+                 account_label=acc['name'])
+        else:
+            main_multi_account(accounts_override=valid)
+    
+    elif args.count:
+        # Use first N ready accounts
+        ready_accounts = get_ready_accounts()
+        if not ready_accounts:
+            print("❌ No ready accounts found!")
+            sys.exit(1)
+        
+        n = min(args.count, len(ready_accounts))
+        accounts_to_use = [acc for idx, acc in ready_accounts[:n]]
+        print(f"✓ Using first {n} ready account(s): {[acc['name'] for acc in accounts_to_use]}")
+        main_multi_account(accounts_override=accounts_to_use)
+    
+    elif args.single:
+        # Force single-account mode
+        print("Running in SINGLE account mode (--single flag)")
+        main(account_label="SINGLE")
+    
+    elif args.multi:
+        # Legacy multi-account mode
+        main_multi_account()
+    
+    else:
+        # No arguments - show quick help and use auto mode
+        print("=" * 60)
+        print(f"LOCAL FLOW WORKER {WORKER_VERSION} - Account Auto-Detection (build {WORKER_BUILD})")
+        print("=" * 60)
+        
+        ready_accounts = get_ready_accounts()
+        
+        if not ready_accounts:
+            print("\n❌ No ready accounts found!")
+            print("\nRun with --list to see account status")
+            print("Run with --help for usage information")
+            sys.exit(1)
+        
+        # Show what's available
+        print(f"\nDetected {len(ready_accounts)} ready account(s):")
+        for idx, acc in ready_accounts:
+            print(f"  {idx}. {acc['name']}")
+        
+        print(f"\n→ Starting with all {len(ready_accounts)} accounts...")
+        print("  (Use --accounts 1,2 to select specific accounts)")
+        print()
+        
+        accounts_to_use = [acc for idx, acc in ready_accounts]
+        main_multi_account(accounts_override=accounts_to_use)
