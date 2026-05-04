@@ -40,9 +40,21 @@
         new `product_image:` top-level field is set on this image):
         "Use the uploaded product reference image for [product ingredient name] —
         match its label, packaging, color, and proportions exactly."
-    (3) CHAIN — only when `reference_image:` is not `none`:
-        "Use Image N as the visual reference for the previous scene — preserve
-        the [setting], [lighting], [anchor props], and continuity from there."
+    (3) CHAIN — only when `reference_image:` is not `none` (v589.1
+        SEMANTIC FORM — preferred; the v581 "Use Image N..." form is
+        kept as a legacy backward-compat alias):
+        "Use the prior-scene reference image to preserve the [setting],
+        [lighting], [anchor props], and continuity from the previous
+        scene."
+        Why semantic over numbered: each Banana 2 generation is
+        independent — at job time only persona+product+chain are
+        attached (max 3 inputs). A markdown reference like "Image 4"
+        means nothing to Banana 2 unless rewritten by the platform
+        (case-sensitive substitution \\bImage K\\b → flow slot+1).
+        The semantic phrase "the prior-scene reference image" is
+        understood by Banana 2 as a role descriptor AND substituted
+        by the platform to "Image M" at emission — robust to direct-
+        paste testing in Flow or Gemini.
     One blank line separator after the bindings, then the visual description as
     before. Banana 2 reads bindings as instructions and description as content.
     Pre-v581 markdowns where the platform auto-prepended these lines at job

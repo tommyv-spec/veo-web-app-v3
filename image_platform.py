@@ -1169,11 +1169,27 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
             )
 
         elif cls == "chain":
+            # v589.1: PRIMARY substitution — semantic chain-reference
+            # phrase. Author-written form is robust to direct paste-into-
+            # Flow / Gemini-direct testing because the role descriptor
+            # ("the prior-scene reference image") is meaningful even
+            # without substitution; the platform translation makes it
+            # match Banana 2's positional view of the inputs at emission.
+            body = body.replace(
+                "the prior-scene reference image",
+                f"Image {flow_image_num}",
+            )
+            body = body.replace(
+                "the previous scene's reference image",
+                f"Image {flow_image_num}",
+            )
+
+            # v581 LEGACY substitution — number-based reference. Kept
+            # for backward compatibility with pre-v589.1 markdowns.
+            # New decodes should NOT use "Image K" by markdown number;
+            # use the semantic phrase above instead.
             parent = edge.parent
             if parent is None or parent.scene_index_in_batch is None:
-                # Defensive: leave body untouched if parent's markdown
-                # number can't be resolved. Banana 2 will see the literal
-                # "Image K" — graceful degradation.
                 continue
             md_image_num = parent.scene_index_in_batch + 1
             if md_image_num == flow_image_num:
