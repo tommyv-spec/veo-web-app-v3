@@ -351,6 +351,177 @@ v586 is the canonical proof of bidirectionality:
 
 ---
 
+## VLM video understanding + Veo 3.1 First/Last-Frame + absolute-magnitude grammar (v589)
+
+**Three coordinated halves.** v586 codified per-frame description grammar parity. v587 added the comprehension layer + Veo final-prompts symmetry. v588 added dense per-shot frame sampling. v589 closes the remaining gaps that v586+v587+v588 left open: a structural VLM backstop for action-arc detection, a Veo 3.1 First/Last-Frame workflow for state-evolution clips, and absolute-magnitude grammar that stops prompts from hedging.
+
+### Why the rule exists
+
+Surfaced from the second-pass review of the @icelandicwisdom belly-fat HOOK (May 2026). After v588 corrected the static "points at anatomy" miss to a fat-melt prop-violence arc, the rewrite still hedged: *"the fat is now DRAMATICALLY REDUCED, the abdominal organs clearly visible, only residual yellow fat at the very bottom edge."*
+
+User pushback: *"it all melts completely while we say 'dramatically reduced' — we need it more powerful, the reverse-engineering needs to actually understand what's happening."*
+
+Verdict: dense-frame human-walk plus six-block grammar still wasn't enough. Three things needed:
+1. A **structural VLM backstop** that catches what the human eye underestimates
+2. The **Veo 3.1 First/Last-Frame ("S/E Frame") workflow** so generation matches the source's actual end-state visually rather than via prose alone
+3. **Absolute-magnitude grammar** so prompts stop hedging when the actual state change is COMPLETE
+
+### Half A — Stage 4d VLM video understanding (decode-side)
+
+Adds a new stage to the v579 pipeline AFTER the v588 dense-frame human-walk. Source video uploaded to Gemini API (`gemini-2.5-flash` default; `gemini-3-flash-preview` when available). Gemini natively samples at 1fps + audio at 1Kbps + per-second timestamps and produces a structured per-shot action-arc JSON (`stage4d_vlm.json`).
+
+**The VLM JSON schema** (per `code/v589_video_understanding.py`):
+
+```json
+{
+  "shot": 1,
+  "start": 0.0, "end": 6.47,
+  "summary": "<one sentence: rhetorical function + visible action>",
+  "static_composition": {
+    "subject": "<persona pose + eye direction + mouth state + expression>",
+    "framing": "<camera distance + frame partition + depth layers + crop>",
+    "anchor_props_with_positions": "<every visible prop and its EXACT position>",
+    "lighting_and_palette": "<lighting direction + color palette + mood>"
+  },
+  "action_arc": {
+    "has_state_evolution": true,
+    "start_state": "<foreground prop / subject look at shot start>",
+    "mid_state": "<what's happening at midpoint>",
+    "end_state": "<foreground prop / subject look at shot end>",
+    "magnitude": "COMPLETE",
+    "verbs_observed": ["pour", "melt", "reveal"]
+  },
+  "audio": "<dialogue + ambient sound cues + register>",
+  "veo_reproduction_hints": {
+    "use_first_last_frame_workflow": true,
+    "start_image_caption": "<one paragraph Nano Banana 2 description of optimal start frame>",
+    "end_image_caption": "<one paragraph Nano Banana 2 description of optimal end frame>",
+    "transition_prompt": "<one paragraph Veo 3.1 transition prompt with absolute magnitude language>"
+  },
+  "human_walk_corrections": "<flags any aspect where a midpoint-only human walk would under-describe the arc>"
+}
+```
+
+**The VLM JSON becomes the AUTHORITATIVE source for visual action arcs** — parallel to whisper.cpp being authoritative for dialogue. When Gemini reports *"the fat completely melts away and the abdominal organs are fully revealed"* but the human-walk wrote *"dramatically reduced,"* the VLM correction wins (or at minimum the discrepancy is flagged).
+
+**Cost**: ~300 tokens/sec at default media resolution; a 45s video ≈ 13.5K input tokens + 1-2K output tokens. On `gemini-2.5-flash` that's well under $0.01 per decode. Free tier covers many decodes per day.
+
+**Setup**:
+```bash
+pip install google-genai
+export GEMINI_API_KEY=...   # https://ai.google.dev/
+```
+
+**Run**:
+```bash
+python code/v589_video_understanding.py path/to/source.mp4 \
+    --shots _decode_tmp/.../shots.json \
+    --transcript _decode_tmp/.../transcript.json
+# → writes stage4d_vlm.json next to the video (or per --out)
+```
+
+**Reconciliation discipline**: the decoder runs Stage 4d AFTER the v588 dense-frame walk and reconciles the two sources before authoring the markdown. The VLM JSON is archived alongside the v579 manifest in `raw/decode_artifacts/<source-id>/stage4d_vlm.json` for audit.
+
+### Half B — Veo 3.1 First/Last-Frame for state-evolution clips (generate-side)
+
+Per Google Cloud's Veo 3.1 prompt guide: *"This technique allows you to create a specific and controlled camera movement or transformation between two distinct points of view... Veo's task is to generate a smooth, controlled video that connects these two specific visual states."* This is the highest level of narrative and cinematic control available in Veo 3.1.
+
+**The rule**: every clip whose action_arc has `has_state_evolution: true` (per the VLM JSON) MUST emit BOTH a start-frame Image AND an end-frame Image, and the Veo 3.1 Final Prompt for that clip MUST use the First/Last-Frame ("S/E Frame") workflow.
+
+**Naming convention**:
+- `image_N` — the START frame for state-evolution clips
+- `image_N_end` — the END frame for the same clip
+- Both images have full v586 six-block prompts (Subject / Composition / Action / Location / Style / Tech)
+- Both images include the v581 explicit binding lines (PERSONA + PRODUCT-if-bound + CHAIN)
+- The end-frame image's `reference_image:` typically points at the corresponding `image_N` for chain consistency, or `none` if it's an independent end-state composition
+
+**Veo 3.1 Final Prompt block structure for state-evolution clips**:
+
+```
+### Clip N.M — Scene N, Line M (<block tag>) — VEO 3.1 FIRST/LAST-FRAME
+**Mode:** Veo 3.1 First/Last-Frame ("S/E Frame") workflow per v589
+**Start frame:** Image N (description of start state)
+**End frame:** Image N_end (description of end state)
+
+**Text prompt (transition):**
+` ` `
+[Cinematography]
+
+Generate a smooth 8-second metamorphosis transitioning from the start image to the end image. The transformation: [the specific physical or stylistic change that occurs between the frames, with absolute-magnitude language naming the metamorphosis].
+
+Three timed beats:
+[00:00–00:02] [start beat — opening pose / setup]
+[00:02–00:05] [mid-clip beat — the transformation peaks]
+[00:05–00:08] [end beat — fully transformed end state]
+
+He/She says with [register]: [dialogue].
+
+Ambient: [setting tone + ambient sound cues].
+(no subtitles, no captions)
+` ` `
+**Negative prompt:**
+` ` `
+[canonical 12-element negative]
+[plus state-evolution-specific bans like "no partial fat removal — fat must completely melt off the upper torso"]
+` ` `
+```
+
+Static talking-head clips with no state evolution continue to use single-image start frames as before — the rule applies ONLY to clips whose action_arc has `has_state_evolution: true`.
+
+### Half C — Absolute-magnitude grammar (both sides)
+
+action_notes describing visible state-evolution end-states MUST use absolute language when the source shows complete change. The VLM's `magnitude` field (COMPLETE / PARTIAL / MINIMAL) is the parser-grade signal that gates which language tier the action_note uses.
+
+**Forbidden hedge words when magnitude is COMPLETE**:
+- "dramatically" (e.g. "dramatically reduced")
+- "mostly" (e.g. "mostly visible")
+- "almost" (e.g. "almost completely")
+- "substantially reduced"
+- "largely"
+- "for the most part"
+
+**Required absolute alternatives**:
+- "completely melts away"
+- "fully revealed"
+- "entirely dissolves"
+- "the [X] is gone"
+- "the [Y] now shows the [Z] fully"
+- "all of the [X]"
+- "every [Y] is visible"
+
+**Hedge language reserved ONLY for genuinely partial states** — e.g. "partially squeezed" if the lemon retains half its juice on screen, or "the fat is reduced to half" if that's what the source actually shows.
+
+The negative prompt for state-evolution clips should ALSO encode the absolute-magnitude requirement explicitly — e.g. *"no partial fat removal — fat must completely melt off the upper torso, no residual yellow ON the upper-abdominal organs, no anatomical organs still hidden by fat at clip-end."*
+
+### Worked example — @icelandicwisdom HOOK Clip 1.1
+
+Pre-v589 (v588-corrected, still hedging):
+> *"By clip-end the fat is now DRAMATICALLY REDUCED, the abdominal organs clearly visible, only residual yellow fat at the very bottom edge of the torso melting downward in slow drips."*
+
+v589-compliant (absolute magnitude + S/E-Frame syntax):
+> **Mode:** Veo 3.1 First/Last-Frame
+> **Start frame:** Image 1 (torso COMPLETELY DRAPED in yellow fat, abdominal organs FULLY OBSCURED, glass mug raised tilted-forward filled with amber tea)
+> **End frame:** Image 1_end (torso ENTIRELY CLEAR of fat on the upper abdomen — anatomical organs FULLY REVEALED and unobstructed; melted fat has cascaded down in amber rivulets puddling at the lower edge of the torso)
+>
+> *"By clip-end the entire upper abdomen of the torso is FULLY CLEARED of fat, every anatomical organ (the pale-pink stomach, the liver, the coiled small intestine, the colon, the kidneys behind) ENTIRELY REVEALED and sharply visible. The mug drains COMPLETELY by the end."*
+
+The combination — VLM-grounded action-arc detection + S/E-Frame visual anchoring + absolute-magnitude grammar — gives Veo 3.1 unambiguous instructions for what the COMPLETE end state must look like. No hedge, no guess.
+
+### Bidirectional implication
+
+v589 closes the bidirectional cycle for state-evolution actions:
+- **Decode side**: Stage 4d VLM is the structural backstop for capturing what the source actually shows
+- **Generate side**: Veo 3.1 First/Last-Frame + absolute-magnitude grammar is the structural mechanism for producing what we actually intend
+- **Same checklist, both directions**: every state-evolution clip on either side must answer: what's the start state? what's the end state? what's the magnitude (COMPLETE / PARTIAL / MINIMAL)? what verbs operate?
+
+### Migration
+
+Pre-v589 decodes valid as-is — flag for re-pass when re-using as parents for state-evolution variants. New decodes from this commit forward MUST: (1) run Stage 4d when GEMINI_API_KEY is available and reconcile findings with the human walk; (2) emit start+end image pairs for every state-evolution clip; (3) use absolute-magnitude language in action_notes whose end-state magnitude is COMPLETE per the VLM JSON.
+
+When `GEMINI_API_KEY` is NOT available in the decode session's environment, the decoder notes it in the HTML pipeline audit trail and proceeds with v588 dense-walk as the action-arc source. Half B (S/E-Frame for state-evolution) and Half C (absolute-magnitude) still apply — they don't depend on the API.
+
+---
+
 ## Dense per-shot frame sampling (v588)
 
 **Extends v585 Stage 4 (motion capture).** v585 added optical-flow camera-move classification per shot. v586 added the per-frame description grammar parity. But v585 + v586 together still allowed the decoder to inspect ONLY the midpoint frame per shot — and that is insufficient when the shot contains a visible **state-evolution arc within the prop**.

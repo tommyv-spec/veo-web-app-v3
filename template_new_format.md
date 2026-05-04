@@ -1,5 +1,5 @@
 <!--
-  KAVENO SCENE TABLE — NEW FORMAT (v588)
+  KAVENO SCENE TABLE — NEW FORMAT (v589)
   Fill in below. Key conventions (see template_reference.md for full docs):
 
   • Image prompts: always open with "Shot on iPhone with wide-angle lens, handheld,
@@ -168,6 +168,63 @@
     forward MUST satisfy the v586 checklist. The v579 pipeline
     Stage 4 view-tool prompt is updated to walk the six blocks
     per frame.
+  • VLM VIDEO UNDERSTANDING + VEO 3.1 FIRST/LAST-FRAME + ABSOLUTE-
+    MAGNITUDE GRAMMAR (v589, three coordinated halves):
+    HALF A — Stage 4d VLM video understanding (decode-side): AFTER
+    the v588 dense-frame human-walk, run Gemini API video
+    understanding (`code/v589_video_understanding.py`,
+    `gemini-2.5-flash` default) to produce a structured per-shot
+    action-arc JSON (`stage4d_vlm.json`) with start_state /
+    mid_state / end_state / magnitude (COMPLETE / PARTIAL /
+    MINIMAL) / verbs_observed. The VLM JSON is the AUTHORITATIVE
+    source for visual action arcs, parallel to whisper.cpp being
+    authoritative for dialogue. When Gemini reports "the fat
+    completely melts away" but the human-walk wrote "dramatically
+    reduced," the VLM correction wins. Cost: ~300 tokens/sec at
+    default media resolution; a 45s video ≈ 13.5K tokens; well
+    under $0.01 per decode on gemini-2.5-flash. Setup:
+    `pip install google-genai`; `export GEMINI_API_KEY=...` from
+    ai.google.dev (free tier covers many decodes/day).
+    HALF B — Veo 3.1 First/Last-Frame for state-evolution clips
+    (generate-side): every clip whose action_arc has
+    has_state_evolution=true (HOOK with prop-violence-and-payoff,
+    RECIPE state-evolution per v580, before/after transformation
+    per v541, ANY clip where the foreground prop visibly changes
+    from start to end) MUST emit BOTH a start-frame Image AND an
+    end-frame Image. Naming convention: state-evolution clips use
+    `image_N` for the start frame and `image_N_end` for the end
+    frame; both have full v586 six-block prompts. The Veo 3.1
+    Final Prompt for that clip uses Veo 3.1's First/Last-Frame
+    ("S/E Frame") workflow — provide start_image + end_image +
+    a transition_prompt that names the metamorphosis. Far more
+    reliable than text-prompting "fat melts dramatically" — Veo
+    3.1 anchors the metamorphosis in the two visual states. Per
+    Google Cloud's Veo 3.1 prompt guide: "the highest level of
+    narrative and cinematic control available — Veo's task is to
+    generate a smooth, controlled video that connects these two
+    specific visual states." Static talking-head clips with no
+    state evolution continue to use single-image start frames.
+    HALF C — Absolute-magnitude grammar (both sides): action_notes
+    describing visible state-evolution end-states MUST use
+    absolute language when the source shows complete change.
+    FORBIDDEN hedge words when magnitude is COMPLETE: "dramatically",
+    "mostly", "almost", "substantially reduced", "largely". REQUIRED
+    absolute alternatives: "completely melts away", "fully revealed",
+    "entirely dissolves", "the X is gone", "the Y now shows the Z
+    fully". Hedge language reserved ONLY for genuinely partial
+    states the source actually shows. The VLM's `magnitude` field
+    (COMPLETE / PARTIAL / MINIMAL) is the parser-grade signal that
+    gates which language tier the action_note uses. Why: surfaced
+    from the second-pass review of @icelandicwisdom belly-fat HOOK.
+    User pushback after v588 fix still hedged ("dramatically
+    reduced"): "it all melts completely while we say 'dramatically
+    reduced' — we need it more powerful, the reverse-engineering
+    needs to actually understand what's happening." Verdict: dense-
+    frame human-walk plus six-block grammar still wasn't enough;
+    needed a VLM backstop, the Veo 3.1 S/E-Frame workflow, AND
+    absolute-magnitude grammar. See template_reference "VLM video
+    understanding + Veo 3.1 First/Last-Frame (v589)" section for
+    the full deep-dive.
   • DENSE PER-SHOT FRAME SAMPLING FOR ACTION-ARC CAPTURE (v588,
     extends v585 Stage 4): every shot's view-tool inspection MUST
     view at minimum start (t=start+0.1s), midpoint, and end
