@@ -351,6 +351,90 @@ v586 is the canonical proof of bidirectionality:
 
 ---
 
+## Dense per-shot frame sampling (v588)
+
+**Extends v585 Stage 4 (motion capture).** v585 added optical-flow camera-move classification per shot. v586 added the per-frame description grammar parity. But v585 + v586 together still allowed the decoder to inspect ONLY the midpoint frame per shot — and that is insufficient when the shot contains a visible **state-evolution arc within the prop**.
+
+### The bug v588 prevents
+
+Real example from the @icelandicwisdom belly-fat decode (May 2026): the HOOK shot was a 6.47s fat-melt prop-violence sequence — the persona POURED a glass of warm tea onto a fat-draped anatomical torso, and the yellow prosthetic fat **visibly melted on contact**, revealing the abdominal organs by clip-end. The midpoint frame at 3.23s caught only the mid-pour state with the fat partially-reduced; without seeing the START frame (fat-fully-draped) or the END frame (fat-mostly-melted-away, organs revealed), the first-pass decoder wrote *"the persona points at the gut/belly area of an anatomical model"* — a static gesture description that **completely missed the prop-violence + visible-payoff arc that was the ENTIRE point of the HOOK**.
+
+The fix: see all three frames before authoring the description.
+
+### The mandatory minimum: start / midpoint / end
+
+Every shot's view-tool inspection MUST view at minimum these three frames:
+- **Start** at `t = shot.start + 0.1s` — the opening visual state
+- **Midpoint** at `t = (shot.start + shot.end) / 2` — the central beat
+- **End** at `t = shot.end - 0.1s` — the closing visual state
+
+Three frames, three states. The action_note's three motion beats — start beat (0-2s), mid-clip beat (3-5s), end beat (5-8s) — are then GROUNDED in three distinct visual references rather than one frame extrapolated.
+
+### Additional dense-sampling triggers
+
+View **5+ frames evenly distributed across the shot** when ANY of these signal an action arc within the shot:
+
+1. **Shot duration > 3s** — long enough to contain an arc.
+2. **v585 optical-flow magnitude > 0.7px** — drift with motion (some movement happening, even if classified as static-handheld-with-drift).
+3. **Dialogue overlapping the shot mentions a verb-of-state-change** — `squeeze in`, `pour`, `drop`, `add`, `stir`, `mix`, `spread`, `press`, `pull`, `squeeze`, `crack`, `melt`, `dissolve`, `unfold`, `apply`, `wipe`, etc. The verb is the action-arc signal.
+4. **Start-frame and end-frame visual signatures DIFFER** — comparing start and end frames reveals state evolution (fat-draped → fat-melted; clear-water → amber-tea; lemon-held-high → lemon-mid-squeeze; bottle-on-counter → bottle-in-hand). When the start ≠ end, sample densely between to catch the transition.
+
+When any trigger fires, sample at least 5 frames at `t = shot.start + 0.1, shot.start + 0.25 * duration, midpoint, shot.start + 0.75 * duration, shot.end - 0.1`. View all of them before writing the description.
+
+### How to apply
+
+```python
+# Stage 4a — frame extraction (with v588 dense sampling)
+import cv2
+cap = cv2.VideoCapture(SRC)
+fps = cap.get(cv2.CAP_PROP_FPS)
+for shot in shots:
+    duration = shot.end - shot.start
+    # v588 minimum: start / mid / end
+    base_times = [shot.start + 0.1, (shot.start + shot.end) / 2, shot.end - 0.1]
+    # v588 dense triggers
+    needs_dense = (duration > 3.0
+                   or motion[shot.id].magnitude > 0.7
+                   or any(verb in shot.dialogue.lower()
+                          for verb in ["squeeze", "pour", "drop", "add", "stir",
+                                       "mix", "spread", "press", "pull", "crack",
+                                       "melt", "dissolve", "unfold", "apply", "wipe"])
+                   or visual_diff(start_frame, end_frame) > THRESHOLD)
+    times = base_times if not needs_dense else \
+            [shot.start + 0.1] + [shot.start + p * duration for p in [0.25, 0.5, 0.75]] + [shot.end - 0.1]
+    for t in times:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(t * fps))
+        ok, frame = cap.read()
+        if ok:
+            cv2.imwrite(f"frames/shot{shot.id:02d}_t{t:.2f}s.png", frame)
+```
+
+Then view-tool every saved frame for that shot before authoring the image prompt + action_note.
+
+### Anti-patterns the rule prevents
+
+| Anti-pattern | Bug it produces |
+|---|---|
+| Inspecting only the midpoint frame | Static-snapshot description; the action arc is missed entirely |
+| Skipping the end frame because "the start frame is sufficient" | The PAYOFF of the action is missed (fat-melted, lemon-squeezed, ingredients-added, stirring-done) |
+| Treating the shot as a single visual state when v585 reports flow > 0.7px | Drift signal indicates motion within the shot — could be a hand entering frame, a prop changing state, an off-camera light shifting — needs dense walk |
+| Ignoring verb-of-state-change in the overlapping dialogue | The dialogue is the action signal; "squeeze in" guarantees a state change in the prop, regardless of what the midpoint shows |
+| Viewing 3+ frames but writing the action_note as if from one snapshot | Three frames, three beats — anchor each motion beat to its source frame |
+
+### Bidirectional implication
+
+v588 is decode-side. But the same principle applies to generate-side authoring: when authoring a new image prompt for a multi-state action scene (e.g. recipe state-evolution per v580, transformation per v541, or any prop-violence HOOK with visible payoff in-clip), the AUTHOR must mentally walk start / mid / end before writing — same checklist, applied imaginatively rather than retrospectively. The grammar is one language, both directions. See [[the-cycle]].
+
+### Promotion candidates surfaced via v588
+
+The fat-melt-on-anatomical-torso HOOK class observed in the @icelandicwisdom decode is a **stronger v539 sub-variant** than separate HOOK-then-RESULT structures because the prop-violence and the visible payoff happen in the SAME 6-second clip. Once 5/5 evidence accumulates across decoded scripts, promote as a named v539 sub-variant (e.g. v539-fat-melt or v539-payoff-in-clip).
+
+### Migration
+
+Pre-v588 decodes that inspected only midpoint frames remain valid as historical record; flag them for action-arc audit when re-using as parents for new variants. New decodes from this commit forward MUST satisfy v588 dense sampling.
+
+---
+
 ## Reproduction-ready decode artifact (v587)
 
 **Extends v586.** v586 ensured that every decoded image description was structurally rich enough for Banana 2 to re-render the source frame. v587 closes the symmetry: every decoded script is now a **complete reproduction package** with the same shape as a generate-side script.

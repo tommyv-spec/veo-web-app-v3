@@ -1,5 +1,5 @@
 <!--
-  KAVENO SCENE TABLE — NEW FORMAT (v587)
+  KAVENO SCENE TABLE — NEW FORMAT (v588)
   Fill in below. Key conventions (see template_reference.md for full docs):
 
   • Image prompts: always open with "Shot on iPhone with wide-angle lens, handheld,
@@ -168,6 +168,34 @@
     forward MUST satisfy the v586 checklist. The v579 pipeline
     Stage 4 view-tool prompt is updated to walk the six blocks
     per frame.
+  • DENSE PER-SHOT FRAME SAMPLING FOR ACTION-ARC CAPTURE (v588,
+    extends v585 Stage 4): every shot's view-tool inspection MUST
+    view at minimum start (t=start+0.1s), midpoint, and end
+    (t=end-0.1s) frames — three frames, three states. Additional
+    dense-sampling triggers — view 5+ frames evenly distributed
+    when ANY of these signal an action arc within the shot:
+    (1) shot duration > 3s; (2) v585 optical-flow magnitude > 0.7px
+    (drift with motion); (3) the dialogue overlapping the shot
+    mentions a verb-of-state-change ("squeeze in", "pour", "drop",
+    "add", "stir", "mix", "spread", "press"); (4) the start-frame
+    and end-frame visual signatures DIFFER (state evolution
+    detected). When any trigger fires, the action_note's three
+    motion beats are GROUNDED in distinct frames (start beat =
+    start-frame snapshot, mid-clip beat = midpoint-frame snapshot,
+    end beat = end-frame snapshot) — three real visual references,
+    not one frame extrapolated. Why: the midpoint frame catches
+    one slice of the arc and the decoder writes a static
+    description that misses the WHOLE point of the shot. v588
+    fixes the gap that v586 + v585 left open. Bug it prevents:
+    the @icelandicwisdom belly-fat HOOK was misread on first pass
+    as "pointing at anatomy" because the midpoint frame caught
+    only mid-pour; the actual action was a fat-melt prop-violence
+    state-evolution arc visible only when start (fat-draped
+    torso), mid (pour cascading), and end (fat melted, organs
+    revealed) frames were inspected together. v588 enforces the
+    dense walk so action arcs are captured. See template_reference
+    "Dense per-shot frame sampling (v588)" section for the
+    sampling protocol, anti-patterns, and the worked example.
   • REPRODUCTION-READY ARTIFACT (v587, extends v586): every decoded
     script MUST include two structured sections after the Storyboard
     section, promoting methodology metadata (previously hidden in the
