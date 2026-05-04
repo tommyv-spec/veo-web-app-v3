@@ -168,63 +168,84 @@
     forward MUST satisfy the v586 checklist. The v579 pipeline
     Stage 4 view-tool prompt is updated to walk the six blocks
     per frame.
-  • VLM VIDEO UNDERSTANDING + VEO 3.1 FIRST/LAST-FRAME + ABSOLUTE-
-    MAGNITUDE GRAMMAR (v589, three coordinated halves):
-    HALF A — Stage 4d VLM video understanding (decode-side): AFTER
-    the v588 dense-frame human-walk, run Gemini API video
-    understanding (`code/v589_video_understanding.py`,
-    `gemini-2.5-flash` default) to produce a structured per-shot
-    action-arc JSON (`stage4d_vlm.json`) with start_state /
-    mid_state / end_state / magnitude (COMPLETE / PARTIAL /
-    MINIMAL) / verbs_observed. The VLM JSON is the AUTHORITATIVE
-    source for visual action arcs, parallel to whisper.cpp being
-    authoritative for dialogue. When Gemini reports "the fat
-    completely melts away" but the human-walk wrote "dramatically
-    reduced," the VLM correction wins. Cost: ~300 tokens/sec at
-    default media resolution; a 45s video ≈ 13.5K tokens; well
-    under $0.01 per decode on gemini-2.5-flash. Setup:
-    `pip install google-genai`; `export GEMINI_API_KEY=...` from
-    ai.google.dev (free tier covers many decodes/day).
-    HALF B — Veo 3.1 First/Last-Frame for state-evolution clips
-    (generate-side): every clip whose action_arc has
-    has_state_evolution=true (HOOK with prop-violence-and-payoff,
-    RECIPE state-evolution per v580, before/after transformation
-    per v541, ANY clip where the foreground prop visibly changes
-    from start to end) MUST emit BOTH a start-frame Image AND an
-    end-frame Image. Naming convention: state-evolution clips use
-    `image_N` for the start frame and `image_N_end` for the end
-    frame; both have full v586 six-block prompts. The Veo 3.1
-    Final Prompt for that clip uses Veo 3.1's First/Last-Frame
-    ("S/E Frame") workflow — provide start_image + end_image +
-    a transition_prompt that names the metamorphosis. Far more
-    reliable than text-prompting "fat melts dramatically" — Veo
-    3.1 anchors the metamorphosis in the two visual states. Per
-    Google Cloud's Veo 3.1 prompt guide: "the highest level of
-    narrative and cinematic control available — Veo's task is to
-    generate a smooth, controlled video that connects these two
-    specific visual states." Static talking-head clips with no
-    state evolution continue to use single-image start frames.
-    HALF C — Absolute-magnitude grammar (both sides): action_notes
-    describing visible state-evolution end-states MUST use
-    absolute language when the source shows complete change.
-    FORBIDDEN hedge words when magnitude is COMPLETE: "dramatically",
-    "mostly", "almost", "substantially reduced", "largely". REQUIRED
-    absolute alternatives: "completely melts away", "fully revealed",
-    "entirely dissolves", "the X is gone", "the Y now shows the Z
-    fully". Hedge language reserved ONLY for genuinely partial
-    states the source actually shows. The VLM's `magnitude` field
-    (COMPLETE / PARTIAL / MINIMAL) is the parser-grade signal that
-    gates which language tier the action_note uses. Why: surfaced
-    from the second-pass review of @icelandicwisdom belly-fat HOOK.
-    User pushback after v588 fix still hedged ("dramatically
-    reduced"): "it all melts completely while we say 'dramatically
-    reduced' — we need it more powerful, the reverse-engineering
-    needs to actually understand what's happening." Verdict: dense-
-    frame human-walk plus six-block grammar still wasn't enough;
-    needed a VLM backstop, the Veo 3.1 S/E-Frame workflow, AND
-    absolute-magnitude grammar. See template_reference "VLM video
-    understanding + Veo 3.1 First/Last-Frame (v589)" section for
-    the full deep-dive.
+  • VLM VIDEO UNDERSTANDING (Stage 4d, free local) +
+    STATE-EVOLUTION ARC GRAMMAR FITTED TO EXISTING PLATFORM BLEND +
+    ABSOLUTE-MAGNITUDE GRAMMAR (v589, three coordinated halves):
+    HALF A — Stage 4d VLM video understanding (decode-side,
+    provider-agnostic + free local default): adds a structural
+    backstop AFTER the v588 dense-frame human-walk. Pipeline file
+    `code/v589_video_understanding.py` cascades providers in
+    order: (1) LM Studio (free local, recommended): user opens
+    the LM Studio app with a vision-capable model loaded (e.g.
+    gemma-4-E2B-it-GGUF with mmproj) and enables the local server
+    at http://localhost:1234. Script auto-detects the model and
+    sends dense frames + transcript via OpenAI-compatible API.
+    Zero per-call cost; runs on CPU. (2) Gemini API (paid
+    fallback): when GEMINI_API_KEY is set, native MP4 upload at
+    1fps + audio + per-second timestamps. ~$0.01 per 45s decode
+    on gemini-2.5-flash. (3) Human-walk template (always
+    available): when no automated provider is configured, the
+    script writes a stage4d_vlm.json template skeleton with empty
+    fields per shot + dense frames listed + dialogue. The human-
+    walking decoder LLM session (Claude in chat) walks the dense
+    frames and fills in the JSON manually. The v589 STRUCTURAL
+    rule holds — the schema is produced, just by a human walker
+    instead of an API. The VLM JSON (whichever provider produced
+    it) becomes AUTHORITATIVE for visual action arcs, parallel to
+    whisper.cpp being authoritative for dialogue.
+    HALF B — State-evolution arc grammar fitted to the existing
+    platform blend mechanism (generate-side): the platform
+    already supports interpolation between two different frames
+    via clip_mode=blend, where the NEXT SCENE's image is the
+    end_frame of the current clip and `generate_transition_cue()`
+    in code/veo_generator.py:883 narrates the metamorphosis.
+    Two valid patterns:
+    (B1) MULTI-CLIP state evolution — when the arc spans
+        adjacent shots/scenes naturally (e.g. v580 recipe steps),
+        use clip_mode=blend between adjacent scenes; the next
+        scene's image IS the end-state of the current clip. The
+        platform already supports this — no new field, no parser
+        change.
+    (B2) SINGLE-CLIP state evolution — when the arc is contained
+        within ONE shot (e.g. the icelandicwisdom 6s fat-melt
+        HOOK), the current platform has NO same-scene end_frame
+        anchor — Veo gets only the start_frame + action narrative
+        + transition_cue. RISK: Veo may produce partial changes.
+        Mitigation TODAY: Half C absolute-magnitude grammar in
+        the action_note + an explicit anti-failure-mode clause
+        in the negative prompt (e.g. "no partial fat removal —
+        fat must completely melt off the upper torso, no residual
+        yellow ON the upper-abdominal organs at clip-end").
+    PLATFORM-FUTURE (proposed v590, not yet shipped): extend the
+    parser to support an `image_end:` field on the scene block
+    so single-clip state-evolution arcs can anchor Veo on TWO
+    visual states in ONE clip. Earlier first-pass v589 introduced
+    `### Image N_end` — RETRACTED: parser regex is `### Image
+    (\d+)` (integer-only); image_N_end would not parse.
+    HALF C — Absolute-magnitude grammar (both sides, applies to
+    all state-evolution clips regardless of platform support):
+    action_notes describing visible state-evolution end-states
+    MUST use absolute language when the source shows COMPLETE
+    change. FORBIDDEN hedge words when magnitude is COMPLETE:
+    "dramatically", "mostly", "almost", "substantially reduced",
+    "largely". REQUIRED absolute alternatives: "completely melts
+    away", "fully revealed", "entirely dissolves", "the X is
+    gone", "every Y is visible". Hedge language reserved ONLY
+    for genuinely partial states. Negative prompt for state-
+    evolution clips encodes the absolute requirement explicitly.
+    Why: surfaced from second-pass review of @icelandicwisdom
+    belly-fat HOOK + course-correction on platform alignment.
+    User pushback: "it all melts completely while we say
+    'dramatically reduced' — we need it more powerful." Then:
+    "check how we structure the video in the platform — for now
+    we don't use explicit end frame, we use the blend (between
+    clips and between scenes) ... and we need a free way for the
+    pipeline to actually understand the video." Half A free-
+    local path + Half B fitted to the existing blend mechanism +
+    Half C absolute grammar address all three constraints
+    together. See template_reference "VLM video understanding +
+    state-evolution arc grammar (v589)" section for the deep-
+    dive.
   • DENSE PER-SHOT FRAME SAMPLING FOR ACTION-ARC CAPTURE (v588,
     extends v585 Stage 4): every shot's view-tool inspection MUST
     view at minimum start (t=start+0.1s), midpoint, and end

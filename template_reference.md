@@ -351,9 +351,9 @@ v586 is the canonical proof of bidirectionality:
 
 ---
 
-## VLM video understanding + Veo 3.1 First/Last-Frame + absolute-magnitude grammar (v589)
+## VLM video understanding + state-evolution arc grammar fitted to platform blend + absolute-magnitude grammar (v589)
 
-**Three coordinated halves.** v586 codified per-frame description grammar parity. v587 added the comprehension layer + Veo final-prompts symmetry. v588 added dense per-shot frame sampling. v589 closes the remaining gaps that v586+v587+v588 left open: a structural VLM backstop for action-arc detection, a Veo 3.1 First/Last-Frame workflow for state-evolution clips, and absolute-magnitude grammar that stops prompts from hedging.
+**Three coordinated halves.** v586 codified per-frame description grammar parity. v587 added the comprehension layer + Veo final-prompts symmetry. v588 added dense per-shot frame sampling. v589 closes the remaining gaps: a structural VLM backstop for action-arc detection (with a free local path), state-evolution arc grammar fitted to the platform's existing blend mechanism, and absolute-magnitude grammar that stops prompts from hedging.
 
 ### Why the rule exists
 
@@ -366,9 +366,17 @@ Verdict: dense-frame human-walk plus six-block grammar still wasn't enough. Thre
 2. The **Veo 3.1 First/Last-Frame ("S/E Frame") workflow** so generation matches the source's actual end-state visually rather than via prose alone
 3. **Absolute-magnitude grammar** so prompts stop hedging when the actual state change is COMPLETE
 
-### Half A — Stage 4d VLM video understanding (decode-side)
+### Half A — Stage 4d VLM video understanding (decode-side, provider-agnostic + free local default)
 
-Adds a new stage to the v579 pipeline AFTER the v588 dense-frame human-walk. Source video uploaded to Gemini API (`gemini-2.5-flash` default; `gemini-3-flash-preview` when available). Gemini natively samples at 1fps + audio at 1Kbps + per-second timestamps and produces a structured per-shot action-arc JSON (`stage4d_vlm.json`).
+Adds a structural backstop AFTER the v588 dense-frame human-walk. Pipeline file `code/v589_video_understanding.py` cascades providers in priority order:
+
+**(1) LM Studio (free local, recommended)** — user opens the LM Studio app with a vision-capable model loaded (e.g. `gemma-4-E2B-it-GGUF` with mmproj — already cached on most dev machines after a single LM Studio install) and enables the local server at `http://localhost:1234`. Script auto-detects the running server via `GET /v1/models`, picks a vision-capable model from the available list, and sends dense frames + transcript via OpenAI-compatible `/v1/chat/completions`. Zero per-call cost; runs on CPU.
+
+**(2) Gemini API (paid fallback)** — when `GEMINI_API_KEY` is set, native MP4 upload at 1fps + audio + per-second timestamps. ~$0.01 per 45s decode on `gemini-2.5-flash`. Free tier covers many decodes/day.
+
+**(3) Human-walk template (always available)** — when no automated provider is configured, the script writes a `stage4d_vlm.json` template skeleton with empty fields per shot + dense frame paths listed + dialogue overlapping each shot. The human-walking decoder LLM session (Claude in chat) walks the dense frames produced by v588 and fills in the JSON manually. The v589 STRUCTURAL rule still holds — the schema is produced, just by a human walker instead of an API.
+
+The VLM JSON (whichever provider produced it) becomes the **authoritative source for visual action arcs**, parallel to whisper.cpp being authoritative for dialogue.
 
 **The VLM JSON schema** (per `code/v589_video_understanding.py`):
 
@@ -406,13 +414,19 @@ Adds a new stage to the v579 pipeline AFTER the v588 dense-frame human-walk. Sou
 
 **Cost**: ~300 tokens/sec at default media resolution; a 45s video ≈ 13.5K input tokens + 1-2K output tokens. On `gemini-2.5-flash` that's well under $0.01 per decode. Free tier covers many decodes per day.
 
-**Setup**:
+**Setup (LM Studio path — recommended free local)**:
+1. Install LM Studio from `lmstudio.ai`.
+2. In LM Studio, download `lmstudio-community/gemma-4-E2B-it-GGUF` (or any vision-capable GGUF — Qwen2.5-VL, LLaVA, etc.). Vision capability requires the `mmproj` projector file alongside the main model.
+3. Load the model in LM Studio.
+4. Enable the local server (Developer tab → Start Server). Default URL `http://localhost:1234`.
+
+**Setup (Gemini fallback)**:
 ```bash
 pip install google-genai
 export GEMINI_API_KEY=...   # https://ai.google.dev/
 ```
 
-**Run**:
+**Run** (auto-cascades through providers):
 ```bash
 python code/v589_video_understanding.py path/to/source.mp4 \
     --shots _decode_tmp/.../shots.json \
@@ -420,53 +434,44 @@ python code/v589_video_understanding.py path/to/source.mp4 \
 # → writes stage4d_vlm.json next to the video (or per --out)
 ```
 
-**Reconciliation discipline**: the decoder runs Stage 4d AFTER the v588 dense-frame walk and reconciles the two sources before authoring the markdown. The VLM JSON is archived alongside the v579 manifest in `raw/decode_artifacts/<source-id>/stage4d_vlm.json` for audit.
+To force a specific provider: `--provider lmstudio | gemini | template`.
 
-### Half B — Veo 3.1 First/Last-Frame for state-evolution clips (generate-side)
+**Reconciliation discipline**: the decoder runs Stage 4d AFTER the v588 dense-frame walk and reconciles the two sources before authoring the markdown. The VLM JSON is archived alongside the v579 manifest in `raw/decode_artifacts/<source-id>/stage4d_vlm.json` for audit. When the human-walk template path is used, the decoder LLM session fills in the template by walking the dense frames + dialogue — same schema, same authority.
 
-Per Google Cloud's Veo 3.1 prompt guide: *"This technique allows you to create a specific and controlled camera movement or transformation between two distinct points of view... Veo's task is to generate a smooth, controlled video that connects these two specific visual states."* This is the highest level of narrative and cinematic control available in Veo 3.1.
+### Half B — State-evolution arc grammar fitted to the existing platform blend mechanism (generate-side)
 
-**The rule**: every clip whose action_arc has `has_state_evolution: true` (per the VLM JSON) MUST emit BOTH a start-frame Image AND an end-frame Image, and the Veo 3.1 Final Prompt for that clip MUST use the First/Last-Frame ("S/E Frame") workflow.
+The platform's existing emission model already supports interpolation between two different frames via `clip_mode: blend`, where the NEXT SCENE's image is the end_frame of the current clip. `code/veo_generator.py:883` provides `generate_transition_cue()` which narrates the metamorphosis between two different frames whenever start_frame ≠ end_frame.
 
-**Naming convention**:
-- `image_N` — the START frame for state-evolution clips
-- `image_N_end` — the END frame for the same clip
-- Both images have full v586 six-block prompts (Subject / Composition / Action / Location / Style / Tech)
-- Both images include the v581 explicit binding lines (PERSONA + PRODUCT-if-bound + CHAIN)
-- The end-frame image's `reference_image:` typically points at the corresponding `image_N` for chain consistency, or `none` if it's an independent end-state composition
+**The hard parser constraint**: `### Image N` headers require integer `N` (regex `### Image (\d+)`). Scene blocks have ONE `image:` field. There is no `image_end:` field today. An earlier first-pass v589 introduced `### Image N_end` and a same-scene end-frame field — RETRACTED, because neither would parse. The right pattern fits the platform as-is.
 
-**Veo 3.1 Final Prompt block structure for state-evolution clips**:
+**Two valid patterns for state evolution**:
 
-```
-### Clip N.M — Scene N, Line M (<block tag>) — VEO 3.1 FIRST/LAST-FRAME
-**Mode:** Veo 3.1 First/Last-Frame ("S/E Frame") workflow per v589
-**Start frame:** Image N (description of start state)
-**End frame:** Image N_end (description of end state)
+#### (B1) Multi-clip state evolution
 
-**Text prompt (transition):**
-` ` `
-[Cinematography]
+When the action arc spans naturally across adjacent shots/scenes (e.g. v580 recipe steps — water → lemon → ginger → honey → saffron — each step in its own image), use `clip_mode: blend` between adjacent scenes. The next scene's image IS the end-state of the current clip; the platform's `generate_transition_cue()` narrates the metamorphosis. **The platform already supports this — no new field, no parser change.** The Korella saffron decoded scripts already use this pattern (with `clip_mode: continue` instead of `blend` for tight chains, but the principle is the same).
 
-Generate a smooth 8-second metamorphosis transitioning from the start image to the end image. The transformation: [the specific physical or stylistic change that occurs between the frames, with absolute-magnitude language naming the metamorphosis].
+#### (B2) Single-clip state evolution (PLATFORM-LIMITATION)
 
-Three timed beats:
-[00:00–00:02] [start beat — opening pose / setup]
-[00:02–00:05] [mid-clip beat — the transformation peaks]
-[00:05–00:08] [end beat — fully transformed end state]
+When the action arc is contained within ONE shot (e.g. the @icelandicwisdom 6-second fat-melt HOOK where the entire arc — fat-draped torso → liquid poured → fat completely melts → organs fully revealed — happens within one continuous Veo clip), the current platform has **NO same-scene end_frame anchor**. Veo gets only the start_frame + action narrative + transition_cue.
 
-He/She says with [register]: [dialogue].
+**Risk**: Veo may produce partial state changes when the source shows complete change.
 
-Ambient: [setting tone + ambient sound cues].
-(no subtitles, no captions)
-` ` `
-**Negative prompt:**
-` ` `
-[canonical 12-element negative]
-[plus state-evolution-specific bans like "no partial fat removal — fat must completely melt off the upper torso"]
-` ` `
-```
+**Mitigation TODAY (until v590 platform extension lands)**:
+1. Half C absolute-magnitude grammar throughout the action_note ("completely melts away", "fully revealed", "entirely dissolves").
+2. Explicit anti-failure-mode clause appended to the negative prompt — e.g. *"no partial fat removal — fat must completely melt off the upper torso, no residual yellow ON the upper-abdominal organs at clip-end."*
+3. Three timed beats in the action narrative explicitly stating the end-state per the VLM JSON's `end_state` field (so Veo has prose anchors at `[00:05–00:08]` even without a visual end-frame anchor).
 
-Static talking-head clips with no state evolution continue to use single-image start frames as before — the rule applies ONLY to clips whose action_arc has `has_state_evolution: true`.
+#### PLATFORM-FUTURE candidate (proposed v590, not yet shipping)
+
+Extend the platform parser to support an `image_end:` field on the scene block (parallel to the existing `reference_image:` and `product_image:` fields) so single-clip state-evolution arcs can anchor Veo on TWO visual states in ONE clip. The extension would:
+
+- Allow a scene block to specify `image_end: image_N_b` (or similar non-conflicting integer-suffix scheme) referencing a sibling `### Image` block that holds the end-state composition.
+- Surface `start_frame` and `end_frame` to the worker as TWO different images for that single scene/clip.
+- Reuse `generate_transition_cue()` to narrate the metamorphosis between them.
+
+Until v590 ships, single-clip state-evolution clips ship with the Half C mitigations alone.
+
+**Static talking-head clips with no state evolution** continue to use single-image start frames as before. The Half B rule applies ONLY to clips whose VLM `action_arc.has_state_evolution: true`.
 
 ### Half C — Absolute-magnitude grammar (both sides)
 
@@ -493,19 +498,17 @@ action_notes describing visible state-evolution end-states MUST use absolute lan
 
 The negative prompt for state-evolution clips should ALSO encode the absolute-magnitude requirement explicitly — e.g. *"no partial fat removal — fat must completely melt off the upper torso, no residual yellow ON the upper-abdominal organs, no anatomical organs still hidden by fat at clip-end."*
 
-### Worked example — @icelandicwisdom HOOK Clip 1.1
+### Worked example — @icelandicwisdom HOOK Clip 1.1 (single-clip B2 pattern)
 
 Pre-v589 (v588-corrected, still hedging):
 > *"By clip-end the fat is now DRAMATICALLY REDUCED, the abdominal organs clearly visible, only residual yellow fat at the very bottom edge of the torso melting downward in slow drips."*
 
-v589-compliant (absolute magnitude + S/E-Frame syntax):
-> **Mode:** Veo 3.1 First/Last-Frame
-> **Start frame:** Image 1 (torso COMPLETELY DRAPED in yellow fat, abdominal organs FULLY OBSCURED, glass mug raised tilted-forward filled with amber tea)
-> **End frame:** Image 1_end (torso ENTIRELY CLEAR of fat on the upper abdomen — anatomical organs FULLY REVEALED and unobstructed; melted fat has cascaded down in amber rivulets puddling at the lower edge of the torso)
->
-> *"By clip-end the entire upper abdomen of the torso is FULLY CLEARED of fat, every anatomical organ (the pale-pink stomach, the liver, the coiled small intestine, the colon, the kidneys behind) ENTIRELY REVEALED and sharply visible. The mug drains COMPLETELY by the end."*
+v589-compliant (single-clip B2 pattern — no same-scene end_frame anchor today; Half C absolute-magnitude grammar + negative-prompt failure-mode ban do the work):
+> *"On 'you are on ozempic' the pour completes — the mug pulls back to the right, COMPLETELY DRAINED. By clip-end the upper abdomen of the torso is ENTIRELY CLEARED of fat: every anatomical organ (the pale-pink stomach, the liver, the coiled small intestine, the colon, the kidneys behind) is FULLY REVEALED and sharply visible to camera, no yellow remaining ON the upper torso itself. Only puddled melted fat REMAINS on the desk below the torso..."*
 
-The combination — VLM-grounded action-arc detection + S/E-Frame visual anchoring + absolute-magnitude grammar — gives Veo 3.1 unambiguous instructions for what the COMPLETE end state must look like. No hedge, no guess.
+Negative prompt clause: *"...no partial fat removal — fat must completely melt off the upper torso, no residual yellow ON the upper-abdominal organs at clip-end."*
+
+If/when v590 platform extension ships, the same Clip 1.1 will be upgradeable to B2-with-anchor: keep the same prose, add `image_end:` referencing a separate end-state image showing organs FULLY REVEALED + melted fat puddled on desk. Veo then has BOTH absolute prose AND a visual end-state anchor. Until then, Half C carries.
 
 ### Bidirectional implication
 
