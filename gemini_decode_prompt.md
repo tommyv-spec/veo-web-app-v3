@@ -27,6 +27,10 @@ The output is fed verbatim to a strict regex parser. Any deviation breaks the bu
    - `- **line:** <verbatim dialogue>`
    - `- **action_note:** <three-beat motion narrative>`
 8. **No outer wrapper.** The output starts with `<!--` (the HTML header comment block) and ends with the last clip's negative prompt fence. Nothing before, nothing after.
+9. **Image-number references in body prose: capital-I ONLY in the v581 binding line.** The platform's prompt-builder does case-sensitive substitution: `\bImage K\b` (capital I) gets rewritten to Flow's actual slot number. Lowercase `image K` does NOT get rewritten and Banana 2 sees a phantom reference.
+   - **OK** (capital, in v581 chain binding line): `Use Image 6 as the visual reference for the previous scene` → platform rewrites `Image 6` → actual Flow slot.
+   - **FORBIDDEN** (lowercase, descriptive prose): `Same X interior as image 6`, `the jar from image 5`, `same as image 1`, `continued from image 4`. Banana 2 has only persona + product + chain attached for a given generation; numbered lowercase references break.
+   - **Required pattern** in body prose: `as the previous scene` / `from the previous scene` / `same as before` / `the same X` / direct setting description. NEVER `as image K` / `from image K` / `in image K` (lowercase).
 
 ---
 

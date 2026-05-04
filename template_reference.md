@@ -498,6 +498,32 @@ action_notes describing visible state-evolution end-states MUST use absolute lan
 
 The negative prompt for state-evolution clips should ALSO encode the absolute-magnitude requirement explicitly — e.g. *"no partial fat removal — fat must completely melt off the upper torso, no residual yellow ON the upper-abdominal organs, no anatomical organs still hidden by fat at clip-end."*
 
+### Half D — Image-number reference discipline (case-sensitive substitution rule)
+
+**Why this rule exists**: the platform's `_resolve_flow_prompt_bindings` function in `image_platform.py` does case-sensitive regex substitution to translate the markdown's `Image K` references to Flow's actual slot positions at job emission. The pattern is `\bImage {K}\b` — capital I + integer + word boundaries. **Lowercase `image K` is NOT substituted.** When a body has lowercase descriptive references like *"Same X interior as image 5"* or *"the jar from image 3"*, those stay raw in the prompt sent to Banana 2 — and Banana 2 has only persona + product + chain attached for a given generation (max 3 inputs). Lowercase numbered references → phantom links → confused Banana 2.
+
+**The rule**:
+
+| Where in the prompt | Format | Why |
+|---|---|---|
+| **v581 chain binding line** (single sentence at the top of the Image prompt body) | `Use Image K as the visual reference for the previous scene — preserve <setting>, <lighting>, <anchor props>, continuity from there.` | Capital I; gets rewritten by `_resolve_flow_prompt_bindings` to Flow's actual slot number. **REQUIRED format** — do not paraphrase. |
+| **Body prose (descriptive)** | `Same X interior as the previous scene` / `from the previous scene` / `same as before` / `the same X` / direct setting description | Semantic; no number reference at all. Banana 2 reads "the previous scene" as content (it has the chain ref attached) and renders accordingly. |
+
+**Forbidden in body prose**:
+- `Same X as image K` (lowercase i)
+- `from image K` / `in image K` / `of image K` / `the jar in image K` / `same as image K`
+- Any lowercase `image \d+` pattern outside the v581 binding line
+
+**Required substitutions** when authoring or auditing:
+- `as image K` → `as the previous scene` (or `as before`)
+- `from image K` → `from the previous scene`
+- `in image K` → `in the previous scene`
+- `of image K` → `of the previous scene`
+
+**Confirmed by Gemini Nano Banana 2 official prompting docs** (ai.google.dev/gemini-api/docs/image-generation): the recommended multi-image prompt format uses semantic descriptors like "the dress from input 1", "the model from input 2" — NOT positional `Image 1` / `Image 2` references in body prose. The v581 binding line is the one exception (it gets rewritten to a positional reference Banana 2 understands as "Image 1" = first attached image, etc.).
+
+**Migration**: pre-v589.D decoded scripts may contain lowercase `image K` body-prose references. Audit on re-use; the `_fix_image_refs.py` script (or equivalent regex sweep) can clean them in one pass while preserving the v581 binding lines.
+
 ### Worked example — @icelandicwisdom HOOK Clip 1.1 (single-clip B2 pattern)
 
 Pre-v589 (v588-corrected, still hedging):
