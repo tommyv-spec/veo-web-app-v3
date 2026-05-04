@@ -271,6 +271,86 @@ The pipeline is reusable for any future video. The user's whisper.cpp GGML model
 
 ---
 
+## Decode-side description grammar parity (v586)
+
+**Extends v579 Stage 4.** Every decoded image description MUST follow the canonical Nano Banana 2 six-block grammar, and every action_note MUST follow the canonical Veo 3.1 five-block grammar. This is the **same vocabulary the platform's prompt-builder emits at generation time** — decode-side and generate-side speak one language.
+
+### Why this rule exists
+
+Pre-v586 decodes routinely captured the right pose and the right setting but missed:
+
+1. **Object positions** — "ginger pieces visible to the right" was getting compressed to "ginger nearby". Banana 2 then placed the ginger in random locations.
+2. **Foreshortening cues** — wide-angle composition cues ("the banana foreshortened larger in the lower-center foreground because it's closest to the lens") were getting flattened to "banana in foreground". Without the foreshortening note, Banana 2 renders flat-perspective compositions that don't match the source visual signature.
+3. **Focus depth** — rarely stated. Banana 2 defaults to mid-depth focus and softens the foreground anchor.
+4. **Lighting direction** — "from the glass-door window in the right side of frame" was getting compressed to "natural daylight". Banana 2 then applies generic flat lighting.
+5. **Crop boundaries** — "cropped at lower ribs, NO floor visible" was sometimes implicit. Without it, Banana 2 widens the frame and adds floor.
+
+Decode quality and generate quality are the same problem. A vague decode produces a vague generate prompt produces a hallucinated image. v586 enforces the decode side to match the precision the generate side already requires.
+
+### Mandatory dimensions per image (the six-block checklist)
+
+Every `### Image N` block's `Image prompt:` body must capture all six blocks. The order of blocks in the prose can vary; what matters is that each block is present and specific.
+
+| Block | Dimensions to capture |
+|---|---|
+| **(1) Subject** | Pose, eye direction (locked to lens / tracking down to glass / etc.), mouth state (open mid-word / closed / etc.), expression beat (clinical-disgust / payoff-reveal / informative-warm / etc.). Persona referenced by name ("the main character") per v553.1 — never inline-described. Secondary characters described fully on first appearance per v523.1. |
+| **(2) Composition** | Frame partition (where head and eyes land per rule of thirds — typically upper two-thirds), depth layers (every visible element placed in foreground / middle / background), crop boundary (where bottom / top / sides cut — "cropped at lower ribs", "NO floor visible", "cropped at mid-thigh"), foreshortening note when wide-angle (e.g. "the banana foreshortened larger in the lower-center foreground because it's closest to the lens"), single vs two-shot, headroom. |
+| **(3) Action** | Current gesture, hand positions (left / right, height, holding what), eye tracking (locked to lens vs tracking to a prop), expression beat. The static-frame action — the snapshot of motion mid-clip. |
+| **(4) Location** | Setting + every anchor prop with **explicit position**. Not "anatomy posters in the background" but "two large muscular-anatomy and skeletal-anatomy posters on the white wall behind, multiple framed medical certifications on the left at shoulder height, two small American desk-flag stands at the lower-left of frame, glass display cabinet of medical instruments off to the right". |
+| **(5) Style** | Lighting direction ("vibrant natural HDR daylight from a glass-door window in the right side of frame"), color palette ("warm white walls, clean modern morning-kitchen light"), mood. |
+| **(6) Tech** | Camera type / lens (iPhone wide-angle by default per v553), distance from subject in feet or arm-lengths ("camera approximately one arm's length", "approximately 4 to 5 feet from the desk"), focus depth (deep / shallow, where focus lands — "deep focus throughout"), motion blur if relevant ("motion blur trailing behind the falling cluster"). |
+
+### Mandatory dimensions per action_note (the five-block checklist)
+
+Every `- **action_note:**` body must capture all five blocks of the Veo 3.1 grammar. action_notes describe motion only (per v540) — no start-state restating, no cross-clip refs.
+
+| Block | Dimensions to capture |
+|---|---|
+| **(1) Cinematography** | Camera-move classification grounded in v585 optical-flow data ("static handheld camera, no camera move, slight natural drift" / "slow pull-back over first 2 seconds" / "subtle push-in over the full 8s" / etc.). Magnitude where flow data supports it. |
+| **(2) Subject** | Main character + every secondary character + every key prop named in the action narrative. |
+| **(3) Action** | Three motion beats — `[start beat 0-2s]` → `[mid-clip beat 3-5s]` → `[end beat 5-8s]` — with explicit timing within the 8-second window. Each beat states what moves. |
+| **(4) Context** | Setting carry-over from the start frame, with anchor-prop reuse (the prop that was on the desk in the start frame remains visible in the action narrative). |
+| **(5) Style & Ambiance** | Register tag (`[clinical-disgust held steady]` / `[informative-warm]` / `[payoff-reveal climactic]` / etc.) + ambient sound cues that Veo's audio path can pick up ("SHARP CLATTER of plastic supplement bottles striking metal", "soft hiss of steam rising from the warm water"). |
+
+### v586 worked example — Image upgrade
+
+The same source-video frame, decoded pre-v586 vs decoded under v586:
+
+**Pre-v586 (vague):**
+> The main character at her clinic desk facing camera. Anatomy posters in the background. She is mid-explanation. iPhone wide-angle, deep focus.
+
+**v586 (compliant):**
+> *(Subject)* The main character is seated at her clinic desk facing camera, mouth open mid-word, eyes locked to camera lens, eyebrows raised in confident-authoritative emphasis. *(Composition)* Head and upper torso fill the upper two-thirds of frame, shoulders span frame width, cropped at mid-thigh, NO floor visible, NO feet visible. *(Action)* Right hand resting palm-down on the desk, left hand mid-gesture in the air at chest height — palm open and angled slightly upward in a warm explanatory gesture. *(Location)* Bright modern anatomy clinic interior with two large muscular-anatomy and skeletal-anatomy posters on the white wall behind, multiple framed medical certifications on the left at shoulder height, two small American desk-flag stands at the lower-left of frame, and a glass display cabinet of medical instruments off to the right. *(Style)* Vibrant natural HDR daylight from a side window out of frame to the right, warm-white walls, clean modern clinic palette. *(Tech)* Shot on iPhone wide-angle lens, handheld, camera approximately one arm's length from her at chest level, deep focus throughout, slight wide-angle perspective distortion at the edges of frame.
+
+The v586 version answers every visual question Banana 2 will ask: where does each prop sit, where does the subject's eyeline land, how far is the camera, where is the light source, how deep is the focus. Banana 2 stops hallucinating. The same prose form is also what the generate side writes when authoring a NEW script — so the grammar is one language, used in both directions.
+
+### v586 worked example — action_note upgrade
+
+**Pre-v586 (vague):**
+> She gestures with her left hand and explains. Camera handheld.
+
+**v586 (compliant):**
+> *(Cinematography)* Static handheld camera, no camera move, slight natural drift (per v585 flow data: magnitude < 0.5px). *(Subject)* The main character at her desk; the row of unbranded supplement bottles in the lower foreground. *(Action)* `[Start beat 0-2s]` She squares to camera, both hands relaxed at her sides, head tilting very slightly forward into the lens. `[Mid-clip beat 3-5s]` Right hand opens into a brief instructional sweep at chest height then drops. `[End beat 5-8s]` She leans an inch closer to camera, brows lift in invitation, the corner of her mouth rises into a small knowing half-smile. *(Context)* Same anatomy clinic interior as the start frame; anatomy posters and certifications visible behind throughout. *(Style & Ambiance)* `[Confident-authoritative direct-address]`. Ambient: bright modern anatomy clinic tone, soft fluorescent overhead hum mixed with natural daylight from a side window, faint distant HVAC hum, settled silence after the bottle-sweep.
+
+### How v586 wires into the v579 pipeline
+
+The v579 Stage 4 frame-inspection prompt is updated. Old prompt: *"For each shot record: setting (kitchen / office / bedroom / etc.), composition (talking head / b-roll composite / product hold / etc.), persona pose, foreground props, presence/absence of product."*
+
+New prompt: *"For each shot, walk the v586 six-block image checklist (Subject / Composition / Action / Location / Style / Tech) AND the v586 five-block action_note checklist (Cinematography / Subject / Action / Context / Style & Ambiance). Capture every dimension explicitly. Object positions must be specified ('ginger pieces on a wooden cutting board to the right of the glass'), not paraphrased ('ginger nearby'). Foreshortening must be noted when wide-angle. Lighting direction must name the light source's position. Focus depth must be stated. Crop boundaries must be explicit."*
+
+### Migration
+
+Pre-v586 decodes in `raw/decoded_*.md` are valid as-is — they were authored under earlier rules. From this commit forward, new decodes MUST satisfy the v586 checklist. The wiki's lint pass can flag pre-v586 decoded images that lack one or more of the six blocks, but the lint is advisory not blocking.
+
+### Bidirectional rule cycle (the-cycle.md)
+
+v586 is the canonical proof of bidirectionality:
+- **Decode side** — every new decoded image follows the six-block grammar; this captures the source's visual signature with the precision the generate side needs.
+- **Generate side** — every new authored image already follows the same six-block grammar (Nano Banana 2's native vocabulary); the platform's prompt-builder emits these blocks.
+- **One language, both directions.** Improving the decode-side checklist improves the generate-side checklist — they are the same checklist.
+
+---
+
 ## Image prompt conventions (Nano Banana 2)
 
 Image prompts are written for Nano Banana 2 with a persona's character reference image passed externally on every generation. The conventions below keep prompts tight, subject identity locked, and output style consistent.

@@ -1,5 +1,5 @@
 <!--
-  KAVENO SCENE TABLE — NEW FORMAT (v584)
+  KAVENO SCENE TABLE — NEW FORMAT (v586)
   Fill in below. Key conventions (see template_reference.md for full docs):
 
   • Image prompts: always open with "Shot on iPhone with wide-angle lens, handheld,
@@ -111,6 +111,63 @@
     source"); note this in the decode header. See
     template_reference.md for the full pipeline rationale, code
     snippets, and the unified-manifest schema.
+  • MOTION CAPTURE (v585, extends v579 Stage 4): the decode pipeline
+    samples MULTIPLE frames per shot (not just the midpoint) and runs
+    OpenCV Farneback optical flow to classify camera moves —
+    static / static-handheld-with-drift / push-in / pull-back /
+    pan-left / pan-right / tilt-up / tilt-down — with magnitude
+    grounded in the flow data. Action_notes carry the classified
+    move into the markdown ("slow pull-back over first 2s") instead
+    of defaulting to "static handheld" everywhere. Calibration
+    thresholds (30fps, downscale=4): magnitude < 0.5px = static;
+    < 1.5px = static-handheld-with-drift; > 3px with dominant axis =
+    labeled motion class. Sign conventions: zoom_rate > 0 = push-in,
+    dx > 0 = pan-left, dy > 0 = tilt-up. Pipeline file:
+    `v585_pipeline.py`. Setup: `pip install opencv-python
+    --break-system-packages`. v585 does NOT touch the reference
+    manifest — v581 explicit bindings remain live.
+  • DESCRIPTION GRAMMAR PARITY (v586, extends v579 Stage 4): every
+    decoded image description MUST follow the canonical Nano Banana 2
+    six-block grammar — Subject / Composition / Action / Location /
+    Style / Tech — and every action_note MUST follow the canonical
+    Veo 3.1 five-block grammar — Cinematography / Subject / Action /
+    Context / Style & Ambiance. Same vocabulary the platform's
+    prompt-builder emits at GENERATION time. Mandatory dimensions per
+    image (extends v521.1 pin-down): (1) SUBJECT — pose, eye
+    direction, mouth state, expression beat (persona referenced by
+    name per v553.1, never inline-described); (2) COMPOSITION —
+    frame partition (where head / eyes land per rule of thirds),
+    depth layers (foreground / middle / background populated
+    explicitly), crop boundary (where bottom / top / sides cut),
+    foreshortening note if wide-angle, two-shot vs single, headroom;
+    (3) ACTION — current gesture, hand positions, eye tracking;
+    (4) LOCATION — setting + every anchor prop with explicit position
+    ("the saffron bottle stands upright on the counter to the left
+    of the glass, label-forward to camera"); (5) STYLE — lighting
+    direction (where the source is, hard / soft, color temp), color
+    palette, mood; (6) TECH — camera type / lens (iPhone wide-angle
+    by default per v553), distance from subject in feet or
+    arm-lengths, focus depth (deep / shallow, where focus lands),
+    motion blur if any. Mandatory dimensions per action_note:
+    (1) CINEMATOGRAPHY — camera-move classification grounded in v585
+    flow data; (2) SUBJECT — main character + secondary characters +
+    key props named; (3) ACTION — three motion beats (start →
+    mid-clip → end-beat) with explicit timing within the 8-second
+    clip; (4) CONTEXT — setting carry-over with anchor-prop reuse;
+    (5) STYLE & AMBIANCE — register + ambient sound cues. Why this
+    rule exists: pre-v586 decodes routinely captured pose and setting
+    but missed object positions ("ginger pieces visible to the right"
+    became "ginger nearby"), foreshortening cues, focus depth, and
+    lighting direction. Banana 2 hallucinates the missing fields when
+    the prompt is vague — decode quality and generate quality are
+    the same problem. The bidirectional rule cycle: improving the
+    decode-side grammar improves the generate-side grammar (same
+    fields, same checklist) — see template_reference.md for the
+    deep-dive and examples. Migration: pre-v586 decodes in
+    raw/decoded_*.md are valid as-is; new decodes from this point
+    forward MUST satisfy the v586 checklist. The v579 pipeline
+    Stage 4 view-tool prompt is updated to walk the six blocks
+    per frame.
   • IMAGE ECONOMY: if two phases of ONE physical action (e.g. "about to pour" +
     "mid-pour") can be captured in a single image, use one image — usually the
     mid-action frame. Drop redundant setup images.
