@@ -1,5 +1,5 @@
 <!--
-  KAVENO SCENE TABLE — NEW FORMAT (v586)
+  KAVENO SCENE TABLE — NEW FORMAT (v587)
   Fill in below. Key conventions (see template_reference.md for full docs):
 
   • Image prompts: always open with "Shot on iPhone with wide-angle lens, handheld,
@@ -168,6 +168,69 @@
     forward MUST satisfy the v586 checklist. The v579 pipeline
     Stage 4 view-tool prompt is updated to walk the six blocks
     per frame.
+  • REPRODUCTION-READY ARTIFACT (v587, extends v586): every decoded
+    script MUST include two structured sections after the Storyboard
+    section, promoting methodology metadata (previously hidden in the
+    HTML-comment header) into machine-parseable wiki sections.
+    Decode and generate templates become structurally symmetric —
+    the bidirectional cycle made literal at the artifact level.
+    (A) `## Comprehension` — five required subsections:
+      (1) Structural inventory — total scenes / clips / duration;
+          per-scene block tags from the canonical block vocabulary
+          (HOOK / TITLE / RECIPE / TRANSFORMATION / EXPLAIN /
+          ANATOMY / RESULT / AUTHORITY / PRODUCT / CTA / FOLLOW).
+      (2) v-rule inventory — table mapping every applicable v-rule
+          to how this video uses it. Entry per rule:
+          `applied — <variant or specifics>` /
+          `NOT APPLICABLE — <reason>` /
+          `partial — <which dimensions covered>`.
+          At minimum cover the live rules in the conventions index
+          (v521.1, v523, v523.1 / v573 + v581, v528, v538, v539,
+          v540, v541, v544, v553, v553.1, v573, v577, v579, v580,
+          v581, v584, v585, v586).
+      (3) Rhetorical structure — HOOK type (force-verb /
+          clinical-markup / diagnostic-press / symptom-curiosity /
+          banana-pun / weird-action-on-prop / etc.); frame
+          (recipe-as-claim / before-after-transformation /
+          authority-stack / curiosity-gap / 5-truths-listicle /
+          etc.); payoff structure (timeline-promise / climax-position
+          / authority-anchor / outfit-change-time-jump / etc.); CTA
+          structure (comment-keyword / comment-plus-follow combined
+          / link-in-bio / DM-trigger / etc.).
+      (4) Angle / audience signal — niche; primary audience (gender
+          + age band); secondary audience if any; symptom or
+          aspiration (what the viewer wants to fix or gain);
+          emotional register (warm / fierce / clinical / desperate /
+          hopeful / etc.).
+      (5) Persona archetype + setting tier — archetype label
+          (modern-clinic-doctor / holistic-healer / old-grandma /
+          sexy-doctor / rastafarian-uncle / etc.); setting tier
+          (Tier-0 selfie-arm / Tier-1 single-setting / Tier-2
+          multi-setting); specific settings used.
+    (B) `## Veo 3.1 Final Prompts (per clip)` — one fenced block
+        per clip, fully assembled with Cinematography + Action
+        narrative + Dialogue ("She says with [register]: ...") +
+        Ambient + per-clip `**Negative prompt:**` block. Canonical
+        12-element negative: "no montage, no cutaways, no scene
+        cuts, no flashbacks, no emotional escalation, no cinematic
+        transitions, no burnt-in text, no captions, no on-screen
+        titles, no face distortion, no morphing, no warping, no
+        duplicate limbs, no extra fingers, no inconsistent
+        lighting, no composite split-screen layouts, no
+        disembodied hands." Source-specific bans appended when
+        warranted (e.g. "no second person in frame" for solo
+        videos, "no kitchen background" for clinic-only videos).
+    The image prompts in `## Images` already serve as ready-to-run
+    Banana 2 reproduction prompts (per v586). v587 adds the
+    Comprehension layer + Veo final-prompts symmetry — the decode
+    artifact is now a complete reproduction package: WHAT happens
+    (Storyboard) + HOW it works (Comprehension v-rule inventory) +
+    WHY it works (Comprehension rhetorical + angle subsections) +
+    HOW TO REPRODUCE IT (Images for Banana 2 + Veo final prompts
+    for Veo 3.1). Migration: pre-v587 decodes valid as-is — no
+    retrofit needed; HTML-comment headers remain as historical
+    record. New decodes from this commit forward MUST emit both
+    sections.
   • IMAGE ECONOMY: if two phases of ONE physical action (e.g. "about to pour" +
     "mid-pour") can be captured in a single image, use one image — usually the
     mid-action frame. Drop redundant setup images.
@@ -409,3 +472,103 @@ The main character, same [setting anchor] as image 2, same framing — shot on i
 - **speaker:** on-camera
 - **line:** 
 - **action_note:** 
+
+---
+
+## Comprehension
+
+The reproduction-ready analysis layer (per v587). Five required subsections — every decoded script must fill all five. Decoders can also use this template as the comprehension layer when authoring a new variant — the same structure works in both directions.
+
+### Structural inventory
+
+- **Total**: <N> scenes, <M> clips, ~<T>s duration
+- **Per-scene block tags** (canonical vocabulary: HOOK / TITLE / RECIPE / TRANSFORMATION / EXPLAIN / ANATOMY / RESULT / AUTHORITY / PRODUCT / CTA / FOLLOW):
+  - Scene 1: <BLOCK_TAG>
+  - Scene 2: <BLOCK_TAG>
+  - Scene 3: <BLOCK_TAG>
+
+### v-rule inventory
+
+| v-rule | Status | How this video uses it |
+|---|---|---|
+| v521.1 pin-down | applied | <head/shoulder/crop/distance anchors per persona-primary image> |
+| v523 reference chaining | applied | <chain pattern: sequential / snap-back / mixed> |
+| v523.1 + v573 + v581 isolated refs | applied | <persona uploaded; product uploaded if branded; everything else inline> |
+| v528 clip-mode default | applied | <one full thought per clip, ≤25w cap> |
+| v538 speaker mode | applied | <on-camera all / voiceover scene N / mixed> |
+| v539 HOOK weird-action | applied | <variant: force-verb / symptom-curiosity / clinical-markup / diagnostic-press / banana-pun / etc.> |
+| v540 action_note discipline | applied | <motion-only confirmed; three-beat structure> |
+| v541 outfit-change | applied / NOT APPLICABLE | <Day 1 → Day 14 outfit swap if transformation; NOT APPLICABLE if single-day> |
+| v544 transitions / clip_mode | applied | <fresh+cut default; continue chains in <which scenes>; no blends> |
+| v553 selfie-vlog framing | applied / NOT APPLICABLE | <tight-close default> |
+| v553.1 persona never inline-described | applied | <"the main character" used throughout> |
+| v573 + v581 product binding | applied / NOT APPLICABLE | <branded product in scenes <X, Y, Z> with `product_image:` field + PRODUCT binding line; NOT APPLICABLE if no branded product> |
+| v577 line word budget | applied | <line word counts: max <X>w; multi-line scenes only when total >23w on syntactic boundary> |
+| v580 recipe state-evolution | applied / NOT APPLICABLE | <each prep step gets own image; chain preserves glass+lighting+counter> |
+| v585 motion capture | applied | <camera-move classifications grounded in flow data per shot> |
+| v586 description grammar parity | applied | <every image walks Subject/Composition/Action/Location/Style/Tech; every action_note walks Cinematography/Subject/Action/Context/Style&Ambiance> |
+
+### Rhetorical structure
+
+- **HOOK type**: <force-verb / clinical-markup / diagnostic-press / symptom-curiosity / banana-pun / weird-action-on-prop / bottle-sweep / ...>
+- **Frame**: <recipe-as-claim / before-after-transformation / authority-stack / curiosity-gap / 5-truths-listicle / banana-measurement / ...>
+- **Payoff structure**: <timeline-promise (day 3 / day 7 / day 14) / climax-position / authority-anchor / outfit-change-time-jump / ...>
+- **CTA structure**: <comment-keyword "<WORD>" / comment+follow combined / link-in-bio / DM-trigger / ...>
+
+### Angle / audience signal
+
+- **Niche**: <belly-fat / ED / hair-regrowth / menopause / varicose-veins / etc.>
+- **Primary audience**: <gender + age band, e.g. men 40+>
+- **Secondary audience** (if any): 
+- **Symptom / aspiration**: <what the viewer wants to fix or gain>
+- **Emotional register**: <warm / fierce / clinical / desperate / hopeful / curious / etc.>
+
+### Persona archetype + setting tier
+
+- **Persona archetype**: <modern-clinic-doctor / holistic-healer / old-grandma / sexy-doctor / rastafarian-uncle / aesthetic-doctor / etc.>
+- **Setting tier**: <Tier-0 selfie-arm / Tier-1 single-setting / Tier-2 multi-setting>
+- **Specific settings used**: <kitchen, anatomy-clinic, bedroom, etc.>
+
+---
+
+## Veo 3.1 Final Prompts (per clip)
+
+What the platform's prompt-builder will emit per scene at job emission. One Veo generation per clip = ONE 8-second video. Each prompt is the **assembled** form of camera spec + action narrative + dialogue + ambient — built from the start-frame image + action_note + line in the Storyboard section. Per the canonical convention, **each clip carries its own `**Negative prompt:**` block** immediately after its text prompt.
+
+### Clip 1.1 — Scene 1, Line 1 (<block tag, e.g. HOOK>)
+**Start frame:** Image 1
+**Text prompt:**
+```
+[Cinematography — camera move classification grounded in v585 flow data, e.g. "Static handheld camera, no camera move, slight natural drift."]
+
+[Action narrative — three-beat motion description with explicit timing within the 8s window: start beat 0-2s, mid-clip beat 3-5s, end beat 5-8s. Built from the Storyboard's action_note for this scene.]
+
+She says with [register, e.g. "warm clinical-authoritative emphasis"]: [exact dialogue from the Storyboard's line for this scene].
+
+Ambient: [setting tone + ambient sound cues that Veo's audio path can pick up — built from the Style & Ambiance block of the action_note].
+(no subtitles, no captions)
+```
+**Negative prompt:**
+```
+no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, no cinematic transitions, no burnt-in text, no captions, no on-screen titles, no face distortion, no morphing, no warping, no duplicate limbs, no extra fingers, no inconsistent lighting, no composite split-screen layouts, no disembodied hands.
+```
+
+### Clip 2.1 — Scene 2, Line 1 (<block tag>)
+**Start frame:** Image 2
+**Text prompt:**
+```
+[Cinematography]
+
+[Action narrative — three beats with timing]
+
+She says with [register]: [exact dialogue].
+
+Ambient: [setting tone + ambient cues].
+(no subtitles, no captions)
+```
+**Negative prompt:**
+```
+no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, no cinematic transitions, no burnt-in text, no captions, no on-screen titles, no face distortion, no morphing, no warping, no duplicate limbs, no extra fingers, no inconsistent lighting, no composite split-screen layouts, no disembodied hands.
+```
+
+*(Repeat one Clip block per `- **line:**` in the Storyboard section. Multi-line scenes get one Clip block per line, sharing the same Start frame. Append source-specific bans to the negative prompt when the source has a known failure mode — e.g. "no kitchen background" for clinic-only videos, "no second person in frame" for solo videos.)*

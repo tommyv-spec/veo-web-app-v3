@@ -351,6 +351,92 @@ v586 is the canonical proof of bidirectionality:
 
 ---
 
+## Reproduction-ready decode artifact (v587)
+
+**Extends v586.** v586 ensured that every decoded image description was structurally rich enough for Banana 2 to re-render the source frame. v587 closes the symmetry: every decoded script is now a **complete reproduction package** with the same shape as a generate-side script.
+
+### What problem v587 solves
+
+Pre-v587 decoded scripts were rich on the **what** (storyboard narrative + image prompts) but the **how/why/reproduction** lived in HTML-comment blocks at the top of the file. That was decoder-dependent (some sessions captured it richly, others didn't), wasn't machine-parseable for wiki-side ingest, and made the decode and generate templates structurally asymmetric. The generate-side template already had `## Veo 3.1 Final Prompts (per clip)`; the decode side did not.
+
+The bidirectional rule cycle requires that decode and generate speak the same language. v586 made the per-frame description grammar identical. v587 makes the *artifact-level structure* identical — both templates now produce an output that:
+
+1. States WHAT happens (Storyboard narrative)
+2. States HOW it works (Comprehension v-rule inventory)
+3. States WHY it works (Comprehension rhetorical + angle subsections)
+4. States HOW TO REPRODUCE IT (Images for Banana 2 + Veo final prompts for Veo 3.1)
+
+### The two required sections
+
+#### `## Comprehension`
+
+Five required subsections, all five must be present and filled:
+
+**(1) Structural inventory.** Total scenes / clips / duration. Per-scene block tag from the canonical block vocabulary: HOOK / TITLE / RECIPE / TRANSFORMATION / EXPLAIN / ANATOMY / RESULT / AUTHORITY / PRODUCT / CTA / FOLLOW. The block tag is what the scene is *doing rhetorically*, not what's on screen. A "doctor in clinic" scene could be HOOK or AUTHORITY or PRODUCT depending on its rhetorical role.
+
+**(2) v-rule inventory.** A table mapping every applicable live v-rule (per `code/template_reference.md` and the wiki's [[conventions]] index) to how this specific video uses it. Three statuses:
+- `applied — <variant or specifics>` — rule is present and active
+- `NOT APPLICABLE — <reason>` — rule doesn't match this video's structure (e.g. v541 outfit-change is NOT APPLICABLE for single-day videos)
+- `partial — <which dimensions covered>` — rule is partially honored
+
+The inventory makes promotion-discipline auditing mechanical: a wiki audit can scan for which rules are applied across N scripts and surface which patterns are hardening into broad practice (5/5 → ready to promote a new variant) vs. one-off (1/5 → stays an example, not a rule).
+
+**(3) Rhetorical structure.** Four named axes:
+- HOOK type (force-verb / clinical-markup / diagnostic-press / symptom-curiosity / banana-pun / weird-action-on-prop / bottle-sweep / ...)
+- Frame (recipe-as-claim / before-after-transformation / authority-stack / curiosity-gap / 5-truths-listicle / banana-measurement / ...)
+- Payoff structure (timeline-promise / climax-position / authority-anchor / outfit-change-time-jump / ...)
+- CTA structure (comment-keyword / comment-plus-follow combined / link-in-bio / DM-trigger / ...)
+
+These axes feed [[hook-patterns]], [[cta-patterns]], and the niche playbooks. Filling them on every decode means cross-script pattern surfacing is automatic.
+
+**(4) Angle / audience signal.** Niche, primary audience (gender + age band), secondary audience, symptom or aspiration, emotional register. The targeting axis. Drives [[audience]] folder cross-cuts.
+
+**(5) Persona archetype + setting tier.** Archetype label per [[persona-map]], tier per [[structure-tiers]] (Tier-0 selfie-arm / Tier-1 single-setting / Tier-2 multi-setting), specific settings used. The persona-and-setting axis. Drives [[personas]] and [[settings]] cross-cuts.
+
+#### `## Veo 3.1 Final Prompts (per clip)`
+
+One fenced block per clip. Each clip = one Veo generation = one 8-second video. The prompt is the **assembled** form built from the start-frame image + action_note + line:
+
+```
+### Clip N.M — Scene N, Line M (<block tag>)
+**Start frame:** Image N
+**Text prompt:**
+` ` `
+[Cinematography — camera move classification grounded in v585 flow data]
+
+[Action narrative — three motion beats with timing]
+
+She says with [register]: [exact dialogue from Storyboard].
+
+Ambient: [setting tone + ambient sound cues].
+(no subtitles, no captions)
+` ` `
+**Negative prompt:**
+` ` `
+no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, no cinematic transitions, no burnt-in text, no captions, no on-screen titles, no face distortion, no morphing, no warping, no duplicate limbs, no extra fingers, no inconsistent lighting, no composite split-screen layouts, no disembodied hands.
+` ` `
+```
+
+The canonical 12-element negative is the default. Append source-specific bans when the source has a known failure mode — e.g. `no composite split-screen layouts, no disembodied hands` for b-roll-heavy sources where Veo defaults to disembodied-hand recipe shots; `no second person in frame` for solo videos; `no kitchen background` for clinic-only videos.
+
+### When the source is a video being decoded
+
+The Veo Final Prompts in a decoded script are **reproduction prompts** — feeding them to Veo 3.1 should re-render a clip very close to the source clip. This is the ultimate test of "did we understand what's happening": if the assembled prompt re-renders the source faithfully, comprehension is complete; if it doesn't, something in the description grammar (v586) or the action_note (v540) was insufficient.
+
+This makes the decode artifact self-validating. A reviewer can pick any clip from the source and any clip prompt from the decode, run the prompt through Veo, and compare frames.
+
+### When the source is an idea being authored
+
+The Veo Final Prompts in a generate-side script are **generation prompts** — the literal text Veo will see when the operator runs the script. The platform's prompt-builder will assemble equivalent prompts at job emission from the Storyboard section, so the explicit Veo Final Prompts section in the markdown is review-only by default — a discipline check that lets a human catch v540 violations (start-state restating, cross-clip refs, action_notes that describe what Veo already sees in the start frame) before generation burns credits. If a clip's pre-assembled prompt diverges from what the platform builds, the **Storyboard section wins** — the Veo final-prompts section is a derived view, not a source of truth.
+
+### Migration
+
+Pre-v587 decoded scripts in `raw/decoded_*.md` are valid as-is — they retain their HTML-comment headers as historical record. No retrofit required. New decodes from this commit forward MUST emit both `## Comprehension` and `## Veo 3.1 Final Prompts (per clip)` as structured sections.
+
+The wiki's lint pass can flag pre-v587 decoded scripts that lack the structured sections, but the lint is advisory not blocking — the scripts remain functional under the older shape.
+
+---
+
 ## Image prompt conventions (Nano Banana 2)
 
 Image prompts are written for Nano Banana 2 with a persona's character reference image passed externally on every generation. The conventions below keep prompts tight, subject identity locked, and output style consistent.
