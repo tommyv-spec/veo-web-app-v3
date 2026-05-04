@@ -1,5 +1,5 @@
 <!--
-  KAVENO SCENE TABLE — NEW FORMAT (v589)
+  KAVENO SCENE TABLE — NEW FORMAT (v590)
   Fill in below. Key conventions (see template_reference.md for full docs):
 
   • Image prompts: always open with "Shot on iPhone with wide-angle lens, handheld,
@@ -180,6 +180,47 @@
     forward MUST satisfy the v586 checklist. The v579 pipeline
     Stage 4 view-tool prompt is updated to walk the six blocks
     per frame.
+  • GENERATE-SIDE CHAIN OPTIONALITY (v590, parallel-generation
+    enablement, GENERATE-SIDE ONLY):
+    ASYMMETRIC RULE — applies to generate side ONLY (templates/*.md
+    for our own videos / variants / adaptations). Decode-side
+    (raw/decoded_*.md) MUST chain faithfully to mirror the source.
+    On the generate side, set reference_image: none for every scene
+    EXCEPT those requiring tight pixel-level continuity. Persona
+    locks via Flow slot 0 upload; product (when bound) via slot 1;
+    the v586 description grammar carries the rest. Slight natural
+    background variation between independent scenes is desirable —
+    avoids the AI-flattened "every scene looks identical" tell.
+    CHAIN REQUIRED on generate side (the exceptions):
+      (1) v580 recipe state-evolution — each step inherits glass +
+          counter + cumulative ingredient state (chain consecutive
+          recipe images, e.g. 3→4→5→6→7);
+      (2) v541 before/after transformation — same patient + same
+          setting, only outfit/skin/visible-state differ (chain
+          Day-1 → Day-14 image pair);
+      (3) Single-shot action arc — start frame and end frame within
+          ONE clip (when single-clip dual-frame anchoring lands as
+          a future v-rule);
+      (4) Two-shot follow-up — close-up preserving the identity/
+          pose of a secondary character from a prior two-shot scene.
+    Everything else (HOOK / CONTEXT / EXPLAIN / AUTHORITY / single-
+    frame PRODUCT / CTA / FOLLOW): reference_image: none. Each
+    independent scene's image prompt is SELF-SUFFICIENT — full v586
+    six-block walk, setting + anchor props described inline since
+    no chain carries them.
+    Throughput math (8-scene script): all-chained sequential ≈
+    4 min Banana 2 + 10 min Veo (16-22 min total). v590-applied
+    (3 chains in recipe + 5 independents) ≈ 1 min Banana 2 (parallel
+    via the platform's existing parallel_slots, default 2, max 6)
+    + 4 min Veo (parallel) — 6-8× faster ship.
+    Why generate-only: decode = WHAT the source is (chain mirrors
+    source); generate = WHAT WE SHIP (chain is a per-scene tradeoff
+    between identity-anchor strength vs. generation throughput).
+    The bidirectional rule cycle holds for grammar (v586/v540/v577/
+    v589/v589.1) but NOT for chain topology — that's where the
+    asymmetry sits. Migration: existing templates/*.md authored
+    under chain-everywhere v523 default can be re-audited and
+    chains relaxed where v590 conditions allow.
   • VLM VIDEO UNDERSTANDING (Stage 4d, free local) +
     STATE-EVOLUTION ARC GRAMMAR FITTED TO EXISTING PLATFORM BLEND +
     ABSOLUTE-MAGNITUDE GRAMMAR (v589, three coordinated halves):
@@ -228,7 +269,8 @@
         in the negative prompt (e.g. "no partial fat removal —
         fat must completely melt off the upper torso, no residual
         yellow ON the upper-abdominal organs at clip-end").
-    PLATFORM-FUTURE (proposed v590, not yet shipped): extend the
+    PLATFORM-FUTURE (unnumbered, not yet shipped — v590 was
+    reassigned to chain-optionality): extend the
     parser to support an `image_end:` field on the scene block
     so single-clip state-evolution arcs can anchor Veo on TWO
     visual states in ONE clip. Earlier first-pass v589 introduced

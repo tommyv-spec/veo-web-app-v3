@@ -351,6 +351,104 @@ v586 is the canonical proof of bidirectionality:
 
 ---
 
+## Generate-side chain optionality — parallel-generation enablement (v590)
+
+**ASYMMETRIC RULE — applies to GENERATE-SIDE only.** This is the first v-rule that breaks the bidirectional-cycle symmetry (v589.1 was about the chain-binding-line wording — same-grammar-both-sides). v590 is about chain TOPOLOGY — which scenes need chains at all — and the right answer differs between observation (decode) and execution (generate).
+
+### The two sides
+
+| Side | Chain policy | Why |
+|---|---|---|
+| **Decode** (`raw/decoded_*.md`) | Chain faithfully to mirror the source | The decode is observational — if the viral video kept tight continuity scene-to-scene, we record that. If it didn't, we don't invent it. Faithfulness wins. |
+| **Generate** (`templates/*.md` for our own videos / variants / adaptations) | `reference_image: none` for every scene EXCEPT those genuinely requiring tight pixel-level continuity | The generate-side template is execution — chain is a per-scene tradeoff between identity-anchor strength vs. generation throughput. Optimize per-scene for shipping. |
+
+### Why generate-side chain optionality matters
+
+**Persona is locked via the upload (Flow slot 0).** Identity is preserved across every generation that gets the persona reference attached. **Product (when bound) is locked via slot 1.** Brand consistency holds. **The v586 description grammar carries the rest** — setting, anchor props, lighting, mood, framing.
+
+Slight natural background variation between independent scenes is **desirable**:
+- Avoids the AI-flattened "every scene looks identical" tell that betrays generation.
+- Different angles, slightly different positions, naturalistic camera-shift between cuts — these are properties of real video, not bugs.
+- A chained-everywhere shoot looks artificial; a varied-but-anchored shoot looks human.
+
+### Chain REQUIRED on generate side (the four exceptions)
+
+1. **v580 recipe state-evolution** — each prep step inherits glass + counter + cumulative ingredient state from the prior step. Chain consecutive recipe images (typical pattern: 3→4→5→6→7 for a 5-step recipe). The chain anchors the literal jar/glass/counter so ingredient accumulation reads visibly.
+2. **v541 before/after transformation** — same patient, same setting, only outfit/skin/visible-state differ. Chain Day-1 → Day-14 image pair (or any equivalent before-after pair). Chain anchors the patient's identity beyond what the persona+product uploads cover.
+3. **Single-shot action arc** — start frame and end frame within ONE clip share composition. Chain when the single-clip dual-frame anchoring lands as a separate v-rule (currently a v589 PLATFORM-FUTURE candidate).
+4. **Two-shot follow-up** — when a close-up scene must preserve the exact identity/pose of a secondary character introduced in a prior two-shot scene. Chain the close-up to the two-shot anchor; the secondary character's identity is now locked beyond what the persona+product uploads cover (because secondary characters are NOT uploaded as references).
+
+### Everything else: independent
+
+HOOK / CONTEXT / EXPLAIN / AUTHORITY / single-frame PRODUCT (bottle hero) / CTA / FOLLOW — set `reference_image: none`. The persona+product uploads + the v586 description carry the rest. Each independent scene's image prompt must be **self-sufficient**: full six-block walk, setting + anchor props described inline since no chain carries them.
+
+### Throughput math (typical 8-scene script)
+
+| Pattern | Banana 2 | Veo 3.1 | Total |
+|---|---|---|---|
+| All-chained (every scene `reference_image: image_K`) | sequential ≈ 4 min | sequential ≈ 10 min | 16-22 min |
+| v590-applied (3 chains in recipe + 5 independents) | parallel ≈ 1 min (via `parallel_slots`, default 2, max 6) | parallel ≈ 4 min | 5-7 min |
+
+**6-8× faster ship** on typical script structure. Bigger scripts (e.g. the 10-scene Nuri saffron-ED listicle) gain more.
+
+### How to apply when authoring a `templates/*.md`
+
+1. **Walk the storyboard.** For each scene, classify: independent (HOOK/CONTEXT/EXPLAIN/AUTHORITY/PRODUCT-single-frame/CTA/FOLLOW) or chain-required (recipe state-evolution / before-after / single-shot action / two-shot follow-up).
+2. **Independent scenes:** set `reference_image: none`. Verify the image prompt is self-sufficient — full v586 six-block walk with the setting + anchor props described inline (since no chain carries them).
+3. **Chain-required scenes:** set `reference_image: image_K` per the existing v523/v589.1 rule. Use the v589.1 semantic chain-binding line.
+4. **Per-scene secondary characters** (one-offs introduced in a single scene, not appearing elsewhere): described fully on first appearance per v523.1. NO chain needed unless the character appears in a follow-up scene.
+5. **Run the platform.** Non-chained scenes start in parallel via `parallel_slots`. Chained scenes generate sequentially within their chain group but multiple chain groups run in parallel relative to each other.
+
+### What's RETAINED (every other v-rule applies unchanged)
+
+- v553.1 persona-never-inline-described — every scene
+- v581 + v589.1 binding lines (PERSONA always; PRODUCT when bound; CHAIN when chained)
+- v586 six-block image grammar + five-block action_note grammar — every scene
+- v540 motion-only action_notes — every scene
+- v577 line word budget — every scene
+- v589 absolute-magnitude grammar — every state-evolution clip
+- v589.1 semantic chain-binding line — every chained scene
+
+v590 is purely about CHAIN TOPOLOGY (which scenes have chains). Everything else is invariant.
+
+### Worked example — Nuri saffron-ED listicle template
+
+The `templates/nuri-saffron-ed-anatomy-clinic.md` (10 scenes / 10 clips) authored under chain-everywhere v523 default chains all 10 images sequentially. Re-audit under v590:
+
+| Scene | Block tag | v590 verdict | reference_image |
+|---|---|---|---|
+| 1 | HOOK (bottle-sweep) | Independent | `none` |
+| 2 | TITLE-CARD (listicle frame) | Independent | `none` |
+| 3 | RECIPE TRUTH-1 (water) | Recipe state-evolution start | `none` (recipe head) |
+| 4 | RECIPE TRUTH-2 (lemon) | Chain-required (state evolution) | `image_3` |
+| 5 | RECIPE TRUTH-3 (ginger) | Chain-required (state evolution) | `image_4` |
+| 6 | RECIPE TRUTH-4 (honey) | Chain-required (state evolution) | `image_5` |
+| 7 | RECIPE TRUTH-5 (saffron, climax) | Chain-required (state evolution) | `image_6` |
+| 8 | AUTHORITY (with patient) | Two-shot follow-up — patient identity is one-off, no chain needed (described fully inline per v523.1) | `none` |
+| 9 | PRODUCT (bottle hero) | Independent | `none` |
+| 10 | CTA | Independent | `none` |
+
+Result: 4 chains within the recipe (Scenes 4-7) + 6 independents (Scenes 1, 2, 3, 8, 9, 10). The 6 independents start in parallel; the recipe chain runs sequentially within itself. **Worst-case sequential dependency** drops from 10 stages to 5 stages (6 parallel + 5 sequential within recipe chain) — roughly **2× faster** on this specific script.
+
+### Why generate-only: the bidirectional asymmetry
+
+The cycle has held bidirectional for grammar — every v-rule about HOW to describe a frame, an action, a state-change applies equally on both sides because the GRAMMAR is the same language. v590 is the first rule about TOPOLOGY (the structure of dependencies between scenes) and topology IS asymmetric:
+
+- The **decode** records what was — including any chain dependency the source happened to use, however incidental.
+- The **generate** chooses what to ship — including which chain dependencies actually pay for themselves in identity anchoring vs. cost in throughput.
+
+This asymmetry is documented explicitly in [[the-cycle]]: grammar is symmetric, topology is not.
+
+### Migration
+
+**Existing `templates/*.md` artifacts** authored under chain-everywhere v523 default can be re-audited and chains relaxed where v590 conditions allow. The Nuri saffron template (above) is the canonical worked migration.
+
+**New templates** from this commit forward use v590 chain-optionality from the start. Authors walk the storyboard once, classify each scene as independent or chain-required, set `reference_image:` accordingly.
+
+**Decoded scripts in `raw/decoded_*.md`** are NOT migrated — they remain faithful to source.
+
+---
+
 ## VLM video understanding + state-evolution arc grammar fitted to platform blend + absolute-magnitude grammar (v589)
 
 **Three coordinated halves.** v586 codified per-frame description grammar parity. v587 added the comprehension layer + Veo final-prompts symmetry. v588 added dense per-shot frame sampling. v589 closes the remaining gaps: a structural VLM backstop for action-arc detection (with a free local path), state-evolution arc grammar fitted to the platform's existing blend mechanism, and absolute-magnitude grammar that stops prompts from hedging.
@@ -461,7 +559,7 @@ When the action arc is contained within ONE shot (e.g. the @icelandicwisdom 6-se
 2. Explicit anti-failure-mode clause appended to the negative prompt — e.g. *"no partial fat removal — fat must completely melt off the upper torso, no residual yellow ON the upper-abdominal organs at clip-end."*
 3. Three timed beats in the action narrative explicitly stating the end-state per the VLM JSON's `end_state` field (so Veo has prose anchors at `[00:05–00:08]` even without a visual end-frame anchor).
 
-#### PLATFORM-FUTURE candidate (proposed v590, not yet shipping)
+#### PLATFORM-FUTURE candidate (unnumbered, not yet shipping — v590 was reassigned to chain-optionality)
 
 Extend the platform parser to support an `image_end:` field on the scene block (parallel to the existing `reference_image:` and `product_image:` fields) so single-clip state-evolution arcs can anchor Veo on TWO visual states in ONE clip. The extension would:
 
