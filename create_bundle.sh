@@ -530,6 +530,93 @@ violated rules in past LLM outputs:
      re-prompt you to fix violations otherwise. Self-correction here
      saves a round-trip.
 
+[13] V600 EXAGGERATION-MAGNITUDE GATE — cartoon-physics or boring.
+
+     The 24-decoded-corpus is built on MAGNITUDE THAT EXCEEDS REALITY.
+     Real-life magnitude = scroll-by. Cartoon-physics magnitude =
+     scroll-stop. The corpus pattern: multiple cascading force-verbs
+     + specific exaggerated quantities + visible effects that exceed
+     physics.
+
+     This is what salvora-banana actually does:
+       RIPS banana off bunch -> SLAMS bunch back -> FULL PYRAMID
+       COLLAPSE -> neighbors TUMBLE (4 verbs, exaggerated quantity)
+
+     This is what dr_kim_hair_regrowth actually does:
+       SLAMS onion cut-side DOWN onto CROWN -> cut-face FLATTENS ->
+       juice SPRAYS 3-4 droplets -> GRIND clockwise -> juice runs
+       2-3 streams through hair (5 verbs, specific exaggerated
+       quantities)
+
+     This is what dr_kim_cockroach_bait actually does:
+       LEFT pinched-fingers -> VIOLENT VERTICAL SUGAR JET -> BLAST
+       into glass -> ATOMIZE mist -> RICOCHET particles -> cockroach
+       ENGULFED (6 verbs, physics-violating cascade)
+
+     If your action_note is "she compresses the saffron threads" or
+     "she places the pillow on the counter" — that's REALISTIC. It's
+     dead. Cartoon-physics or boring.
+
+     Three sub-tests for the HOOK + any spectacle scene (RECIPE
+     product-reveal, EXPLAIN demo). All 3 must pass:
+
+     Q9a. PROP POSITION / SIZE / QUANTITY exaggerated past realism?
+          - Real: pillow at counter level. Viral: pillow HELD HIGH
+            OVERHEAD with both arms fully extended.
+          - Real: one drop of juice. Viral: 3-4 SPRAYING droplets
+            specified.
+          - Real: a banana off the bunch. Viral: the WHOLE PYRAMID
+            COLLAPSING.
+          - Real: a single saffron thread. Viral: a CASCADE of
+            saffron threads pouring like a waterfall.
+          Scale up the prop's position/size/quantity by 2-3x past
+          what a real person would do. Specify quantity + position
+          explicitly in prompt body and action_note.
+
+     Q9b. VISIBLE EFFECT PRE-IMPACT? The wind-up frame must show
+          MAGNITUDE BEFORE THE IMPACT. Cascading sweat / dripping
+          juice / scattering particles / spraying liquid ALREADY in
+          motion BEFORE the climactic moment.
+          - Real: pillow lifts then lands. Viral: pillow OVERHEAD
+            with sweat-water STREAMS POURING DOWN her bare forearms
+            in 3 visible rivulets, hair dripping, camisole already
+            wet — wind-up captures the magnitude.
+          - Real: hand grinds onion on scalp. Viral: onion held
+            aloft cut-side-down with juice ALREADY DRIPPING in
+            pre-cascade visible streams before contact.
+          - Real: cabbage placed on counter. Viral: cabbage held
+            high in two hands with leaves ALREADY peeling outward
+            in pre-fall motion before the SLAM.
+          - Real: saffron sprinkled. Viral: saffron CASCADE held
+            aloft with threads ALREADY in mid-fall streaming
+            downward as a visible curtain before they hit the water.
+          Capture the wind-up moment with magnitude pre-impact.
+
+     Q9c. CASCADING FORCE-VERBS — 3+ verbs in sequence in the
+          action_note?
+          Verb library by spectacle type:
+            FORCE-ON-PROP: LIFT -> SLAM -> SCATTER -> COLLAPSE -> SETTLE
+            LIQUID AGENT: LIFT -> POUR -> SPRAY -> CASCADE -> BLEED -> DISSOLVE
+            PRESSURE: TRIGGER -> BLAST -> ATOMIZE -> SCATTER -> ENGULF
+            BODY-ANATOMY: POINT -> TRACE -> CARVE -> MARK -> REVEAL
+            SURGICAL: LOWER -> PRESS -> TRACE -> LIFT -> ANGLE
+            WIND-UP IMPACT: RAISE -> WIND-UP -> SMACK / THROW -> SPLATTER -> SPRAY -> DRIP
+          Single-verb action_note = realistic = boring. Pull from
+          the verb library and chain 3+ in temporal sequence with
+          each verb's visible effect specified.
+
+     If your hook is "lady at counter doing soft saffron pinch" —
+     Q9 fails. Pivot to "pillowcase HELD HIGH OVERHEAD with sweat
+     STREAMING DOWN her forearms while she WINDS UP to SMACK it
+     onto the marble" — Q9 passes.
+
+     v600 applies to: HOOK Scenes 1-2 always; RECIPE product-reveal
+     scene (saffron CASCADE / capsule POUR); EXPLAIN scene if it
+     includes a demonstration. Does NOT apply to talking-head
+     CTA/OUTRO (those need authority-pose not spectacle) or Day-1
+     frame of Day-1/Day-14 transformation (the "before" is
+     deliberately real-life).
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

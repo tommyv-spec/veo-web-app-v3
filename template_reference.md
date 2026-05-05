@@ -1256,6 +1256,117 @@ psychologically-dead trap.
 
 ---
 
+## Exaggeration-magnitude discipline (v600) — cartoon-physics or boring
+
+**Source: 2026-05-06 owner observation** *"the pillow would needed to be held higher and sweat running down while is about to smack it or throw it on the desk."* The first soaked-pillow-on-marble hook (v598 Q1-Q8 compliant) was rejected as STILL too weak. Diagnosis: the spectacle was at **realistic** magnitude, not **viral** magnitude. A soaked pillow placed gently on a counter is what a real tired wife does. A drenched pillow held HIGH OVERHEAD with sweat streaming DOWN her forearms while she winds up to SMACK it onto the desk — that's what the corpus does. Real-life = scroll-by. Cartoon-physics = scroll-stop.
+
+The 24-decoded-corpus is built on **magnitude that exceeds reality**:
+
+| Corpus video | What a real person does | What the viral video does |
+|---|---|---|
+| master_salvora_costco_banana | Pulls a banana off the bunch | RIPS banana → SLAMS bunch → FULL PYRAMID COLLAPSE → neighbors TUMBLE |
+| dr_kim_hair_regrowth_male | Cuts an onion in the kitchen | SLAMS onion cut-side DOWN onto CROWN → cut-face FLATTENS → juice SPRAYS 3-4 droplets → GRIND clockwise → juice runs 2-3 streams through hair |
+| dr_kim_cockroach_bait | Pours sugar in a glass | LEFT pinched-fingers → VIOLENT VERTICAL SUGAR JET → BLAST into glass → ATOMIZE mist → RICOCHET particles → cockroach ENGULFED |
+| master_salvora_costco_salmon | Picks up a salmon | SLAMS salmon on checkout → ICE SPLASHES → CLEAVER swing → scrape into pot |
+| master_salvora_costco_cabbage | Selects a cabbage | THRUSTS onto counter-display with FORCE → SLAM down → leaves SCATTER everywhere |
+| dr_kim_belly_burn_male | Discusses a patient | DAY1/DAY14 outfit-change CUT — hanging belly to flat abs in editorial weird-action |
+| Belly-fat tea pour | Pours tea in a cup | Tea POURED on anatomy torso → yellow fat visibly LIQUEFIES → organs cleanse |
+
+In every case the corpus pattern is: **multiple cascading force-verbs + specific exaggerated quantities + visible effects that exceed physics**.
+
+### The 3-part magnitude test (Q9 — v600 enforcement)
+
+For every HOOK image and HOOK action_note, all 3 must answer YES. (This applies to spectacle-driven scenes too — RECIPE product-cascade, EXPLAIN demonstration. Anywhere the corpus uses force-verbs, magnitude must be cartoon-grade.)
+
+**Q9a. PROP POSITION / SIZE / QUANTITY exaggerated past realism?**
+
+- Real: pillow at counter level. Viral: pillow HELD HIGH OVERHEAD with both arms fully extended.
+- Real: one drop of juice. Viral: 3-4 SPRAYING droplets specified.
+- Real: a banana off the bunch. Viral: the WHOLE PYRAMID COLLAPSING.
+- Real: a single saffron thread. Viral: a CASCADE of saffron threads pouring like a waterfall.
+- Real: a salmon on the cutting board. Viral: a salmon SLAMMED on stainless steel with ICE SPLASH ARC.
+
+The corpus rule: **scale up the prop's position/size/quantity by 2-3× past what a real person would do.** Held higher. More streams. More droplets. More leaves scattering. More ice spraying. Specify the quantity and the position explicitly in the prompt body and action_note.
+
+**Q9b. VISIBLE EFFECT PRE-IMPACT?**
+
+The wind-up frame must show MAGNITUDE BEFORE THE IMPACT. The viewer sees the cascading sweat / dripping juice / scattering particles / spraying liquid ALREADY in motion before the climactic moment. This gives 1-2 frames of "oh shit, look at the scale of this" — the scroll-stop micro-decision.
+
+- Real: pillow lifts, then lands on counter. Viral: pillow OVERHEAD with sweat-water STREAMS already POURING DOWN her bare forearms in 3 visible rivulets, hair dripping, camisole already wet — wind-up captures the magnitude.
+- Real: hand grinds onion on scalp. Viral: onion held aloft cut-side-down with juice ALREADY DRIPPING in pre-cascade visible streams before contact.
+- Real: cabbage placed on counter. Viral: cabbage held high in two hands with leaves ALREADY peeling outward in pre-fall motion before the SLAM.
+- Real: saffron sprinkled. Viral: saffron CASCADE held aloft with threads ALREADY in mid-fall streaming downward as a visible curtain before they hit the water.
+
+The wind-up moment is THE moment. Capture it.
+
+**Q9c. CASCADING FORCE-VERBS — 3+ verbs in sequence in the action_note?**
+
+The corpus action_notes describe SEQUENCES of force-verbs, not single verbs:
+- RIP → SLAM → COLLAPSE → TUMBLE (4 verbs)
+- SLAM → FLATTEN → SPRAY → GRIND → STREAM (5 verbs)
+- JET → BLAST → ATOMIZE → RICOCHET → ENGULF (5 verbs)
+- SLAM → SPLASH → SWING → SCRAPE (4 verbs)
+- SLAM → SCATTER → SETTLE (3 verbs)
+
+A single-verb action_note ("she compresses the saffron threads") = 1 verb = realistic = boring. The Q9c rule: **every spectacle action_note must chain 3+ force-verbs in temporal sequence, with each verb's visible effect specified.**
+
+Verb library by spectacle type:
+
+| Spectacle type | Cascading verb chain template |
+|---|---|
+| Force-on-prop (banana, cabbage, pillow) | LIFT → SLAM → SCATTER → COLLAPSE → SETTLE |
+| Liquid agent-of-change (tea, saffron, juice) | LIFT → POUR → SPRAY → CASCADE → BLEED → DISSOLVE |
+| Pressure spectacle (water flosser, sugar jet) | TRIGGER → BLAST → ATOMIZE → SCATTER → ENGULF |
+| Body-anatomy demo (belly tap, vein point) | POINT → TRACE → CARVE → MARK → REVEAL |
+| Surgical / clinical (marker on lump) | LOWER → PRESS → TRACE → LIFT → ANGLE |
+| Wind-up + impact (pillow throw, banana pyramid) | RAISE → WIND-UP → SMACK / THROW → SPLATTER → SPRAY → DRIP |
+
+If your action_note has 1-2 verbs, you're at realistic magnitude. Pull from the verb library and chain 3+ in sequence.
+
+### Worked example — the menopause-saffron HOOK rebuilt at v600 magnitude
+
+**Pre-v600 version** (passed v598 Q1-Q8 but failed v600 Q9 — too realistic):
+- Pillowcase placed crumpled half-on-half-off the marble edge
+- Persona's RIGHT hand caught mid-release of pillowcase grip
+- Single force-verb: SLAM (post-impact frame captured)
+- Single visible effect: water droplets in mid-air arc-spraying
+
+**Post-v600 version** (Q9a + Q9b + Q9c all passing):
+
+HOOK image — **wind-up frame at peak magnitude**:
+- Persona standing with the soaked white silk pillowcase HELD HIGH OVERHEAD in both hands fully extended above her head, both arms fully visible at full extension
+- Sweat-water visibly POURING DOWN her bare forearms in 3-4 distinct rivulets, dripping off her elbows, soaking into her white silk camisole at the shoulders, plastering wet strands of hair to her temples and neck
+- Her face is in fury-mode — eyes wide, mouth open mid-snarl, jaw set, eyebrows angled down in determined rage
+- Body weight shifted FORWARD onto the front foot, shoulders fully torqued, frozen at the apex of a wind-up SMACK motion (1 frame before the throw)
+- The pillowcase itself is comically drenched — not just damp but DRIPPING-WET, visible water sheeting off the silk in vertical cascade-streams from each corner toward the marble counter below
+- Foreground on marble (target zone): cream-ceramic bowl of dried red saffron threads positioned directly beneath where the pillowcase is about to SMACK
+- Background: husband-silhouette in soft-focus through bedroom doorway, peacefully blanket-covered, dim blue night-light, oblivious — the contrast of HER fury vs HIS peaceful sleep is the taboo direct-address
+- Two-temperature lighting: warm amber kitchen + cool blue bedroom doorway = "she is awake in fury, he is asleep in peace"
+
+HOOK action_note — **5-verb cascading chain**:
+> Static handheld camera holds at apex of wind-up (mag ~1.5px subtle handheld breathe). The Black-female-practitioner persona in a wet-shouldered white silk camisole + the soaked pillowcase HELD HIGH OVERHEAD in both clenched hands + sweat-water STREAMING DOWN her bare forearms in 3-4 visible rivulets + the cream-ceramic bowl of dried red saffron threads on the marble target-zone below + the husband-silhouette soft-focus through bedroom doorway in dim blue light. [Start beat 0-1s] HARD-CUT to wind-up apex — pillowcase OVERHEAD with sweat-streams POURING DOWN her forearms, eyes WIDE in fury locked to camera, mouth open mid-snarl on "Your husband sleeps through this." [Mid-clip beat 1-3s] On "Saffron is what" she RIPS the pillowcase down in a full-arc DOWNWARD SMACK trajectory, water-spray ARC EXPLODES across the marble, the saffron bowl SHUDDERS, threads SCATTER violently into the spatter, tendrils UNFOLD in gold-amber bloom-arcs through mid-air water droplets. [End beat 3-5s] On "wakes you up" she RIPS a saffron pinch from the wreckage of the spatter, raises it aloft DRIPPING with sweat-and-saffron-water, gold-amber dust trailing in cascade from her fingers as she holds it to camera, eyes still wide in fury, husband still motionless in doorway behind. [Conspiratorial-fury F-to-F-about-M direct-address with husband-as-bystander register]. Ambient: 2 a.m. kitchen quiet, faint distant ceiling-fan hum, sweat-water drumming sound from the pre-impact pillowcase drip, saffron threads compressing with a wet crackle.
+
+Verb chain: RIP → SMACK → EXPLODE → SCATTER → UNFOLD → RIP → RAISE (7 verbs). Magnitude: pillowcase HIGH OVERHEAD + 3-4 sweat-streams already pouring + drenched-not-damp + wind-up apex captured. Cascading effects: water-spray + saffron-scatter + tendril-bloom + dust-cascade.
+
+This is what passes v600.
+
+### When v600 applies
+
+v600 applies to any image/scene where the corpus rule calls for force-verb spectacle:
+- **Always** the HOOK (Scenes 1-2)
+- **Often** the RECIPE product-reveal scene (saffron CASCADE, capsule POUR, banana SLAM)
+- **Sometimes** the EXPLAIN scene if it includes a demonstration (anatomy fat-melt, marker-trace)
+
+v600 does NOT apply to:
+- Talking-head closing scenes (CTA / OUTRO) — those need authority-pose, not spectacle
+- The Day-1 frame of a Day-1/Day-14 transformation (the "before" is meant to look real-life)
+
+### Why v600 vs leaving it implicit in v598 Q8
+
+v598 Q8 (ii) said "violent-act / spectacle" but that was too soft — LLMs interpreted "violent" as "press-down" or "compress." v600 makes magnitude an explicit gate with 3 sub-tests (position/size/quantity, pre-impact effect, cascading verb chain) so the LLM can't smuggle a realistic gesture into a "violent" label.
+
+---
+
 ## Product-image presence discipline + LLM-omission audit (v599)
 
 **Source: 2026-05-06 owner observation** *"chatgpt earlier didn't include the product in the images that needed the product. check the rules, for you and for other LLM. don't miss anything."* v581 documented the explicit-binding contract (product_image field + binding line + product visual in prompt body), but LLMs (ChatGPT, Gemini, Claude API) consistently OMIT one or more of the three required parts when authoring videos/*.md from a bundle. v599 elevates v581's three-part requirement from "implicit per-scene judgment" to "explicit per-scene matrix + pre-output gate."

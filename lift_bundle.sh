@@ -486,6 +486,60 @@ violated rules in past LLM outputs:
 
      If ANY of [A]-[H] fail, FIX before emitting.
 
+[13] V600 EXAGGERATION-MAGNITUDE GATE — cartoon-physics or boring.
+
+     The 24-decoded-corpus is built on MAGNITUDE THAT EXCEEDS REALITY.
+     Real-life = scroll-by. Cartoon-physics = scroll-stop.
+
+     Corpus references (what the actual videos do):
+       salvora-banana: RIPS banana -> SLAMS bunch -> FULL PYRAMID
+         COLLAPSE -> neighbors TUMBLE (4 verbs)
+       dr_kim_hair_regrowth: SLAMS onion onto CROWN -> FLATTENS ->
+         juice SPRAYS 3-4 droplets -> GRIND -> juice runs 2-3
+         streams (5 verbs, specific exaggerated quantities)
+       dr_kim_cockroach_bait: PINCHED -> VIOLENT VERTICAL JET ->
+         BLAST -> ATOMIZE -> RICOCHET -> ENGULF (6 verbs, physics-
+         violating cascade)
+
+     Three sub-tests, all 3 must pass:
+
+     Q9a. PROP POSITION / SIZE / QUANTITY exaggerated past realism?
+          Scale prop's position/size/quantity by 2-3x past real
+          person. Held HIGH OVERHEAD instead of at hand level.
+          3-4 SPRAYING droplets specified instead of one. Whole
+          PYRAMID COLLAPSING instead of a single banana removed.
+
+     Q9b. VISIBLE EFFECT PRE-IMPACT? The wind-up frame must show
+          MAGNITUDE BEFORE THE IMPACT. Sweat-water STREAMS already
+          POURING DOWN her bare forearms BEFORE the SMACK.
+          Onion-juice ALREADY DRIPPING before contact. Saffron
+          threads ALREADY in mid-fall before they hit the water.
+          Capture the wind-up moment with magnitude visible.
+
+     Q9c. CASCADING FORCE-VERBS — 3+ verbs in temporal sequence in
+          the action_note?
+          Verb library:
+            FORCE-ON-PROP: LIFT -> SLAM -> SCATTER -> COLLAPSE -> SETTLE
+            LIQUID AGENT: LIFT -> POUR -> SPRAY -> CASCADE -> BLEED -> DISSOLVE
+            PRESSURE: TRIGGER -> BLAST -> ATOMIZE -> SCATTER -> ENGULF
+            BODY-ANATOMY: POINT -> TRACE -> CARVE -> MARK -> REVEAL
+            SURGICAL: LOWER -> PRESS -> TRACE -> LIFT -> ANGLE
+            WIND-UP IMPACT: RAISE -> WIND-UP -> SMACK -> SPLATTER -> SPRAY -> DRIP
+          Single-verb action_note = realistic = dead. Chain 3+
+          verbs with each verb's visible effect specified.
+
+     LIFT-SPECIFIC: if the decoded source's HOOK already has 3+
+     cascading force-verbs + exaggerated magnitude (most do — that's
+     why they went viral), port them exactly. If the decoded source
+     has only 1-2 force-verbs in HOOK (low-magnitude), DO NOT
+     replicate the weakness — UPGRADE by adding cascading verbs +
+     pre-impact magnitude per the verb library above.
+
+     v600 applies to: HOOK Scenes 1-2 always; RECIPE product-reveal
+     scene; EXPLAIN scene if it includes a demonstration. Does NOT
+     apply to talking-head CTA/OUTRO or Day-1 frame of Day-1/Day-14
+     transformation.
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.
