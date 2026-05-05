@@ -159,7 +159,7 @@ EOF
 EOF
     cat "$DECODED_FULL"
     echo ""
-    cat <<EOF
+    cat <<'TASKEOF'
 
 ================================================================================
 # TASK
@@ -175,7 +175,139 @@ before writing a line.
 Output the videos/*.md per code/template_new_format.md skeleton + strict
 v593 parser format. End with ## Sources (referencing the decoded source
 above) and ## Used in (placeholder).
-EOF
+
+================================================================================
+# CANONICAL ACTION_NOTE EXAMPLE — match this shape EXACTLY
+================================================================================
+
+Action_notes are the most commonly-malformed field. Plain narrative is
+WRONG. Every action_note must follow this shape (one line, with inline
+[Start beat] / [Mid-clip beat] / [End beat] markers + register tag +
+ambient cue):
+
+  Static handheld camera, no camera move, slight natural drift (per
+  v585: mag 1.13px, no dominant axis). The main character + the
+  seed-covered face mask + the small glass jar of seeds in his right
+  hand. [Start beat 0-2s] Mask is fully on his face, jar held at chest
+  height square to camera, eyes lock to lens, mouth opens on "What if
+  I told you". [Mid-clip beat 2-3s] On "you're throwing away" his
+  left hand briefly rises into the lower-foreground in a small
+  dismissive flick gesture toward off-frame, then drops. [End beat
+  3-3.9s] On "the most powerful part of the papaya" his right hand
+  lifts the seed jar slightly higher toward camera as a visual
+  evidence-presentation, eyes never leaving the lens, eyebrows lower
+  in conspiratorial-confrontational emphasis with deadpan delivery.
+  [Deadpan curiosity-gap delivery]. Ambient: muted Asian apothecary
+  tone, soft warmth of natural daylight, faint distant herb-jar clink.
+
+Five required parts in every action_note:
+  1. v585 cinematography opener: "Static handheld..." or named
+     camera-move (push-in / pan-left / tilt-down) with mag
+  2. Subject inventory: "The main character + [props] + [secondary]"
+  3. THREE timed beats: [Start beat 0-Xs] / [Mid-clip beat X-Ys] /
+     [End beat Y-Zs] with explicit second ranges and what changes
+  4. Register tag in square brackets: [Conspiratorial-warm register]
+     or [Symptom-validation register] etc.
+  5. Ambient sound cues at the end
+
+When LIFTING from a decoded source: the action_note timed beats should
+mirror what the decoded source actually shows. If the decoded artifact
+already contains beat-level descriptions, port them; if it shows raw
+shot timestamps + dense-frame walks, synthesize the three timed beats
+from those frames. Do NOT collapse the decoded detail into vague
+narrative — preserve specificity.
+
+================================================================================
+# PRE-OUTPUT SELF-VALIDATION CHECKLIST
+================================================================================
+
+Before emitting your final videos/*.md, walk this checklist mentally
+and FIX any item that fails. Do NOT skip — these are the most-
+violated rules in past LLM outputs:
+
+[1] STRICT HEADERS (v593) — every "### Image N" and "### Scene N"
+    line ends after the integer. NO descriptive suffix. NO "### Image
+    1 — HOOK" or "#### Scene 8a". If you need to split a scene by
+    clip, add a second `- **line:**` + `- **action_note:**` pair
+    inside the same Scene block.
+
+[2] CHAIN-BINDING LINE PRESENT (v589.1) — every Image with
+    `reference_image: image_K` (not "none") has a line at the START
+    of its prompt body that reads: "Use the prior-scene reference
+    image to preserve [setting], [lighting], [anchor props], and
+    continuity from the previous scene." This is REQUIRED. Do NOT
+    use the legacy form "Use Image K as the visual reference..." —
+    the semantic phrase is the canonical form per v589.1.
+
+[3] NO LOWERCASE "image K" IN BODY PROSE (v589.1) — never write
+    "same as image 1", "from image 3", "as image 4", "in image 5".
+    The platform's case-sensitive substitution doesn't rewrite
+    lowercase, so Banana 2 sees a phantom reference. Required
+    substitutions: "as the previous scene", "from the previous
+    scene", "same as before", "the same X". If you genuinely need
+    to reference a specific earlier image, use capital "Image 4"
+    (capital I) in body prose and the platform will substitute it.
+
+[4] ACTION_NOTE STRUCTURE (v586) — every action_note follows the
+    canonical shape above (cinematography opener + subject + THREE
+    timed beats with [Start/Mid-clip/End beat] markers + register
+    tag + ambient cue). Plain narrative without timed beats is
+    insufficient. Single line — multiline bulleted Cinematography/
+    Subject/Action/Context/Style structures DO NOT PARSE.
+
+[5] CHAIN ONLY WHEN REQUIRED (v590) — set `reference_image: none`
+    by default. Only chain when ONE of these four conditions
+    applies: (a) v580 recipe state-evolution (each step inherits
+    cumulative ingredient state); (b) v541 before/after transformation
+    (Day-1 -> Day-14 same-body); (c) two-shot follow-up (preserve
+    secondary-character identity from a prior two-shot); (d) single-
+    shot action arc anchoring. SETTING CHANGES ARE NEVER CHAINED —
+    if Image N is a different room/desk/location, it's `none` even
+    if the persona is the same.
+
+[6] PERSONA CONSISTENCY WITH DECODED SOURCE — the persona in the
+    lift should match the decoded source's persona archetype unless
+    the operator's prompt explicitly retargets. If the decoded
+    source shows a Black-female-practitioner and the operator says
+    "lift this for [persona] [niche] [audience]" without a persona
+    override, keep the same archetype. Pick from corpus-validated
+    personas in wiki/persona-map.md — DO NOT invent a new persona
+    name.
+
+[7] RISKY-VOCABULARY SWAPPED IN DIALOGUE — actually apply the swaps
+    from risky-vocabulary.md. "Menopause" -> "after 40" / "the change".
+    "Erection" -> "morning signal" / "back to attention". "Performance"
+    in sexual context -> "going strong" / "lasting". "Cure" / "treats"
+    / "reverses" + disease name -> never. Awareness-only without
+    swap is insufficient — actually edit the lines.
+
+[8] FIDELITY TO DECODED SOURCE — the lift should preserve the
+    source's STRUCTURE (hook beat, recipe steps, transformation arc,
+    CTA placement) and its DOMINANT MECHANISM (vicarious-benefit,
+    visual-pun, taboo-warning, conspiracy, etc.). Naming the move
+    BEFORE writing per psychology-of-conversion is mandatory. The
+    Korella adaptation changes the SURFACE (persona swap if
+    requested, recipe swap to corpus-validated, niche-language
+    swap) — not the underlying mechanism.
+
+[9] UNIVERSAL CLOSER (mandatory final line) — "follow me first or I
+    can't reach you" or close variant. Verbatim across 12+ raw
+    decodes; deviate only with documented reason.
+
+[10] M <= N IMAGE CARDINALITY (v594) — count distinct images vs total
+     scenes. M (images) must be <= N (scenes). Two scenes that share
+     composition (same setting + blocking + camera) should reuse the
+     same image_K via the Scene block's `image:` field. Setting
+     changes always require a new image (never reuse across settings).
+     If the decoded source has K source shots but they consolidate
+     to M < K compositions, the lift should output M images — do
+     not 1:1 mirror redundant decoded shots.
+
+If any item above fails, FIX IT BEFORE OUTPUT. The operator will
+re-prompt you to fix violations otherwise. Self-correction here saves
+a round-trip.
+
+TASKEOF
 }
 
 # Always write to a temp file as fallback (clipboard access can fail in
