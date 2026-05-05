@@ -336,27 +336,62 @@ violated rules in past LLM outputs:
          reveal motion. "you wake up at 3am" -> alarm-clock cut.
          Voiceover-over-static-shot FAILS.
 
-     LIFT-SPECIFIC: if the decoded source's HOOK already passes Q1-Q5,
-     port its visual structure exactly (same prop class, same motion
-     verb, same metaphor). If the decoded source's HOOK FAILS the
-     test (e.g. it's a generic talking-head opener), DO NOT replicate
-     the failure — the lift should UPGRADE the hook by manufacturing
-     a stronger visual using the niche surrogate library in hook-
-     patterns.md or one of the four manufactured-hook forms:
-       (a) Wearable evidence prop — thermometer / pulse-ox / sleep-
-           tracker showing alarming reading
-       (b) Environmental witness prop — soaked pillow / sheets-in-
-           dryer / fan-set-to-high / glass-of-water knocked over
-       (c) Body-anatomy surrogate — torso visualizing sweat-glands
-           firing / brain-cross-section foggy -> clear / hormone-
-           graph crashing
-       (d) Scene-mirror cold-open — hyper-specific time + place
-           mirroring the viewer's literal experience (3:47am alarm,
-           2am water-grab, 5am bedside fan)
+     Q6. BACKGROUND-AUTHORITY MATCHES PERSONA? (≥2 anchor props
+         visible 0-2s frame). Setting must signal the persona's
+         authority type. Corpus-grounded persona x setting pairings
+         (24-decode evidence):
 
-     If ANY of Q1-Q5 fail, REJECT the hook and propose 3 alternatives
-     from the niche surrogate library in hook-patterns.md before
-     emitting the videos/*.md.
+         - CLINICAL DOCTOR -> T2 exam room OR T2 diploma office;
+           anchors: diploma + US flag + anatomy poster + equipment
+           cart + exam stool + IV pole; BREAKS in domestic kitchen
+         - FOLK-WISDOM ELDER -> T0/T1 honey-oak bench OR rustic
+           kitchen; anchors: honey-oak/barn-board wall + 3+ herb jars
+           + ceramic teapot + window outdoors + patina; BREAKS in
+           sterile clinic
+         - RETAIL-WITNESS OPERATOR -> T0-retail Costco/Walmart;
+           anchors: store signage + fluorescent industrial ceiling +
+           blurred shoppers + actual store-stocked product; BREAKS in
+           studio
+         - CARIBBEAN HERBALIST -> T0/T1 Caribbean sunroom; anchors:
+           bamboo wall + Rasta+US flags + 3+ herb jars + honey-oak
+           table + amber light; BREAKS without cultural anchors
+         - MODERN-CLINIC SEXY-DOCTOR / KORELLA F-to-F-about-M ->
+           T0 clean kitchen (HOOK) + T2 office (OUTRO) DUAL-FLIP
+           required; BREAKS with single-setting reduction (4-corpus-
+           instance evidence)
+
+     Q7. SETTING RESONATES WITH AUDIENCE? Audience x setting matrix:
+         - WOMEN 40+ -> kitchen + clinical-exam DUAL-FLIP
+         - MALE 40-70 US (Mike) -> retail warehouse + clinic +
+           luxury-apartment OUTRO (avoid pure home-kitchen)
+         - F-to-F-about-M -> kitchen + office DUAL-FLIP (Korella
+           canonical)
+         - NEUTRAL/MIXED -> T2 clinical authority
+         - BLACK WOMEN -> Caribbean sunroom + bamboo + flags
+
+         REJECT if background not visible / ambiguous / contradicts
+         persona / "generic talking-head studio with bokeh."
+
+     LIFT-SPECIFIC: if the decoded source's HOOK already passes Q1-Q7,
+     port its visual structure exactly (same prop class, same motion
+     verb, same metaphor, SAME SETTING + SAME ANCHOR PROPS). If the
+     decoded source's HOOK FAILS the test (e.g. it's a generic
+     talking-head opener with weak background), DO NOT replicate the
+     failure — the lift should UPGRADE the hook by:
+
+     (1) Pulling foreground prop + motion from the corpus surrogate
+         library in template_reference.md §"Corpus-grounded surrogate
+         library" matched to the decoded source's niche.
+     (2) Pulling background + anchor props from the persona x setting
+         authority pairings matched to the decoded source's persona
+         archetype (or Korella-adapted persona if retargeting).
+     (3) Preserving the decoded source's underlying MECHANISM
+         (vicarious-benefit, visual-pun, taboo-warning, conspiracy)
+         while upgrading the visual surface.
+
+     If ANY of Q1-Q7 fail, REJECT the hook and propose 3 alternatives
+     pulling from the corpus surrogate library + persona x setting
+     authority pairings before emitting the videos/*.md.
 
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves

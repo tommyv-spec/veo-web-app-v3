@@ -302,30 +302,101 @@ violated rules in past LLM outputs:
          reveal motion. "you wake up at 3am" -> alarm-clock cut.
          Voiceover-over-static-shot FAILS.
 
-     For HOOK-HARD niches with no inherent visual (hot flash, brain
-     fog, insomnia, anxiety, internal pain), MANUFACTURE a visual
-     using one of these four forms:
-       (a) Wearable evidence prop — thermometer / pulse-ox / sleep-
-           tracker showing alarming reading
-       (b) Environmental witness prop — soaked pillow / sheets-in-
-           dryer / fan-set-to-high / glass-of-water knocked over
-       (c) Body-anatomy surrogate — torso visualizing sweat-glands
-           firing / brain-cross-section foggy -> clear / hormone-
-           graph crashing
-       (d) Scene-mirror cold-open — hyper-specific time + place
-           mirroring the viewer's literal experience (3:47am alarm,
-           2am water-grab, 5am bedside fan)
+     Q6. BACKGROUND-AUTHORITY MATCHES PERSONA? (≥2 anchor props
+         visible in 0-2s frame). Setting must signal the persona's
+         authority type or the entire hook collapses. Corpus-grounded
+         pairings (24-decode evidence):
 
-     Korella menopause-saffron specific: lean into the validated F-to-
-     F-about-M cell with the SAFFRON PROP (warm-water-bowl + thread +
-     gold-color reveal). DO NOT default to "woman alone in dim
-     bedroom about hot flashes" — that hook has no prop, no motion,
-     no pun, no novelty. It WILL fail. Pivot to the validated saffron-
-     vitality angle with manufactured visual.
+         CLINICAL DOCTOR (dr-kim, dr-sage, dr-aesthetic, podiatrist,
+         black-female-practitioner office-flip)
+           -> required: T2 clinical exam room OR T2 diploma office
+           -> required anchors: diploma (gold frame) / US flag /
+              anatomy poster / equipment cart / exam stool / IV pole /
+              surgical pen
+           -> BREAKS if: filmed in domestic kitchen (MD authority dies)
 
-     If ANY of Q1-Q5 fail, REJECT the hook and propose 3 alternatives
-     from the niche surrogate library in hook-patterns.md before
-     emitting the videos/*.md.
+         FOLK-WISDOM ELDER (master-chen kitchen, master-shen, old-earl,
+         icelandic-elder, master-salvora kitchen-variant)
+           -> required: T0/T1 honey-oak farm-bench OR rustic kitchen
+           -> required anchors: honey-oak/barn-board wall + 3+ herb
+              jars + ceramic teapot/copper kettle + window with
+              outdoors + visible patina
+           -> BREAKS if: sterile clinic ("50 years on the farm" dies)
+
+         RETAIL-WITNESS OPERATOR (master-salvora Costco, master-shen
+         Walmart)
+           -> required: T0-retail Costco/Walmart aisle
+           -> required anchors: store signage (yellow Costco / Walmart
+              logo) + fluorescent industrial ceiling + blurred ordinary
+              shoppers + actual store-stocked product
+           -> BREAKS if: studio shot ("ordinary-shopper-with-secret"
+              evaporates)
+
+         CARIBBEAN HERBALIST (rastajahmeil, mama-rasta)
+           -> required: T0/T1 Caribbean sunroom
+           -> required anchors: bamboo wall + Rasta+US flags + 3+ herb
+              jars on shelving + honey-oak table + warm amber light
+           -> BREAKS if: cultural anchors removed (lineage-claim is
+              VISUAL not narrative)
+
+         MODERN-CLINIC SEXY-DOCTOR / KORELLA F-to-F-about-M
+         (nuri, black-female-practitioner kitchen-flip)
+           -> required: T0 clean kitchen for HOOK + T2 office for
+              OUTRO (DUAL-FLIP both required)
+           -> HOOK anchors: clean kitchen counter + window-soft light
+              + warm domestic + persona kitchen-anchor pose
+           -> OUTRO anchors: framed credentials + clean desk +
+              window with skyline
+           -> BREAKS if: single-setting reduction (kitchen-only OR
+              office-only) — corpus shows BOTH required for trust
+
+     Q7. SETTING RESONATES WITH AUDIENCE? Setting carries TWO signals:
+         "the world I live in" (peer / kitchen-table / Costco aisle)
+         OR "the credible expert space" (clinic / diploma office /
+         herbalist sanctuary). Setting that achieves NEITHER =
+         forgettable. DUAL-FLIP achieves both = highest trust.
+
+         AUDIENCE x SETTING corpus matrix:
+         - WOMEN 40+ -> kitchen + clinical exam-room DUAL-FLIP
+           (kitchen-only = amateurish; office-only = pharmaceutical)
+         - MALE 40-70 US (Mike) -> retail warehouse + clinic +
+           luxury-apartment OUTRO (avoid pure home-kitchen — reads
+           as wife giving advice)
+         - F-to-F-about-M -> kitchen + office DUAL-FLIP (Korella
+           saffron canonical, 4 corpus instances)
+         - NEUTRAL/MIXED -> T2 clinical authority (Dr-Sage husband-
+           skeptic exam-room -> office DUAL-FLIP)
+         - BLACK WOMEN -> Caribbean sunroom + bamboo + cultural flags
+
+         REJECT hook if:
+         - Background not visible in HOOK (only persona-on-bokeh)
+         - Background ambiguous (could be any room)
+         - Background contradicts persona (clinical persona in kitchen
+           / folk-elder in clinic / retail-witness in studio)
+         - Background resonates with NO audience (luxury venue for
+           cold-prostate Mike / sterile clinic for Caribbean-herbalist
+           niche)
+         - "Generic talking-head studio with bokeh" — zero authority,
+           zero resonance, this is the failure mode of "When The Heat
+           Hits At Night" Ogheci-bedroom hook.
+
+     Korella menopause-saffron specific: pivot to the validated
+     Korella F-to-F-about-M T0-kitchen-DUAL-FLIP-to-T2-office pattern
+     (4 corpus instances). HOOK foreground = saffron threads in warm-
+     water bowl + ripe banana on marble. HOOK background = clean
+     domestic kitchen (warm light + window-soft + marble counter +
+     Black-female-practitioner kitchen-anchor pose). OUTRO background
+     = T2 office (diploma + US flag + clean desk). The hot-flash
+     story-beat MOVES TO THE DIALOGUE ("when the heat wakes you at
+     2 a.m., this is what your body is missing..."), but the visual
+     frame is the validated saffron-prop kitchen -> office DUAL-FLIP.
+     DO NOT default to "woman alone in dim bedroom" — fails Q1, Q2,
+     Q3, Q6, Q7 (only Q4 and Q5 might pass).
+
+     If ANY of Q1-Q7 fail, REJECT the hook and propose 3 alternatives
+     pulling from the corpus surrogate library in template_reference.md
+     §"Corpus-grounded surrogate library" + persona x setting
+     authority pairings before emitting the videos/*.md.
 
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves

@@ -1144,19 +1144,100 @@ The "When The Heat Hits At Night" failure mode: LLM picked an internal symptom (
 
 v598 elevates the hook-image-power decision from "implicit" (buried in hook-patterns.md catalog) to "explicit gate that blocks output." The bundle TASK block now self-validates against this test before emitting.
 
-### Decision rule summary
+### Q6. BACKGROUND AUTHORITY MATCH — does the setting confer the persona's authority?
+
+**Source: 2026-05-06 owner observation** *"and study also the backgrounds, especially because they have to resonate with the audience and have to give authority."* The HOOK frame is not just the foreground prop — the BACKGROUND signals what kind of authority the persona has. A clinical persona in a kitchen sounds like a stranger; a folk-wisdom elder in a sterile clinic sounds like a fraud. The setting MUST match the persona's authority type or the entire hook collapses.
+
+**Corpus-grounded persona × setting authority pairings** (24-decode audit, 2026-05-06):
+
+| Persona archetype | Required setting | Required visible anchors (0-2s) | What BREAKS authority |
+|---|---|---|---|
+| **Clinical doctor** (dr-kim, dr-sage, dr-aesthetic, podiatrist-blood-sugar, black-male-doctor, black-female-practitioner office-flip) | T2 clinical exam room or T2 diploma office | At least ONE: framed diploma (gold frame, classical type) / US flag / anatomy poster / equipment cart (white drawers) / exam stool / IV pole / surgical pen in hand | Filming in domestic kitchen → MD authority collapses; viewer reads "stranger giving advice" |
+| **Folk-wisdom elder** (master-chen, master-salvora kitchen-variant, old-earl, icelandic-elder, master-shen) | T0/T1 honey-oak farm-bench OR Caribbean sunroom OR rustic kitchen | Honey-oak/barn-board wall + 3+ herb jars + ceramic teapot/copper kettle + window with outdoors visible + visible patina/weathering | Filming in sterile clinic → "50 years on the farm" credibility dies; lived-experience authority requires lived-environment props |
+| **Retail-witness operator** (master-salvora Costco-variant, master-shen Walmart-variant) | T0-retail Costco produce / Walmart aisle | Visible store signage (Costco yellow spark / Walmart logo) + fluorescent industrial ceiling + blurred ordinary shoppers (social-proof) + actual store-stocked product on display | Filming in studio → "ordinary-shopper-with-secret" credibility evaporates; secret-in-plain-sight requires real public space |
+| **Caribbean herbalist** (rastajahmeil, mama-rasta) | T0/T1 Caribbean sunroom | Bamboo wall + Rasta + US flags + 3+ herb jars on shelving + honey-oak table + warm amber light | Removing dreadlocks/tam/flags → ancestral lineage-claim is visual not narrative; persona without visual lineage anchors fails |
+| **Modern-clinic sexy-doctor** (nuri, black-female-practitioner kitchen-flip) | T0 clean kitchen for HOOK + T2 office for OUTRO (DUAL-FLIP) | HOOK: clean kitchen counter + window-soft light + warm domestic; OUTRO: framed credentials + clean desk + window with skyline | Single-setting reduction (kitchen-only OR office-only) → loses 33% trust per corpus dual-flip evidence; both warmth + credentials needed |
+
+**Hook-time background discipline (0-2s requirement)**:
+- The 0-2s frame MUST contain ≥2 props signaling the authority type — never ambiguous
+- Lighting mood must match: clinical = cool-white LED / folk = warm domestic gold / retail = fluorescent harsh / luxury = window-bright
+- Persona body language must match: clinical = positioned with equipment-or-patient / folk = hands-on-work / retail = operating-product / luxury = relaxed
+
+### Q7. AUDIENCE RESONANCE — does the setting look like the audience's world or a credible authority space?
+
+The setting carries TWO simultaneous signals: it must either look like *"the world I live in"* (peer / kitchen-table / Costco aisle resonance) OR *"the credible expert space I trust"* (clinic / diploma office / herbalist sanctuary). Setting that achieves neither = forgettable. Setting that achieves both via DUAL-FLIP = highest trust per corpus.
+
+**Corpus-validated audience × setting resonance matrix**:
+
+| Audience axis | Resonates with | Bridges to via DUAL-FLIP | Anti-resonance (avoid) |
+|---|---|---|---|
+| **Women 40+ (largest segment)** | Domestic bright kitchen (warm peer) + clinical exam-room (credible) | Kitchen-warmth → office-credentials hard cut | Kitchen-only = amateurish; office-only = cold/pharmaceutical |
+| **Male 40-70 US (Mike Henderson)** | Retail warehouse (accessible "I shop here") + clinic (male-doctor-male-patient = shame removed) + luxury apartment (success-status fantasy) | Costco accessibility → clinical proof | Pure home-kitchen authority (reads as wife giving advice not "the guy") |
+| **F→F-about-M** | Kitchen + office DUAL-FLIP (Korella saffron canonical: Black-female-practitioner kitchen-warmth → diploma office credentials) | Kitchen recipe-warm → office credibility-anchor | Single-setting fails per 4-corpus-instance evidence; bedroom is non-resonant for transactional/conspiratorial F→F register |
+| **Neutral / male+female** | T2 clinical authority (Dr-Sage husband-skeptic exam room → office cinnamon-pour) | Exam-room-with-bystander → solo-office recipe | Pure folk-wisdom register has narrower resonance for mixed audiences |
+| **Black women** | Caribbean sunroom (ancestral) + bamboo + cultural flags | (single-setting often sufficient when persona+lineage anchors are strong) | Generic clinic = lineage authority lost |
+
+**Hook-image rejection criteria (Q6+Q7 combined)**:
+
+- Background not visible in HOOK frame? → REJECT — operator sees only persona-floating-on-blur, no authority signal
+- Background visible but ambiguous (could be any room)? → REJECT — needs ≥2 anchor props
+- Background contradicts persona archetype? → REJECT (clinical persona in kitchen / folk-elder in clinic / retail-witness in studio)
+- Background resonates with NO audience (luxury venue for Mike Henderson cold-prostate ad, sterile clinic for Black-women-Caribbean-herbalist niche)? → REJECT
+- Background is "generic talking-head studio with bokeh"? → REJECT — zero authority signal, zero resonance, this is the failure mode of the "When The Heat Hits At Night" Ogheci-bedroom hook
+
+### Decision rule summary (expanded — 7 questions)
 
 ```
-For every videos/*.md draft:
-  Q1. PHYSICAL OBJECT in HOOK? — yes/no
-  Q2. VISIBLE MOTION 0-2s?    — yes/no
-  Q3. PUN / METAPHOR / SCENE? — yes/no
-  Q4. NOVELTY (v591) PASSED?  — yes/no
-  Q5. MOTION-TEXT-MATCH (v592)? — yes/no
+For every videos/*.md draft, the FIRST IMAGE must pass all 7:
+  Q1. PHYSICAL OBJECT in HOOK foreground?         — yes/no
+  Q2. VISIBLE MOTION 0-2s?                        — yes/no
+  Q3. PUN / METAPHOR / SCENE-MIRROR?              — yes/no
+  Q4. NOVELTY (v591) PASSED?                      — yes/no
+  Q5. MOTION-TEXT-MATCH (v592)?                   — yes/no
+  Q6. BACKGROUND-AUTHORITY MATCHES PERSONA?       — yes/no  (≥2 anchor props visible 0-2s)
+  Q7. SETTING RESONATES WITH AUDIENCE?            — yes/no  (peer-world OR credible-authority OR DUAL-FLIP)
 
 If ALL yes → ship.
-If ANY no → reject hook, propose 3 alternatives from corpus surrogate table.
+If ANY no → reject hook, propose 3 alternatives:
+  - Replace foreground prop (Q1-Q3) using corpus surrogate library
+  - Re-anchor the background (Q6) using persona × setting authority pairings
+  - Re-target the setting (Q7) using audience × setting resonance matrix
 ```
+
+### Corpus-grounded surrogate library (replaces speculative entries — 24-decode evidence)
+
+| Niche | HOOK foreground (corpus-grounded) | HOOK background (corpus-grounded) | Source video |
+|---|---|---|---|
+| ED / male performance | Single banana ripped from pyramid bunch + bunch SLAM-collapse on display lip | T0-retail Costco produce aisle (yellow Costco signage + fluorescent industrial ceiling + blurred shoppers + plus-sized white-male bystander reaction) | master_salvora_costco_banana |
+| ED / saffron-vitality (F→F-about-M) | Fresh ripe banana on marble + amber saffron mug at counter | T0 clean kitchen (warm domestic light + window-soft + marble counter + persona kitchen-anchor pose) DUAL-FLIP to T2 office (diploma + credentials) for OUTRO | corella_saffron_v578 / v581 / saffron_male_v577 / saffron_vitality_v577 (4-corpus F→F-about-M) |
+| Belly fat / visceral | Patient's exposed distended belly + clinician's RIGHT-index TAP + LEFT-hand gesture | T2 clinical exam room (bright LED + equipment cart + exam stool + diploma + US flag + anatomy poster) | dr_kim_belly_burn_male / oldearl_visceralfat_clinic / decoded_corella_saffron_blood_sugar_v584 |
+| Belly fat / Costco-cabbage variant | Whole purple-red cabbage SLAM onto counter-display + leaves SCATTER | T0-retail Costco produce (signage + fluorescent + cardboard slope-display + shoppers) | master_salvora_costco_cabbage |
+| Belly fat / tea-warm-elder variant | Amber tea POUR from glass mug | T0-T1 Caribbean sunroom (bamboo wall + herb jars + Rasta+US flags + honey-oak table + amber light) | rastajahmeil_fat_melt |
+| Belly fat / liver-reframe | Patient's exposed belly + gloved-right-hand gesture toward liver area + husband-skeptic bystander | T2 clinical exam room (3-person blocking: clinician + patient + bystander husband) → DUAL-FLIP to T2 office for cinnamon-pour recipe | decoded_healthylifesage_DX7iVuRMzUM |
+| Hair loss (male) | Cut onion half SLAM on crown + GRIND clockwise + juice SPRAY 3-4 droplets | T2 clinical exam room (bright LED + diploma + clinical pen visible) → DUAL-FLIP to NYC luxury apartment (corner window + skyline + beige sectional + fiddle-leaf fig) for OUTRO | dr_kim_hair_regrowth_male |
+| Tonsil stones | Chrome water-flosser tip + mannequin head mouth-up + flosser LOWERS toward stones | T1 honey-oak farm workbench + barn-board wall + reading-lamp glow + ceramic teapot + dried herb jars | oldearl_tonsil_healer |
+| Back lump / sagging skin | Female-patient exposed back + black surgical-marker PRESS + TRACE curved line + tick mark | T2 clinical exam room (bright LED + diploma + equipment cart) → DUAL-FLIP to NYC luxury apartment for OUTRO | dr_kim_back_lump / decoded_back_bump_transformation |
+| Varicose veins | Patient's exposed calf with visible vein cluster + gloved-finger POINT + MOVE-IN closer + hand-opens toward swelling | T2 clinical exam room (clinical authority + visible patient-table + cool-white LED) | decoded_varicose_vein_transformation |
+| Joint inflammation / brain fog | Whole salmon SLAM on checkout + ice SPLASH + cleaver swing | T0-retail Costco seafood counter (Fresh Catch signage + ice display + fluorescent + shoppers) | master_salvora_costco_salmon |
+| Probiotic / gut | Cup steady at chest + downward TILT to read label + ROTATE back + dismissive SHAKE + knot eyebrows | T0 honey-oak kitchen + bright domestic + ceramic teapot visible | master_chen_three_things |
+| Pest control / cockroach | Dead cockroach in glass jar + LEFT pinched-fingers + VIOLENT vertical sugar JET + ATOMIZE mist | T0 clean kitchen + window-light + clean countertop (operator persona) | dr_kim_cockroach_bait |
+| Anti-aging / skin | Papaya face-mask + seed-jar lift to camera + mask-of-product reveal | T0 Spanish patio (stucco wall + warm window light + botanical) | decoded_meta_AQPaHJENd45_papaya_skin |
+| Bladder / nocturia (corpus-evidence) | Tea mug stir + clinician at desk demo | T2 hospital exam room (clinical + IV pole + diploma + US flag) | decoded_bladder_tea_transformation / decoded_belly_burn_tea |
+| Big-Soap / chemical conspiracy | Product bottle brand-bashing listicle reveal | T0-retail Walmart parking lot HOOK → Walmart aisle ×4 brands → T1 personal-car-with-windshield-Walmart for TCM CTA | decoded_herbal.health.tips_DX5QQZOhRd1 |
+| Ozempic-alternative folk-remedy | Farm prop + folksy demo (warm-elder authority) | T0 farm kitchen (honey-oak + barn-board + ceramic + window with outdoors) | decoded_icelandicwisdom_DX5OIgip1Rq_belly_fat |
+
+**The principle**: never invent a new niche/setting pairing — pull from the corpus first. If the niche is HOOK-HARD (no corpus precedent — hot flash, brain fog, anxiety), pull a setting/persona pairing from a CORPUS-VALIDATED ADJACENT NICHE (e.g. menopause-saffron should reuse the Korella saffron-vitality T0-kitchen-DUAL-FLIP-to-T2-office pattern that has 4 corpus instances, not invent a dim-bedroom).
+
+### Worked example — fixing "When The Heat Hits At Night"
+
+The Ogheci hot-flash output failed because:
+- Q1: NO foreground prop (just a person in bed)
+- Q2: NO visible motion (sleeping/turning is not a force-verb)
+- Q3: NO visual pun (hot flash has no inherent visual)
+- Q6: BACKGROUND was a dim bedroom — gives ZERO authority (Ogheci has no persona-archetype anchor; no diploma, no herb jars, no Costco signage, no clinic equipment)
+- Q7: Resonates with NO audience (women 40+ with hot flashes don't want to see another woman in another dim bedroom — they live that already; it's not a peer space because it's identity-confirming-suffering, and it's not an authority space)
+
+The corpus-grounded fix: pivot to the Korella saffron-vitality T0-kitchen-DUAL-FLIP pattern (4 corpus instances). HOOK foreground = saffron threads in warm-water bowl + ripe banana on marble. HOOK background = clean domestic kitchen (warm light + window-soft + marble counter + Black-female-practitioner kitchen-anchor pose). OUTRO background = T2 office (diploma + US flag + clean desk). The hot-flash story-beat moves to the dialogue ("when the heat wakes you at 2 a.m., this is what your body is missing..."), but the visual frame is the validated saffron-prop kitchen → office DUAL-FLIP.
 
 ---
 
