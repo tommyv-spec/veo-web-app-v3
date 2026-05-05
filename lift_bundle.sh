@@ -71,6 +71,7 @@ fi
 BUNDLE_FILES=(
     "wiki/meta/viral-video-pipeline.md"
     "wiki/audience/niche-audience-matrix.md"
+    "wiki/audience/strategy-mechanisms.md"
     "wiki/audience/psychology-of-conversion.md"
     "wiki/audience/audience-mapping.md"
     "wiki/audience/pain-point-language.md"
