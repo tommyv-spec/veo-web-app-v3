@@ -819,6 +819,420 @@ The wiki's lint pass can flag pre-v587 decoded scripts that lack the structured 
 
 ---
 
+## Novelty-gate before HOOK lock (v591)
+
+**Source: Milen Stanchev 2026-04-23 LiB innovation call.** The cheapest freshness filter.
+
+Before authoring locks the HOOK, answer one question:
+
+> **Have I seen this exact visual on any LiB Inspire account?**
+
+- **Yes** → discard. Source a fresh visual via `wiki/strategy/viral-recreation-method.md` §Step 1 (1M-likes floor + outside-LiB-pool sourcing). Don't ship.
+- **No** → ship.
+
+This gate is the cheapest novelty check available — 30 seconds, prevents shipping a banana-smash-equivalent the audience has already skipped past. Pairs with the screenshot-AI-ideate workflow in `wiki/strategy/viral-recreation-method.md`.
+
+Source quote (Milen 2026-04-23 ~00:03:51):
+
+> *"The same angles, but with extremely different visual hook. Something that the market has not seen. Something you don't go and see on the LiB Inspire account."*
+
+Generate-side rule. The decode side observes whatever the source filmed; freshness is a generate-side production decision.
+
+---
+
+## Motion-text-match in HOOK (v592)
+
+**Source: Milen Stanchev 2026-04-23 LiB innovation call (~00:23:35).** The verb-object in the voiceover at second N must be matched by a visible motion in-frame at second N.
+
+| Voiceover verb | Required visible motion |
+|---|---|
+| smash | visible smash motion |
+| pour | visible pour |
+| squeeze | visible squeeze |
+| show | physical reveal |
+| add | visible adding |
+
+No abstract voiceover-over-static-shot in HOOK scenes. **Anti-pattern** (Milen ~00:46:33): static prop in hand while voiceover talks about the prop ("this banana") — flagged as "boring." Either the prop moves or the voiceover changes.
+
+### Generalization beyond v539
+
+v539 was weird-action-prop specific (SLAM/POUR/SPRAY/SMASH/GRIND). v592 generalizes to **verbal-only HOOKs** (SYMPTOM-CASCADE / NUMBERED-LIST / NOT-X DISMISSAL): the visual must still have motion (zoom, dolly, hands gesturing on emphasis words, prop reveal mid-line). Static talking-head at second 0–3 fails the gate.
+
+### Decode-side application
+
+When decoding, flag motion-text-match VIOLATIONS as anti-patterns in the action_note (the source author's failure, NOT a parser failure). Example: *"Static prop in hand while voiceover names the prop — v592 violation in source; reproduction should add motion."*
+
+### Generate-side application
+
+Per-scene action_note must verify v592 — the verb at second N has a visible motion at the corresponding beat marker in the action_note. Example: *"squeeze" verb lands on visible peak-squeeze beat in mid-clip — verified.*
+
+---
+
+## Image cardinality — universal (v594)
+
+**Decoded shots ≠ generated images.** PySceneDetect detects *histogram cuts* (camera nudges, gesture peaks, small zoom shifts) — it does NOT detect compositions. **A producer films N setups; PySceneDetect logs M cuts where M ≥ N.** Image cardinality matches what was actually filmed (the producer's setup count), NOT what PySceneDetect threshold-detected.
+
+### The three cardinalities (must be distinguished — every artifact, decode + generate)
+
+| Cardinality | What it counts | Where it lives |
+|---|---|---|
+| **PySceneDetect shots (N)** | Histogram cuts | `manifest.json` — analysis units (motion / dense-frame / dialogue overlap) |
+| **Distinct compositions (M, M ≤ N)** | Setups the producer actually filmed | `## Images` section — one `### Image M` block per composition |
+| **Dialogue beats / clips (K)** | Voiceover units / Veo render units | `## Storyboard` (generate) / `## Veo 3.1 Final Prompts` (decode) |
+
+### Decision per shot/scene
+
+For each shot/scene during authoring, ask:
+
+1. **Does setting / camera position / blocking change vs. the prior shot/scene?** — if YES, new image
+2. **Is there a visible state-evolution** (recipe ingredient added, transformation Day-1→Day-14, prop transformed)? — if YES, new chained image (v580 / v541 / v590 chain-required)
+3. **Otherwise** — reuse the prior image via `- **image:** image_N` pointing to the shared image. Veo's action_note arc handles the gesture / expression / dialogue variation within the clip from a single visual anchor.
+
+Combined: **distinct composition OR state-evolution → new image; otherwise reuse**.
+
+### Universal application — both decode and generate sides
+
+Originally drafted as generate-side-only ("decode-side stays 1:1 with PySceneDetect shots — faithful observation"). **Revised 2026-05-05 to be universal**: faithful observation = describing what the source IS (the producer's actual setup count), NOT blindly transcribing PySceneDetect output. A 12-image decoded artifact for a 5-composition source is *less accurate* than a 5-image artifact, because the source HAS 5 compositions.
+
+- **Decode** (`raw/decoded_*.md`): `## Images` section emits M descriptions; per-shot motion / dense-frame / dialogue analysis stays 1:1 in `manifest.json`.
+- **Generate** (`videos/*.md`): `## Images` section emits M descriptions; `## Storyboard` scene blocks reference shared images via `- **image:** image_N` (multiple scenes can map to the same image).
+
+### Typical cardinality
+
+| Pattern | Image count |
+|---|---|
+| 3 talking-head scenes at same desk with different gestures | **1 image** (gesture variation in Veo) |
+| 4 recipe scenes with cumulative ingredient state-evolution | **4 chained images** (v580) |
+| 2 scenes with patient before/after outfit-change | **2 chained images** (v541) |
+| HOOK in clinical room + EXPLAIN in office (different setting) | **2 distinct images** |
+| Empty-desk close-up with declamatory then tent then palms-up gestures | **1 image** (gestures handled by Veo) |
+
+For talking-head + recipe-pivot videos: typically **3-6 images for 8-12 shots**. For long-form videos with listicle structure: **6-8 images for 30-50 shots**.
+
+### What stays per-shot (analysis grammars — these don't consolidate)
+
+- v585 motion classification
+- v588 dense-frame action-arc walk
+- v589 Half C state magnitude
+- Dialogue overlap timestamps
+- Per-clip Veo final prompts (one per dialogue clip — each notes which underlying image it uses)
+
+Only the `## Images` section consolidates.
+
+### Worked examples
+
+- `decoded_healthylifesage_DX7iVuRMzUM.md`: 12 PySceneDetect shots, 12 dialogue beats, **5 compositions** (clinic 3-person blocking shots 1-3 / cinnamon-pour shot 4 / lemon-squeeze shot 5 chain / lemon-aloft EXPLAIN shot 6 chain / empty-desk close-up shots 7-12).
+- `decoded_herbal.health.tips_DX5QQZOhRd1.md`: 44 PySceneDetect shots, 25 dialogue beats, **6 compositions** (parking-lot HOOK shots 1-2 / Walmart-Dawn portrait shots 3-11 / Palmolive 12-19 / Joy 20-26 / Ajax 27-34 / car-with-Walmart-windshield 35-44). 86% compression ratio.
+- `videos/dr-sage-belly-liver-husband-bystander.md` (generate-side): 8 scenes, **5 images** (clinic 3-person Scenes 1-3 / cinnamon-pour Scene 4 / lemon-squeeze Scene 5 chain / EXPLAIN Scene 6 chain / empty-desk Scenes 7-8).
+
+### Compounds with v590 (generate side)
+
+v590 says "chain only the 4 exceptions"; v594 says "generate only the distinct compositions." Together they minimize chain depth AND image count.
+
+### Why this matters
+
+| Reason | Impact |
+|---|---|
+| **Banana 2 generation cost** | Fewer generations per video (generate side) |
+| **Visual consistency** | Banana 2 silently drifts persona / setting / bystander details across "near-identical" compositions when forced to generate them separately; sharing an anchor eliminates drift |
+| **Faster ship time** | Fewer parallel slots needed |
+| **Decode quality** | M-image artifact for an M-composition source IS more accurate than N-image artifact |
+
+### Migration
+
+Pre-v594 decoded artifacts (1:1 shot-to-image) are valid as historical record. New decodes from this commit forward MUST consolidate per composition. Existing `videos/*.md` artifacts authored under shot-to-image cardinality should be re-audited and consolidated where possible.
+
+---
+
+## LLM-agnostic Stage 4d decode interface (v595)
+
+**Generalizes v589 Half A from a fixed cascade to a provider-agnostic interface contract.** Any vision-capable LLM that satisfies the Stage 4d input/output contract is a valid decode provider.
+
+### The interface contract
+
+**INPUT** the LLM receives:
+1. PySceneDetect `shots.json` (timestamps + boundaries)
+2. v588 dense-extracted PNG frames per shot (start + midpoint + end + 5 dense when v588 triggers fire)
+3. v578 whisper `transcript.json` (per-segment dialogue + timestamps)
+4. v585 `motion.json` (per-shot Farneback classification)
+5. v589 Stage 4d prompt template specifying the schema
+
+**OUTPUT** the LLM must produce — `stage4d.json`:
+
+```json
+{
+  "shots": [
+    {
+      "shot_index": 1,
+      "start": 0.0, "end": 5.30,
+      "static_composition": "<v586 six-block compact description>",
+      "action_arc": {
+        "start_state": "<observable state at t=start+0.1>",
+        "mid_state": "<observable state at midpoint>",
+        "end_state": "<observable state at t=end-0.1>",
+        "magnitude": "COMPLETE | PARTIAL | MINIMAL",
+        "verbs_observed": ["<verb1>", "<verb2>", ...]
+      },
+      "audio": {"ambient": "<sound cues>", "music": "<music notes or 'none'>"},
+      "veo_reproduction_hints": {
+        "use_blend_to_next_scene": false,
+        "needs_platform_future_image_end": false,
+        "transition_prompt": "<cue>"
+      }
+    }
+  ]
+}
+```
+
+After Stage 4d output lands, **v594 consolidation** runs over it: per-shot `static_composition` strings cluster into per-composition image descriptions for the `## Images` section.
+
+### Provider catalog
+
+Providers ranked by recommended priority for a typical operator session:
+
+| Rank | Provider | Cost | Setup | When to use |
+|---|---|---|---|---|
+| **1** | **Claude in-session** (Claude Code Read tool with PNG image support) | Free for operator (Claude Code subscription) | None — already running | **Default when operating inside Claude Code.** Used for the 2026-05-05 healthylifesage + herbal.health.tips decodes. |
+| 2 | **LM Studio** (local, free) | Free | Install [LM Studio](https://lmstudio.ai); vision-capable GGUF (e.g. `gemma-4-E2B-it-GGUF` with mmproj); local server at port 1234 | Headless / batch decoding |
+| 3 | **Gemini API** | ~$0.01 per 45s on `gemini-2.5-flash` | Set `GEMINI_API_KEY`; native MP4 upload at 1fps + audio + per-second timestamps | Best for motion-heavy / multi-character videos |
+| 4 | **OpenAI GPT-4o-vision** | ~$0.01-0.02 per dense frame | Set `OPENAI_API_KEY`; image-by-image API | Operator already has OpenAI billing |
+| 5 | **Anthropic Claude API direct** | Similar to GPT-4o per image | Set `ANTHROPIC_API_KEY`; image-by-image API | Headless / non-Claude-Code automation |
+| 6 | **Ollama local with vision model** | Free | `ollama serve` + `llava` / `llama3.2-vision` | Operator wants free + headless |
+| 7 | **OpenRouter** | Paid gateway | Single API key abstracts over many providers | Operator wants provider flexibility behind one bill |
+| 8 | **Human-walk template** (fallback) | Free | None | Always-available fallback |
+
+### Provider selection rule
+
+```
+if operating inside a Claude Code session:
+    → use Claude-in-session (provider 1)  # default
+elif LM Studio local server is up at localhost:1234:
+    → use LM Studio (provider 2)
+elif GEMINI_API_KEY is set:
+    → use Gemini API (provider 3)
+elif OPENAI_API_KEY is set:
+    → use GPT-4o-vision (provider 4)
+elif ANTHROPIC_API_KEY is set:
+    → use Claude API direct (provider 5)
+elif Ollama is running locally:
+    → use Ollama vision model (provider 6)
+elif operator has OpenRouter configured:
+    → use OpenRouter (provider 7)
+else:
+    → write the human-walk template (provider 8) and prompt the operator to fill it
+```
+
+### Invocation
+
+For provider 1 (Claude-in-session): no script needed. Claude walks the dense frames using the Read tool on `_decode_tmp/<source-id>/frames/shotNN_<label>_<t>s.png`, fills the schema in markdown, then v594-consolidates per composition while authoring the decoded artifact directly.
+
+For providers 2–7 (automated):
+```bash
+python code/v589_video_understanding.py path/to/source.mp4
+# auto-cascades through providers; force one with --provider lmstudio|gemini|openai|anthropic|ollama|openrouter|template
+```
+
+For provider 8 (human-walk template):
+```bash
+python code/v589_video_understanding.py path/to/source.mp4 --provider template
+# writes _decode_tmp/<source-id>/stage4d_vlm.json with empty fields + frame paths
+```
+
+### What stays unchanged regardless of provider
+
+- v578 whisper transcription (purpose-built for speech)
+- v585 Farneback optical flow (purpose-built for motion)
+- v588 ffmpeg dense frame extraction (purpose-built for frame I/O)
+- v594 composition consolidation (deterministic post-processing)
+
+Only the Stage 4d VLM step is provider-agnostic.
+
+### Why v595 vs locking to v589 Half A
+
+v589 Half A was implementation-locked to specific providers (LM Studio → Gemini → human-walk). v595 makes it a contract: any vision LLM that satisfies the schema is valid. The implementation script `code/v589_video_understanding.py` may need new `--provider {openai,anthropic,ollama,openrouter}` flags added when those providers are first used; for Claude-in-session no script change is ever needed (Claude reads frames directly via the Read tool).
+
+### Migration
+
+Existing `code/v589_video_understanding.py` cascade (LM Studio → Gemini → human-walk) is a v595-compliant subset. New providers can be added without breaking existing decodes.
+
+---
+
+## VAD matcher bounded lookahead (v596)
+
+**Source: 2026-05-05 belly-fat-tonic export failure analysis.** The `[WhisperVAD]` script-to-audio in-order matcher was advancing its `wi` pointer arbitrarily far when cross-clip audio bleed caused a late whisper word to fuzzy-match a script word. Earlier valid script words got stranded behind the advanced pointer.
+
+### Concrete failure observed
+
+Belly-fat-tonic clip 2 (script: *"every man over forty hits this wall. metabolism quits. waistline doesn't."*):
+
+```
+Whisper bucket (raw heard, with bleed):
+[because, it, tells, every, man, wall., metabolism, quits,, w, you, start, doing, this,, you]
+                       ^script[0,1]   ^^^^script[6,7,8]^^^^               ^bleed-from-clip-3
+
+Pre-v596 matcher behavior:
+- match "every" @ j=3, wi=4
+- match "man" @ j=4, wi=5
+- skip "over" "forty" "hits" (Whisper drops, OK)
+- search "this" from wi=5 to END-of-bucket → finds "this," @ j=12 (clip-3 bleed!)
+- accept, wi=13
+- search "wall" from wi=13 → NOT FOUND (real "wall" was at j=5, stranded behind wi)
+- search "metabolism" → stranded at j=6
+- search "quits" → stranded at j=7
+
+Result: 3/11 matched (every, man, this — where "this" is bleed audio, NOT clip 2 script's "this")
+```
+
+### The fix
+
+Add a `lookahead_window` parameter (default **6**) to `_match_in_order`. Each script word can only search whisper[wi : wi+6] — NOT whisper[wi : end]. If the script word isn't found within the window, fall through (Whisper drop OR out-of-window bleed) without advancing `wi`.
+
+```python
+def _match_in_order(whisper_bucket, script_words,
+                    fuzzy_threshold=0.80,
+                    short_word_threshold=0.95,
+                    lookahead_window=6):    # ← v596 NEW
+    ...
+    for s_word in script_words:
+        ...
+        # v596: bounded search
+        search_end = min(len(whisper_bucket), wi + lookahead_window)
+        for j in range(wi, search_end):
+            sim = SequenceMatcher(None, w_clean[j], s_clean).ratio()
+            if sim >= threshold:
+                kept_indices.append(j)
+                wi = j + 1
+                break
+```
+
+### Post-v596 behavior on the same input
+
+```
+- match "every" @ j=3, wi=4
+- match "man" @ j=4, wi=5
+- skip "over" "forty" "hits" (within wi=[5,11] — none found)
+- search "this" within wi=[5,11] → "this," is at j=12, OUT OF WINDOW → skip
+- search "wall" within wi=[5,11] → FOUND at j=5! Accept. wi=6.
+- search "metabolism" within wi=[6,12] → FOUND at j=6. wi=7.
+- search "quits" within wi=[7,13] → FOUND at j=7. wi=8.
+- skip "waistline" "doesn't" (Whisper drops, none found in window)
+
+Result: 5/11 matched (every, man, wall, metabolism, quits) — bleed "this" correctly classified as filler
+```
+
+### Window sizing rationale
+
+| window | Behavior |
+|---|---|
+| 1-2 | Too tight; misses normal Whisper drops (1-2 fast function words like "a", "the", "to") |
+| **6 (default)** | Absorbs typical Whisper drops while rejecting bleed jumps |
+| 8-10 | Lets some bleed through; observed failure mode in clip 2 (j=12 still in window) |
+| ∞ (pre-v596) | Original strand-behind bug |
+
+For clips with heavy whisper drops (high music background), increase `lookahead_window` per-call. For clips with severe Veo audio bleed, decrease. Default 6 handles 95%+ of observed cases on the 2026-05 corpus.
+
+### What this fix does NOT address
+
+- **Truncated clips at end of video** (e.g. belly-fat-tonic clip 11: script too long for 7.7s window — Veo cut off mid-word). Matcher correctly stops at audible audio.
+- **Whisper genuinely missing words** (e.g. clip 1 "of stubborn" missing). Matcher skips script words it can't find — same behavior pre and post v596.
+- **Veo audio hallucinations** (handled by separate logic — refused-bridge detection on unmatched words with 0.4-0.6 confidence).
+
+### Migration
+
+`code/video_processor.py` line 1151 `_match_in_order` already updated. No call-site changes needed — `lookahead_window` defaults to 6. Per-clip overrides possible via the `lookahead_window` parameter.
+
+### Worked impact estimate (belly-fat-tonic export, 2026-05-05)
+
+Pre-fix: 86/116 script words matched (74%)
+Post-fix expected: ~95-100/116 (~85-90%) — recovers ~9-14 stranded script words across clips 2, 3, 11. Final-export VAD segments will retain those previously-cut dialogue ranges.
+
+---
+
+## Strict-header platform contract (v593)
+
+**The platform parser (`code/image_platform.py`) uses STRICT regexes — silent on failure.** Bad headers don't error, they're skipped, and you get `Parse error: No scenes found in the markdown` at import.
+
+### Strict header regexes
+
+```python
+^###\s+Image\s+(\d+)\s*$    # ### Image N — integer + nothing else
+^###\s+Scene\s+(\d+)\s*$    # ### Scene N — integer + nothing else
+```
+
+### Required Image block schema
+
+```markdown
+### Image N
+- **reference_image:** image_M | none      ← optional; defaults to none
+- **product_image:** <name>                ← optional (v581 product binding)
+- **Image prompt:**
+  ```
+  <Banana 2 six-block prompt>
+  ```
+```
+
+The fenced **Image prompt** block is required. The parser only reads the bullet fields above and the FIRST fenced block after `**Image prompt:**`.
+
+### Required Scene block schema
+
+```markdown
+### Scene N
+- **image:** image_N            ← REQUIRED — references which Image block
+- **clip_mode:** fresh|continue|blend     ← optional
+- **transition:** cut|null|blend          ← optional (alias: scene_transition)
+- **visual register:** <text>             ← optional, em-dash splits at first " — "
+- **rhythm tier:** <text>                 ← optional
+- **speaker:** on-camera|voiceover|auto   ← optional, normalized via synonym table
+- **line:** <dialogue text>               ← REQUIRED, ≥1 per scene
+- **action_note:** <single-line prose>    ← optional, attaches to most recent line
+
+# multiple line+action_note pairs allowed in ONE scene block:
+- **line:** <second dialogue line>
+- **action_note:** <second action_note prose>
+```
+
+### action_note must be a single line
+
+The bullet regex captures `(.+?)\s*$` per line — multiline structured forms (bulleted Cinematography/Subject/Action/Context/Style) will NOT parse; the parser sees only the first line. Use **inline prose** with `[Start beat 0-Xs]`, `[Mid-clip beat]`, `[End beat]` markers in one continuous string.
+
+### Speaker synonyms (parser-accepted)
+
+| Canonical | Accepted spellings (case-insensitive, dashes/spaces/underscores ignored) |
+|---|---|
+| `on-camera` | on-camera, on camera, on_camera, dialogue, speaks, spoken, lip-sync, character, character speaks |
+| `voiceover` | voiceover, voice-over, vo, narration, off-screen, narrator, narrated |
+| `auto` | auto, detect, default, "" (empty) |
+
+### Block boundaries
+
+Scene/Image blocks end at the next `### Scene N` / `### Image N` / `## <Capital>` heading.
+
+### Pre-import verification (mandatory)
+
+Before pushing a `videos/*.md` to the platform, run:
+
+```bash
+python -c "
+import re
+text = open('videos/<file>.md', encoding='utf-8').read()
+imgs = re.findall(r'^###\s+Image\s+(\d+)\s*\$', text, re.MULTILINE)
+scns = re.findall(r'^###\s+Scene\s+(\d+)\s*\$', text, re.MULTILINE)
+print(f'Images: {len(imgs)}  Scenes: {len(scns)}')
+"
+```
+
+If either count is 0 (or fewer than expected), check for header suffixes — the most common failure mode.
+
+### Splitting a scene by clip (v577 word budget)
+
+Add a second `- **line:**` + `- **action_note:**` pair within ONE `### Scene N` block — never via `#### Scene Na` h4 sub-headers (h4 is parser-rejected).
+
+### Migration
+
+Pre-v593 markdowns with descriptive header suffixes (e.g. `### Image 1 — HOOK clinical-exam`) silently fail import. Author all new artifacts to v593 strict format from this commit forward.
+
+---
+
 ## Image prompt conventions (Nano Banana 2)
 
 Image prompts are written for Nano Banana 2 with a persona's character reference image passed externally on every generation. The conventions below keep prompts tight, subject identity locked, and output style consistent.

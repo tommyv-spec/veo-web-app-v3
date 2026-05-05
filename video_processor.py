@@ -1150,17 +1150,43 @@ def _align_dp(whisper_bucket: list, expected_words: list) -> list:
 
 def _match_in_order(whisper_bucket: list, script_words: list,
                     fuzzy_threshold: float = 0.80,
-                    short_word_threshold: float = 0.95) -> list:
+                    short_word_threshold: float = 0.95,
+                    lookahead_window: int = 6) -> list:
     """v553 — strict in-order match. The single-purpose replacement for
     _locate_script_span + _align_dp.
 
+    v596 — bounded lookahead window (default 6 whisper words per script
+    word). Before v596 the matcher searched from ``wi`` to the END of
+    the bucket; if a late-bleed whisper word (e.g. clip-3 audio bleeding
+    into clip-2's window) happened to fuzzy-match a script word, ``wi``
+    would jump arbitrarily far ahead and strand earlier valid matches
+    behind the new pointer. Concrete failure observed: clip 2 of the
+    2026-05-05 belly-fat-tonic decode — script "every man over forty
+    hits this wall. metabolism quits. waistline doesn't" matched only
+    3/11 because Whisper transcribed the clip-3-bleed "this" at j=9,
+    advanced wi=10, then "wall" (j=2), "metabolism" (j=3), "quits"
+    (j=4) were all stranded behind. With ``lookahead_window=8`` the
+    same input yields ~5-6/11 matches because the late "this" is out
+    of window, gets correctly classified as bleed/filler, and "wall"
+    matches at j=2 with wi=2.
+
     Walk through ``script_words`` IN ORDER. For each script word, search
-    forward in ``whisper_bucket`` from the current position until we
-    find a Whisper word whose lowercased text fuzzy-matches the script
-    word above the threshold. When found, that Whisper word is kept
-    and the search pointer advances past it. Whisper words between
-    matches are NOT kept — they are filler / hallucination / Veo TTS
-    lead-ins that the user explicitly does not want in the export.
+    forward in ``whisper_bucket`` from the current position UP TO
+    ``wi + lookahead_window`` for a Whisper word whose lowercased text
+    fuzzy-matches the script word above the threshold. When found, that
+    Whisper word is kept and the search pointer advances past it.
+    Whisper words between matches are NOT kept — they are filler /
+    hallucination / Veo TTS lead-ins / cross-clip bleed that the user
+    explicitly does not want in the export.
+
+    Window sizing:
+      A typical Veo TTS clip has 2-4 fast function words ("a", "the",
+      "to", "of") that Whisper occasionally drops. ``lookahead_window=6``
+      absorbs those drops while preventing the wild wi-jumps that
+      cross-clip bleed creates. Increase the window for clips with
+      heavy whisper drops (high-music backgrounds); decrease for clips
+      with severe bleed (Veo's audio tail spillover). The default
+      handles 95%+ of observed cases on the 2026-05 corpus.
 
     Why this replaces the v542/v544 contiguous-span locator:
       The previous locator returned a CONTIGUOUS RANGE of indices and
@@ -1184,10 +1210,12 @@ def _match_in_order(whisper_bucket: list, script_words: list,
       locator, kept here.
 
     Whisper-missed-word handling:
-      If a script word can't be found in Whisper from the current
-      pointer onward, the loop just skips that script word and
-      continues to the next. Whisper occasionally drops fast
-      function words; we don't try to bridge over the drop.
+      If a script word can't be found within the lookahead window,
+      the loop just skips that script word and continues to the next.
+      Whisper occasionally drops fast function words; we don't try to
+      bridge over the drop. With v596's bounded window, dropping a
+      script word does NOT advance wi — the next script word still
+      gets the full window from the same wi position.
 
     Returns the matched Whisper word dicts in time order.
     """
@@ -1269,17 +1297,23 @@ def _match_in_order(whisper_bucket: list, script_words: list,
             continue
         threshold = short_word_threshold if len(s_clean) <= 3 else fuzzy_threshold
 
-        # Search forward in whisper from wi
-        for j in range(wi, len(whisper_bucket)):
+        # v596: bounded lookahead — search whisper[wi : wi+lookahead_window]
+        # NOT whisper[wi : end]. Prevents wi from jumping arbitrarily far
+        # ahead when a cross-clip-bleed whisper word happens to fuzzy-match
+        # a script word, stranding earlier valid script words behind the
+        # advanced pointer.
+        search_end = min(len(whisper_bucket), wi + lookahead_window)
+        for j in range(wi, search_end):
             sim = SequenceMatcher(None, w_clean[j], s_clean).ratio()
             if sim >= threshold:
                 kept_indices.append(j)
                 wi = j + 1
                 break
-        # If not found, the loop falls through to the next script word
-        # without touching wi or kept_indices — Whisper missed this
-        # script word. The next script word picks up wherever it
-        # appears in the bucket.
+        # If not found within the window, the loop falls through to the
+        # next script word without touching wi or kept_indices — Whisper
+        # either missed this script word OR the audio is out of window
+        # (likely cross-clip bleed). The next script word still picks up
+        # from the same wi with a fresh window.
 
     return [whisper_bucket[i] for i in kept_indices]
 

@@ -1,281 +1,190 @@
-# Gemini decode prompt — v589 video reverse-engineering
+# Decode prompt — v595 LLM-agnostic invocation wrapper
 
-**Usage:** in Gemini (gemini.google.com or the Gemini API), upload the source MP4 and paste this entire file as the prompt. Gemini natively samples video at 1fps + audio + per-second timestamps.
+**Thin wrapper.** This file is *only* the invocation instructions. The actual decode rules + output skeleton live ONCE in `code/template_new_format.md` (skeleton) + `code/template_reference.md` (rules). Do not duplicate them here.
 
----
-
-## CRITICAL output-format rules (the platform parser depends on these)
-
-The output is fed verbatim to a strict regex parser. Any deviation breaks the build.
-
-1. **DO NOT wrap the entire output in a code fence.** Do not start with ` ``` ` or ` ```markdown `. The output is plain markdown.
-2. **DO NOT use ` ```markdown ` anywhere.** All code fences are bare three-backticks: ` ``` ` (no language tag).
-3. **Image headings are EXACTLY `### Image N`** where N is an integer (e.g. `### Image 1`, `### Image 2`). Capital "I" in "Image". The space and integer matter.
-4. **Scene headings are EXACTLY `### Scene N`** with the same rules.
-5. **References to images use lowercase + underscore: `image_N`** (e.g. `reference_image: image_1`, `image: image_3`). NEVER `Image 1`, `image 1`, `image1`, or `IMAGE_1`.
-6. **Every `### Image N` block MUST contain three fields in this order:**
-   - `- **reference_image:** image_K`  (or `none` for Image 1 / non-chained images)
-   - `- **product_image:** the [product name]`  (ONLY when the image binds the product upload — omit the line entirely otherwise; do NOT write `none`)
-   - `- **Image prompt:**` followed by a bare-fence ` ``` ` block containing the prompt body
-7. **Every `### Scene N` block MUST contain these fields in this order:**
-   - `- **image:** image_K`
-   - `- **clip_mode:** fresh | continue | blend`
-   - `- **transition:** cut | blend | null`
-   - `- **visual register:** <BLOCK_TAG — short descriptor>`
-   - `- **rhythm tier:** <descriptor> (Xw)`
-   - `- **speaker:** on-camera | voiceover`
-   - `- **line:** <verbatim dialogue>`
-   - `- **action_note:** <three-beat motion narrative>`
-8. **No outer wrapper.** The output starts with `<!--` (the HTML header comment block) and ends with the last clip's negative prompt fence. Nothing before, nothing after.
-9. **Chain-reference binding line: SEMANTIC phrase only — no markdown image numbers (v589.1).** Each Banana 2 generation is independent — at job emission only persona + (product) + chain are attached (max 3 inputs). A markdown reference like `Image 4` means nothing to Banana 2 directly. **Required form** for the CHAIN binding line:
-   - **REQUIRED**: `Use the prior-scene reference image to preserve the <setting>, <lighting>, <anchor props>, and continuity from the previous scene.`
-   - **FORBIDDEN**: `Use Image 4 as the visual reference for the previous scene...` (the legacy v581 form — only works via platform substitution and is human-confusing).
-   - The platform substitutes `the prior-scene reference image` → `Image M` (Flow's actual slot) at job emission. Banana 2 reads it semantically AND positionally — robust whether the substitution runs or not.
-10. **Lowercase `image K` in descriptive body prose is FORBIDDEN.** Patterns like `Same X interior as image 5`, `the jar from image 3`, `same as image 1`, `continued from image 4` break: case-sensitive substitution doesn't rewrite lowercase, Banana 2 sees phantom references.
-   - **Required substitutions** in body prose: `as the previous scene` / `from the previous scene` / `same as before` / `the same X` / direct setting description. NEVER `as image K` / `from image K` / `in image K` (lowercase).
+> **Filename note**: keeps the historical name `gemini_decode_prompt.md` for back-compat, but per v595 this prompt works with **any vision-capable LLM that satisfies the Stage 4d interface contract**. Not Gemini-specific.
 
 ---
 
-## Role
+## Single source of truth (do NOT duplicate)
 
-You are a video-understanding assistant for a viral-ad reverse-engineering pipeline. Your output drives generative-video re-rendering (Veo 3.1) and image generation (Nano Banana 2). The decoded markdown becomes a **reproduction-ready artifact**: feeding any clip's prompt back to Veo 3.1 should re-render the source clip closely.
-
-## Input
-
-I'm uploading a viral short-form video (typically 30-90s, 9:16). Decode it under the v589 schema below.
-
-## Output structure (literal — copy this skeleton)
-
-The block below is a literal skeleton. Replace `<...>` placeholders with real content. Keep field names, heading levels, and bare-fence syntax exactly as shown.
-
-````
-<!--
-  DECODED FROM SOURCE: <filename or url>
-  Source specs: <duration>s duration, <W>x<H>, <fps>fps, codec=<codec>.
-
-  ═══════════════════════════════════════════════════════════════════
-  PIPELINE USED FOR THIS DECODE (v579 + v585 + v586 + v587 + v588 + v589)
-  ═══════════════════════════════════════════════════════════════════
-  Decoded via Gemini native video understanding (1fps + audio + per-second timestamps).
-  Whisper.cpp not run — Gemini transcription is the dialogue source.
-  All v586 grammar + v587 sections + v588 dense-frame discipline + v589 absolute-magnitude rule applied.
-
-  ═══════════════════════════════════════════════════════════════════
-  STRUCTURE: <N> scenes, <M> clips
-  ═══════════════════════════════════════════════════════════════════
-  • Scene 1 <BLOCK_TAG>: <one-line summary>
-  • Scene 2 <BLOCK_TAG>: <one-line summary>
-  ...
-
-  ═══════════════════════════════════════════════════════════════════
-  RULE-VARIANT NOTES
-  ═══════════════════════════════════════════════════════════════════
-  V539 HOOK variant: <force-verb / clinical-markup / diagnostic-press / symptom-curiosity / banana-pun / fat-melt / ...>
-  V541 OUTFIT-CHANGE: applied | NOT APPLICABLE — <reason>
-  V580 RECIPE STATE-EVOLUTION: applied | partial | NOT APPLICABLE — <reason>
-  V573 PRODUCT BINDING: applied (scenes <X, Y, Z>) | NOT APPLICABLE — <reason>
-  V585 MOTION CAPTURE: <camera-move classifications observed>
-  V589 ABSOLUTE-MAGNITUDE: <which clips are state-evolution + magnitude COMPLETE/PARTIAL>
--->
-
-**Video:** <one-line title>
-**Persona:** <archetype>
-**Setting:** <Tier 0/1/2 — single or multi>
-**Duration:** <X>s
-**Structure:** <HOOK N / RECIPE N / EXPLAIN N / AUTHORITY N / PRODUCT N / CTA N>
-**Video mode:** storyboard
-**Auto-split:** off
-
----
-
-## Ingredients
-
-| Name (used in prompts) | Type | Description | Source |
-|---|---|---|---|
-| `the main character` | character | <archetype + ethnicity + age band — never inline-described per v553.1> | External persona upload — Flow slot 0 (Image 1) |
-| `the [product name]` | product | <only if branded product visible; omit row if no product> | External product upload — Flow slot 1 (Image 2) |
-
----
-
-## Images
-
-### Image 1
-- **reference_image:** none
-- **Image prompt:**
-```
-Use the uploaded character reference image for the main character — match identity, hair, clothing exactly.
-
-<v586 six-block walk: Subject (pose / eye direction / mouth state / expression) — Composition (frame partition / depth layers / crop / foreshortening / single-vs-two-shot) — Action (current gesture / hand positions / eye tracking) — Location (every prop with EXPLICIT position: "the bottle on the desk lower-left", "the anatomy poster behind at jaw height" — never "in the background") — Style (lighting direction / palette / mood) — Tech (iPhone wide-angle handheld / distance in feet or arm-lengths / deep focus / motion blur if any)>
-```
-
-### Image 2
-- **reference_image:** image_1
-- **Image prompt:**
-```
-Use the uploaded character reference image for the main character — match identity, hair, clothing exactly.
-Use the prior-scene reference image to preserve the <setting>, <lighting>, <anchor props>, and continuity from the previous scene.
-
-<v586 six-block walk for this scene's start frame>
-```
-
-### Image 3
-- **reference_image:** image_2
-- **product_image:** the [product name]
-- **Image prompt:**
-```
-Use the uploaded character reference image for the main character — match identity, hair, clothing exactly.
-Use the uploaded product reference image for the [product name] — match label, packaging, color, proportions exactly.
-Use the prior-scene reference image to preserve the <setting>, <lighting>, <anchor props>, and continuity from the previous scene.
-
-<v586 six-block walk; the product is named in the description>
-```
-
----
-
-## Storyboard
-
-### Scene 1
-- **image:** image_1
-- **clip_mode:** fresh
-- **transition:** null
-- **visual register:** HOOK — <short descriptor>
-- **rhythm tier:** <descriptor> (<X>w)
-- **speaker:** on-camera
-- **line:** <verbatim dialogue from audio>
-- **action_note:** <v586 five-block: Cinematography (camera-move per v585) — Subject (every entity that moves) — Action ([Start beat 0-2s] X / [Mid-clip beat 3-5s] Y / [End beat 5-8s] Z) — Context (anchor-prop carry-over from start frame) — Style & Ambiance ([register tag] + ambient sound cues)>
-
-### Scene 2
-- **image:** image_2
-- **clip_mode:** fresh
-- **transition:** cut
-- **visual register:** <BLOCK_TAG> — <descriptor>
-- **rhythm tier:** <descriptor> (<X>w)
-- **speaker:** on-camera
-- **line:** <verbatim dialogue>
-- **action_note:** <v586 five-block>
-
----
-
-## Comprehension
-
-### Structural inventory
-- Total: <N> scenes, <M> clips, ~<T>s
-- Per-scene block tags:
-  - Scene 1: HOOK
-  - Scene 2: <TAG>
-  - ...
-
-### v-rule inventory
-| v-rule | Status | How this video uses it |
+| File | Role | What it contains |
 |---|---|---|
-| v521.1 pin-down | applied | <head/shoulder/crop/distance anchors> |
-| v523 reference chaining | applied | <chain pattern> |
-| v538 speaker mode | applied | <on-camera / voiceover per scene> |
-| v539 HOOK weird-action | applied — variant: <name> | <description> |
-| v540 action_note discipline | applied | <motion-only confirmed; three-beat structure> |
-| v541 outfit-change | applied / NOT APPLICABLE | <reason> |
-| v544 transitions | applied | <fresh+cut default; continue chains in scenes ...> |
-| v553.1 persona never inline | applied | <"the main character" used; identity from upload> |
-| v573 + v581 product binding | applied / NOT APPLICABLE | <product_image: field on images <list>> |
-| v577 line word budget | applied | <line word counts; longest <X>w> |
-| v580 recipe state-evolution | applied / partial / NOT APPLICABLE | <each step own image, OR collapsed> |
-| v585 motion capture | applied | <camera-move classifications per shot> |
-| v586 description grammar parity | applied | <six-block walk per image; five-block per action_note> |
-| v587 reproduction-ready artifact | applied | <Comprehension + Veo Final Prompts emitted> |
-| v588 dense per-shot frame sampling | applied | <action arcs captured> |
-| v589 absolute-magnitude grammar | applied | <COMPLETE/PARTIAL per state-evolution clip> |
+| `code/template_new_format.md` | THE SKELETON | Fill-in scaffold; canonical output shape; parser-readable grammar conventions |
+| `code/template_reference.md` | THE BIBLE — single source of truth for v-rules | Every v-rule's full deep-dive (v521.1 → v595); v579 pipeline spec; legacy format history |
+| `wiki/meta/decode-grammar-checklist.md` | THE WORKFLOW | Operator-facing process docs; references `template_reference.md` for rule deep-dives |
+| `wiki/patterns/conventions.md` | THE INDEX | One row per v-rule; each row links to the deep-dive in `template_reference.md` |
+| THIS FILE | THE INVOCATION | How to invoke a decode using an LLM. References the above. |
 
-### Rhetorical structure
-- **HOOK type**: <name + variant>
-- **Frame**: <recipe-as-claim / before-after-transformation / authority-stack / curiosity-gap / 5-truths-listicle / ...>
-- **Payoff structure**: <timeline-promise / climax-position / authority-anchor / outfit-change-time-jump / ...>
-- **CTA structure**: <comment-keyword "<word>" / comment+follow / link-in-bio / DM-trigger / ...>
-
-### Angle / audience signal
-- **Niche**: <belly-fat / ED / hair-regrowth / menopause / varicose-veins / etc.>
-- **Primary audience**: <gender + age band>
-- **Secondary audience**: <if any>
-- **Symptom / aspiration**: <what the viewer wants to fix or gain>
-- **Emotional register**: <warm / fierce / clinical / desperate / hopeful / curious / ...>
-
-### Persona archetype + setting tier
-- **Persona archetype**: <modern-clinic-doctor / holistic-healer / old-grandma / sexy-doctor / rastafarian-uncle / ...>
-- **Setting tier**: <Tier-0 selfie-arm / Tier-1 single-setting / Tier-2 multi-setting>
-- **Specific settings used**: <list>
+When v596+ ships, the deep-dive lands ONLY in `template_reference.md`. The other files reference it; this file references it via the operator instructions below.
 
 ---
 
-## Veo 3.1 Final Prompts (per clip)
+## How to invoke a decode (by provider per v595)
 
-### Clip 1.1 — Scene 1, Line 1 (<BLOCK_TAG>)
-**Start frame:** Image 1
-**Text prompt:**
+### Provider 1 — Claude in-session (DEFAULT for any decode inside Claude Code)
+
+No API key, no install. Claude has Read access to all files.
+
 ```
-<Cinematography per v585: "Static handheld camera, no camera move, slight natural drift." or named move>
+Operator says: "decode this video: <path>"
 
-<Action narrative — three timed beats: 0-2s / 3-5s / 5-8s with absolute-magnitude language for state-evolution clips>
-
-He/She says with <register>: <verbatim dialogue>.
-
-Ambient: <setting tone + sound cues>.
-(no subtitles, no captions)
-```
-**Negative prompt:**
-```
-no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, no cinematic transitions, no burnt-in text, no captions, no on-screen titles, no face distortion, no morphing, no warping, no duplicate limbs, no extra fingers, no inconsistent lighting, no composite split-screen layouts, no disembodied hands.
-```
-
-### Clip 2.1 — Scene 2, Line 1 (<BLOCK_TAG>)
-**Start frame:** Image 2
-**Text prompt:**
-```
-<Cinematography>
-
-<Action narrative — three timed beats>
-
-He/She says with <register>: <verbatim dialogue>.
-
-Ambient: <setting tone + sound cues>.
-(no subtitles, no captions)
-```
-**Negative prompt:**
-```
-no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, no cinematic transitions, no burnt-in text, no captions, no on-screen titles, no face distortion, no morphing, no warping, no duplicate limbs, no extra fingers, no inconsistent lighting, no composite split-screen layouts, no disembodied hands.
+Claude:
+1. Reads code/template_new_format.md       (the output skeleton)
+2. Reads code/template_reference.md        (the v-rule deep-dives)
+3. Reads wiki/meta/decode-grammar-checklist.md (the workflow procedure)
+4. Runs the v579 pipeline (Stages 1-3 via the existing scripts in _decode_tmp/<prior-decode>/):
+   - ffmpeg audio extraction
+   - faster-whisper transcription
+   - PySceneDetect AdaptiveDetector + Farneback motion classification
+   - manifest.json build
+   - Stage 4: dense per-shot frame extraction (v588) into _decode_tmp/<source-id>/frames/
+5. Performs Stage 4d (v589 Half A) by walking dense frames via the Read tool
+   on _decode_tmp/<source-id>/frames/shotNN_<label>_<t>s.png
+6. Applies v594 image consolidation: groups shots by composition; emits M images for N shots
+7. Authors raw/decoded_<source-id>.md following the template_new_format.md schema
+8. Moves artifacts to raw/decode_artifacts/<source-id>/
+9. Authors wiki/scripts/<persona>/<source-id>.md summary + bidirectional ## Used in footers
+10. Updates wiki/scripts/_index.md count + wiki/log.md entry + wiki/meta/_index.md
 ```
 
-(Repeat one Clip block per `- **line:**` in the Storyboard section.)
-````
+### Provider 2 — LM Studio (local, free)
+
+Install LM Studio, load a vision-capable GGUF (e.g. `gemma-4-E2B-it-GGUF` with mmproj), enable the local server (Developer tab → Start Server, default port 1234).
+
+```bash
+python code/v589_video_understanding.py path/to/source.mp4 --provider lmstudio
+```
+
+The script auto-detects via `GET http://localhost:1234/v1/models` + sends frames + transcript via OpenAI-compatible API. Outputs `_decode_tmp/<source-id>/stage4d.json`.
+
+The Claude-in-session operator (or a downstream script) then reads `stage4d.json` + applies v594 consolidation + authors the decoded markdown per `template_new_format.md`.
+
+### Provider 3 — Gemini API (paid, best for motion-heavy / multi-character)
+
+```bash
+export GEMINI_API_KEY=<key>
+python code/v589_video_understanding.py path/to/source.mp4 --provider gemini
+```
+
+Uploads MP4 natively at 1fps + audio + per-second timestamps. Outputs `_decode_tmp/<source-id>/stage4d.json`. Same downstream flow.
+
+### Providers 4-7 — OpenAI / Anthropic API direct / Ollama / OpenRouter
+
+Same pattern with different `--provider` flag. Each provider only needs to satisfy the v595 input/output contract (see `template_reference.md` §"LLM-agnostic Stage 4d decode interface (v595)" for the schema).
+
+```bash
+python code/v589_video_understanding.py path/to/source.mp4 --provider openai|anthropic|ollama|openrouter
+```
+
+### Provider 8 — Human-walk template (always-available fallback)
+
+```bash
+python code/v589_video_understanding.py path/to/source.mp4 --provider template
+# writes _decode_tmp/<source-id>/stage4d.json with empty fields + frame paths
+# operator (or Claude in-session) fills the JSON; same v589 schema applies
+```
+
+### Provider selection rule
+
+```
+if operating inside a Claude Code session:
+    → Provider 1 (Claude in-session)  # default — no API key, full Read access
+elif LM Studio local server is up at localhost:1234:
+    → Provider 2 (LM Studio)
+elif GEMINI_API_KEY is set:
+    → Provider 3 (Gemini API)
+elif OPENAI_API_KEY is set:
+    → Provider 4 (GPT-4o-vision)
+elif ANTHROPIC_API_KEY is set:
+    → Provider 5 (Claude API direct)
+elif Ollama is running locally:
+    → Provider 6 (Ollama vision model)
+elif operator has OpenRouter configured:
+    → Provider 7 (OpenRouter)
+else:
+    → Provider 8 (human-walk template)
+```
 
 ---
 
-## Hard rules
+## When operating headless with Gemini / GPT-4o / Claude API direct
 
-1. **Dialogue verbatim** — no paraphrase. Audio track is authoritative.
-2. **v553.1: persona NEVER inline-described** in image-prompt body — referenced as "the main character"; identity comes from the uploaded reference image.
-3. **Object positions explicit** — "the bottle on the desk lower-left", "the anatomy poster behind at jaw height" — NOT "in the background".
-4. **Foreshortening notes** when wide-angle: "the banana is closest to the wide-angle lens, foreshortened larger as the foreground anchor".
-5. **Crop boundaries explicit** — "cropped at mid-thigh, NO floor visible, NO feet visible".
-6. **Lighting direction** — name the light source position: "vibrant natural HDR daylight from a glass-door window in the right side of frame".
-7. **v589 absolute-magnitude** when source shows COMPLETE state change: use "completely melts away", "fully revealed", "entirely dissolves". FORBIDDEN: "dramatically", "mostly", "almost", "largely". Reserved only for genuinely partial states.
-8. **Three timed beats** in every action_note with explicit `[Start beat 0-2s] / [Mid-clip beat 3-5s] / [End beat 5-8s]`.
-9. **Verbs of state change** — when dialogue or action contains pour/squeeze/add/stir/mix/melt/dissolve/spread/press/pull/crack, the clip almost certainly has visible state evolution → emit start AND end image frames + Veo First/Last-Frame mode.
-10. **Camera-move classification** — every action_note opens with v585 classification: static handheld / static-handheld-with-drift / push-in / pull-back / pan-left / pan-right / tilt-up / tilt-down (with magnitude when observable).
-11. **v577 line word budget**: each `- **line:**` ≤21 words ±2. If a scene's total dialogue >23w, split at clause/comma boundaries into multi-line scenes — each split ≥10w + syntactically complete.
+These providers don't have local file access — they only see the prompt content. To invoke them, the operator must concatenate this wrapper + the relevant template files at invocation time:
+
+```bash
+# Build the headless prompt by concatenating the canonical sources
+cat code/gemini_decode_prompt.md \
+    code/template_new_format.md \
+    code/template_reference.md \
+    > /tmp/decode_prompt_headless.md
+
+# Then upload the source MP4 + paste /tmp/decode_prompt_headless.md as the prompt
+```
+
+The headless LLM then sees:
+- (this wrapper's) operator instructions
+- (template_new_format.md's) canonical output skeleton
+- (template_reference.md's) v-rule deep-dives
+
+The single source of truth stays in the templates; this wrapper just orchestrates the concatenation.
 
 ---
 
-## Self-validation
+## What every decode produces
 
-Before finalizing: pick one Veo Final Prompt from your output. Could that prompt re-render the source clip closely if fed to Veo 3.1? If not, the description grammar (v586) or action_note discipline (v540 motion-only / v589 absolute-magnitude) was insufficient — go back and tighten.
+Per `template_new_format.md` (the skeleton) + `template_reference.md` (the rules):
+
+- `raw/decoded_<source-id>.md` — the v521.1→v595-compliant decoded artifact
+- `raw/decode_artifacts/<source-id>/manifest.json` — N shots × dialogue × motion
+- `raw/decode_artifacts/<source-id>/transcript.json` — faster-whisper segments
+- `raw/decode_artifacts/<source-id>/shots.json` — PySceneDetect AdaptiveDetector
+- `raw/decode_artifacts/<source-id>/motion.json` — Farneback per v585
+- `raw/decode_artifacts/<source-id>/stage4d.json` — v589 Half A VLM output
+- `raw/<source-id>.mp4` — source archived
+- `wiki/scripts/<persona>/<source-id>.md` — wiki summary
+- `wiki/scripts/<persona>/_index.md` — persona folder (if new persona)
+- `wiki/log.md` — decode entry
+- `wiki/meta/_index.md` — chronological index entry
+- `wiki/scripts/_index.md` — count incremented
+- Bidirectional `## Used in` footer on the decoded markdown
+- v594 image cardinality applied (M ≤ N — shots cluster into compositions)
 
 ---
 
-## Output
+## What this file is NOT
 
-Just the markdown. Plain. The output:
-- Starts with `<!--` (HTML comment header).
-- Ends with the last clip's negative-prompt closing ` ``` ` fence.
-- NO outer code-fence wrapper. NO ` ```markdown ` tag. NO prose preamble. NO "Here is the decoded markdown:" line. NO trailing commentary.
-- All internal fences are bare three-backticks ` ``` ` (no language tag).
-- All `### Image N` and `### Scene N` headings use literal capital "Image" / "Scene" + integer.
-- All references use lowercase + underscore: `image_1`, `image_2`, etc.
+- NOT the v-rule deep-dives (those live in `code/template_reference.md`)
+- NOT the output skeleton (that lives in `code/template_new_format.md`)
+- NOT the workflow checklist (that lives in `wiki/meta/decode-grammar-checklist.md`)
+- NOT the v-rule index (that lives in `wiki/patterns/conventions.md`)
+- NOT a substitute for reading the canonical sources — the LLM (whether Claude in-session or headless) must consult `template_new_format.md` + `template_reference.md` to produce a compliant artifact
+
+---
+
+## Common operator commands
+
+```
+"decode this video: <path>"
+  → Provider 1 (Claude in-session): Claude reads templates, runs pipeline, walks frames, authors markdown
+
+"recreate this decoded video as a Korella ad"
+  → Phase 4-5 of viral-video-pipeline.md: read decoded artifact + apply v590 chain optionality
+    + v594 image cardinality + v591 novelty-gate + v592 motion-text-match + risky-vocabulary
+    policy-flag pass + psychology-of-conversion authoring → write videos/<name>.md
+```
+
+Both flows defer to `template_new_format.md` + `template_reference.md` for the schema and rules.
+
+---
+
+## Updates
+
+When a new v-rule (v596+) lands:
+1. Add the deep-dive to `code/template_reference.md` (the bible)
+2. Add a row to `wiki/patterns/conventions.md` (the index — one-line summary + cross-link, no duplication)
+3. Add a brief workflow note to `wiki/meta/decode-grammar-checklist.md` or `wiki/meta/generate-video-checklist.md` (which side it applies to)
+4. Add a quickref paragraph to `CLAUDE.md` (session-start gotcha) IF the rule is critical-or-easy-to-violate
+5. **Do NOT update this file** unless the invocation flow itself changes (new provider, new operator command, etc.)
+
+The deduplication architecture: rule deep-dives live ONCE in `template_reference.md`; the index points to them; this wrapper points to the index. When the rule changes, only `template_reference.md` needs editing (+ a one-line index update).
