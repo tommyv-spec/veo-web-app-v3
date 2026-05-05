@@ -5250,12 +5250,25 @@ async def export_final_video(
                 sped_filename = f"sped_{output_filename}"
                 sped_path = output_dir / sped_filename
                 # setpts=(1/speed)*PTS speeds up video; atempo handles audio (max 2.0, min 0.5)
+                #
+                # v597: force constant 24fps output via "-r 24 -vsync cfr".
+                # Same bug v560 fixed in master_align: setpts=PTS/N adjusts
+                # presentation timestamps but ffmpeg keeps the original frame
+                # count, producing a variable-framerate output. Container says
+                # X seconds but internal packet timestamps span the original
+                # (longer) duration. Visible to the user as "tweaking frames"
+                # / micro-stutter at playback because the player's frame-pacing
+                # doesn't match the encoded packet timing. This is the same
+                # failure mode as v560 in master_align (which already has the
+                # CFR fix); the export-speed path was missed and silently
+                # regressed for any clip exported with playback_speed > 1.0.
                 import subprocess as _sp
                 cmd_speed = [
                     "ffmpeg", "-y", "-i", str(output_path),
                     "-filter_complex",
                     f"[0:v]setpts={1/speed:.6f}*PTS[v];[0:a]atempo={speed:.3f}[a]",
                     "-map", "[v]", "-map", "[a]",
+                    "-r", "24", "-vsync", "cfr",   # v597: force CFR — same fix as v560 in master_align
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
                     "-c:a", "aac", "-b:a", "192k",
                     str(sped_path)

@@ -1057,6 +1057,106 @@ Existing `code/v589_video_understanding.py` cascade (LM Studio → Gemini → hu
 
 ---
 
+## Export-pipeline frame-grid discipline (v597) — eliminates "tweaking frames"
+
+**Source: 2026-05-05 user-reported visible artifact** in WhisperVAD-mode exports — "frames that are tweaking" at scattered points in the final video. Three compounding bugs in the export pipeline that all violate the same invariant: **every encoding stage must agree on the frame grid (constant fps, frame-aligned boundaries) or boundary frames get dup/dropped asymmetrically.**
+
+### Bug A — speed-apply path produces VFR output (most impactful)
+
+Location: `code/main.py` `~line 5253` — the `[Export] Speed applied: 1.1×` step.
+
+The ffmpeg command was:
+
+```
+ffmpeg -i <output> -filter_complex "[0:v]setpts=(1/speed)*PTS[v];[0:a]atempo=speed[a]"
+       -map [v] -map [a] -c:v libx264 -preset ultrafast -crf 18 ...
+       <out>
+```
+
+**Missing `-r 24 -vsync cfr`.** Same exact bug v560 fixed in `master_align()`:
+- `setpts=PTS/N` adjusts presentation timestamps but ffmpeg keeps the original frame count
+- Output is VFR — container says X seconds, internal packet timestamps span the original (longer) duration
+- Visible at playback as **micro-stutter / "tweaking frames"** because the player's frame-pacing doesn't match the encoded packet timing
+- Triggers any time the operator exports with `playback_speed > 1.0`
+
+The v560 fix was applied to `master_align` but missed in the export-speed path. v597 reapplies it.
+
+```python
+# Fix:
+cmd_speed = [
+    "ffmpeg", "-y", "-i", str(output_path),
+    "-filter_complex", f"[0:v]setpts={1/speed:.6f}*PTS[v];[0:a]atempo={speed:.3f}[a]",
+    "-map", "[v]", "-map", "[a]",
+    "-r", "24", "-vsync", "cfr",   # v597 — same fix as v560 in master_align
+    ...
+]
+```
+
+### Bug B — VAD segment extraction missing fps lock
+
+Location: `code/video_processor.py` `apply_vad()` segment-extraction loop.
+
+Each segment was extracted via libx264 without `-r {fps} -vsync cfr`. Source clips are 24fps CFR after the trim step, but absent explicit locking, the encoder can produce VFR if boundaries fall mid-frame. Then the downstream concat step (which DOES use `-vsync cfr`) has to dup/drop boundary frames asymmetrically.
+
+Fix: pass `-r {src_fps} -vsync cfr` on every segment extraction (defense in depth).
+
+### Bug C — VAD segment boundaries are sub-frame
+
+Location: `code/video_processor.py` `apply_vad()` after `merged = []`.
+
+WhisperVAD timestamps come from word-end times (e.g. `segment 1: 0.000s → 4.470s`, `segment 3: 14.800s → 15.255s`). These are **sub-frame at 24fps** (where each frame = 0.04167s). At 4.470s = 107.28 frames; at 15.255s = 366.12 frames — neither aligned.
+
+Without snapping, segment extraction has to decide what to do with a partial boundary frame:
+- libx264 + CFR may dup OR drop the partial frame
+- The decision varies subtly per segment (depends on rounding inside ffmpeg)
+- Concatenating ~16 segments × 2 boundary decisions = ~32 chances for a frame to dup/drop unpredictably
+- User sees "tweaking frames" at scattered points in the final video — the dup/drop artifacts
+
+Fix: snap each segment boundary to the nearest frame multiple BEFORE extraction. Round `start` DOWN, round `end` UP. This widens each segment by at most one frame each side (~40ms total at 24fps) — well under the `silence_keep_duration` padding, so no dialogue is lost. Result: every segment has a whole-frame count and concat is glitch-free.
+
+```python
+# Fix:
+import math
+frame_dur = 1.0 / src_fps
+snapped = []
+for start, end in merged:
+    snap_start = math.floor(start / frame_dur) * frame_dur
+    snap_end = math.ceil(end / frame_dur) * frame_dur
+    snapped.append((max(0.0, snap_start), snap_end))
+merged = snapped
+```
+
+### Why all three bugs needed fixing
+
+The fixes compound:
+- Bug A alone: every export with speed>1.0 has VFR output regardless of segment grid
+- Bug B alone: per-segment VFR drift even at 1.0× speed
+- Bug C alone: sub-frame boundaries cause asymmetric dup/drop even with CFR locking
+
+Fixing only one leaves residual artifacts. v597 fixes all three so every encoding stage agrees on the frame grid throughout the pipeline.
+
+### What stays unchanged
+
+- `concat_videos()` already had `-r 24 -vsync cfr` (added by v560)
+- `master_align()` already had `-r 24 -vsync cfr` (v560)
+- `trim_video()` source clips are CFR 24fps from Veo so no fix needed there
+- Whisper transcription, motion classification, dense-frame extraction — all unchanged
+
+### Migration
+
+Existing exports made before v597 may have visible frame artifacts. Re-export with the fixed code to eliminate them. No data migration needed; the fix is purely in the encoding pipeline.
+
+### Verification (post-v597)
+
+After v597 ships, exports should have:
+- Smooth playback at any `playback_speed` value (no micro-stutter)
+- Clean cuts at WhisperVAD segment boundaries (no boundary-frame artifacts)
+- Whole-second durations matching the sum of segment durations (no VFR-induced drift)
+
+If artifacts persist after v597, the root cause is upstream of these three fixes (e.g. Veo source-clip fps inconsistency, or DeepFilter audio-resample skew if enabled).
+
+---
+
 ## VAD matcher bounded lookahead (v596)
 
 **Source: 2026-05-05 belly-fat-tonic export failure analysis.** The `[WhisperVAD]` script-to-audio in-order matcher was advancing its `wi` pointer arbitrarily far when cross-clip audio bleed caused a late whisper word to fuzzy-match a script word. Earlier valid script words got stranded behind the advanced pointer.

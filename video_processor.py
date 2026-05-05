@@ -1736,7 +1736,29 @@ def apply_vad(
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
             merged.append((start, end))
-    
+
+    # v597: snap segment boundaries to frame multiples BEFORE extraction.
+    # Whisper-VAD timestamps come from word-end times (e.g. 4.470s, 7.970s,
+    # 14.800s) and are sub-frame at 24fps (where each frame = 0.04167s).
+    # Without snapping, segment extraction with libx264 + CFR has to dup or
+    # drop a partial frame at each boundary. The dup/drop decision varies
+    # subtly between segments — visible to the user as "tweaking frames"
+    # at every concat cut.
+    #
+    # Snap: round start DOWN to nearest frame, round end UP. This widens
+    # each segment by at most one frame on each side (≈40ms total) — well
+    # under the silence_keep_duration padding, so no dialogue is lost.
+    src_fps = get_fps(ffprobe_json(src))
+    if src_fps and src_fps > 0:
+        import math as _math
+        frame_dur = 1.0 / src_fps
+        snapped = []
+        for start, end in merged:
+            snap_start = _math.floor(start / frame_dur) * frame_dur
+            snap_end = _math.ceil(end / frame_dur) * frame_dur
+            snapped.append((max(0.0, snap_start), snap_end))
+        merged = snapped
+
     total_speech = sum(end - start for start, end in merged)
     
     if progress_callback:
@@ -1780,8 +1802,17 @@ def apply_vad(
             cmd += ["-i", str(src)]
             if fine_ss > 0:
                 cmd += ["-ss", f"{fine_ss:.6f}"]     # output seek — frame-accurate fine positioning
+            # v597: lock segment encoding to source fps + CFR. Without this,
+            # libx264 inherits whatever the source has and can produce VFR
+            # output when boundaries fall mid-frame. The downstream concat
+            # step uses -vsync cfr which then has to dup/drop boundary
+            # frames asymmetrically, producing the "tweaking frames" the
+            # user reports at every cut. Locking fps here AND at concat
+            # ensures both passes agree on the frame grid.
+            seg_fps = src_fps if (src_fps and src_fps > 0) else 24
             cmd += [
                 "-t", f"{duration_seg:.6f}",
+                "-r", f"{seg_fps:g}", "-vsync", "cfr",   # v597
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                 "-pix_fmt", "yuv420p",
                 "-threads", "1",
