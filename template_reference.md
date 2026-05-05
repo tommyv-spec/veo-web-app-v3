@@ -360,7 +360,7 @@ v586 is the canonical proof of bidirectionality:
 | Side | Chain policy | Why |
 |---|---|---|
 | **Decode** (`raw/decoded_*.md`) | Chain faithfully to mirror the source | The decode is observational — if the viral video kept tight continuity scene-to-scene, we record that. If it didn't, we don't invent it. Faithfulness wins. |
-| **Generate** (`templates/*.md` for our own videos / variants / adaptations) | `reference_image: none` for every scene EXCEPT those genuinely requiring tight pixel-level continuity | The generate-side template is execution — chain is a per-scene tradeoff between identity-anchor strength vs. generation throughput. Optimize per-scene for shipping. |
+| **Generate** (`videos/*.md` for our own videos / variants / adaptations) | `reference_image: none` for every scene EXCEPT those genuinely requiring tight pixel-level continuity | The generate-side template is execution — chain is a per-scene tradeoff between identity-anchor strength vs. generation throughput. Optimize per-scene for shipping. |
 
 ### Why generate-side chain optionality matters
 
@@ -391,7 +391,7 @@ HOOK / CONTEXT / EXPLAIN / AUTHORITY / single-frame PRODUCT (bottle hero) / CTA 
 
 **6-8× faster ship** on typical script structure. Bigger scripts (e.g. the 10-scene Nuri saffron-ED listicle) gain more.
 
-### How to apply when authoring a `templates/*.md`
+### How to apply when authoring a `videos/*.md`
 
 1. **Walk the storyboard.** For each scene, classify: independent (HOOK/CONTEXT/EXPLAIN/AUTHORITY/PRODUCT-single-frame/CTA/FOLLOW) or chain-required (recipe state-evolution / before-after / single-shot action / two-shot follow-up).
 2. **Independent scenes:** set `reference_image: none`. Verify the image prompt is self-sufficient — full v586 six-block walk with the setting + anchor props described inline (since no chain carries them).
@@ -413,7 +413,7 @@ v590 is purely about CHAIN TOPOLOGY (which scenes have chains). Everything else 
 
 ### Worked example — Nuri saffron-ED listicle template
 
-The `templates/nuri-saffron-ed-anatomy-clinic.md` (10 scenes / 10 clips) authored under chain-everywhere v523 default chains all 10 images sequentially. Re-audit under v590:
+The `videos/nuri-saffron-ed-anatomy-clinic.md` (10 scenes / 10 clips) authored under chain-everywhere v523 default chains all 10 images sequentially. Re-audit under v590:
 
 | Scene | Block tag | v590 verdict | reference_image |
 |---|---|---|---|
@@ -441,7 +441,7 @@ This asymmetry is documented explicitly in [[the-cycle]]: grammar is symmetric, 
 
 ### Migration
 
-**Existing `templates/*.md` artifacts** authored under chain-everywhere v523 default can be re-audited and chains relaxed where v590 conditions allow. The Nuri saffron template (above) is the canonical worked migration.
+**Existing `videos/*.md` artifacts** authored under chain-everywhere v523 default can be re-audited and chains relaxed where v590 conditions allow. The Nuri saffron template (above) is the canonical worked migration.
 
 **New templates** from this commit forward use v590 chain-optionality from the start. Authors walk the storyboard once, classify each scene as independent or chain-required, set `reference_image:` accordingly.
 

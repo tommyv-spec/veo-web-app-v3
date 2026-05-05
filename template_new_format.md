@@ -182,7 +182,7 @@
     per frame.
   • GENERATE-SIDE CHAIN OPTIONALITY (v590, parallel-generation
     enablement, GENERATE-SIDE ONLY):
-    ASYMMETRIC RULE — applies to generate side ONLY (templates/*.md
+    ASYMMETRIC RULE — applies to generate side ONLY (videos/*.md
     for our own videos / variants / adaptations). Decode-side
     (raw/decoded_*.md) MUST chain faithfully to mirror the source.
     On the generate side, set reference_image: none for every scene
@@ -218,7 +218,7 @@
     between identity-anchor strength vs. generation throughput).
     The bidirectional rule cycle holds for grammar (v586/v540/v577/
     v589/v589.1) but NOT for chain topology — that's where the
-    asymmetry sits. Migration: existing templates/*.md authored
+    asymmetry sits. Migration: existing videos/*.md authored
     under chain-everywhere v523 default can be re-audited and
     chains relaxed where v590 conditions allow.
   • VLM VIDEO UNDERSTANDING (Stage 4d, free local) +
