@@ -1057,6 +1057,109 @@ Existing `code/v589_video_understanding.py` cascade (LM Studio → Gemini → hu
 
 ---
 
+## Hook-image power test (v598) — the single biggest viral lever
+
+**Source: 2026-05-06 ChatGPT-output audit.** A bundle-driven create produced a menopause hot-flash video titled "When The Heat Hits At Night" with a generic woman-in-dim-bedroom HOOK image. No prop. No motion. No visual pun. No taboo trigger. No physical evidence. The 430KB of upstream rules were technically respected but the HOOK had zero scroll-stop power. **The hook image is the variable that decides 50 views vs 5M views.** Every other rule (chain-binding, action_note grammar, M ≤ N cardinality, persona consistency) is a ZERO-multiplier if the HOOK doesn't stop the scroll.
+
+### The test (5 questions, all must answer YES before locking the HOOK image)
+
+Before emitting `### Image 1` for any video, the LLM must walk through these five questions. If ANY answers NO, the hook is too weak to ship — replace it.
+
+**Q1. PHYSICAL OBJECT in the hook?**
+
+Is there a foreground prop being held, manipulated, or shown to camera (banana, seed jar, papaya, cabbage, salmon, pill bottle, mannequin tonsils, back-model, gold coin, stack of money, alarm clock, faucet, tape measure, surgical pen)?
+
+Corpus rule: **NEVER a hook with no prop.** Every viral video in the 27-decode corpus has a foreground physical object in the first 1-2 seconds. Persona-talking-head with empty hands fails this test.
+
+If NO — STOP. Find a prop that visually surrogates the niche (see Q3 metaphor library below).
+
+**Q2. VISIBLE MOTION at second 0-2s?**
+
+Not gestures — actual prop motion or state-change. SLAM / POUR / SPRAY / GRIND / SMASH / DROP / LIFT / REVEAL / SQUEEZE / TWIST. Or rapid camera move (push-in, dolly, whip-pan). Or visible prop transformation (banana wilting → upright, fat melting, stones dislodging, drop falling, mask lifting).
+
+Corpus rule: **static talking-head at second 0-3 fails.** Per Milen 2026-04-23: *"Always in the hook, there should be motion. Being too static is just boring."* Even verbal-hook formats (SYMPTOM-CASCADE, NUMBERED-LIST) need motion — gesture-on-emphasis-words, prop-reveal-mid-line, zoom-in.
+
+If NO — STOP. Add a weird-action verb to the action_note that creates visible motion at the start beat.
+
+**Q3. VISUAL PUN, METAPHOR, or HYPER-SPECIFIC SCENE-MIRROR?**
+
+The hook image should activate an associative leap that makes the topic pattern-match instantly. Three valid forms:
+
+- **Visual pun** — banana = penis (ED), papaya/seed-jar = vitality, cabbage/fat-blob = visceral fat, water-flosser-on-tonsil-mannequin = stones, gold-coin = restored worth, drooping cucumber = limp
+- **Niche metaphor object** — anatomy torso for visceral, back-model for sagging skin, faucet/hose for prostate stream, scalp-model for hair
+- **Hyper-specific scene-mirror** — alarm clock 3:47am (nocturia), urinal cropped above waist (BPH-shame), wife-buying-for-husband UGC kitchen, two-different-men split-screen (62-vs-62 vitality contrast)
+
+Corpus library of working puns/metaphors:
+| Niche | Working visual surrogate |
+|---|---|
+| ED / male performance | Banana (now overused — use peeled banana / cucumber / tape-measure split-screen) |
+| Belly fat | Anatomy torso + yellow fat blobs / purple-cabbage broth / belt-notch |
+| Hair loss | Onion-half twist on scalp-model / Day-1-vs-Day-14 split |
+| Tonsil stones | Water-flosser on mannequin tonsils with stone-deposits |
+| Back lump | Female back-model with bra-line lump / Day-1-vs-Day-14 |
+| Joint inflammation | Costco salmon / cabbage SLAM in produce aisle |
+| Prostate / nocturia | Alarm clock 3:47am / faucet drip → fire hose / urinal crop |
+| Hot flash / menopause | Thermometer climbing / ice-pack on forehead / soaked pillow / fan-on-bed / glass of water knocked-over at 2am |
+| High cortisol | Belt-tightening / jeans-zipper-fail / stairs-slow-mo |
+| Liver detox | Yellow torso-organ + bile-color shift |
+| Vitality / "morning signal" | Saffron threads + warm-water-bowl / gold-coin in palm |
+| Brain fog | Glass of water cloudy → clear / fogged window finger-trace |
+
+If NO — STOP. The hook is just "person talks about a problem." Pick a surrogate from the table or invent one with the same associative-leap mechanic.
+
+**Q4. NOVELTY GATE (v591) — has this exact visual been seen on LiB Inspire or any operator's account?**
+
+Walk it: have I seen *this exact composition* on any account in the niche? If yes, discard. If no, ship.
+
+**Banana-smash and banana-tape-measure are now overused** in male-ED (Milen 2026-04-23). Use only with a fundamentally different visual frame (split-screen, time-lapse, anatomical overlay) or pivot to symptom-show-open / A-vs-B-compare / outside-niche-viral-recreation.
+
+If a corpus persona uses a specific prop heavily (e.g. master-salvora's Costco produce SLAM) and that operator is still active on LiB Inspire, that exact prop+setting combo fails the gate for new accounts.
+
+If NO (i.e. yes, it's been seen) — STOP. Source a fresh visual via [[viral-recreation-method]] §Step 1.
+
+**Q5. MOTION-TEXT-MATCH (v592) — does the verb in the voiceover at second N match a visible motion at second N?**
+
+Verb "smash" → visible smash motion at the same second. Verb "pour" → visible pour. Verb "show" / "watch" → physical reveal or push-in. Verb "you wake up at 3 a.m." → cut to alarm clock OR character-rising-from-bed motion.
+
+Anti-pattern: voiceover says *"this is what high blood pressure looks like"* over a static torso shot — the voiceover names a thing but the visual doesn't reveal it. Either change the voiceover to match the static visual, or add a reveal motion that matches the voiceover.
+
+If NO — STOP. Resync verb-and-motion at the same beat.
+
+### Hard rule for niches with no inherent visual
+
+Some niches have no inherent visual surrogate (hot flash, brain fog, anxiety, insomnia, internal pain). These niches are HOOK-HARD — the corpus has fewer working examples and most operator failures occur here.
+
+**For HOOK-HARD niches the LLM MUST manufacture a visual** — never default to "person talks about feeling X." Required: pick from the niche-specific surrogate table above (Q3) or one of these four manufactured-hook forms:
+
+1. **Wearable evidence prop** — thermometer, pulse-oximeter, sleep-tracker on wrist showing alarming reading
+2. **Environmental witness prop** — soaked pillow / sheets-in-the-dryer / fan-set-to-high / glass-of-water-at-bedside-knocked-over
+3. **Body-anatomy surrogate** — visualization torso showing sweat-glands firing / brain-cross-section foggy → clear / hormone-graph crashing
+4. **Scene-mirror cold-open** — hyper-specific time + place that mirrors viewer's literal nightly experience (same as Hook #4 in Male 40-70 ranked list — "3:47 a.m. dark bedroom")
+
+The Korella saffron-vitality angle for menopause-coded videos has a built-in visual: **saffron threads + warm-water bowl + gold-color reveal** as the prop, not the hot-flash itself. Lean into the validated F→F-about-M cell with the saffron prop rather than fighting the unvisualizable internal symptom.
+
+### What this fixes
+
+The "When The Heat Hits At Night" failure mode: LLM picked an internal symptom (hot flash) as the hook subject without manufacturing a visual surrogate. Persona Ogheci was alone in a dim bedroom — no prop, no motion, no pun. Even if every other v-rule was respected, the video would die in the algorithm.
+
+v598 elevates the hook-image-power decision from "implicit" (buried in hook-patterns.md catalog) to "explicit gate that blocks output." The bundle TASK block now self-validates against this test before emitting.
+
+### Decision rule summary
+
+```
+For every videos/*.md draft:
+  Q1. PHYSICAL OBJECT in HOOK? — yes/no
+  Q2. VISIBLE MOTION 0-2s?    — yes/no
+  Q3. PUN / METAPHOR / SCENE? — yes/no
+  Q4. NOVELTY (v591) PASSED?  — yes/no
+  Q5. MOTION-TEXT-MATCH (v592)? — yes/no
+
+If ALL yes → ship.
+If ANY no → reject hook, propose 3 alternatives from corpus surrogate table.
+```
+
+---
+
 ## Export-pipeline frame-grid discipline (v597) — eliminates "tweaking frames"
 
 **Source: 2026-05-05 user-reported visible artifact** in WhisperVAD-mode exports — "frames that are tweaking" at scattered points in the final video. Three compounding bugs in the export pipeline that all violate the same invariant: **every encoding stage must agree on the frame grid (constant fps, frame-aligned boundaries) or boundary frames get dup/dropped asymmetrically.**

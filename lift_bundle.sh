@@ -303,6 +303,61 @@ violated rules in past LLM outputs:
      to M < K compositions, the lift should output M images — do
      not 1:1 mirror redundant decoded shots.
 
+[11] HOOK-IMAGE POWER TEST (v598) — THIS IS THE BIGGEST VIRAL LEVER.
+     Every other rule above is a ZERO-MULTIPLIER if the HOOK image
+     doesn't stop the scroll. Before locking Image 1 / Scene 1, all
+     FIVE questions must answer YES:
+
+     Q1. PHYSICAL OBJECT in the hook? (foreground prop being held /
+         manipulated / shown — banana / seed jar / papaya / anatomy
+         torso / alarm clock / faucet / pill bottle / saffron thread).
+         Persona talking with empty hands FAILS — refuse the draft.
+
+     Q2. VISIBLE MOTION at second 0-2s? (SLAM / POUR / SPRAY / GRIND /
+         SMASH / DROP / LIFT / REVEAL / SQUEEZE / TWIST or rapid
+         camera move). Static talking-head FAILS per Milen 2026-04-23
+         "always in the hook there should be motion. being too static
+         is just boring."
+
+     Q3. VISUAL PUN / METAPHOR / HYPER-SPECIFIC SCENE-MIRROR?
+         (banana = penis / papaya = vitality / cabbage = visceral fat
+         / alarm clock 3:47am = nocturia / soaked pillow = hot flash /
+         saffron thread = restored vitality). The hook activates an
+         associative leap.
+
+     Q4. NOVELTY-GATE (v591) — has this exact visual been seen on LiB
+         Inspire or any operator's account? Banana-smash + banana-
+         tape-measure are OVERUSED in male-ED. If yes-seen, refuse and
+         pivot to symptom-show / A-vs-B-compare / outside-niche-viral-
+         recreation.
+
+     Q5. MOTION-TEXT-MATCH (v592) — verb-at-second-N matches visible-
+         motion-at-second-N? "smash" -> visible smash. "watch" ->
+         reveal motion. "you wake up at 3am" -> alarm-clock cut.
+         Voiceover-over-static-shot FAILS.
+
+     LIFT-SPECIFIC: if the decoded source's HOOK already passes Q1-Q5,
+     port its visual structure exactly (same prop class, same motion
+     verb, same metaphor). If the decoded source's HOOK FAILS the
+     test (e.g. it's a generic talking-head opener), DO NOT replicate
+     the failure — the lift should UPGRADE the hook by manufacturing
+     a stronger visual using the niche surrogate library in hook-
+     patterns.md or one of the four manufactured-hook forms:
+       (a) Wearable evidence prop — thermometer / pulse-ox / sleep-
+           tracker showing alarming reading
+       (b) Environmental witness prop — soaked pillow / sheets-in-
+           dryer / fan-set-to-high / glass-of-water knocked over
+       (c) Body-anatomy surrogate — torso visualizing sweat-glands
+           firing / brain-cross-section foggy -> clear / hormone-
+           graph crashing
+       (d) Scene-mirror cold-open — hyper-specific time + place
+           mirroring the viewer's literal experience (3:47am alarm,
+           2am water-grab, 5am bedside fan)
+
+     If ANY of Q1-Q5 fail, REJECT the hook and propose 3 alternatives
+     from the niche surrogate library in hook-patterns.md before
+     emitting the videos/*.md.
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.
