@@ -393,10 +393,142 @@ violated rules in past LLM outputs:
      DO NOT default to "woman alone in dim bedroom" — fails Q1, Q2,
      Q3, Q6, Q7 (only Q4 and Q5 might pass).
 
-     If ANY of Q1-Q7 fail, REJECT the hook and propose 3 alternatives
+     Q8. PSYCHOLOGY-MECHANISM STACK — name all 4 mechanisms BEFORE
+         locking the hook. Anatomical compliance with Q1-Q7 (object +
+         motion + bg-authority) is necessary but NOT SUFFICIENT. Every
+         viral hook in the 24-decoded-corpus stacks 4 psychological
+         mechanisms simultaneously. If ANY of the 4 is missing, the
+         hook is psychologically dead even if Q1-Q7 pass.
+
+         (i) SHAME-PROXY — what taboo object lets the viewer face the
+             forbidden subject? Banana=penis, cabbage=visceral fat,
+             distended belly=metabolism failure, mannequin tonsil=
+             stones, soaked pillowcase=night-sweat suffering.
+             The proxy CARRIES the shame so the viewer can engage.
+
+         (ii) VIOLENT-ACT / SPECTACLE — what force-verb on the proxy
+              creates a 0-2s shock moment? SLAM / RIP / SCATTER /
+              SPRAY / GRIND / CASCADE / SHATTER / BLAST. NOT a gentle
+              gesture. Visible damage or dramatic state-change. If
+              the action is "thumb gently compresses saffron threads"
+              the hook is dead — pivot to "pillowcase SLAMMED on
+              marble + water spray-arc."
+
+         (iii) AGENT-OF-CHANGE SPECTACLE — does the product (or recipe
+               ingredient) ENTER FRAME and visibly ACT? Not just sit
+               there — DISSOLVE / UNFOLD / CASCADE / SPRAY / IGNITE /
+               TRANSFORM. Saffron capsule cascade with red streaks
+               bleeding through liquid. Tea pour with fat melting on
+               torso. Onion juice spray with hair matting. Saffron
+               threads UNFOLD into gold-amber tendrils in spatter
+               water. The product literally acts in-frame.
+
+         (iv) TABOO DIRECT-ADDRESS + BYSTANDER/WITNESS — does the
+              persona break the fourth wall with a forbidden statement
+              invoking a third-party witness? "Don't show this to your
+              man too often" + male-audience implicit. "Her husband
+              did not believe me" + husband-skeptic on-screen. "Your
+              husband sleeps through this" + sleeping-husband-
+              silhouette in bedroom doorway. The bystander mediates
+              the shame and creates conspiratorial register.
+
+         REQUIRED LLM AUTHORING STEP — write this stack out explicitly
+         in your working draft (not in the final markdown):
+
+           ## Psychology stack — HOOK
+           - Shame-proxy: <object> = <forbidden subject>
+           - Violent-act: <force-verb> on <object> creating <spectacle>
+           - Agent-of-change: <product/ingredient> visibly <action> in-frame
+           - Taboo direct-address: "<line>" + <bystander/witness>
+
+         If you cannot fill any one of the four lines, the hook is
+         dead. Replace the prop, replace the motion, replace the line,
+         or pull a different corpus pattern.
+
+         Q8 fails most often when Q1-Q7 pass with "gentle gesture +
+         clean kitchen + soft saffron pinch" — that's the
+         psychologically-dead trap. Spectacle requires VIOLENCE +
+         SHAME + AGENT + TABOO, not just objects + motion.
+
+     If ANY of Q1-Q8 fail, REJECT the hook and propose 3 alternatives
      pulling from the corpus surrogate library in template_reference.md
      §"Corpus-grounded surrogate library" + persona x setting
-     authority pairings before emitting the videos/*.md.
+     authority pairings + Q8 mechanism stack templates before emitting
+     the videos/*.md.
+
+[12] V599 PRODUCT-PRESENCE + LLM-OMISSION AUDIT — every image where
+     the product is visible/named in voiceover MUST have all 3 v581
+     binding parts present (LLMs typically include 1, sometimes 2,
+     almost never all 3). Plus the broader LLM-omission audit.
+
+     [A] INGREDIENTS TABLE present? (## Ingredients between ## Sources
+         and ## Storyboard) Two rows when product is bound (persona +
+         product). Product row's "Name" column value matches VERBATIM
+         the product_image: field values used throughout the file.
+         Example: table says "the Corella saffron bottle" -> all
+         product_image: fields say EXACTLY "the Corella saffron bottle"
+         (not "Corella saffron" / not "saffron bottle" / not
+         "saffron"). Mismatch = silent platform binding failure.
+
+     [B] V581 3-PART PRODUCT BINDING — on every image where product
+         is visible OR named in voiceover, ALL THREE present:
+           1. product_image: <ingredient-name> field set in image
+              metadata block
+           2. Product binding line at top of fenced Image prompt body
+              (line 2, after persona binding):
+                "Use the uploaded product reference image for <name>
+                — match its label, packaging, [color/wordmark], and
+                proportions exactly."
+           3. Product visual described in prompt body composition
+              ("label-forward to camera", "wordmark squared to lens",
+              "stands upright on counter to the left of the glass")
+
+     [C] PER-SCENE PRODUCT-PRESENCE MATRIX (corpus-grounded for
+         9-scene Korella saffron-style):
+           - HOOK Scenes 1-2 (0-8s): product NOT visible. Use shame-
+             proxy from Q8 (banana, soaked pillowcase, distended
+             belly). Burn the curiosity loop FIRST. The 4 corella
+             saffron videos all delay product reveal.
+           - RECIPE early scenes (lemon-pour, ginger-pinch, honey-
+             cascade): product NOT visible yet — building the drink.
+           - RECIPE product-reveal scene (typically scene 6 of 9):
+             product CASCADES into the recipe — capsule cascade,
+             threads pour, bottle stands on counter label-forward.
+             This is the climactic agent-of-change moment per Q8.
+           - EXPLAIN scene 7: product bottle visible, label readable.
+             Authority-transfer moment.
+           - OUTRO scene 8: product bottle held at chest height,
+             label-forward, hero-shot.
+           - OUTRO scene 9 (CTA): product bottle in one hand + CTA
+             finger gesture from the other.
+
+     [D] PERSONA-POSE-TO-CAMERA LOCK — every scene's action_note
+         specifies "eyes locked to lens" or "eyes locked to camera"
+         or equivalent. Every viral video in the corpus has direct-
+         eye-contact lock. Talking-to-side / eyes-on-product-only
+         FAILS.
+
+     [E] V577 WORD BUDGET PER SCENE — every `- **line:**` value
+         ≤21 words ±2. If 24+ words, SPLIT into multi-line scene
+         (two `- **line:**` + `- **action_note:**` pairs in one
+         Scene block per v593).
+
+     [F] UNIVERSAL CLOSER — final scene's `- **line:**` ends with
+         "follow me first or I can't reach you" or close variant.
+
+     [G] DAY1/14 ANCHOR — if niche is DAY1/14 transformation (back
+         lump, hair regrowth, varicose, sagging skin, body lump),
+         "$X surgery you didn't pay" anchor must appear in EXPLAIN
+         scene ($8000 / $3000 / $4000 / $10000 documented in
+         strategy-mechanisms.md).
+
+     [H] FILE STRUCTURE — YAML frontmatter at top (persona/niche/
+         audience/cell), `## Sources` section near end with raw-file
+         citations, `## Used in` section at end (placeholder).
+
+     If ANY of [A]-[H] fail, FIX before emitting. The operator will
+     re-prompt you to fix violations otherwise. Self-correction here
+     saves a round-trip.
 
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves

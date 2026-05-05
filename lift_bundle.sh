@@ -389,9 +389,102 @@ violated rules in past LLM outputs:
          (vicarious-benefit, visual-pun, taboo-warning, conspiracy)
          while upgrading the visual surface.
 
-     If ANY of Q1-Q7 fail, REJECT the hook and propose 3 alternatives
+     Q8. PSYCHOLOGY-MECHANISM STACK — name all 4 mechanisms BEFORE
+         locking the hook. Anatomical compliance with Q1-Q7 (object +
+         motion + bg-authority) is necessary but NOT SUFFICIENT.
+
+         (i) SHAME-PROXY — taboo object that lets the viewer face the
+             forbidden subject (banana=penis, cabbage=visceral fat,
+             distended belly=metabolism failure, soaked pillowcase=
+             night-sweat suffering)
+
+         (ii) VIOLENT-ACT / SPECTACLE — force-verb on the proxy that
+              creates a 0-2s shock (SLAM / RIP / SCATTER / SPRAY /
+              GRIND / CASCADE / SHATTER / BLAST). NOT a gentle
+              gesture.
+
+         (iii) AGENT-OF-CHANGE SPECTACLE — the product or recipe
+               ingredient visibly ACTS in-frame (DISSOLVE / UNFOLD /
+               CASCADE / SPRAY / IGNITE / TRANSFORM)
+
+         (iv) TABOO DIRECT-ADDRESS + BYSTANDER/WITNESS — fourth-wall-
+              break with forbidden statement invoking third-party
+              witness ("don't show this to your man", "her husband
+              didn't believe me", "your husband sleeps through this")
+
+         REQUIRED LLM AUTHORING STEP — write the stack explicitly in
+         your working draft:
+
+           ## Psychology stack — HOOK
+           - Shame-proxy: <object> = <forbidden subject>
+           - Violent-act: <force-verb> on <object> creating <spectacle>
+           - Agent-of-change: <product/ingredient> visibly <action> in-frame
+           - Taboo direct-address: "<line>" + <bystander/witness>
+
+         LIFT-SPECIFIC: if the decoded source's HOOK already stacks
+         all 4 mechanisms, port them exactly. If the decoded source's
+         HOOK is missing one or more (e.g. it has shame-proxy +
+         violent-act but no agent-of-change in the HOOK itself), DO
+         NOT replicate the partial stack — UPGRADE by adding the
+         missing mechanisms via Q1-Q3 prop swaps. Spectacle requires
+         VIOLENCE + SHAME + AGENT + TABOO together, not just objects.
+
+     If ANY of Q1-Q8 fail, REJECT the hook and propose 3 alternatives
      pulling from the corpus surrogate library + persona x setting
-     authority pairings before emitting the videos/*.md.
+     authority pairings + Q8 mechanism stack templates before emitting
+     the videos/*.md.
+
+[12] V599 PRODUCT-PRESENCE + LLM-OMISSION AUDIT — every image where
+     the product is visible/named in voiceover MUST have all 3 v581
+     binding parts present.
+
+     [A] INGREDIENTS TABLE present? (## Ingredients section between
+         ## Sources and ## Storyboard) Two rows when product is bound
+         (persona + product). Product row's "Name" column matches
+         VERBATIM the product_image: field values throughout the file.
+         Mismatch = silent platform binding failure.
+
+     [B] V581 3-PART PRODUCT BINDING — on every image where product
+         is visible OR named in voiceover, ALL THREE present:
+           1. product_image: <ingredient-name> field set
+           2. Product binding line at top of fenced Image prompt body
+              ("Use the uploaded product reference image for <name>
+              — match its label, packaging, [wordmark], color, and
+              proportions exactly.")
+           3. Product visual described in prompt body composition
+              ("label-forward to camera", "wordmark squared to lens",
+              "stands upright on counter")
+
+     [C] PER-SCENE PRODUCT-PRESENCE MATRIX:
+           - HOOK Scenes 1-2: product NOT visible. Use shame-proxy.
+           - RECIPE early: product NOT visible yet
+           - RECIPE product-reveal scene: product CASCADES + bottle
+             on counter label-forward (the agent-of-change moment)
+           - EXPLAIN: product bottle visible, label readable
+           - OUTRO + CTA: product hero-shot + CTA gesture
+
+         LIFT-SPECIFIC: if the decoded source has its product reveal
+         at a different scene number, mirror that timing in the lift.
+         Some decoded sources reveal earlier (DAY1/14 transformation)
+         or later (multi-step recipe).
+
+     [D] PERSONA-POSE-TO-CAMERA LOCK — every action_note specifies
+         "eyes locked to lens" / "eyes locked to camera." Every
+         viral corpus video has direct-eye-contact lock.
+
+     [E] V577 WORD BUDGET — every `- **line:**` ≤21 words ±2.
+         Split if 24+ words.
+
+     [F] UNIVERSAL CLOSER — final `- **line:**` ends with "follow
+         me first or I can't reach you" or close variant.
+
+     [G] DAY1/14 ANCHOR (transformation niches only) — "$X surgery
+         you didn't pay" anchor in EXPLAIN.
+
+     [H] FILE STRUCTURE — YAML frontmatter (persona/niche/audience/
+         cell) + ## Sources (citations) + ## Used in (placeholder).
+
+     If ANY of [A]-[H] fail, FIX before emitting.
 
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves

@@ -1185,10 +1185,60 @@ The setting carries TWO simultaneous signals: it must either look like *"the wor
 - Background resonates with NO audience (luxury venue for Mike Henderson cold-prostate ad, sterile clinic for Black-women-Caribbean-herbalist niche)? → REJECT
 - Background is "generic talking-head studio with bokeh"? → REJECT — zero authority signal, zero resonance, this is the failure mode of the "When The Heat Hits At Night" Ogheci-bedroom hook
 
-### Decision rule summary (expanded — 7 questions)
+### Q8. PSYCHOLOGICAL MECHANISM STACK — name the 4-mechanism wrapper before locking the hook
+
+**Source: 2026-05-06 owner observation** *"there's no action, nothing happens. you have just a list of hooks, but you didn't understand the psychology behind it."* The first v598 ship gave Q1-Q7 (object + motion + pun + novelty + match + bg-authority + audience-resonance) but missed the **psychology** that makes the corpus videos actually viral. A hook can pass Q1-Q7 (lady at counter doing nice things with saffron, with proper background) and still be **psychologically dead** because no shame is being mediated, no taboo is being violated, no agent is acting, no curiosity loop is open.
+
+Every viral hook in the 24-decoded-video corpus stacks **four psychological mechanisms simultaneously**. Q8 forces the LLM to NAME each mechanism explicitly before locking the hook image; if any of the four is missing, the hook is psychologically dead even if Q1-Q7 pass.
+
+**The 4-mechanism stack (corpus-derived):**
+
+| Mechanism | What it does | Corpus examples |
+|---|---|---|
+| **Shame-proxy** | Taboo object lets the viewer face the forbidden subject without the shame of confronting it directly. The proxy CARRIES the shame; the persona/audience can therefore TALK about the underlying problem. | Banana = penis (corella saffron, salvora costco banana). Cabbage = visceral fat (salvora costco cabbage). Distended belly = metabolism failure (dr_kim_belly_burn_male). Mannequin tonsil-stones = bad breath shame (oldearl_tonsil_healer). Soaked pillowcase = night-sweat suffering (proposed for menopause-saffron). |
+| **Violent-act / spectacle** | Force-verb on the proxy creates a 0-2s shock moment that interrupts the scroll. NOT a gentle gesture — a SLAM, RIP, SPRAY, GRIND, SHATTER, CASCADE, that creates visible damage or dramatic state-change. | Banana-bunch SLAM-COLLAPSE pyramid (salvora costco banana). Onion-SLAM-on-crown + JUICE-SPRAY 3-4 droplets (dr_kim_hair_regrowth_male). Sugar-VIOLENT-VERTICAL-JET-ATOMIZE engulfs cockroach (dr_kim_cockroach_bait). Salmon-SLAM + ICE-SPLASH + CLEAVER swing (salvora_costco_salmon). Surgical-marker PRESS + TRACE on back lump (dr_kim_back_lump). |
+| **Agent-of-change spectacle** | The product (or the recipe ingredient) ENTERS THE FRAME and visibly ACTS — dissolves, unfolds, ignites, transforms, sprays. The viewer sees the agent doing something, not just sitting there. | Tea POURED on torso → fat liquefies (belly-fat tea). Saffron capsule CASCADES into glass → red-orange streaks bleed through liquid (nuri-saffron-ed). Onion juice SPRAYS into hair → matting visible (dr_kim_hair_regrowth_male). Surgical marker LINE traced → curved contour appears (dr_kim_back_lump). Sugar JET fills jar → cockroach engulfed (dr_kim_cockroach_bait). |
+| **Taboo direct-address** + bystander/witness | The persona breaks the fourth wall with a forbidden statement, often invoking a third-party witness/bystander (husband-asleep, wife-buying-for-husband, your-doctor-doesn't-know) to mediate the shame and create a conspiratorial register. | "Don't show this to your man too often" (rastajahmeil_fat_melt). "Her husband did not believe me" (decoded_healthylifesage). "What I just told my urologist left him speechless" (corpus #7). "Your husband sleeps through this" (proposed for menopause-saffron). |
+
+**Required LLM authoring step (before locking the hook):**
+
+Output an explicit "Psychology stack" block in your reasoning (not in the final markdown — in the working draft) naming each of the four mechanisms and what fills it for THIS hook:
 
 ```
-For every videos/*.md draft, the FIRST IMAGE must pass all 7:
+## Psychology stack — HOOK
+- Shame-proxy: <object> = <forbidden subject>
+- Violent-act: <force-verb> on <object> creating <visible spectacle>
+- Agent-of-change: <product/ingredient> visibly <action> in-frame
+- Taboo direct-address: "<line>" + <bystander/witness>
+```
+
+If you cannot fill any one of the four lines, the hook is dead. Replace the prop, replace the motion, replace the line, or pull a different corpus pattern.
+
+**Corpus-grounded mechanism stacks per niche** (use as templates):
+
+| Niche | Shame-proxy | Violent-act | Agent-of-change | Taboo direct-address + bystander |
+|---|---|---|---|---|
+| ED / saffron-vitality (F→F-about-M) | Banana = penis | Saffron capsule CASCADE into glass + red streaks bleed | Saffron streaks dissolving into amber water | "Add up to two inches to your banana overnight" + husband as implicit listener |
+| Belly fat / visceral clinical | Distended belly | RIGHT-index TAP + dismissive flick | Tea POUR over torso = fat liquefies | "He came in with this dad bod" + husband-skeptic bystander |
+| Hair loss (male) | Bald-spot crown | Onion-SLAM + GRIND + JUICE-SPRAY | Onion-juice MATTING visible in hair | "Your wife stopped looking at your hairline weeks ago" + wife-as-bystander |
+| Tonsil stones | Mannequin-tonsil with stone-deposits | Water-flosser SPRAY-blast | Stones DISLODGE + float away | "If your breath smells like this you're ruining every conversation" |
+| Back lump (DAY1/14) | Bra-line back lump | Surgical-marker PRESS + TRACE | Marker line CARVES contour around lump | "She didn't pay $8000 for surgery" + wife-as-self-reflexive |
+| **Menopause / hot-flash → saffron-vitality** | **Soaked pillowcase = night-sweat suffering** | **Pillowcase SLAM on marble + water spray-arc + saffron tendrils SPATTER** | **Saffron threads UNFOLD gold-amber tendrils in the spatter water** | **"Your husband sleeps through this. Saffron is what wakes you up." + sleeping-husband-silhouette in doorway** |
+
+**Worked example — the menopause-saffron rewrite (post Q1-Q8)**:
+
+A first-pass v598 hook ("woman in clean kitchen with saffron bowl, gentle pinch") passed Q1-Q7 but FAILED Q8 (no shame-proxy, no violent-act, no agent-of-change moment, no bystander). The Q8-corrected version stacks all four:
+- Shame-proxy: soaked white silk pillowcase carrying the night-sweat suffering
+- Violent-act: pillowcase SLAMMED onto marble — water droplets in mid-air arc-spraying across the saffron bowl
+- Agent-of-change: saffron threads visibly UNFOLDING into gold-amber tendrils in the spatter water (the product literally acts)
+- Taboo direct-address: "Your husband sleeps through this. Saffron is what wakes you up." + sleeping-husband-silhouette visible through bedroom doorway in soft-focus background
+
+Q8 is what separates "lady doing nice things" from "scroll-stop spectacle." Anatomical compliance with Q1-Q7 is necessary but not sufficient — without the 4-mechanism psychology stack, the hook is dead.
+
+### Decision rule summary (expanded — 8 questions)
+
+```
+For every videos/*.md draft, Image 1 / Scene 1 must pass all 8:
   Q1. PHYSICAL OBJECT in HOOK foreground?         — yes/no
   Q2. VISIBLE MOTION 0-2s?                        — yes/no
   Q3. PUN / METAPHOR / SCENE-MIRROR?              — yes/no
@@ -1196,13 +1246,144 @@ For every videos/*.md draft, the FIRST IMAGE must pass all 7:
   Q5. MOTION-TEXT-MATCH (v592)?                   — yes/no
   Q6. BACKGROUND-AUTHORITY MATCHES PERSONA?       — yes/no  (≥2 anchor props visible 0-2s)
   Q7. SETTING RESONATES WITH AUDIENCE?            — yes/no  (peer-world OR credible-authority OR DUAL-FLIP)
+  Q8. PSYCHOLOGY STACK — all 4 filled?            — yes/no  (shame-proxy + violent-act + agent-of-change + taboo direct-address)
 
 If ALL yes → ship.
-If ANY no → reject hook, propose 3 alternatives:
-  - Replace foreground prop (Q1-Q3) using corpus surrogate library
-  - Re-anchor the background (Q6) using persona × setting authority pairings
-  - Re-target the setting (Q7) using audience × setting resonance matrix
+If ANY no → reject hook. Q8 fails most often when Q1-Q7 pass with
+"gentle gesture + clean kitchen + soft saffron pinch" — that's the
+psychologically-dead trap.
 ```
+
+---
+
+## Product-image presence discipline + LLM-omission audit (v599)
+
+**Source: 2026-05-06 owner observation** *"chatgpt earlier didn't include the product in the images that needed the product. check the rules, for you and for other LLM. don't miss anything."* v581 documented the explicit-binding contract (product_image field + binding line + product visual in prompt body), but LLMs (ChatGPT, Gemini, Claude API) consistently OMIT one or more of the three required parts when authoring videos/*.md from a bundle. v599 elevates v581's three-part requirement from "implicit per-scene judgment" to "explicit per-scene matrix + pre-output gate."
+
+### v581 product binding has THREE required parts (LLMs skip one or more)
+
+For every image where the product is named in voiceover, visible in frame, or referenced for the platform to bind the product upload, ALL THREE of the following MUST be present (LLMs typically include one, sometimes two, almost never all three):
+
+1. **`product_image:` field** in the image block metadata (above the `Image prompt:` fenced block), with value = product ingredient name verbatim from the Ingredients table:
+   ```
+   - **product_image:** the Corella saffron bottle
+   ```
+
+2. **Product binding line** as the SECOND line at the top of the fenced `Image prompt:` body (after the persona binding line, before the chain binding if present):
+   ```
+   Use the uploaded product reference image for the Corella saffron bottle — match its label, packaging, navy-and-cream wordmark, color, and proportions exactly.
+   ```
+
+3. **Product visual description in the prompt body** — the product MUST be described in the scene composition (where it sits, what the persona does with it, "label-forward to camera, navy-and-cream wordmark clearly readable"):
+   > the Corella saffron bottle stands upright on the counter to the left of the glass, label-forward to camera, navy-and-cream wordmark clearly readable
+
+If ANY of the three parts is omitted, Banana 2 either:
+- Doesn't bind the product upload (no consistent label/packaging across scenes — defeats the entire upload mechanism)
+- Generates a generic bottle that doesn't match the brand's packaging (label drift)
+- Generates the scene without the product visible at all (reads as "talking-head over recipe" — no product authority moment)
+
+### Per-scene product-presence matrix (corpus-grounded)
+
+For a typical 9-scene Korella saffron-style video, the product-presence schedule:
+
+| Scene type | Product visible? | product_image field set? | Required | Source video evidence |
+|---|---|---|---|---|
+| HOOK Scene 1-2 (0-8s) | ❌ NO — use shame-proxy + visual-pun (banana, soaked pillowcase, mannequin tonsil, distended belly). Product appears LATER. | NO | Don't reveal the product yet — burn the curiosity loop first. The HOOK uses the proxy to draw the viewer in. | All 4 corella saffron videos delay the saffron bottle reveal until the recipe-pour or post-recipe EXPLAIN. salvora costco banana never shows product in HOOK. |
+| RECIPE Scene 3-5 (build-up: lemon-pour, ginger-pinch, honey-cascade) | ❌ NO ingredient form of the product yet | NO | Building the drink — the product hasn't entered the recipe yet | nuri-saffron-ed-anatomy-clinic Images 3-6 (no product_image field) |
+| RECIPE Scene 6 (PRODUCT REVEAL — product cascades into the recipe) | ✅ YES — product capsule/bottle/threads ENTERS the frame as the agent-of-change | YES | This is the climactic agent-of-change moment per v598 Q8. Product CASCADES, POURS, UNFOLDS, etc. + the bottle stands on counter label-forward | nuri-saffron-ed-anatomy-clinic Image 7 (saffron capsule cascade, Korella bottle on counter label-forward) |
+| EXPLAIN Scene 7 (8-22s) | ✅ YES — product bottle visible, persona may hold or stand beside | YES | Authority-transfer moment. The brand bottle anchors the credentials | nuri-saffron-ed-anatomy-clinic Image 8 (Korella bottle on desk between persona and patient) |
+| OUTRO Scene 8 (Sign-off) | ✅ YES — product bottle held at chest height label-forward, hero-shot | YES | The CTA-prep frame. Persona holds bottle squared to lens | nuri-saffron-ed-anatomy-clinic Image 9 (bottle in right hand, navy-and-cream wordmark squared to lens) |
+| OUTRO Scene 9 (Finger-up follow + CTA gesture) | ✅ YES — product bottle in one hand + CTA finger gesture from the other | YES | Final hero-shot + CTA pose | nuri-saffron-ed-anatomy-clinic Image 10 (bottle in left hand, right index pointing to lens) |
+
+**Per-niche variations**:
+- **DAY1/14 transformation videos** (back lump, hair regrowth, varicose veins): product reveal can move EARLIER to after Day-14 reveal, or later in the EXPLAIN. Bottle still appears in OUTRO scenes 8-9.
+- **Educational / no-branded-product videos** (asian-elder-papaya-skin, master-chen-three-things): drop product_image field entirely, drop the product row from Ingredients table, omit product mentions from prompts. v573 covers this case.
+- **Multi-step recipes** (5+ ingredients): the product is typically the LAST ingredient added, so product reveal at scene 6 of 9 (or later) is canonical.
+
+### Ingredients table — required dependency
+
+For any video with `product_image:` set on at least one image, the file MUST contain a `## Ingredients` table at the top (between `## Sources` and `## Storyboard`, per v581 + v573 spec). The table has TWO rows: persona + product.
+
+```
+## Ingredients
+
+| # | Type | Name | Reference |
+|---|---|---|---|
+| 1 | character | the main character | personas/refs/<persona>.png |
+| 2 | product | the Corella saffron bottle | products/refs/corella-saffron-bottle.png |
+```
+
+The product row's "Name" column value MUST match VERBATIM the value used in `product_image:` fields throughout the file. If the table says "the Corella saffron bottle" and an image's `product_image:` says "Corella saffron" (missing "the" + "bottle"), the platform's binding resolution will fail silently.
+
+LLMs commonly omit the Ingredients table entirely OR mismatch the product name between the table and the image fields. v599 makes this an explicit gate.
+
+### LLM-omission audit (the things ChatGPT/Gemini/Claude consistently skip)
+
+This audit catches everything LLMs commonly omit when authoring videos/*.md from a bundle. v599 enforces all of these as explicit gates in the bundle TASK self-validation block.
+
+| # | Omission | What's missing | Gate enforces |
+|---|---|---|---|
+| 1 | Product binding (3-part) | `product_image:` field OR binding line OR product visual description | All 3 must be present on every image where product is visible/referenced. v581 contract. |
+| 2 | Ingredients table | Entire `## Ingredients` section missing OR product row missing OR name mismatch with `product_image:` field values | Table required if any image uses `product_image:`. Names must match VERBATIM. |
+| 3 | Persona pose-to-camera lock | Action_note doesn't specify "eyes locked to lens" / "eyes locked to camera" | Required in every scene's action_note (corpus rule — every viral video has direct-eye-contact lock). |
+| 4 | Source / Used-in section | Missing `## Sources` and `## Used in` sections at end of file | Required per CLAUDE.md publishing convention. |
+| 5 | YAML frontmatter | Missing `persona:` / `niche:` / `audience:` / `cell:` keys at top of file | Required for indexing. Cell value should reference strategy-mechanisms.md row. |
+| 6 | v577 word budget per scene | A `- **line:**` value exceeds 21 words ±2 (≥24 words = must split into multi-line scene) | Word-count check per line. |
+| 7 | Universal closer | Final scene's `- **line:**` doesn't end with "follow me first" or close variant | Required final-line check. |
+| 8 | DAY1/14 anchor (transformation niches) | Niche is DAY1/14 (back lump, hair regrowth, varicose, sagging skin) but no "$X surgery you didn't pay" anchor in EXPLAIN scene | Required dollar-anchor in EXPLAIN for transformation niches. |
+
+### Bundle TASK gate (v599 enforcement — pre-output validation)
+
+Before emitting the videos/*.md, the LLM MUST walk this 8-item checklist and FIX any item that fails:
+
+```
+v599 PRE-OUTPUT PRODUCT-PRESENCE + LLM-OMISSION AUDIT
+
+[A] Ingredients table present (## Ingredients between ## Sources and
+    ## Storyboard)? Two rows when product is bound (persona + product).
+    Product row's "Name" column value matches VERBATIM the
+    product_image: field values used throughout the file?
+[B] On every image where the product is visible OR named in voiceover,
+    ALL THREE of the v581 binding parts present:
+      - product_image: <ingredient-name> field set
+      - "Use the uploaded product reference image for <name> — match
+        its label, packaging, [color/wordmark], and proportions exactly."
+        binding line at top of fenced prompt body (line 2, after
+        persona binding line)
+      - Product visual described in prompt body ("label-forward to
+        camera", "wordmark squared to lens", "stands upright on counter")
+[C] Per-scene product-presence matrix respected:
+      - HOOK Scenes 1-2: product NOT visible (use shame-proxy)
+      - RECIPE early scenes: product NOT visible until product-cascade
+        moment
+      - RECIPE product-reveal scene: product CASCADES + bottle on
+        counter label-forward
+      - EXPLAIN: product visible, label readable
+      - OUTRO + CTA: product hero-shot + CTA gesture
+[D] Every scene's action_note specifies "eyes locked to lens" or
+    "eyes locked to camera" (persona-pose-to-camera lock)
+[E] Every `- **line:**` value ≤21 words ±2 (split if 24+ words)
+[F] Final scene's `- **line:**` ends with "follow me first or I can't
+    reach you" or close variant (universal closer)
+[G] If niche is DAY1/14 transformation (back lump, hair regrowth,
+    varicose, sagging skin): "$X surgery you didn't pay" anchor in
+    EXPLAIN scene
+[H] File ends with `## Sources` (with citations) + `## Used in`
+    (placeholder), and YAML frontmatter at top (persona/niche/
+    audience/cell)
+```
+
+If ANY of [A]-[H] fail, FIX before emitting. Self-correction here saves a round-trip.
+
+### Why v599 vs leaving v581 implicit
+
+v581 documented the contract (product_image field + binding line + visual description). v599 codifies the per-scene SCHEDULE (which scenes need product, which don't) + the ENFORCEMENT (pre-output gate that catches LLM omissions). The contract was already correct — the LLMs just weren't applying it consistently because the rule was buried in 100+ lines of v581 deep-dive and the per-scene matrix was implicit.
+
+LLMs are pattern-matchers. v599 gives them an explicit pattern to match.
+
+---
+
+## Export-pipeline frame-grid discipline (v597) — eliminates "tweaking frames"
 
 ### Corpus-grounded surrogate library (replaces speculative entries — 24-decode evidence)
 
