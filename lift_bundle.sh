@@ -670,6 +670,42 @@ violated rules in past LLM outputs:
      original persona by archetype label — when lifting, replace
      with generic alias + scene-specific description.
 
+[16] V603 STYLE LOCK + PROSE DISCIPLINE — corpus iPhone-UGC aesthetic.
+
+     Every Image prompt body MUST include this exact opener:
+       "Shot on iPhone wide-angle lens, handheld, deep focus
+        throughout, vibrant natural HDR daylight"
+
+     Every Image prompt MUST close with this exact tag:
+       "iPhone HDR colors, deep focus."
+
+     Without these, Banana 2 defaults to studio-clean. Corpus uses
+     UGC iPhone-handheld. Mandatory.
+
+     PROSE DISCIPLINE — 4-7 sentences per Image prompt body (after
+     binding lines). Each sentence carries: setting+style+framing /
+     subject+props / active-gesture+body-language / eye-contact+
+     expression / closing style tag.
+
+     CUT from prompt bodies:
+     - Rule citations ("per v601", "per v585", "per v600 SYMPTOM-DEMO")
+     - Cinematography jargon ("1/500-sec", "motion-frozen", "WIND-UP APEX")
+     - Meta-commentary ("V601 SYMPTOM-DEMO HOOK — captured at...")
+     - Excess setting redescription
+
+     REQUIRED:
+     - Concrete camera distance ("camera approximately one arm's
+       length", "approximately 4 feet")
+     - Explicit crop with NO-floor / NO-feet ("cropped at mid-thigh,
+       NO floor visible, NO feet visible")
+
+     ACTIVE-GESTURE in 1 sentence + FACIAL-EXPRESSION in 1 sentence
+     (not 3 paragraphs).
+
+     LIFT-SPECIFIC: corpus videos already use this style lock. When
+     porting, copy the corpus style anchor verbatim. If decoded
+     source lacks it (rare), upgrade by adding the v603 anchors.
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

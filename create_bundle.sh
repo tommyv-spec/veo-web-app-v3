@@ -848,6 +848,79 @@ violated rules in past LLM outputs:
      / age ranges / hair-color-texture redescription. If found ->
      REPLACE with generic alias from v581 binding line.
 
+[16] V603 STYLE LOCK + PROSE DISCIPLINE — corpus iPhone-UGC aesthetic.
+
+     Every Image prompt body MUST include this exact opener style
+     anchor:
+
+       "Shot on iPhone wide-angle lens, handheld, deep focus
+        throughout, vibrant natural HDR daylight"
+
+     Every Image prompt MUST close with this exact tag:
+
+       "iPhone HDR colors, deep focus."
+
+     Without these two anchors, Banana 2 defaults to studio-clean
+     aesthetic. Corpus uses UGC iPhone-handheld aesthetic. Different
+     look. Style-lock = mandatory.
+
+     PROSE DISCIPLINE — 4-7 sentences per Image prompt body
+     (after the persona/product/chain binding lines). Corpus
+     reference videos/nuri-saffron-ed-anatomy-clinic.md averages
+     4-5 sentences per image. Target 4-7. Each sentence carries
+     one of:
+       1. Setting + style lock + framing distance
+       2. Subject + props + composition
+       3. Active gesture + body language
+       4. Eye-contact + facial expression
+       5. Closing style tag
+
+     CUT from prompt bodies:
+     - Rule citations: "per v601", "per v585", "per v600 SYMPTOM-DEMO"
+       (these are author-side notes, not Banana 2 instructions —
+       move to YAML frontmatter)
+     - Cinematography jargon: "1/500-sec sharpness", "motion-frozen
+       at peak emphasis", "captured at the WIND-UP APEX" (Banana 2
+       generates photographs, not action-frames — these confuse it)
+     - Meta-commentary: "V601 SYMPTOM-DEMO HOOK — captured at the
+       APPLY moment of an active diagnostic..." (Banana 2 reads
+       this as competing instructions)
+     - Excess setting redescription: state setting once, lock with
+       style anchor, move on
+
+     CONCRETE FRAMING DISTANCE + CROP required:
+     - Camera distance: "camera approximately one arm's length",
+       "camera approximately 4 feet", "camera approximately 6 feet"
+     - Explicit crop: "head and upper chest filling the upper
+       two-thirds of the frame", "shoulders spanning frame width",
+       "cropped at mid-thigh, NO floor visible, NO feet visible"
+     - The "NO floor / NO feet" instruction is universal in corpus —
+       forces tight headroom
+
+     ACTIVE-GESTURE + FACIAL-EXPRESSION discipline:
+     - One sentence on dominant hand-action verb + visible result
+       (corpus: "Her right hand grips a fresh half-lemon mid-squeeze
+        directly above the glass, golden droplets visibly streaming
+        down into the water, fingers tightening, knuckles whitening")
+     - One sentence on facial expression + eye-contact + brow emphasis
+       (corpus: "Mouth open mid-word, eyes locked to camera then
+        briefly down to the glass at mid-clip, brows in claim-delivery
+        emphasis")
+     - NOT three paragraphs describing every body angle, weight
+       shift, hip rotation, vein visibility
+
+     PRE-OUTPUT VALIDATION before emitting any Image prompt:
+     - YES opener style lock present?
+     - YES closing tag present?
+     - YES concrete camera distance?
+     - YES explicit crop with NO-floor / NO-feet?
+     - YES body prose 4-7 sentences?
+     - NO rule citations in body?
+     - NO cinematography jargon?
+     - NO meta-commentary?
+
+     If any answer wrong, REMOVE/FIX before emitting.
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

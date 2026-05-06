@@ -1256,6 +1256,92 @@ psychologically-dead trap.
 
 ---
 
+## Style lock + prose discipline (v603) — corpus iPhone-UGC aesthetic, tight composition
+
+**Source: 2026-05-06 owner observation** *"the compositing of the images and the style is completely off, what the fuck?"* The menopause-saffron prompts produced wrong composition + wrong style. Diagnosis: missing style-lock package, prose too verbose, rule citations leaked into prompt body, cinematography jargon confused Banana 2.
+
+The corpus reference (`videos/nuri-saffron-ed-anatomy-clinic.md`) uses a specific repeated style anchor across every image. v603 codifies this as a hard rule.
+
+### The style lock package (use verbatim, every image)
+
+Every Image prompt body MUST include this exact style anchor as part of the composition description:
+
+```
+Shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight
+```
+
+And every Image prompt MUST close with this exact tag as the final sentence:
+
+```
+iPhone HDR colors, deep focus.
+```
+
+This pair — opener style-lock + closing tag — anchors Banana 2 to the corpus UGC aesthetic. Without it, Banana 2 defaults to studio-clean which doesn't match what's already shipping on viral accounts.
+
+### Prose discipline — 4-7 sentences per image prompt body
+
+The corpus reference is tight. Counts in `videos/nuri-saffron-ed-anatomy-clinic.md`:
+- Image 1: 5 sentences after binding lines
+- Image 2: 4 sentences
+- Image 3: 4 sentences
+- Image 4: 4 sentences
+
+Target: **4-7 sentences** per Image prompt body. Each sentence carries one of:
+1. Setting + style lock + framing distance ("Shot on iPhone... | camera approximately X distance")
+2. Subject + props + composition ("the main character is seated at... | foreground props are...")
+3. Active gesture + body language
+4. Eye-contact + facial expression
+5. Closing style tag ("iPhone HDR colors, deep focus.")
+
+What gets CUT from prompt bodies:
+- Rule citations: `"per v601 SYMPTOM-DEMO HOOK"`, `"per v585 motion calibration"`, `"per v600 magnitude"` — these are AUTHOR-SIDE notes, not Banana 2 instructions. Move to YAML frontmatter or commentary.
+- Cinematography jargon: `"1/500-sec sharpness"`, `"motion-frozen at peak emphasis"`, `"captured at the WIND-UP APEX"` — Banana 2 generates photographs, not action-frames. These confuse it.
+- Meta-commentary: `"V601 SYMPTOM-DEMO HOOK — captured at the APPLY moment of an active diagnostic..."` — Banana 2 reads this as competing instructions.
+- Excess setting redescription: state the setting once, lock with style anchor, move on.
+
+### Concrete framing distance + crop — required
+
+Every Image prompt must specify:
+- **Camera distance** in concrete terms: `"camera approximately one arm's length"`, `"camera approximately 4 feet"`, `"camera approximately 6 feet"`
+- **Crop** explicitly: `"head and upper chest filling the upper two-thirds of the frame"`, `"shoulders spanning frame width"`, `"cropped at mid-thigh, NO floor visible, NO feet visible"`
+
+These tight crops are corpus-defining. The "NO floor / NO feet" instruction is universal in nuri — it forces tight headroom.
+
+### Active-gesture + facial-expression discipline
+
+The corpus describes active gesture in 1-2 sentences with concrete verbs + visible state:
+- `"Her right arm is RAISED MID-SWEEP at chest height, fingers extended into a flat palm, the bottles in mid-flight — three already SCATTERING off the right edge of the desk"`
+- `"Her right hand grips a fresh half-lemon mid-squeeze directly above the glass, golden droplets visibly streaming down into the water, fingers tightening, knuckles whitening"`
+
+Format:
+- One sentence on the dominant hand-action verb + visible result
+- One sentence on facial expression + eye-contact + brow emphasis
+
+NOT:
+- Three paragraphs describing every body angle, weight shift, hip rotation, vein visibility, etc.
+
+### Pre-output validation
+
+Before emitting any Image prompt, scan the body for:
+- ✅ Opener style lock present? (`"Shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight"`)
+- ✅ Closing tag present? (`"iPhone HDR colors, deep focus."`)
+- ✅ Concrete camera distance? (`"camera approximately X"`)
+- ✅ Explicit crop? (`"cropped at X, NO floor visible, NO feet visible"`)
+- ✅ Body prose 4-7 sentences total (after binding lines)?
+- ❌ NO rule citations in body (`"per v585"`, `"per v600"`, `"per v601 SYMPTOM-DEMO"`)?
+- ❌ NO cinematography jargon (`"1/500-sec"`, `"motion-frozen"`, `"captured at peak emphasis"`, `"WIND-UP APEX"`)?
+- ❌ NO meta-commentary (`"V601 SYMPTOM-DEMO HOOK — captured at the APPLY moment..."`)?
+
+If any ❌ found, REMOVE before emitting.
+
+### Why v603 vs leaving style implicit
+
+Pre-v603, prompts described composition in detail but had no STYLE LOCK. Banana 2 defaulted to studio-clean photography aesthetic. Corpus videos use UGC iPhone-handheld aesthetic — entirely different look. Without v603, every operator's video drifts to a different style and the brand visual identity collapses. v603 makes the style anchor a HARD REQUIREMENT, not an authorial choice.
+
+The user framing: *"we use rules and not a list to pick from."* v603 is a rule (style lock + prose discipline) that any niche applies; the LLM picks scene-specific composition + gesture from niche context.
+
+---
+
 ## Persona body-prose generic-reference rule (v602) — identity comes from upload, not from prose
 
 **Source: 2026-05-06 owner observation** *"when we create a new video, we keep the main subject generic, because it's retrieved by the image in the prompt when creating it with nano banana."* The menopause-saffron video had body prose describing the persona as "The Black-female-practitioner persona" with archetype-label + ethnic descriptor baked in. That fights with the v581 upload-binding because Banana 2 reads body prose as INSTRUCTIONS — and a redundant identity description in prose creates identity-drift between scenes (the upload says X, the prose says Y, the model splits the difference and produces Z that matches neither).
