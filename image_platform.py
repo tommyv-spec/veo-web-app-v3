@@ -6036,6 +6036,21 @@ def promote_batch_to_video(
     dialogue_list: List[Dict[str, Any]] = []
     scenes_list: List[Dict[str, Any]] = []
     clip_specs: List[Dict[str, Any]] = []   # collected for post-Job Clip inserts
+    # v612 — track R2 keys for frames so the new Job can survive Render
+    # ephemeral-filesystem redeploys. Without this, cloning the promoted
+    # job, the /api/jobs/{id}/images/{filename} serving endpoint, and
+    # the video worker's start_frame fetch all 404 after the next deploy
+    # because the local copies are gone and the `jobs/{job_id}/frames/`
+    # R2 prefix was never populated.
+    frames_storage_keys: Dict[str, str] = {}
+    try:
+        from backends.storage import is_storage_configured, get_storage as _get_storage
+        _r2_configured = is_storage_configured()
+        _r2_storage = _get_storage() if _r2_configured else None
+    except Exception as _se:
+        log.warning(f"[image_platform] R2 storage init failed for promote: {_se}")
+        _r2_configured = False
+        _r2_storage = None
 
     # v572 — load all assignments for this batch in one query so we can
     # propagate per-line Veo prompt overrides to dialogue_list. The
@@ -6078,6 +6093,23 @@ def promote_batch_to_video(
             copy2(src_path, dst_path)
         except Exception as e:
             raise HTTPException(500, f"Node {n.id}: failed to copy variant file: {e}")
+
+        # v612 — mirror to R2 at the canonical jobs/{job_id}/frames/{filename}
+        # prefix so /api/jobs/{job_id}/images/{filename}, the clone-job
+        # config endpoint, and the video worker's start_frame fetch all
+        # work after a Render redeploy. The standard /api/jobs upload
+        # path goes through a background task that does this same upload
+        # (main.py ~line 1936); we replicate that step inline here so
+        # promoted jobs reach the same persistence baseline.
+        if _r2_configured and _r2_storage is not None:
+            try:
+                _r2_storage.upload_job_frame(new_job_id, dst_filename, dst_path)
+                frames_storage_keys[dst_filename] = f"jobs/{new_job_id}/frames/{dst_filename}"
+            except Exception as _ue:
+                log.warning(
+                    f"[image_platform] v612: R2 upload of frame {dst_filename} "
+                    f"failed for new job {new_job_id}: {_ue}"
+                )
 
         line_text_default = n.voiceover_text or ""
         mode = (n.clip_mode or "blend").lower()
@@ -6211,6 +6243,13 @@ def promote_batch_to_video(
         "imported_from_batch": batch_id,
         "imported_from_batch_name": job_name,
         "assembly_mode": True,
+        # v612 — promoted jobs ARE storyboard-mode (have scenes data, multi-
+        # image lineup, scene-line associations). Without this flag set, the
+        # /api/jobs/{id}/config-driven cloneJob frontend (static/index.html
+        # ~line 10754) discards data.scenes and falls into 'auto' editor
+        # mode, losing the multi-line scene structure and image-line
+        # bindings. Setting it True keeps the storyboard layout on clone.
+        "storyboard_mode": True,
     }
     if batch.persona:
         config_dict["persona"] = batch.persona
@@ -6231,9 +6270,25 @@ def promote_batch_to_video(
         output_dir=str(job_output_dir),
         total_clips=len(clip_specs),
         backend="flow",
+        # v612 — mirror frames to R2 at canonical jobs/{id}/frames/{filename}
+        # prefix during the file-copy loop above, then stamp the keys map
+        # here so the video worker, image-serving endpoint, and clone-job
+        # config endpoint can all rehydrate from R2 after Render redeploy.
+        frames_storage_keys=_json.dumps(frames_storage_keys) if frames_storage_keys else None,
     )
     db.add(job)
     db.flush()
+    if frames_storage_keys:
+        log.info(
+            f"[image_platform] v612: promoted job {new_job_id[:8]} mirrored "
+            f"{len(frames_storage_keys)} frame(s) to R2"
+        )
+    elif _r2_configured:
+        log.warning(
+            f"[image_platform] v612: promoted job {new_job_id[:8]} — R2 "
+            f"configured but no frames uploaded successfully (clone will "
+            f"break after Render redeploy)"
+        )
 
     # v575: import the prompt-composer so Clips with prebuilt overrides get
     # their final Veo prompt stamped onto Clip.prompt_text at promote time.

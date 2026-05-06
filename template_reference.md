@@ -1256,6 +1256,75 @@ psychologically-dead trap.
 
 ---
 
+## Promote-from-images persistence + storyboard mode (v612) — clone-of-promoted-job no longer breaks after redeploy
+
+**Source: 2026-05-06 owner observation** *"the clone of the video i promoted from images job doesnt work.. it doesn include the images and the lines. deeply check it."*
+
+The "promote-to-video" path (`code/image_platform.py:promote_batch_to_video`) takes a completed Banana 2 image batch and creates a video Job + Clip rows from it. Pre-v612 it had two persistence holes that combined to break the clone-of-promoted-job UX.
+
+### Bug 1 — images mirrored locally only, never uploaded to R2
+
+`promote_batch_to_video` copied each chosen variant file from the image-platform variant store to `app_config.uploads_dir / new_job_id / image_NN.png` (LOCAL filesystem) and set `Clip.start_frame = "jobs/{new_job_id}/frames/image_NN.png"` (R2-style key). But the file was **never actually uploaded to R2** at that key.
+
+Knock-on effects on Render's ephemeral filesystem (which wipes on every redeploy):
+- `/api/jobs/{job_id}/images/{filename}` 404s — Method 1 (local) fails, Method 2 (R2 lookup at `jobs/{job_id}/frames/{filename}`) finds nothing.
+- `/api/jobs/{job_id}/config` returns `images: []` — same lookup chain. The cloneJob frontend reads `data.images` and skips its image-loading block when empty, so the cloned job has no uploaded images.
+- The Flow video worker's start_frame fetch fails — the worker reads `Clip.start_frame` (R2 key) and tries to download from R2, but the key doesn't exist.
+
+The standard `/api/jobs` upload path goes through a background task (`main.py` ~line 1936) that uploads frames to R2 via `storage.upload_job_frame(job_id, frame_name, local_path)` and stamps the resulting keys map onto `Job.frames_storage_keys`. Promote was the only Job-creation path that skipped this step.
+
+### Bug 2 — `storyboard_mode` flag missing from promoted job's config
+
+Promote set `assembly_mode: True` in `config_json` but NOT `storyboard_mode: True`. The cloneJob frontend (`code/static/index.html` ~line 10754) checks `cfg.storyboard_mode` to decide whether to:
+
+- Build `sceneBreaks` from `data.scenes`
+- Call `setEditorMode('storyboard')` (vs `'auto'`)
+
+When `storyboard_mode` was missing/falsy, even though the response carried full `data.scenes` array, the frontend discarded it and dropped into 'auto' editor mode. The user saw:
+
+- No scene boundaries
+- No multi-line scene structure
+- No image-line bindings
+- An auto-mode editor with possibly-populated dialogue but no way to re-bind it to images
+
+`assembly_mode` and `storyboard_mode` are independent flags: assembly_mode signals "the worker assembles pre-existing clips" (v447 video pipeline behavior); storyboard_mode signals "the editor displays a per-scene UI with image+lines bindings." Promoted jobs are BOTH (assembly-mode for the worker AND storyboard-mode for the editor).
+
+### The fix — v612 inline R2 mirror + flag
+
+In `promote_batch_to_video`:
+
+1. **Initialize R2 storage at function entry** — `is_storage_configured()` + `get_storage()`, gracefully degrades when R2 isn't configured.
+2. **Per-image R2 upload** — after `copy2(src, dst)` for each chosen variant, also call `storage.upload_job_frame(new_job_id, dst_filename, dst_path)`. Track filename → R2 key mapping in `frames_storage_keys` dict. Failures log a warning but don't abort the promote (degrades to local-only, which still works on the same server session).
+3. **Stamp keys on Job row** — `Job(..., frames_storage_keys=json.dumps(frames_storage_keys) if frames_storage_keys else None)`. The Flow worker (`main.py` ~line 7318) and image-serving endpoint already know to consult this column for R2 fallback.
+4. **Add `storyboard_mode: True` to config_dict** — one line, makes cloneJob restore storyboard editor + scene structure correctly.
+
+### Test plan (after deploy)
+
+1. Promote an image batch → produces video Job J1.
+2. Verify `Job(J1).frames_storage_keys` is non-null and contains a `{filename: r2_key}` map for every image.
+3. Verify `GET /api/jobs/J1/config` returns `images` populated AND `config.storyboard_mode === true`.
+4. Trigger Render redeploy (or manually wipe `uploads_dir/J1/`).
+5. Re-call `GET /api/jobs/J1/config` — `images` array should still be populated (R2 fallback fires).
+6. Click `📋 Clone` on J1 → cloneJob flow should:
+   - Fetch images via R2 presigned URLs (no 404s)
+   - Restore storyboard mode (scene breaks, image-line bindings)
+   - Populate `dialogueInput` with the scene lines
+
+### What v612 does NOT change
+
+- **Job model** — `frames_storage_keys` column existed pre-v612 (`code/models.py:189`); v612 just starts populating it from the promote path.
+- **Image-serving endpoint** — pre-existing R2 fallback at `code/main.py:6068` was already correct; the pre-v612 issue was that R2 had nothing to find.
+- **Video worker** — pre-existing `frames_storage_keys` consumption path at `code/main.py:7318` was already correct; v612 just makes promoted jobs feed it.
+- **Image-platform variant store** — variants stay at `images/<variant_id>.png` under the image-platform R2 prefix. v612 only mirrors COPIES of the chosen variants to the video Job's `jobs/{id}/frames/` prefix at promote time.
+
+### Failure modes still possible after v612
+
+- **R2 not configured** — promote degrades to local-only. Same behavior as pre-v612 on the same server session; first redeploy still wipes everything. Operator-side fix: configure S3_ENDPOINT + credentials.
+- **R2 upload fails for some frames** (transient network) — those frames are missing from `frames_storage_keys`; clone after redeploy will be partial. Logged at WARNING. Operator-side fix: re-promote, or manually upload via `_storage_upload_file`.
+- **Variant file genuinely missing from R2** — pre-existing v477 R2 rehydration falls through to "permanent loss" 500 error before promote even reaches the upload step. v612 doesn't change that path.
+
+---
+
 ## Whisper export — strict matched-word containment (v611) — defense-in-depth final pass
 
 **Source: 2026-05-06 owner observation** *"the whisper export type is still bugging a bit... the final outcome is, i want to maintain only the original lines mentioned in the video, everything else is cut out. you have everything in the code files. check them and find the perfect solution."*
