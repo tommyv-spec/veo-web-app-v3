@@ -884,6 +884,57 @@ violated rules in past LLM outputs:
            pronoun-free constructions?
        YES Other-character pronouns unchanged?
 
+[22] V613 PRODUCT-MENTION-BINDING PARITY + CORPUS-GROUNDING — every
+     product reference must be bound; lift must inherit corpus parents.
+
+     v613a — PRODUCT-MENTION PARITY (mechanical):
+       For every Image N where the prompt body, action_note, or any
+       scene line pointing to image N contains a product term (any
+       type: product ingredient name OR brand keyword), the image
+       MUST have product_image: <exact-ingredient-name> set.
+
+       CONVERSELY for HOOK (scenes 1-2) and RECIPE-early (lemon /
+       ginger) images per v599 matrix, the prompt body MUST NOT
+       contain any product visual mention.
+
+       FORBIDDEN: HOOK prompt body says "and a Korella saffron
+         bottle standing label-forward on the counter behind" with
+         no product_image field set — Banana 2 invents a generic
+         bottle AND violates v599 matrix.
+       REQUIRED: HOOK uses non-product placeholder, e.g. "and a
+         clean cream-tone counter behind (no product visible —
+         HOOK burns the curiosity loop before scene 6 reveal)."
+
+     v613b — CORPUS-GROUNDING (declared at top of lifted file):
+       Lifted videos/*.md MUST cite at minimum:
+         1. The DECODED SOURCE this lift is recreating (always — it's
+            the lift's primary corpus parent), with parenthetical
+            pattern label.
+         2. ≥1 ADDITIONAL raw/decoded file for cross-validation of
+            the structural pattern.
+         3. The niche voiceover-script wiki page —
+            wiki/voiceover-scripts/<niche>.md.
+         4. Cell honesty NOTE (✓ direct lift / ✓ niche-adjacent
+            adaptation / ⚠ speculative cross-niche port).
+
+     v613c — PER-LINE CORPUS ANNOTATION (encouraged):
+       Each scene's action_note can begin with [corpus: <source>
+       §<section>]. Novel/added lines: [novel — added during lift].
+
+     LIFT-SPECIFIC: when porting a decoded source whose original
+     contained product visibility violations (e.g. product showed
+     in the HOOK), DO NOT replicate the violation. Fix to v599
+     matrix in the lift. The corpus is the dialogue/structural
+     parent, NOT a license to copy compliance violations.
+
+     PRE-OUTPUT VALIDATION:
+       YES Every Image with product term in body has product_image set?
+       YES No product visible in HOOK / RECIPE-early image bodies?
+       YES Decoded source explicitly cited as corpus parent?
+       YES ≥1 additional cross-validating raw/decoded file cited?
+       YES Niche voiceover-script wiki page cited?
+       YES Cell honesty NOTE present?
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

@@ -1227,6 +1227,81 @@ violated rules in past LLM outputs:
        YES Other-character pronouns (patient / bystander / customer)
            unchanged?
 
+[22] V613 PRODUCT-MENTION-BINDING PARITY + CORPUS-GROUNDING — script
+     must come from corpus, every product reference must be bound.
+
+     v613a — PRODUCT-MENTION PARITY (mechanical):
+       For every Image N where the prompt body, action_note, or any
+       scene line pointing to image N contains a product term (any
+       ingredient name with type: product from the Ingredients table,
+       OR brand keywords like "Korella", "saffron bottle", "saffron
+       capsule", "Rosabella"), the image MUST have product_image:
+       <exact-ingredient-name> set.
+
+       CONVERSELY for HOOK images (scenes 1-2) and RECIPE-early
+       images (lemon-pour, ginger-pinch) per the v599 matrix, the
+       prompt body MUST NOT contain any product visual mention. Use
+       a non-product placeholder ("clean cream-tone counter behind",
+       "a small terracotta basil pot"). The product is REVEALED at
+       scene 6 (RECIPE product-cascade) — earlier visibility burns
+       the curiosity loop pre-scene-6.
+
+       FORBIDDEN (HOOK image with product mention but no binding):
+         "Bright modern clinical exam room interior with [...] and
+         a Korella saffron bottle standing label-forward on the
+         counter behind."
+         (product visible in HOOK = v599 matrix violation; no
+         product_image field = v613a parity violation; Banana 2
+         invents a generic supplement.)
+
+       REQUIRED (HOOK with product reveal delayed):
+         "Bright modern clinical exam room interior with [...] and
+         a clean cream-tone counter behind (no product visible —
+         HOOK burns the curiosity loop before the product reveal in
+         scene 6)."
+
+     v613b — CORPUS-GROUNDING (declared at top of every videos/*.md):
+       The video frontmatter or ## Sources block MUST cite at minimum:
+
+       1. ≥2 specific raw/decoded files this script adapts from, with
+          parenthetical pattern label:
+             raw/dr_kim_belly_burn_male_decoded.md (clinical-authority
+                HOOK pattern)
+             raw/decoded_corella_saffron_blood_sugar_v584.md (podiatrist
+                + patient active diagnostic)
+       2. The niche voiceover-script wiki page —
+          wiki/voiceover-scripts/<niche>.md — corpus-distilled hook
+          library for the niche. The HOOK line should adapt one of
+          the listed Opening line entries from that page's ## Hooks
+          table.
+       3. A "NOTE on cell honesty" — explicit declaration of whether
+          the cell is corpus-validated (✓ direct adaptation),
+          corpus-adjacent (✓ adapted from neighboring niche), or
+          speculative (⚠ novel territory).
+
+     v613c — PER-LINE CORPUS ANNOTATION (encouraged):
+       Each scene's action_note can begin with a corpus annotation:
+         [corpus: <source-file> §<section>] Static handheld camera...
+       Novel lines (no corpus parent): [novel — testing]
+       Makes corpus-derivation auditable at review.
+
+     PRE-OUTPUT VALIDATION:
+       YES For each Image, list product terms in (prompt body,
+           action_notes of scenes pointing here, scene lines pointing
+           here). If ANY term present AND product_image: NOT set →
+           REJECT, fix by setting product_image: OR removing the
+           mention if image is HOOK / RECIPE-early.
+       YES For each HOOK image (scenes 1-2) and RECIPE-early image
+           (lemon/ginger), no product visible in prompt body? Use
+           non-product anchor language.
+       YES Frontmatter or ## Sources cites ≥2 raw/decoded files
+           with parenthetical pattern labels?
+       YES Niche voiceover-script wiki page cited?
+       YES Cell honesty NOTE present (✓ validated / ✓ adjacent /
+           ⚠ speculative)?
+       YES HOOK line adapts an Opening line from the niche wiki
+           page's ## Hooks table (or [novel — testing] flagged)?
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

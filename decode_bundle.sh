@@ -469,6 +469,29 @@ PRE-OUTPUT VALIDATION (v610):
 
 If any wrong, FIX before emitting.
 
+V613 PRODUCT-MENTION-BINDING PARITY (decode-side):
+
+  When the source video shows a product on screen, the decoded artifact
+  MUST set product_image: <ingredient-name> on every image whose prompt
+  body, action_note, or scene line will mention the product. Decode
+  artifacts feed lifts — a parity violation in the decode propagates
+  into the lift unless the lift author manually fixes it.
+
+  When the source video does NOT show the product (HOOK before-state,
+  RECIPE-early lemon/ginger steps), the decoded prompt body MUST NOT
+  describe the product as visible. Use a non-product anchor, e.g.
+  "clean cream-tone counter behind" instead of "Korella saffron bottle
+  on the counter behind".
+
+  PRE-OUTPUT VALIDATION (v613):
+    YES For every Image where prompt body / action_note / scene line
+        contains a product term, product_image: is set?
+    YES For every HOOK image (scenes 1-2) and RECIPE-early image
+        (lemon, ginger), prompt body has NO product visual mention?
+    YES The Ingredients table declares the product with type: product?
+
+  If any wrong, FIX before emitting.
+
 Output the decoded markdown per code/template_new_format.md skeleton +
 strict v593 parser format. Include ## Sources (manifest / transcript /
 shots / motion / source MP4 paths) and ## Used in (placeholder).

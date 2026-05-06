@@ -1256,6 +1256,117 @@ psychologically-dead trap.
 
 ---
 
+## Product-mention-binding parity + corpus-grounding (v613) — script must come from corpus, every product reference must be bound
+
+**Source: 2026-05-06 owner observation** *"we have to review how we compose a new video... the script doesn't make any sense... you have plenty of examples in raw and clippings folders, base and adapt the script on those ones. sometime when teh product is mentione is not referenced as image. review those rules and make them stronger and reflect it also in the wiki. this is bery important."*
+
+The pre-v613 authoring discipline had two structural gaps:
+
+### Gap 1 — product-mention parity (mechanical)
+
+v599 codified the 3-part product binding (product_image field + binding line + visual description) and the per-scene presence matrix (HOOK NOT visible / RECIPE-early NOT visible / RECIPE-reveal CASCADES / EXPLAIN visible / OUTRO hero-shot). But v599 had no MECHANICAL VALIDATOR forcing parity between two facts:
+
+- **Visual mention** — does the image's prompt body describe the product visibly? ("a Korella saffron bottle on the counter," "the saffron capsule mid-pour")
+- **Binding declaration** — is `product_image: <ingredient name>` set on the image?
+
+When these diverged, two failure modes appeared in the menopause-saffron test video:
+
+| Image | Prompt body mention | `product_image:` set? | Failure |
+|---|---|---|---|
+| Image 1 (HOOK) | "a Korella saffron bottle standing label-forward on the counter behind" | NO | Banana 2 invents a generic supplement (no Korella ref attached) AND violates v599 "HOOK product NOT visible" matrix rule |
+| Image 3 (RECIPE setup) | "and a Korella saffron capsule pouch in soft-focus to the right" | NO | Same — invented prop AND v599 "RECIPE-early NOT visible yet" violation |
+
+Both failures stem from the same root: prompt body and binding field drifted out of sync because no validator enforced parity.
+
+### Gap 2 — corpus-grounding (qualitative)
+
+The pre-v613 bundle TASK blocks instructed the LLM to "adapt corpus patterns" but didn't enforce that EACH dialogue line trace back to a SPECIFIC corpus parent. Consequence: the LLM invented dialogue that drifted from the validated patterns in `raw/decoded_*.md` and the niche voiceover-script wiki pages. The user's complaint *"the script doesn't make any sense"* was about exactly this — dialogue that sounds plausible in isolation but doesn't match any corpus voiceover hook, opening rhythm, or claim structure.
+
+The corpus is rich — 16+ decoded competitor videos in `raw/`, niche-specific hook libraries in `wiki/voiceover-scripts/<niche>.md`, the Korella playbook in `raw/Lib Course - Korella.pdf`, the script adaptation reference in `raw/Scripts to adapt_Korella.pdf`. A new video shouldn't reach for novel framing when corpus-validated framings exist for the same niche.
+
+### The rule (v613)
+
+**v613a — Product-mention parity (mechanical, pre-output validator)**:
+
+For every Image N where the prompt body, action_note (in any scene that uses image N), or any clip's `- **line:**` pointed at image N contains a product term (any ingredient name with `type: product` from the Ingredients table, OR brand-name keywords like "Korella," "saffron bottle," "saffron capsule," "Rosabella"), the image MUST have `product_image: <exact-ingredient-name>` set.
+
+**Conversely**, for HOOK images (scenes 1-2) and RECIPE-early images (lemon-pour, ginger-pinch) per the v599 matrix, the prompt body MUST NOT contain any product visual mention. Use a non-product placeholder ("clean cream-tone counter behind," "a small terracotta basil pot"). The product is REVEALED at scene 6 (RECIPE product-cascade) — earlier visibility burns the curiosity loop pre-scene-6.
+
+**v613b — Corpus-grounding (authoring discipline, declared at the top of every videos/*.md)**:
+
+The video frontmatter (or the `## Sources` block immediately under the title) MUST cite at minimum:
+
+1. **2 specific raw/decoded files** that this script adapts from — e.g. `raw/dr_kim_belly_burn_male_decoded.md (clinical-authority HOOK pattern)` + `raw/decoded_corella_saffron_blood_sugar_v584.md (podiatrist + patient active diagnostic)`. Each citation includes the parenthetical PATTERN being borrowed.
+2. **The niche voiceover-script wiki page** — `wiki/voiceover-scripts/<niche>.md` — this is the corpus-distilled hook library for the niche. The HOOK line should adapt one of the listed `Opening line` entries from that page's `## Hooks` table.
+3. **A "NOTE on cell honesty"** — explicit declaration of whether the cell is corpus-validated (✓ direct adaptation), corpus-adjacent (✓ adapted from neighboring niche), or speculative (⚠ novel territory). Speculative cells should be flagged so the operator knows it's an experiment.
+
+**v613c — Per-line corpus annotation (in action_note, optional but encouraged)**:
+
+For each scene, the action_note can begin with a `[corpus: <source-file> §<section>]` annotation showing which corpus file the dialogue line is paraphrased from. Example:
+
+```
+- **action_note:** [corpus: dr_kim_belly_burn_male_decoded.md §HOOK clinical-finding emphasis] Static handheld camera, slight forward push toward the thermometer reading. The main character standing beside the seated patient...
+```
+
+When a line is novel (no corpus parent), use `[novel — testing]` instead. This makes the corpus-derivation auditable at review time and keeps scripts from drifting into unfounded territory.
+
+### Pre-output validation gate
+
+Before emitting any videos/*.md draft, the LLM must self-check:
+
+**v613a parity check**:
+- For each Image N, list the product terms appearing in: image prompt body, action_notes of scenes pointing to image N, dialogue lines of scenes pointing to image N.
+- If ANY product term appears AND `product_image:` is NOT set → REJECT, fix by either (a) setting `product_image:` to the bound ingredient OR (b) removing the product mention if image N falls in HOOK / RECIPE-early per v599 matrix.
+- If image N is HOOK (scenes 1-2) or RECIPE-early (lemon-pour, ginger-pinch) per v599 matrix AND prompt body mentions any product → REJECT, replace with non-product anchor language.
+
+**v613b corpus check**:
+- Frontmatter or `## Sources` cites ≥2 raw/decoded files? ✓
+- Niche voiceover-script wiki page cited? ✓
+- Cell honesty note present? ✓
+- HOOK line adapts an entry from the niche page's hook table? ✓ (or novel + flagged)
+
+If any ❌ → REWRITE before emitting.
+
+### Worked example — Image 1 + Image 3 fix in the menopause-saffron test video
+
+**Pre-v613 (parity violation)**:
+
+```
+### Image 1
+- **reference_image:** none
+- **Image prompt:**
+[...] Bright modern clinical exam room interior with one framed medical certification on the white wall behind, a small American desk-flag stand on the counter, a muscular-anatomy poster on the right edge of frame, and a Korella saffron bottle standing label-forward on the counter behind. [...]
+```
+
+The bottle is described visibly but `product_image:` field is absent → Banana 2 invents a generic bottle. Plus this is the HOOK image — v599 matrix says product NOT visible.
+
+**Post-v613 (matrix + parity compliant)**:
+
+```
+### Image 1
+- **reference_image:** none
+- **Image prompt:**
+[...] Bright modern clinical exam room interior with one framed medical certification on the white wall behind, a small American desk-flag stand on the counter, a muscular-anatomy poster on the right edge of frame, and a clean cream-tone counter behind (no product visible — HOOK burns the curiosity loop before the product reveal in scene 6). [...]
+```
+
+Same scene composition, but the product mention is removed from the prompt body, restoring v599 matrix compliance AND avoiding the binding parity issue.
+
+### Why this matters more than the existing v599 rule
+
+v599 stated the rule clearly but left enforcement to authoring vigilance. Under attention pressure (long prompt body, 4-7 sentence v603 prose, six v606 compositing directives, v610 gender-neutrality scan), the LLM consistently drops the parity check first. v613 codifies the validator as an item in every bundle TASK block ([22]) so the LLM CAN'T emit a draft without scanning for parity violations.
+
+The corpus-grounding half (v613b/c) addresses a different failure: when the LLM "adapts" a script without citing specific corpus parents, it generates plausible-sounding dialogue that drifts from validated voiceover patterns. Forcing each line to trace to a corpus anchor keeps scripts within the corpus's tested-by-virality territory.
+
+### What v613 does NOT change
+
+- v581 binding mechanics (product_image field + binding line + visual description) — same.
+- v599 per-scene presence matrix (HOOK NOT visible / RECIPE-early NOT visible / etc.) — same.
+- v606 product compositing directives — same six directives apply when product IS visible.
+- The niche voiceover-script wiki pages structure — already present, just now mandatory-cited.
+- Banana 2 / Veo prompt mechanics — v613 is purely authoring discipline.
+
+---
+
 ## Promote-from-images persistence + storyboard mode (v612) — clone-of-promoted-job no longer breaks after redeploy
 
 **Source: 2026-05-06 owner observation** *"the clone of the video i promoted from images job doesnt work.. it doesn include the images and the lines. deeply check it."*
