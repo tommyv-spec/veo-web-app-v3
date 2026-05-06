@@ -1256,6 +1256,137 @@ psychologically-dead trap.
 
 ---
 
+## Whisper export — mid-segment unbridge + frame-snap + tighter fallback (v616) — close the last leak path
+
+**Source: 2026-05-06 owner observation** *"sometimes i can see some extra frames added in the whisper exported final.. there's still something wrong... check the whole logic and maybe check online what's the best approach... you know what i need and want."*
+
+v611 introduced strict matched-word containment as a defense-in-depth post-pass. It worked for segment EDGES — capping segment.start and segment.end against the nearest unmatched whisper word. But the user kept seeing extra frames. v616 closes the THREE remaining leak paths.
+
+### Online research (Whisper word-boundary state of the art, 2024-2026)
+
+Per [WhisperX (Bain et al., Interspeech 2023)](https://arxiv.org/abs/2303.00747) and follow-up work:
+
+- **Whisper's free transcription has ±200ms word-boundary error** (corpus-wide measurement against ground-truth phoneme alignment).
+- **Whisper consistently OVERSHOOTS word.end** by 50-150ms — it appends trailing breath/silence into the reported word boundary because the decoder treats acoustic energy roll-off as part of the word.
+- **WhisperX's forced-aligner approach** (wav2vec2 phoneme-level alignment on top of Whisper transcription) achieves ±20-100ms accuracy under strict tolerance — that's the gold standard.
+- A [2025 Whisper internal-aligner paper](https://arxiv.org/abs/2509.09987) found that filtering Whisper's own attention heads while teacher-forcing characters can match WhisperX accuracy without the wav2vec2 dependency.
+
+The pragmatic implication for our pipeline: **don't trust Whisper's `word.end` to be the actual phoneme end.** Pad less, snap more, and unbridge mid-segment garbage that the bridger merged in.
+
+### Three leak paths v611 didn't close
+
+**Leak 1 — Mid-segment hallucination bridged by v548**:
+
+The v548 bridger merges intra-clip gaps ≤ `BRIDGE_GAP_MAX=0.7s` and only refuses to bridge when an unmatched whisper word with `confidence ≥ HALLUC_PROB_FLOOR=0.30` sits in the gap. **Lower-confidence hallucinations slip through.** Concrete failure:
+
+```
+matched word M1 at 5.0s end=5.05s
+hallucination H at 5.25s end=5.40s (conf=0.20 — below 0.30 floor)
+matched word M2 at 5.5s end=5.6s
+gap M1.end → M2.start = 0.45s ≤ 0.7s → bridger merges
+result: one segment [5.0s, 5.95s] containing H's audio in the middle
+```
+
+v611 then walks this segment, finds matched words M1+M2, looks PAST M2 for unmatched words, finds none. **H is between M1 and M2, not past M2 — v611's edge-only check doesn't see it.** H survives in the export.
+
+**Leak 2 — Whisper word.end overshoot under fallback pad**:
+
+When no high-conf unmatched word follows the last matched word in a segment, v611's fallback caps end at `last_matched.end + STRICT_FALLBACK_END_PAD=0.18s`. But Whisper consistently OVERSHOOTS `word.end` by 50-150ms (per WhisperX research). So a fallback of 180ms ON TOP OF an already-overshot word.end gives us 230-330ms of post-word audio — silence, breath, ambient. At 24fps that's 5-8 extra frames per clip-end.
+
+**Leak 3 — Mid-frame cuts**:
+
+The existing v499 + v597 pipeline uses output seek (frame-accurate) + fps lock + CFR concat. But the segment timestamps fed to ffmpeg can land MID-FRAME. When a frame at 7.917s spans `[7.917s, 7.958s)` and we ask ffmpeg to cut at 7.928s (mid-frame), libx264's behavior is encoder-version dependent. Most builds keep the frame because the cut is past frame's start; some keep it AND its successor because of B-frame reorder buffer interactions.
+
+### The v616 fix — three layers
+
+**v616a — Mid-segment unbridge (split at intra-segment blockers)**:
+
+After v611's edge cap, walk each contained segment. For every consecutive pair of matched words inside the segment, scan the gap between them for any whisper word with `confidence ≥ UNBRIDGE_PROB_FLOOR=0.10` (much lower floor than the v548 bridger's 0.30). If found, SPLIT the segment at that point — emit `[current_start, m1.end + STRICT_MIN_END_TAIL]` as one sub-segment, then resume at `m2.start - STRICT_START_GUARD` for the next.
+
+The lower 0.10 floor catches faint hallucinations that the bridger ignored. Splitting (not just trimming) is correct because the matched words on both sides should both stay — we just need to surgically remove the blocker between them.
+
+```python
+UNBRIDGE_PROB_FLOOR = 0.10
+for each segment:
+    inside_matched = sorted matched words inside this segment
+    for each consecutive pair (m1, m2):
+        blockers = [u for u in all_unmatched
+                    if m1.end <= u.start and u.end <= m2.start
+                    and u.probability >= UNBRIDGE_PROB_FLOOR]
+        if blockers:
+            split: emit [seg_start, m1.end + 0.05]
+            resume: seg_start = m2.start - 0.02
+    emit [seg_start, seg_end]
+```
+
+**v616b — Frame-snap segment boundaries to source fps grid**:
+
+Read source fps from ffprobe (`r_frame_rate`). Snap each segment's `start` UP to the next frame boundary (we keep only complete frames AFTER start) and `end` DOWN to the previous frame boundary (we keep only complete frames BEFORE end).
+
+```python
+src_fps = parse from ffprobe r_frame_rate
+for (s, e) in speech_groups:
+    s_snap = ceil(s * fps) / fps    # round UP — exclude pre-start partial frame
+    e_snap = floor(e * fps) / fps   # round DOWN — exclude post-end partial frame
+    # Defensive: if snap collapses segment, keep original
+    if e_snap > s_snap: emit (s_snap, e_snap)
+    else: emit (s, e)
+```
+
+This eliminates encoder-rounding ambiguity at cut boundaries. The cuts always land cleanly on frame edges, so libx264 has no choice about which frame to include.
+
+**v616c — Tighten STRICT_FALLBACK_END_PAD from 0.18s to 0.10s**:
+
+When no unmatched word follows the last matched word, cap the segment end at `last_matched.end + 0.10s` instead of `+ 0.18s`. Per WhisperX research, Whisper's word.end already overshoots by 50-150ms — so 100ms additional pad is enough to preserve typical fricative consonant decay (50-80ms) without preserving the silence/breath Whisper rolled into word.end. At 24fps, this is ~2.4 frames vs the previous ~4.3 frames.
+
+If consonant decay gets clipped on specific phonemes after this change (mostly word-final fricatives or aspirated stops), raise back to 0.14. But 0.18 was almost certainly too generous given the documented overshoot.
+
+### Validation
+
+Synthetic test cases (5 cases all pass):
+
+| Case | Before | After v616 | Expected |
+|---|---|---|---|
+| Mid-segment hallucination at conf 0.20 | `[(5.0, 5.95)]` (bridged single segment) | `[(5.0, 5.10), (5.48, 5.95)]` | Split at hallucination ✓ |
+| Clean segment (no blockers) | `[(5.0, 5.95)]` | `[(5.0, 5.95)]` | Pass-through ✓ |
+| Sub-floor noise (conf 0.05) | `[(5.0, 5.95)]` | `[(5.0, 5.95)]` | Below 0.10 floor — pass-through ✓ |
+| Frame-snap @ 24fps end=7.928s | `(5.0, 7.928)` | `(5.0, 7.917)` | floor(7.928×24)/24=7.917 ✓ |
+| Frame-snap @ 30fps start=5.013s | `(5.013, 7.945)` | `(5.033, 7.933)` | ceil(5.013×30)/30=5.033 ✓ |
+
+### Future work — forced alignment (v617+)
+
+The proper "best approach" per online research is to replace free transcription with forced alignment. We have the SCRIPT TEXT (it's in `dialogue_texts`); a wav2vec2 forced-aligner can align that script to audio with ±20-100ms accuracy vs Whisper's ±200ms.
+
+That would make most of the v498→v616 patches obsolete:
+- No more matcher needed (alignment IS the matching)
+- No more padding decisions (alignment gives true boundaries)
+- No more bridge/unbridge (no false-positive intermediate hallucinations to bridge)
+
+The cost is adding a wav2vec2 dependency (`whisperx` Python package, or a lightweight Modal-hosted forced-aligner). Worth doing if v616 still leaks. **For now: v616 closes the leak paths within the existing free-transcription pipeline.** If a future user report comes in showing extra frames AFTER v616 in production, escalate to v617 = WhisperX integration.
+
+### Tuning guide if v616 over-trims
+
+If after deploy users report **clipped consonant decay** on word endings:
+1. Raise `STRICT_FALLBACK_END_PAD: 0.10 → 0.14` (preserves more fricative tail)
+2. Raise `STRICT_END_GUARD: 0.08 → 0.05` (closer to next blocker)
+
+If users report **clipped onsets** at segment starts (rare):
+1. Lower `STRICT_START_GUARD: 0.02 → 0.0` (no buffer past pre-segment unmatched word)
+
+If the **mid-segment unbridge over-aggressively splits** legitimate segments (when Whisper transcribed a borderline real word that happens to not match the script):
+1. Raise `UNBRIDGE_PROB_FLOOR: 0.10 → 0.20` (only split on stronger hallucinations)
+
+All four constants live at the top of the v611 / v616 blocks in `code/video_processor.py:detect_speech_segments_whisper`.
+
+### What v616 does NOT change
+
+- v498-v557 matcher / padder / bridger logic — preserved.
+- v611 edge-cap defense — preserved (v616 fires AFTER v611, on the v611-contained segments).
+- v499/v597 ffmpeg output-seek + CFR + fps-lock — preserved (v616b's frame-snap COMPLEMENTS them by feeding cleaner timestamps in).
+- Energy-mode silence detection — separate code path; v616 only fires when `silence_mode="whisper"`.
+
+---
+
 ## Em-dash absolute ban in dialogue lines (v615)
 
 **Source: 2026-05-06 owner directive (mandatory)** *"absolutely mandatory no — symbols in any lines."*

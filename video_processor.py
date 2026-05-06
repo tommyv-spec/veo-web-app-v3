@@ -746,7 +746,19 @@ def detect_speech_segments_whisper(
             # tight, end guard moderate (preserves consonant decay).
             STRICT_START_GUARD = 0.02       # 20ms after a pre-segment unmatched word's end
             STRICT_END_GUARD = 0.08         # 80ms before a post-segment unmatched word's start
-            STRICT_FALLBACK_END_PAD = 0.18  # if no unmatched word in tail: cap at last_matched.end + 180ms
+            # v616c — STRICT_FALLBACK_END_PAD tightened from 0.18s to 0.10s.
+            # User reported "extra frames added in the whisper exported final"
+            # despite v611. At 24fps the prior 180ms = ~4.3 frames; new 100ms
+            # = ~2.4 frames. Per WhisperX research (Bain 2023, Interspeech
+            # arxiv 2303.00747), Whisper's free word-end timestamps have ±200ms
+            # systematic error — they often OVERSHOOT actual phoneme end by
+            # 50-150ms (Whisper appends trailing silence/breath into the word
+            # boundary). Reducing the fallback pad to 100ms keeps consonant
+            # decay (~50-80ms typical for fricatives) without preserving the
+            # silence/breath Whisper rolled into word.end. If consonant decay
+            # gets clipped on specific phonemes, raise back to 0.14 — but
+            # 0.18 was almost certainly too generous given Whisper's overshoot.
+            STRICT_FALLBACK_END_PAD = 0.10
             STRICT_MIN_END_TAIL = 0.05      # never trim below last_matched.end + 50ms
 
             matched_start_set = {w.get('start') for w in speech_words}
@@ -823,6 +835,146 @@ def detect_speech_segments_whisper(
                     contained_groups.append((gs, ge))
 
             speech_groups = contained_groups
+
+            # === v616a — mid-segment unbridge (split at intra-segment blockers) ===
+            # User reported "extra frames added in the whisper exported final"
+            # despite v611. Root cause: v611 only caps segment EDGES against
+            # unmatched-word locations. It cannot remove a hallucination that
+            # was BRIDGED INTO THE MIDDLE of a segment by the v548 bridger.
+            #
+            # Concrete leak path:
+            #   matched word M1 at 5.0s
+            #   hallucination H at 5.5s (conf 0.20 — below v548 HALLUC_PROB_FLOOR
+            #     of 0.30, so v548 bridger doesn't block on it)
+            #   matched word M2 at 6.0s
+            #   v548 bridger sees gap M1.end(5.05) → M2.start(6.0) = 0.95s,
+            #     within BRIDGE_GAP_MAX=0.7s? NO — 0.95 > 0.7. Bridger doesn't merge.
+            #
+            # Tighter case where v616a IS needed:
+            #   M1 at 5.0s, M2 at 5.5s, H at 5.25s (conf 0.20).
+            #   Gap M1.end(5.05) → M2.start(5.5) = 0.45s ≤ BRIDGE_GAP_MAX. Bridged.
+            #   v611 sees one segment, looks past M2 for unmatched, doesn't
+            #     see H (it's between the matched words, not past).
+            #   H's audio ("um", "uh", breath, half-word fragment) survives
+            #     in the middle of the segment.
+            #
+            # v616a fixes this: scan each contained segment for whisper words
+            # (any conf ≥ UNBRIDGE_PROB_FLOOR=0.10) sitting between consecutive
+            # matched words inside the segment. SPLIT the segment to exclude
+            # them, producing two (or more) shorter segments with tight tails.
+            #
+            # Splitting (vs simply trimming) is the right move because the
+            # matched words on each side of the blocker may be far apart in
+            # source-time but should both stay in the export — we just want
+            # to cut the blocker from between them.
+            UNBRIDGE_PROB_FLOOR = 0.10
+            unbridged_groups = []
+            for (gs, ge) in speech_groups:
+                inside_matched = sorted(
+                    [w for w in speech_words
+                     if w.get('start') is not None
+                     and gs <= w['start'] < ge],
+                    key=lambda w: w['start']
+                )
+                if len(inside_matched) <= 1:
+                    unbridged_groups.append((gs, ge))
+                    continue
+
+                # Find blockers between consecutive matched words
+                splits = []  # list of (cut_end, cut_resume_start) pairs
+                for i in range(len(inside_matched) - 1):
+                    m1 = inside_matched[i]
+                    m2 = inside_matched[i + 1]
+                    m1_end = m1.get('end', 0)
+                    m2_start = m2.get('start', 0)
+                    if m2_start <= m1_end:
+                        continue  # touching or overlapping, no gap to scan
+                    blockers = [
+                        u for u in all_unmatched_for_guard
+                        if u.get('start') is not None
+                        and u.get('end') is not None
+                        and u['start'] >= m1_end - 0.05
+                        and u['end'] <= m2_start + 0.05
+                        and u.get('probability', 1.0) >= UNBRIDGE_PROB_FLOOR
+                    ]
+                    if not blockers:
+                        continue
+                    cut_end = m1_end + STRICT_MIN_END_TAIL
+                    cut_resume_start = m2_start - STRICT_START_GUARD
+                    if cut_end < cut_resume_start:
+                        splits.append((cut_end, cut_resume_start, blockers))
+
+                if not splits:
+                    unbridged_groups.append((gs, ge))
+                    continue
+
+                # Apply splits — emit (current_start, cut_end), then resume
+                cur_start = gs
+                for (cut_end, cut_resume_start, blockers) in splits:
+                    if cut_end > cur_start:
+                        unbridged_groups.append((cur_start, cut_end))
+                    cur_start = cut_resume_start
+                    blocker_summary = ", ".join(
+                        f"'{b.get('text', '?')}'(p={b.get('probability', 0):.2f}@{b.get('start', 0):.2f}s)"
+                        for b in blockers[:3]
+                    )
+                    print(f"[WhisperVAD] ✂ v616a unbridge: split at {cut_end:.3f}s → {cut_resume_start:.3f}s in segment [{gs:.3f}s, {ge:.3f}s] — blockers: {blocker_summary}", flush=True)
+                if cur_start < ge:
+                    unbridged_groups.append((cur_start, ge))
+
+            speech_groups = unbridged_groups
+
+            # === v616b — frame-snap segment boundaries to source video's frame grid ===
+            # FFmpeg's -ss/-t with output seek (v499) is frame-accurate at the
+            # decode level, but the requested timestamp can still land mid-
+            # frame. When that happens libx264 may include an extra frame at
+            # the boundary depending on encoder rounding. Snapping the segment
+            # boundaries to the source's frame grid eliminates this entirely:
+            # start snaps UP to the next frame boundary (we keep only complete
+            # frames AFTER start), end snaps DOWN to the previous frame
+            # boundary (we keep only complete frames BEFORE end).
+            #
+            # Source fps comes from ffprobe r_frame_rate (already read above
+            # as `info`). Falls back to 24.0 if unparseable.
+            src_fps = 24.0
+            try:
+                for stream in info.get("streams", []):
+                    if stream.get("codec_type") == "video":
+                        rf = stream.get("r_frame_rate", "24/1")
+                        if "/" in rf:
+                            num, den = rf.split("/", 1)
+                            den_f = float(den)
+                            if den_f > 0:
+                                src_fps = float(num) / den_f
+                        else:
+                            src_fps = float(rf)
+                        break
+            except Exception:
+                src_fps = 24.0
+
+            import math as _math
+            def _snap_ceil(t, fps):
+                return _math.ceil(t * fps) / fps if fps > 0 else t
+
+            def _snap_floor(t, fps):
+                return _math.floor(t * fps) / fps if fps > 0 else t
+
+            frame_snapped = []
+            for (s, e) in speech_groups:
+                s_snap = _snap_ceil(s, src_fps)
+                e_snap = _snap_floor(e, src_fps)
+                # If snapping collapses the segment (e.g. both round to the
+                # same frame), keep the original to avoid a zero-length cut.
+                # Pre-frame-snap segments < 1 frame are pathological anyway —
+                # the matcher shouldn't produce them, but defensive.
+                if e_snap > s_snap:
+                    if abs(s_snap - s) > 0.001 or abs(e_snap - e) > 0.001:
+                        print(f"[WhisperVAD] 🎬 v616b frame-snap: ({s:.3f}s, {e:.3f}s) → ({s_snap:.3f}s, {e_snap:.3f}s) @ {src_fps:.3f}fps", flush=True)
+                    frame_snapped.append((s_snap, e_snap))
+                else:
+                    frame_snapped.append((s, e))
+
+            speech_groups = frame_snapped
 
             result = speech_groups
             
