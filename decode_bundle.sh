@@ -346,6 +346,66 @@ PRE-OUTPUT VALIDATION (v605):
 
 If any wrong, FIX before emitting.
 
+V606 — PRODUCT COMPOSITING / LIGHTING INTEGRATION (NEW 2026-05-06)
+==================================================================
+
+When decoding a source video that has product-bearing scenes, the
+decoded artifact's image prompts must include v606 compositing
+directives so future generations don't produce photoshopped-looking
+output. Default Banana 2 with uploaded product reference produces:
+oversized + self-lit + hard-edged + center-stage + shadow-less +
+occlusion-less = photoshopped look.
+
+For every Image in the decoded artifact with product_image: set,
+include a compositing paragraph in the body prose (before the v603
+closing tag) covering all 6 directives:
+
+[a] SCALE: realistic supplement-bottle scale (~5 inches), anchored
+    to a scene element observable in the source video (palm size /
+    torso fraction / glass height comparison)
+[b] LIGHTING: bottle lit by the scene's actual light source at
+    actual color temperature (cite source-video lighting from VLM
+    pass — warm window-soft / cool clinical LED / outdoor daylight)
+[c] CAST SHADOW: shadow direction matching source-video light
+    direction, with softness and length specified
+[d] PERSPECTIVE: bottle angle matching source-video camera angle
+    (cite the actual camera height / angle observed)
+[e] SURFACE CONTACT / GRIP: explicit contact point — flush against
+    desk surface OR fingers visibly wrapping bottle, palm contact
+[f] NATURAL OCCLUSION: foreground element partially crossing the
+    bottle silhouette (the source video almost always has SOMETHING
+    in front — a hand, a desk edge, an object — observe and decode it)
+
+Compositing paragraph format:
+  "The bottle integrates naturally with the scene: [a] realistic
+   supplement-bottle scale (~5 inches), [b] lit by [scene's actual
+   light source from VLM] with no dedicated product-shot lighting,
+   [c] base [contact-point from VLM] with a soft natural cast shadow
+   [direction + length matching VLM light direction], [d] perspective
+   matching the scene's [camera angle from VLM], [e] [grip or surface-
+   contact detail from VLM], [f] partially occluded by [foreground
+   element from VLM] breaking the silhouette."
+
+V606 negative constraints to add to closing negative block:
+  - No dedicated product-shot lighting on the bottle.
+  - No oversized bottle — realistic supplement-bottle scale.
+  - No floating bottle — physical contact with surface or hand.
+  - No hard cut-and-paste edges.
+  - No color-saturated label — match scene color temperature.
+  - No center-stage product hero-shot composition.
+
+PRE-OUTPUT VALIDATION (v606):
+
+  YES [a] scale anchor present in every product image prompt?
+  YES [b] lighting integration cites scene's actual light source?
+  YES [c] cast shadow direction + length stated?
+  YES [d] perspective matches source-video camera angle?
+  YES [e] surface contact / grip explicit?
+  YES [f] natural foreground occlusion observed and decoded?
+  YES v606 negative constraints in closing negative block?
+
+If any wrong, FIX before emitting.
+
 Output the decoded markdown per code/template_new_format.md skeleton +
 strict v593 parser format. Include ## Sources (manifest / transcript /
 shots / motion / source MP4 paths) and ## Used in (placeholder).

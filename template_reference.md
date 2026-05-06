@@ -1256,6 +1256,142 @@ psychologically-dead trap.
 
 ---
 
+## Product compositing / lighting integration (v606) — make the product melt into the scene
+
+**Source: 2026-05-06 owner observation** *"we need to improve the prompting according to nano bana prompting rules to make the product melt into the image and not look like it's photoshopped."* The first generated frame from the menopause-saffron HOOK had the Korella saffron bottle visibly photoshopped-in: oversized (~12-15 inches vs real ~5-inch supplement), self-lit (product-shot lighting on label that didn't match cool-clinical room ambient), floating-flat (no cast shadow on desk, hard edges), color-pop saturated, no foreground occlusion. The bottle read as a separate product render dropped onto the scene, not as an object IN the scene.
+
+Per Google's Gemini Nano Banana 2 official prompting docs (ai.google.dev/gemini-api/docs/image-generation), uploaded reference products integrate into generated scenes ONLY when explicitly prompted to do so. By default, Banana 2 places the upload at product-shot scale with its own lighting — that produces the "photoshopped-in" look every time. v606 codifies six compositing directives that must appear in every Image prompt body where a product is visible.
+
+### The 6 compositing directives
+
+Every Image prompt body where a product is visible (i.e. has `product_image:` field set) must include compositing directives in these six dimensions. Body prose adds a final compositing paragraph BEFORE the v603 closing tag and AFTER the negative-constraint block.
+
+#### [a] Scale anchor — realistic real-world size
+
+❌ FORBIDDEN: "the Korella saffron bottle stands upright on the counter, label-forward to camera" — gives no scale information; Banana 2 places at default product-shot scale (oversized).
+
+✅ REQUIRED: anchor the bottle's size to a scene element.
+
+- "the Korella saffron bottle is shown at realistic supplement-bottle scale, approximately 5 inches tall"
+- "the bottle's height is approximately 1/4 of the persona's torso width"
+- "the bottle is sized so it would fit naturally in the persona's palm" (when held)
+- "the bottle is roughly the same height as the glass tumbler beside it"
+
+#### [b] Lighting integration — match scene light source + color temperature
+
+❌ FORBIDDEN: "label clearly readable", "wordmark squared to lens", "navy-and-cream wordmark visible" without a lighting anchor — these read as product-shot directives.
+
+✅ REQUIRED: explicitly state that the bottle is lit BY the scene's light source(s), at the scene's color temperature.
+
+- "the bottle is lit by the same warm window-soft daylight as the rest of the kitchen — no dedicated product-shot lighting"
+- "the bottle's surface picks up the cool-clinical LED ambient of the exam room — slight cool-white highlights on the cap, label colors subtly desaturated to match the muted clinical color palette"
+- "the bottle's white plastic cap reflects the warm honey-oak shelving behind in a soft amber tint"
+- "the label is in scene-ambient lighting (warm domestic daylight) — readable but not over-illuminated"
+
+#### [c] Cast shadow — explicit shadow on the surface
+
+❌ FORBIDDEN: bottle described without any shadow, or with vague "stands on the counter."
+
+✅ REQUIRED: state cast shadow direction + softness + length, matching the scene's light direction.
+
+- "the bottle's base casts a soft natural cast shadow on the desk surface, falling viewer-right at a 30-degree angle, matching the room's window light from camera-left"
+- "the bottle has a subtle cast shadow extending viewer-right approximately 2 inches, soft-edged from the diffuse window light"
+- "the bottle's shadow on the marble counter is faint and warm-toned, matching the late-morning daylight"
+
+#### [d] Perspective integration — match scene camera angle
+
+❌ FORBIDDEN: "label-forward to camera" / "wordmark squared to lens" without a perspective anchor — these conflict with the scene's actual camera angle.
+
+✅ REQUIRED: state the bottle's tilt/angle relative to the scene's camera position.
+
+- "the bottle is shot from the same camera angle as the rest of the scene (slightly above desk-eye-level), so the label is angled slightly upward toward the camera, with the cap visible at the top"
+- "the bottle's perspective matches the room's vanishing point — slight tilt back at the top because the camera is angled down at the desk surface"
+- "the bottle is shown straight-on at chest-height, label visible but with natural perspective foreshortening because the persona's hand grips it slightly off-axis"
+
+If the scene camera is at desk-eye-level, the bottle on the desk should be near-straight-on. If the camera is above, the bottle should be slightly foreshortened. State this explicitly.
+
+#### [e] Surface contact — physical placement, no floating
+
+❌ FORBIDDEN: bottle simply "on the counter" or "in her hand" — generic placement language can produce floating-bottle results where the bottle doesn't appear in physical contact with the surface or hand.
+
+✅ REQUIRED: state the contact point + grip explicitly.
+
+- "the bottle's base sits flush on the wooden desk surface, in clear physical contact, no floating gap"
+- "the bottle is gripped firmly in her viewer-left hand, fingers visibly wrapping the cylindrical body, thumb on the cap top, the persona's palm in contact with the bottle's lower third"
+- "the bottle's base is in soft contact with the marble counter, with the contact line clearly visible at the bottom edge of the bottle"
+
+#### [f] Natural occlusion — foreground breaks the silhouette
+
+❌ FORBIDDEN: bottle as the dead-center hero element with nothing in front of it — produces a "cut-and-paste" look.
+
+✅ REQUIRED: something in the foreground partially obscures the bottle's silhouette, breaking the cut-out edge.
+
+- "a small portion of the bottle is partially obscured by the persona's hand in the foreground"
+- "the bottle is partially behind the wooden cutting board in the foreground, breaking the silhouette so it looks naturally placed in the kitchen workspace"
+- "the bottom of the bottle is partially behind the desk edge in the immediate foreground"
+- "the persona's gesturing hand on the viewer-left side partially crosses in front of the bottle's lower third"
+
+Even subtle foreground occlusion (a hand grazing the edge of the bottle) breaks the cut-and-paste look that Banana 2 defaults to.
+
+### Compositing paragraph format
+
+Every product-bearing Image prompt body should include a final compositing paragraph BEFORE the v603 closing tag (`"iPhone HDR colors, deep focus."`) and AFTER the main scene description but BEFORE the negative-constraint block:
+
+```
+[scene description with persona, props, framing, action]
+
+The bottle integrates naturally with the scene: [a] realistic supplement-bottle scale (~5 inches tall), [b] lit by the same [scene lighting source] as the room with no dedicated product-shot lighting, [c] base [contact-point] with a soft natural cast shadow [direction + length], [d] perspective matching the scene's [camera angle], [e] [grip or surface-contact detail], [f] partially occluded by [foreground element] breaking the silhouette.
+
+iPhone HDR colors, deep focus.
+
+[negative constraints — including v606-specific anti-photoshop ones below]
+```
+
+### v606 negative constraints (mandatory addendum to existing negative-constraint block)
+
+Add these to the closing negative-constraint block in every product-bearing image:
+
+- "No dedicated product-shot lighting on the bottle — same ambient lighting as the rest of the scene."
+- "No oversized bottle — realistic supplement-bottle scale (~5 inches tall)."
+- "No floating bottle — must be in physical contact with the surface or hand."
+- "No hard cut-and-paste edges — bottle blends into scene with natural ambient transitions."
+- "No color-saturated label — colors match the room's color temperature and may appear slightly desaturated to match scene ambient."
+- "No center-stage product hero-shot composition — bottle is integrated into the scene, partially occluded by foreground elements."
+
+### Pre-output validation gate
+
+Before emitting any Image prompt with a `product_image:` field, scan the body prose for ALL six directives:
+
+- ✅ [a] Scale anchor present (realistic-size statement + scene-element anchor)?
+- ✅ [b] Lighting integration present (lit by scene's light source, color temperature stated)?
+- ✅ [c] Cast shadow present (direction + softness + length stated)?
+- ✅ [d] Perspective integration present (bottle angle matches scene camera)?
+- ✅ [e] Surface contact / grip explicit (no floating bottle)?
+- ✅ [f] Natural occlusion (foreground element partially crosses bottle silhouette)?
+- ✅ v606 negative constraints added to closing negative-constraint block?
+
+If any ❌ found, ADD before emitting.
+
+### Why v606 vs leaving compositing implicit
+
+v599 enforced product-presence (3-part binding + bottle visible label-forward). v605 enforced prop-position-grounding (where the bottle is, citing VLM source). Neither addressed COMPOSITING — how the bottle integrates LIGHTING-WISE and PHYSICALLY into the scene. Banana 2's default behavior with an uploaded product reference is to render it at product-shot quality with its own lighting and place it center-frame at oversized scale. Without explicit compositing directives, every product-bearing image looks photoshopped.
+
+The user framing: *"make the product melt into the image and not look like it's photoshopped."* v606 is the rule that operationalizes "melt." Six directives, all six required, mechanical anti-photoshop gate.
+
+### Worked example — Image 2 (HOOK reveal with bottle on counter)
+
+**Pre-v606 (photoshopped look)**:
+> The Korella saffron bottle now prominent in the lower-foreground of the desk in front of her, label-forward, navy-and-cream wordmark squared to lens.
+
+**Post-v606 (compositing directives applied)**:
+> The Korella saffron bottle is in the lower-foreground of the desk, sized at realistic supplement-bottle scale (~5 inches tall, roughly 1/4 of the persona's torso width). The bottle is lit by the same cool-clinical LED ambient as the exam room — slight cool-white highlights on the white cap, the navy-and-cream label colors subtly desaturated to match the muted clinical palette, no dedicated product-shot lighting. The bottle's base sits flush on the desk surface in clear physical contact, casting a soft natural shadow viewer-right approximately 2 inches at a 30-degree angle from the room's window light source camera-left. The bottle is shown at the same camera angle as the rest of the scene (slightly above desk-eye-level), so the label is angled slightly upward toward camera with the cap visible at the top. The persona's gesturing hand on the viewer-left side partially crosses in front of the bottle's upper third, breaking the silhouette so the bottle reads as naturally placed in the workspace, not as a separate product render. iPhone HDR colors, deep focus.
+>
+> No dedicated product-shot lighting on the bottle. No oversized bottle. No floating bottle. No hard cut-and-paste edges. No color-saturated label. No center-stage product hero-shot composition.
+
+That's what makes the product melt into the scene.
+
+---
+
 ## Decoder anti-template-bias + prop-tracking matrix + prop-as-subject priority (v605)
 
 **Source: 2026-05-06 Gemini decode session** (`raw/decode_prompt_accuracy_gemini_2026-05-06.md`) — same `decoded_healthylifesage_DX5jJgeMj30.md` decode that surfaced v604, but a different failure mode: Image 5 placed the Rosabella bottle ON THE DESK (corpus default) when the actual source video shows Dr. Sage HOLDING the bottle up to camera in his blue-gloved left hand.

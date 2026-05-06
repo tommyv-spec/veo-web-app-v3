@@ -770,6 +770,47 @@ violated rules in past LLM outputs:
        YES ~60% allocation to prop handling?
        YES decoded source's prop_position preserved exactly?
 
+[19] V606 PRODUCT COMPOSITING / LIGHTING INTEGRATION — make product
+     melt into scene, not look photoshopped.
+
+     Default Banana 2 with uploaded product reference: oversized
+     scale + product-shot lighting + hard edges + center-stage +
+     no shadow + no occlusion = photoshopped look.
+
+     v606 = 6 mandatory compositing directives per product image:
+
+     [a] SCALE: realistic supplement-bottle scale (~5 inches),
+         anchored to scene element (palm size / torso fraction /
+         glass height comparison)
+     [b] LIGHTING: lit by scene light source at scene color
+         temperature, no dedicated product-shot lighting
+     [c] SHADOW: cast shadow direction + softness + length matching
+         scene light direction
+     [d] PERSPECTIVE: bottle angle matches scene camera angle
+         (not "label-forward to camera" if camera isn't straight-on)
+     [e] CONTACT: explicit physical contact with surface or hand
+         (no floating gap)
+     [f] OCCLUSION: foreground element partially crosses the bottle
+         silhouette (breaks cut-and-paste look)
+
+     Compositing paragraph format — final paragraph before v603
+     closing tag:
+       "The bottle integrates naturally with the scene: [a] [b] [c]
+        [d] [e] [f]."
+       "iPhone HDR colors, deep focus."
+       "[negative constraints including v606 anti-photoshop adds]"
+
+     V606 NEGATIVE CONSTRAINTS:
+       No dedicated product-shot lighting / No oversized bottle / No
+       floating bottle / No hard cut-and-paste edges / No color-
+       saturated label / No center-stage hero-shot composition.
+
+     LIFT-SPECIFIC: when porting a decoded source, the original
+     decoded artifact may not have v606 compositing directives
+     (since v606 is new). The lift should ADD compositing directives
+     based on the decoded source's setting + camera + lighting,
+     even if the decoded artifact doesn't explicitly call them out.
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

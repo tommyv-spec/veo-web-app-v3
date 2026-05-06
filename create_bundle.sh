@@ -1048,6 +1048,117 @@ violated rules in past LLM outputs:
        NO corpus-template defaults invoked as source of prop
           placement?
 
+[19] V606 PRODUCT COMPOSITING / LIGHTING INTEGRATION — make the
+     product melt into the scene, not look photoshopped.
+
+     Default Banana 2 behavior with an uploaded product reference:
+     places the bottle at PRODUCT-SHOT scale (oversized) with its
+     own product-shot LIGHTING (self-lit), HARD cut-and-paste edges,
+     CENTER-STAGE composition, no cast shadow, no foreground
+     occlusion. This produces the photoshopped look every time.
+
+     v606 = 6 mandatory compositing directives in every Image prompt
+     body that has product_image: field set. All 6 required.
+
+     [a] SCALE ANCHOR — realistic real-world size relative to scene
+         FORBIDDEN: "label-forward to camera" alone (no scale)
+         REQUIRED: "the bottle is shown at realistic supplement-
+                    bottle scale, approximately 5 inches tall"
+                   "bottle's height is approximately 1/4 of persona's
+                    torso width"
+                   "sized so it would fit naturally in palm"
+
+     [b] LIGHTING INTEGRATION — match scene light source + color temp
+         FORBIDDEN: "label clearly readable", "wordmark squared to
+                    lens" without a lighting anchor (these read as
+                    product-shot directives)
+         REQUIRED: "the bottle is lit by the same warm window-soft
+                    daylight as the rest of the kitchen — no
+                    dedicated product-shot lighting"
+                   "the bottle's surface picks up the cool-clinical
+                    LED ambient — slight cool-white highlights on
+                    the cap, label colors subtly desaturated to
+                    match the muted clinical palette"
+
+     [c] CAST SHADOW — explicit shadow on the surface
+         FORBIDDEN: bottle described without any shadow
+         REQUIRED: "the bottle's base casts a soft natural cast
+                    shadow on the desk surface, falling viewer-right
+                    at a 30-degree angle, matching the room's window
+                    light from camera-left"
+
+     [d] PERSPECTIVE INTEGRATION — match scene camera angle
+         FORBIDDEN: "label-forward to camera" / "wordmark squared to
+                    lens" without a perspective anchor
+         REQUIRED: "the bottle is shot from the same camera angle as
+                    the rest of the scene (slightly above desk-eye-
+                    level), so the label is angled slightly upward
+                    toward camera with the cap visible at the top"
+
+     [e] SURFACE CONTACT / GRIP — physical placement, no floating
+         FORBIDDEN: bottle simply "on the counter" or "in her hand"
+                    without contact specifics
+         REQUIRED: "the bottle's base sits flush on the wooden desk
+                    surface, in clear physical contact, no floating
+                    gap"
+                   "gripped firmly in her viewer-left hand, fingers
+                    visibly wrapping the cylindrical body, thumb on
+                    the cap top, palm in contact with bottle's
+                    lower third"
+
+     [f] NATURAL OCCLUSION — foreground breaks the silhouette
+         FORBIDDEN: bottle as dead-center hero with nothing in front
+         REQUIRED: "the persona's gesturing hand on the viewer-left
+                    side partially crosses in front of the bottle's
+                    upper third, breaking the silhouette so the
+                    bottle reads as naturally placed in the workspace"
+                   "the bottle is partially behind the wooden cutting
+                    board in the foreground, breaking the silhouette"
+                   "bottom of bottle partially behind desk edge in
+                    immediate foreground"
+
+     COMPOSITING PARAGRAPH FORMAT — final paragraph before v603
+     closing tag and before negative-constraint block:
+
+       [scene description with persona, props, framing, action]
+
+       The bottle integrates naturally with the scene: [a] realistic
+       supplement-bottle scale (~5 inches tall), [b] lit by the same
+       [scene lighting] as the room with no dedicated product-shot
+       lighting, [c] base [contact-point] with a soft natural cast
+       shadow [direction + length], [d] perspective matching the
+       scene's [camera angle], [e] [grip or surface-contact detail],
+       [f] partially occluded by [foreground element] breaking the
+       silhouette.
+
+       iPhone HDR colors, deep focus.
+
+       [negative constraints including v606 anti-photoshop additions]
+
+     V606 NEGATIVE CONSTRAINTS (add to closing negative block):
+       - No dedicated product-shot lighting on the bottle — same
+         ambient lighting as the rest of the scene.
+       - No oversized bottle — realistic supplement-bottle scale
+         (~5 inches tall).
+       - No floating bottle — must be in physical contact with the
+         surface or hand.
+       - No hard cut-and-paste edges — bottle blends into scene
+         with natural ambient transitions.
+       - No color-saturated label — colors match the room's color
+         temperature and may appear slightly desaturated to match
+         scene ambient.
+       - No center-stage product hero-shot composition — bottle is
+         integrated into the scene, partially occluded by foreground.
+
+     PRE-OUTPUT VALIDATION:
+       YES [a] scale anchor present?
+       YES [b] lighting integration present (lit by scene source)?
+       YES [c] cast shadow direction + softness + length stated?
+       YES [d] perspective matches scene camera angle?
+       YES [e] surface contact / grip explicit?
+       YES [f] natural foreground occlusion present?
+       YES v606 negative constraints added to closing block?
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.
