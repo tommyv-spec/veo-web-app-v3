@@ -1256,6 +1256,61 @@ psychologically-dead trap.
 
 ---
 
+## Whisper export — single-pass trim+concat filter graph (v617)
+
+**Source: 2026-05-06 owner clarification** *"the frames i was seeing are not extra frame after or before the words or segments, are just extra frames added randomly, so hard cuts are between them, does this clarify?"*
+
+The pre-v617 2-stage pipeline (per-segment extract files + concat-demuxer re-encode) was **inserting duplicate frames at segment boundaries** via two mechanisms:
+
+1. **Per-segment encode rounds duration UP**. `-r {fps} -vsync cfr -t {duration}` makes libx264 pad with duplicate frames at segment END to align to integer-frame counts. Even floating-point error in the v597/v616b frame-snap (e.g. 0.45000001s instead of 0.450s) → 1 extra frame per segment.
+2. **Concat demuxer + `-vsync cfr` re-encode**. At each segment boundary, the encoder sees a PTS gap and resolves it by duplicating the last frame of segment N to maintain CFR continuity into segment N+1.
+
+Different from v611-v616's "edge leak" — these are **inserted duplicates** between hard cuts, mid-segment.
+
+### The fix — replace 2 stages with 1 ffmpeg invocation
+
+```
+ffmpeg -y -i source.mp4 -filter_complex "
+  [0:v]trim=start=S1:end=E1,setpts=PTS-STARTPTS[v0];
+  [0:a]atrim=start=S1:end=E1,asetpts=PTS-STARTPTS[a0];
+  [0:v]trim=start=S2:end=E2,setpts=PTS-STARTPTS[v1];
+  [0:a]atrim=start=S2:end=E2,asetpts=PTS-STARTPTS[a1];
+  ...
+  [v0][a0][v1][a1]...concat=n=N:v=1:a=1[outv][outa]
+" -map "[outv]" -map "[outa]"
+  -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p
+  -c:a aac -b:a 128k
+  output.mp4
+```
+
+- `trim` filter cuts at exact PTS — frame-accurate when timestamps land on frame boundaries (v616b ensures this).
+- `concat` filter joins with seamless PTS continuity — no boundary insertion possible, **there are no encoder-visible boundaries** (one filter graph, one encoder pass).
+- No `-vsync cfr` flag — the concat filter outputs continuous PTS internally; libx264 just encodes whatever frames it receives. No dup/drop decisions at boundaries.
+
+### What v617 removes
+
+- The `tempfile.TemporaryDirectory()` block + per-segment `.mp4` extraction.
+- The `concat_list.txt` + `-f concat -safe 0` demuxer step.
+- The double `-vsync cfr` flag (per-segment + concat) that was the duplicate-frame source.
+- The `-async 1` audio resync (concat filter handles audio sync intrinsically).
+
+### What v617 keeps
+
+- v499/v597/v616b frame-snap and tight matched-word containment — feed cleaner timestamps to the trim filter.
+- All v611-v616 segment-computation logic — the filter graph just consumes the final speech_groups list.
+- Source fps detection (still needed by v616b's frame-snap before this stage).
+
+### Validation
+
+Filter_complex generation tested for 3-segment case at 6-decimal precision (`1.234567`, `8.000000`, `15.111111`) → 438-char filter string. Well under ffmpeg's filter-graph length limits (~tens of MB). For typical 9-segment videos: ~1.3KB filter string.
+
+### What v617 does NOT change
+
+- v498-v616 segment computation logic — preserved.
+- Energy-mode silence detection — separate code path.
+
+---
+
 ## Whisper export — mid-segment unbridge + frame-snap + tighter fallback (v616) — close the last leak path
 
 **Source: 2026-05-06 owner observation** *"sometimes i can see some extra frames added in the whisper exported final.. there's still something wrong... check the whole logic and maybe check online what's the best approach... you know what i need and want."*

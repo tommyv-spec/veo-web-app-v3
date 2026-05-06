@@ -2024,99 +2024,86 @@ def apply_vad(
     if progress_callback:
         progress_callback(f"Found {len(merged)} speech segments ({total_speech:.1f}s)")
     
-    # Extract and concatenate speech segments
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        segment_files = []
-        
-        for idx, (start, end) in enumerate(merged, 1):
-            if progress_callback:
-                progress_callback(f"Extracting segment {idx}/{len(merged)}...")
-            
-            segment_file = temp_path / f"segment_{idx:04d}.mp4"
-            duration_seg = end - start
-            
-            # v499: use OUTPUT seek (-ss AFTER -i) for frame-accurate cuts.
-            # Previously this used INPUT seek (-ss BEFORE -i) which is fast
-            # but snaps to the nearest keyframe before the requested time.
-            # With ultrafast preset's default ~10s GOP, a request for
-            # -ss 17.520 could snap to a keyframe at 10s (in clip 2's
-            # timeline in the concatenated file) or at 20s (deep in clip
-            # 3's filler content). Output then contained the wrong frames
-            # — user saw "random frames like the last frames of that clip"
-            # appearing at segment cuts.
-            #
-            # Performance optimization: use COARSE input seek + FINE
-            # output seek. Input seek to (start - 2.0) gets us near the
-            # target fast (keyframe-aligned, no full decode), then output
-            # seek advances frame-accurately the remaining ~2s. This
-            # bounds decode work per segment to ~2s regardless of how
-            # deep in the source file we're cutting.
-            COARSE_MARGIN = 2.0  # seconds of pre-roll for coarse seek
-            coarse_ss = max(0.0, start - COARSE_MARGIN)
-            fine_ss = start - coarse_ss  # 0 if start < COARSE_MARGIN, else COARSE_MARGIN
+    # === v617 — Single-pass trim+concat filter graph ===
+    # User report: "the frames i was seeing are not extra frame after or
+    # before the words or segments, are just extra frames added randomly,
+    # so hard cuts are between them."
+    #
+    # Root cause: the prior 2-stage pipeline (per-segment extract files +
+    # concat-demuxer re-encode) was inserting duplicate frames at segment
+    # boundaries via TWO mechanisms:
+    #   (a) Per-segment encode with `-r {fps} -vsync cfr -t {duration}`
+    #       — when segment duration isn't an integer-frame multiple,
+    #       libx264 pads with duplicate frames at the segment END to
+    #       align to the integer-frame count. Even floating-point error
+    #       in the v597/v616b frame-snap (e.g. 0.45000001s instead of
+    #       exactly 0.450s) causes 1 extra frame per segment.
+    #   (b) Concat demuxer + `-vsync cfr` re-encode — at every segment
+    #       boundary, the encoder sees a PTS gap and resolves it by
+    #       duplicating the last frame of segment N to maintain CFR
+    #       across the boundary into segment N+1.
+    #
+    # The fix replaces both stages with ONE ffmpeg invocation using the
+    # trim + concat filter graph. ffmpeg decodes the source ONCE, the
+    # trim filter selects each segment's PTS range with frame-accurate
+    # precision (no encode-side rounding), the concat filter joins them
+    # with seamless PTS continuity (no boundary insertion possible
+    # because there are no encoder boundaries — it's one continuous
+    # filter graph), and the output is encoded ONCE with consistent
+    # PTS throughout.
+    #
+    # No temporary segment files. No concat-demuxer. No CFR rounding
+    # at boundaries. Just trim + concat in one pass.
+    if progress_callback:
+        progress_callback(f"Extracting and joining {len(merged)} segments (single-pass)...")
 
-            cmd = [FFMPEG_BIN, "-y"]
-            if coarse_ss > 0:
-                cmd += ["-ss", f"{coarse_ss:.6f}"]   # input seek — fast coarse positioning
-            cmd += ["-i", str(src)]
-            if fine_ss > 0:
-                cmd += ["-ss", f"{fine_ss:.6f}"]     # output seek — frame-accurate fine positioning
-            # v597: lock segment encoding to source fps + CFR. Without this,
-            # libx264 inherits whatever the source has and can produce VFR
-            # output when boundaries fall mid-frame. The downstream concat
-            # step uses -vsync cfr which then has to dup/drop boundary
-            # frames asymmetrically, producing the "tweaking frames" the
-            # user reports at every cut. Locking fps here AND at concat
-            # ensures both passes agree on the frame grid.
-            seg_fps = src_fps if (src_fps and src_fps > 0) else 24
-            cmd += [
-                "-t", f"{duration_seg:.6f}",
-                "-r", f"{seg_fps:g}", "-vsync", "cfr",   # v597
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                "-pix_fmt", "yuv420p",
-                "-threads", "1",
-                "-c:a", "aac", "-b:a", "128k",
-                "-avoid_negative_ts", "make_zero",
-                str(segment_file)
-            ]
-            
-            code, _, err = run(cmd)
-            if code != 0:
-                raise RuntimeError(f"Failed to extract segment {idx}: {err}")
-            
-            segment_files.append(segment_file)
-        
-        if progress_callback:
-            progress_callback("Joining segments...")
-        
-        # Concatenate all segments
-        concat_file = temp_path / "concat_list.txt"
-        with concat_file.open("w", encoding="utf-8") as f:
-            for seg_file in segment_files:
-                f.write(f"file {shlex.quote(str(seg_file))}\n")
-        
-        cmd = [
-            FFMPEG_BIN, "-y",
-            "-f", "concat", "-safe", "0", "-i", str(concat_file),
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-threads", "1",
-            "-vsync", "cfr",
-            "-c:a", "aac", "-b:a", "128k",
-            "-async", "1",
-            "-video_track_timescale", "90000",
-            str(out)
-        ]
-        
-        code, _, err = run(cmd)
-        if code != 0:
-            raise RuntimeError(f"Failed to concatenate segments: {err}")
-    
+    # Build the filter_complex. For each (start, end), emit:
+    #   [0:v]trim=start=S:end=E,setpts=PTS-STARTPTS[vN];
+    #   [0:a]atrim=start=S:end=E,asetpts=PTS-STARTPTS[aN];
+    # Then concat them: [v0][a0][v1][a1]...concat=n=N:v=1:a=1[outv][outa]
+    filter_parts = []
+    concat_inputs = []
+    for idx, (start, end) in enumerate(merged):
+        # 6-decimal precision matches v499's frame-accurate seek
+        filter_parts.append(
+            f"[0:v]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS[v{idx}]"
+        )
+        filter_parts.append(
+            f"[0:a]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS[a{idx}]"
+        )
+        concat_inputs.append(f"[v{idx}][a{idx}]")
+    filter_parts.append(
+        f"{''.join(concat_inputs)}concat=n={len(merged)}:v=1:a=1[outv][outa]"
+    )
+    filter_complex = ";".join(filter_parts)
+
+    cmd = [
+        FFMPEG_BIN, "-y",
+        "-i", str(src),
+        "-filter_complex", filter_complex,
+        "-map", "[outv]",
+        "-map", "[outa]",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-threads", "1",
+        "-c:a", "aac", "-b:a", "128k",
+        "-video_track_timescale", "90000",
+        # NOTE: no -vsync flag here. The concat filter outputs continuous
+        # PTS internally; libx264 just encodes whatever frames it receives
+        # at the source's native rate. No dup/drop decisions at boundaries
+        # because there ARE no encoder-visible boundaries — one filter
+        # graph, one encoder pass.
+        str(out)
+    ]
+
+    code, _, err = run(cmd)
+    if code != 0:
+        raise RuntimeError(f"Failed to extract+concat segments (filter): {err[:500]}")
+
     # Get final duration
     final_info = ffprobe_json(out)
     final_duration = get_duration(final_info)
-    
+
     return {
         "original_duration": original_duration,
         "final_duration": final_duration,
