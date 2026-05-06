@@ -5159,8 +5159,26 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     # in parallel-slot mode), and those tile_ids get attributed to the
     # new submission. The user observed this as "wrong images downloaded
     # — pre-existing project tiles, not the new generation."
-    captured_batches = []  # list of {ts, prompt_in_resp, fife_urls, media_ids, consumed}
-    listener_state = {'attached': False}
+    captured_batches = []  # list of {ts, prompt_in_resp, fife_urls, media_ids, consumed, node_id}
+    listener_state = {'attached': False, 'current_submitting_node_id': None}
+    request_to_node = {}  # id(playwright_request) → node_id (set when request fires, popped on response)
+    captured_urls_by_node = {}  # node_id → list[str] (aggregated fife URLs, in order)
+
+    def _on_image_request(request):
+        """Tag every outgoing batchGenerateImages POST with the node_id of
+        the job currently being submitted. Set inside _submit_one_job
+        right before click_generate_image; cleared after a brief wait
+        for all N variant POSTs to have fired."""
+        try:
+            if 'batchGenerateImages' not in request.url:
+                return
+            if request.method != 'POST':
+                return
+        except Exception:
+            return
+        nid = listener_state.get('current_submitting_node_id')
+        if nid is not None:
+            request_to_node[id(request)] = nid
 
     def _on_image_response(response):
         try:
@@ -5174,6 +5192,11 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
         media = body.get('media') or []
         if not media:
             return
+        # v627: prefer request → node_id tag; falls back to prompt-match.
+        try:
+            tagged_node_id = request_to_node.pop(id(response.request), None)
+        except Exception:
+            tagged_node_id = None
         fife_urls = []
         media_ids = []
         prompt_in_resp = ''
@@ -5192,24 +5215,34 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 continue
         if not fife_urls:
             return
+        if tagged_node_id is not None:
+            # Tagged path — guaranteed correct attribution regardless of
+            # prompt collisions.
+            bucket = captured_urls_by_node.setdefault(tagged_node_id, [])
+            for u in fife_urls:
+                if u not in bucket:
+                    bucket.append(u)
+        # Always also store in captured_batches as legacy/fallback path.
+        # Prompt-match still works for any response that wasn't tagged
+        # (e.g. a request that fired late, after we cleared the state).
         captured_batches.append({
             'ts': time.time(),
             'prompt_in_resp': prompt_in_resp,
             'fife_urls': fife_urls,
             'media_ids': media_ids,
-            'consumed': False,
+            'consumed': tagged_node_id is not None,  # if tagged, don't double-attribute
+            'node_id': tagged_node_id,
         })
-        # FIFO eviction so memory stays bounded over long runs
         if len(captured_batches) > 200:
             del captured_batches[:50]
 
     try:
+        page.on('request', _on_image_request)
         page.on('response', _on_image_response)
         listener_state['attached'] = True
         print(f"[API] ✓ v624 network-listener attached (batchGenerateImages → fife URL capture)", flush=True)
-        # v625.1: cross-batch parallelism is auto-enabled whenever the
-        # listener attaches — no CLI flag required. Platform-launched
-        # workers (downloaded from the UI) get it for free.
+        print(f"[API] ✓ v627 request-tag attribution enabled (request → node_id mapping survives prompt collisions)", flush=True)
+        # v625.1: cross-batch parallelism auto-enables when listener attaches.
         print(f"[API] ✓ v625 cross-batch parallelism ENABLED (auto, listener-backed) — jobs from different batches run concurrently", flush=True)
     except Exception as e:
         print(f"[API] ⚠ Couldn't attach network listener: {e} — v624 attribution disabled, falling back to DOM-only", flush=True)
@@ -5798,13 +5831,28 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             # re-mounted during scan and misattributed to this node.
             baseline_urls = baseline_urls | _claimed_tile_urls
 
-            if not click_generate_image(page, context=ctx):
-                raise RuntimeError("Failed to click Generate")
-            _save_state()
+            # v627: tag the upcoming batchGenerateImages POSTs with this
+            # node_id so the response listener can attribute them
+            # correctly even if two scenes share an identical prompt
+            # template (Scene 6 and Scene 9 in the user's batch — both
+            # CTA scenes with the same wording — collided under the
+            # v626 prompt-match path). Flag stays set during click_generate
+            # AND the tile_id capture window (a few seconds), which
+            # comfortably covers Flow's request-emission window.
+            listener_state['current_submitting_node_id'] = node_id
+            try:
+                if not click_generate_image(page, context=ctx):
+                    raise RuntimeError("Failed to click Generate")
+                _save_state()
 
-            prompt_key = _derive_prompt_key(prompt)
-            if len(prompt_key) < 30:
-                print(f"[API:submit] ⚠ Node {node_id}: prompt_key only {len(prompt_key)} chars — attribution may be ambiguous", flush=True)
+                prompt_key = _derive_prompt_key(prompt)
+                if len(prompt_key) < 30:
+                    print(f"[API:submit] ⚠ Node {node_id}: prompt_key only {len(prompt_key)} chars — attribution may be ambiguous", flush=True)
+            except Exception:
+                # Restore state before re-raising so downstream submits
+                # don't inherit a stale node_id tag
+                listener_state['current_submitting_node_id'] = None
+                raise
 
             # v521: capture per-tile UUIDs from the new container at
             # data-index="0". Flow assigns each variant a stable
@@ -5856,6 +5904,19 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             except Exception as e:
                 print(f"[API:submit] ⚠ Node {node_id}: tile_id capture failed ({e}) — listener will handle attribution" if listener_state['attached']
                       else f"[API:submit] ⚠ Node {node_id}: tile_id capture failed ({e}) — attribution will use prompt_key fallback", flush=True)
+            finally:
+                # v627: clear the request-tag flag so subsequent submits
+                # don't accidentally tag their POSTs with this job's id.
+                # Report how many batchGenerateImages requests were tagged
+                # for this submit — useful diagnostic for prompt-collision
+                # cases (should equal `variants` in healthy runs).
+                tagged_count = sum(1 for v in request_to_node.values() if v == node_id)
+                if listener_state['attached']:
+                    if tagged_count == 0:
+                        print(f"[API:submit] ⚠ Node {node_id}: 0 outgoing batchGenerateImages POSTs were tagged — listener may have missed them; will fall back to prompt-match", flush=True)
+                    elif tagged_count < variants:
+                        print(f"[API:submit] ⓘ Node {node_id}: only {tagged_count}/{variants} POSTs tagged — remaining variants may attribute via prompt-match fallback", flush=True)
+                listener_state['current_submitting_node_id'] = None
 
             in_flight[node_id] = InFlightJob(
                 node_id=node_id,
@@ -5912,20 +5973,67 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             return 0
 
         # ─────────────────────────────────────────────────────────────
-        # v624 NETWORK-LISTENER PATH (highest priority, runs first)
+        # v627 NETWORK-LISTENER PATH (highest priority, runs first)
         # ─────────────────────────────────────────────────────────────
-        # For each pending job, find ALL captured batchGenerateImages
-        # responses whose prompt matches the job. Flow fires N separate
-        # POSTs when N variants are requested (one variant per POST), so
-        # we need to AGGREGATE before enqueueing — otherwise jobs get
-        # marked complete with only the first-arriving variant. Wait
-        # until len(matches) >= job.variants OR the partial-accept
-        # timeout has elapsed (90s after submit) — same idea as the
-        # local CLI mode's two-phase wait.
+        # Two-tier attribution within the listener path:
+        #   Tier A (v627): URLs collected via request-tag mapping
+        #     (request_to_node). Guaranteed correct — we tagged the
+        #     request before it went out, then the response listener
+        #     looked up the tag via Playwright's response.request linkage.
+        #     Survives prompt collisions (Scene 6 + Scene 9 with same
+        #     CTA template — both have identical prompts).
+        #   Tier B (v626 prompt-match): only used for jobs that had no
+        #     request tagged (rare — request fired before submit set
+        #     the flag, or response.request linkage broke). Aggregates
+        #     captured_batches by prompt; can only attribute correctly
+        #     when prompts are unique.
+        # Both tiers wait for variants count to be satisfied or the
+        # PARTIAL_TIMEOUT to elapse (90s after submit).
         ids_resolved_jobs = set()
         cookies_v521, user_agent_v521 = None, None
         PARTIAL_TIMEOUT = 90  # seconds after submit before accepting partial result
+
+        def _enqueue_for_job(job, ready_urls, source_label, batch_count=None):
+            nonlocal cookies_v521, user_agent_v521
+            if cookies_v521 is None:
+                try:
+                    cookies_v521, user_agent_v521 = _snapshot_browser_session()
+                except Exception as _e:
+                    print(f"[API:scan] ⚠ session snapshot failed: {_e}", flush=True)
+                    cookies_v521, user_agent_v521 = [], ""
+            for u in ready_urls:
+                _claimed_tile_urls.add(u)
+            http_queue.put({
+                'node_id': job.node_id,
+                'urls': ready_urls,
+                'output_dir': job.output_dir,
+                'cookies': cookies_v521,
+                'user_agent': user_agent_v521,
+            })
+            job.status = "completed"
+            ids_resolved_jobs.add(job.node_id)
+            need_count = max(1, getattr(job, 'variants', 1) or 1)
+            partial = " (partial — timeout reached)" if len(ready_urls) < need_count else ""
+            extra = f", aggregated from {batch_count} batch(es)" if batch_count is not None else ""
+            print(f"[API:scan] ✓ Node {job.node_id} matched → {len(ready_urls)}/{need_count} variant(s){partial} → enqueue ({source_label}{extra})", flush=True)
+
+        # Tier A: request-tag attribution (v627)
         for job in pending:
+            tagged_urls = list(captured_urls_by_node.get(job.node_id, []))
+            if not tagged_urls:
+                continue
+            need_count = max(1, getattr(job, 'variants', 1) or 1)
+            age = time.time() - job.submit_time
+            if len(tagged_urls) < need_count and age < PARTIAL_TIMEOUT:
+                continue  # wait for more responses
+            # Pop the bucket so we don't double-attribute
+            captured_urls_by_node.pop(job.node_id, None)
+            _enqueue_for_job(job, tagged_urls, source_label="v627 request-tag listener")
+
+        # Tier B: prompt-match attribution (v626 fallback)
+        for job in pending:
+            if job.node_id in ids_resolved_jobs:
+                continue
             matches = _collect_batches_for_prompt(job.prompt, consume=False)
             if not matches:
                 continue
@@ -5936,36 +6044,12 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                         collected_urls.append(u)
             need_count = max(1, getattr(job, 'variants', 1) or 1)
             age = time.time() - job.submit_time
-            # Wait for full set unless we've passed the partial-accept timeout
             if len(collected_urls) < need_count and age < PARTIAL_TIMEOUT:
-                # Don't consume; let more batches accumulate. Next scan tick
-                # will check again.
                 continue
-            # Either we have all variants OR timed out — consume + enqueue
             for b in matches:
                 b['consumed'] = True
-            ready = collected_urls
-            if not ready:
-                continue
-            if cookies_v521 is None:
-                try:
-                    cookies_v521, user_agent_v521 = _snapshot_browser_session()
-                except Exception as _e:
-                    print(f"[API:scan] ⚠ session snapshot failed: {_e}", flush=True)
-                    cookies_v521, user_agent_v521 = [], ""
-            for u in ready:
-                _claimed_tile_urls.add(u)
-            http_queue.put({
-                'node_id': job.node_id,
-                'urls': ready,
-                'output_dir': job.output_dir,
-                'cookies': cookies_v521,
-                'user_agent': user_agent_v521,
-            })
-            job.status = "completed"
-            ids_resolved_jobs.add(job.node_id)
-            partial = " (partial — timeout reached)" if len(ready) < need_count else ""
-            print(f"[API:scan] ✓ Node {job.node_id} matched by network response → {len(ready)}/{need_count} variant(s){partial} → enqueue (v624 network-listener, aggregated from {len(matches)} batch(es))", flush=True)
+            if collected_urls:
+                _enqueue_for_job(job, collected_urls, source_label="v626 prompt-match listener", batch_count=len(matches))
 
         # ─────────────────────────────────────────────────────────────
         # v521 PRIMARY PATH — submission-first DOM tile-ID lookup
