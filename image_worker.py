@@ -2434,9 +2434,17 @@ def _is_generate_enabled(page):
         return False
 
 
-def wait_for_image_result(page, timeout=120, context="", baseline_urls=None):
+def wait_for_image_result(page, timeout=120, context="", baseline_urls=None,
+                          get_captured=None):
     """
-    Wait for the generated image to appear in Flow UI.
+    Wait for the generated image to appear.
+
+    Detection priority:
+      1) `get_captured()` — network listener has already seen the
+         `batchGenerateImages` response. Fastest, fires the moment Flow
+         returns the JSON (avg ~24s after click). No DOM dependency.
+      2) Virtuoso DOM scrape (legacy fallback) — `snapshot_generated_image_urls`
+         compared against `baseline_urls`.
 
     While generating:
       - A tile shows an 'image' icon + percentage text (e.g. "23%", "77%")
@@ -2447,20 +2455,14 @@ def wait_for_image_result(page, timeout=120, context="", baseline_urls=None):
       - "Failed" text in div.sc-25d34a31-1
 
     On success:
+      - `batchGenerateImages` JSON response captured (preferred), OR
       - Image appears as <img src="/fx/api/trpc/media.getMediaUrlRedirect?name=UUID">
-      - Percentage indicator disappears
-      - Toolbar with download/reuse/delete buttons appears
+        with the toolbar mounted (legacy DOM path).
 
     Args:
-        baseline_urls: set of media.getMediaUrlRedirect URLs that existed
-                       BEFORE clicking Generate (from
-                       snapshot_generated_image_urls). Success is declared
-                       as soon as ANY new URL appears — not when the total
-                       count grows past len(baseline). This matters because
-                       Flow's Virtuoso list keeps a fixed window of mounted
-                       DOM items; a new tile at position 0 can push an old
-                       tile off the bottom, leaving the count unchanged
-                       while the SET has actually shifted.
+        baseline_urls: set of pre-Generate URLs (DOM fallback only).
+        get_captured: optional callable returning list[str] of fifeUrls
+                      seen by `attach_image_url_listener`.
 
     Returns:
         True if image generated successfully, False if failed/timeout
@@ -2474,33 +2476,41 @@ def wait_for_image_result(page, timeout=120, context="", baseline_urls=None):
     start_time = time.time()
     last_progress = ""
     FAILURE_GRACE_SECONDS = 10  # Don't trust "Failed" detection during warmup
+    POLL_INTERVAL = 0.5         # was 2.0 — listener-driven detection wants fast wakeups
+    DOM_POLL_EVERY = 4          # poll DOM only every Nth iteration (every 2s wall-clock)
+    iteration = 0
 
     while time.time() - start_time < timeout:
         elapsed = int(time.time() - start_time)
+        iteration += 1
 
-        # Check for SUCCESS — use SET delta, not count. Virtuoso can
-        # unmount an old tile when a new one prepends, keeping the count
-        # equal while the set has genuinely changed.
-        try:
-            current_urls = snapshot_generated_image_urls(page)
-            new_urls = current_urls - baseline_urls
-            if new_urls:
-                print(f"{prefix}✓ Image generated! ({elapsed}s, {len(new_urls)} new tile(s))", flush=True)
-                time.sleep(2)  # Let UI settle
-                return True
-        except:
-            pass
+        # Check for SUCCESS — listener first (fast path).
+        if get_captured is not None:
+            try:
+                cap = get_captured()
+                if cap:
+                    print(f"{prefix}✓ Image generated! ({elapsed}s, {len(cap)} URL(s) via network)", flush=True)
+                    return True
+            except Exception:
+                pass
+
+        # DOM fallback — only every DOM_POLL_EVERY ticks (cheap polling
+        # for the listener, expensive eval for DOM).
+        if iteration % DOM_POLL_EVERY == 0:
+            try:
+                current_urls = snapshot_generated_image_urls(page)
+                new_urls = current_urls - baseline_urls
+                if new_urls:
+                    print(f"{prefix}✓ Image generated! ({elapsed}s, {len(new_urls)} new tile(s) via DOM)", flush=True)
+                    return True
+            except:
+                pass
         
         # Check for FAILURE — but only *after* a grace period, and only when
-        # the Failed badge is visibly attached to a generation tile. Flow UI
-        # may carry over stale 'warning' icons from prior project state or
-        # tooltips; we refuse to trust them in the first few seconds.
-        if elapsed >= FAILURE_GRACE_SECONDS:
+        # the Failed badge is visibly attached to a generation tile. Gate
+        # this on the DOM-poll interval too (each is_visible call is ~300ms).
+        if elapsed >= FAILURE_GRACE_SECONDS and iteration % DOM_POLL_EVERY == 0:
             try:
-                # Use the tile-specific failure container: div.sc-25d34a31-1
-                # (this is the class the original code comment identified).
-                # Fall back to a more generic VISIBLE Failed badge only if
-                # accompanied by a visible warning icon in the same subtree.
                 failed_badge = page.locator("div.sc-25d34a31-1:has-text('Failed'), div:has-text('Generation failed'):has(i:text('warning'))").first
                 if failed_badge.count() > 0:
                     try:
@@ -2511,24 +2521,25 @@ def wait_for_image_result(page, timeout=120, context="", baseline_urls=None):
                         pass
             except:
                 pass
-        
-        # Check PROGRESS — percentage indicator
-        try:
-            progress_el = page.locator("div.sc-55ebc859-7, div.kAxcVK").first
-            if progress_el.count() > 0 and progress_el.is_visible(timeout=300):
-                progress_text = progress_el.inner_text().strip()
-                if progress_text and progress_text != last_progress:
-                    print(f"{prefix}  Generating: {progress_text} ({elapsed}s)", flush=True)
-                    last_progress = progress_text
-        except:
-            pass
-        
+
+        # Check PROGRESS — percentage indicator (also DOM-gated)
+        if iteration % DOM_POLL_EVERY == 0:
+            try:
+                progress_el = page.locator("div.sc-55ebc859-7, div.kAxcVK").first
+                if progress_el.count() > 0 and progress_el.is_visible(timeout=300):
+                    progress_text = progress_el.inner_text().strip()
+                    if progress_text and progress_text != last_progress:
+                        print(f"{prefix}  Generating: {progress_text} ({elapsed}s)", flush=True)
+                        last_progress = progress_text
+            except:
+                pass
+
         # Periodic status log
         if elapsed % 15 == 0 and elapsed > 0 and not last_progress:
             print(f"{prefix}  Still waiting... ({elapsed}s)", flush=True)
-        
-        time.sleep(2)
-    
+
+        time.sleep(POLL_INTERVAL)
+
     print(f"{prefix}⚠ Timeout after {timeout}s", flush=True)
     return False
 
@@ -2904,6 +2915,57 @@ def interactive_mode(page):
 # MULTI-VARIANT DOWNLOAD
 # ============================================================
 
+def attach_image_url_listener(page):
+    """Attach a network response listener that captures generated image
+    URLs directly from `batchGenerateImages` JSON responses.
+
+    Replaces DOM-polling for URL detection. Each Flow image generation
+    POSTs to `aisandbox-pa.googleapis.com/.../flowMedia:batchGenerateImages`
+    and returns JSON containing `media[].image.generatedImage.fifeUrl` —
+    the direct CDN URL we want to download. Catching the response gives
+    us URLs roughly when the model finishes (no DOM-render delay) and
+    skips Virtuoso list tile-mount race conditions entirely.
+
+    Returns (get_captured, detach):
+        get_captured() -> list[str] of fifeUrls in order of arrival.
+        detach()        -> remove the response handler.
+    """
+    captured = []  # list of fifeUrl strings (preserves order)
+    seen = set()
+
+    def on_response(response):
+        try:
+            url = response.url
+            if 'batchGenerateImages' not in url:
+                return
+            if response.status != 200:
+                return
+            body = response.json()
+        except Exception:
+            return
+        for media in (body.get('media') or []):
+            try:
+                fife = media['image']['generatedImage']['fifeUrl']
+            except (KeyError, TypeError):
+                continue
+            if fife and fife not in seen:
+                seen.add(fife)
+                captured.append(fife)
+
+    page.on('response', on_response)
+
+    def get_captured():
+        return list(captured)
+
+    def detach():
+        try:
+            page.remove_listener('response', on_response)
+        except Exception:
+            pass
+
+    return get_captured, detach
+
+
 def snapshot_generated_image_urls(page, exclude_uploads=True):
     """Return a set of absolute URLs for completed generation tiles in the DOM.
 
@@ -3010,13 +3072,22 @@ def snapshot_generated_image_urls(page, exclude_uploads=True):
     return urls
 
 
-def download_image_urls(page, urls, output_dir, context=""):
-    """Download a specific list of image URLs into output_dir as
-    variant_1.png, variant_2.png, ... Returns list of saved filenames.
+def download_image_urls(page, urls, output_dir, context="", max_workers=4):
+    """Download a list of image URLs into output_dir as variant_1.png,
+    variant_2.png, ... Returns list of saved filenames.
 
-    Used after delta detection: `urls` is the concrete set of new
-    variants we want, so there's no guessing about which DOM elements
-    to pick.
+    Two-tier client strategy:
+      - Tier A: `httpx.Client(http2=True)` if installed — single TLS
+        connection, multiplexed streams (lower TTFB on multi-image batches).
+      - Tier B: `requests.Session()` with keep-alive (HTTP/1.1).
+    Both use warm browser cookies + Referer/Origin from the live page.
+
+    Downloads run in parallel via ThreadPoolExecutor (default 4 workers).
+    Per HAR, each image is ~700 KB / ~210 ms (mostly TTFB); 4-way parallel
+    cuts a 6-variant batch from ~1.3s to ~250 ms.
+
+    Falls back to `page.request.get` (Playwright's own HTTP) per-URL if
+    both tier-A and tier-B fail for that URL.
     """
     prefix = f"[{context}] " if context else ""
     os.makedirs(output_dir, exist_ok=True)
@@ -3025,70 +3096,108 @@ def download_image_urls(page, urls, output_dir, context=""):
         print(f"{prefix}❌ No URLs provided to download", flush=True)
         return []
 
-    # Build a requests.Session with warm browser cookies + Referer/Origin
+    # ---- Build a warm-cookie HTTP client (httpx HTTP/2 if available) ----
     try:
-        import requests as _requests
-    except ImportError:
-        _requests = None
+        ua = page.evaluate("navigator.userAgent")
+    except Exception:
+        ua = "Mozilla/5.0"
+    headers = {
+        "Referer": "https://labs.google/",
+        "Origin": "https://labs.google",
+        "User-Agent": ua,
+        "Accept": "image/png,image/*;q=0.9,*/*;q=0.5",
+    }
+    try:
+        cookies = {ck["name"]: ck["value"] for ck in page.context.cookies()}
+    except Exception:
+        cookies = {}
 
-    session = None
-    if _requests:
+    client = None
+    client_label = "none"
+    try:
+        import httpx as _httpx  # type: ignore
         try:
-            session = _requests.Session()
-            session.headers.update({
-                "Referer": "https://labs.google/",
-                "Origin": "https://labs.google",
-                "User-Agent": page.evaluate("navigator.userAgent"),
-                "Accept": "image/png,image/*;q=0.9,*/*;q=0.5",
-            })
-            for ck in page.context.cookies():
-                session.cookies.set(ck["name"], ck["value"],
-                                    domain=ck.get("domain", ""))
-        except Exception as e:
-            print(f"{prefix}⚠ Couldn't build requests.Session: {e}", flush=True)
-            session = None
+            client = _httpx.Client(http2=True, headers=headers, cookies=cookies,
+                                   timeout=60.0, follow_redirects=True)
+            client_label = "httpx/h2"
+        except Exception:
+            # http2 extra not installed — fall back to httpx HTTP/1.1
+            client = _httpx.Client(headers=headers, cookies=cookies,
+                                   timeout=60.0, follow_redirects=True)
+            client_label = "httpx"
+    except ImportError:
+        try:
+            import requests as _requests
+            client = _requests.Session()
+            client.headers.update(headers)
+            client.cookies.update(cookies)
+            client_label = "requests"
+        except ImportError:
+            client = None
+            client_label = "playwright-only"
 
-    saved = []
-    for idx, img_url in enumerate(urls, start=1):
+    def _close_client():
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    # ---- Per-URL worker ----
+    def _fetch_one(idx_url):
+        idx, img_url = idx_url
         save_name = f"variant_{idx}.png"
         save_path = os.path.join(output_dir, save_name)
-        ok = False
 
-        if session is not None:
+        if client is not None:
             try:
-                resp = session.get(img_url, timeout=60, allow_redirects=True, stream=True)
-                if resp.status_code == 200:
+                resp = client.get(img_url, timeout=60)
+                status = getattr(resp, "status_code", None)
+                if status == 200:
+                    body = resp.content if hasattr(resp, "content") else resp.read()
                     with open(save_path, "wb") as f:
-                        for chunk in resp.iter_content(chunk_size=8192):
-                            f.write(chunk)
+                        f.write(body)
                     if os.path.getsize(save_path) > 0:
-                        size_kb = os.path.getsize(save_path) / 1024
-                        print(f"{prefix}  ✓ {save_name} via session ({size_kb:.0f} KB)", flush=True)
-                        saved.append(save_name)
-                        ok = True
-                else:
-                    print(f"{prefix}  session GET returned {resp.status_code} for {save_name}, trying page.request fallback", flush=True)
+                        return (idx, save_name, save_path, "client", None)
             except Exception as e:
-                print(f"{prefix}  session GET failed for {save_name}: {str(e)[:120]}", flush=True)
+                client_err = str(e)[:120]
+            else:
+                client_err = f"status={status}"
+        else:
+            client_err = "no client"
 
-        if ok:
-            continue
-
+        # Playwright fallback (page.request shares the browser's session
+        # — works even when cookie copy missed something)
         try:
             api_resp = page.request.get(img_url, timeout=60000)
             if api_resp.ok:
+                body = api_resp.body()
                 with open(save_path, "wb") as f:
-                    f.write(api_resp.body())
+                    f.write(body)
                 if os.path.getsize(save_path) > 0:
-                    size_kb = os.path.getsize(save_path) / 1024
-                    print(f"{prefix}  ✓ {save_name} via page.request ({size_kb:.0f} KB)", flush=True)
-                    saved.append(save_name)
-                else:
-                    print(f"{prefix}  ❌ {save_name}: page.request returned empty body", flush=True)
-            else:
-                print(f"{prefix}  ❌ {save_name}: page.request returned {api_resp.status}", flush=True)
+                    return (idx, save_name, save_path, "playwright", None)
+                return (idx, save_name, None, "playwright", "empty body")
+            return (idx, save_name, None, "playwright", f"status={api_resp.status}")
         except Exception as e:
-            print(f"{prefix}  ❌ {save_name} page.request failed: {str(e)[:120]}", flush=True)
+            return (idx, save_name, None, "playwright", f"{client_err}; pw={str(e)[:120]}")
+
+    # ---- Fan out ----
+    print(f"{prefix}Downloading {len(urls)} variant(s) via {client_label} (parallel x{max_workers})...", flush=True)
+    saved = []
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            results = list(pool.map(_fetch_one, list(enumerate(urls, start=1))))
+    finally:
+        _close_client()
+
+    # Preserve original order
+    for idx, save_name, save_path, route, err in sorted(results, key=lambda r: r[0]):
+        if save_path:
+            size_kb = os.path.getsize(save_path) / 1024
+            print(f"{prefix}  ✓ {save_name} via {route} ({size_kb:.0f} KB)", flush=True)
+            saved.append(save_name)
+        else:
+            print(f"{prefix}  ❌ {save_name}: {err}", flush=True)
 
     return saved
 
@@ -3190,58 +3299,71 @@ def process_image_job_multi(page, input_paths, prompt, output_dir,
         before_urls = snapshot_generated_image_urls(page)
         print(f"{prefix}Pre-Generate URL snapshot: {len(before_urls)} existing tile(s) (includes uploaded refs)", flush=True)
 
-        if not click_generate_image(page, context=context):
-            return False, [], "Failed to click Generate"
+        # Attach the network response listener BEFORE clicking Generate.
+        # It will see the `batchGenerateImages` JSON response the moment
+        # Flow's API returns it (~24s after the click) — faster and more
+        # reliable than DOM-polling for tile mount.
+        get_captured, detach_listener = attach_image_url_listener(page)
 
-        # 6) Wait for at least one new variant. We pass the full URL SET
-        # as baseline (not just a count) so the check is virtuoso-safe:
-        # Flow's virtualized list may unmount old tiles when new ones
-        # prepend, leaving the total count equal while the set has
-        # actually shifted. Set-delta detects new URLs regardless.
-        if not wait_for_image_result(page, timeout=240, context=context, baseline_urls=before_urls):
-            return False, [], "Timeout or failure waiting for generation"
+        try:
+            if not click_generate_image(page, context=context):
+                return False, [], "Failed to click Generate"
 
-        # 7) Wait for variants. Two-phase approach:
-        #    Phase 1: wait for the FIRST new variant (no time limit here;
-        #             wait_for_image_result already enforced the overall
-        #             240s limit for generation starting)
-        #    Phase 2: once the first variant arrives, wait up to 30 more
-        #             seconds for the REMAINING variants. Anything not
-        #             ready by then is abandoned and we proceed with
-        #             whatever we have.
-        new_urls = set()
-        if variants >= 1:
-            # Phase 1: wait for the first new variant to appear.
-            # Poll every 2s, up to 60s beyond wait_for_image_result's confirmation.
+            # 6) Wait for at least one new variant. The listener fast-paths
+            # detection; baseline_urls remains the DOM fallback.
+            if not wait_for_image_result(page, timeout=240, context=context,
+                                         baseline_urls=before_urls,
+                                         get_captured=get_captured):
+                return False, [], "Timeout or failure waiting for generation"
+
+            # 7) Collect URLs. Listener-captured URLs are the fife (CDN)
+            # URLs we want to download from directly. If for any reason
+            # the listener missed (e.g. response body unparseable),
+            # fall back to DOM scraping.
+            new_urls = []  # ordered list, fife URLs preferred
+
             print(f"{prefix}Waiting for first variant to appear...", flush=True)
             first_deadline = time.time() + 60
             while time.time() < first_deadline:
-                try:
-                    current_urls = snapshot_generated_image_urls(page)
-                    new_urls = current_urls - before_urls
-                except Exception:
-                    new_urls = set()
-                if len(new_urls) >= 1:
-                    print(f"{prefix}  ✓ First variant arrived ({len(new_urls)} so far)", flush=True)
+                cap = get_captured()
+                if cap:
+                    new_urls = cap
+                    print(f"{prefix}  ✓ First variant URL captured ({len(new_urls)} so far)", flush=True)
                     break
-                time.sleep(2)
+                time.sleep(0.25)
+            else:
+                # Listener never fired — fall back to DOM
+                try:
+                    dom_urls = snapshot_generated_image_urls(page) - before_urls
+                except Exception:
+                    dom_urls = set()
+                new_urls = list(dom_urls)
+                if new_urls:
+                    print(f"{prefix}  ✓ First variant via DOM ({len(new_urls)} so far)", flush=True)
 
-            # Phase 2: starting NOW, give up to 30s for the remaining variants
+            # Phase 2: wait for remaining variants
             if new_urls and len(new_urls) < variants:
                 print(f"{prefix}Waiting up to 30s for remaining variants ({len(new_urls)}/{variants} so far)...", flush=True)
                 remaining_deadline = time.time() + 30
                 while time.time() < remaining_deadline:
-                    try:
-                        current_urls = snapshot_generated_image_urls(page)
-                        new_urls = current_urls - before_urls
-                    except Exception:
-                        pass
+                    cap = get_captured()
+                    if cap and len(cap) >= len(new_urls):
+                        new_urls = cap
                     if len(new_urls) >= variants:
                         print(f"{prefix}  ✓ All {variants} variants ready", flush=True)
                         break
-                    time.sleep(2)
+                    time.sleep(0.25)
                 else:
+                    # Final DOM sweep before giving up
+                    try:
+                        dom_urls = snapshot_generated_image_urls(page) - before_urls
+                        if len(dom_urls) > len(new_urls):
+                            new_urls = list(dom_urls)
+                    except Exception:
+                        pass
                     print(f"{prefix}  ⏱ 30s elapsed, proceeding with {len(new_urls)}/{variants} variants", flush=True)
+        finally:
+            detach_listener()
 
         if not new_urls:
             return False, [], "No new variants produced (all failed or timed out)"
@@ -3249,7 +3371,7 @@ def process_image_job_multi(page, input_paths, prompt, output_dir,
         # Limit to requested count (shouldn't exceed, but safety)
         new_urls_list = list(new_urls)[:variants]
 
-        # 8) Download the new URLs
+        # 8) Download the new URLs (parallel)
         saved = download_image_urls(page, new_urls_list, output_dir, context=context)
         if not saved:
             return False, [], "No variants could be downloaded"
