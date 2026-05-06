@@ -5147,6 +5147,98 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             old = _claimed_tile_urls_insert_order.pop(0)
             _claimed_tile_urls.discard(old)
 
+    # ─────────────────────────────────────────────────────────────
+    # v624 NETWORK-LISTENER ATTRIBUTION
+    # ─────────────────────────────────────────────────────────────
+    # Capture every batchGenerateImages 200 response. The JSON body has
+    # media[].image.generatedImage.{fifeUrl, mediaId, prompt} — the EXACT
+    # variants generated for THAT specific POST. Matching by prompt text
+    # at scan time replaces the data-index=0 tile-id capture, which has
+    # a fundamental race: when called right after click_generate_image,
+    # data-index=0 may still hold tiles from a previous job (especially
+    # in parallel-slot mode), and those tile_ids get attributed to the
+    # new submission. The user observed this as "wrong images downloaded
+    # — pre-existing project tiles, not the new generation."
+    captured_batches = []  # list of {ts, prompt_in_resp, fife_urls, media_ids, consumed}
+
+    def _on_image_response(response):
+        try:
+            if 'batchGenerateImages' not in response.url:
+                return
+            if response.status != 200:
+                return
+            body = response.json()
+        except Exception:
+            return
+        media = body.get('media') or []
+        if not media:
+            return
+        fife_urls = []
+        media_ids = []
+        prompt_in_resp = ''
+        for m in media:
+            try:
+                gi = m['image']['generatedImage']
+                fife = gi.get('fifeUrl')
+                if fife:
+                    fife_urls.append(fife)
+                mid = gi.get('mediaId') or m.get('name')
+                if mid:
+                    media_ids.append(mid)
+                if not prompt_in_resp:
+                    prompt_in_resp = gi.get('prompt') or ''
+            except (KeyError, TypeError):
+                continue
+        if not fife_urls:
+            return
+        captured_batches.append({
+            'ts': time.time(),
+            'prompt_in_resp': prompt_in_resp,
+            'fife_urls': fife_urls,
+            'media_ids': media_ids,
+            'consumed': False,
+        })
+        # FIFO eviction so memory stays bounded over long runs
+        if len(captured_batches) > 200:
+            del captured_batches[:50]
+
+    try:
+        page.on('response', _on_image_response)
+        print(f"[API] ✓ v624 network-listener attached (batchGenerateImages → fife URL capture)", flush=True)
+    except Exception as e:
+        print(f"[API] ⚠ Couldn't attach network listener: {e} — v624 attribution disabled, falling back to DOM-only", flush=True)
+
+    def _consume_batch_for_prompt(prompt):
+        """Find the OLDEST unconsumed batch whose response prompt matches
+        `prompt`. Tries: (1) exact match, (2) two-way prefix match (Flow
+        may transform/truncate the prompt in the response). Marks the
+        batch consumed and returns it (or None if no match)."""
+        if not prompt:
+            return None
+        target = prompt.strip()
+        # Pass 1: exact match (oldest first)
+        for batch in captured_batches:
+            if batch['consumed']:
+                continue
+            if batch['prompt_in_resp'].strip() == target:
+                batch['consumed'] = True
+                return batch
+        # Pass 2: prefix match — handles cases where Flow stores a
+        # truncated/normalized version of the prompt in the response
+        head = target[:200]
+        if head:
+            for batch in captured_batches:
+                if batch['consumed']:
+                    continue
+                resp_head = batch['prompt_in_resp'].strip()[:200]
+                if not resp_head:
+                    continue
+                # Either side is a prefix of the other on the first 80 chars
+                if resp_head[:80] == head[:80]:
+                    batch['consumed'] = True
+                    return batch
+        return None
+
     # Project-state — only touched by the main thread
     # v541 — `projects` maps every job_key we've ever seen to its
     # Flow project info, so revisited keys reuse their old project
@@ -5761,15 +5853,53 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             return 0
 
         # ─────────────────────────────────────────────────────────────
-        # v521 PRIMARY PATH — submission-first ID lookup
+        # v624 NETWORK-LISTENER PATH (highest priority, runs first)
         # ─────────────────────────────────────────────────────────────
-        # For every pending submission that captured tile_ids at submit
-        # time, query the DOM for those exact UUIDs. This is deterministic
-        # (no fuzzy text matching). When all tiles are out of 'rendering',
-        # queue downloads for ready ones and mark failed ones as failed.
+        # For each pending job, check if a captured batchGenerateImages
+        # response matches its prompt. The network response is ground
+        # truth — it contains the exact fife URLs Google's API returned
+        # for THAT submission. No DOM, no race, no data-index=0 confusion.
         ids_resolved_jobs = set()
         cookies_v521, user_agent_v521 = None, None
         for job in pending:
+            batch = _consume_batch_for_prompt(job.prompt)
+            if not batch:
+                continue
+            ready = [u for u in batch['fife_urls'] if u]
+            if not ready:
+                # Defensive: empty batch shouldn't happen but skip gracefully
+                continue
+            if cookies_v521 is None:
+                try:
+                    cookies_v521, user_agent_v521 = _snapshot_browser_session()
+                except Exception as _e:
+                    print(f"[API:scan] ⚠ session snapshot failed: {_e}", flush=True)
+                    cookies_v521, user_agent_v521 = [], ""
+            for u in ready:
+                _claimed_tile_urls.add(u)
+            http_queue.put({
+                'node_id': job.node_id,
+                'urls': ready,
+                'output_dir': job.output_dir,
+                'cookies': cookies_v521,
+                'user_agent': user_agent_v521,
+            })
+            job.status = "completed"
+            ids_resolved_jobs.add(job.node_id)
+            print(f"[API:scan] ✓ Node {job.node_id} matched by network response → {len(ready)} variant(s) → enqueue (v624 network-listener)", flush=True)
+
+        # ─────────────────────────────────────────────────────────────
+        # v521 PRIMARY PATH — submission-first DOM tile-ID lookup
+        # ─────────────────────────────────────────────────────────────
+        # Fallback for jobs whose batchGenerateImages response wasn't
+        # captured (listener attach failed, or response body unparseable).
+        # For every pending submission that captured tile_ids at submit
+        # time, query the DOM for those exact UUIDs. When all tiles are
+        # out of 'rendering', queue downloads for ready ones and mark
+        # failed ones as failed.
+        for job in pending:
+            if job.node_id in ids_resolved_jobs:
+                continue  # v624 already resolved this one
             if not job.tile_ids:
                 continue  # falls through to legacy path
             tile_states = lookup_tiles_by_id(page, job.tile_ids)
