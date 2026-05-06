@@ -5217,36 +5217,53 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             print(f"[API] ⚠ Disabling --cross-batch because the network listener didn't attach (need it for cross-batch attribution)", flush=True)
             cross_batch = False
 
-    def _consume_batch_for_prompt(prompt):
-        """Find the OLDEST unconsumed batch whose response prompt matches
-        `prompt`. Tries: (1) exact match, (2) two-way prefix match (Flow
-        may transform/truncate the prompt in the response). Marks the
-        batch consumed and returns it (or None if no match)."""
+    def _collect_batches_for_prompt(prompt, consume=False):
+        """Find ALL unconsumed batches whose response prompt matches
+        `prompt`. Returns the list in arrival order WITHOUT consuming
+        them by default — caller decides whether to mark consumed once
+        enough variants are collected.
+
+        Match passes (each requires a UNIQUE match — strict by design
+        because two scenes in the same persona/batch can share the
+        first 100+ chars of the prompt header):
+          1. Exact full-prompt match (after strip)
+          2. Long-prefix match: first 256 chars exact (handles Flow
+             truncation/normalization) — only used when the response
+             prompt is shorter than the request prompt.
+
+        v626: was `_consume_batch_for_prompt`; renamed + reworked to
+        return a LIST so the scan loop can aggregate Flow's per-variant
+        POST splits. Flow fires N separate batchGenerateImages POSTs
+        when the operator requested N variants (each response carries
+        media[0..0] — one variant). Earlier behavior consumed only the
+        first matched batch and marked the job completed with 1
+        variant out of N.
+        """
         if not prompt:
-            return None
+            return []
         target = prompt.strip()
-        # Pass 1: exact match (oldest first)
+        target_head = target[:256]
+        matches = []
         for batch in captured_batches:
             if batch['consumed']:
                 continue
-            if batch['prompt_in_resp'].strip() == target:
-                batch['consumed'] = True
-                return batch
-        # Pass 2: prefix match — handles cases where Flow stores a
-        # truncated/normalized version of the prompt in the response
-        head = target[:200]
-        if head:
-            for batch in captured_batches:
-                if batch['consumed']:
-                    continue
-                resp_head = batch['prompt_in_resp'].strip()[:200]
-                if not resp_head:
-                    continue
-                # Either side is a prefix of the other on the first 80 chars
-                if resp_head[:80] == head[:80]:
-                    batch['consumed'] = True
-                    return batch
-        return None
+            resp = batch['prompt_in_resp'].strip()
+            # Pass 1: exact full match
+            if resp == target:
+                matches.append(batch)
+                continue
+            # Pass 2: long-prefix match — only when response is a
+            # truncation of the request, not vice versa, AND the prefix
+            # is long enough to disambiguate similar-header prompts
+            # (256 chars catches "Use Image 1 ... Use Image 2 ..."
+            # boilerplate plus enough scene-specific text to be unique).
+            if resp and len(resp) >= 64 and target_head.startswith(resp[:256]):
+                matches.append(batch)
+                continue
+        if consume:
+            for b in matches:
+                b['consumed'] = True
+        return matches
 
     # Project-state — only touched by the main thread
     # v541 — `projects` maps every job_key we've ever seen to its
@@ -5897,19 +5914,38 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
         # ─────────────────────────────────────────────────────────────
         # v624 NETWORK-LISTENER PATH (highest priority, runs first)
         # ─────────────────────────────────────────────────────────────
-        # For each pending job, check if a captured batchGenerateImages
-        # response matches its prompt. The network response is ground
-        # truth — it contains the exact fife URLs Google's API returned
-        # for THAT submission. No DOM, no race, no data-index=0 confusion.
+        # For each pending job, find ALL captured batchGenerateImages
+        # responses whose prompt matches the job. Flow fires N separate
+        # POSTs when N variants are requested (one variant per POST), so
+        # we need to AGGREGATE before enqueueing — otherwise jobs get
+        # marked complete with only the first-arriving variant. Wait
+        # until len(matches) >= job.variants OR the partial-accept
+        # timeout has elapsed (90s after submit) — same idea as the
+        # local CLI mode's two-phase wait.
         ids_resolved_jobs = set()
         cookies_v521, user_agent_v521 = None, None
+        PARTIAL_TIMEOUT = 90  # seconds after submit before accepting partial result
         for job in pending:
-            batch = _consume_batch_for_prompt(job.prompt)
-            if not batch:
+            matches = _collect_batches_for_prompt(job.prompt, consume=False)
+            if not matches:
                 continue
-            ready = [u for u in batch['fife_urls'] if u]
+            collected_urls = []
+            for b in matches:
+                for u in b['fife_urls']:
+                    if u and u not in collected_urls:
+                        collected_urls.append(u)
+            need_count = max(1, getattr(job, 'variants', 1) or 1)
+            age = time.time() - job.submit_time
+            # Wait for full set unless we've passed the partial-accept timeout
+            if len(collected_urls) < need_count and age < PARTIAL_TIMEOUT:
+                # Don't consume; let more batches accumulate. Next scan tick
+                # will check again.
+                continue
+            # Either we have all variants OR timed out — consume + enqueue
+            for b in matches:
+                b['consumed'] = True
+            ready = collected_urls
             if not ready:
-                # Defensive: empty batch shouldn't happen but skip gracefully
                 continue
             if cookies_v521 is None:
                 try:
@@ -5928,7 +5964,8 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             })
             job.status = "completed"
             ids_resolved_jobs.add(job.node_id)
-            print(f"[API:scan] ✓ Node {job.node_id} matched by network response → {len(ready)} variant(s) → enqueue (v624 network-listener)", flush=True)
+            partial = " (partial — timeout reached)" if len(ready) < need_count else ""
+            print(f"[API:scan] ✓ Node {job.node_id} matched by network response → {len(ready)}/{need_count} variant(s){partial} → enqueue (v624 network-listener, aggregated from {len(matches)} batch(es))", flush=True)
 
         # ─────────────────────────────────────────────────────────────
         # v521 PRIMARY PATH — submission-first DOM tile-ID lookup
