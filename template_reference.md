@@ -1256,6 +1256,75 @@ psychologically-dead trap.
 
 ---
 
+## Auto-infer + normalize image bindings (v619) — feature delivery, not error rejection
+
+**Source: 2026-05-06 owner directive** *"let's make also the rules stronger and more precise for which images we need in the markdown... from the latest video menopause saffron i can see image2 didn't include the product image, even if it mentions it... and make sure the whole process of image creation actually respects this logic. i don't want errors handling i want the feature to be delivered properly, so focus on doing that perfectly."*
+
+The pre-v619 stack had v581 (binding mechanics), v599 (product-presence matrix), v607 (character force-bind), v613a (parity advisory), v618a/b (parser + fail-fast). The bug: those rules required the markdown to be self-consistent. When the author wrote sloppy markdown (mentioned product in body but forgot `product_image:`, or set `product_image:` but skipped the v581 binding line), the platform either silently dropped bindings or rejected the import. **Neither delivers the feature.**
+
+v619's job is to **deliver the feature**: every image, regardless of how sloppy the markdown is, ends up at generation time with the right references attached. The platform AUTO-FIXES gaps instead of failing.
+
+### Where it runs
+
+In `image_platform.py:import_video_md`, between `_resolve_uploaded_ingredients` (line ~3878) and the per-image binding loop (line ~4033). Operates on the parsed `images` list IN PLACE, so all downstream logic sees normalized data.
+
+### Five normalization operations (per image)
+
+| Op | Trigger | Action |
+|---|---|---|
+| **N1** | `product_image` empty BUT prompt body has v581 product binding line | Extract product name from `"Use the uploaded product reference image for X."` → set `product_image: X` |
+| **N2** | `product_image` empty BUT body mentions a brand keyword (any token ≥ 4 chars from a `type=product` ingredient name, e.g. "korella", "saffron", "bottle") | Auto-set `product_image: <matching-ingredient-name>` |
+| **N3** | `product_image` set BUT v581 product binding line missing from prompt body | Auto-prepend `"Use the uploaded product reference image for X."` |
+| **N4** | v581 character binding line missing from prompt body | Auto-prepend `"Use the uploaded character reference image for the main character."` |
+| **N5** | `reference_image: N` is forward-ref (N ≥ image_index) or N not declared | Set to `None` (drop chain), log warning |
+
+### What v619 does NOT do
+
+- **No HTTPException.** v619 is the feature-delivery layer. Bad markdown gets repaired silently. The one unrecoverable case (declared `Reference` path with no upload) is still v618b's fail-fast.
+- **Doesn't rewrite ingredients.** Ingredients table stays canonical. Only the per-image `prompt` and `product_image:` are normalized.
+- **Doesn't touch already-correct markdown.** Idempotent — running v619 on a clean import is a no-op (verified in synthetic test 6).
+- **Doesn't infer character ingredients.** v607 force-bind already attaches the character edge on every image. N4 just ensures the binding LINE is in the prompt body so Banana 2 sees the slot reference.
+
+### Validation
+
+6 synthetic test cases pass:
+
+1. Body mentions "Korella saffron bottle" with no `product_image:` → N2 auto-sets field, N3 prepends binding line.
+2. `product_image:` set but no binding line → N3 prepends.
+3. v581 binding line present but `product_image:` empty → N1 extracts name from line.
+4. No character binding line → N4 auto-prepends.
+5. Forward chain ref (`reference_image: image_5` from Image 2) → N5 drops.
+6. Already-correct image (full bindings + matching `product_image:`) → idempotent, no change.
+
+### Logging
+
+Every normalization step logs at INFO with the rule number:
+
+```
+[image_platform] v619 N2: Image 2: auto-set product_image='the Korella saffron bottle' from body mention of 'korella'
+[image_platform] v619 N3: Image 2: auto-prepended product binding line for 'the Korella saffron bottle'
+[image_platform] v619 N4: Image 1: auto-prepended character binding line
+[image_platform] v619 N5: Image 2: reference_image=5 is invalid (forward ref or undeclared) — dropping chain
+```
+
+This makes auto-fixes auditable at import time. If an author wonders why their image came back with auto-attached bindings, the log shows exactly which N-rule fired.
+
+### End-to-end correctness
+
+Combining v607 + v618 + v619, the platform now guarantees:
+
+- Every image gets the character ref attached (v607 force-bind)
+- Every image with product brand keywords in body gets the product ref attached (v619 N2)
+- Every image with `product_image:` set gets the v581 binding line in body (v619 N3)
+- Ingredients table is parsed correctly regardless of column order (v618a)
+- Missing uploads are caught loud at import (v618b)
+- Forward / undeclared chain refs are dropped (v619 N5)
+- v607 character force-bind ensures the edge exists even if N4 didn't touch the prompt
+
+This is the FEATURE delivered: from any reasonable markdown, the platform produces correctly-bound images at generation time.
+
+---
+
 ## Header-aware ingredients parser + fail-fast upload validation (v618)
 
 **Source: 2026-05-06 owner observation** (with screenshot of menopause-saffron Image 7): *"why this image from the menopause saffron video didn't include main character?... check both the image worker, the platform or the video markdown... and find where is best to enforce it. make a future-proof, ondurate decision."*

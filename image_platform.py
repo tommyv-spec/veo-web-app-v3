@@ -3942,6 +3942,151 @@ def _import_scene_table_impl(
     anchor_scenes: Dict[str, ImageNode] = {}
     all_ingredient_names = [ing["name"] for ing in parsed_ingredients]
 
+    # === v619 — Auto-infer + normalize image bindings ===
+    # Goal: every image, regardless of how sloppy the markdown is, ends up
+    # with correctly resolved bindings (character + product + chain) at
+    # generation time. The author can omit the v581 binding lines, omit
+    # the `product_image:` field, mention the product only in body prose
+    # — v619 fills the gaps so Banana 2 always gets the right references
+    # attached.
+    #
+    # Normalizes the `images` list IN PLACE before the binding loop runs,
+    # so all downstream logic (mention extraction, edge attachment, slot
+    # resolution at /worker/jobs/pending) sees consistent data.
+    #
+    # Operations performed per image:
+    #   N1. Auto-extract `product_image` from existing v581 binding line
+    #       if line is present but field is empty.
+    #   N2. Auto-set `product_image` from body prose mention if any
+    #       product-typed ingredient name is mentioned anywhere in the
+    #       prompt and `product_image` is empty.
+    #   N3. Auto-prepend the v581 product binding line if `product_image`
+    #       is set but the line is missing from the prompt body.
+    #   N4. Auto-prepend the v581 character binding line if missing
+    #       (every image gets persona per v607).
+    #   N5. Drop forward chain refs (reference_image: image_N where N >=
+    #       image_index OR N not declared) — log warning, set to None.
+    #
+    # No HTTPException — v619 is the FEATURE-DELIVERY layer. Bad markdown
+    # gets repaired; v618b's fail-fast still catches the one unrecoverable
+    # case (missing upload for a declared character/product Reference).
+    if using_ingredients and parsed_ingredients:
+        product_ingredients = [
+            ing for ing in parsed_ingredients
+            if (ing.get("type") or "").strip().lower() == "product"
+        ]
+        product_names_lc = [
+            (ing["name"].strip(), ing["name"].strip().lower())
+            for ing in product_ingredients
+        ]
+
+        # Brand-keyword set: build from product ingredient names. For each
+        # product like "the Korella saffron bottle", extract the brand-y
+        # tokens (skip stop-words). This catches body-prose mentions like
+        # "Korella saffron capsule" or just "saffron bottle".
+        STOP_TOKENS = {
+            "the", "a", "an", "of", "in", "on", "at", "with",
+            "and", "or", "for", "to", "from", "by",
+        }
+        brand_keywords: List[Tuple[str, str]] = []  # (lowercase_keyword, ingredient_name)
+        for ing in product_ingredients:
+            name = ing["name"].strip()
+            tokens = [t.strip(".,;:!?") for t in name.split()]
+            for tok in tokens:
+                tok_lc = tok.lower()
+                if len(tok_lc) >= 4 and tok_lc not in STOP_TOKENS:
+                    brand_keywords.append((tok_lc, name))
+
+        v581_product_re = _re.compile(
+            r"Use the uploaded product reference image for ([^.]+?)(?:\s*[—–-]\s*match[^.]*)?\.",
+            _re.IGNORECASE,
+        )
+        v581_character_line = (
+            "Use the uploaded character reference image for the main character."
+        )
+
+        all_image_indices = {img["image_index"] for img in images}
+
+        for img in images:
+            image_index = img["image_index"]
+            body = img.get("prompt", "") or ""
+            current_product_image = (img.get("product_image") or "").strip()
+
+            # N1 — Auto-extract product_image from v581 binding line
+            if not current_product_image:
+                m = v581_product_re.search(body)
+                if m:
+                    extracted = m.group(1).strip()
+                    # Match against canonical ingredient name (case-insensitive)
+                    matched_canonical = next(
+                        (ing["name"] for ing in product_ingredients
+                         if ing["name"].lower() == extracted.lower()),
+                        None
+                    )
+                    if matched_canonical:
+                        img["product_image"] = matched_canonical
+                        current_product_image = matched_canonical
+                        log.info(
+                            f"[image_platform] v619 N1: Image {image_index}: "
+                            f"extracted product_image={matched_canonical!r} "
+                            f"from existing v581 binding line"
+                        )
+
+            # N2 — Auto-set product_image from body brand-keyword mention
+            if not current_product_image and brand_keywords:
+                body_lc = body.lower()
+                for kw_lc, ing_name in brand_keywords:
+                    # Word-boundary match to avoid false positives
+                    if _re.search(r"\b" + _re.escape(kw_lc) + r"\b", body_lc):
+                        img["product_image"] = ing_name
+                        current_product_image = ing_name
+                        log.info(
+                            f"[image_platform] v619 N2: Image {image_index}: "
+                            f"auto-set product_image={ing_name!r} from body "
+                            f"mention of '{kw_lc}'"
+                        )
+                        break
+
+            # N3 — Auto-prepend v581 product binding line if missing
+            if current_product_image:
+                has_line = bool(v581_product_re.search(body))
+                if not has_line:
+                    new_line = (
+                        f"Use the uploaded product reference image for "
+                        f"{current_product_image}."
+                    )
+                    img["prompt"] = new_line + "\n" + body
+                    body = img["prompt"]
+                    log.info(
+                        f"[image_platform] v619 N3: Image {image_index}: "
+                        f"auto-prepended product binding line for "
+                        f"{current_product_image!r}"
+                    )
+
+            # N4 — Auto-prepend v581 character binding line if missing
+            char_re = _re.compile(
+                r"Use the uploaded character reference image for [^.]+\.",
+                _re.IGNORECASE,
+            )
+            if not char_re.search(body):
+                img["prompt"] = v581_character_line + "\n" + body
+                body = img["prompt"]
+                log.info(
+                    f"[image_platform] v619 N4: Image {image_index}: "
+                    f"auto-prepended character binding line"
+                )
+
+            # N5 — Drop forward / invalid chain refs
+            ref_idx = img.get("reference_image")
+            if ref_idx is not None:
+                if ref_idx >= image_index or ref_idx not in all_image_indices:
+                    log.warning(
+                        f"[image_platform] v619 N5: Image {image_index}: "
+                        f"reference_image={ref_idx} is invalid "
+                        f"(forward ref or undeclared) — dropping chain"
+                    )
+                    img["reference_image"] = None
+
     # v513: pre-pass to compute the anchor image index for each ingredient
     # WITHOUT creating any DB rows. This is done first so variant chains
     # can be resolved correctly: when image 1 anchors `her daughter (before)`,
