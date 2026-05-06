@@ -1288,17 +1288,52 @@ Two-shot of healer-and-patient sitting side-by-side without active demonstration
 Is the video about a SYMPTOM (audience has a problem) or a TRANSFORMATION (audience wants a result)?
 
   → SYMPTOM-DEMO video (patient appears as evidence)
-    → v601 APPLIES. Healer must actively interact with symptom-area
-       in EXPLAIN scene via clinical-authority hand-action.
+    → v601 APPLIES — to BOTH the HOOK and the EXPLAIN scene.
+       The HOOK is the diagnostic-shock moment (healer demonstrating
+       the symptom on the patient at peak magnitude). The EXPLAIN is
+       the mechanism / resolution callback (can be patient again or
+       persona-alone with anatomy poster).
+
+  → RECIPE-FORWARD video (no patient — Korella saffron canonical for
+    F→F-about-M with persona alone in T0 kitchen + visible recipe
+    prop + dialogue promise)
+    → v601 does NOT apply. The recipe demo + product reveal carry
+       the authority. The HOOK uses prop-spectacle (banana SLAM,
+       saffron-mug + dialogue promise) not patient-demonstration.
 
   → TRANSFORMATION video (Day-1 / Day-14 same-body before/after)
     → v601 does NOT apply. The body transformation IS the proof.
-       No patient-other-than-self needed. (Will be its own v-rule
-       when transformation videos get codified.)
+       No patient-other-than-self needed. (Separate v-rule pending.)
 
-  → RECIPE-ONLY video (no patient on-screen)
+  → RECIPE-ONLY video (no patient, no symptom — pure recipe)
     → v601 does NOT apply. The recipe demo carries the authority.
 ```
+
+### Video-type decision rule (which HOOK pattern to pick)
+
+The corpus has two distinct HOOK families, and the video-type decision determines which v601 applies:
+
+| HOOK type | When to pick | Corpus example | v601 applies? |
+|---|---|---|---|
+| **SYMPTOM-DEMO HOOK** | Niche has a body issue the audience can identify with on a patient (visible: belly fat, varicose, back lump, hair loss, tonsil stones; or invisible-via-instrument: menopause/hot-flash, anxiety, insomnia, hormone) | dr_kim_belly_burn_male, decoded_varicose_vein, dr_kim_back_lump, dr_kim_hair_regrowth, decoded_corella_saffron_blood_sugar_v584, decoded_healthylifesage | YES — patient in HOOK + active healer demonstration |
+| **RECIPE-FORWARD HOOK** | Niche is vitality/performance/energy where the audience wants a result not a diagnosis (Korella saffron-vitality F→F-about-M canonical pattern, master-chen probiotic, master-salvora costco) | corella_saffron_v578 / v581, saffron_male_v577, saffron_vitality_v577, master_chen_three_things, master_salvora_costco_banana | NO — persona alone with prop + dialogue promise + force-verb spectacle |
+
+**Hybrid niches** (menopause-saffron, hot-flash-vitality, anxiety-saffron) can go either way. The corpus default for Korella saffron F→F-about-M is RECIPE-FORWARD (4-corpus instances). Owner choice determines: if the operator wants clinical-authority register with husband-bystander shame-mediation, use SYMPTOM-DEMO; if recipe-warm-conspiratorial, use RECIPE-FORWARD.
+
+### When v601 applies in the HOOK (SYMPTOM-DEMO video type)
+
+The HOOK is the diagnostic-shock moment. Structure:
+
+- **Scene 1** — PRESENT + APPLY phase. Healer actively demonstrates the symptom on the patient's body via clinical-authority hand-action. Reading climbs, finding lands.
+- **Scene 2** — REVEAL phase. Healer LIFTS the instrument away, TURNS to camera with the finding, GESTURES toward the corrective (saffron / anatomy / mechanism), transitions to RECIPE.
+
+The HOOK magnitude (per v600) for SYMPTOM-DEMO videos is NOT cartoon-physics SLAM — it's the **shocking READING** + the **patient's visible reaction** (eyebrow LIFTS, eyes WIDEN, breath catches) + the **healer's clinical-finding emphasis**. The magnitude is in the AUTHORITY of the diagnostic moment, not in physical violence.
+
+For invisible-symptom niches (menopause/hot-flash, anxiety, insomnia), the v600 magnitude expresses through:
+- **Display GLOWING red-warning** at unusual reading (99.4°F, 91% O2-sat, 47% sleep-quality, HRV crashing)
+- **Patient's visible reaction** captured at peak surprise (eyebrow LIFTS, eyes flick to instrument, breath catches)
+- **Healer's clinical-finding emphasis** (brows raised, body angled into the demonstration, gesture-finger pointing AT the reading at peak emphasis)
+- **Cascading verbs** in action_note still required: GRAB → RAISE → PRESS → LOCK → GLOW → POINT-AT-READING → TURN → GESTURE-TOWARD-CORRECTIVE (8 verbs)
 
 ### Visible vs invisible symptoms — two paths
 

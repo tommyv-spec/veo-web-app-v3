@@ -541,15 +541,45 @@ violated rules in past LLM outputs:
      transformation.
 
 [14] V601 HEALER-PATIENT ACTIVE-INTERACTION RULE — when a patient
-     appears as evidence of a symptom, the healer must ACTIVELY
-     INTERACT with the symptom-area via clinical-authority hand-
-     actions. Side-by-side seated composition fails. Active demo
-     transfers authority.
+     appears as evidence of a symptom, healer must ACTIVELY INTERACT
+     with symptom-area via clinical-authority hand-actions.
 
-     Decision tree:
-       SYMPTOM-DEMO video -> v601 APPLIES
+     V601 APPLIES TO BOTH THE HOOK AND THE EXPLAIN SCENE for SYMPTOM-
+     DEMO video types. The corpus opens symptom-demo videos with the
+     healer demonstrating the symptom on the patient at peak magnitude
+     — varicose HOOK (gloved-finger POINT + MOVE-IN + hand-opens),
+     back-lump HOOK (surgical-marker PRESS + TRACE), belly HOOK
+     (RIGHT-index TAP + flick). The HOOK IS the diagnostic-shock
+     moment.
+
+     Video-type decision tree:
+       SYMPTOM-DEMO video (visible body issue OR invisible-via-
+         instrument: menopause/hot-flash/anxiety/insomnia)
+         -> v601 APPLIES, patient in HOOK + EXPLAIN
+       RECIPE-FORWARD video (Korella saffron-vitality canonical,
+         master-chen probiotic, salvora costco)
+         -> v601 does NOT apply, persona alone with prop + dialogue
        TRANSFORMATION (Day-1/Day-14) -> v601 does NOT apply
-       RECIPE-ONLY (no patient) -> v601 does NOT apply
+       RECIPE-ONLY -> v601 does NOT apply
+
+     HYBRID NICHES (menopause-saffron, hot-flash-vitality) can go
+     either way — Korella default is RECIPE-FORWARD but SYMPTOM-DEMO
+     valid if clinical-authority register desired.
+
+     V601 IN HOOK (SYMPTOM-DEMO):
+       Scene 1 = PRESENT + APPLY (healer demonstrates symptom on
+         patient, reading climbs, finding lands)
+       Scene 2 = REVEAL (healer LIFTS instrument away, TURNS to
+         camera with finding, GESTURES toward corrective)
+
+     V600 MAGNITUDE FOR SYMPTOM-DEMO HOOK: NOT cartoon-physics SLAM.
+     Magnitude is in AUTHORITY of diagnostic moment — display GLOWS
+     red-warning + patient's visible reaction + healer's clinical-
+     finding emphasis. Cascading verbs still required (8+).
+
+     LIFT-SPECIFIC: most decoded sources are SYMPTOM-DEMO style with
+     patient in HOOK. Port the active interaction exactly. If decoded
+     source has weak HOOK without active demo, UPGRADE per v601.
 
      Two paths by symptom visibility:
 

@@ -618,23 +618,83 @@ violated rules in past LLM outputs:
      deliberately real-life).
 
 [14] V601 HEALER-PATIENT ACTIVE-INTERACTION RULE — when a patient
-     appears in the video as evidence of a symptom (clinical-
-     authority video type), the healer must ACTIVELY INTERACT with
-     the symptom-area on the patient's body via clinical-authority
-     hand-actions. The healer's HANDS DOING SOMETHING TO THE
-     PATIENT is what transfers clinical authority to the viewer.
+     appears as evidence of a symptom, healer must ACTIVELY INTERACT
+     with the symptom-area via clinical-authority hand-actions.
+     Healer's HANDS DOING SOMETHING TO THE PATIENT is what transfers
+     clinical authority to the viewer.
 
-     Two-shot of healer-and-patient sitting side-by-side without
-     active demonstration reads as "two friends" not "doctor and
-     patient." Trust-transfer fails. v601 fixes this.
+     Side-by-side seated composition with patient holding the product
+     reads as "two friends" not "doctor and patient." Trust-transfer
+     fails. v601 fixes this.
 
-     Decision tree — when v601 applies:
-       SYMPTOM-DEMO video (patient as evidence) -> v601 APPLIES
-         (healer must actively interact with symptom-area)
-       TRANSFORMATION video (Day-1/Day-14 same-body) -> v601 does
-         NOT apply (the body transformation IS the proof)
-       RECIPE-ONLY video (no patient on-screen) -> v601 does NOT
-         apply (the recipe demo carries authority)
+     V601 APPLIES TO BOTH THE HOOK AND THE EXPLAIN SCENE FOR SYMPTOM-
+     DEMO VIDEO TYPES — not just EXPLAIN. The corpus opens
+     symptom-demo videos with the healer demonstrating the symptom
+     on the patient at peak magnitude (varicose decode HOOK = gloved-
+     finger POINT + MOVE-IN + hand-opens-toward-swelling; back-lump
+     HOOK = surgical-marker LOWER + PRESS + TRACE curved line; belly
+     HOOK = RIGHT-index TAP + dismissive flick on distended belly).
+     The HOOK IS the diagnostic-shock moment.
+
+     Video-type decision tree — which HOOK pattern to pick:
+
+       SYMPTOM-DEMO video (niche has body issue audience identifies
+       with on a patient — belly fat, varicose, back lump, hair loss,
+       tonsil stones, OR invisible-via-instrument like menopause/
+       hot-flash, anxiety, insomnia, hormone)
+         -> v601 APPLIES — patient in HOOK with active healer demo
+         -> Corpus: dr_kim_belly_burn_male, decoded_varicose_vein,
+            dr_kim_back_lump, dr_kim_hair_regrowth, healthylifesage,
+            blood_sugar_v584
+
+       RECIPE-FORWARD video (niche is vitality/performance/energy
+       where audience wants a result not a diagnosis — Korella
+       saffron-vitality F-to-F-about-M canonical, master-chen
+       probiotic, master-salvora costco)
+         -> v601 does NOT apply
+         -> Persona alone with prop + dialogue promise + force-verb
+            spectacle. NO patient in HOOK.
+         -> Corpus: corella_saffron_v578/v581, saffron_male_v577,
+            saffron_vitality_v577, master_chen_three_things,
+            master_salvora_costco_banana
+
+       TRANSFORMATION video (Day-1/Day-14 same-body before/after)
+         -> v601 does NOT apply (body transformation IS proof,
+            separate v-rule pending)
+
+       RECIPE-ONLY video (no patient, no symptom)
+         -> v601 does NOT apply (recipe demo carries authority)
+
+     HYBRID NICHES (menopause-saffron, hot-flash-vitality, anxiety-
+     saffron) can go either way — corpus default for Korella saffron
+     F-to-F-about-M is RECIPE-FORWARD (4-corpus instances), but if
+     operator wants CLINICAL-AUTHORITY register with husband-
+     bystander shame-mediation, use SYMPTOM-DEMO HOOK.
+
+     V601 IN THE HOOK (SYMPTOM-DEMO):
+       Scene 1 — PRESENT + APPLY phase. Healer actively demonstrates
+         symptom on patient's body via clinical-authority hand-action.
+         Reading climbs, finding lands.
+       Scene 2 — REVEAL phase. Healer LIFTS instrument away, TURNS
+         to camera with finding, GESTURES toward corrective (saffron
+         / anatomy / mechanism), transitions to RECIPE.
+
+     V601 IN THE EXPLAIN (SYMPTOM-DEMO):
+       Scene 7 — patient may reappear (callback to HOOK with relieved/
+         improved appearance) OR persona alone with anatomy poster
+         active gesture. Both valid.
+
+     V600 MAGNITUDE EXPRESSION VARIES BY HOOK TYPE:
+       RECIPE-FORWARD HOOK: cartoon-physics SLAM + cascading force-
+         verbs on the prop (banana-pyramid-COLLAPSE, salmon-CLEAVER-
+         SWING, sugar-JET-ATOMIZE-RICOCHET).
+       SYMPTOM-DEMO HOOK: NOT cartoon-physics SLAM. Magnitude is in
+         the AUTHORITY of the diagnostic moment — display GLOWS
+         red-warning at unusual reading (99.4F, 91% O2-sat) + patient's
+         visible reaction (eyebrow LIFTS, eyes flick to instrument,
+         breath catches) + healer's clinical-finding emphasis (brows
+         raised, gesture-finger pointing AT reading at peak emphasis).
+         Cascading verbs still required (8+ verbs in action_note).
 
      Visible vs invisible symptoms — two paths:
 
