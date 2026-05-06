@@ -3486,8 +3486,17 @@ def select_frames_to_video_mode(page, context="", **kwargs):
             settings_applied = {}
 
             # Video tab
+            # Selector v620: Flow's UI changed the Video tab icon from
+            # 'videocam' to 'play_circle' some time before 2026-05-06.
+            # User pasted the live DOM showing <i>play_circle</i>Video.
+            # Support BOTH icons + a text-based fallback so the worker
+            # is forward-compatible with future icon swaps.
             try:
-                tab = page.locator("button.flow_tab_slider_trigger:has(i:text('videocam'))").first
+                tab = page.locator(
+                    "button.flow_tab_slider_trigger:has(i:text-is('play_circle')), "
+                    "button.flow_tab_slider_trigger:has(i:text-is('videocam')), "
+                    "button.flow_tab_slider_trigger:has-text('Video')"
+                ).first
                 tab.wait_for(state="visible", timeout=10000)
                 if tab.get_attribute("aria-selected") != "true":
                     human_click_element(page, tab, f"{prefix}Video tab")
@@ -3498,9 +3507,12 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                 settings_applied['Video'] = False
                 print(f"{prefix}⚠ Video tab missed", flush=True)
 
-            # Frames tab
+            # Frames tab — text-fallback added per v620 (defensive).
             try:
-                tab = page.locator("button.flow_tab_slider_trigger:has(i:text('crop_free'))").first
+                tab = page.locator(
+                    "button.flow_tab_slider_trigger:has(i:text-is('crop_free')), "
+                    "button.flow_tab_slider_trigger:has-text('Frames')"
+                ).first
                 tab.wait_for(state="visible", timeout=5000)
                 if tab.get_attribute("aria-selected") != "true":
                     human_click_element(page, tab, f"{prefix}Frames tab")
@@ -3511,9 +3523,12 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                 settings_applied['Frames'] = False
                 print(f"{prefix}⚠ Frames tab missed", flush=True)
 
-            # Portrait tab
+            # Portrait tab — text-fallback added per v620 (defensive).
             try:
-                tab = page.locator("button.flow_tab_slider_trigger:has(i:text('crop_9_16'))").first
+                tab = page.locator(
+                    "button.flow_tab_slider_trigger:has(i:text-is('crop_9_16')), "
+                    "button.flow_tab_slider_trigger:has-text('9:16')"
+                ).first
                 tab.wait_for(state="visible", timeout=5000)
                 if tab.get_attribute("aria-selected") != "true":
                     human_click_element(page, tab, f"{prefix}Portrait tab")
@@ -3525,17 +3540,31 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                 print(f"{prefix}⚠ Portrait tab missed", flush=True)
 
             # Fast [Lower Priority] model
+            # v620: scope the model-button search INSIDE the open settings
+            # dropdown (`[role='menu'][data-state='open']`) so .first can't
+            # pick up an unrelated "Veo" button elsewhere on the page (e.g.
+            # the Veo logo in the header). Also adds a primary text-content
+            # selector for the actual button text pattern observed in the
+            # live DOM: `Veo 3.1 - Fast [Lower Priority] (leaving N/M)`.
             try:
+                # Scope to the open settings dropdown when present
+                dropdown_scope = "[role='menu'][data-state='open'] "
                 model_btn = page.locator(
-                    "button:has(span:text('Veo')), "
-                    "button:has(div:text('Veo')), "
-                    "button:has(i:text('volume_up')):has(span:text('Veo')), "
-                    "button.sc-a0dcecfb-3:has(span:text('Veo')), "
-                    "button.sc-a0dcecfb-1:has(i:text('arrow_drop_down'))"
+                    f"{dropdown_scope}button[aria-haspopup='menu']:has-text('Veo'), "
+                    f"{dropdown_scope}button:has(i:text-is('arrow_drop_down')):has-text('Veo'), "
+                    "button[aria-haspopup='menu']:has-text('Veo'):has(i:text-is('arrow_drop_down')), "
+                    "button.sc-a0dcecfb-1:has(i:text-is('arrow_drop_down')):has-text('Veo')"
                 ).first
                 model_btn.wait_for(state="visible", timeout=3000)
                 model_text = model_btn.inner_text().lower()
-                if not ("fast" in model_text and "lower priority" in model_text):
+                # The button text observed in live DOM:
+                #   "Veo 3.1 - Fast [Lower Priority] (leaving 5/10)"
+                # Already-correct check is a substring scan for "fast" +
+                # "lower priority" — survives the trailing credit counter.
+                if "fast" in model_text and "lower priority" in model_text:
+                    settings_applied['Model'] = True
+                    print(f"{prefix}✓ Model already Fast [Lower Priority]", flush=True)
+                else:
                     human_click_locator(page, model_btn, f"{prefix}Model dropdown")
                     time.sleep(1)
                     lp_found = False
@@ -3562,8 +3591,6 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                         time.sleep(0.3)
                     else:
                         settings_applied['Model'] = True
-                else:
-                    settings_applied['Model'] = True
             except:
                 print(f"{prefix}⚠ Model button not found", flush=True)
 
