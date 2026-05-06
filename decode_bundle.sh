@@ -589,6 +589,97 @@ V621 DECODER NARRATIVE LENS + CAPTION BAN:
 
   If any wrong, FIX before emitting.
 
+V622 SYMPTOM-FEATURE EXAGGERATION ON NON-PERSONA CHARACTERS:
+
+  When narrative_lens (v621) is AUGMENTED-SYMPTOMS or HEALER-SHOWING-
+  CURE, OR the scene fits Pattern C (DIAGNOSTIC-PIVOT), AND the source
+  frame shows a non-persona character (patient / customer / bystander)
+  with a body part being pointed at, pressed, framed, circled,
+  magnified, or visually centered, the decoded character description
+  MUST:
+
+    (1) Name the specific body part (chin, jowl, under-eye, neck,
+        scalp, knuckle, calf, ankle, belly, cheek, forehead, hairline,
+        lip, eyelid, etc.)
+    (2) Describe its visually-emphasized state in specific exaggerated
+        terms — match what the source camera is FORCING the viewer to
+        see. The source video exaggerated it for the hook; the decoded
+        prompt must preserve that signal.
+    (3) NEVER use neutral posture filler ("chin raised slightly",
+        "head tilted", "face turned toward the camera", "eyes locked",
+        "leg extended") as a substitute for the actual symptom — those
+        describe pose, not feature.
+    (4) Match framing intensity — tight crop on the symptom = loud
+        description; wider framing = calmer, but still name the
+        feature.
+
+  REQUIRED examples (FORBIDDEN -> REQUIRED):
+
+    Practitioner's finger pressed into patient's full lower jaw:
+      FORBIDDEN: "her chin raised slightly"
+      REQUIRED:  "a full, sagging lower jaw with visible jowl drop,
+                  the practitioner's index finger pressed firmly into
+                  the soft underside of the chin"
+
+    Camera tight on under-eye area:
+      FORBIDDEN: "her eyes looking down"
+      REQUIRED:  "puffy, swollen under-eye bags with dark hollows
+                  beneath, fine crepey skin visible"
+
+    Practitioner pointing at thinning scalp:
+      FORBIDDEN: "head tilted forward"
+      REQUIRED:  "a visibly thinning crown with sparse hair coverage
+                  and exposed scalp through the parting line"
+
+    Hand on distended belly:
+      FORBIDDEN: "torso turned toward the camera"
+      REQUIRED:  "a distended, bloated lower abdomen pushing against
+                  the waistband, the practitioner's palm flat against
+                  the swell"
+
+    Close-up on varicose veins:
+      FORBIDDEN: "her leg extended"
+      REQUIRED:  "ropey, bulging blue-purple varicose veins running
+                  down the calf, raised above the skin surface"
+
+  ASYMMETRY CHAIN (v610 + v622):
+
+    Main character (upload-bound persona):
+      gender: FORBIDDEN (v610)
+      symptom-feature: N/A (persona is not the symptom-bearer)
+
+    Patient / customer / bystander (non-persona) on AUGMENTED-SYMPTOMS
+    or HEALER-SHOWING-CURE lens:
+      gender: REQUIRED (v610)
+      symptom-feature: REQUIRED (v622)
+
+    Patient / customer / bystander on GRABBING-ATTENTION lens with no
+    specific body part indicated:
+      gender: REQUIRED (v610)
+      symptom-feature: NOT required (describe role/clothing/posture)
+
+  PRE-OUTPUT VALIDATION (v622):
+
+    YES For every Image where narrative_lens is AUGMENTED-SYMPTOMS or
+        HEALER-SHOWING-CURE: prompt body names the specific body part
+        being indicated?
+    YES For every non-persona character with a body part being pointed
+        at / pressed / framed / circled: description exaggerates the
+        visible feature in concrete terms, not generic posture?
+    YES Mechanical grep for forbidden filler phrases when a body part
+        is being indicated — "chin raised slightly", "head tilted",
+        "face turned", "eyes locked" (alone), "torso turned", "leg
+        extended", "foot resting" — REWRITE if present alongside a
+        diagnostic crop.
+
+  If any wrong, FIX before emitting.
+
+  Why: a lift of a v621-era decode with neutral filler description
+  will generate a clean-jawed / clean-skinned / clean-belly patient.
+  The diagnostic pivot has nothing to land on. The decoded artifact
+  IS the lift contract for downstream variants — symptom signal lost
+  here is symptom signal lost forever.
+
 V614 / V615 DECODE-SIDE NOTES:
 
   Decode-side captures verbatim spoken dialogue from the source video

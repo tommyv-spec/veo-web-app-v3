@@ -1330,6 +1330,67 @@ Before emitting any decoded artifact OR any videos/*.md draft:
 
 ---
 
+## Symptom-feature exaggeration on non-persona characters (v622)
+
+**Source: 2026-05-06 owner observation.** Decoded prompt for `amish-house` chin-pointing scene read *"her chin raised slightly and her eyes locked to the camera."* The actual source frame shows a patient with a notably full / sagging lower-jaw + jowl drop, and the practitioner's index finger is pressed firmly into the underside of that chin. The whole rhetorical point of the scene is "IF YOUR CHIN LOOKS [LIKE THIS]" — a C-DIAGNOSTIC-PIVOT lifted on the AUGMENTED-SYMPTOMS lens. The decoder flattened the diagnostic feature into generic posture filler. A lift of that prompt would generate a clean-jawed patient and the diagnostic pivot would have nothing to land on.
+
+Owner: *"we need to exagerate the patient characteristics mentioned in the scene."*
+
+**Bug class.** v621 enforces lens classification (HEALER-SHOWING-CURE / AUGMENTED-SYMPTOMS / GRABBING-ATTENTION) but does not enforce *symptom-feature description* at the per-character level. The decoder identifies the lens correctly and then writes the patient as if the lens were neutral. v622 closes the gap.
+
+### The rule
+
+When a scene's `narrative_lens` is `AUGMENTED-SYMPTOMS` OR `HEALER-SHOWING-CURE`, **OR** when the scene fits Pattern C (DIAGNOSTIC-PIVOT), **AND** the source frame shows a non-persona character with a body part being pointed at, pressed, framed, circled, magnified, or visually centered, the decoded character description MUST:
+
+1. **Name the body part** being indicated (chin, jowl, under-eye, neck, scalp, knuckle, calf, ankle, belly, cheek, forehead, hairline, lip, eyelid, etc.).
+2. **Describe its visually-emphasized state in specific exaggerated terms** — match what the source camera is forcing the viewer to see. The source video EXAGGERATED it for the hook; the decoded prompt must preserve that signal.
+3. **Never use neutral posture filler** as a substitute for the actual symptom description. Phrases like *"chin raised slightly"*, *"head tilted"*, *"face turned toward the camera"*, *"eyes looking down"* are forbidden when the frame is a tight crop on a symptom — they describe the *pose*, not the *feature*.
+4. **Match the framing intensity.** If the source crops tight on the symptom, the description must be loud about it. If the source uses wider framing, the description can be calmer — but still names the feature.
+
+### REQUIRED examples
+
+| Source frame shows | FORBIDDEN (neutral filler) | REQUIRED (symptom-exaggerated) |
+|---|---|---|
+| Practitioner's finger pressed into a patient's full lower jaw | "her chin raised slightly" | "a full, sagging lower jaw with visible jowl drop, the practitioner's index finger pressed firmly into the soft underside of the chin" |
+| Camera tight on under-eye area | "her eyes looking down" | "puffy, swollen under-eye bags with dark hollows beneath, fine crepey skin visible" |
+| Practitioner pointing at a thinning scalp | "head tilted forward" | "a visibly thinning crown with sparse hair coverage and exposed scalp through the parting line" |
+| Hand on a distended belly | "torso turned toward the camera" | "a distended, bloated lower abdomen pushing against the waistband, the practitioner's palm flat against the swell" |
+| Close-up on varicose veins | "her leg extended" | "ropey, bulging blue-purple varicose veins running down the calf, raised above the skin surface" |
+| Practitioner inspecting back acne | "her back facing the camera" | "an upper back covered in red, raised, inflamed acne lesions clustered across the shoulder blades" |
+| Hand on a swollen ankle | "foot resting on the floor" | "a noticeably swollen ankle with stretched, shiny skin and faint pitting, almost erasing the ankle bone" |
+
+### Asymmetry chain (v610 + v622)
+
+| Character role | Gender description | Symptom-feature description |
+|---|---|---|
+| Main character (upload-bound persona) | FORBIDDEN (v610) | N/A — persona is not the symptom-bearer; the patient is |
+| Patient / customer / bystander (non-persona) on AUGMENTED-SYMPTOMS or HEALER-SHOWING-CURE lens | REQUIRED (v610) | REQUIRED (v622) |
+| Patient / customer / bystander on GRABBING-ATTENTION lens with no specific body part indicated | REQUIRED (v610) | NOT required — describe role/clothing/posture instead |
+
+The persona is upload-swapped at lift time; the patient is NOT — the patient's prose IS the only source of truth for Banana 2 to anchor on. Vague non-persona descriptions on diagnostic scenes produce generic Banana 2 output, and the diagnostic pivot collapses.
+
+### Pre-output validation gate (decoder-side)
+
+Before emitting any `raw/decoded_*.md`:
+
+- ✅ For every Image whose `narrative_lens:` is `AUGMENTED-SYMPTOMS` or `HEALER-SHOWING-CURE`: does the prompt body name the **specific body part** being indicated?
+- ✅ For every Image where the source frame shows a non-persona character with a body part being pointed at / pressed / framed / circled: does the description **exaggerate the visible feature** in concrete terms, not generic posture?
+- ✅ Mechanical check (negative): grep the body for these forbidden filler phrases when a body part is being indicated — `"chin raised slightly"`, `"head tilted"`, `"face turned"`, `"eyes locked"` (alone), `"torso turned"`, `"leg extended"`, `"foot resting"`. If present AND the source frame is a tight diagnostic crop, REWRITE.
+
+### What v622 does NOT change
+
+- v610 main-character gender ban — preserved (persona descriptions stay gender-neutral; v622 only governs non-persona feature description).
+- v621 narrative-lens classification — preserved (v622 builds on the lens; doesn't replace it).
+- Dialogue lines — preserved verbatim from source whisper transcription.
+- GRABBING-ATTENTION lens scenes without a specific symptom — no exaggeration required (no symptom = nothing to exaggerate).
+- Persona uploads — still bound by v607 + v619 N4. v622 governs prose only, not binding mechanics.
+
+### Lift-side application
+
+When lifting from a decoded source whose original artifact predates v622 (decoded with neutral posture filler), the lift author MUST upgrade the symptom description to match v622 — re-watch the source frame at the timestamp, identify the actual visible feature, and rewrite the patient's description before lifting into `videos/*.md`. A lift that propagates v621-era neutral filler will produce a generic generated patient and the diagnostic-pivot rhetoric will fail at video time.
+
+---
+
 ## Auto-infer + normalize image bindings (v619) — feature delivery, not error rejection
 
 **Source: 2026-05-06 owner directive** *"let's make also the rules stronger and more precise for which images we need in the markdown... from the latest video menopause saffron i can see image2 didn't include the product image, even if it mentions it... and make sure the whole process of image creation actually respects this logic. i don't want errors handling i want the feature to be delivered properly, so focus on doing that perfectly."*
