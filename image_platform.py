@@ -2937,29 +2937,46 @@ def _parse_ingredients_block(md_text: str) -> List[Dict[str, Any]]:
 
     The ingredients block declares named visual references (characters,
     products, recurring settings) that are cited by name in image prompts.
-    See template_reference_v3.md for the convention.
+    See template_reference.md for the convention.
 
-    Expected markdown shape:
+    v618 — HEADER-AWARE COLUMN DETECTION. Pre-v618 the parser hard-coded
+    column positions as `Name | Type | Description | Source`. Authors using
+    different column orders (e.g. `# | Type | Name | Reference`) silently
+    produced rows with `name="1"` (the index column) and `description="the
+    main character"` (the actual name) — _resolve_uploaded_ingredients
+    couldn't match the persona by name, v607 force-bind silently skipped,
+    and Banana 2 generated generic faces instead of the persona upload.
+    Concrete failure: 2026-05-06 menopause-saffron Image 7 — the Reference
+    panel showed only the saffron bottle; Image 7's variants showed a
+    generic woman, not the Black-female-practitioner persona.
+
+    v618 detects the header row's column names (case-insensitive keyword
+    match against "name", "type", "description"|"desc", "source"|"reference"
+    |"ref"|"path") and parses subsequent rows using the detected positions,
+    accepting ANY column order. Rows where the header has columns we don't
+    recognise (e.g. an `#` index column) are still parseable — those
+    columns just go unused.
+
+    Accepted shapes (both work after v618):
 
         ## Ingredients
-
-        | Name (used in prompts) | Type | Description | Source |
+        | Name | Type | Description | Source |
         |---|---|---|---|
-        | `the main character`   | character | ...     | ... |
-        | `her daughter`         | character | ...     | ... |
-        | `the Salvora bottle`   | product   | ...     | ... |
+        | the main character | character | ... | personas/refs/X.png |
 
-    The "Name" column is the verbatim string the user is expected to use
-    in their image prompts. Backticks around the name are stripped.
+    AND:
 
-    Returns a list of dicts:
+        ## Ingredients
+        | # | Type | Name | Reference |
+        |---|---|---|---|
+        | 1 | character | the main character | personas/refs/X.png |
+
+    Returns a list of dicts (key set unchanged for back-compat):
         [{"name": "the main character", "type": "character",
           "description": "...", "source": "..."}, ...]
 
-    Returns [] if no Ingredients section is present, or if the section
-    contains no parseable rows. This is intentional — the ingredients
-    block is optional and the legacy single-persona import path remains
-    the fallback.
+    Returns [] if no Ingredients section is present, header can't be parsed,
+    or no parseable rows.
     """
     # Find the "## Ingredients" section, capture until the next "## " header
     # or end of document. Case-insensitive on the heading text.
@@ -2971,28 +2988,80 @@ def _parse_ingredients_block(md_text: str) -> List[Dict[str, Any]]:
         return []
     body = m.group(1)
 
+    # Split body into pipe-row lines (any number of columns ≥ 2)
+    pipe_row_re = _re.compile(r"^\s*\|(.+)\|\s*$", flags=_re.MULTILINE)
+    rows_raw: List[List[str]] = []
+    for rm in pipe_row_re.finditer(body):
+        cells = [c.strip().strip("`") for c in rm.group(1).split("|")]
+        rows_raw.append(cells)
+
+    if not rows_raw:
+        return []
+
+    # Find header row — first non-divider row. A divider row is one where
+    # every cell matches `^[-:\s]+$`.
+    def _is_divider(cells: List[str]) -> bool:
+        return all(_re.match(r"^[-:\s]*$", c) for c in cells)
+
+    header_idx = None
+    for i, cells in enumerate(rows_raw):
+        if not _is_divider(cells):
+            header_idx = i
+            break
+    if header_idx is None:
+        return []
+    header_cells = rows_raw[header_idx]
+
+    # Map header keywords → position. Each output field can be filled by
+    # any header containing the keyword (case-insensitive). First match
+    # wins per output field.
+    KEYWORDS = {
+        "name": ["name"],
+        "type": ["type"],
+        "description": ["description", "desc"],
+        "source": ["source", "reference", "ref", "path"],
+    }
+    col_map: Dict[str, int] = {}
+    for field, keywords in KEYWORDS.items():
+        for col_idx, header in enumerate(header_cells):
+            h_lc = header.lower()
+            if any(kw in h_lc for kw in keywords):
+                col_map[field] = col_idx
+                break
+
+    if "name" not in col_map or "type" not in col_map:
+        # Without name+type columns we can't produce useful rows.
+        log.warning(
+            f"[image_platform] _parse_ingredients_block: header row "
+            f"{header_cells!r} missing 'name' or 'type' column — skipping"
+        )
+        return []
+
+    name_col = col_map["name"]
+    type_col = col_map["type"]
+    desc_col = col_map.get("description")
+    src_col = col_map.get("source")
+
     rows: List[Dict[str, Any]] = []
-    # Match a 4-column markdown table row. The first column is the name
-    # and may be wrapped in backticks. Skip header and divider rows.
-    table_re = _re.compile(
-        r"^\|\s*`?([^`|]+?)`?\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*$",
-        flags=_re.MULTILINE,
-    )
-    for tm in table_re.finditer(body):
-        name = tm.group(1).strip()
+    for i, cells in enumerate(rows_raw):
+        if i <= header_idx:
+            continue
+        if _is_divider(cells):
+            continue
+        # Tolerate rows with too few cells (skip them instead of crash)
+        max_col = max(name_col, type_col,
+                      desc_col if desc_col is not None else -1,
+                      src_col if src_col is not None else -1)
+        if len(cells) <= max_col:
+            continue
+        name = cells[name_col]
         if not name:
-            continue
-        # Skip header row ("Name (used in prompts)") and divider rows ("---")
-        name_lc = name.lower()
-        if name_lc.startswith("name") and "prompt" in name_lc:
-            continue
-        if _re.match(r"^[-:\s]+$", name):
             continue
         rows.append({
             "name": name,
-            "type": tm.group(2).strip(),
-            "description": tm.group(3).strip(),
-            "source": tm.group(4).strip(),
+            "type": cells[type_col],
+            "description": cells[desc_col] if desc_col is not None else "",
+            "source": cells[src_col] if src_col is not None else "",
         })
 
     # De-dupe by name, preserving first occurrence
@@ -3814,6 +3883,56 @@ def _import_scene_table_impl(
             f"({list(ingredient_nodes.keys())}), "
             f"{len(parsed_ingredients) - len(ingredient_nodes)} will anchor to scenes"
         )
+
+        # === v618b — Fail-fast validation: every character/product ingredient
+        # with a declared `Reference` path MUST resolve to an uploaded
+        # ImageNode. Before v618b the platform silently parsed missing
+        # uploads as "anchor-scene ingredients" — Banana 2 then generated
+        # generic faces / generic bottles instead of the persona / brand
+        # the author intended. Concrete failure: 2026-05-06 menopause-
+        # saffron Image 7 was generated WITHOUT the Black-female-
+        # practitioner upload attached because the v618a parser bug had
+        # registered the persona ingredient under name="1" (the # column),
+        # so _resolve_uploaded_ingredients couldn't link it. v618b would
+        # have caught the same scenario regardless of the v618a parser
+        # bug — by checking that every character/product row with a
+        # Reference path resolves to an upload. ===
+        unresolved = []
+        for ing in parsed_ingredients:
+            ing_name = ing.get("name", "")
+            ing_type = (ing.get("type") or "").strip().lower()
+            ing_source = (ing.get("source") or "").strip()
+            if ing_type not in ("character", "product"):
+                continue
+            if not ing_source:
+                # No Reference path declared — author may intend an
+                # anchor-scene ingredient (rare for type=character/product
+                # but legal). Skip validation.
+                continue
+            if ing_name not in ingredient_nodes:
+                unresolved.append({
+                    "name": ing_name,
+                    "type": ing_type,
+                    "source": ing_source,
+                })
+        if unresolved:
+            details_lines = [
+                f"{u['name']!r} (type={u['type']}, declared Reference: {u['source']})"
+                for u in unresolved
+            ]
+            error_msg = (
+                "Ingredient(s) with type=character/product declare a "
+                "Reference path in the Ingredients table but no matching "
+                "upload exists on the platform. Upload each Reference file "
+                "via the Persona / Product picker UI before importing this "
+                "video, OR pass `ingredient_node_ids` mapping the ingredient "
+                "name → uploaded ImageNode id. Without this binding, "
+                "Banana 2 will generate a generic face / generic product "
+                "instead of the intended reference. Unresolved ingredients:\n"
+                + "\n".join(f"  • {line}" for line in details_lines)
+            )
+            log.error(f"[image_platform] v618b: {error_msg}")
+            raise HTTPException(status_code=400, detail=error_msg)
 
     # v512/v513: track which scene first introduced each non-upload ingredient.
     # Maps ingredient_name → ImageNode (the scene that first mentioned it).

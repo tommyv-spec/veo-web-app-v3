@@ -1256,6 +1256,97 @@ psychologically-dead trap.
 
 ---
 
+## Header-aware ingredients parser + fail-fast upload validation (v618)
+
+**Source: 2026-05-06 owner observation** (with screenshot of menopause-saffron Image 7): *"why this image from the menopause saffron video didn't include main character?... check both the image worker, the platform or the video markdown... and find where is best to enforce it. make a future-proof, ondurate decision."*
+
+The Image 7 reference panel showed only `korella.jpg` as parent; the persona reference was missing entirely. Banana 2 generated a generic woman in a doctor's coat instead of the Black-female-practitioner persona.
+
+### Root cause
+
+Two-stage failure in `image_platform.py`:
+
+1. **`_parse_ingredients_block` was column-position-locked.** The pre-v618 parser hard-coded column positions as `Name | Type | Description | Source`. The test video used `# | Type | Name | Reference`. The parser silently produced rows with `name="1"` (the `#` index column) and `description="the main character"` (the actual name shoved into the description slot).
+
+2. **`_resolve_uploaded_ingredients` then couldn't match the persona by name** — there's no upload registered under `"1"`, only under `"the main character"`. Returned empty `ingredient_nodes`. v607 force-bind looked for `type='character'` ingredients but found nothing under that name. No persona edge attached. Worker pulled only the product ref. Image 7 generated a generic face.
+
+### Where to enforce — the future-proof answer
+
+| Layer | Verdict |
+|---|---|
+| **Markdown** | Author writes the Ingredients table once. Already correct in test video (`# | Type | Name | Reference`). The parser was the wrong layer to be brittle. ❌ Not the fix-site. |
+| **Worker (image_worker.py)** | Just consumes `input_images` from API. No authoring intent. ❌ Wrong layer. |
+| **Platform (image_platform.py)** | Single point of enforcement. All Job-creation paths funnel through `import_video_md` / `promote_batch_to_video`. ✅ **The right layer.** |
+
+### v618a — Header-aware ingredient parser
+
+Detect column positions from the header row's keywords (case-insensitive):
+
+| Output field | Header keyword(s) (substring match) |
+|---|---|
+| `name` | `name` |
+| `type` | `type` |
+| `description` | `description`, `desc` |
+| `source` | `source`, `reference`, `ref`, `path` |
+
+Parse subsequent rows using the detected positions. Tolerate extra columns (e.g. `#` index, `Notes`) — they're ignored. Reject the table only when the header has neither `name` nor `type` columns.
+
+Both layouts now work:
+
+```
+| Name | Type | Description | Source |
+|---|---|---|---|
+| the main character | character | ... | personas/refs/X.png |
+```
+
+AND:
+
+```
+| # | Type | Name | Reference |
+|---|---|---|---|
+| 1 | character | the main character | personas/refs/X.png |
+```
+
+5 synthetic test cases pass: test-video format, legacy docstring format, minimal `Name | Type` only, weird 5-col order with `Reference` first, and missing-`name` rejection.
+
+### v618b — Fail-fast validation at import
+
+After `_resolve_uploaded_ingredients` returns `ingredient_nodes`, walk the parsed ingredients. For every row where:
+
+- `type == "character"` OR `type == "product"`, AND
+- `source` (Reference path) is non-empty, AND
+- name is NOT in `ingredient_nodes` (no upload resolved)
+
+→ raise `HTTPException(400)` with a clear list of unresolved ingredients pointing to the missing uploads.
+
+This converts the previous SILENT failure (generic face/bottle in generation) into a LOUD failure (import rejected before any DB rows are created), telling the author exactly what's missing:
+
+```
+Ingredient(s) with type=character/product declare a Reference path in
+the Ingredients table but no matching upload exists on the platform.
+Upload each Reference file via the Persona / Product picker UI before
+importing this video, OR pass `ingredient_node_ids` mapping the
+ingredient name → uploaded ImageNode id.
+Unresolved ingredients:
+  • 'the main character' (type=character, declared Reference: personas/refs/black-female-practitioner.png)
+```
+
+### What v618 does NOT change
+
+- v607 force-bind logic — preserved (now actually fires because parser correctly registers the character ingredient).
+- v612 promote-to-video persistence — preserved.
+- Parser output schema (`{name, type, description, source}`) — back-compat maintained.
+- ingredient_node_ids resolution path — preserved.
+- Uploads themselves — v618b detects missing uploads but doesn't auto-upload. Auto-upload from the markdown's Reference paths is a future v619 candidate (would require auth + multipart upload from the import path; tractable but bigger surface).
+
+### Why v618b's strict failure is the right behavior
+
+Pre-v618, the platform tolerated missing uploads by treating the ingredient as an "anchor-scene ingredient" (no upload, the first scene that mentions it defines its appearance). For `description` types this is correct. For `character`/`product` types with a `Reference` path declared, the author CLEARLY intended an upload — silently substituting an anchor scene produces generic content the author didn't ask for. Better to fail loud and have the author fix the upload than ship generic faces / generic bottles into a video the author thought was correctly bound.
+
+If a future use case legitimately wants `type=character` without an upload (rare — would mean a character whose appearance is defined entirely by prose), the author can simply omit the `Reference` column — v618b only fails when a Reference path was declared but didn't resolve.
+
+---
+
 ## Whisper export — single-pass trim+concat filter graph (v617)
 
 **Source: 2026-05-06 owner clarification** *"the frames i was seeing are not extra frame after or before the words or segments, are just extra frames added randomly, so hard cuts are between them, does this clarify?"*
