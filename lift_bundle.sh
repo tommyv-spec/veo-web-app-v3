@@ -845,6 +845,45 @@ violated rules in past LLM outputs:
        YES PRODUCT line (when present) ends with the ingredient
            name + period (no "— match its ... exactly" trailer)?
 
+[21] V610 GENDER-NEUTRAL MAIN-CHARACTER REFERENCES — never gender
+     the persona in prose body or action_notes. Identity comes from
+     the upload, NOT from prose. Gendered pronouns referring to the
+     main character force a prose-vs-upload identity conflict that
+     drifts the face/body across images.
+
+     FORBIDDEN (gendered, pre-v610):
+       "The main character pivots from the patient toward camera,
+       her right hand sweeping in a wide gesture-arc..."
+       "She lifts the thermometer away from the patient's temple..."
+
+     REQUIRED (v610 — pick whichever reads cleanest):
+       Role descriptor:
+         "The main character pivots from the patient toward camera,
+         the right hand sweeping in a wide gesture-arc..."
+       Singular-they:
+         "The main character pivots ..., their right hand sweeping..."
+       Pronoun-free body-part subject:
+         "The right hand sweeps in a wide gesture-arc..."
+
+     NOT AFFECTED:
+       - Dialogue lines (`- **line:**`) — gendered language fine.
+       - Other characters (patient, bystander) — gendered pronouns OK.
+       - Persona's name in dialogue (e.g. "I'm Dr. Amara") — verbatim.
+
+     LIFT-SPECIFIC: when porting a decoded source whose original
+     prose uses gendered pronouns for the persona, REWRITE to
+     gender-neutral form for the lifted videos/*.md. The lift is the
+     authoring layer — apply v610 even if the decode artifact has
+     gendered pronouns.
+
+     PRE-OUTPUT VALIDATION:
+       YES Zero instances of \\bshe\\b, \\bhe\\b, \\bher\\b, \\bhis\\b,
+           \\bhim\\b, \\bhers\\b, \\bshe's\\b, \\bhe's\\b in image-prompt
+           bodies and action_notes referring to the main character?
+       YES Persona references use role descriptor / singular-they /
+           pronoun-free constructions?
+       YES Other-character pronouns unchanged?
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

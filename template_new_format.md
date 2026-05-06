@@ -496,6 +496,16 @@
     overlap would confuse the renumbering pass. The platform binds named
     products to the product upload slot via the same ingredient-binding
     logic that already binds "the main character" to the persona slot.
+  • V610 GENDER-NEUTRAL PERSONA REFERENCES: prose body and action_notes
+    must NEVER use gendered pronouns (she / her / hers / he / him / his)
+    to refer to the main character. Identity comes from the upload,
+    NOT from the prose. Use the role descriptor ("the main character,"
+    "the healer," "the practitioner"), the singular "they / their," or
+    pronoun-free constructions ("right hand presses ..." instead of
+    "she presses with her right hand"). Other characters (a patient,
+    husband bystander, customer) keep gendered pronouns — their identity
+    IS the prose. Dialogue (`- **line:**`) is unaffected; the persona's
+    name in dialogue stays verbatim.
     For non-product frames (HOOK before-states with no product, ANATOMY
     overlays, talking-head closeups with the product offscreen) DO NOT
     mention the product — leaving the product slot unbound for those
@@ -583,7 +593,7 @@ Persona is always uploaded as image 1 (Flow slot 0). Product, when present in th
 - **reference_image:** none
 - **Image prompt:**
 ```
-Shot on iPhone with wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight, slight wide-angle perspective distortion at the edges of frame. [One brief anchor phrase for the setting — e.g. "Outdoor garden with blurred foliage" or "Bright modern kitchen with a warm honey-oak tabletop in the lower foreground".] [Describe framing: subject's position in the frame, shoulders-spanning, head placement.] [Describe any secondary characters fully on first appearance only.] [Describe the main character's pose, hand positions, gesture — NEVER their face/hair/beard/glasses/wardrobe.] [Describe the foreground props in active use, their state and position in frame.] [Describe expression direction: mouth open mid-word, eyes tracking, warm teaching smile.] iPhone HDR colors, deep focus.
+Shot on iPhone with wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight, slight wide-angle perspective distortion at the edges of frame. [One brief anchor phrase for the setting — e.g. "Outdoor garden with blurred foliage" or "Bright modern kitchen with a warm honey-oak tabletop in the lower foreground".] [Describe framing: subject's position in the frame, shoulders-spanning, head placement.] [Describe any secondary characters fully on first appearance only — gendered pronouns are fine here, these are prose-described not upload-bound.] [Describe the main character's pose, hand positions, gesture — NEVER face/hair/beard/glasses/wardrobe AND NEVER gendered pronouns referring to the main character (v602 + v610: identity comes from the upload, not prose).] [Describe the foreground props in active use, their state and position in frame.] [Describe expression direction: mouth open mid-word, eyes tracking, warm teaching smile.] iPhone HDR colors, deep focus.
 ```
 
 ### Image 2

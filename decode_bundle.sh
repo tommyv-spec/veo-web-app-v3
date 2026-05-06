@@ -438,6 +438,35 @@ PRE-OUTPUT VALIDATION (v609):
   YES PRODUCT binding line (when present) ends with the ingredient
       name + period (no "— match its ... exactly" trailer)?
 
+V610 GENDER-NEUTRAL MAIN-CHARACTER REFERENCES (decode-side):
+
+  When you write the prose body and action_notes for the main
+  character in the decoded artifact, NEVER use gendered pronouns
+  (she / her / hers / he / him / his) to refer to the persona.
+  Even though the source video shows a gendered presenting actor,
+  the decoded artifact is for AUTHORING and downstream lifts will
+  swap the persona — keep the prose generic so the artifact is
+  reusable.
+
+  Use:
+    - Role descriptor: "the main character," "the healer," "the
+      practitioner," "the host"
+    - Singular-they: "their hand"
+    - Pronoun-free: "right hand presses..." (drop the subject)
+
+  NOT AFFECTED:
+    - Dialogue lines — verbatim transcription, gendered language fine.
+    - Other characters in the source (patient, customer, bystander) —
+      describe their gender in prose (their identity IS the prose).
+
+PRE-OUTPUT VALIDATION (v610):
+
+  YES Zero instances of \bshe\b, \bhe\b, \bher\b, \bhis\b, \bhim\b,
+      \bhers\b in image-prompt bodies and action_notes referring to
+      the main character?
+  YES Persona references use role descriptor / singular-they /
+      pronoun-free constructions?
+
 If any wrong, FIX before emitting.
 
 Output the decoded markdown per code/template_new_format.md skeleton +

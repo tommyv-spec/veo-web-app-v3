@@ -1256,6 +1256,93 @@ psychologically-dead trap.
 
 ---
 
+## Gender-neutral main-character references (v610) — never gender the persona in prose
+
+**Source: 2026-05-06 owner directive** *"also when creating a video never assign a gender to the main carchter, always refer as the healer, the main carchter, or anything else that you can think of."*
+
+v602 established that the persona's identity (face, hair, clothing, build) comes from the uploaded reference image — body prose says "the main character" generically rather than the persona's full name. v610 extends that to **gendered pronouns**: prose must NOT use "she / her / hers / he / him / his" to refer to the main character. Identity attributes flow from the upload; prose attributes flow from the prose. When prose says "she lifts her left hand," it's asserting a gender attribute that should come from the upload, and that assertion conflicts with the upload-bound identity model whenever the persona's actual presentation differs from what the prose names. Under attention pressure, Banana 2 may choose either signal — leading to face/body drift between images that all reference the same upload.
+
+The fix is mechanical: drop gendered pronouns when referring to the main character. Use the role descriptor ("the main character," "the healer," "the practitioner," "the host"), the singular "they / their," or pronoun-free constructions ("right hand presses ..." instead of "she presses with her right hand").
+
+### What v610 does NOT change
+
+- **Dialogue** is unaffected. Spoken script lines (`- **line:** ...`) can use any gendered language the persona naturally uses. Dialogue is content, not visual prose.
+- **Other characters** in the scene (a patient, a husband bystander, a customer) keep their gendered pronouns. Their identity is described in the prose itself, not bound to an upload, so the gender assertion is the source of truth — there's no upload to drift away from.
+- **Persona names** (e.g. "Dr. Amara") in dialogue lines stay verbatim. The persona's name is part of what the persona says about themselves; it isn't a visual claim.
+- **The Ingredients table** still names the persona by their canonical role descriptor (`the main character`). No change to v581 / v607 binding behavior.
+
+### Forms
+
+❌ **FORBIDDEN (gendered, pre-v610):**
+```
+The main character pivots from the patient toward camera, her right hand sweeping in a wide gesture-arc...
+She lifts the thermometer away from the patient's temple...
+Her left hand steadies the glass at its base while her right squeezes the lemon.
+```
+
+✅ **REQUIRED (gender-neutral, v610):**
+```
+The main character pivots from the patient toward camera, the right hand sweeping in a wide gesture-arc...
+The main character lifts the thermometer away from the patient's temple...
+The left hand steadies the glass at its base while the right squeezes the lemon.
+```
+
+Or with singular-they:
+```
+The main character pivots from the patient toward camera, their right hand sweeping in a wide gesture-arc.
+```
+
+Both forms are acceptable; both eliminate the gender claim from prose.
+
+### Distinguishing persona pronouns from other-character pronouns
+
+When you have a multi-character scene, the persona's pronouns drop; the other characters' pronouns stay. Concrete example from the menopause-saffron HOOK (Image 1):
+
+| Text | Refers to | Treatment |
+|---|---|---|
+| "the main character's right hand presses ... against the patient's right temple" | persona | "the main character's" — keep, no gender |
+| "the patient's right eyebrow lifted in visible surprise" | patient | possessive form `the patient's` — keep, no pronoun needed |
+| "her left hand index finger pointing sharply at the reading" | persona | ❌ FORBIDDEN — change to "the left hand index finger" or "the main character's left hand index finger" |
+| "the patient (a late-40s woman in a soft beige knit cardigan with dark eye-circles and faint sweat-sheen at her temples)" | patient | "her temples" — keep (patient is described inline; gender claim IS the prose source of truth) |
+
+The mental test: does this pronoun reference an upload-backed ingredient (`type: character`)? If yes → drop the gender. If no → keep.
+
+### Why singular-they is acceptable but role-descriptor is preferred
+
+- **"the main character" / "the healer" / "the practitioner"** — best. Reads naturally, names the role, stays generic. Use this on first reference per scene and after long subjects.
+- **"their" / "they"** — acceptable. Cleaner than awkward repeated role-descriptors when the same subject is in three consecutive sentences. Banana 2 tolerates singular-they without confusion.
+- **No subject ("right hand presses ...")** — best for action-rich descriptions. The active body part becomes the subject; identity stays in the upload.
+
+Pick whichever reads cleanest in the local sentence. The hard constraint is just: zero gendered pronouns referring to the persona.
+
+### Pre-output validation gate
+
+Before emitting any Image prompt body or action_note, scan for gendered pronouns that refer to the persona:
+
+- ✅ Zero instances of `\bshe\b`, `\bhe\b`, `\bher\b`, `\bhis\b`, `\bhim\b`, `\bhers\b` referring to the main character?
+- ✅ Persona references use role descriptor ("the main character," "the healer," "the practitioner") OR singular-they OR pronoun-free body-part subjects?
+- ✅ Gendered pronouns referring to the patient, husband bystander, or other prose-described (non-upload) characters are unchanged?
+
+If any persona-pronoun found, REWRITE before emitting.
+
+### Why v610 vs leaving gender implicit in prose
+
+v602 said "use the role descriptor instead of the persona's full name" so the persona could be swapped without rewriting every scene. v610 closes the same hole at the pronoun level: a video designed for one persona shouldn't need a prose rewrite to ship for a different persona presenting differently. Keep prose generic; let the upload carry identity. This makes videos / cells reusable across the persona library — the same prose body can ship with a Korella-female-practitioner upload, a Korella-male-practitioner upload, or a Korella-non-binary-practitioner upload, without re-authoring.
+
+It also removes a class of generation drift: when the prose asserts "she" but the upload's apparent presentation is read by Banana 2 differently (or the upload is updated to a different presentation later), the model has two conflicting identity signals. Drop the prose claim and the conflict cannot occur.
+
+### Worked example — Image 2 from the menopause-saffron HOOK
+
+**Pre-v610 (gendered, persona-locked)**:
+> The main character pivots from the patient toward camera, thermometer still aloft in her left hand with display GLOWING red, her right hand sweeping in a gesture-arc...
+
+**Post-v610 (gender-neutral, persona-portable)**:
+> The main character pivots from the patient toward camera, thermometer still aloft in the left hand with display GLOWING red, the right hand sweeping in a gesture-arc...
+
+Same scene. Same composition. Zero gender claim. Reusable across persona library.
+
+---
+
 ## Concise reference-binding form (v609) — drop the redundant "match X, Y, Z exactly" clause
 
 **Source: 2026-05-06 owner observation** *"`Use the uploaded product reference image for the Korella saffron` — for the images prompt when the product is needed this above is the right format, no this one: `Use the uploaded product reference image for the Rosabella Beetroot bottle — match its label, packaging, color, and proportions exactly.` nano bana match automatically the info, packaging, color and proportions."*
