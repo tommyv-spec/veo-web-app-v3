@@ -540,6 +540,66 @@ violated rules in past LLM outputs:
      apply to talking-head CTA/OUTRO or Day-1 frame of Day-1/Day-14
      transformation.
 
+[14] V601 HEALER-PATIENT ACTIVE-INTERACTION RULE — when a patient
+     appears as evidence of a symptom, the healer must ACTIVELY
+     INTERACT with the symptom-area via clinical-authority hand-
+     actions. Side-by-side seated composition fails. Active demo
+     transfers authority.
+
+     Decision tree:
+       SYMPTOM-DEMO video -> v601 APPLIES
+       TRANSFORMATION (Day-1/Day-14) -> v601 does NOT apply
+       RECIPE-ONLY (no patient) -> v601 does NOT apply
+
+     Two paths by symptom visibility:
+
+     A. EXTERNALLY VISIBLE SYMPTOM (belly fat, varicose, back lump,
+        hair loss, tonsil stones): healer's hands ACT DIRECTLY on
+        symptom. Verbs: POINT / TAP / TRACE / MARK / GESTURE-TOWARD
+        / PRESS / PALPATE. Corpus refs: varicose decode (gloved-
+        finger POINT + MOVE-IN + hand-opens), back-lump (marker
+        PRESS + TRACE + tick mark), belly (index TAP + flick).
+
+     B. NOT-EXTERNALLY-VISIBLE SYMPTOM (menopause, hot-flash,
+        anxiety, insomnia, vitality, sleep, hormone): MANUFACTURE
+        a clinical demonstration via wearable evidence INSTRUMENT
+        producing visible measurement reading. Thermometer to
+        forehead / pulse-check 2-fingers on wrist / pulse-ox on
+        finger / smartwatch screen / BP cuff / heart-rate monitor.
+        Reading on screen IS the diagnostic moment.
+
+     3-part active-interaction structure for EXPLAIN scene:
+       [Start beat 0-2s] PRESENT — healer LIFTS instrument /
+         RAISES hand / POSITIONS prop
+       [Mid-clip beat 2-4s] APPLY — healer PRESSES / POINTS /
+         TAPS / TRACES / MARKS / PALPATES symptom-area on patient
+       [End beat 4-6s] REVEAL — healer LIFTS fingers / TURNS to
+         camera / POINTS at reading / GESTURES toward symptom
+
+     Compositional rule:
+     - Healer = CLINICAL-AUTHORITY FIGURE throughout
+     - Patient = EVIDENCE-PROVIDER, not subject of explanation
+     - Patient seated on exam-couch / clinic-chair, symptom-area
+       accessible
+     - Healer STANDING or LEANING beside (NOT seated next to)
+     - Camera chest-up two-shot or three-shot (with bystander)
+
+     ANTI-PATTERN: healer + patient seated side-by-side at desk
+     facing camera holding the product. Reads as "two friends"
+     not "doctor + patient." Drink-handover OK in OUTRO 8-9 (the
+     bottle hero-shot anchors authority) but EXPLAIN scene must
+     have active demonstration.
+
+     LIFT-SPECIFIC: corpus sources almost universally use active
+     healer-on-patient interaction in EXPLAIN. If the decoded
+     source already has it, port the specific action exactly. If
+     the decoded source is talking-head only (rare), UPGRADE the
+     lift by adding the active interaction per v601 — match the
+     niche context (visible vs invisible symptom path).
+
+     We use rules not lists. Apply principle + 3-part structure;
+     derive the specific action from niche context.
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

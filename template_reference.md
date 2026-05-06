@@ -1256,6 +1256,127 @@ psychologically-dead trap.
 
 ---
 
+## Healer-patient active-interaction rule (v601) — symptom videos require active clinical demonstration
+
+**Source: 2026-05-06 owner observation** *"we need to show the healer showing the symptoms and interacting with the patient... check what the other decoded are doing when there's a patient with a symptom (example varicose veins) but more in general we need the healer doing something actively to the patient (of course depending on the video, different actions, that's why we use rules and not a list to pick from). when we have symptoms, usually there's the healer, or we have a different type of video content (transformation, which will come later)."*
+
+The first menopause-saffron Scene 7 had the persona seated beside the patient at a desk handing her a drink. That reads as **"two friends,"** not clinical authority. The corpus EXPLAIN pattern when a symptom is involved is **the healer's HANDS DOING SOMETHING TO THE PATIENT** — and that active demonstration is what transfers clinical authority to the viewer.
+
+### The rule (principle, not list)
+
+When a video uses a patient as evidence of a symptom (clinical-authority video type), **the healer must ACTIVELY interact with the symptom-area on the patient's body via clinical-authority hand-actions**. The healer's hands ON or POINTING-AT the patient's symptom-area is what transfers authority. The specific action varies by niche — that's why this is a rule, not a lookup table.
+
+### Corpus evidence (the pattern is universal)
+
+Every corpus video with a patient + symptom uses active healer-on-patient interaction in the EXPLAIN/diagnostic scene:
+
+| Decoded source | Symptom | Active healer-on-patient interaction |
+|---|---|---|
+| decoded_varicose_vein_transformation | Visible calf veins | Gloved-finger POINT + MOVE-IN closer + hand-opens toward swelling |
+| dr_kim_back_lump_decoded | Back lump | Surgical-marker LOWER + PRESS + TRACE curved line + tick mark + LIFT pen |
+| dr_kim_belly_burn_male_decoded | Distended belly | RIGHT-index TAP belly + LEFT-hand dismissive flick + return-to-hover |
+| decoded_corella_saffron_blood_sugar_v584 | High blood sugar (distended belly) | Podiatrist's RIGHT-index POINT + TAP belly once softly + pull-back-to-hover |
+| decoded_healthylifesage_DX7iVuRMzUM | Liver-cause-belly | Gloved-right-hand GESTURE TOWARD liver-area + 3-person blocking with husband-skeptic |
+| oldearl_tonsil_healer_decoded | Tonsil stones | Mannequin head-up + flosser tip POSITIONED + LOWERED toward stones |
+| dr_kim_hair_regrowth_male_decoded | Bald spot crown | Onion-half SLAM cut-side-down on CROWN + GRIND + juice SPRAY through hair |
+
+Two-shot of healer-and-patient sitting side-by-side without active demonstration **does not appear** in the corpus. It's not a viable trust-transfer composition.
+
+### Decision tree — when v601 applies
+
+```
+Is the video about a SYMPTOM (audience has a problem) or a TRANSFORMATION (audience wants a result)?
+
+  → SYMPTOM-DEMO video (patient appears as evidence)
+    → v601 APPLIES. Healer must actively interact with symptom-area
+       in EXPLAIN scene via clinical-authority hand-action.
+
+  → TRANSFORMATION video (Day-1 / Day-14 same-body before/after)
+    → v601 does NOT apply. The body transformation IS the proof.
+       No patient-other-than-self needed. (Will be its own v-rule
+       when transformation videos get codified.)
+
+  → RECIPE-ONLY video (no patient on-screen)
+    → v601 does NOT apply. The recipe demo carries the authority.
+```
+
+### Visible vs invisible symptoms — two paths
+
+**When the symptom is EXTERNALLY VISIBLE** (belly fat / visceral, varicose veins, back lump, hair loss, tonsil stones, distended skin, scars, body-volume issues), the active interaction is **direct on the symptom**:
+
+- POINT — gloved-finger pointing AT the visible symptom (varicose calf, bald-spot crown)
+- TAP — index-finger TAP on the symptom (distended belly)
+- TRACE — surgical-marker TRACING contour around the symptom (back lump)
+- MARK — pen-mark documentation on the symptom (back lump tick mark)
+- GESTURE-TOWARD — gloved hand opening toward the symptom area (varicose, liver area)
+- PRESS — finger-press for palpation demonstration (lump, swelling)
+- PALPATE — multi-finger pressure for visible response (joint inflammation)
+
+**When the symptom is NOT EXTERNALLY VISIBLE** (menopause/hot-flash, anxiety, insomnia, brain fog, cognitive decline, internal pain, vitality, sleep, hormone), the healer must **manufacture a clinical demonstration via a wearable evidence instrument** that produces a visible measurement reading the camera can read:
+
+- Digital infrared thermometer pressed to forehead → reading visible (showing elevated for hot-flash / metabolic dysregulation)
+- 2 fingertips on patient's wrist for pulse-check → count visibly via lip-movement / wristwatch glance / "1, 2, 3" finger-count
+- Fingertip pulse-oximeter clipped on patient's index finger → reading display visible (oxygen sat / heart rate)
+- Smartwatch or sleep-tracker held up next to patient's wrist → screen visible with sleep-quality / heart-rate-variability / hot-flash-event log
+- Dermatome / heat-strip applied to patient's neck → color-shift visible
+- Blood-pressure cuff on patient's arm → reading visible
+- Heart-rate monitor / pulse strap → reading visible
+
+The instrument creates an external proxy for the internal symptom. The reading on the screen is the diagnostic moment.
+
+### The 3-part active-interaction structure (apply in EXPLAIN scene)
+
+Every corpus EXPLAIN with healer-on-patient follows this structure (single Veo clip, 3 timed beats):
+
+1. **PRESENT** the instrument or hand-position — healer LIFTS the thermometer / RAISES her hand / GLOVES UP / POSITIONS the surgical pen / READIES the prop. This signals "clinical action incoming."
+
+2. **APPLY** to patient's symptom-area — healer PRESSES / POINTS / TAPS / TRACES / MARKS / PALPATES the symptom-area on the patient's body. This is the active moment. The healer's hand makes contact with the patient or the symptom-area.
+
+3. **REVEAL the finding** — healer LIFTS fingers / TURNS to camera with finding / POINTS at the reading / GESTURES toward the patient's symptom for the reveal moment. The diagnostic conclusion lands on the viewer.
+
+The 3 beats map naturally to v586 action_note grammar: [Start beat 0-2s] PRESENT, [Mid-clip beat 2-4s] APPLY, [End beat 4-6s] REVEAL.
+
+### The compositional rule
+
+The healer remains the **clinical-authority figure** throughout; the patient is the **evidence-provider**, not the subject of explanation. The viewer aligns with the healer (who provides the answer) and identifies with the patient (whose symptom is shared).
+
+Body positioning that supports v601:
+- Patient seated on exam-couch / clinic-chair, body turned slightly toward healer, symptom-area exposed or accessible
+- Healer standing or leaning beside the patient (NOT seated next to them), body angled toward the symptom-area
+- Camera at chest-up two-shot (or three-shot if bystander present per F→F-about-M husband-skeptic pattern)
+
+### Anti-pattern (what fails)
+
+Healer and patient sitting side-by-side at a desk, both facing camera at parallel angles, patient holding the product, healer talking with hands gesturing. This reads as **two friends sharing news**, not as **doctor and patient in clinical demonstration**. Trust-transfer fails. The drink-handover composition is OK in OUTRO scenes 8-9 (the product hero-shot anchors authority via the bottle), but in the EXPLAIN scene the trust-transfer must come from active demonstration.
+
+The varicose-vein decode shows the principle viscerally: the gloved finger POINTING AT the calf vein-cluster is what makes the viewer think *"she sees what's wrong with my legs."* A healer holding a drink next to a patient does not produce that thought.
+
+### Worked example — fixing the menopause-saffron Scene 7
+
+**Pre-v601** (Scene 7 first version): persona seated behind clinic desk, patient seated next to her, patient holding the finished saffron drink at chest height looking down at it, persona gesturing with hand. No active interaction. Reads as "two friends."
+
+**Post-v601** (Scene 7 v601-corrected): persona STANDING beside seated patient on exam-chair, persona's RIGHT hand presses a digital infrared thermometer FIRMLY to the patient's forehead (full skin contact 1 inch from temple), reading display visible "99.4°F" glowing red-warning, persona's LEFT hand points at the reading, patient's eyebrow lifts in visible surprise at the reading, persona turns to camera with clinical finding, then GESTURES toward the Korella saffron bottle on the desk as the corrective.
+
+3-part structure:
+- PRESENT (0-2s): persona LIFTS the thermometer from desk, raises it toward patient's forehead
+- APPLY (2-4s): persona PRESSES thermometer against patient's temple, reading climbs and locks at 99.4°F glowing red, patient's eyebrow lifts
+- REVEAL (4-6s): persona LIFTS thermometer away, TURNS to camera with brows-raised clinical finding, LEFT hand GESTURES toward Korella bottle on desk for the corrective conclusion
+
+Dialogue alignment:
+- "Most women blame menopause" — PRESENT moment (instrument-raise sets the diagnostic frame)
+- "The real reason is" — APPLY moment (the reading is the proof)
+- "your hormones can't absorb overnight" — REVEAL moment (the finding + product gesture)
+
+Now the healer is doing something. The patient is the evidence. The Korella bottle is the corrective.
+
+### Why v601 vs leaving "use a patient" implicit
+
+Pre-v601, the rules said "use a patient when the niche is clinical" but didn't specify the body-position or interaction. LLMs interpreted this as "put a patient in the frame" — and produced the side-by-side seated composition that reads as "two friends." v601 makes ACTIVE INTERACTION explicit + provides the 3-part structure (PRESENT / APPLY / REVEAL) so the LLM has a concrete pattern to instantiate.
+
+The user's framing: *"we use rules and not a list to pick from."* v601 is a rule (active healer-on-patient interaction with 3-part structure) that the LLM applies to ANY niche, deriving the specific action (POINT / TAP / TRACE / MARK / thermometer / pulse-check / pulse-ox / etc.) from the niche context. Not a closed lookup table.
+
+---
+
 ## Exaggeration-magnitude discipline (v600) — cartoon-physics or boring
 
 **Source: 2026-05-06 owner observation** *"the pillow would needed to be held higher and sweat running down while is about to smack it or throw it on the desk."* The first soaked-pillow-on-marble hook (v598 Q1-Q8 compliant) was rejected as STILL too weak. Diagnosis: the spectacle was at **realistic** magnitude, not **viral** magnitude. A soaked pillow placed gently on a counter is what a real tired wife does. A drenched pillow held HIGH OVERHEAD with sweat streaming DOWN her forearms while she winds up to SMACK it onto the desk — that's what the corpus does. Real-life = scroll-by. Cartoon-physics = scroll-stop.

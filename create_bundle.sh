@@ -617,6 +617,104 @@ violated rules in past LLM outputs:
      frame of Day-1/Day-14 transformation (the "before" is
      deliberately real-life).
 
+[14] V601 HEALER-PATIENT ACTIVE-INTERACTION RULE — when a patient
+     appears in the video as evidence of a symptom (clinical-
+     authority video type), the healer must ACTIVELY INTERACT with
+     the symptom-area on the patient's body via clinical-authority
+     hand-actions. The healer's HANDS DOING SOMETHING TO THE
+     PATIENT is what transfers clinical authority to the viewer.
+
+     Two-shot of healer-and-patient sitting side-by-side without
+     active demonstration reads as "two friends" not "doctor and
+     patient." Trust-transfer fails. v601 fixes this.
+
+     Decision tree — when v601 applies:
+       SYMPTOM-DEMO video (patient as evidence) -> v601 APPLIES
+         (healer must actively interact with symptom-area)
+       TRANSFORMATION video (Day-1/Day-14 same-body) -> v601 does
+         NOT apply (the body transformation IS the proof)
+       RECIPE-ONLY video (no patient on-screen) -> v601 does NOT
+         apply (the recipe demo carries authority)
+
+     Visible vs invisible symptoms — two paths:
+
+     A. EXTERNALLY VISIBLE SYMPTOM (belly fat, varicose veins,
+        back lump, hair loss, tonsil stones, scars, body-volume):
+        Healer's hands act DIRECTLY on the symptom:
+        - POINT — gloved-finger pointing AT visible symptom
+        - TAP — index-finger TAP on the symptom
+        - TRACE — surgical-marker TRACING contour around symptom
+        - MARK — pen-mark documentation on symptom (tick mark)
+        - GESTURE-TOWARD — gloved hand opening toward symptom area
+        - PRESS — finger-press for palpation demonstration
+        - PALPATE — multi-finger pressure for visible response
+
+     B. NOT-EXTERNALLY-VISIBLE SYMPTOM (menopause/hot-flash,
+        anxiety, insomnia, brain fog, vitality, sleep, hormone):
+        Healer must MANUFACTURE a clinical demonstration via a
+        wearable evidence INSTRUMENT producing a visible measurement
+        reading the camera can read:
+        - Digital infrared thermometer pressed to forehead -> reading
+          visible (elevated for hot-flash)
+        - 2 fingertips on patient's wrist for pulse-check -> count
+          visibly via lip-movement / wristwatch glance
+        - Fingertip pulse-oximeter on index finger -> reading display
+          visible (oxygen sat, heart rate)
+        - Smartwatch / sleep-tracker held next to patient's wrist ->
+          screen visible with sleep-quality / HRV / hot-flash log
+        - Dermatome / heat-strip on neck -> color-shift visible
+        - BP cuff on arm -> reading visible
+        The instrument creates an external proxy for the internal
+        symptom. The reading on the screen is the diagnostic moment.
+
+     The 3-part active-interaction structure for the EXPLAIN scene:
+
+     1. PRESENT (0-2s) — healer LIFTS the instrument / RAISES her
+        hand / GLOVES UP / POSITIONS the prop. Signals "clinical
+        action incoming."
+     2. APPLY (2-4s) — healer PRESSES / POINTS / TAPS / TRACES /
+        MARKS / PALPATES the symptom-area on the patient's body.
+        Active moment. Hand makes contact with patient or
+        symptom-area.
+     3. REVEAL (4-6s) — healer LIFTS fingers / TURNS to camera with
+        finding / POINTS at the reading / GESTURES toward the
+        patient's symptom for the reveal moment. Diagnostic
+        conclusion lands on viewer.
+
+     Maps to v586 action_note 3 timed beats: [Start beat 0-2s]
+     PRESENT, [Mid-clip beat 2-4s] APPLY, [End beat 4-6s] REVEAL.
+
+     Compositional rule:
+     - Healer remains the CLINICAL-AUTHORITY FIGURE throughout
+     - Patient is the EVIDENCE-PROVIDER, not the subject of
+       explanation
+     - Viewer aligns with healer + identifies with patient
+     - Patient seated on exam-couch / clinic-chair, body turned
+       slightly toward healer, symptom-area exposed or accessible
+     - Healer STANDING or LEANING beside the patient (NOT seated
+       next to them), body angled toward the symptom-area
+     - Camera at chest-up two-shot (or three-shot if bystander
+       present per F-to-F-about-M husband-skeptic pattern)
+
+     ANTI-PATTERN: healer and patient seated side-by-side at a
+     desk both facing camera at parallel angles patient holding
+     the product healer talking. This reads as "two friends" not
+     "doctor and patient." The drink-handover composition is OK
+     in OUTRO scenes 8-9 (product hero-shot anchors authority via
+     the bottle) but in the EXPLAIN scene the trust-transfer must
+     come from active demonstration.
+
+     The varicose-vein decode shows the principle viscerally: the
+     gloved finger POINTING AT the calf vein-cluster is what makes
+     the viewer think "she sees what's wrong with my legs." A
+     healer holding a drink next to a patient does not produce
+     that thought.
+
+     We use rules not lists. Apply the active-interaction principle
+     + 3-part structure to whatever niche you're in; derive the
+     specific action (POINT / TAP / TRACE / MARK / thermometer /
+     pulse-check / pulse-ox / etc.) from the niche context.
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.
