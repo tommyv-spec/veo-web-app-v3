@@ -454,18 +454,41 @@ V610 GENDER-NEUTRAL MAIN-CHARACTER REFERENCES (decode-side):
     - Singular-they: "their hand"
     - Pronoun-free: "right hand presses..." (drop the subject)
 
-  NOT AFFECTED:
+  NOT AFFECTED — DESCRIBE GENDER REQUIRED:
     - Dialogue lines — verbatim transcription, gendered language fine.
-    - Other characters in the source (patient, customer, bystander) —
-      describe their gender in prose (their identity IS the prose).
+    - Other characters in the source (patient, customer, bystander,
+      husband/wife, child, friend) — DESCRIBE their gender, age band,
+      body build, clothing, role in the scene. Their identity IS the
+      prose; without the description Banana 2 has no anchor for them.
+
+  REQUIRED examples:
+    "a late-40s woman in a soft beige knit cardigan"
+    "an adult male patient seen from behind in a teal hospital gown"
+    "her husband, a middle-aged man asleep in the bed behind"
+    "a young female customer at the counter to the right"
+
+  FORBIDDEN (when the character is non-persona):
+    "the patient" without gender / age / clothing
+    "another person beside them"
+    "they sit on the chair" (when the source video clearly shows a
+     specific gender — the decoder MUST commit to what the camera shows)
+
+  Why the asymmetry: the main character will be SWAPPED on lift (a
+  Black-female-practitioner upload one day, a Korean-male-practitioner
+  another). Other characters are NOT bound to uploads — the prose is
+  the only source of truth for their appearance. Vague non-persona
+  descriptions produce Banana 2 hallucinations.
 
 PRE-OUTPUT VALIDATION (v610):
 
   YES Zero instances of \bshe\b, \bhe\b, \bher\b, \bhis\b, \bhim\b,
       \bhers\b in image-prompt bodies and action_notes referring to
-      the main character?
+      the MAIN character?
   YES Persona references use role descriptor / singular-they /
       pronoun-free constructions?
+  YES Every NON-persona character (patient, bystander, customer)
+      has gender + age band + clothing/role described where they
+      first appear?
 
 If any wrong, FIX before emitting.
 

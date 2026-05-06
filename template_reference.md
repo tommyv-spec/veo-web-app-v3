@@ -2156,6 +2156,25 @@ When you have a multi-character scene, the persona's pronouns drop; the other ch
 
 The mental test: does this pronoun reference an upload-backed ingredient (`type: character`)? If yes → drop the gender. If no → keep.
 
+### Non-persona characters: gender description is REQUIRED
+
+The flip side of the v610 rule. For every non-persona character in the scene (patient, bystander, customer, husband, wife, child, friend), the prose MUST describe their gender, age band, body build, and clothing/role. Their identity is NOT bound to an upload — the prose is the only source of truth.
+
+✅ REQUIRED examples:
+- *"a late-40s woman in a soft beige knit cardigan with dark eye-circles"*
+- *"an adult male patient seen from behind in a teal hospital gown"*
+- *"her husband, a middle-aged man asleep in the bed behind"*
+- *"a young female customer at the counter to the right"*
+
+❌ FORBIDDEN (when the character is non-persona):
+- *"the patient"* — without gender / age / clothing → Banana 2 hallucinates a generic body
+- *"another person beside them"* — vague gender → drift across variants
+- *"they sit on the chair"* — when the source video clearly shows a specific gender, the decoder MUST commit to what the camera shows
+
+This applies especially to **decode-side** authoring: when decoding a competitor video, the decoder is OBSERVING what the camera shows. If the patient is a woman, write "a woman." Don't apply persona-style gender-neutrality to non-persona characters — they're a different type of entity.
+
+**The asymmetry rationale**: the main character will be SWAPPED on lift (a Black-female-practitioner upload one day, a Korean-male-practitioner upload another). Other characters are NOT bound to uploads — the prose is the only source of truth for their appearance. Vague non-persona descriptions produce Banana 2 hallucinations across variants. Generic "they" for a clearly-gendered patient = different patients across variant 1 / 2 / 3 / 4 within the SAME image generation.
+
 ### Why singular-they is acceptable but role-descriptor is preferred
 
 - **"the main character" / "the healer" / "the practitioner"** — best. Reads naturally, names the role, stays generic. Use this on first reference per scene and after long subjects.
