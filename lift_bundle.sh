@@ -448,9 +448,11 @@ violated rules in past LLM outputs:
          is visible OR named in voiceover, ALL THREE present:
            1. product_image: <ingredient-name> field set
            2. Product binding line at top of fenced Image prompt body
-              ("Use the uploaded product reference image for <name>
-              — match its label, packaging, [wordmark], color, and
-              proportions exactly.")
+              — v609 CONCISE FORM:
+              "Use the uploaded product reference image for <name>."
+              NOT the verbose pre-v609 form ending in
+              "— match its label, packaging, color, and proportions
+              exactly." (redundant — Banana 2 auto-matches).
            3. Product visual described in prompt body composition
               ("label-forward to camera", "wordmark squared to lens",
               "stands upright on counter")
@@ -810,6 +812,38 @@ violated rules in past LLM outputs:
      (since v606 is new). The lift should ADD compositing directives
      based on the decoded source's setting + camera + lighting,
      even if the decoded artifact doesn't explicitly call them out.
+
+[20] V609 CONCISE REFERENCE-BINDING FORM — drop the redundant
+     "match X, Y, Z exactly" clause. Banana 2 already auto-matches
+     uploaded references' face / hair / clothing / label / packaging
+     / color / proportions. The verbose clause adds nothing — it
+     dilutes attention from per-image directives.
+
+     FORBIDDEN (verbose, pre-v609):
+       "Use the uploaded character reference image for the main
+       character — match her facial features, identity, hair, and
+       clothing exactly."
+       "Use the uploaded product reference image for the Korella
+       saffron bottle — match its label, packaging, color, and
+       proportions exactly."
+
+     REQUIRED (concise, v609):
+       "Use the uploaded character reference image for the main
+       character."
+       "Use the uploaded product reference image for the Korella
+       saffron bottle."
+
+     The CHAIN line (v589.1 semantic form) is unchanged.
+
+     LIFT-SPECIFIC: when porting a decoded source whose original
+     prompts use the verbose pre-v609 form, REWRITE the binding
+     lines into the concise form for the lifted videos/*.md.
+
+     PRE-OUTPUT VALIDATION:
+       YES PERSONA line ends with the ingredient name + period
+           (no "— match her ... exactly" trailer)?
+       YES PRODUCT line (when present) ends with the ingredient
+           name + period (no "— match its ... exactly" trailer)?
 
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves

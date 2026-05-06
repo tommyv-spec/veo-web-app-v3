@@ -406,6 +406,40 @@ PRE-OUTPUT VALIDATION (v606):
 
 If any wrong, FIX before emitting.
 
+V609 CONCISE REFERENCE-BINDING FORM (decode-side enforcement):
+
+  When you write the binding lines at the top of each Image prompt
+  body in the decoded artifact, USE THE CONCISE FORM. Banana 2 auto-
+  matches uploaded references' face / hair / clothing / label /
+  packaging / color / proportions; the verbose "— match X, Y, Z
+  exactly" clause is redundant noise that dilutes attention from
+  per-image directives.
+
+  FORBIDDEN (verbose, pre-v609):
+    "Use the uploaded character reference image for the main
+    character — match her facial features, identity, hair, and
+    clothing exactly."
+    "Use the uploaded product reference image for the Rosabella
+    Beetroot bottle — match its label, packaging, color, and
+    proportions exactly."
+
+  REQUIRED (concise, v609):
+    "Use the uploaded character reference image for the main
+    character."
+    "Use the uploaded product reference image for the Rosabella
+    Beetroot bottle."
+
+  The CHAIN line (v589.1 semantic form) is unchanged.
+
+PRE-OUTPUT VALIDATION (v609):
+
+  YES PERSONA binding line ends with the ingredient name + period
+      (no "— match her ... exactly" trailer)?
+  YES PRODUCT binding line (when present) ends with the ingredient
+      name + period (no "— match its ... exactly" trailer)?
+
+If any wrong, FIX before emitting.
+
 Output the decoded markdown per code/template_new_format.md skeleton +
 strict v593 parser format. Include ## Sources (manifest / transcript /
 shots / motion / source MP4 paths) and ## Used in (placeholder).

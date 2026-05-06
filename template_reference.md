@@ -31,8 +31,8 @@ All optional except where noted. Placed at the top of the markdown.
 - **product_image:** the Corella saffron bottle      # OPTIONAL — only on images that bind a product upload (v581)
 - **Image prompt:**
 `` `
-Use the uploaded character reference image for the main character — match her facial features, identity, hair, and clothing exactly.
-Use the uploaded product reference image for the Corella saffron bottle — match its label, packaging, color, and proportions exactly.
+Use the uploaded character reference image for the main character.
+Use the uploaded product reference image for the Corella saffron bottle.
 Use Image N as the visual reference for the previous scene — preserve the [setting], lighting, [anchor props], and continuity from there.
 
 A middle-aged man in a barn, soft morning light, holding a herb bundle...
@@ -1256,6 +1256,66 @@ psychologically-dead trap.
 
 ---
 
+## Concise reference-binding form (v609) — drop the redundant "match X, Y, Z exactly" clause
+
+**Source: 2026-05-06 owner observation** *"`Use the uploaded product reference image for the Korella saffron` — for the images prompt when the product is needed this above is the right format, no this one: `Use the uploaded product reference image for the Rosabella Beetroot bottle — match its label, packaging, color, and proportions exactly.` nano bana match automatically the info, packaging, color and proportions."*
+
+Banana 2 already matches the uploaded reference image's visual attributes (face / hair / clothing for characters; label / packaging / color / proportions for products) **automatically** when the prompt body says `"Use the uploaded [character|product] reference image for [name]"`. The verbose `"— match its label, packaging, color, and proportions exactly"` clause adds nothing. It's redundant noise that dilutes the model's attention from the actual per-image directives (composition, action, lighting, prop position, occlusion).
+
+This rule supersedes the verbose binding form that appeared in v581's first draft and was carried forward through v589.1 / v603 examples by inertia. v609 is purely a prompt-quality cleanup: shorter prompts, sharper attention, no behavioral change in the platform parser (the slot-substitution at `_resolve_flow_prompt_bindings()` still triggers on the literal phrase `"the uploaded character reference image"` / `"the uploaded product reference image"`, regardless of what follows the ingredient name).
+
+### Forms
+
+❌ **FORBIDDEN (verbose, pre-v609):**
+```
+Use the uploaded character reference image for the main character — match her facial features, identity, hair, and clothing exactly.
+Use the uploaded product reference image for the Korella saffron bottle — match its label, packaging, color, and proportions exactly.
+```
+
+✅ **REQUIRED (concise, v609):**
+```
+Use the uploaded character reference image for the main character.
+Use the uploaded product reference image for the Korella saffron bottle.
+```
+
+### Why concise wins
+
+1. **Banana 2 already does the matching automatically.** Per Google's official Gemini Nano Banana 2 docs, when a generation cites an uploaded reference image as the visual source for a named ingredient, the model preserves the upload's facial geometry, identity markers, hair, clothing, label artwork, color palette, and proportions by default. There is no toggle to "match harder" — the verbose clause does not increase fidelity.
+2. **Attention dilution.** Each image prompt has a finite budget of attention the model spreads across directives. Spending a sentence on "match X, Y, Z exactly" — for a behavior the model performs by default — is attention NOT spent on the per-image directive that actually matters (e.g. v600 cartoon-physics, v601 active interaction, v605 prop position, v606 compositing). On dense prompts, the verbose clause measurably erodes those harder-to-enforce rules.
+3. **Cleaner human authoring.** The author is forced to think about what's UNIQUE to this image — the action, framing, prop position, lighting — instead of restating boilerplate that's identical across every image of the video.
+4. **Cleaner decoded artifacts.** Decode-side, the rule applies symmetrically: when a decoder writes a freshly-decoded `raw/decoded_*.md`, the binding lines should be concise. v609 keeps decode artifacts compact and high-signal.
+
+### What v609 does NOT change
+
+- The 3 binding line types (PERSONA / PRODUCT / CHAIN) and their order — same as v581.
+- The platform's slot-substitution behavior at `_resolve_flow_prompt_bindings()` — triggers on the same trigger phrases.
+- Whether persona / product / chain bindings appear — same rules as v581 + v607 (persona always; product when `product_image:` is set; chain when `reference_image:` is set).
+- The CHAIN line wording from v589.1 (semantic "the prior-scene reference image" form) — kept verbatim.
+
+### Pre-output validation gate
+
+Before emitting any Image prompt body, scan the binding lines:
+
+- ✅ PERSONA line ends with the ingredient name + period? (no "— match her ... exactly" trailer)
+- ✅ PRODUCT line (when present) ends with the ingredient name + period? (no "— match its ... exactly" trailer)
+- ✅ CHAIN line uses the v589.1 semantic form? (no behavior change here from v589.1)
+
+If any ❌ found, REWRITE before emitting.
+
+### Worked example — Image 2 from the menopause-saffron HOOK
+
+**Pre-v609 (verbose, redundant)**:
+> Use the uploaded character reference image for the main character — match her facial features, identity, hair, and skin tone exactly.
+> Use the uploaded product reference image for the Korella saffron bottle — match its label, packaging, navy-and-cream wordmark, color, and proportions exactly.
+
+**Post-v609 (concise)**:
+> Use the uploaded character reference image for the main character.
+> Use the uploaded product reference image for the Korella saffron bottle.
+
+Both forms produce identical persona-fidelity and product-fidelity from Banana 2. The concise form leaves more attention budget for the v600/v601/v605/v606 directives that actually drive the per-image distinctiveness.
+
+---
+
 ## Worker file_chooser bypass (v608) — skip 8s of guaranteed-fail file picker calls
 
 **Source: 2026-05-06 owner observation** *"and now that we are changing the worker let's imprve also these warning or mechanism... it works as it is, just avoid these steps that are nto working."* The worker logs from a normal run showed:
@@ -1625,8 +1685,8 @@ The user framing: AI models are probability engines that fill data gaps with sta
 - **visual_delta:** Rosabella Beetroot bottle enters frame on viewer-left side, held at chest height by blue-gloved left hand, label-forward; viewer-right blue-gloved hand gestures next to the bottle for emphasis.
 - **Image prompt:**
 
-Use the uploaded character reference image for the main character — match his facial features, identity, hair, and clothing exactly.
-Use the uploaded product reference image for the Rosabella Beetroot bottle — match its label, packaging, color, and proportions exactly.
+Use the uploaded character reference image for the main character.
+Use the uploaded product reference image for the Rosabella Beetroot bottle.
 Use the prior-scene reference image to preserve the walnut desk, warm wood-paneled office, framed diplomas, lighting, framing, and continuity from the previous scene.
 
 Use image_4 as the exact base frame. Keep everything from image_4 identical. Only change: the Rosabella Beetroot bottle is held up at chest height in his blue-gloved viewer-left hand, presented directly toward the lens, label-forward to camera, navy-and-cream wordmark squared to lens, fingers wrapping the cap top. His viewer-right blue-gloved hand gestures next to the bottle for emphasis. He is seated at his walnut desk with eyes locked to camera, expression warm and authoritative. Shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
@@ -1792,8 +1852,8 @@ Post-v604 (frame-locked reconstruction with all four universal rules):
 - **visual_delta:** Rosabella Beetroot bottle enters the frame on viewer-right side, held at chest height by the clinician's gloved hand, label facing camera. Other gloved hand gestures near the bottle on viewer-left.
 - **Image prompt:**
 ```
-> Use the uploaded character reference image for the main character — match his facial features, identity, hair, and skin tone exactly.
-> Use the uploaded product reference image for the Rosabella Beetroot bottle — match its label, packaging, color, and proportions exactly.
+> Use the uploaded character reference image for the main character.
+> Use the uploaded product reference image for the Rosabella Beetroot bottle.
 > Use the prior-scene reference image to preserve the wood-paneled office, framed diplomas, desk, lighting, framing, and continuity from the previous scene.
 >
 > Use image_4 as the exact base frame. Keep the same silver-haired male clinician, same white button-down shirt, same blue nitrile gloves, same seated chest-up framing, same wooden desk edge at the bottom, same warm wood-paneled office, same framed diplomas on the wall, same phone-camera look, same lighting, same camera distance. Only change: the Rosabella Beetroot bottle is now held at chest height in his gloved hand on the viewer-right side of the frame, label facing camera, navy-and-cream wordmark squared to lens. His other gloved hand on the viewer-left side gestures near the bottle. iPhone HDR colors, deep focus.
@@ -3345,13 +3405,13 @@ The first lines of every `Image prompt:` fenced block — before the visual desc
 
 1. **Persona binding (always present, every image):**
    ```
-   Use the uploaded character reference image for the main character — match her facial features, identity, hair, and clothing exactly.
+   Use the uploaded character reference image for the main character.
    ```
    Replace "the main character" with whatever persona alias your Ingredients table uses. Replace "her" with the appropriate pronoun for the persona.
 
 2. **Product binding (only when the image binds the product upload — i.e. when the `product_image:` field is set on this image):**
    ```
-   Use the uploaded product reference image for the [product ingredient name] — match its label, packaging, color, and proportions exactly.
+   Use the uploaded product reference image for the [product ingredient name].
    ```
    Replace `[product ingredient name]` with the verbatim ingredient name from the table — e.g. `the Corella saffron bottle`, `the Salvora bottle`, `the Karela saffron bottle`.
 

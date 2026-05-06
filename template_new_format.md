@@ -34,12 +34,14 @@
     each `Image prompt:` fenced block MUST begin with explicit binding lines that
     declare which uploads are used for what. Three line types in this order:
     (1) PERSONA — always present, every image:
-        "Use the uploaded character reference image for the main character —
-        match her facial features, identity, hair, and clothing exactly."
+        "Use the uploaded character reference image for the main character."
     (2) PRODUCT — only when the image binds the product upload (i.e. when the
         new `product_image:` top-level field is set on this image):
-        "Use the uploaded product reference image for [product ingredient name] —
-        match its label, packaging, color, and proportions exactly."
+        "Use the uploaded product reference image for [product ingredient name]."
+    (v609 — concise form. Banana 2 auto-matches face / clothing / label /
+        packaging / color / proportions when an upload is referenced;
+        the verbose "— match X, Y, Z exactly" clause is redundant noise
+        that dilutes attention from per-image directives.)
     (3) CHAIN — only when `reference_image:` is not `none` (v589.1
         SEMANTIC FORM — preferred; the v581 "Use Image N..." form is
         kept as a legacy backward-compat alias):
