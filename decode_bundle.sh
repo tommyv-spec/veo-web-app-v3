@@ -254,6 +254,98 @@ PRE-OUTPUT VALIDATION:
   YES negative-constraint DO-NOT block at end of every image prompt?
   NO bare "left" / "right" — replaced with "viewer-left" / "viewer-right"?
 
+V605 — DECODER ANTI-TEMPLATE-BIAS + PROP-TRACKING MATRIX (NEW 2026-05-06)
+=========================================================================
+
+Source: 2026-05-06 Gemini decode session diagnosed template-bias
+failure. Decoder placed Rosabella bottle ON DESK because nuri-saffron
+corpus pattern says so — actual source video shows bottle HELD IN
+HAND. AI models are probability engines that fill VLM-data gaps with
+statistical priors. v605 forces explicit citation OR explicit gap-flag.
+
+[a] ANTI-TEMPLATE-BIAS — FLAG GAPS, never fill with corpus prior
+
+When Stage 4d VLM data has a gap about a prop's position or handling:
+  1. FLAG the gap explicitly with HTML comment in the decoded artifact:
+     <!-- VLM-GAP: bottle position not visible in dense frames at
+          {timestamps}; mid_state describes only persona torso. -->
+  2. Provide best-effort description sourced from visible frames with
+     confidence annotation in prop_position field
+  3. NEVER silently substitute a corpus template default ("bottle on
+     desk because that's how nuri-saffron does it"). Corpus priors are
+     EVIDENCE OF WHAT WORKS, not EVIDENCE OF WHAT THIS VIDEO SHOWS.
+
+The position of the product MUST be explicitly sourced from Stage 4d
+VLM JSON (start_state / mid_state / end_state). If the VLM data does
+not explicitly state where the bottle is, do not invent a composition.
+
+[b] PROP-TRACKING MATRIX — explicit prop_position field per product image
+
+Every Image with product_image: field set MUST also have prop_position:
+field declared, answering:
+  1. Is product INTERACTING WITH ENVIRONMENT (on desk / counter / shelf)?
+  2. Or INTERACTING WITH PERSONA (held in viewer-left hand / viewer-
+     right hand / both hands)?
+  3. If held: at what height (chest / chin / waist / above-head) and
+     orientation (label-forward / label-back / vertical / horizontal)?
+  4. The matrix answer must come from VLM frame data (cite the
+     timestamp / state field), NOT corpus prior.
+
+Format:
+  ### Image 5
+  - **frame_anchor:** 106.0s
+  - **reference_image:** image_4
+  - **product_image:** the Rosabella Beetroot bottle
+  - **prop_position:** held in viewer-left hand at chest height,
+      label-forward to camera, wordmark squared to lens, fingers
+      wrapping cap top (sourced from VLM mid_state at 106.0s)
+  - **visual_delta:** Rosabella Beetroot bottle enters frame on
+      viewer-left side, held at chest height by blue-gloved left
+      hand, label-forward; viewer-right hand gestures next to bottle.
+  - **Image prompt:** [body prose]
+
+[c] PROP-AS-SUBJECT priority for product-reveal scenes
+
+When an image has product_image: set, body prose MUST allocate:
+  - 60% on prop handling (how product is held, manipulated, positioned,
+    presented; hands relative to product, label orientation, height,
+    lighting on bottle)
+  - 40% on persona pose (eye-contact, body language, expression)
+
+When the prop is in frame, the product IS the subject of the photograph.
+Persona is secondary anchor.
+
+PROP-LED format — name the prop in the FIRST SENTENCE of body prose:
+  WRONG (persona-led): "The main character is seated at his desk, eyes
+    locked to camera. The Rosabella bottle is on the desk in front of him."
+  RIGHT (prop-led): "The Rosabella beetroot bottle is held up at chest
+    height in his blue-gloved viewer-left hand, presented directly toward
+    the lens, label-forward, wordmark clearly readable. He is seated at
+    his desk with eyes locked to camera."
+
+Banana 2 prioritizes the subject named first. Lead with the prop.
+
+[d] STRICT VLM ACTION_ARC SOURCING (downstream pipeline rule)
+
+For every prop_position claim, cite which VLM frame timestamp/state
+field was the source. For Claude in-session decodes (v595 default),
+walk dense frames per shot via Read-tool PNG support and document the
+frame audit trail explicitly. The frame audit trail is the anti-bias
+receipt.
+
+PRE-OUTPUT VALIDATION (v605):
+
+  YES every Image with product_image: has prop_position: field?
+  YES every prop_position: cites a VLM timestamp / state field?
+  YES VLM-data gaps flagged with <!-- VLM-GAP: ... --> comments?
+  YES body prose for product-reveal images is PROP-LED (prop named
+      in first sentence)?
+  YES ~60% description allocation to prop handling, ~40% to persona?
+  NO references to corpus templates ("nuri-saffron pattern",
+     "standard product-anchor desk shot") as source of prop placement?
+
+If any wrong, FIX before emitting.
+
 Output the decoded markdown per code/template_new_format.md skeleton +
 strict v593 parser format. Include ## Sources (manifest / transcript /
 shots / motion / source MP4 paths) and ## Used in (placeholder).

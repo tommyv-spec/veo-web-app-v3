@@ -997,6 +997,57 @@ violated rules in past LLM outputs:
        NO bare "left" / "right" — replaced with "viewer-left" /
          "viewer-right"?
 
+[18] V605 PROP-TRACKING + PROP-AS-SUBJECT (product-reveal scenes):
+
+     For every Image with product_image: field set, the body prose
+     MUST be PROP-LED, not persona-led. The prop is the subject of
+     the photograph; persona is secondary anchor.
+
+     Required: prop named in the FIRST SENTENCE of body prose.
+
+     PROP-LED format example:
+       "The Korella saffron bottle is held up at chest height in
+        her viewer-right hand, presented directly toward the lens,
+        label-forward, navy-and-cream wordmark squared to lens.
+        Her viewer-left hand gestures next to the bottle for
+        emphasis. She is seated at her clinic desk with eyes locked
+        to camera, expression warm and authoritative."
+
+     PERSONA-LED format (FORBIDDEN for product-reveal scenes):
+       "The main character is seated at her clinic desk, eyes
+        locked to camera, expression warm. The Korella saffron
+        bottle is on the desk in front of her, label visible."
+
+     Description allocation:
+       - 60% on prop handling (how held / manipulated / positioned /
+         presented; hands relative to product, label orientation,
+         height, lighting on bottle)
+       - 40% on persona pose (eye-contact, body language, expression)
+
+     For NON-product-reveal scenes (HOOK with no bottle, recipe-
+     prep before product cascade, EXPLAIN with no bottle), standard
+     v603 prose discipline applies — no specific allocation.
+
+     ANTI-TEMPLATE-BIAS for create-from-zero:
+     When authoring a new video from a corpus-validated cell, do
+     NOT default to "bottle on desk because nuri-saffron does it"
+     unless that's the actual composition you're scripting. State
+     prop_position explicitly:
+
+       - **prop_position:** held in viewer-left hand at chest
+           height, label-forward (or "stands upright on desk
+           viewer-right side, label-forward to camera")
+
+     Either way, decide the position consciously and write it as
+     a prop_position: field in the image metadata block.
+
+     PRE-OUTPUT VALIDATION:
+       YES product-reveal images have prop_position: field?
+       YES body prose is PROP-LED (prop in first sentence)?
+       YES ~60% allocation to prop handling, ~40% to persona?
+       NO corpus-template defaults invoked as source of prop
+          placement?
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

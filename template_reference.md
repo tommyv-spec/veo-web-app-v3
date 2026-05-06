@@ -1256,6 +1256,138 @@ psychologically-dead trap.
 
 ---
 
+## Decoder anti-template-bias + prop-tracking matrix + prop-as-subject priority (v605)
+
+**Source: 2026-05-06 Gemini decode session** (`raw/decode_prompt_accuracy_gemini_2026-05-06.md`) — same `decoded_healthylifesage_DX5jJgeMj30.md` decode that surfaced v604, but a different failure mode: Image 5 placed the Rosabella bottle ON THE DESK (corpus default) when the actual source video shows Dr. Sage HOLDING the bottle up to camera in his blue-gloved left hand.
+
+Gemini's self-diagnosis:
+
+> *"I encountered a gap in my sparse frame data regarding exactly where the bottle was. Instead of flagging the gap, I fell back on a standard Kaveno corpus template (specifically, the nuri-saffron pattern), where the product sits anchored on the desk while the persona holds the capsule."*
+
+> *"AI models are probability engines. When we lack explicit, high-fidelity data, we default to the most common pattern. Forcing me to cite the exact frame data — and explicitly forbidding me from using fill-in-the-blank templates for props — is the mechanical fix."*
+
+This is **template bias** — the decoder fills VLM-data gaps with the most-statistically-likely corpus pattern. v605 codifies the fixes:
+
+### [a] Anti-template-bias — FLAG GAPS, never fill with corpus prior
+
+When the Stage 4d VLM data has a gap about a prop's position or handling, the decoder MUST:
+
+1. **Flag the gap explicitly** in the decoded artifact:
+   ```
+   <!-- VLM-GAP: bottle position not visible in dense frames at 105.2s/106.0s/106.8s; mid_state describes only persona torso. -->
+   ```
+2. **Provide best-effort description sourced from visible frames**, with a confidence annotation:
+   ```
+   - **prop_position:** UNCLEAR — frames show persona torso facing camera; bottle inferred to be at chest height held by blue-gloved hand based on dialogue cue "the only one I trust" (low confidence; flag for operator review)
+   ```
+3. **Never silently substitute** a corpus template default ("bottle on desk because that's how nuri-saffron does it"). Corpus priors are EVIDENCE OF WHAT WORKS, not EVIDENCE OF WHAT THIS VIDEO ACTUALLY SHOWS.
+
+The rule:
+
+> The position of the product must be explicitly sourced from the Stage 4d VLM JSON (`start_state`, `mid_state`, `end_state`). If the VLM data does not explicitly state the bottle is "on the desk," do not place it there. If the data is missing, flag the missing data rather than inventing a composition.
+
+This is the **mechanical anti-bias gate** — the decoder must cite the source frame for every prop-position claim, or flag the absence.
+
+### [b] Prop-tracking matrix — explicit prop-position field per product image
+
+Every Image with a `product_image:` field set MUST also have a `prop_position:` field that explicitly answers:
+
+1. Is the product **interacting with environment** (on desk / counter / shelf / floor) — and if so, where?
+2. Is the product **interacting with persona** (held in viewer-left hand / viewer-right hand / both hands) — and if so, at what height (chest / chin / waist / above-head) and orientation (label-forward / label-back / vertical / horizontal)?
+3. The matrix answer must come from VLM frame data (cite the timestamp / state field), not from corpus prior.
+
+Format:
+```
+### Image 5
+- **frame_anchor:** 106.0s
+- **reference_image:** image_4
+- **product_image:** the Rosabella Beetroot bottle
+- **prop_position:** held in viewer-left hand at chest height, label-forward to camera, wordmark squared to lens (sourced from VLM mid_state at 106.0s + end_state at 107.5s)
+- **visual_delta:** Rosabella Beetroot bottle enters frame on viewer-left side, held at chest height by blue-gloved left hand, label-forward; viewer-right hand gestures next to the bottle.
+- **Image prompt:**
+```
+
+The `prop_position:` field is the explicit prop-tracking declaration. It forces the decoder to answer "where is the prop and how is it being handled?" before authoring the body prose. This breaks the template-bias trap (decoder can no longer skip the question).
+
+### [c] Prop-as-Subject priority for product-reveal scenes
+
+When an image has `product_image:` set (i.e. it's a product-reveal frame), the body prose MUST allocate description weight as:
+
+- **60%** on prop handling — how the product is held, manipulated, positioned, presented (hands relative to product, label orientation, height, lighting on the bottle)
+- **40%** on persona pose — eye-contact, body language, facial expression
+
+For non-product-reveal scenes (HOOK, recipe-prep, EXPLAIN with no bottle), the standard v603 prose discipline applies (4-7 sentences, no specific allocation).
+
+The principle: when the product is in the frame, the product IS the subject of the photograph. The persona is the secondary anchor. Pre-v605, decoders led with persona-pose ("Dr. Sage is seated at his desk, eyes locked to camera...") and demoted the product to a background anchor ("The bottle is on the desk in front of him"). v605 inverts this — when the prop is in frame, lead with the prop.
+
+**Pre-v605 (persona-led)**:
+> Dr. Sage is seated at his walnut desk, eyes locked to the camera lens, expression warm and authoritative. The Rosabella bottle is on the desk in front of him, label visible.
+
+**Post-v605 (prop-led)**:
+> The Rosabella beetroot bottle is held up at chest height in his blue-gloved viewer-left hand, presented directly toward the lens, label-forward, wordmark clearly readable. His viewer-right hand gestures next to the bottle for emphasis. He is seated at his walnut desk with eyes locked to camera, expression warm and authoritative.
+
+The prop-led version names the prop in the first 6 words. Banana 2 prioritizes the subject named first.
+
+### [d] Strict adherence to VLM action_arc JSON for prop placement
+
+This is a downstream pipeline rule that applies when the operator runs the v589 Stage 4d VLM pass: the parser must provide the FULL `action_arc` JSON (start_state / mid_state / end_state) to the LLM context, not just a midpoint summary. The LLM must base its image grammar strictly on the dense-frame VLM descriptions, not on dialogue extrapolation.
+
+For Claude in-session decodes (the v595 default provider), this means the operator/Claude should walk dense frames per shot via the Read tool's PNG support and explicitly cite which frame timestamps were viewed for each `prop_position` claim. The frame audit trail is the anti-bias receipt.
+
+### Pre-output validation gate
+
+Before emitting any decoded artifact with product_image fields, scan for:
+
+- ✅ Every Image with `product_image:` has `prop_position:` field declared
+- ✅ Every `prop_position:` cites a VLM frame timestamp or state field as the source
+- ✅ For images where VLM data has a gap, an explicit `<!-- VLM-GAP: ... -->` annotation is present (not silently substituted with corpus prior)
+- ✅ Body prose for product-reveal images is prop-led (prop named in first sentence)
+- ✅ Body prose allocates ~60% to prop handling, ~40% to persona pose for product-reveal images
+- ❌ NO references to corpus templates ("nuri-saffron pattern", "standard product-anchor desk shot") as source of prop placement
+
+If ❌ found, FIX before emitting.
+
+### Why v605 vs leaving it implicit
+
+Pre-v605, v599 enforced product-presence (bottle visible + 3-part binding) but not prop-position-grounding. The decoder could honor v599 ("bottle is in the frame, label-forward") while silently inventing the position from corpus prior ("bottle on desk because that's typical"). v605 closes this gap with `prop_position:` field + VLM-citation requirement + prop-as-subject priority.
+
+The user framing: AI models are probability engines that fill data gaps with statistical priors. v605 forces decoders to either CITE source-frame evidence or FLAG GAPS — never substitute a template default.
+
+### Worked example — Image 5 healthylifesage Rosabella
+
+**Pre-v605 (template bias — bottle on desk because nuri-saffron pattern says so)**:
+```
+### Image 5
+- **reference_image:** image_4
+- **product_image:** the Rosabella Beetroot bottle
+- **Image prompt:**
+
+[persona pose led] Dr. Sage is seated at his walnut desk, eyes locked to camera, expression warm and authoritative. [bottle as background anchor] The Rosabella bottle stands upright on the desk in front of him, label-forward to camera. [generic style] iPhone HDR colors, deep focus.
+```
+
+**Post-v605 (VLM-grounded, prop-led, viewer-relative)**:
+```
+### Image 5
+- **frame_anchor:** 106.0s
+- **reference_image:** image_4
+- **product_image:** the Rosabella Beetroot bottle
+- **prop_position:** held in viewer-left hand at chest height, label-forward to camera, wordmark squared to lens, fingers wrapping the cap top (sourced from VLM mid_state at 106.0s — full skin contact between blue nitrile glove and bottle base visible in dense frame)
+- **visual_delta:** Rosabella Beetroot bottle enters frame on viewer-left side, held at chest height by blue-gloved left hand, label-forward; viewer-right blue-gloved hand gestures next to the bottle for emphasis.
+- **Image prompt:**
+
+Use the uploaded character reference image for the main character — match his facial features, identity, hair, and clothing exactly.
+Use the uploaded product reference image for the Rosabella Beetroot bottle — match its label, packaging, color, and proportions exactly.
+Use the prior-scene reference image to preserve the walnut desk, warm wood-paneled office, framed diplomas, lighting, framing, and continuity from the previous scene.
+
+Use image_4 as the exact base frame. Keep everything from image_4 identical. Only change: the Rosabella Beetroot bottle is held up at chest height in his blue-gloved viewer-left hand, presented directly toward the lens, label-forward to camera, navy-and-cream wordmark squared to lens, fingers wrapping the cap top. His viewer-right blue-gloved hand gestures next to the bottle for emphasis. He is seated at his walnut desk with eyes locked to camera, expression warm and authoritative. Shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
+
+No lab coat. No stethoscope. No hospital room. No extra products. No recipe ingredients. No background change. Bottle is real-supplement-sized, not oversized, not floating, not redesigned. Bottle is NOT on the desk in this image — it is held in the persona's viewer-left hand.
+```
+
+Note the explicit **"Bottle is NOT on the desk in this image"** in the negative-constraint block — this directly counters the template-bias default that would otherwise place it there.
+
+---
+
 ## Decode-prompt accuracy + universal prompt-discipline (v604) — frame-locked, viewer-relative, negative-constrained
 
 **Source: 2026-05-06 ChatGPT decode session** (`raw/decode_prompt_accuracy_chat_2026-05-06.md`) — operator audited a freshly-decoded `decoded_healthylifesage_DX5jJgeMj30.md` and found two failure modes:

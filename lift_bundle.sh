@@ -736,6 +736,40 @@ violated rules in past LLM outputs:
      and visual_delta values exactly. The decoded artifact is the
      source-of-truth for what the source video actually shows.
 
+[18] V605 PROP-TRACKING + PROP-AS-SUBJECT (product-reveal scenes):
+
+     For every Image with product_image: field set, body prose MUST
+     be PROP-LED. Prop is the subject of the photograph; persona is
+     secondary anchor.
+
+     Required: prop_position: field declared on every product-reveal
+     image, answering:
+       - Interacting with environment (on desk / counter)?
+       - Or interacting with persona (held in viewer-left hand /
+         viewer-right hand / both hands)?
+       - If held: at what height (chest / chin / waist) and
+         orientation (label-forward / label-back)?
+
+     Body prose must be PROP-LED — name the prop in the FIRST
+     SENTENCE. 60% description on prop handling, 40% on persona pose.
+
+     LIFT-SPECIFIC: when porting a decoded source, preserve the
+     decoded artifact's prop_position EXACTLY. If the decoded source
+     shows bottle-held-in-hand, keep it held. If decoded shows
+     bottle-on-desk, keep it on desk. The decoded artifact is the
+     source-of-truth.
+
+     If decoded source has VLM-GAP comments flagging unclear prop
+     position, the lift should propose a position based on best
+     evidence + flag it as operator-review. Do NOT silently fill
+     with corpus prior.
+
+     PRE-OUTPUT VALIDATION:
+       YES every product-reveal image has prop_position: field?
+       YES body prose is PROP-LED (prop named in first sentence)?
+       YES ~60% allocation to prop handling?
+       YES decoded source's prop_position preserved exactly?
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.
