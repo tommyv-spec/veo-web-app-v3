@@ -630,6 +630,46 @@ violated rules in past LLM outputs:
      We use rules not lists. Apply principle + 3-part structure;
      derive the specific action from niche context.
 
+[15] V602 PERSONA BODY-PROSE GENERIC-REFERENCE RULE — persona's
+     identity comes from uploaded reference image (v581), NOT from
+     body prose. Reference the persona using the generic alias from
+     the v581 binding line ("the main character" default, or whatever
+     alias the Ingredients table declares verbatim).
+
+     FORBIDDEN in body prose (upload-authoritative):
+     - Persona-archetype labels: "Black-female-practitioner persona",
+       "Asian-elder-herbalist", "modern-clinic-doctor", "Caribbean
+       herbalist"
+     - Ethnic / racial descriptors applied to bound persona
+     - Age ranges applied to bound persona
+     - Hair color / texture / facial feature redescription
+     - Permanent-wardrobe identity items
+
+     ALLOWED in body prose (scene-specific):
+     - Pose, scene-clothing, facial expression, body language,
+       active gesture, eye-contact, hair styling FOR THIS SCENE,
+       sweat / skin condition FOR THIS SCENE
+
+     Applies to BOTH Image prompt body AND scene action_note body.
+     Per Google's Nano Banana 2 docs, multi-image prompt format
+     uses semantic descriptors ("the model from input 2") not
+     identity redescription. Redescribing identity creates drift
+     across scenes.
+
+     MULTI-CHARACTER scenes:
+     - BOUND persona (with upload) -> "the main character" / alias
+     - UNBOUND bystander / patient -> describe with prose
+
+     SAME RULE for products: v581 product binding makes upload
+     authoritative for label / packaging / wordmark; body prose
+     handles position only.
+
+     LIFT-SPECIFIC: when porting a decoded source, the persona may
+     be retargeted (corpus persona "master-salvora" -> Korella "the
+     main character"). The decoded source's body prose may reference
+     original persona by archetype label — when lifting, replace
+     with generic alias + scene-specific description.
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

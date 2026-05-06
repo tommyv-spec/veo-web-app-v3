@@ -775,6 +775,79 @@ violated rules in past LLM outputs:
      specific action (POINT / TAP / TRACE / MARK / thermometer /
      pulse-check / pulse-ox / etc.) from the niche context.
 
+[15] V602 PERSONA BODY-PROSE GENERIC-REFERENCE RULE — the persona's
+     identity comes from the uploaded reference image (v581 binding),
+     NOT from body prose. Body prose must reference the persona
+     using the generic alias from the v581 binding line ("the main
+     character" by default, or whatever alias the Ingredients table
+     declares verbatim).
+
+     FORBIDDEN in body prose (these are upload-authoritative):
+     - Persona-archetype labels: "Black-female-practitioner persona",
+       "Asian-elder-herbalist", "modern-clinic-doctor", "Caribbean
+       herbalist", "folk-wisdom elder"
+     - Ethnic / racial descriptors: "Black", "Asian", "Caribbean",
+       "Mediterranean", "Hispanic", "European"
+     - Age descriptors: "late-30s", "early-40s", "60s", "mid-50s"
+     - Hair color / style identity: "dark curly hair", "long grey
+       dreadlocks", "salt-and-pepper beard"
+     - Facial feature identity: "almond eyes", "Fu Manchu mustache",
+       "olive skin"
+     - Body type identity: "tall", "slim", "broad-shouldered"
+     - Permanent-wardrobe identity: items the persona wears in EVERY
+       scene per the upload (always-on stethoscope, always-on
+       Rasta tam, etc.)
+
+     ALLOWED in body prose (scene-specific, not identity):
+     - Pose: "STANDING beside", "seated on exam-chair", "torso
+       angled toward"
+     - Clothing IF non-default for THIS scene
+     - Facial expression: "brows raised", "mouth open mid-snarl"
+     - Body language: "body weight forward", "shoulders torqued"
+     - Active gesture: "RIGHT hand presses thermometer to patient's
+       temple", "LEFT hand POINTS at reading"
+     - Eye-contact / gaze direction: "eyes locked to camera"
+     - Hair STYLING for this scene (not color/texture identity):
+       "hair pulled loosely back"
+     - Sweat / skin condition for this scene: "faint sweat-sheen
+       at temples"
+
+     RULE applies to BOTH the fenced Image prompt body AND the
+     scene action_note body. Both are sent to Banana 2 / Veo
+     respectively.
+
+     PER GOOGLE'S OFFICIAL GEMINI NANO BANANA 2 DOCS — the
+     recommended multi-image prompt format uses semantic descriptors
+     like "the dress from input 1" / "the model from input 2" —
+     NOT redescription of identity. Identity = upload + binding line;
+     prose = scene composition + physical action.
+
+     When body prose redescribes identity, Banana 2 receives two
+     competing identity signals (upload + prose) and produces
+     identity-drift across the image set. Subtle features waver
+     between scenes. Visual consistency collapses.
+
+     MULTI-CHARACTER SCENES — bystander / patient exception:
+     - PERSONA WITH UPLOAD (v581 binding) -> use "the main character"
+       / declared alias generically; identity from upload
+     - BYSTANDER / PATIENT WITHOUT UPLOAD -> DESCRIBE with prose
+       since no upload exists, prose IS the identity source.
+       "A late-40s female patient in a soft beige knit cardigan" is
+       FINE because the patient has no upload binding.
+
+     SAME RULE FOR PRODUCTS — v581 product binding makes the product
+     upload authoritative for label, packaging, wordmark, color,
+     proportions. Body prose for product:
+       ALLOWED: position ("stands UPRIGHT on counter", "label-forward
+         to camera", "wordmark squared to lens")
+       FORBIDDEN: re-describing label color, wordmark fonts, bottle
+         shape, proportions — upload-authoritative
+
+     PRE-OUTPUT VALIDATION: scan all Image prompt bodies and scene
+     action_notes for persona-archetype labels / ethnic descriptors
+     / age ranges / hair-color-texture redescription. If found ->
+     REPLACE with generic alias from v581 binding line.
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

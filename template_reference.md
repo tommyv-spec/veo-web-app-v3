@@ -1256,6 +1256,94 @@ psychologically-dead trap.
 
 ---
 
+## Persona body-prose generic-reference rule (v602) — identity comes from upload, not from prose
+
+**Source: 2026-05-06 owner observation** *"when we create a new video, we keep the main subject generic, because it's retrieved by the image in the prompt when creating it with nano banana."* The menopause-saffron video had body prose describing the persona as "The Black-female-practitioner persona" with archetype-label + ethnic descriptor baked in. That fights with the v581 upload-binding because Banana 2 reads body prose as INSTRUCTIONS — and a redundant identity description in prose creates identity-drift between scenes (the upload says X, the prose says Y, the model splits the difference and produces Z that matches neither).
+
+The corpus pattern (verified in `videos/nuri-saffron-ed-anatomy-clinic.md` — the canonical reference): body prose refers to the persona as **"the main character"** generically. No archetype labels, no ethnic descriptors, no age ranges, no facial feature descriptors. Identity is upload-authoritative.
+
+### The rule
+
+When the persona is bound to an upload via v581 (persona binding line at top of Image prompt body declaring "Use the uploaded character reference image for the main character — match her facial features, identity, hair, and skin tone exactly"), the BODY PROSE — both inside the fenced Image prompt block AND in scene action_notes — must reference the persona using the **GENERIC ALIAS declared in the v581 binding line** (default: "the main character"; or whatever alias the Ingredients table uses verbatim).
+
+Body prose must NOT redescribe identity-defining attributes that the upload carries.
+
+### Forbidden in body prose (these are upload-authoritative)
+
+- **Ethnic / racial descriptors** — "Black", "Asian", "Caribbean", "Mediterranean", "Hispanic", "European"
+- **Age descriptors** — "late-30s", "early-40s", "60s", "mid-50s"
+- **Persona-archetype labels** — "Black-female-practitioner", "Asian-elder-herbalist", "modern-clinic-doctor", "Caribbean herbalist", "folk-wisdom elder"
+- **Hair color / style identity** — "dark curly hair", "long grey dreadlocks", "salt-and-pepper beard", "olive natural curls"
+- **Facial feature identity** — "almond eyes", "Fu Manchu mustache", "olive skin", "high cheekbones"
+- **Body type identity** — "tall", "slim", "broad-shouldered", "petite"
+- **Permanent-wardrobe identity** — items the persona wears in EVERY scene per the upload (e.g. nuri's stethoscope is part of her persona-identity if always-on)
+
+These are all in the UPLOAD. Banana 2 will read them from the reference image, not from prose. Redescribing creates conflict.
+
+### Allowed in body prose (these are scene-specific)
+
+- **Pose** — "STANDING beside", "seated on exam-chair", "torso angled toward", "body weight forward"
+- **Clothing IF non-default for the persona** — "in a crisp white doctor's coat over a navy blouse" (only because the persona doesn't ALWAYS wear this)
+- **Facial expression** — "brows raised in clinical-finding emphasis", "mouth open mid-snarl"
+- **Body language** — "body weight forward", "shoulders torqued", "hands clenched white-knuckled"
+- **Active gesture** — "RIGHT hand presses thermometer to patient's temple", "LEFT hand POINTS at reading"
+- **Eye-contact / gaze direction** — "eyes locked to camera", "eye-track to thermometer"
+- **Hair STYLING for this scene** — "hair pulled loosely back" (styling, not identity color/texture)
+- **Sweat / skin condition for this scene** — "faint sweat-sheen at temples" (scene-state, not identity)
+
+Identity = upload-authoritative; pose / expression / gesture / scene-clothing / scene-styling = prose-driven.
+
+### Multi-character scenes (the bystander / patient exception)
+
+When a scene has additional characters beyond the persona:
+
+- **Bound persona** (with upload via v581) → use "the main character" / declared alias generically
+- **Unbound bystander or patient** (no upload) → DESCRIBE with prose since no upload exists, prose is the only identity source. "A late-40s female patient in a soft beige knit cardigan" is FINE if the patient has no upload binding.
+
+For the patient, body prose carries identity. For the persona, the upload carries identity. v602 only applies to UPLOAD-BOUND characters.
+
+### Same rule applies to products
+
+The v581 product binding line ("Use the uploaded product reference image for the [product name verbatim] — match its label, packaging, [wordmark], color, and proportions exactly") makes the product upload authoritative for label, packaging, wordmark, color, proportions.
+
+Body prose for the product:
+- ✅ ALLOWED: position ("stands UPRIGHT on the exam-counter", "held at chest-height label-forward to camera", "wordmark squared to lens")
+- ❌ FORBIDDEN: re-describing the label color, the wordmark fonts, the bottle shape, the proportions — these are upload-authoritative
+
+### Why this rule (the Banana 2 mechanism)
+
+Per Google's official Gemini Nano Banana 2 prompting docs (ai.google.dev/gemini-api/docs/image-generation), the recommended multi-image prompt format uses semantic descriptors like *"the dress from input 1"*, *"the model from input 2"* — NOT redescription of identity in body prose. Banana 2 expects body prose to describe SCENE COMPOSITION and PHYSICAL ACTION, not character identity. The character identity comes from the upload + the explicit binding line.
+
+When body prose redescribes identity:
+- The model receives two competing identity signals (upload + prose)
+- Different prose in different scenes produces identity-drift across the image set
+- Subtle features (skin tone, eye shape, hair texture) waver between scenes
+- Visual consistency across the video collapses
+
+### Pre-output validation gate
+
+Before emitting any image prompt or scene action_note, scan the body prose for:
+- Persona-archetype labels (e.g. "Black-female-practitioner persona", "the Caribbean herbalist", "the Asian elder")
+- Ethnic / racial descriptors applied to the bound persona
+- Age range descriptors applied to the bound persona
+- Hair color / texture / facial feature redescription
+
+If found → REPLACE with the generic alias from the v581 binding line ("the main character" or declared alias).
+
+### Worked example — fixing the menopause-saffron video
+
+Pre-v602 body prose: *"The Black-female-practitioner persona is in a crisp white doctor's coat over a navy blouse, stethoscope draped around her neck, hair styled professional, STANDING beside the seated patient..."*
+
+Post-v602 body prose: *"The main character is in a crisp white doctor's coat over a navy blouse, stethoscope draped around her neck, hair styled professional, STANDING beside the seated patient..."*
+
+The archetype label "Black-female-practitioner persona" is removed; everything else stays (clothing for THIS scene + pose + body language). Identity comes from the upload.
+
+### Migration
+
+Pre-v602 markdowns that reference the persona by archetype label in body prose remain functional but produce identity-drift across scenes. Migration is mechanical (find/replace persona-archetype labels with the generic alias).
+
+---
+
 ## Healer-patient active-interaction rule (v601) — symptom videos require active clinical demonstration
 
 **Source: 2026-05-06 owner observation** *"we need to show the healer showing the symptoms and interacting with the patient... check what the other decoded are doing when there's a patient with a symptom (example varicose veins) but more in general we need the healer doing something actively to the patient (of course depending on the video, different actions, that's why we use rules and not a list to pick from). when we have symptoms, usually there's the healer, or we have a different type of video content (transformation, which will come later)."*
