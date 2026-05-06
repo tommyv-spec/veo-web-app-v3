@@ -5207,8 +5207,10 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
         page.on('response', _on_image_response)
         listener_state['attached'] = True
         print(f"[API] ✓ v624 network-listener attached (batchGenerateImages → fife URL capture)", flush=True)
-        if cross_batch:
-            print(f"[API] ✓ v625 cross-batch parallelism ENABLED — jobs from different batches will run concurrently", flush=True)
+        # v625.1: cross-batch parallelism is auto-enabled whenever the
+        # listener attaches — no CLI flag required. Platform-launched
+        # workers (downloaded from the UI) get it for free.
+        print(f"[API] ✓ v625 cross-batch parallelism ENABLED (auto, listener-backed) — jobs from different batches run concurrently", flush=True)
     except Exception as e:
         print(f"[API] ⚠ Couldn't attach network listener: {e} — v624 attribution disabled, falling back to DOM-only", flush=True)
         if cross_batch:
@@ -5638,20 +5640,27 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
         # v451: batch-boundary check. If anything is currently in-flight
         # on a different batch, we CAN'T switch projects — the in-flight
         # tiles would be stranded in the old project. Give the claim back
-        # and wait for the current batch to finish. Next poll will pick
-        # it up again when we're idle.
+        # and wait for the current batch to finish.
         #
-        # v625: when --cross-batch is enabled AND the v624 network listener
-        # attached, this lock is no longer necessary. Attribution is by
-        # response-prompt match, not DOM tile-id, so navigating to a
-        # different project doesn't strand the in-flight POSTs (Flow's
-        # API is project-scoped via URL — already-fired POSTs complete
-        # regardless of which project the UI shows). The fife URLs come
-        # back through the listener, get matched to the right job, and
-        # download via cookies + Referer (no project context needed).
+        # v625: when the v624 network listener is attached, this lock is
+        # no longer necessary. Attribution is by response-prompt match,
+        # not DOM tile-id, so navigating to a different project doesn't
+        # strand the in-flight POSTs (Flow's API is project-scoped via
+        # URL — already-fired POSTs complete regardless of which project
+        # the UI shows). The fife URLs come back through the listener,
+        # get matched to the right job, and download via cookies + Referer
+        # (no project context needed).
+        #
+        # v625.1: cross-batch is now AUTO-ENABLED when the listener is
+        # attached, since the platform UI launches the worker without
+        # flags. The --cross-batch flag is kept as an explicit toggle
+        # in case the operator wants to FORCE-enable it even if the
+        # listener attach reported a fault, but the default-on path
+        # is the listener-attached one.
         active_in_flight = [j for j in in_flight.values()
                             if j.status in ("submitted", "downloading")]
-        if active_in_flight and not (cross_batch and listener_state['attached']):
+        cross_batch_active = listener_state['attached'] or cross_batch
+        if active_in_flight and not cross_batch_active:
             current_batch = project_state.get("current_job_key")
             if current_batch and current_batch != new_job_key:
                 print(f"[API:submit] ⏸ Node {node_id} is batch '{new_job_key}' but {len(active_in_flight)} in-flight on '{current_batch}' — releasing claim, will re-queue", flush=True)
@@ -6735,8 +6744,12 @@ Examples:
             api_key = args.api_key or os.environ.get("LOCAL_WORKER_API_KEY", "local-worker-secret-key-12345")
             if args.parallel >= 2:
                 cross_batch_mode = bool(getattr(args, 'cross_batch', False))
+                # Cross-batch auto-enables once inside api_pull_mode_parallel
+                # whenever the v624 listener attaches, even without the flag.
+                # Print the explicit-flag state here for debug clarity; the
+                # actual runtime decision is logged once the listener attaches.
                 print(f"[IMAGE] Parallel mode — {args.parallel} concurrent slots"
-                      f"{' (cross-batch ENABLED)' if cross_batch_mode else ''}", flush=True)
+                      f"{' (cross-batch flag set)' if cross_batch_mode else ' (cross-batch auto-on if listener attaches)'}", flush=True)
                 api_pull_mode_parallel(page, args.api_url, api_key,
                                        worker_id=args.worker_id,
                                        parallel_slots=args.parallel,
