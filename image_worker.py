@@ -5028,7 +5028,7 @@ class InFlightJob:
 
 
 def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
-                           parallel_slots=2):
+                           parallel_slots=2, cross_batch=False):
     """Parallel version of api_pull_mode using a single-threaded main loop
     for all Playwright calls plus a background HTTP thread for downloads
     and uploads.
@@ -5160,6 +5160,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     # new submission. The user observed this as "wrong images downloaded
     # — pre-existing project tiles, not the new generation."
     captured_batches = []  # list of {ts, prompt_in_resp, fife_urls, media_ids, consumed}
+    listener_state = {'attached': False}
 
     def _on_image_response(response):
         try:
@@ -5204,9 +5205,15 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
 
     try:
         page.on('response', _on_image_response)
+        listener_state['attached'] = True
         print(f"[API] ✓ v624 network-listener attached (batchGenerateImages → fife URL capture)", flush=True)
+        if cross_batch:
+            print(f"[API] ✓ v625 cross-batch parallelism ENABLED — jobs from different batches will run concurrently", flush=True)
     except Exception as e:
         print(f"[API] ⚠ Couldn't attach network listener: {e} — v624 attribution disabled, falling back to DOM-only", flush=True)
+        if cross_batch:
+            print(f"[API] ⚠ Disabling --cross-batch because the network listener didn't attach (need it for cross-batch attribution)", flush=True)
+            cross_batch = False
 
     def _consume_batch_for_prompt(prompt):
         """Find the OLDEST unconsumed batch whose response prompt matches
@@ -5633,9 +5640,18 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
         # tiles would be stranded in the old project. Give the claim back
         # and wait for the current batch to finish. Next poll will pick
         # it up again when we're idle.
+        #
+        # v625: when --cross-batch is enabled AND the v624 network listener
+        # attached, this lock is no longer necessary. Attribution is by
+        # response-prompt match, not DOM tile-id, so navigating to a
+        # different project doesn't strand the in-flight POSTs (Flow's
+        # API is project-scoped via URL — already-fired POSTs complete
+        # regardless of which project the UI shows). The fife URLs come
+        # back through the listener, get matched to the right job, and
+        # download via cookies + Referer (no project context needed).
         active_in_flight = [j for j in in_flight.values()
                             if j.status in ("submitted", "downloading")]
-        if active_in_flight:
+        if active_in_flight and not (cross_batch and listener_state['attached']):
             current_batch = project_state.get("current_job_key")
             if current_batch and current_batch != new_job_key:
                 print(f"[API:submit] ⏸ Node {node_id} is batch '{new_job_key}' but {len(active_in_flight)} in-flight on '{current_batch}' — releasing claim, will re-queue", flush=True)
@@ -5775,9 +5791,24 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             # tiles may not appear in the DOM for a few hundred ms after
             # the click. If capture fails entirely, the InFlightJob keeps
             # tile_ids=[] and falls back to the legacy prompt_key path.
+            # v625: when the v624 network listener is attached, attribution
+            # is handled by prompt-match against batchGenerateImages JSON
+            # responses — tile_ids are no longer needed for the primary
+            # path. The only reason to keep capturing them is as a safety
+            # net for jobs whose response the listener somehow misses.
+            # Drop the budget from 4s × 8 attempts to 1s × 2 attempts: a
+            # near-instant best-effort snapshot. If tile_ids appear quickly,
+            # great — they're a backup. If they don't, the listener has us
+            # covered.
+            #
+            # When the listener is NOT attached (rare: page.on() failed),
+            # fall back to the original 8-attempt loop because tile_id
+            # is the only attribution mechanism left.
             tile_ids = []
+            tid_attempts = 2 if listener_state['attached'] else 8
+            tid_sleep = 0.5
             try:
-                for _attempt in range(8):  # ~4s total
+                for _attempt in range(tid_attempts):
                     tile_ids = page.evaluate("""() => {
                         const c = document.querySelector('[data-index="0"]');
                         if (!c) return [];
@@ -5790,13 +5821,15 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     }""")
                     if tile_ids and len(tile_ids) >= variants:
                         break
-                    time.sleep(0.5)
+                    time.sleep(tid_sleep)
                 if tile_ids:
-                    print(f"[API:submit] ✓ Node {node_id}: captured {len(tile_ids)} tile_id(s) at data-index=0", flush=True)
-                else:
+                    print(f"[API:submit] ✓ Node {node_id}: captured {len(tile_ids)} tile_id(s) at data-index=0 (backup; primary is v624 listener)" if listener_state['attached']
+                          else f"[API:submit] ✓ Node {node_id}: captured {len(tile_ids)} tile_id(s) at data-index=0", flush=True)
+                elif not listener_state['attached']:
                     print(f"[API:submit] ⚠ Node {node_id}: no tile_ids captured — attribution will use prompt_key fallback", flush=True)
             except Exception as e:
-                print(f"[API:submit] ⚠ Node {node_id}: tile_id capture failed ({e}) — attribution will use prompt_key fallback", flush=True)
+                print(f"[API:submit] ⚠ Node {node_id}: tile_id capture failed ({e}) — listener will handle attribution" if listener_state['attached']
+                      else f"[API:submit] ⚠ Node {node_id}: tile_id capture failed ({e}) — attribution will use prompt_key fallback", flush=True)
 
             in_flight[node_id] = InFlightJob(
                 node_id=node_id,
@@ -6603,9 +6636,17 @@ Examples:
         help='Bearer token for --api-url (defaults to LOCAL_WORKER_API_KEY env var)')
     parser.add_argument('--worker-id', type=str,
         help='Identifier sent with API polls (defaults to image-worker-<hostname>)')
-    parser.add_argument('--parallel', type=int, default=2,
-        help='Max concurrent in-flight generations in API mode (default: 2; '
-             'set to 1 for legacy sequential mode)')
+    parser.add_argument('--parallel', type=int, default=3,
+        help='Max concurrent in-flight generations in API mode (default: 3; '
+             'set to 1 for legacy sequential mode). HAR evidence shows Flow '
+             'accepts up to ~5 simultaneous batchGenerateImages POSTs.')
+    parser.add_argument('--cross-batch', action='store_true',
+        help='Allow simultaneous in-flight jobs across DIFFERENT batches '
+             '(different Flow projects). Requires v624 network-listener '
+             'attribution to be active so jobs are matched by prompt rather '
+             'than DOM tile-id. When off (default), cross-batch jobs are '
+             'released and re-queued — preserves the legacy single-project '
+             '"safe" mode.')
     
     # Single job args
     parser.add_argument('--input', type=str, action='append', default=[],
@@ -6693,10 +6734,13 @@ Examples:
         elif args.api_url:
             api_key = args.api_key or os.environ.get("LOCAL_WORKER_API_KEY", "local-worker-secret-key-12345")
             if args.parallel >= 2:
-                print(f"[IMAGE] Parallel mode — {args.parallel} concurrent slots", flush=True)
+                cross_batch_mode = bool(getattr(args, 'cross_batch', False))
+                print(f"[IMAGE] Parallel mode — {args.parallel} concurrent slots"
+                      f"{' (cross-batch ENABLED)' if cross_batch_mode else ''}", flush=True)
                 api_pull_mode_parallel(page, args.api_url, api_key,
                                        worker_id=args.worker_id,
-                                       parallel_slots=args.parallel)
+                                       parallel_slots=args.parallel,
+                                       cross_batch=cross_batch_mode)
             else:
                 print(f"[IMAGE] Sequential mode (legacy — --parallel 1)", flush=True)
                 api_pull_mode(page, args.api_url, api_key, worker_id=args.worker_id)
