@@ -1256,6 +1256,80 @@ psychologically-dead trap.
 
 ---
 
+## Decoder narrative lens + caption ban (v621)
+
+**Source: 2026-05-06 owner directive** *"for the decode always make the decoder look at the video from the perspective of: the healer is showing a cure, or showing augmented symptoms or grabbing attention... and specify to not include captions in the decoded images or the created images."*
+
+Two unrelated additions bundled into one v-rule because both surfaced from the same example (`raw_decoded_01_amish_house_back_acne_mask.md` had no narrative-lens framing AND included `"yellow burned-in captions at the lower third"` in its image description, which would generate baked-in captions if used as a Banana 2 prompt).
+
+### v621a — Decoder narrative lens (3 categories)
+
+When decoding a competitor video, every image description must be framed through ONE of three narrative lenses. The lens shapes how the decoder DESCRIBES the image — which details to emphasize, which to skip.
+
+| Lens | When | Decoder emphasis |
+|---|---|---|
+| **HEALER-SHOWING-CURE** | recipe steps, product reveals, mechanism explanations, anatomy-pointer scenes, ingredient-add scenes, the cascade moment | The PRESENTATIONAL gesture — what the persona is showing the viewer. Hand position relative to prop. Camera angle that proves the cure. Product placement, label visibility, recipe-step state. Mid-action POSE that demonstrates the remedy. |
+| **AUGMENTED-SYMPTOMS** | HOOK shock images, problem-callouts, exposed before-state (back acne, varicose veins, distended belly, soaked pillow), thermometer readings, glucose-meter readings, anatomical magnification | The AMPLIFIED visible problem — what the camera is forcing the viewer to see. Crop tight on the symptom. Background props that contextualize (medical room, kitchen, garden). NO solution visible yet — the "before" must read as raw and unresolved. |
+| **GRABBING-ATTENTION** | scroll-stopper cold opens, weird actions without specific cure context, persona introduction shots, transition/movement frames, decorative cuts | The PURE SPECTACLE — motion, magnitude, novelty (per v600 cartoon-physics). What makes the thumb stop. Decoder names what's startling without binding it to a remedy or symptom yet. |
+
+**Per-image declaration**. Every `### Image N` block in a decoded `raw/decoded_*.md` artifact must include:
+
+```
+- **narrative_lens:** HEALER-SHOWING-CURE
+```
+
+(or `AUGMENTED-SYMPTOMS` or `GRABBING-ATTENTION`). The field goes alongside `reference_image:` and `product_image:` in the metadata block.
+
+This is a **decoder-side mindset enforcement**, not a parser-required field. The platform parser ignores it. But the decoder has to CLASSIFY before describing — that's the whole point.
+
+**Why this matters**. Pre-v621 decoders described images as flat scene-inventories ("the persona stands at the left, the patient sits on the right, the kitchen is in the background"). Post-v621 the decoder asks "what is this shot DOING for the viewer?" first, then describes. The result is sharper image prompts that downstream lifts can adapt without losing the rhetorical purpose of the shot.
+
+### v621b — Caption ban (decode + create + lift)
+
+Image prompts must NEVER describe caption text that appears in the source video.
+
+**FORBIDDEN phrases in any image prompt body**:
+- *"yellow burned-in captions at the lower third"*
+- *"white subtitle bar across the bottom"*
+- *"large overlaid text reading 'X'"*
+- *"caption: 'Try this remedy!'"*
+- ANY descriptor of post-production text overlays
+
+**Why**: captions get added at the platform level (post-generation, via the video editor's caption layer). Including caption descriptors in the prompt makes Banana 2 BAKE the caption into the pixels — which then can't be edited, translated, or A/B-tested. Pixel-baked captions are also low-fidelity (usually wrong font, wrong wrap, wrong timing) and look amateur.
+
+**Scope**:
+- **Decoder** (`raw/decoded_*.md`): when the source video shows captions, IGNORE them in image descriptions. Capture caption TEXT in the dialogue lines (it usually mirrors the spoken voiceover anyway), but never in the visual description of any image.
+- **Create / Lift** (`videos/*.md`): same — never describe captions in image prompts. Captions are produced separately by the video editor from the dialogue lines.
+
+**Concrete example** (from the amish-house-back-acne decode):
+
+```
+Pre-v621b (FORBIDDEN):
+"Style: natural iPhone HDR, bright homemade remedy look, clinical-shock hook,
+yellow burned-in captions at the lower third."
+
+Post-v621b (REQUIRED):
+"Style: natural iPhone HDR, bright homemade remedy look, clinical-shock hook."
+```
+
+Same description; caption descriptor removed.
+
+### Pre-output validation gate
+
+Before emitting any decoded artifact OR any videos/*.md draft:
+
+- ✅ **Every image declares `narrative_lens:`** (decode-side; create/lift can declare it too as documentation but not required by parser).
+- ✅ **Zero caption descriptors** anywhere in image prompt bodies. Mechanical check: grep for `caption`, `captions`, `subtitle`, `subtitles`, `overlay text`, `lower third` — should return zero hits.
+
+### What v621 does NOT change
+
+- v614 corpus-pattern + adaptation_map — preserved (decoders still classify into Pattern A/B/C/D/E AND into one of the 3 narrative lenses; both classifications are useful).
+- v615 em-dash ban in dialogue — preserved.
+- v619 auto-infer normalization — preserved (operates on `### Image` blocks regardless of narrative_lens).
+- Caption HANDLING in the platform — captions are still added post-generation by the editor; v621b just bans them from the image-generation prompt.
+
+---
+
 ## Auto-infer + normalize image bindings (v619) — feature delivery, not error rejection
 
 **Source: 2026-05-06 owner directive** *"let's make also the rules stronger and more precise for which images we need in the markdown... from the latest video menopause saffron i can see image2 didn't include the product image, even if it mentions it... and make sure the whole process of image creation actually respects this logic. i don't want errors handling i want the feature to be delivered properly, so focus on doing that perfectly."*

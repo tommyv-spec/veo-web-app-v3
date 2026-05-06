@@ -971,6 +971,25 @@ violated rules in past LLM outputs:
        YES corpus_compliance_audit declared?
        YES No corporate voice / no melodrama / canonical CTA?
 
+[25] V621b ABSOLUTE BAN — NO CAPTION DESCRIPTORS IN IMAGE PROMPTS.
+
+     Image prompts MUST NEVER describe caption text. Captions are
+     added at the platform level post-generation (via the editor's
+     caption layer). Including caption descriptors makes Banana 2
+     BAKE them into pixels — uneditable, wrong font, low fidelity.
+
+     FORBIDDEN: "yellow burned-in captions at the lower third",
+     "white subtitle bar across the bottom", "large overlaid text",
+     "caption: 'X'", any post-production text-overlay descriptors.
+
+     LIFT-SPECIFIC: when the decoded source has caption descriptors
+     (pre-v621 decodes), STRIP them on lift. Caption TEXT belongs in
+     dialogue lines, not in image-prompt visual description.
+
+     PRE-OUTPUT VALIDATION:
+       YES Zero caption / subtitle / "lower third" / "overlay text"
+           descriptors in any image prompt body?
+
 [24] V615 ABSOLUTE BAN — NO EM-DASH (—) IN DIALOGUE LINES.
 
      Owner directive (mandatory): scene "- **line:**" entries MUST

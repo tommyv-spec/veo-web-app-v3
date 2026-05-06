@@ -492,6 +492,80 @@ V613 PRODUCT-MENTION-BINDING PARITY (decode-side):
 
   If any wrong, FIX before emitting.
 
+V621 DECODER NARRATIVE LENS + CAPTION BAN:
+
+  v621a — Every "### Image N" block in the decoded artifact MUST declare
+  ONE of three narrative lenses, classifying what the shot is DOING for
+  the viewer:
+
+    HEALER-SHOWING-CURE    — recipe steps, product reveals, mechanism
+                             explanations, anatomy-pointer scenes,
+                             ingredient-add scenes, cascade moments.
+                             Decoder emphasis: the PRESENTATIONAL gesture
+                             (what the persona is showing the viewer),
+                             hand position relative to prop, camera angle
+                             that proves the cure, product placement /
+                             label visibility / recipe-step state.
+
+    AUGMENTED-SYMPTOMS     — HOOK shock images, problem-callouts, exposed
+                             before-state (back acne, varicose veins,
+                             distended belly, soaked pillow), thermometer
+                             readings, glucose-meter readings, anatomical
+                             magnification.
+                             Decoder emphasis: the AMPLIFIED visible
+                             problem. Crop tight on the symptom.
+                             Background props that contextualize. NO
+                             solution visible yet — "before" must read
+                             as raw and unresolved.
+
+    GRABBING-ATTENTION     — scroll-stopper cold opens, weird actions
+                             without specific cure context, persona
+                             introduction shots, transition/movement
+                             frames, decorative cuts.
+                             Decoder emphasis: the PURE SPECTACLE — motion,
+                             magnitude, novelty. What makes the thumb
+                             stop. Decoder names what's startling without
+                             binding to a remedy or symptom yet.
+
+  Declaration goes alongside reference_image / product_image in the
+  Image metadata block:
+
+    ### Image 1
+    - **reference_image:** none
+    - **narrative_lens:** AUGMENTED-SYMPTOMS
+    - **Image prompt:**
+    ...
+
+  This is mindset enforcement: classify BEFORE describing. Every shot
+  exists for a rhetorical reason. Naming that reason produces sharper
+  descriptions that lifts can adapt without losing the purpose.
+
+  v621b — Image prompts must NEVER describe caption text. Captions
+  get added at the platform level post-generation (via the editor's
+  caption layer). Including caption descriptors makes Banana 2 BAKE
+  them into pixels — uneditable, wrong font, wrong wrap, looks
+  amateur.
+
+  FORBIDDEN phrases in any Image prompt body:
+    "yellow burned-in captions at the lower third"
+    "white subtitle bar across the bottom"
+    "large overlaid text reading 'X'"
+    "caption: 'Try this remedy!'"
+    ANY descriptor of post-production text overlays.
+
+  When the source video shows captions, IGNORE them in image
+  descriptions. Capture caption TEXT in dialogue lines (mirrors
+  voiceover anyway), but never in the visual description.
+
+  PRE-OUTPUT VALIDATION (v621):
+
+    YES Every "### Image N" declares narrative_lens (one of HEALER-
+        SHOWING-CURE / AUGMENTED-SYMPTOMS / GRABBING-ATTENTION)?
+    YES Zero caption / subtitle / "overlay text" / "lower third"
+        descriptors in any image prompt body?
+
+  If any wrong, FIX before emitting.
+
 V614 / V615 DECODE-SIDE NOTES:
 
   Decode-side captures verbatim spoken dialogue from the source video
