@@ -706,6 +706,36 @@ violated rules in past LLM outputs:
      porting, copy the corpus style anchor verbatim. If decoded
      source lacks it (rare), upgrade by adding the v603 anchors.
 
+[17] V604 UNIVERSAL PROMPT-DISCIPLINE (4 sub-rules):
+
+     [a] IMAGE PROMPT = STILL FRAME ONLY. Motion goes ONLY in
+         action_note. No motion verbs in image prompt body
+         ("captured at", "frozen at", "mid-action", "PIVOTING from",
+         "mid-rotation"). Banana 2 generates photographs, not action
+         frames.
+
+     [b] CAMERA LOCK SPECIFICITY beyond v603 generic line. Per-video
+         lock: aspect / tripod-handheld / framing crop / camera
+         height / subject position / frame-bottom / background
+         characteristics. Generic style line alone can produce a
+         different room.
+
+     [c] NEGATIVE-CONSTRAINT DISCIPLINE. Every Image prompt body
+         closes with explicit DO-NOT statements AFTER v603 closing
+         tag. Adapt to niche/persona. Anchor against common drift
+         failures.
+
+     [d] VIEWER-LEFT / VIEWER-RIGHT convention. Generators confuse
+         "left" / "right" (subject-perspective vs frame-perspective).
+         Always use "viewer-left" / "viewer-right" to anchor to
+         camera POV. Universal — image prompts, action_notes, and
+         visual_delta.
+
+     LIFT-SPECIFIC: when porting a decoded source that has v604
+     fields (frame_anchor, visual_delta), preserve the timestamps
+     and visual_delta values exactly. The decoded artifact is the
+     source-of-truth for what the source video actually shows.
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

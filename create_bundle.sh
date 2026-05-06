@@ -921,6 +921,82 @@ violated rules in past LLM outputs:
 
      If any answer wrong, REMOVE/FIX before emitting.
 
+[17] V604 UNIVERSAL PROMPT-DISCIPLINE (4 sub-rules):
+
+     [a] IMAGE PROMPT = STILL FRAME ONLY. Motion goes ONLY in
+         action_note. No motion verbs in image prompt body
+         ("captured at", "frozen at", "mid-action", "PIVOTING from",
+         "mid-rotation", "captured at the APPLY moment"). Banana 2
+         generates photographs, not action frames — mixed motion
+         makes it invent weird poses.
+
+         FORBIDDEN in image prompt body:
+           - "her right hand is captured mid-action GRIPPING"
+           - "PIVOTING from patient toward camera"
+           - "frozen at the apex of a wind-up motion"
+           - "captured at the APPLY moment"
+
+         ALLOWED in image prompt body:
+           - "right hand presses thermometer to right temple"
+             (verb is "presses", static pose)
+           - "stands beside the seated patient"
+
+     [b] CAMERA LOCK SPECIFICITY beyond v603 style line. The generic
+         "Shot on iPhone wide-angle lens, handheld, deep focus
+         throughout, vibrant natural HDR daylight" is necessary but
+         not sufficient. Per-video, also lock:
+           - vertical or horizontal aspect?
+           - tripod or stable handheld?
+           - exact framing crop (chest-up / head-and-shoulders)
+           - camera height (above desk / at eye level / low-angle)
+           - subject position (face centered upper half)
+           - what's at frame bottom (desk edge / counter / floor)
+           - background characteristics (warm wood / white clinical /
+             honey-oak / Caribbean bamboo)
+
+         Generic style line alone can produce a different room.
+         Lock the actual setting anchors per video.
+
+     [c] NEGATIVE-CONSTRAINT DISCIPLINE. Every Image prompt body
+         CLOSES with explicit DO-NOT statements AFTER the v603
+         closing tag "iPhone HDR colors, deep focus." Adapt to
+         niche/persona. Anchor against common drift failures.
+
+         Example for T0 kitchen Korella saffron-vitality:
+           "No clinical setting. No lab coat. No medical equipment.
+            No empty kitchen — must have warm honey-oak shelving +
+            ceramic vessels visible. No background change."
+
+         Example for T2 clinical exam:
+           "No domestic kitchen background. No casual clothing on
+            the clinician. No extra patients. No background change
+            between this and the prior scene."
+
+         Format: closing v603 tag -> negative-constraint paragraph
+         as the FINAL paragraph of the Image prompt body.
+
+     [d] VIEWER-LEFT / VIEWER-RIGHT convention. Generators confuse
+         "left" and "right" (subject-perspective vs frame-
+         perspective). Always use "viewer-left" and "viewer-right"
+         to anchor to camera POV.
+
+         FORBIDDEN: "her left hand POINTS at the reading"
+         REQUIRED:  "her gloved hand on the viewer-left side POINTS"
+
+         FORBIDDEN: "the bottle stands to the left of the glass"
+         REQUIRED:  "the bottle stands on the viewer-left side of
+                     the glass"
+
+         Universal — applies to image prompts, action_notes, and
+         visual_delta descriptions.
+
+     PRE-OUTPUT VALIDATION:
+       NO motion verbs in image prompt body?
+       YES camera lock specificity beyond generic v603 line?
+       YES negative-constraint DO-NOT block at end of image prompt?
+       NO bare "left" / "right" — replaced with "viewer-left" /
+         "viewer-right"?
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

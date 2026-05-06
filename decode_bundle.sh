@@ -150,11 +150,109 @@ EOF
 # TASK
 ================================================================================
 
-Decode the source video into a v521.1 -> v597 compliant raw/decoded_*.md.
-Apply v594 image cardinality consolidation (M images for N shots, M <= N).
-Apply v586 six-block image grammar. Apply v587 Comprehension + Veo Final
-Prompts sections. Apply v589 absolute-magnitude grammar for state-evolution
-clips. Apply v589.1 semantic chain-binding for chained images.
+Decode the source video into a v521.1 -> v604 compliant raw/decoded_*.md.
+
+V604 — DECODE-PROMPT ACCURACY (NEW 2026-05-06)
+==============================================
+
+Apply ALL of:
+- v594 image cardinality consolidation (M images for N shots, M <= N)
+- v586 six-block image grammar
+- v587 Comprehension + Veo Final Prompts sections
+- v589 absolute-magnitude grammar for state-evolution clips
+- v589.1 semantic chain-binding for chained images
+- v603 style lock + prose discipline (iPhone-UGC anchor every image)
+- v604 frame-locked decode prompts (NEW — see below)
+
+V604 NEW FIELDS PER IMAGE (decode-side):
+
+[a] frame_anchor — timestamp of the source-video key frame this image
+    describes. Format: "0.5s", "12.0s", "106.0s". This locks each image
+    to a single frame from the source, NOT to a generic scene-idea.
+
+    Example:
+      ### Image 1
+      - **frame_anchor:** 0.5s
+      - **reference_image:** none
+
+    Decode-prompt body should reference the timestamp:
+      "At 0.5s, he holds a wounded foot upright in the center of frame..."
+    NOT:
+      "A clinician shows a symptom..."
+
+[b] visual_delta — for chained images (reference_image set), the
+    visual_delta field names ONLY the change from the parent image.
+    Body prose then becomes:
+      "Use image_K as the exact base frame. Keep everything from
+       image_K identical. Only change: <visual_delta value>."
+
+    This is much stronger than rewriting the whole scene. The model
+    gets a clean signal: preserve everything, change one thing.
+
+V604 CONTINUITY-CHAIN DETECTION (CRITICAL):
+
+When deciding whether to chain Image N to Image N-1, check these
+visual-continuity criteria:
+  - same person?
+  - same clothes?
+  - same room?
+  - same camera angle?
+  - same prop table / surface?
+  - only object/action changes?
+
+If ALL match -> CHAIN it. EVEN IF dialogue moves to a new point
+(explanation -> product reveal, recipe step -> CTA, problem -> solution).
+
+THE TRAP: trusting dialogue-beat grouping over visual continuity.
+Decoders frequently treat "talking-head explanation" and "talking-head
+product reveal" as separate images because the dialogue topic changes
+— but visually they are the same setup, so they should be chained.
+
+V604 UNIVERSAL PROMPT-DISCIPLINE (decode + generate both):
+
+[c] IMAGE PROMPT = STILL FRAME ONLY. Motion goes ONLY in action_note.
+    No motion verbs in image prompt body ("captured at", "frozen at",
+    "mid-action", "PIVOTING from"). Banana 2 generates photographs,
+    not action frames. Mixed motion makes generators invent weird poses.
+
+[d] CAMERA LOCK SPECIFICITY beyond v603 generic style line. Per-video
+    decoded artifact should also lock specific anchors:
+      - vertical or horizontal aspect?
+      - tripod or stable handheld?
+      - exact framing crop (chest-up / head-and-shoulders / full-torso)
+      - camera height (above desk / at eye level / low-angle)
+      - subject position in frame
+      - what's at the bottom of frame (desk edge / counter)
+      - background characteristics (warm wood / white clinical / honey-oak)
+
+    "iPhone HDR daylight" alone is too broad. It can create a different
+    room. Lock the camera to the actual source-video anchors.
+
+[e] NEGATIVE-CONSTRAINT DISCIPLINE. Every Image prompt body must close
+    with explicit DO-NOT statements that prevent generator drift,
+    AFTER the v603 closing tag "iPhone HDR colors, deep focus.":
+      "No lab coat. No stethoscope. No hospital room. No extra
+       products. No recipe ingredients. No dramatic cinematic lighting.
+       No background change."
+    Adapt to the niche/persona. Anchor against common drift failures.
+
+[f] VIEWER-LEFT / VIEWER-RIGHT convention. Generators confuse "left"
+    and "right" (subject-perspective vs frame-perspective). Always use
+    "viewer-left" and "viewer-right" to anchor perspective to camera POV.
+      FORBIDDEN: "her left hand POINTS at the reading"
+      REQUIRED:  "her gloved hand on the viewer-left side POINTS at..."
+    Universal — applies to decode prompts, generate prompts, action_notes.
+
+PRE-OUTPUT VALIDATION:
+
+  YES every Image block has frame_anchor: field with timestamp?
+  YES every chained Image has visual_delta: field naming only-the-change?
+  YES continuity-chain check passed (same setup -> chain regardless of
+      dialogue beat change)?
+  YES image prompt body has STATIC pose only (no motion verbs)?
+  YES camera lock specificity beyond generic v603 style line?
+  YES negative-constraint DO-NOT block at end of every image prompt?
+  NO bare "left" / "right" — replaced with "viewer-left" / "viewer-right"?
 
 Output the decoded markdown per code/template_new_format.md skeleton +
 strict v593 parser format. Include ## Sources (manifest / transcript /

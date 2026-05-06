@@ -1256,6 +1256,176 @@ psychologically-dead trap.
 
 ---
 
+## Decode-prompt accuracy + universal prompt-discipline (v604) — frame-locked, viewer-relative, negative-constrained
+
+**Source: 2026-05-06 ChatGPT decode session** (`raw/decode_prompt_accuracy_chat_2026-05-06.md`) — operator audited a freshly-decoded `decoded_healthylifesage_DX5jJgeMj30.md` and found two failure modes:
+
+1. Image 4 and Image 5 should have been **chained** (same clinician, same desk, same diploma-wall office, same camera angle, same shirt/gloves, same framing — only Rosabella bottle enters the frame in Image 5). The decoder separated them because dialogue beat changed (explanation → product reveal). Visual continuity > dialogue grouping.
+2. Image prompts described the **idea** of the scene, not the **frame evidence**. That makes generators drift. Prompts need to be frame-locked: same camera, same body crop, same objects, only the visible delta per scene.
+
+v604 codifies the fixes. Decode-side gets two new fields (`frame_anchor`, `visual_delta`); both decode and generate sides get four universal prompt-discipline rules.
+
+### Decode-side new fields
+
+#### `frame_anchor` — timestamp of the source-video key frame this image describes
+
+Every Image block in a decoded artifact (`raw/decoded_*.md`) should declare a `frame_anchor:` field with the source-video timestamp. Format: `frame_anchor: 0.5s` / `frame_anchor: 12.0s` / `frame_anchor: 106.0s`. This locks the image to a single frame from the source, not to a scene-idea description.
+
+```
+### Image 1
+- **frame_anchor:** 0.5s
+- **reference_image:** none
+- **Image prompt:**
+```
+> At 0.5s, he holds a wounded foot upright in the center of frame...
+
+vs. the failed pattern:
+
+> A clinician shows a symptom...
+
+The frame_anchor field forces the decoder to pin the image to a real moment, not to invent a generic scene description.
+
+#### `visual_delta` — only-change description for chained images
+
+For images where `reference_image:` is set (state-evolution chain or same-setup-bottle-enters-frame chain), the body prose should NOT rewrite the entire scene. Instead, declare a `visual_delta:` field that names ONLY the change from the parent image, then the body prose reduces to:
+
+> Use image_K as the exact base frame. Keep everything from image_K identical. Only change: [visual_delta value].
+
+Example from the corpus chat:
+```
+### Image 5
+- **frame_anchor:** 106.0s
+- **reference_image:** image_4
+- **product_image:** Rosabella Beetroot bottle
+- **visual_delta:** Rosabella Beetroot bottle enters the frame on viewer-right side, held at chest height by the clinician's gloved hand, label facing camera. Other gloved hand gestures near the bottle on viewer-left.
+- **Image prompt:**
+```
+> Use image_4 as the exact base frame. Keep the same silver-haired male clinician, same white button-down shirt, same blue nitrile gloves, same seated chest-up framing, same wooden desk edge at the bottom, same warm wood-paneled office, same framed diplomas on the wall, same phone-camera look, same lighting, same camera distance.
+>
+> Only change: [visual_delta value].
+>
+> [negative constraints — see rule 3 below]
+
+This is much stronger than rewriting the whole scene. The model gets a clean signal: "preserve everything, change one thing."
+
+### Continuity-chain detection rule (v580 / v590 extension)
+
+When deciding whether to chain Image N to Image N-1, check these visual-continuity criteria:
+
+1. Same person?
+2. Same clothes?
+3. Same room?
+4. Same camera angle?
+5. Same prop table / surface?
+6. Only object/action changes?
+
+If ALL match → CHAIN it. Even if the dialogue moves to a new point (explanation → product reveal, recipe step → CTA, problem statement → solution).
+
+**The trap to avoid**: trusting dialogue-beat grouping over visual continuity. Decoders frequently treat "talking-head explanation" and "talking-head product reveal" as separate images because the script topic changes — but visually they're the same setup, so the chain saves cost (one Banana 2 generation instead of two, no drift) and improves consistency.
+
+### Universal prompt-discipline rules (apply to BOTH decode and generate)
+
+#### 1. Image prompt = STILL frame only; motion goes ONLY in `action_note`
+
+The `Image prompt:` fenced block describes a STATIC photograph. No motion verbs ("she pivots", "he raises", "hand sweeping in arc"). All motion goes in the scene's `action_note` field.
+
+Mixing motion into image prompts makes generators invent weird poses (the model tries to depict the motion mid-flight and gets confused). Banana 2 generates photographs, not action frames.
+
+❌ FORBIDDEN in Image prompt body: "her right hand is captured mid-action GRIPPING", "PIVOTING from patient toward camera", "frozen at the apex of a wind-up motion"
+
+✅ ALLOWED in Image prompt body: static pose ("stands beside the seated patient", "right hand presses thermometer to right temple") — the verb is "presses" not "is pressing mid-action."
+
+The static-pose phrasing tells the model "this is what's in the photo." The motion-frame phrasing tells the model "depict an in-progress action" which produces blurry / wrong results.
+
+#### 2. Camera lock specificity — concrete anchors, not generic style names
+
+v603 introduced the iPhone-UGC style lock as a baseline. v604 extends it: per-video, the decoded artifact should also lock specific camera anchors that aren't covered by the generic style line.
+
+The generic v603 line (`"Shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight"`) is necessary but not sufficient — different videos need different camera anchors:
+
+- **Vertical or horizontal aspect?** — vertical selfie / horizontal landscape
+- **Tripod or handheld?** — fixed tripod / stable handheld / shaky-vlog
+- **Framing crop?** — chest-up / head-and-shoulders / full-torso / wide-room
+- **Camera height?** — slightly above desk height / at eye level / low-angle / overhead
+- **Subject position in frame?** — face centered upper half / lower-third / off-center
+- **What's at frame bottom?** — desk edge visible / counter edge / floor
+- **Background characteristics?** — warm wood diploma wall / white clinical walls / honey-oak shelving
+
+For the healthylifesage Rosabella decode, the lock is: "vertical selfie-style phone video, stable handheld, chest-up framing, camera slightly above desk height, face centered upper half, desk edge visible at bottom, warm wood diploma wall behind." That's specific enough to prevent room-drift.
+
+#### 3. Negative-constraint discipline
+
+Every Image prompt body should close with explicit DO-NOT statements that prevent generator drift. The negative constraints depend on the niche/persona, but the corpus pattern is to anchor against common drift failures:
+
+> No lab coat. No stethoscope. No hospital room. No extra products. No recipe ingredients. No dramatic cinematic lighting. No background change.
+
+For Korella saffron-vitality videos in T0 kitchen:
+> No clinical setting. No lab coat. No medical equipment. No empty kitchen (must have warm honey-oak shelving + ceramic vessels visible).
+
+For T2 clinical exam scenes:
+> No domestic kitchen background. No casual clothing on the clinician. No extra patients. No background change between this and the prior scene.
+
+The negative-constraint section should be the LAST paragraph of the Image prompt body, after the v603 closing tag `"iPhone HDR colors, deep focus."` This gives the model a clear separation: positive description → style anchor → negative constraints.
+
+#### 4. Viewer-left / viewer-right convention
+
+Generators frequently confuse "left" and "right" — they may interpret as subject-perspective (the subject's own left/right) instead of frame-perspective (the viewer's left/right looking at the frame). Result: hands reversed, props on wrong side.
+
+Fix: ALWAYS use **viewer-left** and **viewer-right** in body prose:
+
+❌ "her left hand POINTS at the reading"
+✅ "her gloved hand on the viewer-left side POINTS at the reading"
+
+❌ "the bottle stands to the left of the glass"
+✅ "the bottle stands on the viewer-left side of the glass"
+
+The "viewer-" prefix anchors the perspective to the camera's POV. This is universal — applies to decode prompts, generate prompts, action_notes.
+
+### Pre-output validation gate
+
+Before emitting any decoded artifact OR generate-side videos/*.md, scan for:
+
+- ✅ Decode-side: every Image block has `frame_anchor:` field with timestamp
+- ✅ Decode-side: every chained Image has `visual_delta:` field naming only-the-change
+- ✅ Continuity-chain check: same person + same clothes + same room + same camera + same surface = CHAIN, even across dialogue-beat boundaries
+- ✅ Image prompt body has STATIC pose only — no motion verbs ("captured at", "frozen at", "mid-action")
+- ✅ Camera lock specificity beyond the generic v603 style line — concrete anchors per-video
+- ✅ Negative-constraint DO-NOT block at end of every Image prompt body
+- ❌ NO bare "left" / "right" — replaced with "viewer-left" / "viewer-right"
+
+If any ❌ found, FIX before emitting.
+
+### Worked example — Image 5 of healthylifesage Rosabella
+
+Pre-v604 (general scene prompt):
+> The clinician sits at his desk and shows the Rosabella bottle while explaining the supplement. Background is the office. He gestures with his hands.
+
+Post-v604 (frame-locked reconstruction with all four universal rules):
+
+```
+### Image 5
+- **frame_anchor:** 106.0s
+- **reference_image:** image_4
+- **product_image:** Rosabella Beetroot bottle
+- **visual_delta:** Rosabella Beetroot bottle enters the frame on viewer-right side, held at chest height by the clinician's gloved hand, label facing camera. Other gloved hand gestures near the bottle on viewer-left.
+- **Image prompt:**
+```
+> Use the uploaded character reference image for the main character — match his facial features, identity, hair, and skin tone exactly.
+> Use the uploaded product reference image for the Rosabella Beetroot bottle — match its label, packaging, color, and proportions exactly.
+> Use the prior-scene reference image to preserve the wood-paneled office, framed diplomas, desk, lighting, framing, and continuity from the previous scene.
+>
+> Use image_4 as the exact base frame. Keep the same silver-haired male clinician, same white button-down shirt, same blue nitrile gloves, same seated chest-up framing, same wooden desk edge at the bottom, same warm wood-paneled office, same framed diplomas on the wall, same phone-camera look, same lighting, same camera distance. Only change: the Rosabella Beetroot bottle is now held at chest height in his gloved hand on the viewer-right side of the frame, label facing camera, navy-and-cream wordmark squared to lens. His other gloved hand on the viewer-left side gestures near the bottle. iPhone HDR colors, deep focus.
+>
+> No lab coat. No stethoscope. No hospital room. No extra products. No recipe ingredients. No dramatic cinematic lighting. No background change. Bottle is real-supplement-sized, not oversized, not floating, not redesigned.
+
+### Why v604 vs leaving these implicit
+
+v580 + v589.1 + v590 + v603 set the generic chain-binding contract and the generic style lock, but didn't make decode-side prompts FRAME-LOCKED to specific timestamps and didn't enforce viewer-relative directions or negative constraints. Decoders kept producing "scene-idea" prompts that drifted at generation time. v604 makes frame-locking, viewer-relative direction, negative constraints, and motion-only-in-action_note all explicit gates.
+
+The user framing: *"these decodes I should check: same person / same clothes / same room / same camera angle / same prop table / only object/action changes — when those match, it's probably a chained image even if the script moves to a new point."* v604 codifies that visual-continuity-trumps-dialogue-grouping rule.
+
+---
+
 ## Style lock + prose discipline (v603) — corpus iPhone-UGC aesthetic, tight composition
 
 **Source: 2026-05-06 owner observation** *"the compositing of the images and the style is completely off, what the fuck?"* The menopause-saffron prompts produced wrong composition + wrong style. Diagnosis: missing style-lock package, prose too verbose, rule citations leaked into prompt body, cinematography jargon confused Banana 2.
