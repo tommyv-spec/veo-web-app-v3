@@ -5163,12 +5163,24 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     listener_state = {'attached': False, 'current_submitting_node_id': None}
     request_to_node = {}  # id(playwright_request) → node_id (set when request fires, popped on response)
     captured_urls_by_node = {}  # node_id → list[str] (aggregated fife URLs, in order)
+    # v628: FIFO fallback queue for POSTs that fire AFTER submit returns.
+    # Each entry: {node_id, expected_count, ts, tagged_count}.
+    # When _on_image_request fires with no current_submitting_node_id, it
+    # FIFO-matches to the oldest pending submission whose tagged_count is
+    # still below expected_count. This handles the case where Flow
+    # emits N POSTs over 2-5s but our submit-time flag only stays set
+    # for ~1-2s — the late-arriving POSTs would otherwise be untagged
+    # and force the job onto the brittle prompt-match fallback (which
+    # mis-attributes when two scenes share an identical prompt template).
+    pending_submissions = []
 
     def _on_image_request(request):
         """Tag every outgoing batchGenerateImages POST with the node_id of
-        the job currently being submitted. Set inside _submit_one_job
-        right before click_generate_image; cleared after a brief wait
-        for all N variant POSTs to have fired."""
+        the job currently being submitted. Two paths:
+          (1) flag-tagged: `current_submitting_node_id` is set → use that
+          (2) FIFO fallback: flag is None → match to oldest pending
+              submission with tagged_count < expected_count
+        """
         try:
             if 'batchGenerateImages' not in request.url:
                 return
@@ -5179,6 +5191,18 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
         nid = listener_state.get('current_submitting_node_id')
         if nid is not None:
             request_to_node[id(request)] = nid
+            # Update pending counter so FIFO fallback knows quota progress
+            for p in pending_submissions:
+                if p['node_id'] == nid and p['tagged_count'] < p['expected_count']:
+                    p['tagged_count'] += 1
+                    break
+            return
+        # Path 2: flag is None, find oldest unfilled pending submission
+        for p in pending_submissions:
+            if p['tagged_count'] < p['expected_count']:
+                request_to_node[id(request)] = p['node_id']
+                p['tagged_count'] += 1
+                break
 
     def _on_image_response(response):
         try:
@@ -5836,10 +5860,27 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             # correctly even if two scenes share an identical prompt
             # template (Scene 6 and Scene 9 in the user's batch — both
             # CTA scenes with the same wording — collided under the
-            # v626 prompt-match path). Flag stays set during click_generate
-            # AND the tile_id capture window (a few seconds), which
-            # comfortably covers Flow's request-emission window.
+            # v626 prompt-match path).
+            #
+            # v628: also register this submission in pending_submissions so
+            # POSTs that fire AFTER the flag is cleared (Flow emits N
+            # POSTs over 2-5s; our flag-window is ~1-2s) still get
+            # FIFO-matched to the right job. Healthy run: all N POSTs
+            # tagged via the flag path. Late-firing run: late POSTs
+            # tagged via the FIFO fallback. Either way no fall-through
+            # to the brittle prompt-match path.
             listener_state['current_submitting_node_id'] = node_id
+            pending_submissions.append({
+                'node_id': node_id,
+                'expected_count': variants,
+                'ts': time.time(),
+                'tagged_count': 0,
+            })
+            # Cap pending list — drop entries older than 60s. They
+            # represent submissions whose POSTs already fired or were
+            # dropped; keeping them risks misattributing future POSTs.
+            cutoff = time.time() - 60
+            pending_submissions[:] = [p for p in pending_submissions if p['ts'] > cutoff]
             try:
                 if not click_generate_image(page, context=ctx):
                     raise RuntimeError("Failed to click Generate")
@@ -5905,17 +5946,33 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 print(f"[API:submit] ⚠ Node {node_id}: tile_id capture failed ({e}) — listener will handle attribution" if listener_state['attached']
                       else f"[API:submit] ⚠ Node {node_id}: tile_id capture failed ({e}) — attribution will use prompt_key fallback", flush=True)
             finally:
-                # v627: clear the request-tag flag so subsequent submits
-                # don't accidentally tag their POSTs with this job's id.
-                # Report how many batchGenerateImages requests were tagged
-                # for this submit — useful diagnostic for prompt-collision
-                # cases (should equal `variants` in healthy runs).
+                # v628: actively wait up to 5s for all N batchGenerateImages
+                # POSTs to fire and be tagged. Flow's frontend can emit POSTs
+                # over a 2-5s window; the 1s tile_id capture window above is
+                # often too short. Early-exit when tagged_count reaches
+                # variants, so healthy runs don't pay the full 5s.
+                # Late POSTs that arrive AFTER this wait still get tagged via
+                # the FIFO fallback path in _on_image_request — so even if
+                # we time out here, attribution remains correct.
+                if listener_state['attached']:
+                    tag_deadline = time.time() + 5.0
+                    while time.time() < tag_deadline:
+                        tagged_count = sum(1 for v in request_to_node.values() if v == node_id)
+                        if tagged_count >= variants:
+                            break
+                        time.sleep(0.1)
+                # Final tagged-count diagnostic
                 tagged_count = sum(1 for v in request_to_node.values() if v == node_id)
                 if listener_state['attached']:
                     if tagged_count == 0:
-                        print(f"[API:submit] ⚠ Node {node_id}: 0 outgoing batchGenerateImages POSTs were tagged — listener may have missed them; will fall back to prompt-match", flush=True)
+                        print(f"[API:submit] ⚠ Node {node_id}: 0 POSTs tagged via flag-path; FIFO fallback will catch any late POSTs", flush=True)
                     elif tagged_count < variants:
-                        print(f"[API:submit] ⓘ Node {node_id}: only {tagged_count}/{variants} POSTs tagged — remaining variants may attribute via prompt-match fallback", flush=True)
+                        print(f"[API:submit] ⓘ Node {node_id}: {tagged_count}/{variants} POSTs tagged via flag-path; FIFO fallback handles the rest", flush=True)
+                    else:
+                        # Quiet success — the diagnostic only fires on partial-tag conditions
+                        pass
+                # v627: clear the request-tag flag so subsequent submits
+                # don't accidentally tag their POSTs with this job's id.
                 listener_state['current_submitting_node_id'] = None
 
             in_flight[node_id] = InFlightJob(
