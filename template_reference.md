@@ -1256,6 +1256,79 @@ psychologically-dead trap.
 
 ---
 
+## Whisper export — strict matched-word containment (v611) — defense-in-depth final pass
+
+**Source: 2026-05-06 owner observation** *"the whisper export type is still bugging a bit... the final outcome is, i want to maintain only the original lines mentioned in the video, everything else is cut out. you have everything in the code files. check them and find the perfect solution."*
+
+The whisper export pipeline (`code/video_processor.py:detect_speech_segments_whisper`) had accumulated 30+ tuned parameters across v498→v557 to balance "include real speech" vs "cut filler." Each iteration added a guard for a specific failure mode. v611 is the FINAL containment pass — a defense-in-depth check that catches any non-script audio that slipped through the earlier guards.
+
+### Why earlier guards weren't enough
+
+Four leak paths could carry non-script audio into the final export despite v548/v554/v557:
+
+| # | Leak path | Pre-v611 behavior |
+|---|---|---|
+| (a) | Low-confidence (<0.30) hallucinations | Excluded from `unmatched_words` by `HALLUC_PROB_FLOOR`. Invisible to per-word v554 guard AND to bridger's v548 blocker check. |
+| (b) | Clip-final 350ms tail (`EDGE_PAD_END`) | Always applied to the last word of each clip. If the next 350ms is filler/silence/breath, included in segment. |
+| (c) | `TAIL_OVERLAP=0.15s` end-pad bleed | Allowed matched-word end-pads to extend 150ms INTO unmatched-word range "for consonant decay." Bleeds in the unmatched word's onset. |
+| (d) | Bridger merging across a low-conf hallucination | `BRIDGE_GAP_MAX=0.7s` gaps inside same clip get bridged unless a ≥0.30 conf word sits in the gap. Lower-conf words don't block. |
+
+### What v611 does
+
+After all earlier passes (matching, padding, neighbor-clamp, hallucination guard, grouping, bridging), v611 walks each final speech segment:
+
+1. **Find the matched-word range inside the segment**: locate the first and last matched script words whose timestamps fall inside `(group_start, group_end)`.
+2. **End-cap**: scan ALL Whisper words (any confidence — including the <0.30 floor that earlier guards ignored) for the nearest one starting AFTER the last matched word's end and BEFORE the segment's current end. If found, pull segment end back to `unmatched.start - STRICT_END_GUARD (80ms)`. If no unmatched word found in the tail, cap at `last_matched.end + STRICT_FALLBACK_END_PAD (180ms)` instead of the existing 350ms.
+3. **Start-cap**: scan for the nearest unmatched word ENDING before the first matched word's start and AFTER the segment's current start. If found, push segment start forward to `unmatched.end + STRICT_START_GUARD (20ms)`. Asymmetric per the v554 carryover: start guard is tight (no pre-onset filler bleed); end guard is moderate (preserves consonant decay tail).
+4. **Never extend** — only contract. All earlier preservation logic stays intact for the matched-word interior. v611 cannot add audio to a segment, only remove leak.
+
+### v611 parameters
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `STRICT_START_GUARD` | 0.02s (20ms) | Buffer between pre-segment unmatched word's end and segment start |
+| `STRICT_END_GUARD` | 0.08s (80ms) | Buffer between segment end and post-segment unmatched word's start |
+| `STRICT_FALLBACK_END_PAD` | 0.18s (180ms) | Max segment-end extension past last matched word when no unmatched word in tail |
+| `STRICT_MIN_END_TAIL` | 0.05s (50ms) | Floor — never trim segment end below `last_matched.end + 50ms` (preserves at least minimal consonant decay) |
+
+### Failure modes addressed
+
+| Pre-v611 leak | v611 fix |
+|---|---|
+| Low-conf hallucination at clip-final tail (e.g. Whisper transcribes a soft-breath as "uh" with p=0.18, sits 50ms after last script word, 350ms `EDGE_PAD_END` includes its audio) | v611 sees ALL unmatched words. Caps segment end to `unmatched.start - 80ms = ~30ms past last_matched.end`. |
+| Filler past last script word, no unmatched word transcribed (silence/ambient) | Fallback cap at `last_matched.end + 180ms` instead of 350ms. Saves 170ms of dead air per clip. |
+| Padding overrun absorbed an unmatched word's audio (TAIL_OVERLAP allowed the bleed-in) | v611 final pass re-checks against the unmatched-word range and pulls the edge back to be unmatched-clean. |
+| Bridge across low-conf hallucination merged garbage into segment | v611 doesn't unbridge segments (would re-split them), but it caps the segment edges so any garbage past the last matched word gets cut. Mid-segment garbage (between two matched words) survives the bridge — that's an authoring/matcher problem, not a containment problem. |
+
+### What v611 does NOT change
+
+- Earlier matcher / padder / bridger logic — all preserved.
+- The matched-word interior (between first and last matched word) — never touched. Consonant decay between adjacent matched words is preserved by intra-pair midpoint clamps.
+- Per-clip behavior — v611 operates on already-bridged speech_groups, doesn't see clip boundaries directly.
+- Energy-mode silence detection — completely separate code path; v611 only fires when `silence_mode="whisper"`.
+
+### Logging
+
+v611 logs every cap event so the user can verify what was trimmed:
+
+```
+[WhisperVAD] ✂ v611 end-cap: 8.453s → 8.227s (filler 'uh' p=0.18 at 8.307s)
+[WhisperVAD] ✂ v611 end-cap (fallback): 12.108s → 11.928s (no unmatched in tail, clamp to last-word + 0.18s)
+[WhisperVAD] ✂ v611 start-cap: 14.732s → 14.821s (filler 'and' p=0.22 at 14.801s)
+```
+
+If v611 ever drops a segment as "unanchored" (no matched words found inside), it logs a warning — that would indicate a bug in the upstream speech_groups construction.
+
+### Reverting / tuning
+
+If a user finds v611 too aggressive, the four constants are at the top of the v611 block. Loosening order (most → least likely to fix over-trim):
+1. `STRICT_FALLBACK_END_PAD: 0.18 → 0.30` (give more tail when no filler detected)
+2. `STRICT_END_GUARD: 0.08 → 0.04` (closer to filler — preserves more consonant decay)
+3. `STRICT_MIN_END_TAIL: 0.05 → 0.10` (always preserve at least 100ms past last matched word)
+4. Use only `unmatched_words[≥0.30]` for v611 guard instead of all_unmatched (revert the low-conf-blocker-visibility change)
+
+---
+
 ## Gender-neutral main-character references (v610) — never gender the persona in prose
 
 **Source: 2026-05-06 owner directive** *"also when creating a video never assign a gender to the main carchter, always refer as the healer, the main carchter, or anything else that you can think of."*

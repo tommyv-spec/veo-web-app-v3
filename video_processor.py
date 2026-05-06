@@ -716,6 +716,114 @@ def detect_speech_segments_whisper(
                     bridged_groups.append((s, e))
                 speech_groups = bridged_groups
 
+            # === v611 — strict matched-word containment (defense-in-depth) ===
+            # Goal: every output segment's edges are bounded by matched-
+            # word audio + tight tolerance, regardless of what padding /
+            # bridging produced. Filler / hallucination / silence past
+            # the LAST matched word in a segment, OR before the FIRST
+            # matched word, gets cut.
+            #
+            # Why this is needed even after v548/v554/v557: those guards
+            # operate on per-word padding (v554 unmatched_words guard)
+            # and on bridge-time gap inspection (v548 Fix A) using the
+            # HALLUC_PROB_FLOOR=0.30 confidence floor. They can't catch:
+            #   (a) low-confidence (<0.30) hallucinations sitting in
+            #       padded zones — invisible to per-word guard
+            #   (b) the EDGE_PAD_END=0.35s tail past the clip-final word
+            #       when no high-confidence unmatched word follows
+            #   (c) the TAIL_OVERLAP=0.15s allowed bleed into unmatched-
+            #       word range when consonant decay was assumed
+            #
+            # User goal (2026-05-06): "the final outcome is, i want to
+            # maintain only the original lines mentioned in the video,
+            # everything else is cut out."
+            #
+            # v611 fires AFTER bridging and uses ALL whisper words
+            # (any confidence) as edge blockers. It only contracts
+            # segments — it cannot extend them — so all earlier
+            # preservation logic stays intact for the matched-word
+            # interior. Asymmetric per v554 carryover: start guard
+            # tight, end guard moderate (preserves consonant decay).
+            STRICT_START_GUARD = 0.02       # 20ms after a pre-segment unmatched word's end
+            STRICT_END_GUARD = 0.08         # 80ms before a post-segment unmatched word's start
+            STRICT_FALLBACK_END_PAD = 0.18  # if no unmatched word in tail: cap at last_matched.end + 180ms
+            STRICT_MIN_END_TAIL = 0.05      # never trim below last_matched.end + 50ms
+
+            matched_start_set = {w.get('start') for w in speech_words}
+            # Use ALL whisper words (any confidence) for the final
+            # guard, not just unmatched_words[≥0.30]. Low-confidence
+            # whisper outputs ARE filler/hallucination/breath — exactly
+            # what the user wants cut.
+            all_unmatched_for_guard = [
+                w for w in all_words
+                if w.get('start') not in matched_start_set
+            ]
+            all_unmatched_for_guard.sort(key=lambda w: w.get('start', 0))
+
+            contained_groups = []
+            for (gs, ge) in speech_groups:
+                inside_matched = [
+                    w for w in speech_words
+                    if (gs <= w.get('start', -1) < ge) or (gs < w.get('end', -1) <= ge)
+                ]
+                if not inside_matched:
+                    print(f"[WhisperVAD] ⚠ v611: dropping unanchored segment {gs:.3f}s → {ge:.3f}s", flush=True)
+                    continue
+
+                first_matched = min(inside_matched, key=lambda w: w.get('start', 0))
+                last_matched = max(inside_matched, key=lambda w: w.get('end', 0))
+                lm_start = first_matched.get('start', gs)
+                lm_end = last_matched.get('end', ge)
+
+                new_start, new_end = gs, ge
+
+                # End-cap: nearest unmatched word starting past lm_end and inside segment
+                nearest_post = next(
+                    (u for u in all_unmatched_for_guard
+                     if u.get('start') is not None
+                     and u['start'] >= lm_end
+                     and u['start'] < new_end),
+                    None
+                )
+                if nearest_post:
+                    min_end = lm_end + STRICT_MIN_END_TAIL
+                    capped = max(min_end, nearest_post['start'] - STRICT_END_GUARD)
+                    if capped < new_end:
+                        u_text = nearest_post.get('text', '?')
+                        u_p = nearest_post.get('probability', 0)
+                        print(f"[WhisperVAD] ✂ v611 end-cap: {new_end:.3f}s → {capped:.3f}s (filler '{u_text}' p={u_p:.2f} at {nearest_post['start']:.3f}s)", flush=True)
+                    new_end = capped
+                else:
+                    capped = min(new_end, lm_end + STRICT_FALLBACK_END_PAD)
+                    if capped < new_end:
+                        print(f"[WhisperVAD] ✂ v611 end-cap (fallback): {new_end:.3f}s → {capped:.3f}s (no unmatched in tail, clamp to last-word + {STRICT_FALLBACK_END_PAD:.2f}s)", flush=True)
+                    new_end = capped
+
+                # Start-cap: nearest unmatched word ending before lm_start and inside segment
+                pre_candidates = [
+                    u for u in all_unmatched_for_guard
+                    if u.get('end') is not None
+                    and u['end'] <= lm_start
+                    and u['end'] > new_start
+                ]
+                if pre_candidates:
+                    nearest_pre = max(pre_candidates, key=lambda w: w.get('end', 0))
+                    max_start = lm_start
+                    pushed = min(max_start, nearest_pre['end'] + STRICT_START_GUARD)
+                    if pushed > new_start:
+                        u_text = nearest_pre.get('text', '?')
+                        u_p = nearest_pre.get('probability', 0)
+                        print(f"[WhisperVAD] ✂ v611 start-cap: {new_start:.3f}s → {pushed:.3f}s (filler '{u_text}' p={u_p:.2f} at {nearest_pre['end']:.3f}s)", flush=True)
+                    new_start = pushed
+
+                if new_end > new_start:
+                    contained_groups.append((new_start, new_end))
+                else:
+                    print(f"[WhisperVAD] ⚠ v611: segment collapsed {gs:.3f}s → {ge:.3f}s — keeping original", flush=True)
+                    contained_groups.append((gs, ge))
+
+            speech_groups = contained_groups
+
             result = speech_groups
             
             # Log results
