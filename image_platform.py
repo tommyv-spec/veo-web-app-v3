@@ -4053,6 +4053,30 @@ def _import_scene_table_impl(
                             f"field bound '{product_image_name}'"
                         )
 
+            # v607: force-bind any character-typed ingredient even when the
+            # body prose doesn't literally mention it. The character upload
+            # MUST be referenced in Flow's slot manifest on every image so
+            # persona-identity is preserved across the whole video. Without
+            # this, when v602/v603 prose drops the literal "the main character"
+            # phrase from a scene's body (e.g. a prop close-up that focuses on
+            # a saffron bottle, or a chained recipe pivot), the persona ref
+            # slot goes unbound and Flow generates an arbitrary face on the
+            # next take. Mirrors v581 product_image binding but for the
+            # persona — except characters bind unconditionally rather than
+            # only when an explicit field is set, because characters have no
+            # equivalent declarative field. The slot-priority sort below
+            # places `character` ingredients at slot 0, so this never pushes
+            # a chain or product binding out of slot bounds (3-cap still
+            # honors priority).
+            for _ing_name, _ing_type in ingredient_types.items():
+                if _ing_type == "character" and _ing_name in ingredient_nodes:
+                    if _ing_name not in mentioned:
+                        mentioned.append(_ing_name)
+                        log.info(
+                            f"[import] Image {image_index}: v607 force-bind "
+                            f"character '{_ing_name}' (not mentioned in body)"
+                        )
+
             attached_parents_count = 0
             slot = 0
 

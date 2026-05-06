@@ -1988,92 +1988,39 @@ def upload_reference_images(page, image_paths, context="", already_uploaded=None
             except Exception:
                 _input_count_before = 0
 
-            # v529 fix #2: cut file_chooser timeout 10s → 4s. The Playwright
-            # filechooser event fires within ~1s of the click or it doesn't
-            # fire at all (the click went to a stale/wrong element). Waiting
-            # 10s just wastes time before the retry path can recover.
+            # v608: skip the expect_file_chooser path entirely. On Patchright
+            # + Chrome, the programmatic file picker trigger is reliably
+            # blocked (isTrusted=false on synthesized clicks suppresses
+            # Chrome's file picker event). The two prior attempts (4000ms
+            # each + a full dialog reset) consistently timed out before
+            # falling through to the set_input_files recovery — wasting
+            # ~8-10s per upload. Recovery via the newly-mounted input
+            # always succeeded.
             #
-            # v535: switched from human_click_for_file_chooser (low-level
-            # mouse.down/mouse.up at coords, no synthesized "click" event)
-            # to locator.click() (Playwright's high-level click that
-            # dispatches a proper trusted click sequence with mousedown +
-            # mouseup + click events in order). User confirmed clicking
-            # the upload tile div via low-level mouse events doesn't
-            # reliably trigger Flow's React onClick handler that
-            # programmatically opens the file picker. locator.click()
-            # uses CDP-level synthesis that produces isTrusted=true
-            # events, which Chrome accepts for programmatic file picker
-            # triggers.
+            # New flow: click the upload tile once (this still mounts a
+            # fresh <input type="file"> in Flow's React tree even though
+            # the file_chooser event doesn't fire), then go straight to
+            # the set_input_files strategy chain below. The chip
+            # verification + gallery recovery path catches any chip that
+            # didn't auto-attach.
+            #
+            # If file_chooser semantics change in a future Flow build (the
+            # event starts firing again), the strategy chain still works
+            # because set_input_files on the freshly-mounted input is
+            # equivalent to fc_info.value.set_files. No regression.
             try:
-                with page.expect_file_chooser(timeout=4000) as fc_info:
-                    upload_btn.click(timeout=3000)
-                time.sleep(random.uniform(2, 5))
-                fc_info.value.set_files(img_path)
-                # v529 fix #6: this point only confirms bytes were sent to
-                # the file chooser — the actual chip attachment happens
-                # async in Flow's UI and is verified at lines ~2022-2031.
-                # Don't claim ✓ until the chip is verified.
-                print(f"{prefix}  ⤴ Sent {filename} (file chooser) — verifying chip", flush=True)
-                uploaded = True
-            except Exception as e1:
-                print(f"{prefix}  ⚠ File chooser attempt 1 failed: {e1}", flush=True)
+                upload_btn.click(timeout=3000)
+                # Brief wait for Flow to mount the file input in response
+                # to the click. Empirically <1s is enough; using a small
+                # randomized sleep to avoid bot-detection signal patterns
+                # while keeping it tight.
+                time.sleep(random.uniform(0.6, 1.0))
+            except Exception as e_click:
+                print(f"{prefix}  ⚠ Upload button click failed: {e_click}", flush=True)
+                # Don't raise here — the strategy chain below may still find
+                # an existing input under the dialog (rare, but possible).
 
-            # Fix #2: before the second attempt, fully reset the dialog state.
-            # The previous upload_btn click may have gone to a stale DOM element
-            # (a leftover dialog from earlier settings config, or a modal behind
-            # Flow's current viewport). Re-running expect_file_chooser without
-            # this reset just hits the same stale state and times out again.
-            if not uploaded:
-                try:
-                    # Close whatever dialog is open
-                    page.keyboard.press("Escape")
-                    time.sleep(0.4)
-                    page.keyboard.press("Escape")
-                    time.sleep(1.0)
-                    # Re-open the Create dialog from scratch
-                    fresh_create_btn = page.locator(
-                        f"{frame_selector}:has(i:text('add_2'))"
-                    ).first
-                    try:
-                        fresh_create_btn.wait_for(state="visible", timeout=5000)
-                    except Exception:
-                        fresh_create_btn = page.locator(
-                            f"{frame_selector}:has(span:text('Create'))"
-                        ).first
-                        fresh_create_btn.wait_for(state="visible", timeout=5000)
-                    fresh_box = fresh_create_btn.bounding_box()
-                    if fresh_box:
-                        human_mouse_move_to(page,
-                                            fresh_box['x'] + fresh_box['width']/2,
-                                            fresh_box['y'] + fresh_box['height']/2)
-                        time.sleep(0.3)
-                        human_click_at(page)
-                    else:
-                        fresh_create_btn.click(timeout=5000)
-                    time.sleep(1.2)
-                    # Wait for the fresh dialog
-                    fresh_dialog = page.locator('[role="dialog"]').first
-                    fresh_dialog.wait_for(state="visible", timeout=5000)
-
-                    # Now try the file chooser again on the freshly-opened dialog
-                    fresh_upload_btn = find_dialog_upload_button(fresh_dialog)
-                    fresh_upload_btn.wait_for(state="visible", timeout=3000)
-                    # v529 fix #2: same 4s cap as Attempt 1.
-                    # v535: locator.click() instead of human_click_for_file_chooser
-                    # (same reasoning as Attempt 1 above).
-                    with page.expect_file_chooser(timeout=4000) as fc_info2:
-                        fresh_upload_btn.click(timeout=3000)
-                    time.sleep(random.uniform(2, 4))
-                    fc_info2.value.set_files(img_path)
-                    # v529 fix #6: intermediate state, chip not yet verified.
-                    print(f"{prefix}  ⤴ Sent {filename} (file chooser after UI reset) — verifying chip", flush=True)
-                    uploaded = True
-                    # Swap in the fresh dialog for subsequent steps
-                    dialog = fresh_dialog
-                except Exception as e2:
-                    print(f"{prefix}  ⚠ File chooser attempt 2 (after reset) failed: {e2}", flush=True)
-
-            # Attempt 3: set_input_files fallback (last resort, no click).
+            # Attempt: set_input_files strategy chain (the path that works).
             # v531: restored the page-wide `input[type='file']` path that
             # v529 incorrectly removed.
             # v532: smarter input picking — use the before/after snapshot
@@ -2092,57 +2039,58 @@ def upload_reference_images(page, image_paths, context="", already_uploaded=None
             #   3. Any input under any open [role='dialog'] (portal mount,
             #      take last as Flow appends modals at body bottom)
             #   4. Last input on the page (coarse, but better than .first)
-            if not uploaded:
-                try:
-                    time.sleep(random.uniform(1, 2))
-                    _used_path = None
-                    # Strategy 1: dialog-scoped (preferred when present)
-                    _file_input = dialog.locator("input[type='file']").first
-                    if _file_input.count() > 0:
-                        _file_input.set_input_files(img_path)
-                        _used_path = "dialog input"
+            # v608: this block always runs (no `if not uploaded` gate). The
+            # file_chooser path that used to set `uploaded = True` was removed;
+            # the strategy chain below is now the sole upload path.
+            try:
+                _used_path = None
+                # Strategy 1: dialog-scoped (preferred when present)
+                _file_input = dialog.locator("input[type='file']").first
+                if _file_input.count() > 0:
+                    _file_input.set_input_files(img_path)
+                    _used_path = "dialog input"
+                else:
+                    # v532 — Strategy 2: newly-mounted input (count grew).
+                    # This is the most precise signal that an input was
+                    # mounted in response to OUR click.
+                    try:
+                        _input_count_after = page.locator("input[type='file']").count()
+                    except Exception:
+                        _input_count_after = _input_count_before
+                    if _input_count_after > _input_count_before:
+                        # The new input is at one of the last positions.
+                        # Prefer the very last one — Flow appends new
+                        # elements to the bottom of the body.
+                        page.locator("input[type='file']").nth(_input_count_after - 1).set_input_files(img_path)
+                        _used_path = (f"newly-mounted input "
+                                      f"({_input_count_before}→{_input_count_after})")
                     else:
-                        # v532 — Strategy 2: newly-mounted input (count grew).
-                        # This is the most precise signal that an input was
-                        # mounted in response to OUR click.
-                        try:
-                            _input_count_after = page.locator("input[type='file']").count()
-                        except Exception:
-                            _input_count_after = _input_count_before
-                        if _input_count_after > _input_count_before:
-                            # The new input is at one of the last positions.
-                            # Prefer the very last one — Flow appends new
-                            # elements to the bottom of the body.
-                            page.locator("input[type='file']").nth(_input_count_after - 1).set_input_files(img_path)
-                            _used_path = (f"newly-mounted input "
-                                          f"({_input_count_before}→{_input_count_after})")
+                        # v531 Strategy 3: any input under an open dialog.
+                        portal_inputs = page.locator("[role='dialog'] input[type='file']")
+                        portal_count = portal_inputs.count()
+                        if portal_count > 0:
+                            portal_inputs.nth(portal_count - 1).set_input_files(img_path)
+                            _used_path = f"portal input (last of {portal_count} dialog inputs)"
                         else:
-                            # v531 Strategy 2: any input under an open dialog.
-                            portal_inputs = page.locator("[role='dialog'] input[type='file']")
-                            portal_count = portal_inputs.count()
-                            if portal_count > 0:
-                                portal_inputs.nth(portal_count - 1).set_input_files(img_path)
-                                _used_path = f"portal input (last of {portal_count} dialog inputs)"
+                            # v532 Strategy 4: LAST input on page (was
+                            # .first in v531, but .last is empirically
+                            # more reliable — most recent mount wins).
+                            # Only matters if Flow doesn't grow the count
+                            # AND doesn't put input under a dialog —
+                            # rare path, kept as safety net.
+                            _all_inputs = page.locator("input[type='file']")
+                            _all_count = _all_inputs.count()
+                            if _all_count > 0:
+                                _all_inputs.nth(_all_count - 1).set_input_files(img_path)
+                                _used_path = f"last page-wide input (of {_all_count})"
                             else:
-                                # v532 Strategy 4: LAST input on page (was
-                                # .first in v531, but .last is empirically
-                                # more reliable — most recent mount wins).
-                                # Only matters if Flow doesn't grow the count
-                                # AND doesn't put input under a dialog —
-                                # rare path, kept as safety net.
-                                _all_inputs = page.locator("input[type='file']")
-                                _all_count = _all_inputs.count()
-                                if _all_count > 0:
-                                    _all_inputs.nth(_all_count - 1).set_input_files(img_path)
-                                    _used_path = f"last page-wide input (of {_all_count})"
-                                else:
-                                    raise RuntimeError(
-                                        "no file input element found anywhere on page")
-                    print(f"{prefix}  ⤴ Sent {filename} ({_used_path}) — verifying chip", flush=True)
-                    uploaded = True
-                except Exception as e3:
-                    print(f"{prefix}  ❌ All upload attempts failed: {e3}", flush=True)
-                    raise
+                                raise RuntimeError(
+                                    "no file input element found anywhere on page")
+                print(f"{prefix}  ⤴ Sent {filename} ({_used_path}) — verifying chip", flush=True)
+                uploaded = True
+            except Exception as e3:
+                print(f"{prefix}  ❌ Upload failed: {e3}", flush=True)
+                raise
 
             time.sleep(2)
 

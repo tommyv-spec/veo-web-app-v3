@@ -1256,6 +1256,120 @@ psychologically-dead trap.
 
 ---
 
+## Worker file_chooser bypass (v608) — skip 8s of guaranteed-fail file picker calls
+
+**Source: 2026-05-06 owner observation** *"and now that we are changing the worker let's imprve also these warning or mechanism... it works as it is, just avoid these steps that are nto working."* The worker logs from a normal run showed:
+
+```
+[node_943] ⚠ File chooser attempt 1 failed: Timeout 4000ms
+[node_943] ⚠ File chooser attempt 2 (after reset) failed: Timeout 4000ms
+[node_943] ⤴ Sent chain_from_image_3.png (last page-wide input (of 1)) — verifying chip
+[node_943] ✓ Recovered via gallery
+```
+
+Both file_chooser attempts **always fail** in the current Patchright + Chrome combo. The path that actually works is the set_input_files fallback on the freshly-mounted `<input type="file">`. So the two file_chooser try-blocks waste ~8 seconds per uploaded reference image (4000ms timeout × 2 + dialog reset overhead) on every single upload — and that's the path executed for every chained image, persona ref, and product ref.
+
+### The mechanic — why file_chooser doesn't fire
+
+Playwright's `page.expect_file_chooser()` listens for Chrome's file picker dialog event. Chrome only emits that event when triggered by an `isTrusted=true` user gesture. Patchright synthesizes clicks via CDP, but Chrome flags those as `isTrusted=false` (defense-in-depth against automation), and the file picker is suppressed.
+
+What still works: clicking the upload tile mounts a fresh `<input type="file">` element in Flow's React tree (the React onClick handler runs regardless of isTrusted because it's a JS-level event). We can then call `set_input_files()` directly on that newly-mounted input. The file gets attached without ever opening the OS file picker.
+
+### v608 flow (what the worker now does)
+
+1. Snapshot the page-wide `input[type='file']` count BEFORE clicking.
+2. Click the upload button once. **No `expect_file_chooser` wrapper.** No retry. No 4-second timeout.
+3. Sleep 0.6-1.0s for Flow to mount the new input.
+4. Run the existing strategy chain (dialog-scoped → newly-mounted → portal → last-on-page) to find the input and call `set_input_files()`.
+5. Verify the chip attached. If not, fall back to gallery recovery (find the file in the gallery via its filename, click it).
+
+### Time savings
+
+| Path | Before (v607-) | After (v608) |
+|---|---|---|
+| Successful chip on first try (the common path) | ~10s (4s fc-attempt-1 timeout + reset + 4s fc-attempt-2 timeout + 2-5s set_files sleep + chip-verify) | ~2s (1s click+mount + chip-verify) |
+| Per ref image | 8s wasted on guaranteed timeouts | 0s wasted |
+| 9-image video × 2 refs/image | 144s wasted on file_chooser timeouts | 0s wasted |
+
+### Code locations
+
+- `code/image_worker.py` `upload_reference_images()` Step 2b — the two `expect_file_chooser` try-blocks were removed; replaced with a single `upload_btn.click()` + brief `time.sleep()`.
+- The set_input_files strategy chain (Strategies 1-4) was preserved verbatim. The `if not uploaded:` gate was removed since the strategy chain is now the sole upload path.
+
+### When file_chooser starts working again (forward compatibility)
+
+If a future Patchright update ships an isTrusted=true synthesis, or Flow stops requiring the OS file picker entirely, the v608 path is still correct: `set_input_files()` on the freshly-mounted input is functionally equivalent to `fc_info.value.set_files()`. No regression. We just stop racing against the picker that was never going to fire anyway.
+
+### What v608 does NOT change
+
+- The retry logic when the chip doesn't attach (gallery recovery path) — kept.
+- The `MAX_ATTACH_RETRIES` budget per image — kept.
+- The `flow_worker.py` `upload_frame()` function (used by clip uploads, not image refs) — kept, because that path's logs aren't reporting the same failure pattern. Apply v608 to flow_worker only if/when the same telemetry shows there.
+
+---
+
+## Worker character force-bind (v607) — every image gets the persona ref attached, mention or no mention
+
+**Source: 2026-05-06 owner observation** *"in this video in on eimage it didn't include teh caracheter image, is it because it's not in the video information, or it should be the worker doing it? poin is: we need the carachter image as reference prompted in flow."*
+
+The user observed that on at least one image, the character (persona) reference upload was missing from Flow's reference slots. The worker received only the chain ref (`chain_from_image_3.png`) and no character ref — so Flow generated an arbitrary face on the next take, breaking persona continuity.
+
+### Root cause
+
+The platform binds the persona-ingredient parent edge ONLY when the body prose **literally contains** the ingredient's name (e.g. "the main character"). The detection lives in `_extract_ingredient_names_in_prompt()` — a substring scanner over the body. If a v602/v603 prompt body drops the literal "the main character" phrase (e.g. a prop-focused close-up that just describes the bottle on the desk), no persona edge gets created at import time. Then when the worker pulls the job, `input_images` arrives without the persona slot, and Flow has no character reference to anchor the face to.
+
+This is a brittle binding pattern. Persona identity is a **video-level invariant** — every image where the character could appear must reference the persona upload, regardless of the per-image phrasing.
+
+### The fix — force-bind characters at import
+
+After the v581 product_image force-bind block in the per-image binding loop (`code/image_platform.py` `import_video()`), add a loop that scans `ingredient_types` for any `character`-typed ingredient and force-adds it to the `mentioned` list. The downstream slot-priority sort (`_slot_priority`) already gives `_is_persona_alias()` names slot 0, so the character always wins the lowest available reference slot in Flow.
+
+```python
+# v607: force-bind any character-typed ingredient even when the body
+# prose doesn't literally mention it. ...
+for _ing_name, _ing_type in ingredient_types.items():
+    if _ing_type == "character" and _ing_name in ingredient_nodes:
+        if _ing_name not in mentioned:
+            mentioned.append(_ing_name)
+            log.info(
+                f"[import] Image {image_index}: v607 force-bind "
+                f"character '{_ing_name}' (not mentioned in body)"
+            )
+```
+
+### Why force-bind characters (not products)
+
+- **Products**: bind only when the prompt explicitly references them. A close-up on the persona's face shouldn't have the saffron bottle attached. v581 already handles this with the explicit `product_image:` field.
+- **Characters**: bind on every image. Persona identity is the through-line of the video. Even if a particular shot is a tight close-up on a prop, Flow's slot manifest still benefits from having the persona reference present (Flow ignores unused slots; nothing breaks). The win: zero risk of an unbound face popping up mid-video.
+
+### What this does NOT do
+
+- Does NOT bypass the 3-parent slot cap. Character gets slot 0 (priority), product slot 1, chain slot 2 — same as before. v607 just guarantees the character edge always exists, not that it always gets a slot. In practice the cap rarely matters: most images have ≤3 binding candidates.
+- Does NOT force-add characters that aren't in the Ingredients table. The character must still be declared with `type: character` in the `## Ingredients` block of the video markdown. v607 is "force-bind a declared character"; it's not "invent a character."
+
+### Symptom you're looking at if v607 didn't fire
+
+Look at the worker log for an image that should have a character but doesn't:
+
+```
+[API:submit]    Inputs: 1 ref(s)              ← only 1 ref
+[node_X]   Image 1/1: chain_from_image_N.png  ← only the chain, no character
+```
+
+Compare with v607 active:
+
+```
+[API:submit]    Inputs: 2 ref(s)              ← 2 refs
+[node_X]   Image 1/1: variant_<persona_id>.png  ← persona attached
+[node_X]   Image 2/2: chain_from_image_N.png   ← chain also attached
+```
+
+### LLM-author counterpart (still recommended)
+
+Even with v607 force-binding the character at import, body prose should mention "the main character" verbatim somewhere in every image where the character is visible — the prose mention is what gives Flow's slot manifest a textual anchor for the slot. v607 ensures the slot is **bound**; the body prose ensures the slot is **used**. Both layers reinforce each other.
+
+---
+
 ## Product compositing / lighting integration (v606) — make the product melt into the scene
 
 **Source: 2026-05-06 owner observation** *"we need to improve the prompting according to nano bana prompting rules to make the product melt into the image and not look like it's photoshopped."* The first generated frame from the menopause-saffron HOOK had the Korella saffron bottle visibly photoshopped-in: oversized (~12-15 inches vs real ~5-inch supplement), self-lit (product-shot lighting on label that didn't match cool-clinical room ambient), floating-flat (no cast shadow on desk, hard edges), color-pop saturated, no foreground occlusion. The bottle read as a separate product render dropped onto the scene, not as an object IN the scene.
