@@ -1302,6 +1302,115 @@ violated rules in past LLM outputs:
        YES HOOK line adapts an Opening line from the niche wiki
            page's ## Hooks table (or [novel — testing] flagged)?
 
+[23] V614 CROSS-CORPUS STRUCTURAL SURVEY + MANDATORY ADAPTATION MAP —
+     before writing any dialogue line, survey ALL raw/decoded_*.md
+     and raw/dr_kim_*_decoded.md files (~24 in current corpus) to
+     extract structural patterns. Classify each into Pattern A/B/C/
+     D/E:
+       A — BEFORE/AFTER (4-6 lines): dr_kim trilogy, decoded_back_bump,
+           decoded_varicose_vein
+       B — RECIPE-LED (4-15 lines): saffron-trilogy, belly_burn_tea,
+           bladder_tea, icelandicwisdom, oldearl_visceralfat
+       C — DIAGNOSTIC/SHOW-PROBLEM-PIVOT (4-17 lines): corella_blood_
+           sugar, oldearl_tonsil, master_chen_three_things
+       D — CULTURAL-AUTHORITY TEMPLATE (10-line rigid): master_salvora
+           trilogy (banana/cabbage/salmon — IDENTICAL template)
+       E — PERSONAL-AUTHORITY (8-16 lines): rastajahmeil, master_chen,
+           decoded_meta_papaya_skin
+
+     Universal corpus rules extracted from all 24 winners:
+       - 12-25 words per line (conversational, not literary)
+       - 4-17 total lines (most winners 4-10)
+       - CANONICAL CTA in 12 of 24: "comment '<keyword>' and i'll
+         send you my full <protocol>. but follow me first so i can
+         reach you" — DON'T REINVENT, LIFT IT
+       - MECHANISM = 1 line, concrete benefit ("saffron relaxes blood
+         vessels — more blood means more girth"), NOT clever-reframe
+         academic-jargon ("blood-brain barrier resets hypothalamus")
+       - AUTHORITY IMPLICIT, NOT DECLARED: corpus voice is "I've seen
+         people go from X to Y", NOT corporate "I'm Dr. X and I help
+         one million Y"
+       - RECIPE STEPS are short comma-lists or single-action lines
+       - NO MELODRAMA: direct symptom-callouts, not theatrical reframes
+       - NEGATION-PIVOT signature (Pattern C): "the best thing for X
+         is not Y, not Z, definitely not W"
+
+     v614b — MANDATORY frontmatter fields:
+       corpus_pattern: <A/B/C/D/E or hybrid declaration>
+       adaptation_map:
+         scene_1: "<corpus-file> L<line> §<section-label>"
+         scene_2: "..."
+         ...
+         scene_N: "..."
+       (every scene mapped; novel scenes use "[novel — testing]"
+       with rationale)
+
+     v614c — MANDATORY per-scene [corpus: ...] annotation:
+       Every scene's action_note MUST begin with:
+         [corpus: <source-file> L<line> §<section>] <rest of action_note>
+       Annotation must match the adaptation_map entry for that scene.
+       Mismatch = REJECT.
+
+     v614d — MANDATORY corpus_compliance_audit in frontmatter:
+       corpus_compliance_audit:
+         - words_per_line: <range vs corpus 12-25>
+         - line_count: <count vs corpus 4-17>
+         - cta_template_canonical: yes/no
+         - mechanism_concrete_not_clever: yes/no
+         - authority_implicit: yes/no
+         - melodrama_removed: yes/no
+       If any field 'no' → explain WHY in comment OR rewrite to comply.
+
+     PRE-OUTPUT VALIDATION:
+       YES corpus_pattern: declared with at least one of A/B/C/D/E?
+       YES adaptation_map: declared, one entry per scene?
+       YES Every action_note opens with [corpus: ...] matching map?
+       YES corpus_compliance_audit: all 6 fields declared?
+       YES Words-per-line in 12-25 corpus norm?
+       YES CTA scene lifts canonical "comment '<keyword>' / send my
+           full / follow me first" template?
+       YES Mechanism scenes use concrete-benefit chain, NOT jargon-
+           academic reframe?
+       YES No corporate voice ("I'm Dr. X and I help one million Y")?
+
+[24] V615 ABSOLUTE BAN — NO EM-DASH (—) IN DIALOGUE LINES.
+
+     Owner directive (mandatory): "absolutely mandatory no — symbols
+     in any lines."
+
+     Scene "- **line:**" entries MUST contain ZERO em-dash (—)
+     characters. Em-dashes create awkward pauses in spoken delivery
+     that don't match natural speech. Use commas, periods, or
+     rephrase to flow naturally.
+
+     SCOPE — applies ONLY to scene "- **line:**" entries (the spoken
+     voiceover). Em-dashes are still allowed in:
+       - action_note prose (cinematic direction, not spoken)
+       - Image prompt body (visual direction, not spoken)
+       - Frontmatter / Sources / metadata
+       - corpus annotations like [corpus: file — section]
+
+     FORBIDDEN:
+       "- **line:** Saffron is the only ingredient — and the only
+        one — that resets your hormones."
+       "- **line:** This is what menopause does at 2 a.m. — soaked
+        sheets, racing heart, no sleep."
+
+     REQUIRED:
+       "- **line:** Saffron is the only ingredient that resets your
+        hormones."
+       "- **line:** This is what menopause does at 2 a.m. Soaked
+        sheets, racing heart, no sleep."
+
+     PRE-OUTPUT VALIDATION:
+       YES Zero — characters in any "- **line:**" entry?
+       YES Replaced with: comma, period, or rephrase?
+
+     Note: this OVERRIDES corpus-pattern preservation when the corpus
+     parent line contained em-dashes. The corpus is a DIALOGUE TONE
+     reference, not a punctuation mandate. Owner's spoken-delivery
+     preference takes precedence.
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

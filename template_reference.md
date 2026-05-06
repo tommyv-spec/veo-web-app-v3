@@ -1256,6 +1256,182 @@ psychologically-dead trap.
 
 ---
 
+## Em-dash absolute ban in dialogue lines (v615)
+
+**Source: 2026-05-06 owner directive (mandatory)** *"absolutely mandatory no — symbols in any lines."*
+
+Scene `- **line:**` entries MUST contain ZERO em-dash (`—`) characters. Em-dashes create awkward pauses in spoken delivery that don't match natural speech cadence. Use commas, periods, or rephrase to flow naturally.
+
+### Scope
+
+Applies ONLY to scene `- **line:**` entries (the spoken voiceover). Em-dashes are still allowed in:
+
+- `action_note` prose (cinematic direction, not spoken)
+- Image prompt bodies (visual direction, not spoken)
+- Frontmatter / `## Sources` / metadata
+- corpus annotations like `[corpus: file — section]`
+- This deep-dive document
+
+### Forms
+
+❌ FORBIDDEN:
+```
+- **line:** Saffron is the only ingredient — and the only one — that resets your hormones.
+- **line:** This is what menopause does at 2 a.m. — soaked sheets, racing heart, no sleep.
+- **line:** Now open one Korella saffron capsule and pour it in — this is where your hormones come back online.
+```
+
+✅ REQUIRED:
+```
+- **line:** Saffron is the only ingredient that resets your hormones.
+- **line:** This is what menopause does at 2 a.m. Soaked sheets, racing heart, no sleep.
+- **line:** Now open one Korella saffron capsule and pour it in. This is where your hormones come back online.
+```
+
+### Replacement strategies
+
+| Em-dash use | Replace with |
+|---|---|
+| Aside / parenthetical | Comma pair OR new sentence |
+| Trailing emphasis | Period + new sentence |
+| Restatement / appositive | Period + restatement OR drop the redundancy |
+| List intro | Colon OR period |
+| Pause for breath | Period (matches actual speech rhythm) |
+
+### Why v615 overrides corpus pattern preservation
+
+The corpus (`raw/decoded_*.md`) DOES contain em-dashes in many dialogue lines (e.g. *"saffron relaxes blood vessels — more blood means more girth"*). v615 OVERRIDES this. The corpus is a **dialogue tone reference**, not a punctuation mandate. The owner's spoken-delivery preference takes precedence: in voice synthesis (Veo TTS), em-dashes generate audible hesitations that read as TTS-artifact rather than natural speech.
+
+### Pre-output validation gate
+
+Before emitting any videos/*.md draft:
+
+- ✅ Zero `—` characters in any `- **line:**` entry?
+- ✅ Replacements use comma / period / rephrase (preserving meaning)?
+
+Mechanical check: grep `^- \*\*line:\*\*` for `—` should return zero matches.
+
+### What v615 does NOT change
+
+- action_notes, image prompt bodies, frontmatter — em-dashes allowed there.
+- The decoded artifacts in `raw/decoded_*.md` — those preserve verbatim spoken dialogue from source videos, em-dashes and all (the spoken delivery IS the corpus reference for downstream lifts).
+- v614 corpus-grounding — adaptation_map citations, [corpus: ...] annotations — em-dashes allowed in those (they're metadata, not spoken).
+
+---
+
+## Cross-corpus structural survey + mandatory per-scene adaptation map (v614) — every line must lift from a named corpus parent
+
+**Source: 2026-05-06 owner observation** *"also the script doesn0t make any sense... you have plenty of amazing examples and winning case... adapt and innovate those... not just the ones from korella saffron but all, to see how they structure the video and script."*
+
+v613 introduced corpus-grounding (cite ≥2 raw/decoded files; cell honesty NOTE; HOOK from niche hook table; per-line corpus annotation encouraged). v614 closes the remaining gap: **the LLM was still authoring without surveying the WHOLE corpus first**. Owner caught the test video drifting into melodrama ("Your husband sleeps through this — but watch what 2 a.m. does to her body") despite the corpus containing 24 winning videos with very different structural DNA.
+
+### The cross-corpus survey
+
+Before writing a single dialogue line, the LLM must read the dialogue lines of all 24 `raw/decoded_*.md` and `raw/dr_kim_*_decoded.md` files and classify each into one of 5 structural patterns. The survey takes ~30 seconds (1-line-per-file extraction) and changes everything downstream.
+
+| Pattern | Used by (corpus exemplars) | Structure | Line count |
+|---|---|---|---|
+| **A — BEFORE/AFTER transformation** | dr_kim_back_lump, dr_kim_belly_burn_male, dr_kim_hair_regrowth_male, decoded_back_bump_transformation, decoded_varicose_vein_transformation | L1 problem-now / L2 fixed-N-days-later (with no-surgery-no-gym disclaimer) / L3 [demographic-frequency-benefit] / L4 CTA | 4-6 |
+| **B — RECIPE-LED** | decoded_corella_saffron_1to1, decoded_saffron_male, decoded_saffron_vitality, decoded_belly_burn_tea, decoded_bladder_tea, decoded_icelandicwisdom_belly_fat, oldearl_visceralfat | HOOK (claim or symptom-callout) / RECIPE-steps (2-5 lines: warm water, lemon, ginger, honey, capsule) / MECHANISM-line (1 line, concrete benefit) / CTA | 4-15 |
+| **C — DIAGNOSTIC / SHOW-PROBLEM-PIVOT** | decoded_corella_saffron_blood_sugar, oldearl_tonsil_healer, decoded_varicose_vein, master_chen_three_things | Repeated-show-problem (3-5 lines) / NEGATION-PIVOT ("not X, not Y, definitely not Z") / mechanism / CTA | 4-17 |
+| **D — CULTURAL-AUTHORITY TEMPLATE** | master_salvora trilogy (banana/cabbage/salmon — IDENTICAL 10-line template, swap-INGREDIENT) | "if you think X is only for Y, you are mistaken... cut half... bring to boil... say goodbye to..." | 10 (rigid) |
+| **E — PERSONAL-AUTHORITY** | rastajahmeil_fat_melt, master_chen, decoded_meta_papaya_skin | Hook with prankster-lead ("don't drink this too often because your family will think...") / recipe / signature ("my name is X and i am on a mission...") / CTA | 8-16 |
+
+### Universal corpus rules (extracted from all 24)
+
+1. **12-25 words per line.** Conversational, not literary. Test-video melodrama lines like "Your husband sleeps through this — but watch what 2 a.m. does to her body" (14 words) are within range numerically but VIOLATE the corpus tone. Direct symptom-callouts win.
+2. **4-17 total lines.** Anything outside this range needs a structural rationale. Most winners are 4-10.
+3. **Canonical CTA template.** 12 of 24 corpus videos end verbatim or near-verbatim with: `"comment '<keyword>' and i'll send you my full <protocol>. but follow me first so i can reach you."` Don't reinvent. Lift it.
+4. **Mechanism = 1 line, concrete benefit.** Corpus example: *"saffron relaxes blood vessels — more blood means more girth, and within a week she'll feel the difference."* NOT *"saffron is the only ingredient that crosses the blood-brain barrier and resets the hypothalamus directly"* (jargon-academic — corpus never uses this register).
+5. **Authority is implicit, not declared.** Corpus voice: *"I've seen people go from constantly tired and drained to feeling lighter, clearer, actually energized — one capsule a day."* CORPORATE VOICE (FORBIDDEN): *"I'm Dr. X, and I help one million women..."*. Practitioner-voice trumps title-pumping.
+6. **Recipe steps are SHORT comma-lists or single-action lines.** Corpus example: *"warm water, half a lemon, raw ginger, raw honey, then open a saffron capsule."* NOT *"First — half a fresh lemon, squeezed into warm water."* (over-formatted, breaks the rhythm).
+7. **No melodrama.** Corpus uses direct demonstrative language. *"this is what menopause does at 2 a.m. — soaked sheets, racing heart, no sleep."* NOT *"Your husband sleeps through this — but watch what 2 a.m. does to her body."*
+8. **Negation-pivot is a Pattern C signature.** *"the best thing for X is not Y, not Z, definitely not W."* Strong dismissal of the wrong solutions before naming the right one.
+
+### The rule (v614)
+
+**v614a — Cross-corpus pre-survey (mandatory before writing)**:
+
+The LLM must, before authoring any dialogue, extract the full set of `- **line:**` entries from all `raw/decoded_*.md` and `raw/dr_kim_*_decoded.md` files (all 24 in the current corpus, more as the corpus grows). This produces a flat list of ~150 corpus dialogue lines. The LLM then classifies each into one of the 5 patterns (A/B/C/D/E) and identifies the 2-4 closest structural matches for the cell being authored.
+
+**v614b — Mandatory `corpus_pattern:` and `adaptation_map:` frontmatter fields**:
+
+Every videos/*.md must declare in its frontmatter:
+
+```yaml
+corpus_pattern: B (RECIPE-LED) + C (DIAGNOSTIC-PIVOT) hybrid — HOOK uses Pattern C; Scenes 3-6 use Pattern B; Scene 7 uses Pattern B mechanism-line; Scene 9 uses canonical CTA template
+adaptation_map:
+  scene_1: "decoded_corella_saffron_blood_sugar_v584.md L1-L4 §HOOK diagnostic-callout pattern + wiki/voiceover-scripts/menopause.md hook 1"
+  scene_2: "decoded_corella_saffron_blood_sugar_v584.md L5 §NEGATION-PIVOT (not X, not Y, definitely not Z)"
+  scene_3: "decoded_saffron_male_v577.md L2 + decoded_saffron_vitality_v577.md L2 §RECIPE-INTRO"
+  ...
+  scene_9: "decoded_corella_saffron_blood_sugar_v584.md L17 §CANONICAL-CTA"
+```
+
+Every scene maps to a SPECIFIC corpus line citation with the section label. No scene is allowed to be unmapped — if a scene is genuinely novel, map it as `"[novel — testing]"` with rationale.
+
+**v614c — Mandatory per-scene `[corpus: ...]` annotation (was encouraged in v613c, now mandatory)**:
+
+Every scene's `- **action_note:**` MUST begin with a `[corpus: <source-file> L<line> §<section>]` annotation matching the adaptation_map entry for that scene. Mismatch between adaptation_map and the scene's annotation = REJECT.
+
+**v614d — `corpus_compliance_audit:` self-check in frontmatter**:
+
+Each videos/*.md must declare a self-audit section in frontmatter that reports its compliance with the universal corpus rules:
+
+```yaml
+corpus_compliance_audit:
+  - words_per_line: <range observed in this script's lines, vs corpus norm 12-25>
+  - line_count: <count, vs corpus range 4-17>
+  - cta_template_canonical: yes/no (lifts the 12-of-24 canonical CTA?)
+  - mechanism_concrete_not_clever: yes/no (concrete-benefit chain, NOT jargon-academic reframe?)
+  - authority_implicit: yes/no (practitioner-voice, NOT "I'm Dr. X" title-pumping?)
+  - melodrama_removed: yes/no (direct symptom-callouts, NOT theatrical reframes?)
+```
+
+If any field is `no`, the script must explain WHY in a comment immediately below the audit, OR rewrite to comply.
+
+### Pre-output validation gate
+
+Before emitting any videos/*.md draft:
+
+- ✅ `corpus_pattern:` declared in frontmatter with at least one of A/B/C/D/E?
+- ✅ `adaptation_map:` declared with one entry per scene? Each entry cites a specific corpus file + line + section?
+- ✅ Every scene's action_note opens with `[corpus: ...]` matching the adaptation_map?
+- ✅ `corpus_compliance_audit:` declared with all 6 fields?
+- ✅ Words-per-line within 12-25 corpus norm?
+- ✅ CTA scene lifts the canonical "comment 'X' / send my full / follow me first" template?
+- ✅ Mechanism scenes use concrete-benefit chains, not jargon-academic reframes?
+
+If ANY ❌ → REWRITE before emitting.
+
+### Worked example — menopause-saffron HOOK before/after v614
+
+**Pre-v614 (melodramatic, no corpus parent declared)**:
+> Scene 1: "Your husband sleeps through this — but watch what 2 a.m. does to her body."
+
+This sounds plausible in isolation but doesn't match any corpus pattern. The closest corpus opener (decoded_corella_saffron_blood_sugar L1-L4) uses a 4-line REPEATED-SHOWING structure, not a clever-reframe-with-bystander. Test-audience would feel the dissonance even if they couldn't articulate why.
+
+**Post-v614 (corpus-grounded, Pattern C diagnostic-callout)**:
+> Scene 1: "This is what menopause does at 2 a.m. — soaked sheets, racing heart, no sleep."
+> action_note: `[corpus: decoded_corella_saffron_blood_sugar_v584.md L1-L4 §HOOK diagnostic-callout pattern + wiki/voiceover-scripts/menopause.md hook 1 night-sweats opener] ...`
+
+Same scene composition (HOOK with main character + patient diagnostic). But now the dialogue tone is corpus-aligned (direct demonstrative, no melodrama, no bystander framing) AND the line is auditable — a reviewer can verify the corpus parent and check fidelity.
+
+### Why v614 vs v613 alone
+
+v613 said "cite ≥2 raw/decoded files in Sources" + "per-line corpus annotation encouraged." That was insufficient pressure: under attention load (long prompt body, 4-7 sentence v603 prose, six v606 directives, v610 gender scan, v613 product-binding parity), the LLM dropped corpus-faithfulness and reverted to plausible-but-corporate dialogue. v614 mandates the cross-corpus survey BEFORE writing AND mandates per-scene annotation AFTER writing — closes the loop on both ends.
+
+The cross-corpus survey is the bigger fix. Pre-v614, the LLM would read the niche voiceover-script wiki page (4-5 hooks) and call it done. v614 forces the LLM to read all 24 decoded files' dialogue, see the structural diversity (Pattern A through E), and CHOOSE which pattern matches the cell — making the choice explicit forces corpus-thinking.
+
+### What v614 does NOT change
+
+- v581 binding mechanics, v599 product-presence matrix, v606 compositing, v610 gender-neutrality, v613 product-mention parity — all preserved.
+- Niche voiceover-script wiki pages — still cited via v613b. v614 adds the cross-corpus survey on TOP.
+- Banana 2 / Veo prompt mechanics — purely authoring discipline.
+- Decode-side artifacts — v614 applies to authoring (lift / create), not decode (decode lifts dialogue verbatim from the source video transcription, no adaptation needed).
+
+---
+
 ## Product-mention-binding parity + corpus-grounding (v613) — script must come from corpus, every product reference must be bound
 
 **Source: 2026-05-06 owner observation** *"we have to review how we compose a new video... the script doesn't make any sense... you have plenty of examples in raw and clippings folders, base and adapt the script on those ones. sometime when teh product is mentione is not referenced as image. review those rules and make them stronger and reflect it also in the wiki. this is bery important."*

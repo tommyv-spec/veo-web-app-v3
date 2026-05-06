@@ -935,6 +935,60 @@ violated rules in past LLM outputs:
        YES Niche voiceover-script wiki page cited?
        YES Cell honesty NOTE present?
 
+[23] V614 CROSS-CORPUS STRUCTURAL SURVEY + MANDATORY ADAPTATION MAP —
+     before lifting any dialogue, survey ALL raw/decoded_*.md and
+     raw/dr_kim_*_decoded.md files (~24 in current corpus). Classify
+     each into Pattern A (BEFORE/AFTER) / B (RECIPE-LED) / C
+     (DIAGNOSTIC-PIVOT) / D (CULTURAL-AUTHORITY 10-line rigid) /
+     E (PERSONAL-AUTHORITY).
+
+     Universal corpus rules: 12-25 words/line; 4-17 lines total;
+     canonical CTA from 12-of-24 ("comment '<keyword>' / send my
+     full / follow me first"); mechanism = 1 concrete-benefit line,
+     not jargon-academic reframe; authority implicit ("I've seen
+     people go from X to Y"), not corporate ("I'm Dr. X..."); recipe
+     steps short comma-lists; no melodrama; negation-pivot signature.
+
+     LIFT-SPECIFIC: the decoded source dictates which Pattern this
+     lift adopts. If decoded source is Pattern B (saffron-trilogy),
+     the lift stays Pattern B — don't refactor to A or C. But the
+     lift MAY tighten dialogue to corpus norms when the decoded
+     source has drifted (long-form decoded artifacts often have
+     narrator commentary that should be cut on lift).
+
+     v614b/c/d MANDATORY frontmatter fields (in lifted videos/*.md):
+       corpus_pattern: <pattern from decoded source>
+       adaptation_map: <one entry per scene mapping to decoded
+                        source line + cross-validating corpus file>
+       corpus_compliance_audit: <6-field self-audit>
+
+     Per-scene [corpus: ...] annotation MANDATORY in every action_note.
+
+     PRE-OUTPUT VALIDATION:
+       YES corpus_pattern declared (matching decoded source)?
+       YES adaptation_map covers every scene?
+       YES Every action_note opens with [corpus: ...] matching map?
+       YES corpus_compliance_audit declared?
+       YES No corporate voice / no melodrama / canonical CTA?
+
+[24] V615 ABSOLUTE BAN — NO EM-DASH (—) IN DIALOGUE LINES.
+
+     Owner directive (mandatory): scene "- **line:**" entries MUST
+     contain ZERO em-dash (—) characters. Em-dashes create awkward
+     pauses in spoken delivery. Use commas, periods, or rephrase.
+
+     LIFT-SPECIFIC: when porting a decoded source whose dialogue
+     contained em-dashes, REWRITE to comply. The decoded source is
+     a tone/structural reference, NOT a license to copy punctuation
+     into the lifted videos/*.md.
+
+     SCOPE applies ONLY to "- **line:**" entries. Em-dashes still
+     allowed in action_note prose, image prompt bodies, frontmatter,
+     metadata, corpus annotations.
+
+     PRE-OUTPUT VALIDATION:
+       YES Zero — characters in any "- **line:**" entry?
+
 If any item above fails, FIX IT BEFORE OUTPUT. The operator will
 re-prompt you to fix violations otherwise. Self-correction here saves
 a round-trip.

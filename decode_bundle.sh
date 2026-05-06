@@ -492,6 +492,24 @@ V613 PRODUCT-MENTION-BINDING PARITY (decode-side):
 
   If any wrong, FIX before emitting.
 
+V614 / V615 DECODE-SIDE NOTES:
+
+  Decode-side captures verbatim spoken dialogue from the source video
+  (whisper transcription is authoritative). Decoders do NOT author
+  dialogue, so v614 (cross-corpus survey + adaptation_map) and v615
+  (em-dash ban) DO NOT apply to decoded "- **line:**" entries —
+  preserve what the speaker actually said, em-dashes and all (the
+  dialogue tone IS the corpus reference for downstream lifts).
+
+  However, decoded artifacts MUST still:
+    - Classify the source video into one of the 5 corpus patterns
+      (A/B/C/D/E) and declare in frontmatter as
+      `corpus_pattern: <A/B/C/D/E>`. This makes the decoded artifact
+      catalog-ready for v614 surveys at lift time.
+    - Stay tight to the source's dialogue — do not insert narrator
+      commentary as separate "- **line:**" entries. If the source
+      pauses or has filler, omit it; downstream lifts can re-tighten.
+
 Output the decoded markdown per code/template_new_format.md skeleton +
 strict v593 parser format. Include ## Sources (manifest / transcript /
 shots / motion / source MP4 paths) and ## Used in (placeholder).
