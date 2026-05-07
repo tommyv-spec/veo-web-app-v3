@@ -2150,35 +2150,43 @@ def apply_vad(
     except Exception as _e:
         print(f"[v633] diagnostic failed (non-fatal): {_e}", flush=True)
 
-    # v634 — dump actual frame PTS at seg boundaries in pre-speed concat.
-    # User reports ghost frames look like "from end of clip" — NOT
-    # post-word residual at trim end. Need to know what frame actually
-    # lands at each seg boundary in concat output. Compare against
-    # expected (cumulative seg duration). If a boundary frame has
-    # source content from outside its trim range, the trim filter is
-    # leaking despite correct frame counts.
+    # v634b — dump actual frame PTS sequence at seg boundaries in pre-speed
+    # concat. v634a's -read_intervals returned empty; switch to one bulk
+    # ffprobe call returning all frame PTS, then filter Python-side around
+    # each boundary. Also use modern field name `pts_time` (pkt_pts_time
+    # is deprecated in newer ffprobe).
     try:
-        ffprobe_bin = FFMPEG_BIN.replace("ffmpeg", "ffprobe")
-        cum = 0.0
-        boundary_pts = []
-        for i, (s, e) in enumerate(merged[:-1]):
-            cum += (e - s)
-            boundary_pts.append((i + 1, cum))  # boundary AFTER seg i+1
-        for seg_num, b_pts in boundary_pts:
-            # Dump frames in window [b_pts - 4/24, b_pts + 4/24] = ~8 frames around boundary
-            win_start = max(0, b_pts - 4.0/24)
-            win_end = b_pts + 4.0/24
-            pf_cmd = [ffprobe_bin, "-v", "error",
-                      "-select_streams", "v:0",
-                      "-show_entries", "frame=pkt_pts_time",
-                      "-read_intervals", f"{win_start:.4f}%{win_end:.4f}",
-                      "-of", "csv=p=0", str(out)]
-            r = run(pf_cmd)
-            ptses = [x.strip() for x in (r[1] or "").splitlines() if x.strip()]
-            print(f"[v634] boundary after seg{seg_num} expected at PTS≈{b_pts:.4f}s, "
-                  f"frames in window: {ptses}", flush=True)
+        all_pts_cmd = [FFPROBE_BIN, "-v", "error",
+                       "-select_streams", "v:0",
+                       "-show_entries", "frame=pts_time",
+                       "-of", "csv=p=0",
+                       str(out)]
+        import subprocess as _sp
+        r = _sp.run(all_pts_cmd, capture_output=True, text=True, timeout=60)
+        raw_lines = [x.strip() for x in r.stdout.splitlines() if x.strip()]
+        all_pts = []
+        for x in raw_lines:
+            try:
+                all_pts.append(float(x))
+            except ValueError:
+                pass
+        print(f"[v634b] total v-frames in concat: {len(all_pts)}, "
+              f"stderr-tail: {(r.stderr or '')[-200:]}", flush=True)
+        if all_pts:
+            print(f"[v634b] first 5: {all_pts[:5]} | last 5: {all_pts[-5:]}", flush=True)
+            # compute boundary PTSes (cumulative seg durations)
+            cum = 0.0
+            boundary_pts = []
+            for i, (s, e) in enumerate(merged[:-1]):
+                cum += (e - s)
+                boundary_pts.append((i + 1, cum))
+            for seg_num, b_pts in boundary_pts:
+                nearby = [p for p in all_pts if abs(p - b_pts) < 0.21]
+                print(f"[v634b] boundary after seg{seg_num} expected≈{b_pts:.4f}s "
+                      f"| got {len(nearby)} frames: {[f'{p:.4f}' for p in nearby]}",
+                      flush=True)
     except Exception as _e:
-        print(f"[v634] boundary PTS dump failed (non-fatal): {_e}", flush=True)
+        print(f"[v634b] boundary PTS dump failed (non-fatal): {_e}", flush=True)
 
     return {
         "original_duration": original_duration,
