@@ -57,7 +57,6 @@ BUNDLE_FILES=(
     "wiki/mechanics/cta-patterns.md"
     "wiki/mechanics/scene-structure.md"
     "wiki/strategy/risky-vocabulary.md"
-    "wiki/strategy/meta-policy-2026.md"
     "wiki/strategy/viral-recreation-method.md"
     "code/template_reference.md"
     "code/template_new_format.md"
