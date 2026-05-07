@@ -3087,6 +3087,27 @@ class HumanPacer:
                     time.sleep(2)
                     continue
                 _now = datetime.now()
+                # v663 — pre-compute clip → data-index mapping by submission
+                # order for THIS run. Pre-v663 the matcher used a 20-char
+                # dialogue prefix to find each clip's tile in Flow. When
+                # multiple clips submit to the same project, Flow's tile
+                # innerText contains shared metadata + the prompt, so the
+                # 20-char prefix often matched MULTIPLE tiles. JS returned
+                # the first match in DOM order → wrong tile (usually the
+                # OLDER clip's tile) → URL of an already-completed previous
+                # clip got re-queued for the newer clip.
+                #
+                # User report: account2 submitted clips 2 and 4 to one Flow
+                # project. Both ended up downloading the same video file
+                # (clip 2's). Same pattern with account1 / clips 1 and 3.
+                #
+                # Fix: data-index 0 = MOST RECENTLY submitted clip (per
+                # comment at line ~3183). Sort the in-flight clips by
+                # submission time DESCENDING; the first one is data-index 0,
+                # next is data-index 1, etc. Lookup the tile by data-index
+                # directly — no text matching, no false positives.
+                _ts_sorted_desc = sorted(clip_submit_times.items(), key=lambda kv: kv[1], reverse=True)
+                _ci_to_data_index = {ci: idx for idx, (ci, _) in enumerate(_ts_sorted_desc)}
                 for _ci, _st in list(clip_submit_times.items()):
                     if _ci in _dl_checked:
                         continue
@@ -3095,20 +3116,21 @@ class HumanPacer:
                         if not _clip_obj:
                             _dl_checked.add(_ci)
                             continue
-                        _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
+                        _data_idx = _ci_to_data_index.get(_ci)
+                        if _data_idx is None:
+                            _dl_checked.add(_ci)
+                            continue
                         try:
                             _urls = page.evaluate(f"""() => {{
-                                for (const c of document.querySelectorAll('[data-index]')) {{
-                                    if ((c.innerText||'').includes({repr(_dlg)})) {{
-                                        const urls = [];
-                                        for (const v of c.querySelectorAll('video')) {{
-                                            const u = v.src || (v.querySelector('source')||{{}}).src || '';
-                                            if (u && !u.startsWith('blob:')) urls.push(u);
-                                        }}
-                                        if (urls.length) return urls;
-                                        if (c.querySelectorAll('video').length > 0) return ['__blob__'];
-                                    }}
+                                const c = document.querySelector('[data-index="{_data_idx}"]');
+                                if (!c) return [];
+                                const urls = [];
+                                for (const v of c.querySelectorAll('video')) {{
+                                    const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                    if (u && !u.startsWith('blob:')) urls.push(u);
                                 }}
+                                if (urls.length) return urls;
+                                if (c.querySelectorAll('video').length > 0) return ['__blob__'];
                                 return [];
                             }}""")
                             if _urls and _urls != ['__blob__']:
@@ -3117,27 +3139,23 @@ class HumanPacer:
                                 print(f"[Flow] ✓ @{(_now-_st).total_seconds():.0f}s: clip {_ci+1} ready → HTTP worker", flush=True)
                                 _dl_checked.add(_ci)  # shared with http_enqueued_clips
                             elif not _urls or _urls == ['__blob__']:
-                                # No URL yet — check if the tile failed
+                                # No URL yet — check if the tile failed.
+                                # v663: same data-index lookup as URL extraction
+                                # (was: dialogue-substring match on all tiles).
                                 try:
                                     _fail_info = page.evaluate(f"""() => {{
-                                        for (const c of document.querySelectorAll('[data-index]')) {{
-                                            if ((c.innerText||'').includes({repr(_dlg)})) {{
-                                                const icons = Array.from(c.querySelectorAll('i')).map(i => i.textContent.trim());
-                                                const hasRefresh = icons.includes('refresh');
-                                                const hasFailed = c.innerText.includes('Failed');
-                                                const hasUndo = icons.includes('undo');
-                                                const hasDelete = icons.includes('delete_forever');
-                                                const hasVideocam = icons.includes('videocam');
-                                                const hasVideo = c.querySelectorAll('video').length > 0;
-                                                // Hard failure: has refresh button (Flow explicitly killed it)
-                                                if (hasRefresh && !hasVideo) return 'hard';
-                                                // Also hard: "Failed" text with no generating indicator
-                                                if (hasFailed && !hasVideocam && !hasVideo && !/\d+%/.test(c.textContent||'')) return 'hard';
-                                                // Soft failure: undo+delete but no refresh/videocam (transient)
-                                                if (hasUndo && hasDelete && !hasRefresh && !hasVideocam && !hasVideo) return 'soft';
-                                                return null;
-                                            }}
-                                        }}
+                                        const c = document.querySelector('[data-index="{_data_idx}"]');
+                                        if (!c) return null;
+                                        const icons = Array.from(c.querySelectorAll('i')).map(i => i.textContent.trim());
+                                        const hasRefresh = icons.includes('refresh');
+                                        const hasFailed = c.innerText.includes('Failed');
+                                        const hasUndo = icons.includes('undo');
+                                        const hasDelete = icons.includes('delete_forever');
+                                        const hasVideocam = icons.includes('videocam');
+                                        const hasVideo = c.querySelectorAll('video').length > 0;
+                                        if (hasRefresh && !hasVideo) return 'hard';
+                                        if (hasFailed && !hasVideocam && !hasVideo && !/\d+%/.test(c.textContent||'')) return 'hard';
+                                        if (hasUndo && hasDelete && !hasRefresh && !hasVideocam && !hasVideo) return 'soft';
                                         return null;
                                     }}""")
                                     if _fail_info == 'hard':
@@ -3147,17 +3165,16 @@ class HumanPacer:
                                         delayed_failures.append(_ci)
                                         _dl_checked.add(_ci)
                                     elif _fail_info == 'soft':
-                                        # Transient failure — retry in-place via Reuse Prompt
+                                        # Transient failure — retry in-place via Reuse Prompt.
+                                        # v663: data-index lookup (was: dialogue match).
                                         print(f"[{self.account_name}] ⚠ Between-clip: clip {_ci+1} tile failed — clicking Reuse Prompt to retry in-place...", flush=True)
                                         _reused = page.evaluate(f"""() => {{
-                                            for (const c of document.querySelectorAll('[data-index]')) {{
-                                                if ((c.innerText||'').includes({repr(_dlg)})) {{
-                                                    const btn = Array.from(c.querySelectorAll('button')).find(b =>
-                                                        Array.from(b.querySelectorAll('i')).some(i => i.textContent.trim() === 'undo')
-                                                    );
-                                                    if (btn) {{ btn.click(); return true; }}
-                                                }}
-                                            }}
+                                            const c = document.querySelector('[data-index="{_data_idx}"]');
+                                            if (!c) return false;
+                                            const btn = Array.from(c.querySelectorAll('button')).find(b =>
+                                                Array.from(b.querySelectorAll('i')).some(i => i.textContent.trim() === 'undo')
+                                            );
+                                            if (btn) {{ btn.click(); return true; }}
                                             return false;
                                         }}""")
                                         if _reused:
