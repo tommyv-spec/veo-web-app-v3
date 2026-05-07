@@ -1849,6 +1849,131 @@ Every element is traceable to a documented source:
 
 ---
 
+## Dialogue best-practices supplement (v643) — web-grounded
+
+**Source: 2026-05-07 owner directive** *"search online the best practice for the dialogue and prompt structure for Veo 3.1 and update the rules and docs."* Verified across five independent sources: Google Vertex AI docs, Google DeepMind Veo prompt guide, GlobalGPT Veo 3.1 dialogue guide (2026-02-11), veo3ai.io 2026 native-audio guide, skywork.ai lip-sync prompting guide. Convergent rules below.
+
+### v643.1 — Camera angle directly affects lip-sync quality
+
+| Shot type | Lip-sync quality | When to use |
+|---|---|---|
+| Close-up / Medium Close-Up | **High** | Default for any clip with on-camera dialogue |
+| Head-and-Shoulders | **High** | Standard talking-head — preferred for our content |
+| Medium shot (waist up) | Medium | OK for two-person dialogue framing |
+| Wide / establishing | **Low — avoid for dialogue** | Mouth too small for Veo to animate accurately |
+| Profile (side view) | Medium | Side view is harder; only when scene demands |
+
+**Project rule:** every scene with on-camera dialogue (`speaker: on-camera`, default) MUST be framed Close-Up or Head-and-Shoulders in the cinematography line. Wide shots are reserved for HOOK / ENVIRONMENT / B-roll beats with `speaker: voiceover`.
+
+### v643.2 — Disambiguate the speaker when multiple humans are in frame
+
+When the scene has ≥2 visible humans (persona + bystander, persona + customer, etc.), the dialogue cue MUST start with a specific-descriptor identification, not a generic pronoun. Veo otherwise routes the audio to the wrong character's mouth.
+
+| ❌ Wrong (ambiguous) | ✅ Right (disambiguated) |
+|---|---|
+| `She says in a calm voice, "this is the moment"` | `The main character in the white coat says in a calm voice, "this is the moment"` |
+| `He says in a weary voice, "..."` | `The seasoned detective says in a weary voice, "..."` |
+
+For solo on-camera scenes (one human visible), `She says…` / `He says…` / `The main character says…` is fine.
+
+### v643.3 — Multilingual dialogue handling
+
+If the persona's language is non-English, write the spoken text in the target language **inside the quotes**. Veo handles accent + lip-sync automatically. Do NOT append `(Italian)` / `(Spanish)` / etc. as a parenthetical after the quoted line.
+
+```
+✅ She says in a warm voice, "ciao a tutti, oggi parliamo di salute"
+❌ She says in a warm voice (Italian): "ciao a tutti..."
+❌ She says in a warm voice, "ciao a tutti..." (Italian)
+```
+
+The `(English) (English):` typo observed in pre-v642 outputs (asian-elder file) is forbidden. Default-language scenes get NO language tag at all.
+
+### v643.4 — Multi-speaker scenes — prefer one speaker per clip
+
+Veo 3.1 can theoretically handle multi-speaker dialogue, but third-party testing (Replicate 2025, skywork.ai, veo3ai) confirms tight lip-sync degrades when two speakers appear in one ≤8s clip. Project rule:
+
+- **One speaker per clip**: each `- **line:**` is its own scene with its own image. The other character (if visible) keeps lips closed (`The bystander stays silent with closed lips` in the action_note).
+- **Conversation = chain of clips**: speaker A's line in clip N, speaker B's reply in clip N+1, with continuity provided by `clip_mode: continue` and a shared setting reference image.
+- Multi-speaker single-clip is allowed only when both speakers are off-screen voiceovers (no lip-sync target) — uncommon in this project.
+
+### v643.5 — Audio block ordering inside the Veo prompt body
+
+Veo parses the audio elements in the order they appear in the prompt. Project canonical order (matches all five sourced guides):
+
+```
+[Cinematography line]
+
+[Action narrative — three motion beats]
+
+She says in a [voice qualifier] voice, "[exact dialogue]".    ← DIALOGUE first
+
+(SFX line, when scene-specific — e.g. "SFX: tongue-depressor tap on heel skin, twice, mid-clip.")    ← SFX second
+
+Ambient: [setting tone + low-priority background sounds].    ← AMBIENT last
+(no subtitles, no captions)
+```
+
+Reasoning: Veo gives priority to whatever audio element is mentioned first. Dialogue placed before SFX/Ambient stays clean and audible; dialogue buried after a wall of ambient text gets buried in the mix. The "no subtitles, no captions" line stays at the end of the body block.
+
+### v643.6 — Negative-audio additions for clean dialogue takes
+
+The canonical 12-element negative prompt block (still mandatory, unchanged from v642 base) handles visual artifacts. Append audio-side negatives **only when the scene's dialogue MUST be the dominant audio** (i.e. all our talking-head Korella/Saffron/etc. videos):
+
+```
+no background music, no overlapping speakers, no extra dialogue, no fake applause, no robotic narration, no cartoon sound effects
+```
+
+Add as one comma-separated chunk at the end of the canonical 12-element negative block. Do NOT add audio negatives to scenes where music/ambience IS desirable (rare in this project but possible — wedding montage, action montage, etc.).
+
+### v643.7 — The five common mistakes that break native-audio Veo clips
+
+Per veo3ai.io 2026 audio guide, ranked by impact:
+
+1. **Too much audio in too short a clip.** A 5-8s window can NOT hold dialogue + music + SFX + ambient + transition sting. Pick one primary audio focus per clip; everything else stays subtle.
+2. **Not specifying who speaks.** Veo guesses, often wrong. See v643.2.
+3. **Long lines.** v577 already enforces ~21-word per-clip budget at 158 wpm; lines that push past 23 words risk lip-stop or audio cut-off mid-sentence.
+4. **Audio that doesn't match visible action.** If the action_note shows the persona pouring liquid, an SFX line about "phone ringing in background" creates dissonance. SFX must be tied to a visible action in the scene.
+5. **Forgetting silence.** Some payoff/CTA clips work better with very low ambient and zero music. Don't pad every clip with sound.
+
+### v643.8 — Per-scene review checklist (pre-output gate, supplements v642)
+
+Before emitting any `videos/*.md` Veo Final Prompt, run the v642 7-check gate AND these v643 additions:
+
+- ✅ Cinematography line specifies Close-Up / Medium Close-Up / Head-and-Shoulders for any on-camera dialogue scene
+- ✅ When ≥2 humans in frame, dialogue cue starts with a specific-descriptor identification (v643.2)
+- ✅ Non-English text is written in the target language INSIDE the quotes (v643.3) — no dangling language tags
+- ✅ Each `- **line:**` is its own scene (multi-speaker conversations are CHAINED across scenes, not packed in one) (v643.4)
+- ✅ Audio order in body: Dialogue → optional SFX → Ambient → "(no subtitles, no captions)"
+- ✅ For talking-head scenes: audio negatives appended (`no background music, no overlapping speakers, no extra dialogue`) (v643.6)
+- ✅ Each scene has ONE primary audio focus, not five competing layers (v643.7.1)
+- ✅ Word count of spoken line ≤21 (already enforced by v577) — confirms no lip-stop risk (v643.7.3)
+
+### v643.9 — Sources verified
+
+Every rule above traces to ≥2 of these sources:
+
+- **Google Vertex AI Veo prompt guide** — `Clippings/Veo on Vertex AI video generation prompt guide.md` (official Google docs)
+- **Google DeepMind Veo prompt guide** — https://deepmind.google/models/veo/prompt-guide/ (official Google research docs)
+- **Google Cloud Ultimate Prompting Guide for Veo 3.1** — `Clippings/Ultimate prompting guide for Veo 3.1.md` (official Google blog 2025-11)
+- **GlobalGPT Veo 3.1 dialogue guide** — https://www.glbgpt.com/hub/how-to-make-characters-speak-in-veo-3-1-the-ultimate-guide-to-dialogue-audio-lip-sync/ (community 2026-02-11, references Replicate + Vertex)
+- **veo3ai.io native-audio guide** — https://www.veo3ai.io/blog/veo-3-native-audio-prompt-guide-2026 (community 2026-Q1)
+- **skywork.ai lip-sync prompting** — https://skywork.ai/blog/how-to-prompt-lip-synced-dialogue-google-veo-3/ (community 2025-10, lip-sync verification methodology)
+- **Project wiki:** `wiki/generation/veo-prompting.md`, `wiki/generation/kaveno-veo-bridge.md` (already aligned)
+
+Convergence ≥2 sources for each rule prevents single-source over-fitting.
+
+### What v643 does NOT change (preserves v642 + earlier scope)
+
+- Dialogue cue syntax stays `She says in a [qualifier] voice, "[line]"` (v642)
+- Voice qualifier vocabulary table (v642) unchanged
+- Voiceover variant `A voiceover with [quality] speaks in a [tone] tone, "[line]"` (v642) unchanged
+- Action_note prose stays scene-dependent (v540)
+- Em-dash ban inside quoted line (v615) still applies
+- Word-count budget per line ≤21 (v577) still applies
+- 12-element canonical negative prompt block stays the visual baseline; audio negatives are an APPEND when scene-appropriate
+
+---
+
 ## Em-dash absolute ban in dialogue lines (v615)
 
 **Source: 2026-05-06 owner directive (mandatory)** *"absolutely mandatory no — symbols in any lines."*
