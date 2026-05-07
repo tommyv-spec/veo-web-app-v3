@@ -13482,6 +13482,20 @@ Example: A realistic vertical video of a professional presenter speaking directl
             return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
 
+        // v649 — find which sidebar group key a node belongs to. Used by
+        // the "← Back to job" button on the node detail header. Walks
+        // imgState.groupsByKey (already populated by the sidebar render).
+        // Returns null when the node isn't grouped (e.g. orphan upload
+        // before refresh).
+        function imgFindGroupKeyForNode(nodeId) {
+            const gbk = imgState.groupsByKey || {};
+            for (const k of Object.keys(gbk)) {
+                const ns = gbk[k] || [];
+                if (ns.some(n => n.id === nodeId)) return k;
+            }
+            return null;
+        }
+
         // v645 — batch overview modal. Opens from the node-detail "📋 Batch
         // overview" button. Fetches /api/images/batches/{id}/overview which
         // returns the raw source markdown PLUS a parsed breakdown
@@ -14810,8 +14824,19 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // by an oversized name or prompt.
             const deleteBtnTop = `<button class="btn btn-secondary" onclick="imgDeleteNode(${node.id})" style="color:var(--error);flex-shrink:0;white-space:nowrap;" title="Delete this node">🗑 Delete</button>`;
 
+            // v649 — top-left "Back to job" button so the user can jump
+            // from any node detail to the job overview (where the
+            // 📋 Batch overview button lives, per v648). Resolves the
+            // group key by scanning imgState.groupsByKey for this node.
+            // Hidden when the node isn't grouped (orphan / pre-render).
+            const _jobKeyForBack = imgFindGroupKeyForNode(node.id);
+            const backToJobBtn = _jobKeyForBack
+                ? `<button class="btn btn-secondary" onclick="imgSelectJob('${_jobKeyForBack.replace(/"/g, '&quot;')}')" style="flex-shrink:0;white-space:nowrap;" title="Back to job overview (batch markdown, scenes, prompts)">← Back to job</button>`
+                : '';
+
             area.innerHTML = `
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;position:sticky;top:0;background:var(--bg-surface);padding:8px 0;z-index:10;border-bottom:1px solid var(--border-color);">
+                    ${backToJobBtn}
                     <h2 title="${nameTitleSafe}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;">${nameSafe}${titleSuffix}</h2>
                     ${deleteBtnTop}
                 </div>
