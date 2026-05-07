@@ -597,23 +597,39 @@ def detect_speech_segments_whisper(
                             tail_cap = min(u_start + TAIL_OVERLAP, u_end - 0.05)
                             end = max(w['end'], min(end, tail_cap))
 
-                # v546 — clip boundary is a soft hint, not a hard wall.
-                # Only clamp padding that goes BEYOND a clip's range
-                # WHEN the word itself is fully inside that clip. If
-                # the word straddles or precedes the boundary (v544
-                # attribution case), preserve the word's real audio.
+                # v635 — HARD-CLAMP to clip physical boundaries (replaces
+                # v546's soft-clamp). User reported a "ghost frame from end
+                # of prior clip" at every seg boundary where the AI-rendered
+                # audio bleeds across the physical clip cut.
+                #
+                # Concrete repro from user log: clip 8 physical range is
+                # 54.1-61.8s but its first matched word "this" starts at
+                # 53.90s (inside clip 7's physical window 46.4-54.1).
+                # v546 saw `w['start']=53.90 < cs=54.1` and SKIPPED the
+                # clamp, keeping seg8 trim start at 53.958. That trim
+                # range pulled 142ms (~3.4 frames @ 24fps) of CLIP 7's
+                # video into seg8's beginning. User sees those 3-4 frames
+                # as "ghost from end of clip 7" — because they literally
+                # are clip 7's last visual frames.
+                #
+                # Same issue affected seg10 (starts 69.542 vs clip 10 cs
+                # 69.6 → 58ms / 1.4 frames of clip 9 leak).
+                #
+                # Tradeoff: when audio bleeds across a clip boundary
+                # (AI-generation artifact), the bleeding portion is now
+                # cut. e.g. "this" word audio at 53.90-54.62 → trim starts
+                # at 54.1 → ~200ms of word's leading audio dropped. Word
+                # may sound clipped. Acceptable because:
+                #   (a) visual artifact was unacceptable to user
+                #   (b) AI clips SHOULDN'T bleed across boundaries; if
+                #       they do, that's an upstream gen issue
+                #   (c) Whisper word.start often overshoots the actual
+                #       phoneme start by 50-150ms anyway, so the audible
+                #       loss is smaller than the timestamp suggests.
                 if clip_idx is not None:
                     cs, ce = clip_boundaries[clip_idx]
-                    # Only clamp start to cs if the word starts AFTER cs.
-                    # When the word starts BEFORE cs (a v544 first-word-
-                    # pre-tolerance attribution), keep the original
-                    # padded start — that audio belongs to this clip
-                    # acoustically even though it's pre-boundary.
-                    if w['start'] >= cs:
-                        start = max(start, cs)
-                    # Symmetric end clamp: only if word ends BEFORE ce.
-                    if w['end'] <= ce:
-                        end = min(end, ce)
+                    start = max(start, cs)
+                    end = min(end, ce)
 
                 words_ts.append((start, end))
 
