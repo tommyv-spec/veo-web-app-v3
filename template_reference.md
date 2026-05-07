@@ -947,6 +947,35 @@ Pre-v594 decoded artifacts (1:1 shot-to-image) are valid as historical record. N
 
 ---
 
+## Per-image timestamp + delta metadata (v667) — decode-side first
+
+**Source: 2026-05-08 owner directive** *"let's optimize the time frame extraction first from the decode, so we can later on learn how to recreate those videos in our system."*
+
+Every `### Image N` block in `raw/decoded_*.md` MUST include two metadata bullets above the image-prompt body:
+
+```
+### Image N
+- **frame_anchor:** <Xs>      # source-video timestamp (manifest.json shot start_time)
+- **reference_image:** image_K | none
+- **visual_delta:** <one-sentence prose>   # required when reference_image != none
+- **Image prompt:**
+…
+```
+
+`frame_anchor` carries the precise PySceneDetect shot start time for the FIRST shot mapped to this image (per v594 image cardinality, multiple shots may collapse into one image — use the EARLIEST shot's `start_time` from `manifest.json`).
+
+`visual_delta` is the minimal one-sentence diff vs the prior chained image — required on every chained image, omitted on chain root. Lift-side eventually uses both:
+- frame_anchor → orders the storyboard by source timeline (transformation videos: Day 1 / Day 30 / Day 67 / Day 120)
+- visual_delta → drives Veo first-and-last-frame morph between consecutive frames
+
+This rule is the FIRST half of the transformation-video pipeline (decode side). The lift-side platform parser does NOT yet read these fields — that's the SECOND half (deferred). Capturing the data at decode time means future-lift can be turned on without re-decoding the corpus.
+
+Full rule + validation gate + worked examples: `wiki/meta/decode-grammar-checklist.md` §"Image metadata fields (v667)".
+
+Optional third bullet: `- **narrative_lens:** <LENS>` — corpus-folklore tag for the rhetorical role (AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE / CTA-AUTHORITY / CONSPIRATORIAL-WHISPER). Documented separately in v621.
+
+---
+
 ## LLM-agnostic Stage 4d decode interface (v595)
 
 **Generalizes v589 Half A from a fixed cascade to a provider-agnostic interface contract.** Any vision-capable LLM that satisfies the Stage 4d input/output contract is a valid decode provider.

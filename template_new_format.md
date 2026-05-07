@@ -590,6 +590,7 @@ Persona is always uploaded as image 1 (Flow slot 0). Product, when present in th
 ## Images
 
 ### Image 1
+- **frame_anchor:** 0.5s         # v667 — source-video timestamp where this composition first appears (decode side; from manifest.json shot start_time)
 - **reference_image:** none
 - **Image prompt:**
 ```
@@ -597,14 +598,18 @@ Shot on iPhone with wide-angle lens, handheld, deep focus throughout, vibrant na
 ```
 
 ### Image 2
+- **frame_anchor:** 3.0s         # v667 — when this state first appears in source
 - **reference_image:** image_1
+- **visual_delta:** [v667 — one sentence naming the concrete change vs image_1: prop / pose / wardrobe / expression. Required on every chained image.]
 - **Image prompt:**
 ```
 The main character, same [setting anchor] as image 1, same framing — shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight. [What's changed: new pose, new action, new prop state.] [Expression direction.] iPhone HDR colors, deep focus.
 ```
 
 ### Image 3 — example with product (v573)
+- **frame_anchor:** 7.5s         # v667
 - **reference_image:** image_2
+- **visual_delta:** The main character now holds the product bottle label-forward at chest height; everything else preserved.
 - **Image prompt:**
 ```
 The main character, same [setting anchor] as image 2, same framing — shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight. The main character holds the [product name — e.g. "the Salvora Rhodiola Rosea bottle"] label-forward to camera, [describe how the product is held: at chest height with the cap thumb-up, mid-pour over a glass, etc.]. [Expression direction.] iPhone HDR colors, deep focus.
