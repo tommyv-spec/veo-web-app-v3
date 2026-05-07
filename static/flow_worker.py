@@ -493,6 +493,47 @@ def restore_chrome_window(page, label=""):
         pass
 
 
+def set_chrome_no_activate(page, label=""):
+    """v662 — Apply WS_EX_NOACTIVATE so the Chrome window can NEVER
+    become the foreground window via OS events, regardless of what
+    triggers them. Combined with v661's HWND_BOTTOM placement, this
+    makes the window unconditionally background.
+
+    Why send_chrome_to_back alone wasn't enough: even with HWND_BOTTOM
+    + SWP_NOACTIVATE, certain Win32 events (focus-on-app-switch, system
+    messages, Chromium's own activation requests) can still flash the
+    window forward briefly. WS_EX_NOACTIVATE blocks ALL of those at
+    the OS level — the window cannot become the foreground window
+    unless the user EXPLICITLY clicks it from the taskbar.
+
+    Set once per Chrome window after launch. Idempotent — only
+    rewrites the style if the bit isn't already set.
+
+    Windows only; no-op elsewhere.
+    """
+    import platform as _platform
+    if _platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        hwnd = _find_chrome_hwnd(page, label=label)
+        if not hwnd:
+            return
+        user32 = ctypes.windll.user32
+        GWL_EXSTYLE = -20
+        WS_EX_NOACTIVATE = 0x08000000
+        user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.GetWindowLongW.restype = ctypes.c_long
+        user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+        user32.SetWindowLongW.restype = ctypes.c_long
+        cur = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if not (cur & WS_EX_NOACTIVATE):
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, cur | WS_EX_NOACTIVATE)
+    except Exception:
+        pass
+
+
 def send_chrome_to_back(page, label=""):
     """v661 — Push Chrome to the BOTTOM of the Z-order without minimising
     and without activating. The window stays visible (so Playwright
@@ -558,10 +599,13 @@ def defocus_chrome(page, label=""):
         page.evaluate("window.blur()")
     except Exception:
         pass
-    # OS-level: send to back of Z-order without activation (Windows only)
+    # OS-level: enforce WS_EX_NOACTIVATE + send to back (Windows only)
     try:
         if getattr(page, "_stay_visible", False):
             return
+        # v662 — set once-per-window WS_EX_NOACTIVATE so OS events
+        # never reactivate this Chrome window. Idempotent.
+        set_chrome_no_activate(page, label=label)
         send_chrome_to_back(page, label=label)
     except Exception:
         pass
