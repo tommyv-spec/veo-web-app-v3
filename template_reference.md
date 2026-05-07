@@ -788,7 +788,10 @@ One fenced block per clip. Each clip = one Veo generation = one 8-second video. 
 
 [Action narrative — three motion beats with timing]
 
-She says with [register]: [exact dialogue from Storyboard].
+She says in a [voice qualifier] voice, "[exact dialogue from Storyboard]".
+
+(Voiceover variant when `**speaker:** voiceover` is set on the scene:
+A voiceover with [voice quality] speaks in a [tone] tone, "[exact dialogue from Storyboard]".)
 
 Ambient: [setting tone + ambient sound cues].
 (no subtitles, no captions)
@@ -1734,6 +1737,115 @@ All four constants live at the top of the v611 / v616 blocks in `code/video_proc
 - v611 edge-cap defense — preserved (v616 fires AFTER v611, on the v611-contained segments).
 - v499/v597 ffmpeg output-seek + CFR + fps-lock — preserved (v616b's frame-snap COMPLEMENTS them by feeding cleaner timestamps in).
 - Energy-mode silence detection — separate code path; v616 only fires when `silence_mode="whisper"`.
+
+---
+
+## Dialogue lip-sync trigger and voice qualifier syntax (v642)
+
+**Source: 2026-05-07 owner review** + cross-reference against Google Vertex AI docs (`Clippings/Veo on Vertex AI video generation prompt guide.md`) + project wiki (`wiki/generation/veo-prompting.md`, `wiki/generation/kaveno-veo-bridge.md`).
+
+The pre-v642 canonical rule was:
+
+```
+She says with [register]: [exact dialogue from Storyboard].
+```
+
+**Two problems vs the documented Veo 3.1 behaviour:**
+
+1. **No quotation marks around the dialogue.** Per `wiki/generation/veo-prompting.md` §"Audio gotchas": *"Quotation marks trigger lip sync — use them for spoken lines."* Without quotes Veo may render the line as off-screen narration rather than synchronising the on-camera character's lips. Vertex AI's own examples (interrogation-room detective, "We have to leave now", weary-voice detective, etc.) all use quotes.
+
+2. **`with [register]` is not a documented Veo syntax.** Vertex examples use either:
+   - `says in a [qualifier] voice, "..."` (single qualifier — e.g. *weary*)
+   - `speaks in a [adjective], [adjective] tone, "..."` (multi-qualifier — e.g. *serious, urgent*)
+   - `says: "..."` (bare colon form)
+   - `with a [accent] accent, speaks in a [emotion] tone, "..."` (accent variant)
+
+   `with [free-form register]` was a project-internal label that maps onto a wider distribution of deliveries — Veo often defaults to neutral / rushed / flat because the cue doesn't anchor on its training-vocabulary words.
+
+### v642 canonical syntax (replaces L791 placeholder)
+
+**On-camera dialogue (default — `**speaker:** on-camera` or unset):**
+
+```
+She says in a [voice qualifier] voice, "[exact dialogue from Storyboard]".
+```
+
+**Voiceover (when `**speaker:** voiceover`):**
+
+```
+A voiceover with [voice quality] speaks in a [tone] tone, "[exact dialogue from Storyboard]".
+```
+
+Both forms wrap the spoken text in `"…"` so Veo's lip-sync trigger fires (or is correctly suppressed for voiceover, where the dialogue is in quotes but the `voiceover` opener tells Veo to keep on-camera lips closed — the speech overlay pattern from Vertex's *"a voiceover with a polished British accent speaks in a serious, urgent tone"* example).
+
+### Voice qualifier vocabulary (controlled list, Vertex-grounded)
+
+Pick **1-3 adjectives** that Veo's TTS reliably maps onto. Single-word and two-word combinations are most stable; three-word stacks dilute.
+
+| Family | Tokens (use one or compose) |
+|---|---|
+| Pace | `measured` · `deliberate` · `slow` · `brisk` · `rushed` · `clipped` · `drawn-out` |
+| Volume / register | `quiet` · `low` · `lowered` · `intimate` · `projected` · `raised` · `breathy` · `flat-monotone` · `chest-voice` · `head-voice` |
+| Emotion | `weary` · `serious` · `urgent` · `calm` · `energetic` · `enthusiastic` · `angry` · `confident` · `cold` · `warm` · `clinical` · `authoritative` · `concerned` · `disgusted` |
+| Conviction | `assertive` · `softly assertive` · `firm` · `gentle but firm` · `matter-of-fact` |
+
+Compose like Vertex examples: *"weary voice"* (1 token) · *"serious, urgent tone"* (2 tokens, comma-separated) · *"calm, measured, authoritative voice"* (3 tokens, max).
+
+**Audio direction phrases** (alternate form, from project's Lib Course notes — `wiki/generation/kaveno-veo-bridge.md` Phase 4): `talks with enthusiasm`, `talks angry`, `talks with emotion`. Lower-precision than the `says in a [X] voice` form, but useful when the qualifier is a single emotion word.
+
+### Worked old → new examples (from real `videos/*.md` files)
+
+| Old (no quotes, free-form register) | New (quoted, Vertex-grounded qualifier) |
+|---|---|
+| `She says with serious clinical-teaching authority: this is high blood sugar.` | `She says in a measured, low, authoritative voice, "this is high blood sugar".` |
+| `She says with confident-authoritative direct-address: there are five truths every doctor should tell you.` | `She says in a confident, brisk, direct voice, "there are five truths every doctor should tell you".` |
+| `She says with cold clinical-authoritative disgust: these won't fix what's actually broken.` | `She says in a cold, clinical, disgusted voice, "these won't fix what's actually broken".` |
+| `He says with deadpan curiosity-gap delivery (English): What if I told you...` | `He says in a deadpan, curious voice, "what if I told you you're throwing away the most powerful part of the papaya".` |
+| `She says with warm-authoritative-CTA closing emphasis: comment "stamina" and I'll send you the full protocol.` | `She says in a warm, authoritative voice, "comment stamina and I'll send you the full protocol".` |
+
+(Note last example: the `"stamina"` keyword inside the line had to be unquoted — nested quotes break the lip-sync parser. Use single keyword without quotes inside the dialogue, or use single quotes `'stamina'` if a marker is needed.)
+
+### Language tag placement
+
+Pre-v642 outputs sometimes appended `(English)` — and one file double-stamped `(English) (English):`. Rule:
+
+- If the persona's language is the default (English in this project), **omit the language tag**.
+- If non-English, place the tag in the voice qualifier itself: `says in an Italian-accented, weary voice, "..."`. Don't append `(Language)` after the colon — that's not Vertex syntax.
+
+### Nested quotes inside dialogue
+
+Veo's parser uses `"…"` as the lip-sync trigger boundary. Never nest double quotes inside the dialogue line. If a keyword needs marking, drop the inner quotes and rely on context (`comment stamina and I'll send the protocol`) or use single quotes (`comment 'stamina'`).
+
+### Pre-output validation gate
+
+Before emitting any `videos/*.md` Veo Final Prompt:
+
+- ✅ Dialogue text is wrapped in `"…"` (on-camera AND voiceover both quoted)
+- ✅ Voice qualifier sits **between** `says`/`speaks` and the quoted dialogue, not after the colon
+- ✅ Qualifier uses tokens from the controlled vocabulary above (1-3 adjectives, comma-separated when ≥2)
+- ✅ No `(English)` or `(Language)` annotations dangling outside the qualifier
+- ✅ No nested double-quotes inside the dialogue text
+- ✅ The line itself still satisfies the v615 em-dash ban
+- ✅ For `voiceover` scenes: `A voiceover [...] speaks in a [tone] tone, "..."` form used (the `voiceover` opener is mandatory — keeps Veo from animating lip-sync on the visible subject)
+
+### Why this is doc-grounded, not speculation
+
+Every element is traceable to a documented source:
+
+- **Quotes for lip sync** ← `wiki/generation/veo-prompting.md` L155 + `wiki/generation/kaveno-veo-bridge.md` L61
+- **`says in a [qualifier] voice` form** ← Vertex AI guide line 354 + Ultimate Guide line 189 (*"says in a weary voice"*)
+- **Multi-adjective tone form** ← Vertex AI guide line 354 (*"speaks in a serious, urgent tone"*)
+- **Voiceover + voice quality + tone** ← Vertex AI guide line 354 (*"a voiceover with a polished British accent speaks in a serious, urgent tone"*)
+- **Audio direction phrase alternative** ← `wiki/generation/kaveno-veo-bridge.md` L100 (Lib Course — *"talks with enthusiasm"*)
+- **Master template** ← `wiki/generation/kaveno-veo-bridge.md` L120 (`Character A says: "..."`)
+
+### What v642 does NOT change
+
+- Action_note prose — actions remain scene-dependent per v540.
+- The `**speaker:**` field semantics (v537/v538) — still controls on-camera vs voiceover routing.
+- The `**visual register:**` and `**rhythm tier:**` storyboard fields — visual register tagging only, separate from spoken delivery.
+- Em-dash ban (v615) on the spoken line text — still applies inside the quoted portion.
+- Ambient block, cinematography line, negative prompt block — unchanged.
 
 ---
 

@@ -715,7 +715,7 @@ What the platform's prompt-builder will emit per scene at job emission. One Veo 
 
 [Action narrative — three-beat motion description with explicit timing within the 8s window: start beat 0-2s, mid-clip beat 3-5s, end beat 5-8s. Built from the Storyboard's action_note for this scene.]
 
-She says with [register, e.g. "warm clinical-authoritative emphasis"]: [exact dialogue from the Storyboard's line for this scene].
+She says in a [voice qualifier] voice, "[exact dialogue from the Storyboard's line for this scene]". (v642: quoted text triggers Veo lip-sync; voice qualifier composes 1-3 tokens from {pace: measured/deliberate/brisk/clipped}, {volume: low/quiet/projected/breathy}, {emotion: weary/serious/urgent/calm/warm/clinical/authoritative/cold/disgusted}. Multi-adjective form uses commas, e.g. "serious, urgent voice". For `**speaker:** voiceover` scenes use: A voiceover with [voice quality] speaks in a [tone] tone, "[line]". See template_reference.md §"Dialogue lip-sync trigger and voice qualifier syntax (v642)" for the full rubric.)
 
 Ambient: [setting tone + ambient sound cues that Veo's audio path can pick up — built from the Style & Ambiance block of the action_note].
 (no subtitles, no captions)
@@ -733,7 +733,7 @@ no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, 
 
 [Action narrative — three beats with timing]
 
-She says with [register]: [exact dialogue].
+She says in a [voice qualifier] voice, "[exact dialogue]".
 
 Ambient: [setting tone + ambient cues].
 (no subtitles, no captions)
