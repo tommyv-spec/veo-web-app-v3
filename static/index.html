@@ -7223,7 +7223,18 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         const cListEl = document.getElementById('clipsList');
                         const hasLineup = cachedClips.some(x => x.in_lineup === false);
                         const visible = hasLineup ? cachedClips.filter(x => x.in_lineup !== false) : cachedClips;
-                        const expandBtn = `<div style="display:flex;justify-content:flex-end;margin-bottom:8px;"><button id="expandToggleBtn" class="expand-toggle" onclick="toggleVariantsExpanded()">${variantsExpanded ? '⊟ Collapse' : '⊞ Expand'}</button></div>`;
+                        // v657 — match the main-render path's #clipsToolbar
+                        // structure so the diff-path doesn't insert a
+                        // second expand button. Pre-v657 the cache-render
+                        // emitted its own anonymous wrapper without
+                        // #clipsToolbar; main fetch path then ran, found
+                        // no #clipsToolbar, and added another → two
+                        // visible Expand buttons.
+                        const _stuckCountCache = visible.filter(x => ['pending','generating','redo_queued','flow_redo_queued','preparing'].includes(x.status)).length;
+                        const _retryCacheBtn = _stuckCountCache > 0
+                            ? `<button id="retryStuckBtn" class="expand-toggle" onclick="retryStuckClips('${id}')" title="Re-queue all clips that are stuck (worker dropped them)" style="margin-right:8px;background:rgba(245,158,11,0.18);color:#fbbf24;border-color:rgba(245,158,11,0.5);">🔄 Retry stuck (${_stuckCountCache})</button>`
+                            : '';
+                        const expandBtn = `<div id="clipsToolbar" style="display:flex;justify-content:flex-end;margin-bottom:8px;">${_retryCacheBtn}<button id="expandToggleBtn" class="expand-toggle" onclick="toggleVariantsExpanded()">${variantsExpanded ? '⊟ Collapse' : '⊞ Expand'}</button></div>`;
                         cListEl.innerHTML = `<div id="reviewBannerSlot"></div>` + expandBtn + `<div class="clips-grid ${variantsExpanded ? 'expanded-mode' : ''}" data-exports-loaded="false">${visible.map(x => renderClip(x, id)).join('')}</div>`;
                         visible.forEach(clip => {
                             clipStates[clip.clip_index] = getClipStateKey(clip);
