@@ -1453,6 +1453,152 @@ Before emitting any decoded artifact OR any videos/*.md draft:
 
 ---
 
+## Non-persona character identity prose is mandatory (v669) — close the v602 over-application loophole
+
+**Source: 2026-05-08 owner directive.** Decoder/author over-applied v602 (persona description ban) and stripped identity descriptors from a non-persona patient ("Josh" — visible Black male in source). Result: Nano Banana 2 hallucinated the patient's identity differently across the 4 transformation frames; the patient's race / build / face drifted between Day 1 and Day 120, killing the transformation continuity.
+
+### The misread
+
+v602 forbids racial / ethnic / age descriptors for **the persona** because the persona's identity comes entirely from the uploaded reference image. v602 does NOT extend to non-persona characters. For non-persona characters there is NO UPLOAD — the prose is the only source of truth Banana 2 can bind to.
+
+The author/decoder's fault mode: applies v602's gender-neutral discipline to ALL humans in the prompt out of habit, leaving the non-persona character un-anchored.
+
+### The rule
+
+Every non-persona character described in an image-prompt body MUST be anchored with these three identity descriptors at FIRST appearance:
+
+1. **Race / ethnicity** — `Black male`, `East Asian female`, `White elderly woman`, `Latino young man`. Use plain demographic language; do NOT euphemize ("brown-skinned", "fair complexion") because Banana 2's training data binds to the demographic terms directly.
+2. **Visible age band** — `young adult` (20s) / `middle-aged` (40-50s) / `older` (60+) / `elderly` (70+). Skip when the source frame is too tight to show an age signal.
+3. **Body type / build** — `heavy-set`, `slender`, `athletic`, `frail`, `muscular`. Required when the body is the subject (patient transformation, before/after).
+
+When the character chains across multiple images (transformation montage, multi-shot dialogue), the identity descriptors lock at FIRST appearance. Subsequent images preserve via reference_image continuity AND a one-line restatement of the locked identity to prevent Banana 2's drift between independent generations.
+
+### The fix-pattern from the failure case
+
+❌ Pre-v669 (Josh as patient, transformation montage):
+```
+A heavy-set patient sits drinking from a glass. His exposed midsection features a massive
+distended belly...
+```
+
+✅ Post-v669:
+```
+A heavy-set Black male patient (mid-40s) sits drinking from a glass. His exposed
+midsection features a massive distended belly...
+```
+
+In every chained image (Day 30, Day 67, Day 120):
+```
+The same Black male patient (mid-40s), now slimmer / now flat-stomached / now shredded.
+[describe the visual delta]
+```
+
+### Asymmetry chain (v602 + v610 + v622 + v669)
+
+| Character role | Race / ethnicity | Age band | Build | Gender pronouns |
+|---|---|---|---|---|
+| Main character (upload-bound persona) | FORBIDDEN (v602) | FORBIDDEN (v602) | FORBIDDEN (v602) | FORBIDDEN (v610) |
+| Patient / customer / bystander (non-persona, no upload) | **REQUIRED (v669)** | **REQUIRED (v669)** | **REQUIRED (v669) when body is subject** | REQUIRED (v610) |
+| Symptom-bearer on AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE lens | **REQUIRED (v669)** | **REQUIRED (v669)** | **REQUIRED (v669) — body IS the subject** | REQUIRED (v610) + symptom feature (v622) |
+
+The persona is upload-swapped at lift time; the patient is NOT — the patient's prose IS the only source of truth for Banana 2 to anchor on. Vague non-persona descriptions on diagnostic / transformation scenes produce drifted Banana 2 output and the visual continuity collapses.
+
+### Pre-output validation gate
+
+Before emitting any image-prompt body containing a non-persona character:
+
+- ✅ First-appearance image: race + age + build (when applicable) explicitly named
+- ✅ Chained appearances: identity restated in one line, then the visual_delta
+- ✅ No use of v602's gender-neutral / identity-stripped phrasing for non-persona characters
+- ✅ Race uses plain demographic terms (`Black male`, `East Asian female`), not euphemisms
+
+### What v669 does NOT change
+
+- v602 main-character description ban — preserved unchanged. Persona identity still comes from the upload, never from prose.
+- v610 main-character pronoun ban — preserved unchanged.
+- v622 symptom-feature exaggeration — still required; v669 adds the identity layer underneath the symptom layer.
+- v553.1 never-describe-persona — preserved unchanged.
+
+---
+
+## Mechanism in active use across transformation montages (v670)
+
+**Source: 2026-05-08 owner directive.** Decoded prompt for a 4-frame transformation montage (Day 1 → Day 30 → Day 67 → Day 120) had the patient HOLDING the juice glass in static poses across all 4 frames. The actual rhetorical mechanism of a transformation video is *the patient consuming the cure WHILE the transformation happens*. By defaulting to a static "holding" pose, the decoded action_note flattened the scene's mechanism — the visual causal chain (drink → result) was lost.
+
+Owner: *"the visual story of the montage is literally him consuming the cure while the transformation happens. By leaving out the active drinking, I missed the actual mechanism of the video."*
+
+### The rule
+
+When a scene is part of a TRANSFORMATION MONTAGE (multi-frame chained progression with consistent persona/patient and a named cause/mechanism — juice, capsule, cream, supplement, etc.), the action_note for EACH frame MUST show the mechanism in **active use**, not static possession. The static "holding" pose is a default trap.
+
+| ❌ Static (forbidden in montage) | ✅ Active (required in montage) |
+|---|---|
+| "the patient holds the juice glass" | "the patient takes a steady drink from the glass, glass tipped to lips mid-swallow" |
+| "the patient sits with the bottle" | "the patient pours saffron drops into the glass, mid-pour" |
+| "the cream is on the counter" | "the patient applies the cream to the affected area, fingertips spread mid-motion" |
+| "the capsule is in his hand" | "the patient swallows the capsule, head tilted back, water glass following" |
+
+### Per-frame motion variation
+
+The mechanism repeats across frames but the MOTION VARIES so each frame reads as a separate moment, not a re-render of the same pose:
+
+```
+Image 1 (Day 1):    raises glass to lips, mid-tilt — first sip beat
+Image 2 (Day 30):   mid-swallow with throat motion visible — sustained-use beat
+Image 3 (Day 67):   lowering glass after drink, glass at chest — completion beat
+Image 4 (Day 120):  raising glass in toast/celebration — confident-mastery beat
+```
+
+Each frame is the SAME mechanism (drinking) but a DIFFERENT moment of the action — preserves continuity AND signals time progression.
+
+### action_note three-beat enforcement
+
+In a transformation-montage scene, the three beats each show a phase of the mechanism in use:
+
+```
+[Start beat 0-2s]  Patient raises the glass, tilts to lips.
+[Mid-clip beat 3-5s]  Mid-swallow, glass tipped fully, throat motion visible.
+[End beat 5-8s]  Glass lowered, expression of relief / satisfaction.
+```
+
+NOT acceptable in a transformation montage:
+
+```
+[Start beat]  Patient sits holding the glass.
+[Mid-clip beat]  Patient continues holding the glass.
+[End beat]  Patient still holds the glass.
+```
+
+### When v670 does NOT apply
+
+- Non-transformation scenes (HOOK without before/after, single-state CTA, single-scene context shot) — static poses are fine when there's no causal chain to show.
+- The PERSONA's actions (the practitioner gesturing toward the patient) — v670 governs the patient/customer's active use of the mechanism, not the persona's commentary.
+- Dialogue-only scenes where the mechanism is named verbally but not visible (rare in this corpus).
+
+### Pre-output validation gate
+
+Before emitting any transformation-montage scene's action_note:
+
+- ✅ Each frame's three-beat action shows the mechanism in motion, not static possession
+- ✅ Across the montage, motion varies frame-to-frame (raise → swallow → lower → toast, not all "holds")
+- ✅ The mechanism's named cause appears in at least 2 of the 3 beats per frame (anchors the visual to the rhetorical claim)
+
+### Lift-side authoring + decode-side observation
+
+Decode side: when observing a transformation montage in a source video, the decoder writes per-frame motion (drinking-mid-tilt / mid-swallow / lowering / toasting) — never collapses to "patient holds glass". v588 dense-frame walk + v589 Half C state magnitude provide the per-frame motion data; v670 is the prose-side discipline to use that data.
+
+Lift side / generate side: when authoring a transformation montage from scratch, the author writes the mechanism's active use into each frame's action_note BEFORE writing dialogue or framing — the active use IS the rhetorical spine of the montage.
+
+### What v670 does NOT change
+
+- v585 motion classification — preserved (still classifies camera + subject motion per shot).
+- v588 dense-frame walk — preserved (provides the per-frame state-arc data v670 turns into prose).
+- v589 absolute-magnitude grammar — preserved (v670 governs ACTION verbs; v589 governs the resulting STATE).
+- v540 action_note three-beat structure — preserved (v670 fills in WHAT each beat shows, doesn't change the three-beat shape).
+- Non-montage scenes — unchanged; static poses fine when not in a transformation chain.
+
+---
+
 ## Symptom-feature exaggeration on non-persona characters (v622)
 
 **Source: 2026-05-06 owner observation.** Decoded prompt for `amish-house` chin-pointing scene read *"her chin raised slightly and her eyes locked to the camera."* The actual source frame shows a patient with a notably full / sagging lower-jaw + jowl drop, and the practitioner's index finger is pressed firmly into the underside of that chin. The whole rhetorical point of the scene is "IF YOUR CHIN LOOKS [LIKE THIS]" — a C-DIAGNOSTIC-PIVOT lifted on the AUGMENTED-SYMPTOMS lens. The decoder flattened the diagnostic feature into generic posture filler. A lift of that prompt would generate a clean-jawed patient and the diagnostic pivot would have nothing to land on.
