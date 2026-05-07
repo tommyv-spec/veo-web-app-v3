@@ -788,7 +788,7 @@ One fenced block per clip. Each clip = one Veo generation = one 8-second video. 
 
 [Action narrative — three motion beats with timing]
 
-She says in a [voice qualifier] voice, "[exact dialogue from Storyboard]".
+The main AI generated character says in a [voice qualifier] voice, "[exact dialogue from Storyboard]".
 
 (Voiceover variant when `**speaker:** voiceover` is set on the scene:
 A voiceover with [voice quality] speaks in a [tone] tone, "[exact dialogue from Storyboard]".)
@@ -1767,7 +1767,7 @@ She says with [register]: [exact dialogue from Storyboard].
 **On-camera dialogue (default — `**speaker:** on-camera` or unset):**
 
 ```
-She says in a [voice qualifier] voice, "[exact dialogue from Storyboard]".
+The main AI generated character says in a [voice qualifier] voice, "[exact dialogue from Storyboard]".
 ```
 
 **Voiceover (when `**speaker:** voiceover`):**
@@ -1797,11 +1797,11 @@ Compose like Vertex examples: *"weary voice"* (1 token) · *"serious, urgent ton
 
 | Old (no quotes, free-form register) | New (quoted, Vertex-grounded qualifier) |
 |---|---|
-| `She says with serious clinical-teaching authority: this is high blood sugar.` | `She says in a measured, low, authoritative voice, "this is high blood sugar".` |
-| `She says with confident-authoritative direct-address: there are five truths every doctor should tell you.` | `She says in a confident, brisk, direct voice, "there are five truths every doctor should tell you".` |
-| `She says with cold clinical-authoritative disgust: these won't fix what's actually broken.` | `She says in a cold, clinical, disgusted voice, "these won't fix what's actually broken".` |
-| `He says with deadpan curiosity-gap delivery (English): What if I told you...` | `He says in a deadpan, curious voice, "what if I told you you're throwing away the most powerful part of the papaya".` |
-| `She says with warm-authoritative-CTA closing emphasis: comment "stamina" and I'll send you the full protocol.` | `She says in a warm, authoritative voice, "comment stamina and I'll send you the full protocol".` |
+| `She says with serious clinical-teaching authority: this is high blood sugar.` | `The main AI generated character says in a measured, low, authoritative voice, "this is high blood sugar".` |
+| `She says with confident-authoritative direct-address: there are five truths every doctor should tell you.` | `The main AI generated character says in a confident, brisk, direct voice, "there are five truths every doctor should tell you".` |
+| `She says with cold clinical-authoritative disgust: these won't fix what's actually broken.` | `The main AI generated character says in a cold, clinical, disgusted voice, "these won't fix what's actually broken".` |
+| `He says with deadpan curiosity-gap delivery (English): What if I told you...` | `The main AI generated character says in a deadpan, curious voice, "what if I told you you're throwing away the most powerful part of the papaya".` |
+| `She says with warm-authoritative-CTA closing emphasis: comment "stamina" and I'll send you the full protocol.` | `The main AI generated character says in a warm, authoritative voice, "comment stamina and I'll send you the full protocol".` |
 
 (Note last example: the `"stamina"` keyword inside the line had to be unquoted — nested quotes break the lip-sync parser. Use single keyword without quotes inside the dialogue, or use single quotes `'stamina'` if a marker is needed.)
 
@@ -1871,7 +1871,7 @@ When the scene has ≥2 visible humans (persona + bystander, persona + customer,
 
 | ❌ Wrong (ambiguous) | ✅ Right (disambiguated) |
 |---|---|
-| `She says in a calm voice, "this is the moment"` | `The main character in the white coat says in a calm voice, "this is the moment"` |
+| `She says in a calm voice, "this is the moment"` | `The main AI generated character (in the white coat) says in a calm voice, "this is the moment"` |
 | `He says in a weary voice, "..."` | `The seasoned detective says in a weary voice, "..."` |
 
 For solo on-camera scenes (one human visible), `She says…` / `He says…` / `The main character says…` is fine.
@@ -1881,9 +1881,9 @@ For solo on-camera scenes (one human visible), `She says…` / `He says…` / `T
 If the persona's language is non-English, write the spoken text in the target language **inside the quotes**. Veo handles accent + lip-sync automatically. Do NOT append `(Italian)` / `(Spanish)` / etc. as a parenthetical after the quoted line.
 
 ```
-✅ She says in a warm voice, "ciao a tutti, oggi parliamo di salute"
-❌ She says in a warm voice (Italian): "ciao a tutti..."
-❌ She says in a warm voice, "ciao a tutti..." (Italian)
+✅ The main AI generated character says in a warm voice, "ciao a tutti, oggi parliamo di salute"
+❌ The main AI generated character says in a warm voice (Italian): "ciao a tutti..."
+❌ The main AI generated character says in a warm voice, "ciao a tutti..." (Italian)
 ```
 
 The `(English) (English):` typo observed in pre-v642 outputs (asian-elder file) is forbidden. Default-language scenes get NO language tag at all.
@@ -1964,7 +1964,7 @@ Convergence ≥2 sources for each rule prevents single-source over-fitting.
 
 ### What v643 does NOT change (preserves v642 + earlier scope)
 
-- Dialogue cue syntax stays `She says in a [qualifier] voice, "[line]"` (v642)
+- Dialogue cue syntax stays `The main AI generated character says in a [qualifier] voice, "[line]"` (v642 + v665)
 - Voice qualifier vocabulary table (v642) unchanged
 - Voiceover variant `A voiceover with [quality] speaks in a [tone] tone, "[line]"` (v642) unchanged
 - Action_note prose stays scene-dependent (v540)
@@ -2014,7 +2014,7 @@ Word count check (operator authoring discipline):
 The Veo Final Prompt's spoken-dialogue line is built from `line + " " + pad` (concatenation with a single space):
 
 ```
-She says in a measured low chest-voice clinical authority,
+The main AI generated character says in a measured low chest-voice clinical authority,
   "this is high blood sugar. Pay attention to this so you can spot it on yourself early".
 ```
 
@@ -2060,7 +2060,7 @@ Good pads for various registers:
 - v539 / v542 (`prefix_short_enabled`, `cut_prefix_audio`) — those remain available as a job-level fallback for the older single-word warm-up case. Not used by v644 — `pad:` is per-scene, multi-word, and suffix-only.
 - v615 em-dash ban — applies to BOTH `line` and `pad` text
 - v577 word budget (~21 words per clip at natural pacing) — pad helps the Veo prompt REACH that budget; it is not an exemption from it
-- v642 dialogue cue syntax (`She says in a [qualifier] voice, "..."`) — quoted text is `line + " " + pad`; voice qualifier and surrounding structure unchanged
+- v642+v665 dialogue cue syntax (`The main AI generated character says in a [qualifier] voice, "..."`) — quoted text is `line + " " + pad`; voice qualifier and surrounding structure unchanged
 - Whisper-VAD code (`code/video_processor.py`) — no changes; existing matcher trims the pad words automatically as unmatched filler
 
 ### Pre-output validation gate
@@ -2080,6 +2080,68 @@ Before emitting any `videos/*.md` clip prompt:
 - veo3ai.io 2026: *"Speech generation performs better with longer text transcripts in your prompt"*
 - Veo 3.1 RAI audio-filter false-positive issue: googleapis/js-genai #1272 (Jan 2026)
 - Project precedent: v539 / v542 (single-word warm-up + cut_prefix_audio) — `code/veo_generator.py:1053` + `code/video_processor.py:1836`
+
+---
+
+## Speaker-subject normalization (v665) — "the main AI generated character"
+
+**Source: 2026-05-07 owner directive** *"in the prompt that we generate, both in the platform and in the rules for the decode, lift etc... we have to say that 'the main AI generated character says'..."*
+
+### Rule
+
+The dialogue cue's subject is ALWAYS the literal phrase **"the main AI generated character"** (capitalized as **"The main AI generated character"** at sentence start). NEVER:
+
+- pronouns (`She` / `He` / `They`)
+- gendered nouns (`the woman` / `the man`)
+- persona names (`Dr. Sage` / `Nuri` / `Master Shen`)
+- generic role labels (`the doctor` / `the practitioner` / `the speaker`)
+- pre-v665 generic (`the main character` — drops the "AI generated" qualifier)
+
+### Why
+
+Pre-v665 prompts used `She says` / `He says` / `the main character`. Three failure modes observed:
+
+1. **Wrong-binding to a bystander.** Veo sometimes routed the spoken dialogue to a non-persona figure visible in the start frame (husband-bystander, customer, child) when the persona's gender / pose was ambiguous in that frame.
+2. **Conflict with persona name in image prompts.** Image prompts deliberately do NOT name the persona (`v553.1 never-describe-persona`); Banana 2 attaches the persona via the upload. If the dialogue cue then says `Dr. Sage says`, Veo has a name without a face binding and may invent features that drift from the persona reference.
+3. **Gender-bound voice.** `She` / `He` triggers Veo's gender-stereotyped voice profile early in the prompt — overrides the explicit voice qualifier in some cases.
+
+The "AI generated" qualifier locks the binding to the persona-reference upload, matching the platform's persona-attachment logic in `image_platform.py` at job-emission time. Veo treats it as a role descriptor pointing at the uploaded character image, not as a free-form character it should imagine.
+
+### Applies to
+
+- `code/template_reference.md` v642 dialogue cue placeholder (`The main AI generated character says in a [voice qualifier] voice, "[line]"`)
+- `code/template_new_format.md` clip-block skeleton
+- `code/veo_generator.py` runtime prompt builder (the `dialogue_block` f-string at the on-camera branch + the voiceover branch's reference to the visible character's lips)
+- `wiki/generation/veo-prompting.md` canonical examples
+- All future-authored `videos/*.md` and `raw/decoded_*.md` artifacts
+- Decode scripts: when reproducing source dialogue, use `The main AI generated character says...` even when the source clearly shows a single human; the rule is uniform across decode and generate to keep the grammar bidirectional.
+
+### Voiceover variant
+
+```
+A voiceover with [voice quality] speaks in a [tone] tone, "[exact dialogue]". The main AI generated character's lips DO NOT MOVE.
+```
+
+The `voiceover` opener handles the off-screen narration; the second sentence enforces lip-sync suppression on the on-camera persona reference. Subject in the second sentence is still "The main AI generated character" — same persona-binding rationale.
+
+### Action_note prose unaffected
+
+Action_note bullets in the storyboard continue to use "the main character" (no "AI generated" qualifier) for movement description, because action_note is INPUT to Veo's motion path, not the dialogue cue's persona binding. Example:
+
+```
+- **action_note:** [Start beat 0-2s] The main character leans slightly forward toward the lens. [Mid-clip beat] On "comment weight loss", the main character's hand gestures openly. [End beat] The main character nods.
+```
+
+The dialogue cue then names "The main AI generated character" because that's the SPEAKER attribution. The two phrasings can coexist in one prompt — they target different Veo subsystems.
+
+### Migration check
+
+Before emitting any clip prompt:
+
+- ✅ Dialogue cue subject is `The main AI generated character`
+- ✅ No `She` / `He` / `They` as dialogue cue subject
+- ✅ No persona name as dialogue cue subject
+- ✅ Voiceover scenes use the two-sentence form with the main AI generated character's lips referenced
 
 ---
 

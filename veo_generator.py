@@ -1691,11 +1691,21 @@ def build_prompt(
         speech_timing = f"0s to {speech_end_time:.1f}s"
         if voiceover_only:
             # v517: off-screen narration for the full clip duration.
-            dialogue_block = f"""An off-screen voiceover narrator says in {language}, "{dialogue_line}". The voice is heard CLEARLY over the shot but NO ONE in the frame speaks. The visible subject's lips DO NOT MOVE. They continue their action with {facial_expression}, {body_language}, while the narration plays. There is no on-camera dialogue."""
+            # v665: subject is "the main AI generated character" — same
+            #       persona-binding rationale as the on-camera branch
+            #       (Veo binds dialogue to the persona-reference upload
+            #       regardless of perceived gender or wardrobe).
+            dialogue_block = f"""An off-screen voiceover narrator says in {language}, "{dialogue_line}". The voice is heard CLEARLY over the shot but NO ONE in the frame speaks. The main AI generated character's lips DO NOT MOVE. They continue their action with {facial_expression}, {body_language}, while the narration plays. There is no on-camera dialogue."""
         else:
-            # v527.2: same fix — name "the main character" as the speaker.
-            dialogue_block = f"""The main character in the frame speaks directly to camera with {facial_expression}, {body_language}.
-The main character says in {language}, "{dialogue_line}". The main character is the ONLY speaker in this clip; any other person visible in the frame stays SILENT with closed lips."""
+            # v527.2 + v665: name "the main AI generated character" as the
+            # speaker. Pre-v665 used "the main character" — Veo sometimes
+            # bound that to a non-persona figure visible in the start
+            # frame (bystander, customer, husband). The "AI generated"
+            # qualifier locks the binding to the persona-reference
+            # upload, matching the platform's persona-attachment logic
+            # in image_platform.py at job emission time.
+            dialogue_block = f"""The main AI generated character in the frame speaks directly to camera with {facial_expression}, {body_language}.
+The main AI generated character says in {language}, "{dialogue_line}". The main AI generated character is the ONLY speaker in this clip; any other person visible in the frame stays SILENT with closed lips."""
     
     # v495: build the top-of-prompt action block. Empty string if no
     # action is available — the prompt just starts at the voice profile
