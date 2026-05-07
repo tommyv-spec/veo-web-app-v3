@@ -3633,6 +3633,109 @@ async def request_clip_redo(
     )
 
 
+@app.post("/api/jobs/{job_id}/retry-stuck")
+async def retry_stuck_clips(
+    job_id: str,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v653 — bulk-retry stuck clips on a job.
+
+    User report 2026-05-07 (job d09df1c): job had 25 lines, ~14 stuck
+    in PENDING with "Waiting…" placeholder hours after submission.
+    Worker had moved on / lost them. Pre-v653 the only remediation was
+    per-clip "Redo" — but `request_clip_redo` rejects clips in PENDING
+    status, so the user couldn't even queue the stuck ones.
+
+    This endpoint scans the job for clips that are stuck and re-queues
+    each via the same flow_redo_queued / redo_queued path the worker
+    polls. Stuck = clips whose status is one of:
+      - PENDING (never started)
+      - GENERATING with claimed_at older than 10 minutes (worker died
+        mid-job; claim went stale)
+      - REDO_QUEUED / FLOW_REDO_QUEUED with updated_at older than
+        10 minutes (worker dropped the redo)
+
+    For each stuck clip:
+      - Clear claim fields
+      - Reset error_code / error_message / output_filename
+      - Set status to flow_redo_queued (Flow backend) or redo_queued
+        (API backend) — same status the existing worker polls
+      - DO NOT bump generation_attempt — this is a worker-side retry,
+        not a user-rejected redo. The 3-attempt limit still applies on
+        actual user-initiated redos.
+
+    Bumps job.updated_at so the worker's 24h activity window includes
+    these reset clips on its next poll.
+    """
+    job = get_user_job(db, job_id, current_user)
+    is_flow = job.backend == 'flow'
+    target_status = ClipStatus.FLOW_REDO_QUEUED.value if is_flow else ClipStatus.REDO_QUEUED.value
+
+    now = datetime.utcnow()
+    stale_cutoff = now - timedelta(minutes=10)
+
+    candidates = db.query(Clip).filter(Clip.job_id == job_id).all()
+    reset_pending = []
+    reset_stale_generating = []
+    reset_stale_redo = []
+
+    for clip in candidates:
+        if clip.status == ClipStatus.PENDING.value:
+            reset_pending.append(clip)
+        elif clip.status == ClipStatus.GENERATING.value:
+            claimed_at = getattr(clip, 'claimed_at', None)
+            if claimed_at is None or claimed_at < stale_cutoff:
+                reset_stale_generating.append(clip)
+        elif clip.status in (ClipStatus.REDO_QUEUED.value, ClipStatus.FLOW_REDO_QUEUED.value):
+            updated_at = getattr(clip, 'updated_at', None) or getattr(clip, 'created_at', None)
+            if updated_at is None or updated_at < stale_cutoff:
+                reset_stale_redo.append(clip)
+
+    all_to_reset = reset_pending + reset_stale_generating + reset_stale_redo
+    if not all_to_reset:
+        return {
+            "job_id": job_id,
+            "reset_count": 0,
+            "pending": 0,
+            "stale_generating": 0,
+            "stale_redo": 0,
+            "message": "No stuck clips found.",
+        }
+
+    for clip in all_to_reset:
+        clip.status = target_status
+        clip.claimed_by_worker = None
+        clip.claimed_at = None
+        clip.error_code = None
+        clip.error_message = None
+        # Don't wipe output_filename if it exists (might be partial); the
+        # worker will overwrite on success. For pure-pending clips it's
+        # already None.
+
+    job.updated_at = now
+    if job.status in (JobStatus.PAUSED.value, JobStatus.FAILED.value):
+        job.status = JobStatus.RUNNING.value
+
+    add_job_log(
+        db, job_id,
+        f"Bulk retry-stuck: {len(all_to_reset)} clips re-queued "
+        f"({len(reset_pending)} pending + {len(reset_stale_generating)} stale-generating "
+        f"+ {len(reset_stale_redo)} stale-redo)",
+        "INFO", "system",
+    )
+    db.commit()
+
+    return {
+        "job_id": job_id,
+        "reset_count": len(all_to_reset),
+        "pending": len(reset_pending),
+        "stale_generating": len(reset_stale_generating),
+        "stale_redo": len(reset_stale_redo),
+        "message": f"Re-queued {len(all_to_reset)} stuck clip(s).",
+    }
+
+
 @app.get("/api/clips/{clip_id}")
 async def get_clip(
     clip_id: int, 

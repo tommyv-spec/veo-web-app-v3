@@ -7245,7 +7245,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 let bannerHtml='';
                 if(generating.length>0){const done=clips.filter(x=>x.status==='completed'||x.status==='failed').length,total=clips.length;bannerHtml=`<div class="generation-progress"><div class="gen-status">🎬 Generating clip ${done+1} of ${total}...</div><div class="gen-bar"><div class="gen-bar-fill" style="width:${(done/total)*100}%"></div></div></div>`;}
                 else if(hasCompleted){bannerHtml=`<div id="reviewBannerSlot"></div>`;}
-                const expandBtn = `<div style="display:flex;justify-content:flex-end;margin-bottom:8px;"><button id="expandToggleBtn" class="expand-toggle" onclick="toggleVariantsExpanded()">${variantsExpanded ? '⊟ Collapse' : '⊞ Expand'}</button></div>`;
+                // v653 — retry-stuck button. Shown when there are clips
+                // in PENDING / GENERATING / REDO_QUEUED that may have
+                // been dropped by the worker. Bulk re-queues all of them
+                // via /api/jobs/{id}/retry-stuck.
+                const stuckCount = clips.filter(x => ['pending','generating','redo_queued','flow_redo_queued','preparing'].includes(x.status)).length;
+                const retryStuckBtn = stuckCount > 0
+                    ? `<button class="expand-toggle" onclick="retryStuckClips('${id}')" title="Re-queue all clips that are stuck in pending/generating/redo (worker dropped them)" style="margin-right:8px;background:rgba(245,158,11,0.18);color:#fbbf24;border-color:rgba(245,158,11,0.5);">🔄 Retry stuck (${stuckCount})</button>`
+                    : '';
+                const expandBtn = `<div style="display:flex;justify-content:flex-end;margin-bottom:8px;">${retryStuckBtn}<button id="expandToggleBtn" class="expand-toggle" onclick="toggleVariantsExpanded()">${variantsExpanded ? '⊟ Collapse' : '⊞ Expand'}</button></div>`;
                 c.innerHTML=bannerHtml+expandBtn+`<div class="clips-grid ${variantsExpanded ? 'expanded-mode' : ''}" data-exports-loaded="true">${visibleClips.map(x=>renderClip(x,id)).join('')}</div>`;
                 visibleClips.forEach(clip=>{clipStates[clip.clip_index]=getClipStateKey(clip);clipVideoKeys[clip.clip_index]=getClipVideoKey(clip);clipUIKeys[clip.clip_index]=getClipUIKey(clip);});loadExistingExports(id);
                 // Preload variant videos for instant switching
@@ -8361,6 +8369,42 @@ Example: A realistic vertical video of a professional presenter speaking directl
         let lineupData = null; // Current lineup state
         let lineupJobId = null;
         
+        // v653 — bulk retry stuck clips on a job. Posts to
+        // /api/jobs/{id}/retry-stuck which resets all PENDING /
+        // stale-GENERATING / stale-REDO clips to the worker's redo
+        // queue. After response, refresh the clips list so the user
+        // sees the updated states immediately.
+        async function retryStuckClips(jobId) {
+            const btn = event && event.currentTarget;
+            const originalLabel = btn ? btn.textContent : null;
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Retrying…'; }
+            try {
+                const r = await fetch(`${API}/jobs/${jobId}/retry-stuck`, { method: 'POST' });
+                if (!r.ok) {
+                    let detail = '';
+                    try { detail = (await r.json()).detail || ''; } catch {}
+                    throw new Error(detail || ('HTTP ' + r.status));
+                }
+                const data = await r.json();
+                if (data.reset_count === 0) {
+                    alert('No stuck clips found.');
+                } else {
+                    const parts = [];
+                    if (data.pending) parts.push(`${data.pending} pending`);
+                    if (data.stale_generating) parts.push(`${data.stale_generating} stale-generating`);
+                    if (data.stale_redo) parts.push(`${data.stale_redo} stale-redo`);
+                    console.log(`[retry-stuck] re-queued ${data.reset_count} (${parts.join(', ')})`);
+                }
+                // Force a clean re-render so the user sees the new statuses
+                clipStates = {}; clipVideoKeys = {}; clipUIKeys = {};
+                document.getElementById('clipsList').innerHTML = '';
+                loadClips(jobId);
+            } catch (e) {
+                alert('Retry failed: ' + e.message);
+                if (btn && originalLabel) { btn.disabled = false; btn.textContent = originalLabel; }
+            }
+        }
+
         async function openLineupEditor(jobId) {
             lineupJobId = jobId;
             try {
