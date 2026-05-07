@@ -746,24 +746,18 @@ def detect_speech_segments_whisper(
             # tight, end guard moderate (preserves consonant decay).
             STRICT_START_GUARD = 0.02       # 20ms after a pre-segment unmatched word's end
             STRICT_END_GUARD = 0.08         # 80ms before a post-segment unmatched word's start
-            # v630 — STRICT_FALLBACK_END_PAD tightened from 0.10s to 0.04s.
-            # User reported a stray frame at the end of clip 7 in a 12-clip
-            # bladder-leak decode. Last word "day." ended at 49.86s; v616c's
-            # 0.10s pad → 49.96s → frame-snap 49.958s = 2.4 frames of
-            # post-speech residual (mouth closed, speaker still). Visible at
-            # output ~13.75s (after 1.1× speed) as "the last frame of clip 7".
+            # v632 — REVERT v630. v630 dropped pad to 0.04s and clipped the
+            # last word's consonant tail (sibilants /s/, /z/, /ʃ/ have
+            # 150-300ms decay; vowel + breath tail also exceeds 1 frame).
+            # Restored to v616c's 0.10s. The "ghost frame at clip boundary"
+            # the user reported was NOT post-speech residual — it persists
+            # even with this pad cut. Different bug, investigated separately.
             #
-            # Whisper's word.end already includes 50-150ms of trailing
-            # silence/breath per WhisperX research (Bain 2023, arxiv
-            # 2303.00747) — the word boundary itself is generous. Adding
-            # ANOTHER 100ms of pad on top of that double-counts.
-            #
-            # New value: 0.04s = 1 frame at 24fps. Keeps a single safety
-            # frame so frame-snap floor doesn't clip the final consonant
-            # if word.end lands mid-frame; cuts everything else. If a
-            # specific consonant tail (long fricative /s/, /ʃ/) gets clipped,
-            # raise to 0.06 — but do NOT go back to 0.10.
-            STRICT_FALLBACK_END_PAD = 0.04
+            # v616c — STRICT_FALLBACK_END_PAD = 0.10s = ~2.4 frames @ 24fps.
+            # Per WhisperX (Bain 2023, arxiv 2303.00747), Whisper's
+            # word.end overshoots phoneme end by 50-150ms (silence/breath
+            # rolled in). The 0.10s margin keeps consonant decay safely.
+            STRICT_FALLBACK_END_PAD = 0.10
             STRICT_MIN_END_TAIL = 0.05      # never trim below last_matched.end + 50ms
 
             matched_start_set = {w.get('start') for w in speech_words}
