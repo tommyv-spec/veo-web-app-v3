@@ -5298,6 +5298,41 @@ async def export_final_video(
                 result = _sp.run(cmd_speed, capture_output=True, timeout=300)
                 if result.returncode == 0:
                     import os as _os
+                    # v633 — diagnostic: count frames in pre-speed and
+                    # post-speed files to localize the ghost-frame source.
+                    try:
+                        cnt_pre_cmd = ["ffmpeg", "-i", str(output_path),
+                                       "-map", "0:v:0", "-c", "copy",
+                                       "-f", "null", "-"]
+                        cnt_post_cmd = ["ffmpeg", "-i", str(sped_path),
+                                        "-map", "0:v:0", "-c", "copy",
+                                        "-f", "null", "-"]
+                        import re as _re
+                        def _count(cmd):
+                            r = _sp.run(cmd, capture_output=True, timeout=60)
+                            text = r.stderr.decode("utf-8", errors="ignore")
+                            for line in text.splitlines()[::-1]:
+                                m = _re.search(r"frame=\s*(\d+)", line)
+                                if m:
+                                    return int(m.group(1))
+                            return None
+                        pre_n = _count(cnt_pre_cmd)
+                        post_n = _count(cnt_post_cmd)
+                        expected_post = round(pre_n / speed) if pre_n else None
+                        delta = (post_n - expected_post) if (post_n and expected_post) else None
+                        print(f"[v633] PRE-speed: {pre_n} frames | "
+                              f"POST-speed: {post_n} frames | "
+                              f"expected POST = round({pre_n}/{speed}) = {expected_post} | "
+                              f"delta = {delta:+d}" if delta is not None else
+                              f"[v633] PRE={pre_n} POST={post_n} expected={expected_post}",
+                              flush=True)
+                        if delta is not None and delta != 0:
+                            print(f"[v633] ⚠ POST-SPEED FRAME COUNT MISMATCH: "
+                                  f"{delta:+d} frames vs expected. "
+                                  f"Speed pass is producing extra/missing frames.",
+                                  flush=True)
+                    except Exception as _e:
+                        print(f"[v633] post-speed diag failed (non-fatal): {_e}", flush=True)
                     _os.replace(sped_path, output_path)
                     stats["playback_speed"] = speed
                     print(f"[Export] Speed applied: {speed}×", flush=True)

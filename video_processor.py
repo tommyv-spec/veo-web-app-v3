@@ -2123,6 +2123,33 @@ def apply_vad(
     final_info = ffprobe_json(out)
     final_duration = get_duration(final_info)
 
+    # v633 — diagnostic: verify pre-speed concat frame count matches sum
+    # of (segment_duration * src_fps). Mismatch → v617 concat is producing
+    # extra frames somewhere (the "ghost frame" the user reports).
+    try:
+        src_fps_diag = get_fps(ffprobe_json(src)) or 24.0
+        expected_frames = sum(round((e - s) * src_fps_diag) for s, e in merged)
+        cnt_cmd = [FFMPEG_BIN, "-i", str(out), "-map", "0:v:0",
+                   "-c", "copy", "-f", "null", "-"]
+        cnt_code, cnt_stdout, cnt_stderr = run(cnt_cmd)
+        actual_frames = None
+        for line in (cnt_stderr or "").splitlines():
+            if "frame=" in line:
+                import re as _re
+                m = _re.search(r"frame=\s*(\d+)", line)
+                if m:
+                    actual_frames = int(m.group(1))
+        print(f"[v633] PRE-SPEED concat: expected {expected_frames} frames "
+              f"(sum of segs × {src_fps_diag}fps), actual {actual_frames}, "
+              f"duration {final_duration:.6f}s, segs={len(merged)}", flush=True)
+        if actual_frames is not None and actual_frames != expected_frames:
+            print(f"[v633] ⚠ FRAME COUNT MISMATCH: "
+                  f"{actual_frames - expected_frames:+d} frames "
+                  f"in pre-speed concat output. v617 trim/concat is leaking.",
+                  flush=True)
+    except Exception as _e:
+        print(f"[v633] diagnostic failed (non-fatal): {_e}", flush=True)
+
     return {
         "original_duration": original_duration,
         "final_duration": final_duration,
