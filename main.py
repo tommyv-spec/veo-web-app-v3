@@ -4084,8 +4084,13 @@ async def download_output(
     filepath = output_dir / filename
 
     # Method 1: Local filesystem (fast path)
-    # Filenames are unique per version — safe to cache aggressively
-    video_cache_headers = {"Cache-Control": "private, max-age=86400, immutable"}
+    # Filenames are unique per version (UUID suffix) — never mutate, safe
+    # to cache forever. v638: bumped from 86400 (24h) → 31536000 (365d)
+    # so the browser never evicts videos that have been viewed once.
+    # User reported clips reload on every job open; 24h cache lost on
+    # day-overs / cache pressure / private mode quirks. 365d + immutable
+    # = browser disk cache hit on every subsequent open.
+    video_cache_headers = {"Cache-Control": "private, max-age=31536000, immutable"}
     if filepath.exists():
         return FileResponse(filepath, media_type="video/mp4", filename=filename, headers=video_cache_headers)
 
