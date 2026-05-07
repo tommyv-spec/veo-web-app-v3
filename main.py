@@ -5263,12 +5263,34 @@ async def export_final_video(
                 # CFR fix); the export-speed path was missed and silently
                 # regressed for any clip exported with playback_speed > 1.0.
                 import subprocess as _sp
+                # v631 — replace `-r 24 -vsync cfr` with in-filter `fps=24`.
+                # User report: "a frame from clip 7 appears at output 13-14s
+                # that shouldn't be there. Not extra frames after 'day' —
+                # looks like the last frame of clip 7 in the wrong position."
+                #
+                # Root cause: `-vsync cfr` does dup/drop at the ENCODER
+                # boundary based on PTS rounding. With setpts=PTS/1.1 on a
+                # 24fps CFR input, the pre-speed boundary between seg7 (last
+                # frame at PTS 49.917s in source) and seg8 (first frame at
+                # 53.958s in source) becomes adjacent in the concatenated
+                # file. After setpts, the speed-output 24fps grid samples
+                # near this boundary using `nearest input frame ≤ output
+                # PTS`. Sub-millisecond float rounding can pick seg7's last
+                # frame for one extra output slot whose audio already belongs
+                # to seg8 → user sees a 1-frame freeze of clip 7 visible
+                # during clip 8's audio onset.
+                #
+                # The `fps=24` filter inside the graph uses
+                # round-half-to-even on PTS sampling and resolves frame
+                # selection BEFORE the encoder sees anything. No encoder
+                # boundary dup. No PTS-rounding ghosts at concat seams.
+                # Also bumps setpts precision from 6 → 9 decimals to match
+                # v629 trim precision.
                 cmd_speed = [
                     "ffmpeg", "-y", "-i", str(output_path),
                     "-filter_complex",
-                    f"[0:v]setpts={1/speed:.6f}*PTS[v];[0:a]atempo={speed:.3f}[a]",
+                    f"[0:v]setpts={1/speed:.9f}*PTS,fps=24[v];[0:a]atempo={speed:.6f}[a]",
                     "-map", "[v]", "-map", "[a]",
-                    "-r", "24", "-vsync", "cfr",   # v597: force CFR — same fix as v560 in master_align
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
                     "-c:a", "aac", "-b:a", "192k",
                     str(sped_path)
