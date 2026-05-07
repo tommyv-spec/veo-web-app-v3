@@ -11996,14 +11996,34 @@ Example: A realistic vertical video of a professional presenter speaking directl
         function imgStartPolling() {
             imgStopPolling();
             imgState.pollTimer = setInterval(() => {
+                // v656 — gate the 2s image-platform refresh on the user
+                // actually being on the images tab. HAR analysis on a
+                // running video-job page showed /api/images/nodes hit
+                // every 2 seconds (count=9 over 16.9s window) because
+                // hasInFlight stays true whenever ANY image node is
+                // still generating somewhere in the user's account —
+                // even when the user is on a completely different tab.
+                // Result: sidebar re-renders + /api/images/nodes fetch
+                // every cycle, perceived as the video page "constantly
+                // updating". The 304 ETag from v640 stops the body
+                // transfer but the JS still re-decoded and re-rendered.
+                //
+                // Hard gate: skip both fetch+render when the body's
+                // tab class is `tab-videos` (or anything not
+                // `tab-images`). Worker-status check still runs on
+                // every tab — it's tiny and used by the global header.
+                const onImagesTab = document.querySelector('.app-container')?.classList.contains('tab-images');
+                if (!onImagesTab) {
+                    // Still tick worker-status (tiny payload, drives the
+                    // global "worker online" indicator)
+                    imgRefreshWorkerStatus();
+                    return;
+                }
                 const hasInFlight = imgState.nodes.some(n =>
                     n.status === 'queued' ||
                     n.status === 'generating' ||
                     n.status === 'draft'   // draft = waiting on a parent choice
                 );
-                // Refresh when: something is being worked on (so we catch
-                // completions and fire notifications), OR the user is
-                // looking at a specific node or job overview.
                 if (hasInFlight || imgState.detailNodeId || imgState.selectedJobKey) {
                     imgRefreshNodes(true);
                 }
