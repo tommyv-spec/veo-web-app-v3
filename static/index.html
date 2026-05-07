@@ -6800,6 +6800,21 @@ Example: A realistic vertical video of a professional presenter speaking directl
         
         async function selectJob(id){
             if(selectedJobId===id)return;selectedJobId=id;lastLogId=0;clipStates={};clipVideoKeys={};clipUIKeys={};currentJobStatus=null;currentJobApprovedCount=0;currentJobBackend=null;
+            // v655 — clear image-platform selection so its 2-second poll
+            // (imgStartPolling at line 11983) stops firing imgRefreshNodes
+            // while the user is on a video job. Without this, navigating
+            // to the image platform first then to a video job kept
+            // imgState.selectedJobKey set, so the 2s loop kept calling
+            // imgRefreshNodes + imgRender every cycle — making the page
+            // appear to refresh constantly even though the video poll is
+            // every 5s. The user reported this as "the job page keeps
+            // updating".
+            try {
+                if (typeof imgState !== 'undefined') {
+                    imgState.selectedJobKey = null;
+                    imgState.detailNodeId = null;
+                }
+            } catch (e) {}
             setActiveState(); // Reopen Review panel when selecting a job
             document.getElementById('noJob').style.display='none';document.getElementById('jobDetails').style.display='block';
             document.getElementById('jobInfo').innerHTML='<div style="color:var(--text-muted)">Loading...</div>';
