@@ -715,7 +715,7 @@ What the platform's prompt-builder will emit per scene at job emission. One Veo 
 
 [Action narrative — three-beat motion description with explicit timing within the 8s window: start beat 0-2s, mid-clip beat 3-5s, end beat 5-8s. Built from the Storyboard's action_note for this scene.]
 
-She says with [pace] [voice register] [tone/role]: [exact dialogue from the Storyboard's line for this scene, optional ALL-CAPS on 1-2 stressed words]. (v641: 3-element prosodic cue — pace from {measured, deliberate, brisk, clipped, drawn-out}; voice register from {low chest-voice, lowered intimate, quiet conspiratorial, projected, raised head-voice, breathy-soft}; tone/role from {clinical authority, warm teaching, urgent warning, matter-of-fact, conspiratorial whisper, payoff reveal, closing CTA, etc.}. See template_reference.md §"Dialogue delivery rubric (v641)" for the full table.)
+She says with [register, e.g. "warm clinical-authoritative emphasis"]: [exact dialogue from the Storyboard's line for this scene].
 
 Ambient: [setting tone + ambient sound cues that Veo's audio path can pick up — built from the Style & Ambiance block of the action_note].
 (no subtitles, no captions)
@@ -733,7 +733,7 @@ no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, 
 
 [Action narrative — three beats with timing]
 
-She says with [pace] [voice register] [tone/role]: [exact dialogue, optional ALL-CAPS on 1-2 stressed words].
+She says with [register]: [exact dialogue].
 
 Ambient: [setting tone + ambient cues].
 (no subtitles, no captions)

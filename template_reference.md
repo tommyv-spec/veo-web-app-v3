@@ -788,7 +788,7 @@ One fenced block per clip. Each clip = one Veo generation = one 8-second video. 
 
 [Action narrative — three motion beats with timing]
 
-She says with [pace] [voice register] [tone/role]: [exact dialogue from Storyboard, with optional ALL-CAPS on the 1-2 stressed words].
+She says with [register]: [exact dialogue from Storyboard].
 
 Ambient: [setting tone + ambient sound cues].
 (no subtitles, no captions)
@@ -1734,77 +1734,6 @@ All four constants live at the top of the v611 / v616 blocks in `code/video_proc
 - v611 edge-cap defense — preserved (v616 fires AFTER v611, on the v611-contained segments).
 - v499/v597 ffmpeg output-seek + CFR + fps-lock — preserved (v616b's frame-snap COMPLEMENTS them by feeding cleaner timestamps in).
 - Energy-mode silence detection — separate code path; v616 only fires when `silence_mode="whisper"`.
-
----
-
-## Dialogue delivery rubric (v641) — 3-element prosodic cue + optional emphasis caps
-
-**Source: 2026-05-07 owner review** — *"the dialogue cue is just a label, Veo doesn't know HOW to pronounce it."*
-
-The pre-v641 cue used a single free-form `[register]` slot — typical output was *"She says with serious clinical-teaching authority: this is high blood sugar."* The string describes the speaker's ROLE but gives Veo 3.1's TTS no explicit prosodic guidance, so the line often lands rushed, flat, or in the wrong pitch register. The cue must encode HOW the line is spoken, not just WHAT role it serves.
-
-### The 3 mandatory elements
-
-Every dialogue cue assembles three slots in this order:
-
-```
-She says with [pace] [voice register] [tone/role]: [exact dialogue].
-```
-
-| Slot | Vocabulary that Veo 3.1 TTS reliably interprets |
-|---|---|
-| **pace** | `measured` · `deliberate` · `slow` · `brisk` · `rushed` · `clipped` · `drawn-out` |
-| **voice register** | `low chest-voice` · `lowered intimate` · `quiet conspiratorial` · `projected` · `raised head-voice` · `flat-monotone` · `breathy-soft` |
-| **tone/role** | `clinical authority` · `warm teaching` · `urgent warning` · `matter-of-fact` · `confident product-pitch` · `conspiratorial whisper` · `payoff reveal` · `closing CTA` |
-
-Compose one token from each column. Combine with hyphens when natural (e.g. `measured low chest-voice clinical authority`). Avoid stacking 5+ adjectives — TTS dilutes.
-
-### Optional 4th element — emphasis caps
-
-For the 1-2 keywords that carry the clip's punch, capitalize them in the line itself. Veo 3.1 respects ALL-CAPS as a stress cue in most renditions. Use sparingly — caps on every word becomes shouting.
-
-```
-She says with measured low chest-voice clinical authority: this is HIGH BLOOD SUGAR.
-```
-
-NOT:
-```
-She says with measured low chest-voice clinical authority: THIS IS HIGH BLOOD SUGAR.
-```
-
-### Worked examples — old → new
-
-| Old (single-label register) | New (3-element + optional caps) |
-|---|---|
-| `She says with serious clinical-teaching authority: this is high blood sugar.` | `She says with measured low chest-voice clinical authority: this is HIGH BLOOD SUGAR.` |
-| `She says with confident-authoritative direct-address: there are five truths every doctor should tell you.` | `She says with brisk projected confident direct-address: there are FIVE TRUTHS every doctor should tell you.` |
-| `She says with warm-authoritative-CTA closing emphasis: comment "stamina" and I'll send you the full protocol.` | `She says with deliberate warm closing CTA: comment STAMINA and I'll send you the full protocol.` |
-| `She says with cold clinical-authoritative disgust: these won't fix what's actually broken.` | `She says with clipped low flat-monotone clinical disgust: these won't fix what's actually BROKEN.` |
-| `She says with payoff-reveal climactic emphasis: truth five — and the most important — Corella saffron.` | `She says with deliberate quiet payoff reveal: truth five, the most important. CORELLA SAFFRON.` |
-
-### Why this works for Veo 3.1 TTS specifically
-
-Veo 3.1's audio model consistently picks up explicit pace/volume/pitch words because they map onto its training data labels. Generic role descriptors ("authority", "emphasis") map onto a much wider distribution of deliveries — Veo gets to choose. Pinning pace + register + tone narrows the distribution to the operator's intended delivery.
-
-Empirical pattern from the corpus's better-performing renditions: every clip whose audio landed correctly on first pass had at least one explicit pace word and one explicit pitch/volume word in the cue.
-
-### Pre-output validation gate
-
-Before emitting any `videos/*.md` clip prompt:
-
-- ✅ The cue includes at least one `[pace]` token from the table above
-- ✅ The cue includes at least one `[voice register]` token (pitch / volume / chest-vs-head)
-- ✅ The cue includes at least one `[tone/role]` token (clinical / warm / urgent / etc.)
-- ✅ Optional ALL-CAPS limited to 1-2 keywords per line; never the whole line
-- ✅ The line itself still satisfies the v615 em-dash ban
-
-### What v641 does NOT change
-
-- Action_note prose — still describes scene-dependent motion beats per [[v540]]
-- The em-dash ban (v615) still applies to the spoken `- **line:**` text — emphasis caps are the only mechanism for stress
-- Ambient block — unchanged
-- Negative prompt — unchanged
-- Storyboard `**visual register:**` and `**rhythm tier:**` fields — those are for visual register tagging, separate from the spoken delivery cue.
 
 ---
 
