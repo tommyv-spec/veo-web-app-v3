@@ -13390,6 +13390,83 @@ Example: A realistic vertical video of a professional presenter speaking directl
             return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
 
+        // v645 — batch overview modal. Opens from the node-detail "📋 Batch
+        // overview" button. Fetches /api/images/batches/{id}/overview which
+        // returns the raw source markdown PLUS a parsed breakdown
+        // (ingredients, images, scenes with lines/pads/action_notes/
+        // veo_prompts) and aggregate stats. Renders a fixed-position modal
+        // with section toggles + scrollable raw-md viewer.
+        async function imgOpenBatchOverview(batchId) {
+            // Tear down any existing overview modal first
+            const existing = document.getElementById('batchOverviewModal');
+            if (existing) existing.remove();
+
+            const modal = document.createElement('div');
+            modal.id = 'batchOverviewModal';
+            modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:24px;';
+            modal.innerHTML = '<div style="background:var(--bg-surface);border:1px solid var(--border-color);border-radius:8px;width:100%;max-width:1200px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;"><div style="padding:16px 20px;border-bottom:1px solid var(--border-color);display:flex;justify-content:space-between;align-items:center;flex-shrink:0;"><div style="font-size:16px;font-weight:600;">📋 Batch overview</div><button class="btn btn-secondary" onclick="document.getElementById(\'batchOverviewModal\').remove()" style="padding:6px 12px;">✕ Close</button></div><div id="batchOverviewBody" style="padding:20px;overflow:auto;flex:1;"><div style="color:var(--text-muted);">Loading…</div></div></div>';
+            document.body.appendChild(modal);
+            modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+
+            try {
+                const res = await fetch(`/api/images/batches/${encodeURIComponent(batchId)}/overview`);
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                imgRenderBatchOverview(data);
+            } catch (e) {
+                const body = document.getElementById('batchOverviewBody');
+                if (body) body.innerHTML = `<div style="color:var(--error);">Failed to load: ${imgEscape(e.message)}</div>`;
+            }
+        }
+
+        function imgRenderBatchOverview(data) {
+            const body = document.getElementById('batchOverviewBody');
+            if (!body) return;
+            const stats = data.stats || {};
+            const parsed = data.parsed || {};
+            const ingredients = parsed.ingredients || [];
+            const images = parsed.images || [];
+            const scenes = parsed.scenes || [];
+
+            const statRow = `<div style="display:flex;gap:16px;flex-wrap:wrap;font-size:11px;color:var(--text-muted);margin-bottom:16px;padding:10px 12px;background:var(--bg-elevated);border-radius:6px;"><span><b style="color:var(--text-primary);">${stats.total_images||0}</b> images</span><span><b style="color:var(--text-primary);">${stats.total_scenes||0}</b> scenes</span><span><b style="color:var(--text-primary);">${stats.total_lines||0}</b> lines</span><span><b style="color:var(--text-primary);">${stats.total_pads||0}</b> pads</span><span><b style="color:var(--text-primary);">${stats.total_action_notes||0}</b> action notes</span><span><b style="color:var(--text-primary);">${stats.total_veo_prompts||0}</b> Veo prompts</span><span><b style="color:var(--text-primary);">${stats.total_ingredients||0}</b> ingredients</span><span><b style="color:var(--text-primary);">${(data.source_markdown_chars||0).toLocaleString()}</b> chars</span></div>`;
+
+            const header = `<div style="margin-bottom:16px;"><div style="font-size:18px;font-weight:600;margin-bottom:4px;">${imgEscape(data.name||'(unnamed batch)')}</div><div style="font-size:11px;color:var(--text-muted);">persona: ${imgEscape(data.persona||'—')} · setting: ${imgEscape(data.setting||'—')} · ${data.duration_seconds||'?'}s · structure: ${imgEscape(data.structure||'—')}</div></div>`;
+
+            // Section: ingredients
+            const ingredientsHtml = ingredients.length
+                ? `<details open style="margin-bottom:12px;"><summary style="cursor:pointer;font-weight:600;padding:6px 0;">🧩 Ingredients (${ingredients.length})</summary><div style="margin-top:8px;display:grid;gap:6px;">${ingredients.map(ing => `<div style="padding:8px 10px;background:var(--bg-elevated);border-radius:4px;font-size:12px;"><b>${imgEscape(ing.name||'')}</b> · <span style="color:var(--text-muted);">${imgEscape(ing.type||'')}</span><div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${imgEscape(ing.description||'')}</div>${ing.source ? `<div style="font-size:10px;color:var(--text-muted);margin-top:2px;">source: ${imgEscape(ing.source)}</div>` : ''}</div>`).join('')}</div></details>`
+                : '';
+
+            // Section: images
+            const imagesHtml = images.length
+                ? `<details open style="margin-bottom:12px;"><summary style="cursor:pointer;font-weight:600;padding:6px 0;">🖼️ Images (${images.length})</summary><div style="margin-top:8px;display:grid;gap:6px;">${images.map(im => `<div style="padding:8px 10px;background:var(--bg-elevated);border-radius:4px;font-size:12px;"><b>image_${im.image_index}</b> · ref: <span style="color:var(--text-muted);">${imgEscape(im.reference_image||'none')}</span>${im.product_image ? ` · product: <span style="color:var(--text-muted);">${imgEscape(im.product_image)}</span>` : ''}<details style="margin-top:6px;"><summary style="cursor:pointer;font-size:11px;color:var(--text-muted);">prompt (${(im.image_prompt||'').length} chars)</summary><pre style="margin-top:6px;padding:8px;background:var(--bg-input);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.4;">${imgEscape(im.image_prompt||'')}</pre></details></div>`).join('')}</div></details>`
+                : '';
+
+            // Section: scenes
+            const scenesHtml = scenes.length
+                ? `<details open style="margin-bottom:12px;"><summary style="cursor:pointer;font-weight:600;padding:6px 0;">🎬 Scenes / Storyboard (${scenes.length})</summary><div style="margin-top:8px;display:grid;gap:8px;">${scenes.map(sc => {
+                    const lines = sc.lines || [];
+                    const pads = sc.pads || [];
+                    const notes = sc.action_notes || [];
+                    const vps = sc.veo_prompts || [];
+                    const lineRows = lines.map((ln, i) => {
+                        const pad = pads[i];
+                        const note = notes[i];
+                        const vp = vps[i];
+                        const lnWords = (ln||'').split(/\s+/).filter(Boolean).length;
+                        const padWords = pad ? pad.split(/\s+/).filter(Boolean).length : 0;
+                        return `<div style="padding:6px 8px;background:var(--bg-input);border-radius:4px;font-size:11px;margin-top:4px;"><div><b>line ${i+1}</b> <span style="color:var(--text-muted);">(${lnWords}w)</span>: ${imgEscape(ln)}</div>${pad ? `<div style="margin-top:4px;color:#fbbf24;"><b>pad</b> <span style="color:var(--text-muted);">(${padWords}w · total ${lnWords+padWords}w)</span>: ${imgEscape(pad)}</div>` : ''}${note ? `<div style="margin-top:4px;color:var(--text-muted);"><b>action</b>: ${imgEscape(note)}</div>` : ''}${vp ? `<details style="margin-top:4px;"><summary style="cursor:pointer;color:#a78bfa;">veo prompt override</summary><pre style="margin-top:4px;padding:6px;background:var(--bg-elevated);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;">${imgEscape((vp.text_prompt||'') + (vp.negative_prompt ? '\n\nNegative: ' + vp.negative_prompt : ''))}</pre></details>` : ''}</div>`;
+                    }).join('');
+                    return `<div style="padding:8px 10px;background:var(--bg-elevated);border-radius:4px;font-size:12px;"><b>Scene ${sc.scene_index}</b> · image_${sc.image_index} · ${imgEscape(sc.clip_mode||'blend')}${sc.scene_transition ? ` · ${imgEscape(sc.scene_transition)}` : ''}${sc.speaker_mode ? ` · speaker: ${imgEscape(sc.speaker_mode)}` : ''}${sc.visual_register ? ` · register: ${imgEscape(sc.visual_register)}` : ''}${lineRows}</div>`;
+                }).join('')}</div></details>`
+                : '';
+
+            // Raw markdown
+            const rawHtml = `<details style="margin-bottom:12px;"><summary style="cursor:pointer;font-weight:600;padding:6px 0;">📄 Raw markdown source (${(data.source_markdown_chars||0).toLocaleString()} chars)</summary><pre style="margin-top:8px;padding:12px;background:var(--bg-input);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.4;max-height:600px;overflow:auto;">${imgEscape(data.source_markdown||'')}</pre></details>`;
+
+            body.innerHTML = header + statRow + ingredientsHtml + imagesHtml + scenesHtml + rawHtml;
+        }
+
         // ---- Parent slot picker -----------------------------------------------
 
         function imgAddParentSlot() {
@@ -14618,6 +14695,13 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 if (node.status === 'ready' && node.chosen_variant_id) {
                     actionBtns.push(`<button class="btn btn-secondary" onclick="imgUseAsParent(${node.id})">↘ Use as parent for new node</button>`);
                 }
+            }
+            // v645 — overview button. Only show when the node belongs to
+            // a batch (came from a markdown import). Opens a modal with
+            // the full source markdown + parsed sections (ingredients,
+            // images, scenes, lines, pads, action_notes, veo prompts).
+            if (node.batch_id) {
+                actionBtns.push(`<button class="btn btn-secondary" onclick="imgOpenBatchOverview('${node.batch_id}')" title="View the full markdown + all parsed sections for this batch">📋 Batch overview</button>`);
             }
             actionBtns.push(`<button class="btn btn-secondary" onclick="imgDeleteNode(${node.id})" style="color:var(--error);">🗑 Delete</button>`);
 

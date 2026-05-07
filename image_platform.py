@@ -5135,6 +5135,91 @@ def get_batch(
     }
 
 
+@router.get("/batches/{batch_id}/overview")
+def get_batch_overview(
+    batch_id: str,
+    db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v645 — full batch overview for the operator UI.
+
+    Returns the raw source markdown PLUS a structured breakdown by
+    section so the frontend can render every part of the import in
+    one place: ingredients, images, scenes (with lines/pads/action
+    notes/Veo prompts per scene), and aggregate counts.
+
+    Used by the "📋 Overview" button on the node-detail view —
+    operator clicks it to inspect the entire markdown that produced
+    the current image without leaving the platform.
+    """
+    import json as _json
+
+    batch = db.query(ImageJobBatch).filter(
+        ImageJobBatch.id == batch_id,
+        ImageJobBatch.user_id == current_user.id,
+    ).first()
+    if not batch:
+        raise HTTPException(404, f"Batch {batch_id} not found")
+
+    md = batch.source_markdown or ""
+
+    # Parse the structured sections directly from the stored markdown.
+    # parse_scene_table returns ingredients + images + scenes already
+    # broken down per the v590 / v644 format.
+    parsed: Dict[str, Any] = {}
+    try:
+        parsed = parse_scene_table(md)
+    except Exception as _pe:
+        parsed = {"_parse_error": str(_pe)}
+
+    # Pull per-scene assignment data (lines + action_notes + veo_prompts
+    # + pads_json) so the overview can show what's actually stored in
+    # the DB (post-import), parallel to what's in the raw markdown.
+    assignments = db.query(ImageSceneAssignment).filter(
+        ImageSceneAssignment.batch_id == batch_id,
+    ).order_by(ImageSceneAssignment.scene_index).all()
+    assignment_dicts = [a.to_dict() for a in assignments]
+
+    # Aggregate counts for the overview header.
+    images_section = parsed.get("images") or []
+    scenes_section = parsed.get("scenes") or []
+    ingredients_section = parsed.get("ingredients") or []
+    total_lines = sum(len(s.get("lines") or []) for s in scenes_section)
+    total_pads = sum(
+        sum(1 for p in (s.get("pads") or []) if p)
+        for s in scenes_section
+    )
+    total_action_notes = sum(
+        sum(1 for n in (s.get("action_notes") or []) if n)
+        for s in scenes_section
+    )
+    total_veo_prompts = sum(
+        sum(1 for vp in (s.get("veo_prompts") or []) if vp)
+        for s in scenes_section
+    )
+
+    return {
+        **batch.to_dict(),
+        "source_markdown": md,
+        "source_markdown_chars": len(md),
+        "parsed": {
+            "ingredients": ingredients_section,
+            "images": images_section,
+            "scenes": scenes_section,
+        },
+        "assignments": assignment_dicts,
+        "stats": {
+            "total_images": len(images_section),
+            "total_scenes": len(scenes_section),
+            "total_lines": total_lines,
+            "total_pads": total_pads,
+            "total_action_notes": total_action_notes,
+            "total_veo_prompts": total_veo_prompts,
+            "total_ingredients": len(ingredients_section),
+        },
+    }
+
+
 @router.post("/batches/{batch_id}/prepare-for-video")
 def prepare_batch_for_video(
     batch_id: str,
