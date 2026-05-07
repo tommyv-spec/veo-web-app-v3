@@ -14003,6 +14003,12 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if (failedCount > 0) {
                 bulkActions.push(`<button class="btn btn-secondary" onclick="imgBulkRegenerateFailed('${keyAttr}')" title="Regenerate all failed scenes in this job">↻ Regenerate failed (${failedCount})</button>`);
             }
+            // v648 — batch overview lives on the JOB page (here), not the
+            // per-node detail view. Shown when the group shares a single
+            // batch_id (i.e. came from a markdown import).
+            if (sharedBatchId) {
+                bulkActions.push(`<button class="btn btn-secondary" onclick="imgOpenBatchOverview('${sharedBatchId}')" title="View the full source markdown + parsed sections (ingredients, images, scenes, lines, pads, action notes, Veo prompts)">📋 Batch overview</button>`);
+            }
             bulkActions.push(`<button class="btn btn-secondary" onclick="imgBulkExportList('${keyAttr}')" title="Copy a plain-text list of scenes + statuses to clipboard">📋 Export list</button>`);
             if (!groupKey.startsWith('__') && nodes.length > 0) {
                 bulkActions.push(`<button class="btn btn-secondary" style="color:var(--error);" onclick="imgBulkDeleteJob('${keyAttr}')" title="Delete every node in this job">🗑 Delete job</button>`);
@@ -14788,13 +14794,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     actionBtns.push(`<button class="btn btn-secondary" onclick="imgUseAsParent(${node.id})">↘ Use as parent for new node</button>`);
                 }
             }
-            // v645 — overview button. Only show when the node belongs to
-            // a batch (came from a markdown import). Opens a modal with
-            // the full source markdown + parsed sections (ingredients,
-            // images, scenes, lines, pads, action_notes, veo prompts).
-            if (node.batch_id) {
-                actionBtns.push(`<button class="btn btn-secondary" onclick="imgOpenBatchOverview('${node.batch_id}')" title="View the full markdown + all parsed sections for this batch">📋 Batch overview</button>`);
-            }
+            // v648 — batch overview button moved from node detail to
+            // the job overview page (per owner directive 2026-05-07).
+            // From a node, navigate up to the job and click "📋 Batch
+            // overview" there.
             actionBtns.push(`<button class="btn btn-secondary" onclick="imgDeleteNode(${node.id})" style="color:var(--error);">🗑 Delete</button>`);
 
             // v505: Delete button is now ALWAYS rendered in the top
