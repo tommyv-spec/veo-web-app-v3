@@ -2150,6 +2150,36 @@ def apply_vad(
     except Exception as _e:
         print(f"[v633] diagnostic failed (non-fatal): {_e}", flush=True)
 
+    # v634 — dump actual frame PTS at seg boundaries in pre-speed concat.
+    # User reports ghost frames look like "from end of clip" — NOT
+    # post-word residual at trim end. Need to know what frame actually
+    # lands at each seg boundary in concat output. Compare against
+    # expected (cumulative seg duration). If a boundary frame has
+    # source content from outside its trim range, the trim filter is
+    # leaking despite correct frame counts.
+    try:
+        ffprobe_bin = FFMPEG_BIN.replace("ffmpeg", "ffprobe")
+        cum = 0.0
+        boundary_pts = []
+        for i, (s, e) in enumerate(merged[:-1]):
+            cum += (e - s)
+            boundary_pts.append((i + 1, cum))  # boundary AFTER seg i+1
+        for seg_num, b_pts in boundary_pts:
+            # Dump frames in window [b_pts - 4/24, b_pts + 4/24] = ~8 frames around boundary
+            win_start = max(0, b_pts - 4.0/24)
+            win_end = b_pts + 4.0/24
+            pf_cmd = [ffprobe_bin, "-v", "error",
+                      "-select_streams", "v:0",
+                      "-show_entries", "frame=pkt_pts_time",
+                      "-read_intervals", f"{win_start:.4f}%{win_end:.4f}",
+                      "-of", "csv=p=0", str(out)]
+            r = run(pf_cmd)
+            ptses = [x.strip() for x in (r[1] or "").splitlines() if x.strip()]
+            print(f"[v634] boundary after seg{seg_num} expected at PTS≈{b_pts:.4f}s, "
+                  f"frames in window: {ptses}", flush=True)
+    except Exception as _e:
+        print(f"[v634] boundary PTS dump failed (non-fatal): {_e}", flush=True)
+
     return {
         "original_duration": original_duration,
         "final_duration": final_duration,
