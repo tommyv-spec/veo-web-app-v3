@@ -184,6 +184,23 @@
             content: ''; position: absolute;
         }
 
+        /* v646 — day separator between batches in the image sidebar.
+           Inserted by the renderer when the day changes between two
+           consecutive batches in the sorted list. */
+        .img-day-separator {
+            margin: 14px 4px 6px 4px;
+            padding: 4px 8px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            border-top: 1px solid var(--border-color);
+            background: var(--bg-elevated);
+            border-radius: 4px;
+            user-select: none;
+        }
+
         /* Collapsible group header in sidebar */
         .img-group-header {
             display: flex; align-items: center; gap: 6px;
@@ -13066,8 +13083,54 @@ Example: A realistic vertical video of a professional presenter speaking directl
             const batchesById = imgState.batchesById || {};
             const videoJobsById = imgState.videoJobsById || {};
 
+            // v646 — day separator helper. Returns 'YYYY-MM-DD' for the
+            // EARLIEST node.created_at in a group, or null if no parseable
+            // date. Used to insert "Today / Yesterday / DD MMM YYYY" header
+            // rows between consecutive batches when their day changes.
+            function batchDayKey(nodes) {
+                let earliest = null;
+                for (const n of nodes) {
+                    const t = n.created_at;
+                    if (!t) continue;
+                    const d = new Date(t);
+                    if (isNaN(d.getTime())) continue;
+                    if (!earliest || d < earliest) earliest = d;
+                }
+                if (!earliest) return null;
+                const y = earliest.getFullYear();
+                const m = String(earliest.getMonth() + 1).padStart(2, '0');
+                const d = String(earliest.getDate()).padStart(2, '0');
+                return `${y}-${m}-${d}`;
+            }
+            function formatDayLabel(dayKey) {
+                if (!dayKey) return 'Undated';
+                const d = new Date(dayKey + 'T00:00:00');
+                if (isNaN(d.getTime())) return dayKey;
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                const yesterday = new Date(today);
+                yesterday.setDate(today.getDate() - 1);
+                const targetMs = d.getTime();
+                if (targetMs === today.getTime()) return 'Today';
+                if (targetMs === yesterday.getTime()) return 'Yesterday';
+                return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+            }
+            let _lastDayKey = '__init__';
+
             const html = sortedKeys.map(k => {
                 const nodes = imgState.groupsByKey[k];
+                // v646 — inject a day-separator header row when the day
+                // changes between consecutive batches in the sorted list.
+                // The SUBJECTS bucket (uploads) skips this — it's not a
+                // dated batch group, just source material.
+                let _daySep = '';
+                if (k !== SUBJECTS_KEY) {
+                    const _dayKey = batchDayKey(nodes);
+                    if (_dayKey !== _lastDayKey) {
+                        _lastDayKey = _dayKey;
+                        _daySep = `<div class="img-day-separator">${formatDayLabel(_dayKey)}</div>`;
+                    }
+                }
                 const total = nodes.length;
                 const readyCount = nodes.filter(n => n.status === 'ready').length;
                 const generatingCount = nodes.filter(
@@ -13223,7 +13286,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     ? nodes.map(n => imgSidebarRowHtml(n, selectedId)).join('')
                     : '';
 
-                return `
+                const _groupBlock = `
                     <div class="img-group ${needsWork ? 'img-group-needswork' : ''}">
                         <div class="img-group-header">
                             <span class="img-group-chevron ${isExpanded ? 'expanded' : ''}"
@@ -13239,6 +13302,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         ${rowsHtml}
                     </div>
                 `;
+                return _daySep + _groupBlock;
             }).join('');
 
             grid.innerHTML = html;
