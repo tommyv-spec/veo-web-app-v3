@@ -627,6 +627,7 @@ The main character, same [setting anchor] as image 2, same framing — shot on i
 - **visual register:** HOOK
 - **rhythm tier:** 
 - **speaker:** voiceover
+- **cut_mode:** auto      # v668 — whisper | timeline | auto. Default `auto` picks `timeline` for bracket-annotation lines (`[music plays]`, `[SFX:...]`) and `whisper` otherwise. Set explicitly when overriding.
 - **line:** 
 - **pad:**           # v644 — optional suffix added AFTER line in Veo prompt only (target line+pad ≈ 20 words; pad is cut from final video by whisper-VAD)
 - **action_note:** 

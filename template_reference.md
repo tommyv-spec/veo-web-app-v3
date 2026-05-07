@@ -947,6 +947,97 @@ Pre-v594 decoded artifacts (1:1 shot-to-image) are valid as historical record. N
 
 ---
 
+## Hybrid clip cutting — whisper vs timeline (v668)
+
+**Source: 2026-05-08 owner directive** *"some cutted according to what is said in the markdown and some according to silence or whisper... we have transformation scenes, and then spoken scenes."*
+
+A single video can mix two cut policies in the final-export trim step. Decode-side and lift-side both encode the choice per scene so downstream concat applies the correct trim to each clip independently.
+
+### The two modes
+
+| `cut_mode` | When to use | How the trim is computed |
+|---|---|---|
+| `whisper` | On-camera dialogue, voiceover narration with real spoken words | Existing apply_vad path: whisper transcribes the rendered clip, matches script words, trims to speech segments + decay pad |
+| `timeline` | Transformation montages, music-only beats, SFX-only beats, beats with bracket annotation lines (`[upbeat music plays]`, `[SFX: door slams]`), scene's `line` is empty or annotation-only | Trim window from `frame_anchor` deltas between consecutive images. Scene N runs from `image_N.frame_anchor` to `image_{N+1}.frame_anchor`. Veo renders 4/6/8s, post-render trim cuts to the exact anchor delta. |
+| `auto` (default when `cut_mode` is omitted) | Most scenes | Detection rule below |
+
+### Auto-detection rule
+
+For every scene, compute `cut_mode = auto` choice as:
+
+```
+if line is empty OR line matches /^\[.+\]$/ OR line.lower() in {"(silent)", "(no dialogue)", "(music)", "(sfx only)"}:
+    cut_mode = "timeline"
+else:
+    cut_mode = "whisper"
+```
+
+The bracket-annotation pattern catches `[upbeat music plays]`, `[SFX: glass clink]`, `[ambient]`, etc. — these are stage directions for Veo's audio path, not spoken words, so whisper has nothing to match against.
+
+### Storyboard syntax
+
+```yaml
+### Scene 1
+- **image:** image_1
+- **speaker:** voiceover
+- **cut_mode:** timeline           # optional; auto-detected from `line` when omitted
+- **line:** [upbeat music plays]
+- **action_note:** ...
+
+### Scene 5
+- **image:** image_5
+- **speaker:** on-camera
+- **cut_mode:** whisper             # optional; default for on-camera with real dialogue
+- **line:** If you want to know the recipe of the juice I gave to Josh,
+- **action_note:** ...
+```
+
+When `cut_mode` is omitted, the auto-detection runs and picks `timeline` or `whisper` based on the line content. Explicit value overrides auto-detection — useful for edge cases (e.g. on-camera scene where the persona mouths along to the music; force `timeline` to keep the music beat aligned regardless of whisper output).
+
+### Applied to a transformation video (your reference example)
+
+5-scene transformation + CTA, 17s total:
+
+| Scene | Speaker | Line | Auto cut_mode | Trim source |
+|---|---|---|---|---|
+| 1 | voiceover | `[upbeat music plays]` | `timeline` | frame_anchor 0.5s → 3.0s = 2.5s |
+| 2 | voiceover | `[upbeat music plays]` | `timeline` | 3.0s → 5.0s = 2.0s |
+| 3 | voiceover | `[upbeat music plays]` | `timeline` | 5.0s → 8.0s = 3.0s |
+| 4 | voiceover | `[upbeat music plays]` | `timeline` | 8.0s → 12.0s = 4.0s |
+| 5 (×3 lines) | on-camera | spoken CTA dialogue | `whisper` | whisper-VAD trim per line |
+
+Final export concatenates all clips with their respective trims applied — same `apply_vad` filter-graph pipeline (v617), just a per-clip mode switch at the trim-decision step.
+
+### Decode-side: emit cut_mode at decode time
+
+When authoring `raw/decoded_*.md`, the decoder emits the `cut_mode` only when the auto-detection would be WRONG for the source's actual delivery (rare). Default behaviour: omit the field; downstream auto-detection from the line content is correct.
+
+Concrete decode-side cases that warrant explicit `cut_mode:`:
+
+- Source has `[music]` on the line but the persona is clearly singing along on-camera with whisper-detectable words → explicit `cut_mode: timeline` (lock to music beats, don't try to whisper-trim a sung line).
+- Source has spoken voiceover that whisper consistently fails to transcribe (heavy accent, low SNR, language whisper isn't loaded with) → explicit `cut_mode: timeline` (rely on the source's own pacing instead).
+
+### Lift-side / generate-side: emit cut_mode at authoring time
+
+The video author adds `cut_mode: timeline` explicitly to:
+
+- Transformation montage scenes (Day 1 → Day 30 → Day 67 → Day 120) where dialogue is just `[music]` — auto-detection already gets these right but explicit form is documentation for future-you.
+- Hook scenes that need a precise N-second beat regardless of whisper's word-count interpretation (e.g. a 1.5s shock beat that whisper would extend to 4s+ if a stray cough leaked through).
+
+### Validation gate
+
+Before emitting any `videos/*.md` or `raw/decoded_*.md`:
+
+- ✅ Every scene with `cut_mode: timeline` has both `frame_anchor` (its own) AND a successor scene's `frame_anchor` (or relies on the doc-level `total_duration` for the last scene)
+- ✅ Every scene with `cut_mode: whisper` has at least one `- **line:**` with real spoken words (not bracket-annotation-only)
+- ✅ When `cut_mode` is omitted, the auto-detection rule above is what the platform applies — author has read it and accepts the default
+
+### Platform wiring (deferred to v668 lift implementation)
+
+Decode-side / generate-side / lift-side rules land here NOW (this commit). The platform-side wiring (parser column, Clip.cut_mode field, apply_vad branch on cut_mode) ships separately when ready — same shape as v667's deferred lift-side wiring. The decode and authoring rules are forward-compatible: `cut_mode` is read by future platform code and ignored by current code, so nothing breaks pre-deploy.
+
+---
+
 ## Per-image timestamp + delta metadata (v667) — decode-side first
 
 **Source: 2026-05-08 owner directive** *"let's optimize the time frame extraction first from the decode, so we can later on learn how to recreate those videos in our system."*
@@ -2174,66 +2265,15 @@ Before emitting any clip prompt:
 
 ---
 
-## Em-dash absolute ban in dialogue lines (v615)
+## Dialogue line punctuation (v615)
 
-**Source: 2026-05-06 owner directive (mandatory)** *"absolutely mandatory no — symbols in any lines."*
+Scene `- **line:**` entries (and `- **pad:**` per v644) use **commas, periods, and sentence breaks** for natural spoken cadence. The same rule covers all spoken text the persona renders through Veo's TTS. Replacement table for typical em-dash uses: aside / parenthetical → comma pair OR new sentence; trailing emphasis → period + new sentence; restatement → period; list intro → colon OR period; pause-for-breath → period.
 
-Scene `- **line:**` entries MUST contain ZERO em-dash (`—`) characters. Em-dashes create awkward pauses in spoken delivery that don't match natural speech cadence. Use commas, periods, or rephrase to flow naturally.
+Mechanical check before emitting any draft: `grep '^- \*\*line:\*\*'` for `—` returns zero matches.
 
-### Scope
+Em-dashes are still natural in `action_note` prose, image-prompt bodies, frontmatter, corpus annotations (`[corpus: file — section]`), and decoded artifacts in `raw/decoded_*.md` (those preserve verbatim source audio).
 
-Applies ONLY to scene `- **line:**` entries (the spoken voiceover). Em-dashes are still allowed in:
-
-- `action_note` prose (cinematic direction, not spoken)
-- Image prompt bodies (visual direction, not spoken)
-- Frontmatter / `## Sources` / metadata
-- corpus annotations like `[corpus: file — section]`
-- This deep-dive document
-
-### Forms
-
-❌ FORBIDDEN:
-```
-- **line:** Saffron is the only ingredient — and the only one — that resets your hormones.
-- **line:** This is what menopause does at 2 a.m. — soaked sheets, racing heart, no sleep.
-- **line:** Now open one Korella saffron capsule and pour it in — this is where your hormones come back online.
-```
-
-✅ REQUIRED:
-```
-- **line:** Saffron is the only ingredient that resets your hormones.
-- **line:** This is what menopause does at 2 a.m. Soaked sheets, racing heart, no sleep.
-- **line:** Now open one Korella saffron capsule and pour it in. This is where your hormones come back online.
-```
-
-### Replacement strategies
-
-| Em-dash use | Replace with |
-|---|---|
-| Aside / parenthetical | Comma pair OR new sentence |
-| Trailing emphasis | Period + new sentence |
-| Restatement / appositive | Period + restatement OR drop the redundancy |
-| List intro | Colon OR period |
-| Pause for breath | Period (matches actual speech rhythm) |
-
-### Why v615 overrides corpus pattern preservation
-
-The corpus (`raw/decoded_*.md`) DOES contain em-dashes in many dialogue lines (e.g. *"saffron relaxes blood vessels — more blood means more girth"*). v615 OVERRIDES this. The corpus is a **dialogue tone reference**, not a punctuation mandate. The owner's spoken-delivery preference takes precedence: in voice synthesis (Veo TTS), em-dashes generate audible hesitations that read as TTS-artifact rather than natural speech.
-
-### Pre-output validation gate
-
-Before emitting any videos/*.md draft:
-
-- ✅ Zero `—` characters in any `- **line:**` entry?
-- ✅ Replacements use comma / period / rephrase (preserving meaning)?
-
-Mechanical check: grep `^- \*\*line:\*\*` for `—` should return zero matches.
-
-### What v615 does NOT change
-
-- action_notes, image prompt bodies, frontmatter — em-dashes allowed there.
-- The decoded artifacts in `raw/decoded_*.md` — those preserve verbatim spoken dialogue from source videos, em-dashes and all (the spoken delivery IS the corpus reference for downstream lifts).
-- v614 corpus-grounding — adaptation_map citations, [corpus: ...] annotations — em-dashes allowed in those (they're metadata, not spoken).
+→ Full rationale + worked failure modes (v615 / v644 archived deep-dive) in `wiki/meta/decode-negative-rules-archive.md` §"v615 — Em-dash ban in dialogue lines".
 
 ---
 
