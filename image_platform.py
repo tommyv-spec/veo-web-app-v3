@@ -1508,6 +1508,7 @@ def _delete_variant_files(node: ImageNode):
 
 @router.get("/nodes")
 def list_nodes(
+    request: Request,
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -1552,7 +1553,31 @@ def list_nodes(
         selectinload(ImageNode.parent_edges).joinedload(ImageEdge.parent),
         selectinload(ImageNode.child_edges).joinedload(ImageEdge.child),
     ).order_by(ImageNode.created_at.desc()).all())
-    return {"nodes": [n.to_dict(include_variants=True) for n in nodes]}
+
+    # v640 — ETag/304 support to kill bandwidth waste from 2s sidebar polling.
+    # User HAR capture showed `/api/images/nodes` returning 2.9 MB every 2 s
+    # (~21 MB/min sustained) even when nothing was changing. Browser caches
+    # don't help because the route uses POST-style auth (cookie). ETag lets
+    # the server skip the body when the response would be byte-identical.
+    #
+    # MD5 of the serialized payload as the cache key. Hashing 2.9 MB ≈ 5-15 ms,
+    # negligible vs the alternative of shipping 2.9 MB every poll. When the
+    # user is mid-edit (something queued/generating), the body changes, hash
+    # mismatches, and the full response is sent. When idle, browser sends
+    # If-None-Match and gets a 49-byte 304 instead.
+    import hashlib
+    import json as _json
+    from fastapi.responses import Response as _FAResponse
+    payload = {"nodes": [n.to_dict(include_variants=True) for n in nodes]}
+    body = _json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+    etag = '"' + hashlib.md5(body).hexdigest() + '"'
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, max-age=0, must-revalidate",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return _FAResponse(status_code=304, headers=headers)
+    return _FAResponse(content=body, media_type="application/json", headers=headers)
 
 
 @router.get("/nodes/{node_id}")
