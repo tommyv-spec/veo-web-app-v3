@@ -1398,6 +1398,25 @@
             box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6),
                         0 0 0 1px rgba(99, 102, 241, 0.1);
         }
+        /* v652 — drag-and-drop affordances on .lineup-item */
+        .lineup-item { cursor: grab; transition: background 0.12s, opacity 0.12s; }
+        .lineup-item:active { cursor: grabbing; }
+        .lineup-item.lineup-dragging { opacity: 0.4; }
+        .lineup-drag-handle {
+            display: inline-block;
+            color: var(--text-muted);
+            font-size: 16px;
+            padding: 0 8px;
+            user-select: none;
+            cursor: grab;
+            letter-spacing: -2px;
+        }
+        .lineup-item.lineup-drop-before {
+            box-shadow: inset 0 3px 0 0 #3b82f6;
+        }
+        .lineup-item.lineup-drop-after {
+            box-shadow: inset 0 -3px 0 0 #3b82f6;
+        }
         .lineup-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--border); }
         .lineup-header h3 { font-size: 15px; font-weight: 600; color: var(--text-primary); }
         .lineup-header-actions { display: flex; gap: 8px; align-items: center; }
@@ -8367,8 +8386,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const ver = clip.versions && clip.versions.length > 0 ? clip.versions[(clip.selected_variant||1)-1] : null;
                 const fn = ver ? ver.filename : clip.output_filename;
                 const thumbUrl = fn ? `${API}/jobs/${lineupJobId}/outputs/${fn}` : '';
-                
-                return `<div class="lineup-item" data-clip-id="${clip.id}" data-pos="${i}">
+
+                // v652 — make rows draggable. Drag handle on the left
+                // for an explicit affordance; whole row is draggable too.
+                return `<div class="lineup-item" data-clip-id="${clip.id}" data-pos="${i}"
+                              draggable="true"
+                              ondragstart="lineupDragStart(event,${i})"
+                              ondragover="lineupDragOver(event,${i})"
+                              ondragleave="lineupDragLeave(event,${i})"
+                              ondrop="lineupDrop(event,${i})"
+                              ondragend="lineupDragEnd(event)">
+                    <span class="lineup-drag-handle" title="Drag to reorder">⋮⋮</span>
                     <span class="lineup-item-pos">${i+1}</span>
                     <video class="lineup-item-thumb" src="${thumbUrl}" muted preload="metadata" onloadeddata="this.currentTime=1"></video>
                     <span class="lineup-item-text" title="${clip.dialogue_text}">${clip.dialogue_text}</span>
@@ -8450,6 +8478,70 @@ Example: A realistic vertical video of a professional presenter speaking directl
             [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
             lineupData.has_override = true;
             renderLineupEditor();
+        }
+
+        // v652 — drag-and-drop reordering for lineup items.
+        // The arrow buttons (lineupMove) stay as a fallback / a11y
+        // affordance. Drag handlers live on each .lineup-item row;
+        // drop position is computed from which row the cursor is over
+        // (compare cursor Y vs row midpoint to decide before/after).
+        let _lineupDragFromIdx = null;
+        function lineupDragStart(e, idx) {
+            _lineupDragFromIdx = idx;
+            try { e.dataTransfer.effectAllowed = 'move'; } catch {}
+            try { e.dataTransfer.setData('text/plain', String(idx)); } catch {}
+            // Visual cue on the source row
+            e.currentTarget.classList.add('lineup-dragging');
+        }
+        function lineupDragOver(e, idx) {
+            if (_lineupDragFromIdx === null) return;
+            e.preventDefault();
+            try { e.dataTransfer.dropEffect = 'move'; } catch {}
+            // Show drop indicator on hovered row (top half = before, bottom half = after)
+            const row = e.currentTarget;
+            const rect = row.getBoundingClientRect();
+            const isAfter = (e.clientY - rect.top) > rect.height / 2;
+            row.classList.toggle('lineup-drop-before', !isAfter);
+            row.classList.toggle('lineup-drop-after', isAfter);
+        }
+        function lineupDragLeave(e, idx) {
+            const row = e.currentTarget;
+            row.classList.remove('lineup-drop-before');
+            row.classList.remove('lineup-drop-after');
+        }
+        function lineupDrop(e, idx) {
+            e.preventDefault();
+            const fromIdx = _lineupDragFromIdx;
+            _lineupDragFromIdx = null;
+            // Strip indicators
+            document.querySelectorAll('.lineup-item').forEach(el => {
+                el.classList.remove('lineup-drop-before');
+                el.classList.remove('lineup-drop-after');
+                el.classList.remove('lineup-dragging');
+            });
+            if (fromIdx === null || fromIdx === idx) return;
+            const row = e.currentTarget;
+            const rect = row.getBoundingClientRect();
+            const isAfter = (e.clientY - rect.top) > rect.height / 2;
+            let toIdx = idx + (isAfter ? 1 : 0);
+            // Adjust target index when the source was BEFORE the target
+            // (splice removes the source first, so all later indices
+            // shift down by 1).
+            if (fromIdx < toIdx) toIdx -= 1;
+            if (toIdx === fromIdx) return;
+            const arr = lineupData.lineup;
+            const [moved] = arr.splice(fromIdx, 1);
+            arr.splice(toIdx, 0, moved);
+            lineupData.has_override = true;
+            renderLineupEditor();
+        }
+        function lineupDragEnd(e) {
+            _lineupDragFromIdx = null;
+            document.querySelectorAll('.lineup-item').forEach(el => {
+                el.classList.remove('lineup-drop-before');
+                el.classList.remove('lineup-drop-after');
+                el.classList.remove('lineup-dragging');
+            });
         }
         
         function lineupRemove(idx) {
