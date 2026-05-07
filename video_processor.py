@@ -2008,16 +2008,30 @@ def apply_vad(
     # Snap: round start DOWN to nearest frame, round end UP. This widens
     # each segment by at most one frame on each side (≈40ms total) — well
     # under the silence_keep_duration padding, so no dialogue is lost.
-    src_fps = get_fps(ffprobe_json(src))
-    if src_fps and src_fps > 0:
-        import math as _math
-        frame_dur = 1.0 / src_fps
-        snapped = []
-        for start, end in merged:
-            snap_start = _math.floor(start / frame_dur) * frame_dur
-            snap_end = _math.ceil(end / frame_dur) * frame_dur
-            snapped.append((max(0.0, snap_start), snap_end))
-        merged = snapped
+    #
+    # v629 fix: SKIP this snap when silence_mode == "whisper". The whisper
+    # path already runs v616b inside detect_speech_segments_whisper, which
+    # snaps boundaries TIGHTLY (ceil start / floor end). Running v597's
+    # WIDENING snap (floor start / ceil end) afterwards re-introduces
+    # silence frames at boundaries due to IEEE float quirks: 1/24 isn't
+    # exactly representable, so e.g. 185/24 in float is 7.708333333333333,
+    # and `floor(7.7083... / 0.04166...)` rounds DOWN to 184 — undoing
+    # v616b's snap and re-adding 1 silence frame at the segment start.
+    # User-visible symptom: random frames inserted at hard-cut boundaries
+    # in the final video. The bug is reproducible: sum of v616b's reported
+    # segment durations differs from the final ffmpeg-output duration by
+    # exactly the count of float-error-affected boundaries.
+    if silence_mode != "whisper":
+        src_fps = get_fps(ffprobe_json(src))
+        if src_fps and src_fps > 0:
+            import math as _math
+            frame_dur = 1.0 / src_fps
+            snapped = []
+            for start, end in merged:
+                snap_start = _math.floor(start / frame_dur) * frame_dur
+                snap_end = _math.ceil(end / frame_dur) * frame_dur
+                snapped.append((max(0.0, snap_start), snap_end))
+            merged = snapped
 
     total_speech = sum(end - start for start, end in merged)
     
@@ -2064,12 +2078,18 @@ def apply_vad(
     filter_parts = []
     concat_inputs = []
     for idx, (start, end) in enumerate(merged):
-        # 6-decimal precision matches v499's frame-accurate seek
+        # v629: 9-decimal precision (was 6). Frame-snapped boundaries like
+        # 185/24 = 7.708333333333... can't fit in 6 decimals exactly. The
+        # truncation "7.708333" lands sub-frame, which means ffmpeg's trim
+        # filter could include or exclude the boundary frame depending on
+        # the comparison's float-round behavior. 9 decimals covers the
+        # full IEEE-double precision so the trim boundary lands EXACTLY
+        # on the source frame's PTS.
         filter_parts.append(
-            f"[0:v]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS[v{idx}]"
+            f"[0:v]trim=start={start:.9f}:end={end:.9f},setpts=PTS-STARTPTS[v{idx}]"
         )
         filter_parts.append(
-            f"[0:a]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS[a{idx}]"
+            f"[0:a]atrim=start={start:.9f}:end={end:.9f},asetpts=PTS-STARTPTS[a{idx}]"
         )
         concat_inputs.append(f"[v{idx}][a{idx}]")
     filter_parts.append(
