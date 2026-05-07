@@ -7128,6 +7128,30 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 return;
             }
             const myGen = ++_loadClipsGeneration; // Capture generation BEFORE fetch
+            // v639 — render cached clips from localStorage IMMEDIATELY
+            // (before network round-trip) so the user sees clip cards
+            // instantly. Fresh data overwrites once fetch completes. The
+            // <video preload=auto> tags use cached HTTP responses (v638
+            // 365d immutable), so playback also starts instantly.
+            try {
+                const cachedRaw = localStorage.getItem(`clips_${id}`);
+                if (cachedRaw && document.getElementById('clipsList')) {
+                    const cachedClips = JSON.parse(cachedRaw);
+                    if (Array.isArray(cachedClips) && cachedClips.length > 0 && id === selectedJobId) {
+                        cachedClipsData = cachedClips; cachedJobId = id;
+                        const cListEl = document.getElementById('clipsList');
+                        const hasLineup = cachedClips.some(x => x.in_lineup === false);
+                        const visible = hasLineup ? cachedClips.filter(x => x.in_lineup !== false) : cachedClips;
+                        const expandBtn = `<div style="display:flex;justify-content:flex-end;margin-bottom:8px;"><button id="expandToggleBtn" class="expand-toggle" onclick="toggleVariantsExpanded()">${variantsExpanded ? '⊟ Collapse' : '⊞ Expand'}</button></div>`;
+                        cListEl.innerHTML = `<div id="reviewBannerSlot"></div>` + expandBtn + `<div class="clips-grid ${variantsExpanded ? 'expanded-mode' : ''}" data-exports-loaded="false">${visible.map(x => renderClip(x, id)).join('')}</div>`;
+                        visible.forEach(clip => {
+                            clipStates[clip.clip_index] = getClipStateKey(clip);
+                            clipVideoKeys[clip.clip_index] = getClipVideoKey(clip);
+                            clipUIKeys[clip.clip_index] = getClipUIKey(clip);
+                        });
+                    }
+                }
+            } catch(e) {}
             try{const r=await fetch(`${API}/jobs/${id}/clips`);
             // Double-check after async call - job might have changed while fetching
             if(id !== selectedJobId) {
@@ -7141,6 +7165,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
             if(!r.ok)return;const clips=await r.json();const c=document.getElementById('clipsList');
             cachedClipsData = clips; cachedJobId = id;
+            // v639 — persist clip metadata to localStorage so reopening a
+            // job renders cards instantly from cache while fresh data
+            // fetches in background. ~KB per job, no quota concerns.
+            try { localStorage.setItem(`clips_${id}`, JSON.stringify(clips)); } catch(e) {}
             if(!clips.length){c.innerHTML='<p style="color:var(--text-muted);text-align:center;padding:10px">Starting...</p>';return;}
             // Filter out clips excluded from lineup (only when a custom lineup exists)
             const hasLineup = clips.some(x => x.in_lineup === false);
