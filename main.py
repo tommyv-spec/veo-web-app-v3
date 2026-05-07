@@ -3743,17 +3743,49 @@ async def cleanup_clip_versions(
 
 @app.get("/api/jobs/{job_id}/review-status")
 async def get_job_review_status(
-    job_id: str, 
+    job_id: str,
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Get summary of clip approval statuses for a job"""
+    """Get summary of clip approval statuses for a job.
+
+    v650: when the user has set a custom lineup (clip_order_json),
+    EXCLUDE clips that are NOT in the lineup from the gating counts.
+    Removed clips kept their pre-removal status (often pending_review),
+    which made can_export stay false even when every clip the user
+    actually wants is approved. Symptom (2026-05-07 owner report): 8/9
+    approved, 1 removed from lineup but still pending → can_export=false,
+    Export Final button stays disabled.
+
+    Removed clips are still counted in `total_excluded_from_lineup` so
+    the UI can surface them if needed, but they no longer block export.
+    """
     job = get_user_job(db, job_id, current_user)
-    
+
     clips = db.query(Clip).filter(Clip.job_id == job_id).all()
-    
+
+    # v650 — lineup-aware filtering. When a custom order is set, only
+    # clips whose ids appear in clip_order_json count toward the
+    # gating logic. When no override is set, all clips count (legacy).
+    lineup_set = None
+    if getattr(job, 'clip_order_json', None):
+        try:
+            import json as _json_lin
+            lineup_set = set(_json_lin.loads(job.clip_order_json))
+        except Exception:
+            lineup_set = None
+
+    in_lineup_clips = (
+        [c for c in clips if c.id in lineup_set]
+        if lineup_set is not None
+        else clips
+    )
+    excluded_count = len(clips) - len(in_lineup_clips) if lineup_set is not None else 0
+
     summary = {
-        "total": len(clips),
+        "total": len(in_lineup_clips),
+        "total_all": len(clips),  # v650 — for UI: all clips regardless of lineup
+        "total_excluded_from_lineup": excluded_count,  # v650
         "pending_review": 0,
         "approved": 0,
         "redo_queued": 0,
@@ -3762,8 +3794,8 @@ async def get_job_review_status(
         "failed": 0,
         "skipped": 0,
     }
-    
-    for c in clips:
+
+    for c in in_lineup_clips:
         if c.status == ClipStatus.COMPLETED.value:
             if c.approval_status == "approved":
                 summary["approved"] += 1
@@ -3779,7 +3811,7 @@ async def get_job_review_status(
             summary["failed"] += 1
         elif c.status == ClipStatus.SKIPPED.value:
             summary["skipped"] += 1
-    
+
     summary["all_approved"] = summary["approved"] > 0 and summary["approved"] + summary["skipped"] == summary["total"]
     # Can export if we have approved clips and nothing is still processing
     summary["can_export"] = summary["approved"] > 0 and summary["generating"] == 0 and summary["redo_queued"] == 0 and summary["pending_review"] == 0
@@ -3787,7 +3819,7 @@ async def get_job_review_status(
     summary["can_lineup"] = summary["approved"] > 0
     summary["needs_attention"] = summary["max_attempts"] > 0 or summary["failed"] > 0
     summary["has_lineup_override"] = getattr(job, 'clip_order_json', None) is not None
-    
+
     return summary
 
 
