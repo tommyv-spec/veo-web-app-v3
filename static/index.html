@@ -13041,16 +13041,44 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 return k;
             }
 
-            function orderKey(k) {
-                if (k === SUBJECTS_KEY) return '0';
+            // v647 — sort batches by recency (newest day first) so the
+            // day separators read top-down: Today → Yesterday → older.
+            // SUBJECTS bucket stays pinned at the top (uploads = source
+            // material, not a dated batch). Ties within the same day are
+            // broken by topic-prefix so same-day batches stay clustered
+            // by subject.
+            function _topicTiebreaker(k) {
                 if (k === OTHER_KEY) return '3';
                 if (k.startsWith('prefix::')) return '1' + k.slice('prefix::'.length).toLowerCase();
                 if (k.startsWith('subject::')) return '2' + k;
                 return '4';
             }
-            const sortedKeys = Array.from(groups.keys()).sort(
-                (a, b) => orderKey(a).localeCompare(orderKey(b))
-            );
+            function _groupDayKey(k) {
+                if (k === SUBJECTS_KEY) return null;
+                const ns = groups.get(k) || [];
+                let earliest = null;
+                for (const n of ns) {
+                    if (!n.created_at) continue;
+                    const d = new Date(n.created_at);
+                    if (isNaN(d.getTime())) continue;
+                    if (!earliest || d < earliest) earliest = d;
+                }
+                if (!earliest) return null;
+                const y = earliest.getFullYear();
+                const m = String(earliest.getMonth() + 1).padStart(2, '0');
+                const dd = String(earliest.getDate()).padStart(2, '0');
+                return `${y}-${m}-${dd}`;
+            }
+            const sortedKeys = Array.from(groups.keys()).sort((a, b) => {
+                if (a === SUBJECTS_KEY) return -1;
+                if (b === SUBJECTS_KEY) return 1;
+                const dayA = _groupDayKey(a);
+                const dayB = _groupDayKey(b);
+                if (dayA && dayB && dayA !== dayB) return dayB.localeCompare(dayA); // desc
+                if (dayA && !dayB) return -1;
+                if (!dayA && dayB) return 1;
+                return _topicTiebreaker(a).localeCompare(_topicTiebreaker(b));
+            });
 
             function nodeSortKey(n) {
                 const m = (n.name || '').match(/Scene\s+(\d+)/i);
