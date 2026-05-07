@@ -493,24 +493,76 @@ def restore_chrome_window(page, label=""):
         pass
 
 
+def send_chrome_to_back(page, label=""):
+    """v661 — Push Chrome to the BOTTOM of the Z-order without minimising
+    and without activating. The window stays visible (so Playwright
+    clicks/navigations work natively) but it never grabs focus and
+    never appears on top.
+
+    Why this beats minimize+restore (v457): when the window is minimized
+    via SW_SHOWMINNOACTIVE, every subsequent Playwright action
+    (click, goto, type) restores the window to its prior position —
+    visibly flickering to the foreground. SetWindowPos with
+    HWND_BOTTOM + SWP_NOACTIVATE + SWP_NOSIZE + SWP_NOMOVE leaves the
+    window at the back of the Z-order without re-activating it; the
+    next Playwright action does NOT restore it because there's nothing
+    to restore from. Window stays accessible (alt-tab, taskbar) but
+    never steals focus.
+
+    Windows only; no-op elsewhere.
+    """
+    import platform as _platform
+    if _platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        hwnd = _find_chrome_hwnd(page, label=label)
+        if not hwnd:
+            return
+        user32 = ctypes.windll.user32
+        # Constants
+        HWND_BOTTOM = 1
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOACTIVATE = 0x0010
+        SWP_NOOWNERZORDER = 0x0200
+        # SetWindowPos signature
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND, wintypes.HWND,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.UINT,
+        ]
+        user32.SetWindowPos.restype = ctypes.c_bool
+        user32.SetWindowPos(
+            hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+        )
+    except Exception:
+        pass
+
+
 def defocus_chrome(page, label=""):
     """Push Chrome behind other windows so it doesn't steal focus.
 
-    v457: now does OS-level minimize (via user32 ShowWindow) in addition
-    to the existing DOM-level window.blur(). Skipped if the page has
-    _stay_visible = True (login flow). Every call site that previously
-    only got a focus nudge now gets a full taskbar hide.
+    v457: minimize via ShowWindow + DOM-level window.blur().
+    v661: switched to SetWindowPos(HWND_BOTTOM, SWP_NOACTIVATE) so the
+    window stays visible (no minimize-restore flicker on subsequent
+    Playwright actions) and never reactivates. User reported the v457
+    minimize approach was producing visible foreground pops every time
+    a job started or a Playwright action ran (because the next click
+    restored the window to its prior position, visibly flashing it).
     """
     # DOM-level blur (portable across OSes)
     try:
         page.evaluate("window.blur()")
     except Exception:
         pass
-    # OS-level minimize (Windows only)
+    # OS-level: send to back of Z-order without activation (Windows only)
     try:
         if getattr(page, "_stay_visible", False):
             return
-        minimize_chrome_window(page, label=label)
+        send_chrome_to_back(page, label=label)
     except Exception:
         pass
 
@@ -15023,7 +15075,7 @@ class AccountWorker(threading.Thread):
                 self.page._stay_visible = False
                 import time as _t_v457
                 _t_v457.sleep(0.4)
-                minimize_chrome_window(self.page, label=self.name)
+                send_chrome_to_back(self.page, label=self.name)
             except Exception:
                 pass
             try:
@@ -15037,7 +15089,7 @@ class AccountWorker(threading.Thread):
                                 import time as _tt
                                 _tt.sleep(0.3)
                                 if not getattr(self.page, "_stay_visible", False):
-                                    minimize_chrome_window(self.page, label=self.name)
+                                    send_chrome_to_back(self.page, label=self.name)
                             except Exception:
                                 pass
                         _thr.Thread(target=_go, daemon=True).start()
