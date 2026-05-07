@@ -7214,9 +7214,19 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // instantly. Fresh data overwrites once fetch completes. The
             // <video preload=auto> tags use cached HTTP responses (v638
             // 365d immutable), so playback also starts instantly.
+            // v658 — gate the cache-render to FIRST paint only. Pre-v658
+            // this block ran on EVERY loadClips() call (every 5s poll +
+            // every external trigger). Each run did a full
+            // cListEl.innerHTML = ... rewrite, destroying every <video>
+            // and <button> in the grid → user saw the entire UI flash
+            // and re-render every poll cycle. The whole point of v639
+            // was instant first-paint while the fetch completes; on
+            // subsequent calls the diff-path already handles updates
+            // without destroying the DOM.
             try {
                 const cachedRaw = localStorage.getItem(`clips_${id}`);
-                if (cachedRaw && document.getElementById('clipsList')) {
+                const _alreadyRendered = !!document.querySelector('#clipsList .clips-grid');
+                if (cachedRaw && document.getElementById('clipsList') && !_alreadyRendered) {
                     const cachedClips = JSON.parse(cachedRaw);
                     if (Array.isArray(cachedClips) && cachedClips.length > 0 && id === selectedJobId) {
                         cachedClipsData = cachedClips; cachedJobId = id;
