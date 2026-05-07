@@ -7411,7 +7411,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             else if(pending && isContinueWaiting)vid=`<div class="pending-state"><div class="pending-icon">🔗</div><div class="pending-text">Waiting for<br>Clip #${c.clip_index}</div></div>`;
             else if(pending)vid=`<div class="pending-state"><div class="pending-icon">⏳</div><div class="pending-text">Waiting...</div></div>`;
             else if(skipped)vid=`<div class="failed-state"><div class="failed-icon">⚠️</div><div class="failed-text">Skipped</div></div>`;
-            else if(c.output_filename){const _blobKey=`variant_${c.id}_${selectedVariant}`;const _vidSrc=(window._variantBlobCache&&window._variantBlobCache[_blobKey])||`${API}/jobs/${jid}/outputs/${c.output_filename}`;vid=`<div class="video-container"><video controls preload="auto" playsinline><source src="${_vidSrc}" type="video/mp4"></video><button class="video-voice-btn" data-clip="${c.output_filename}" onclick="event.stopPropagation();useClipVoice('${jid}','${c.output_filename}',${c.clip_index})" title="Select for voice reference (2-3 clips recommended)">🎤</button><button class="video-download-btn" onclick="event.stopPropagation();downloadClip('${API}/jobs/${jid}/outputs/${c.output_filename}','clip_${c.clip_index+1}.mp4')" title="Download clip">📥</button></div>`;}
+            else if(c.output_filename){const _blobKey=`variant_${c.id}_${selectedVariant}`;const _vidSrc=(window._variantBlobCache&&window._variantBlobCache[_blobKey])||`${API}/jobs/${jid}/outputs/${c.output_filename}`;vid=`<div class="video-container"><video controls preload="metadata" playsinline><source src="${_vidSrc}" type="video/mp4"></video><button class="video-voice-btn" data-clip="${c.output_filename}" onclick="event.stopPropagation();useClipVoice('${jid}','${c.output_filename}',${c.clip_index})" title="Select for voice reference (2-3 clips recommended)">🎤</button><button class="video-download-btn" onclick="event.stopPropagation();downloadClip('${API}/jobs/${jid}/outputs/${c.output_filename}','clip_${c.clip_index+1}.mp4')" title="Download clip">📥</button></div>`;}
             else if(failed)vid=`<div class="failed-state"><div class="failed-icon">❌</div><div class="failed-text">Failed</div></div>`;
             else vid='<div style="color:var(--text-muted);font-size:10px">🎬</div>';
             let variantNav='';
@@ -7494,7 +7494,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         const vFile = v.filename;
                         if(!vFile) return '';
                         return `<div class="variant-card ${isSelected ? 'variant-selected' : ''}" onclick="selectAndApprove(${c.id}, ${vNum})">
-                            <video preload="auto" playsinline loop onmouseenter="document.querySelectorAll('.clip-video-expanded video').forEach(v=>{if(v!==this){v.pause();v.currentTime=0}});this.play().catch(()=>{})" onmouseleave="this.pause();this.currentTime=0"><source src="${API}/jobs/${jid}/outputs/${vFile}" type="video/mp4"></video>
+                            <video preload="none" playsinline loop onmouseenter="document.querySelectorAll('.clip-video-expanded video').forEach(v=>{if(v!==this){v.pause();v.currentTime=0}});this.play().catch(()=>{})" onmouseleave="this.pause();this.currentTime=0"><source src="${API}/jobs/${jid}/outputs/${vFile}" type="video/mp4"></video>
                             <span class="variant-label">v${vLabel}</span>
                             <button class="variant-select-btn" onclick="event.stopPropagation();selectAndApprove(${c.id}, ${vNum})">${isSelected && approved ? '\u2605 Selected' : '\u2606 Select'}</button>
                         </div>`;
@@ -7508,7 +7508,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             } else if(c.output_filename && !isRegenerating && !failed && !pending && !skipped) {
                 // Single variant — show it as a card in expanded mode too
                 expandedVid = `<div class="variants-grid"><div class="variant-card variant-selected">
-                    <video preload="auto" playsinline loop onmouseenter="this.play().catch(()=>{})" onmouseleave="this.pause();this.currentTime=0"><source src="${API}/jobs/${jid}/outputs/${c.output_filename}" type="video/mp4"></video>
+                    <video preload="none" playsinline loop onmouseenter="this.play().catch(()=>{})" onmouseleave="this.pause();this.currentTime=0"><source src="${API}/jobs/${jid}/outputs/${c.output_filename}" type="video/mp4"></video>
                     <span class="variant-label">v${versionLabel}</span>
                 </div></div>`;
                 if(approved) expandedActs = `<div style="display:flex;align-items:center;justify-content:center;gap:8px"><span style="color:var(--success);font-size:13px">\u2713 Approved</span><button class="btn btn-secondary btn-sm" style="padding:4px 8px;font-size:11px" onclick="downloadClip('${API}/jobs/${selectedJobId}/outputs/${c.output_filename}','clip_${c.clip_index+1}.mp4')">\ud83d\udce5</button><button class="btn btn-redo btn-sm" style="padding:4px 8px;font-size:11px" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})" ${c.attempts_remaining<=0?'disabled':''} title="Redo clip">\u21bb</button></div>`;
@@ -7878,22 +7878,33 @@ Example: A realistic vertical video of a professional presenter speaking directl
         
         // Preload all variant videos for a clip as blob URLs for instant switching
         function preloadClipVariants(clip, jobId) {
-            if (!clip.versions || clip.versions.length <= 1) return;
+            // v636 — was eager-fetching EVERY variant MP4 as a blob on
+            // every job open. For a 12-clip job with 4 variants each,
+            // that's 48 parallel video downloads (~100-240MB total) firing
+            // on page load. Caused multi-second lag opening any job, in
+            // BOTH collapsed and expanded modes.
+            //
+            // Now: only preload alternates when the user has expanded
+            // variants AND only for the specific clip (called on demand
+            // from toggleVariantsExpanded / renderVariantSelector).
+            // Selected variant uses native <video src=...> lazy-load so
+            // the browser only downloads when the clip is played.
+            //
+            // Variant switching cost: 200-500ms first-time vs. instant
+            // before. Acceptable because switching is rare and previous
+            // load was painfully slow on every job open.
             if (!window._variantBlobCache) window._variantBlobCache = {};
-            
+            if (!variantsExpanded) return;  // collapsed mode: skip preload
+            if (!clip.versions || clip.versions.length <= 1) return;
+
             clip.versions.forEach((v, idx) => {
                 const variantNum = idx + 1;
                 const cacheKey = `variant_${clip.id}_${variantNum}`;
-                if (window._variantBlobCache[cacheKey]) return; // Already cached
-                
+                if (window._variantBlobCache[cacheKey]) return;
                 const filename = v.filename;
                 if (!filename) return;
-                
                 const url = `${API}/jobs/${jobId}/outputs/${filename}`;
-                fetch(url).then(r => {
-                    if (!r.ok) return;
-                    return r.blob();
-                }).then(blob => {
+                fetch(url).then(r => r.ok ? r.blob() : null).then(blob => {
                     if (blob) window._variantBlobCache[cacheKey] = URL.createObjectURL(blob);
                 }).catch(() => {});
             });
@@ -7944,6 +7955,11 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // Show/hide back-to-top button
             const btt = document.getElementById('backToTopBtn');
             if (btt) btt.style.display = variantsExpanded ? '' : 'none';
+            // v636 — preload alternates only when user expands. Collapsed
+            // mode doesn't show them, so no point downloading.
+            if (variantsExpanded && cachedClipsData && cachedJobId) {
+                cachedClipsData.forEach(clip => preloadClipVariants(clip, cachedJobId));
+            }
         }
         
         // Floating back-to-top button (expanded mode only)
