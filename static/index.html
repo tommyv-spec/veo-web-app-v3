@@ -6419,7 +6419,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
                             (window._veoPromptOverrides
                                 && window._veoPromptOverrides[i]
                                 && window._veoPromptOverrides[i].negative_prompt)
-                            || null
+                            || null,
+                        // v644 — per-line audio-padding suffix from
+                        // `- **pad:**` storyboard bullet. When non-null,
+                        // the Veo prompt builder appends this AFTER the
+                        // line so Veo's experimental audio path has
+                        // enough text to reliably synthesize speech.
+                        // Whisper-VAD continues to use the bare line as
+                        // script truth; pad audio is trimmed by apply_vad
+                        // as unmatched filler.
+                        dialogue_pad:
+                            (window._dialoguePads && window._dialoguePads[i]) || null
                     };
                 }).filter(l => l.text);
                 
@@ -14259,10 +14269,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     // action_note + voice profile and bypassing the
                     // LLM-decoded final prompts entirely.
                     const veoOverridesObj = {};
+                    // v644 — parallel capture for per-line audio-padding
+                    // suffixes from `- **pad:**` storyboard bullets.
+                    // Same flat-index keying as veoOverridesObj.
+                    const padsObj = {};
                     let veoFlatIdx = 0;
                     sceneAssignments.forEach(sa => {
                         const lines = sa.lines || [];
                         const veoPrompts = sa.veo_prompts || [];
+                        const pads = sa.pads || [];
                         for (let i = 0; i < lines.length; i++) {
                             const vp = veoPrompts[i];
                             if (vp && (vp.text_prompt || vp.negative_prompt)) {
@@ -14271,10 +14286,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
                                     negative_prompt: vp.negative_prompt || null,
                                 };
                             }
+                            const pad = pads[i];
+                            if (pad && typeof pad === 'string' && pad.trim()) {
+                                padsObj[veoFlatIdx] = pad.trim();
+                            }
                             veoFlatIdx++;
                         }
                     });
                     window._veoPromptOverrides = veoOverridesObj;
+                    window._dialoguePads = padsObj;
                     try {
                         const overrideCount = Object.keys(veoOverridesObj).length;
                         if (overrideCount > 0) {

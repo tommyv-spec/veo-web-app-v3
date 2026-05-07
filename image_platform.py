@@ -124,6 +124,17 @@ def run_image_platform_migrations():
         # role-pattern detection when NULL, so legacy edges still work.
         ("image_edges", "kind",
          "ALTER TABLE image_edges ADD COLUMN kind TEXT"),
+        # v644: per-line audio-padding suffixes on the assignment row.
+        # Parallel to lines_json. NULL = no pads anywhere; populated =
+        # JSON array of (str | null) per line. Veo prompt builder
+        # appends pad after the line; whisper-VAD ignores it.
+        ("image_scene_assignments", "pads_json",
+         "ALTER TABLE image_scene_assignments ADD COLUMN pads_json TEXT"),
+        # v644: per-clip audio-padding suffix on the clips row (denorm
+        # of the assignment's pads_json so the Veo prompt builder can
+        # read it without re-joining).
+        ("clips", "dialogue_pad",
+         "ALTER TABLE clips ADD COLUMN dialogue_pad TEXT"),
     ]
     postgres_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -158,6 +169,11 @@ def run_image_platform_migrations():
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS veo_negative_prompt_override TEXT"),
         ("image_scene_assignments", "veo_prompts_json",
          "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS veo_prompts_json TEXT"),
+        # v644: per-line audio-padding suffixes (postgres variant).
+        ("image_scene_assignments", "pads_json",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS pads_json TEXT"),
+        ("clips", "dialogue_pad",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS dialogue_pad TEXT"),
         # v429
         ("image_job_batches", "video_mode",
          "ALTER TABLE image_job_batches ADD COLUMN IF NOT EXISTS video_mode VARCHAR(20)"),
@@ -913,6 +929,15 @@ class ImageSceneAssignment(Base):
     # populated with all-null entries = no overrides per-line, equivalent
     # but stored explicitly. The platform tolerates both shapes.
     veo_prompts_json = Column(Text, nullable=True)
+    # v644: parallel array of per-line audio-padding suffixes. JSON list,
+    # same length as lines_json. Each entry is null (no pad → Veo prompt
+    # uses bare line) OR a string appended after the line in the Veo
+    # prompt only. Whisper-VAD continues to use the bare line as script
+    # truth, so the pad's spoken audio is automatically trimmed by the
+    # existing apply_vad pipeline as unmatched filler. Column-level
+    # NULL = no pads anywhere; populated with all-null entries =
+    # equivalent. Migration: nullable column, no backfill needed.
+    pads_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -941,6 +966,17 @@ class ImageSceneAssignment(Base):
         while len(veo_prompts) < len(lines):
             veo_prompts.append(None)
         veo_prompts = veo_prompts[:len(lines)]
+        # v644: per-line audio-padding suffixes (Veo-prompt-only; whisper
+        # script uses the bare line so apply_vad trims pad audio).
+        try:
+            pads = _json.loads(self.pads_json or "null")
+            if pads is None:
+                pads = [None] * len(lines)
+        except Exception:
+            pads = [None] * len(lines)
+        while len(pads) < len(lines):
+            pads.append(None)
+        pads = pads[:len(lines)]
         return {
             "id": self.id,
             "batch_id": self.batch_id,
@@ -951,6 +987,7 @@ class ImageSceneAssignment(Base):
             "lines": lines,
             "action_notes": notes,
             "veo_prompts": veo_prompts,  # v572
+            "pads": pads,  # v644
         }
 
 
@@ -2910,28 +2947,44 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # state).
         speaker_mode = _normalize_speaker_mode(_parse_bullet_field(block, "speaker"))
 
-        # Parse interleaved `- **line:**` / `- **action_note:**` bullets.
-        # A bullet's order matters: action_note is attached to the closest
+        # Parse interleaved `- **line:**` / `- **action_note:**` / `- **pad:**`
+        # bullets. Order matters: action_note and pad attach to the closest
         # preceding line within the same scene.
+        #
+        # v644 — `pad` is an optional suffix string the platform appends to
+        # the Veo dialogue line at prompt-build time. The whisper-VAD script
+        # uses ONLY the `line` text (not the pad), so the pad's spoken audio
+        # is automatically trimmed from the final cut as unmatched filler
+        # by the existing apply_vad pipeline. Purpose: bring short lines
+        # (≤9 words) up to ~20 words total so Veo 3.1's experimental audio
+        # path generates speech reliably (it tends to fail on very short
+        # lines, especially on Fast [Lower Priority] tier).
         #
         # We iterate through each matching bullet in source order.
         bullet_pattern = _re.compile(
-            r"^\s*-\s*\*\*(line|action_note)\s*:\*\*\s*(.+?)\s*$",
+            r"^\s*-\s*\*\*(line|action_note|pad)\s*:\*\*\s*(.+?)\s*$",
             flags=_re.MULTILINE | _re.IGNORECASE,
         )
         lines_list: List[str] = []
         action_notes: List[Optional[str]] = []
+        pads: List[Optional[str]] = []  # v644 parallel array
         for m in bullet_pattern.finditer(block):
             key = m.group(1).lower().replace(" ", "_")
             value = m.group(2).strip()
             if key == "line":
                 lines_list.append(value)
                 action_notes.append(None)
+                pads.append(None)
             elif key == "action_note":
                 if lines_list:
                     # Attach to most recent line
                     action_notes[-1] = value
                 # else: action_note before any line — ignore, likely malformed
+            elif key == "pad":
+                # v644 — attach pad to most recent line
+                if lines_list:
+                    pads[-1] = value
+                # else: pad before any line — ignore, likely malformed
 
         if not lines_list:
             raise ValueError(
@@ -2948,6 +3001,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "visual_register": visual_register,
             "lines": lines_list,
             "action_notes": action_notes,
+            "pads": pads,  # v644 — parallel to lines/action_notes; entries are str or None
             "speaker_mode": speaker_mode,  # v537
         })
 
@@ -4829,6 +4883,17 @@ def _import_scene_table_impl(
             _json.dumps(_veo_prompts_for_scene) if _has_any_override else None
         )
 
+        # v644 — same NULL-when-empty pattern for pads_json. When a scene
+        # has no `- **pad:**` bullets, store NULL (signals "no padding
+        # needed for any line in this scene" → Veo prompt builder uses
+        # bare line text). When at least one line has a pad, store the
+        # full parallel array so per-line attribution is preserved.
+        _pads_for_scene = s.get("pads") or []
+        _has_any_pad = any(p for p in _pads_for_scene)
+        _pads_json_value = (
+            _json.dumps(_pads_for_scene) if _has_any_pad else None
+        )
+
         assignment = ImageSceneAssignment(
             batch_id=batch_id,
             scene_index=s["scene_index"],
@@ -4838,6 +4903,7 @@ def _import_scene_table_impl(
             lines_json=_json.dumps(s.get("lines") or []),
             action_notes_json=_json.dumps(s.get("action_notes") or []),
             veo_prompts_json=_veo_prompts_json_value,  # v572
+            pads_json=_pads_json_value,  # v644
         )
         db.add(assignment)
         assignments_created += 1
@@ -5274,6 +5340,11 @@ def prepare_batch_for_video(
     # through the prepare-for-video UI button (which is the only button the
     # current UI exposes).
     veo_prompts_flat: List[Optional[Dict[str, Optional[str]]]] = []
+    # v644: same denorm pattern for pads (audio-padding suffix). Per-line
+    # entries (str or None) parallel to dialogue_lines_flat. Forwarded
+    # to /api/jobs → DialogueLineInput.dialogue_pad → Clip.dialogue_pad,
+    # then Veo prompt builder appends it after the keeper line.
+    pads_flat: List[Optional[str]] = []
 
     for scene in storyboard:
         node_id = scene["image_node_id"]
@@ -5297,6 +5368,9 @@ def prepare_batch_for_video(
         # The legacy synthesized branch above doesn't include this key, so
         # default to all-None.
         veo_prompts = scene.get("veo_prompts") or []
+        # v644 — same parallel-array convention for pads (audio-padding
+        # suffix per line; None when no pad on that line).
+        pads = scene.get("pads") or []
         # Defensively zip — if asymmetric, pad notes with None to match lines
         while len(notes) < len(lines):
             notes.append(None)
@@ -5304,6 +5378,9 @@ def prepare_batch_for_video(
         while len(veo_prompts) < len(lines):
             veo_prompts.append(None)
         veo_prompts = veo_prompts[:len(lines)]
+        while len(pads) < len(lines):
+            pads.append(None)
+        pads = pads[:len(lines)]
 
         clip_mode = (scene.get("clip_mode") or "blend").lower()
         transition = scene.get("transition")
@@ -5319,11 +5396,13 @@ def prepare_batch_for_video(
             "action_notes": notes,
             # v576 — per-line Veo prompt overrides parallel to lines.
             "veo_prompts": veo_prompts,
+            # v644 — per-line audio-padding suffixes parallel to lines.
+            "pads": pads,
         })
 
         # Back-compat flat arrays — one entry per line across all scenes
-        for i_in_scene, (line_text, note, vp) in enumerate(
-            zip(lines, notes, veo_prompts)
+        for i_in_scene, (line_text, note, vp, pad) in enumerate(
+            zip(lines, notes, veo_prompts, pads)
         ):
             dialogue_lines_flat.append(line_text or "")
             scenes_metadata_flat.append({
@@ -5337,8 +5416,11 @@ def prepare_batch_for_video(
                 # so the UI can read it without cross-referencing scene_assignments.
                 "veo_prompt_override": (vp or {}).get("text_prompt") if vp else None,
                 "veo_negative_prompt_override": (vp or {}).get("negative_prompt") if vp else None,
+                # v644 — denorm pad onto flat row.
+                "dialogue_pad": pad,
             })
             veo_prompts_flat.append(vp)
+            pads_flat.append(pad)
 
     # Resolve video_mode / auto_split — the md-parsed hints on the batch
     # take priority; otherwise default to storyboard + auto-split OFF.
@@ -5360,6 +5442,13 @@ def prepare_batch_for_video(
         # dialogue_lines. UI reads this and forwards to /api/jobs as
         # DialogueLineInput.veo_prompt_override / veo_negative_prompt_override.
         "veo_prompts": veo_prompts_flat,
+        # v644 — flat list of per-line audio-padding suffixes parallel to
+        # dialogue_lines. UI forwards to /api/jobs as
+        # DialogueLineInput.dialogue_pad → Clip.dialogue_pad. Whisper-VAD
+        # uses the bare line as script truth; Veo prompt builder appends
+        # this pad after the line so Veo's audio path has enough text to
+        # reliably synthesize speech (v644 docs in template_reference.md).
+        "pads": pads_flat,
         "video_mode": video_mode,
         "auto_split": auto_split,
         "batch_id": batch_id,

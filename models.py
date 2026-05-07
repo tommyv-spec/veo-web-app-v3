@@ -253,6 +253,16 @@ class Clip(Base):
     clip_index = Column(Integer, nullable=False)  # 0-based index
     dialogue_id = Column(Integer, nullable=False)  # ID from dialogue line
     dialogue_text = Column(Text, nullable=False)
+    # v644 — optional audio-padding suffix appended to the Veo prompt's
+    # dialogue. Veo 3.1's experimental audio path (especially on Fast
+    # Lower Priority tier) frequently fails on short lines (≤9 words)
+    # with "Audio generation failed" at the 27% checkpoint. Pad brings
+    # the spoken text up to ~20 words. Whisper-VAD continues to use
+    # `dialogue_text` (the bare line) as script truth, so the pad's
+    # spoken audio is automatically trimmed by the existing apply_vad
+    # pipeline as unmatched filler. Nullable; absent = no padding,
+    # Veo prompt uses bare dialogue_text.
+    dialogue_pad = Column(Text, nullable=True)
     
     # Status
     status = Column(String(20), default=ClipStatus.PENDING.value)

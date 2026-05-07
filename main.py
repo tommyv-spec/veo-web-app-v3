@@ -181,6 +181,15 @@ class DialogueLineInput(BaseModel):
     # clips. Leaving them None preserves pre-v572 behavior.
     veo_prompt_override: Optional[str] = None
     veo_negative_prompt_override: Optional[str] = None
+    # v644 — per-line audio-padding suffix. When set, the Veo prompt
+    # builder appends `" " + dialogue_pad` after the line so Veo's
+    # experimental audio path has enough text to reliably synthesize
+    # speech (it tends to fail on short lines, especially on Fast Lower
+    # Priority tier). Whisper-VAD continues to use the bare `text` as
+    # script truth, so the pad's spoken audio is automatically trimmed
+    # from the final cut by the existing apply_vad pipeline as
+    # unmatched filler. Optional; if None, Veo prompt uses bare line.
+    dialogue_pad: Optional[str] = None
 
 
 class SceneInput(BaseModel):
@@ -1836,11 +1845,17 @@ async def _create_job_impl(
         line_text = line.get('text', '') if isinstance(line, dict) else str(line)
         clip_mode = line.get('clip_mode', 'blend') if isinstance(line, dict) else 'blend'
         scene_idx = line.get('scene_index', 0) if isinstance(line, dict) else 0
+        # v644 — propagate optional audio-padding suffix from the dialogue
+        # line. None when the LLM-authored markdown didn't include a
+        # `- **pad:**` bullet for this line. Veo prompt builder (in the
+        # background task that follows) appends it after the bare line.
+        dialogue_pad = line.get('dialogue_pad') if isinstance(line, dict) else None
         clip = Clip(
             job_id=job_id,
             clip_index=idx,
             dialogue_id=idx + 1,
             dialogue_text=line_text,
+            dialogue_pad=dialogue_pad,
             status='preparing',  # Background task will set to pending after prompts are built
             clip_mode=clip_mode,
             scene_index=scene_idx,
@@ -2129,6 +2144,15 @@ async def _setup_job_background(
                 clip_mode = line_data.get("clip_mode", "blend")
                 action_note = line_data.get("action_note", None)
                 start_image_idx = line_data.get("start_image_idx", 0)
+                # v644 — audio-padding suffix appended to the Veo prompt
+                # only. Whisper-VAD continues to use the bare `dialogue_text`
+                # as script truth, so the pad's spoken audio is trimmed
+                # by the existing apply_vad pipeline as unmatched filler.
+                _dialogue_pad = (line_data.get("dialogue_pad") or "").strip()
+                _padded_dialogue_for_veo = (
+                    f"{dialogue_text} {_dialogue_pad}".strip()
+                    if _dialogue_pad else dialogue_text
+                )
                 # v572 — per-clip Veo prompt override. When non-empty,
                 # build_prompt short-circuits and ships the prebuilt
                 # prompt to Veo verbatim (with the negative-prompt
@@ -2214,10 +2238,15 @@ async def _setup_job_background(
                     except Exception:
                         pass
 
-                # Build prompt using the REAL function signature
+                # Build prompt using the REAL function signature.
+                # v644: send the padded dialogue (line + " " + pad) to Veo
+                # so its experimental audio path has enough text to render.
+                # The bare line stays in Clip.dialogue_text and is what
+                # whisper-VAD matches against; the pad audio gets trimmed
+                # automatically as unmatched filler by apply_vad.
                 prompt = await asyncio.to_thread(
                     build_prompt,
-                    dialogue_line=dialogue_text,
+                    dialogue_line=_padded_dialogue_for_veo,
                     start_frame_path=start_local,
                     end_frame_path=end_local,
                     clip_index=idx,

@@ -1974,6 +1974,115 @@ Convergence ≥2 sources for each rule prevents single-source over-fitting.
 
 ---
 
+## Audio-padding suffix for short dialogue lines (v644)
+
+**Source: 2026-05-07 owner observation** + Veo 3.1 audio-experimental tier behaviour confirmed via web audit (LaoZhang Flow guide, veo3ai.io 2026 native-audio guide, Google Flow help docs).
+
+### Problem
+
+Veo 3.1's audio path on `Veo 3.1 Fast [Lower Priority]` tier fails to generate speech for short dialogue lines (≤~10 words) on a high-percentage of attempts. The error returned is `Audio generation failed. Please try a different prompt or send feedback.`, observed at the 27% checkpoint (audio-synthesis stage) on every attempt regardless of content. Confirmed not content-related (`hello everybody` fails the same way as medical-content lines).
+
+Per Google's documentation: *"Audio generation in Flow is still experimental on Veo 3.1, and Google says low-quality audio can cause the video not to generate."* Google's veo3ai.io guide adds: *"Speech generation performs better with longer text transcripts in your prompt."*
+
+### Solution — pad short lines to ~20 words
+
+Append a per-scene `- **pad:**` bullet to bring the Veo-prompt dialogue to ~20 words total. The pad text is suffix-only (always AFTER the line, never before). The platform reads both bullets:
+
+- `- **line:**` — the keeper. The whisper-VAD's source-of-truth for matching. Stays in the final cut.
+- `- **pad:**` — the suffix appended to the Veo prompt only. Veo speaks it; the existing whisper-VAD logic doesn't match it against the script, so it's automatically cut from the final video.
+
+### Storyboard syntax
+
+```
+### Scene N
+- **image:** image_N
+- **line:** this is high blood sugar.
+- **pad:** Pay attention to this so you can spot it on yourself early.
+- **action_note:** ...
+```
+
+Word count check (operator authoring discipline):
+
+| Bullet | Words in example |
+|---|---|
+| `line` | 5 |
+| `pad` | 11 |
+| **Total Veo prompt dialogue** | **16** (target: 20 ± 2) |
+
+### Veo prompt assembly
+
+The Veo Final Prompt's spoken-dialogue line is built from `line + " " + pad` (concatenation with a single space):
+
+```
+She says in a measured low chest-voice clinical authority,
+  "this is high blood sugar. Pay attention to this so you can spot it on yourself early".
+```
+
+The whisper-VAD script is `line` only. After Veo renders the 8-second clip:
+- Whisper transcribes the full audio
+- Existing v542-era matcher locates `["this", "is", "high", "blood", "sugar"]` in the transcript
+- Anything outside the matched span is treated as filler and trimmed by `apply_vad`
+- Final video contains only the keeper words
+
+NO code changes to the existing whisper-VAD pipeline. The platform's parser stores `line` and `pad` separately; the Veo-prompt build path concatenates; the whisper-script construction path uses `line` alone — both paths already exist.
+
+### When to use `pad:`
+
+| Line word count | Pad required? |
+|---|---|
+| ≥ 15 words | NO (Veo audio path reliable enough) |
+| 10-14 words | OPTIONAL (recommended if testing shows audio failure) |
+| ≤ 9 words | **REQUIRED** to bring total to ~20 words |
+
+Most CTA / hook / payoff lines fall in the ≤9 category. Most context / explain lines fall in 10-14. Recipe-step lines often hit 15+ on their own.
+
+### Pad content discipline
+
+The pad text gets spoken by Veo during synthesis. Even though it's cut from the final video, the persona is on-camera saying it. Therefore:
+
+1. **In-character with persona**: same vocabulary register as the line — clinical/practitioner persona uses clinical pad, conspiratorial persona uses conspiratorial pad
+2. **No new claims**: pad must NOT introduce a new health/product/benefit claim that the script didn't already make. Pad is filler, not content. (E.g., for the line `"this is high blood sugar"`, pad SHOULD be `"Pay attention to this and remember what I'm showing you"`. Pad SHOULD NOT be `"and the cure is saffron taken at sunrise"` — that's a claim, not filler.)
+4. **Em-dash ban (v615) applies**: pad text is dialogue too — same comma/period/rephrase rules
+3. **No risky tokens**: avoid Veo RAI trigger words (`fire`, `shot`, `strike`, `blood` outside compound terms, `kill`, etc.) in the pad — same constraints as the keeper line
+5. **Persona-consistent ending**: pad should end on a natural mouth-close beat so the lip-sync transitions cleanly
+
+Good pads for various registers:
+
+| Persona register | Sample pad templates |
+|---|---|
+| Clinical-authority | "Pay attention to this so you can spot it on yourself early." · "Remember this carefully because it matters for your recovery." |
+| Warm-conspiratorial | "Trust me on this and remember what I just showed you." · "Take this seriously because most people miss it completely." |
+| Recipe-instructional | "Try this tonight before bed and tell me how you feel tomorrow." · "Make a habit of this and you will see the difference fast." |
+| CTA-closing | "Save this so you can come back to it whenever you need to." · "Share this with someone who needs to see it before tomorrow." |
+
+### What v644 does NOT change
+
+- v539 / v542 (`prefix_short_enabled`, `cut_prefix_audio`) — those remain available as a job-level fallback for the older single-word warm-up case. Not used by v644 — `pad:` is per-scene, multi-word, and suffix-only.
+- v615 em-dash ban — applies to BOTH `line` and `pad` text
+- v577 word budget (~21 words per clip at natural pacing) — pad helps the Veo prompt REACH that budget; it is not an exemption from it
+- v642 dialogue cue syntax (`She says in a [qualifier] voice, "..."`) — quoted text is `line + " " + pad`; voice qualifier and surrounding structure unchanged
+- Whisper-VAD code (`code/video_processor.py`) — no changes; existing matcher trims the pad words automatically as unmatched filler
+
+### Pre-output validation gate
+
+Before emitting any `videos/*.md` clip prompt:
+
+- ✅ Every scene with `len(line.split()) ≤ 9` has a `- **pad:**` bullet
+- ✅ Every scene with `9 < len(line.split()) < 15` either has `- **pad:**` OR is flagged for testing
+- ✅ For scenes with `pad`, total `len(line.split()) + len(pad.split())` is in the range `[18, 22]` (20 ± 2)
+- ✅ Pad text does not introduce a new claim beyond what the line says
+- ✅ Pad text passes the v615 em-dash check
+- ✅ Pad text avoids RAI trigger tokens (`blood` standalone, `fire`, `shot`, `strike`, etc.)
+
+### Sources
+
+- Google Flow help: *"Audio generation in Flow is still experimental on Veo 3.1"* (cited via LaoZhang Flow guide 2026)
+- veo3ai.io 2026: *"Speech generation performs better with longer text transcripts in your prompt"*
+- Veo 3.1 RAI audio-filter false-positive issue: googleapis/js-genai #1272 (Jan 2026)
+- Project precedent: v539 / v542 (single-word warm-up + cut_prefix_audio) — `code/veo_generator.py:1053` + `code/video_processor.py:1836`
+
+---
+
 ## Em-dash absolute ban in dialogue lines (v615)
 
 **Source: 2026-05-06 owner directive (mandatory)** *"absolutely mandatory no — symbols in any lines."*
