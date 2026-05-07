@@ -11102,29 +11102,56 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     try:
         page.goto(project_url, timeout=60000)
         page.wait_for_load_state("domcontentloaded", timeout=30000)
-        time.sleep(3)
-        
-        # Detect "Something went wrong" error page (wrong account's project)
-        try:
-            _err_text = page.evaluate("""() => {
-                for (const el of document.querySelectorAll('h3, h2, h1')) {
-                    if (el.textContent.includes('Something went wrong')) return true;
-                }
-                const btn = document.querySelector('button');
-                if (btn && btn.textContent.includes('Back to projects')) return true;
-                return false;
-            }""")
-            if _err_text:
-                print(f"[REDO] ⚠ Project not accessible (wrong account?) — creating new project", flush=True)
+
+        # v660 — improved access-denied detection.
+        # Pre-v660: 3s sleep + ONE querySelector('h3,h2,h1') + first
+        # <button> check. Two failure modes:
+        # (a) Race React's render — error overlay sometimes mounts AFTER
+        #     the 3s sleep so the check returns false and the worker
+        #     proceeds against a broken page.
+        # (b) "Back to projects" lives in an <a> link in the actual
+        #     overlay, not a <button> — so that branch never matched.
+        #
+        # v660: poll up to 10s on 1s ticks, use document.body.innerText
+        # (catches the error regardless of which DOM tag wraps it),
+        # exit early on the OK signal (Videos / Scenes text), log
+        # exceptions instead of swallowing them silently.
+        _detect_deadline = time.time() + 10.0
+        _project_ready = False
+        while time.time() < _detect_deadline:
+            time.sleep(1.0)
+            # URL check — Flow may redirect access-denied to /fx/tools/flow
+            if "/project/" not in page.url:
+                print(f"[REDO] ⚠ URL no longer on project ({page.url}) — creating new project", flush=True)
                 _need_new_project = True
-        except Exception:
-            pass
-        
-        # Also check if we landed on home instead of project
-        if not _need_new_project and "/project/" not in page.url:
-            print(f"[REDO] ⚠ Didn't land on project page ({page.url}) — creating new project", flush=True)
-            _need_new_project = True
-            
+                break
+            # Body text check — most reliable for the error overlay:
+            #   <h3>Something went wrong.</h3> + <a>Back to projects</a>
+            try:
+                _state = page.evaluate("""() => {
+                    const txt = (document.body && document.body.innerText) || '';
+                    if (txt.includes('Something went wrong')) return 'err-text';
+                    if (txt.includes('Back to projects') && !txt.includes('Videos')) return 'err-link';
+                    if (/\\bVideos\\b/.test(txt) || /\\bScenes\\b/.test(txt)) return 'ok';
+                    return 'wait';
+                }""")
+            except Exception as _e:
+                print(f"[REDO] detection eval error: {_e}", flush=True)
+                _state = 'wait'
+            if _state in ('err-text', 'err-link'):
+                print(f"[REDO] ⚠ Project not accessible ({_state}) — creating new project", flush=True)
+                _need_new_project = True
+                break
+            if _state == 'ok':
+                _project_ready = True
+                break
+        if not _need_new_project and not _project_ready:
+            # 10s window without a clear signal — proceed optimistically.
+            # Downstream steps (settings dropdown, videos tab) have their
+            # own retry loops, so a slow load doesn't auto-trigger
+            # a wasteful new-project creation.
+            print(f"[REDO] ⚠ Project state unclear after 10s — proceeding optimistically", flush=True)
+
     except Exception as e:
         print(f"[REDO] ⚠ Could not navigate to project: {e} — creating new project", flush=True)
         _need_new_project = True
