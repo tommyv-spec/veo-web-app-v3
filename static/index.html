@@ -2209,6 +2209,14 @@
                         </div>
                         <!-- Auto-split toggle inline with title -->
                         <div style="display:flex;align-items:center;gap:6px;">
+                            <!-- v678b: Show prompts button — only visible when window._veoPromptOverrides has entries -->
+                            <button id="showPromptsBtn"
+                                    type="button"
+                                    onclick="showVeoPromptsModal()"
+                                    style="display:none;font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid var(--border-subtle);background:var(--bg-elevated);color:var(--text-primary);cursor:pointer;"
+                                    title="Show the prebuilt Veo prompts that will be sent for each clip">
+                                📝 Show prompts (<span id="showPromptsBtnCount">0</span>)
+                            </button>
                             <span style="font-size:11px;color:var(--text-muted);">✂️ Auto-split</span>
                             <div class="toggle active" id="autoSplitToggle" onclick="toggleAutoSplit()" title="ON: Auto-split into ~7s clips | OFF: Each line = 1 clip"></div>
                         </div>
@@ -2950,6 +2958,13 @@ Example: A realistic vertical video of a professional presenter speaking directl
             document.getElementById('imageThumbnails').innerHTML='';document.getElementById('thumbSizeRow').style.display='none';
             document.getElementById('dialogueInput').value='';
             window._originalDialogueText = null;  // clear stored original on reset
+            // v678b — clear per-clip metadata globals so a fresh job
+            // doesn't accidentally inherit the previous job's prompts /
+            // action notes / pads, and hide the Show prompts button.
+            window._actionNotes = [];
+            window._veoPromptOverrides = [];
+            window._dialoguePads = [];
+            if (typeof refreshShowPromptsBtn === 'function') refreshShowPromptsBtn();
             document.getElementById('contextInput').value='';
             document.getElementById('lineValidation').style.display='none';
             document.getElementById('splitStatus').style.display='none';
@@ -10904,6 +10919,102 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
         }
         
+        // v678b — visibility + modal for the prebuilt Veo prompts of the
+        // currently-loaded job. Reads window._veoPromptOverrides (sparse
+        // array of { text_prompt, negative_prompt } per clip index, set
+        // by cloneJob and by imgPrepareBatchForVideo). Button hidden when
+        // every entry is null/empty.
+        // Normalize the prompt-override store to a plain array indexed by
+        // clip position. Two writers feed it: cloneJob writes an Array,
+        // imgPrepareBatchForVideo writes a sparse Object keyed by clip
+        // index. Both shapes survive at runtime; consumers (submit
+        // builder + this modal) tolerate either via window._X[i].
+        function _veoOverridesAsArray(){
+            const raw = window._veoPromptOverrides;
+            if (!raw) return [];
+            if (Array.isArray(raw)) return raw;
+            // Object case — find max numeric key, build dense array up to it.
+            const keys = Object.keys(raw).map(k => parseInt(k, 10)).filter(n => !Number.isNaN(n));
+            if (!keys.length) return [];
+            const max = Math.max.apply(null, keys);
+            const out = new Array(max + 1).fill(null);
+            for (const k of keys) out[k] = raw[k];
+            return out;
+        }
+
+        function refreshShowPromptsBtn(){
+            const btn = document.getElementById('showPromptsBtn');
+            if (!btn) return;
+            const ovr = _veoOverridesAsArray();
+            const count = ovr.filter(o => o && (o.text_prompt || o.negative_prompt)).length;
+            const countEl = document.getElementById('showPromptsBtnCount');
+            if (countEl) countEl.textContent = String(count);
+            btn.style.display = count > 0 ? 'inline-flex' : 'none';
+        }
+
+        function showVeoPromptsModal(){
+            const ovr = _veoOverridesAsArray();
+            // Pull the dialogue lines straight from the textarea — order is
+            // the same as the per-clip globals, so index N corresponds to
+            // ovr[N]. Truncate the line preview at 80 chars for the header.
+            const inputVal = (document.getElementById('dialogueInput') || {}).value || '';
+            const lines = inputVal.split('\n').filter(l => l.trim()).map(l => {
+                const parts = l.split('|');
+                return parts.length > 1 ? parts.slice(1).join('|').trim() : l.trim();
+            });
+
+            const escapeHtml = (s) => String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+            let body = '';
+            const total = Math.max(ovr.length, lines.length);
+            for (let i = 0; i < total; i++) {
+                const o = ovr[i];
+                const linePreview = (lines[i] || '').slice(0, 80) +
+                    ((lines[i] || '').length > 80 ? '…' : '');
+                if (!o || (!o.text_prompt && !o.negative_prompt)) {
+                    body += `
+                        <div style="border:1px dashed var(--border-subtle);border-radius:6px;padding:10px 12px;margin-bottom:8px;opacity:0.55;">
+                            <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Clip ${i + 1} — ${escapeHtml(linePreview)}</div>
+                            <div style="font-size:12px;font-style:italic;color:var(--text-muted);">No prebuilt prompt — auto-build path will run for this clip.</div>
+                        </div>`;
+                    continue;
+                }
+                const tp = o.text_prompt || '';
+                const np = o.negative_prompt || '';
+                body += `
+                    <div style="border:1px solid var(--border-subtle);border-radius:6px;padding:10px 12px;margin-bottom:8px;">
+                        <div style="font-size:11px;color:var(--accent);margin-bottom:6px;">
+                            Clip ${i + 1} — ${escapeHtml(linePreview)}
+                            <span style="float:right;color:var(--text-muted);">${tp.length} chars text · ${np.length} chars negative</span>
+                        </div>
+                        <pre style="white-space:pre-wrap;font-size:12px;line-height:1.5;background:var(--bg-elevated);padding:8px 10px;border-radius:4px;color:var(--text-primary);margin:0 0 6px 0;max-height:280px;overflow:auto;">${escapeHtml(tp)}</pre>
+                        ${np ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Negative prompt:</div>
+                              <pre style="white-space:pre-wrap;font-size:11px;line-height:1.5;background:var(--bg-elevated);padding:6px 10px;border-radius:4px;color:var(--text-muted);margin:2px 0 0 0;max-height:160px;overflow:auto;">${escapeHtml(np)}</pre>` : ''}
+                    </div>`;
+            }
+
+            let modal = document.getElementById('veoPromptsModal');
+            if (!modal) {
+                modal = document.createElement('div');
+                modal.id = 'veoPromptsModal';
+                modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:9998;backdrop-filter:blur(3px);';
+                modal.onclick = (e) => { if (e.target === modal) modal.style.display = 'none'; };
+                document.body.appendChild(modal);
+            }
+            modal.innerHTML = `
+                <div style="background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:10px;width:min(900px,92vw);max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+                    <div style="padding:14px 18px;border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;justify-content:space-between;">
+                        <div style="font-size:14px;font-weight:600;color:var(--text-primary);">📝 Prebuilt Veo prompts (${ovr.filter(o => o && (o.text_prompt || o.negative_prompt)).length} of ${total} clips)</div>
+                        <button onclick="document.getElementById('veoPromptsModal').style.display='none'"
+                                style="background:transparent;border:none;color:var(--text-muted);font-size:18px;cursor:pointer;padding:0 6px;">✕</button>
+                    </div>
+                    <div style="padding:14px 18px;overflow:auto;">${body || '<div style="color:var(--text-muted);text-align:center;padding:20px;">No prompts.</div>'}</div>
+                </div>`;
+            modal.style.display = 'flex';
+        }
+
         async function cloneJob(id){
             // Show loading overlay
             let overlay = document.getElementById('cloneOverlay');
@@ -11026,6 +11137,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         pads: window._dialoguePads.filter(x => x).length,
                     };
                     console.log('[Clone] per-clip metadata restored:', _restoredCounts);
+                    // v678b — surface the "Show prompts" button when any clip
+                    // carries a prebuilt Veo prompt.
+                    if (typeof refreshShowPromptsBtn === 'function') refreshShowPromptsBtn();
 
                     // Force the visible contenteditable editor to mirror the
                     // textarea immediately — without this, simpleRichEditor
@@ -14806,6 +14920,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     });
                     window._veoPromptOverrides = veoOverridesObj;
                     window._dialoguePads = padsObj;
+                    if (typeof refreshShowPromptsBtn === 'function') refreshShowPromptsBtn();
                     try {
                         const overrideCount = Object.keys(veoOverridesObj).length;
                         if (overrideCount > 0) {
