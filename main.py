@@ -4504,24 +4504,73 @@ async def get_job_prompts(
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Get all prompts for a job with frame references."""
+    """Get all prompts for a job with frame references.
+
+    v678c: also expose the per-clip veo_prompt_override + negative override
+    + dialogue_pad parsed from job.dialogue_json. When clip.prompt_text is
+    empty (e.g. background prompt-build hasn't run yet, or the clip row
+    was created before v572 stamped it), the frontend can fall back to
+    the prebuilt override and still render meaningful content. Also adds
+    char-count fields so the UI can render compact badges instead of
+    measuring inside the browser.
+    """
     job = get_user_job(db, job_id, current_user)
-    
+
     clips = db.query(Clip).filter(
         Clip.job_id == job_id
     ).order_by(Clip.clip_index).all()
-    
+
     base_url = str(request.base_url).rstrip('/')
-    
+
+    # v678c — pull the lines list from dialogue_json so we can index
+    # per-clip overrides + pads. Tolerates legacy plain-list shape.
+    overrides_by_idx: Dict[int, Dict[str, Any]] = {}
+    pads_by_idx: Dict[int, Optional[str]] = {}
+    try:
+        dlg_raw = json.loads(job.dialogue_json) if job.dialogue_json else {}
+        if isinstance(dlg_raw, dict):
+            lines_list = dlg_raw.get("lines") or []
+        elif isinstance(dlg_raw, list):
+            lines_list = dlg_raw
+        else:
+            lines_list = []
+        for idx, l in enumerate(lines_list):
+            if isinstance(l, dict):
+                tp = (l.get("veo_prompt_override") or "").strip() or None
+                np = (l.get("veo_negative_prompt_override") or "").strip() or None
+                if tp or np:
+                    overrides_by_idx[idx] = {"text_prompt": tp, "negative_prompt": np}
+                pad = (l.get("dialogue_pad") or "").strip() or None
+                if pad:
+                    pads_by_idx[idx] = pad
+    except Exception as e:
+        print(f"[prompts] dialogue_json parse warning: {e}", flush=True)
+
     prompts = []
     for clip in clips:
         start_filename = clip.start_frame.split('/')[-1] if clip.start_frame else None
         end_filename = clip.end_frame.split('/')[-1] if clip.end_frame else None
-        
+
+        # Effective prompt text: prefer the stamped clip.prompt_text (the
+        # final composed prompt build_prompt returned), fall back to the
+        # raw veo_prompt_override (with negative trailer joined the same
+        # way build_prompt does it).
+        text = clip.prompt_text or ""
+        ovr = overrides_by_idx.get(clip.clip_index)
+        if not text and ovr:
+            tp = ovr.get("text_prompt") or ""
+            np = ovr.get("negative_prompt") or ""
+            text = tp + (f"\n\nNegative prompt: {np}" if np else "")
+
         prompts.append({
             "clip_index": clip.clip_index,
             "dialogue_text": clip.dialogue_text,
-            "prompt_text": clip.prompt_text or "",
+            "prompt_text": text,
+            "prompt_text_chars": len(text),
+            "is_prebuilt": clip.clip_index in overrides_by_idx,
+            "veo_prompt_override": ovr.get("text_prompt") if ovr else None,
+            "veo_negative_prompt_override": ovr.get("negative_prompt") if ovr else None,
+            "dialogue_pad": pads_by_idx.get(clip.clip_index),
             "start_frame": clip.start_frame,
             "end_frame": clip.end_frame,
             "start_frame_url": f"{base_url}/api/jobs/{job_id}/images/{start_filename}" if start_filename else None,
@@ -4529,7 +4578,7 @@ async def get_job_prompts(
             "clip_mode": clip.clip_mode,
             "scene_index": clip.scene_index,
         })
-    
+
     return {
         "job_id": job_id,
         "backend": job.backend,
