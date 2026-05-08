@@ -2275,6 +2275,65 @@ def trim_video(
     print(f"[VideoProcessor]   trim_video completed")
 
 
+def render_text_card(
+    output_path: Path,
+    caption: str,
+    bg_color: str = "black",
+    duration_s: float = 1.0,
+    width: int = 720,
+    height: int = 1280,
+    fontsize: int = 56,
+    fontcolor: str = "white",
+) -> None:
+    """v681 — render a solid-color clip with a centered drawtext caption.
+
+    Used for `scene_type=text_card` clips ("2 months later…", state
+    labels, transition cards). NO Veo dispatch — ffmpeg generates the
+    clip directly. Output is mp4 H.264 + silent AAC track so concat
+    with audio-bearing peers stays in sync.
+
+    Args:
+        output_path: target mp4 path.
+        caption: text shown on screen, centered. Special drawtext chars
+            (`'`, `:`, `\\`) are escaped before being passed to ffmpeg.
+        bg_color: solid background color name OR hex (CSS-style).
+        duration_s: clip duration in seconds.
+        width / height: output dimensions; defaults match the platform's
+            9:16 vertical rendering target.
+        fontsize / fontcolor: caption styling.
+    """
+    safe_caption = (
+        (caption or "")
+        .replace("\\", "\\\\")
+        .replace(":", r"\:")
+        .replace("'", r"\\'")
+    )
+    print(
+        f"[v681/text_card] caption={caption!r} bg={bg_color} dur={duration_s:.2f}s",
+        flush=True,
+    )
+    cmd = [
+        FFMPEG_BIN, "-y",
+        "-f", "lavfi",
+        "-i", f"color=c={bg_color}:s={width}x{height}:d={duration_s:.6f}:r=30",
+        "-f", "lavfi",
+        "-t", f"{duration_s:.6f}",
+        "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+        "-vf", (
+            f"drawtext=text='{safe_caption}':"
+            f"fontsize={fontsize}:fontcolor={fontcolor}:"
+            f"x=(w-text_w)/2:y=(h-text_h)/2"
+        ),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "128k", "-shortest",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    code, _, err = run(cmd)
+    if code != 0:
+        raise RuntimeError(f"render_text_card failed: {err[:300]}")
+
+
 def concat_videos(files: List[Path], output: Path) -> None:
     """Concatenate multiple videos into one.
 
@@ -3182,6 +3241,29 @@ def export_final_video(
     
     # Check if any trimming is needed
     needs_trimming = frames_to_cut_start > 0 or frames_to_cut_end > 0
+    # v681 — text_card clips need to be rendered via ffmpeg drawtext at
+    # this stage (no Veo source exists for them). Force the per-clip
+    # trim path so the renderer runs. Also disable remove_silence so
+    # whisper-VAD can't collapse a silent text-card to zero seconds.
+    has_text_cards = any(
+        (c.get("scene_type") or "").lower() == "text_card"
+        for c in clip_info
+    )
+    if has_text_cards:
+        if not needs_trimming:
+            print(
+                "[VideoProcessor] Forcing per-clip trim path: text-card "
+                "scene(s) require ffmpeg drawtext render",
+                flush=True,
+            )
+            needs_trimming = True
+        if remove_silence:
+            print(
+                "[VideoProcessor] VAD bypassed: text-card scene(s) present "
+                "(silent text cards would be collapsed by whisper-VAD)",
+                flush=True,
+            )
+            remove_silence = False
     # v668 — timeline-mode clips MUST go through the per-clip trim path so
     # ffmpeg can cut them to exactly target_duration_s. Force the trim path
     # on if any clip declares cut_mode='timeline' with a target duration.
@@ -3236,6 +3318,21 @@ def export_final_video(
                 skip_start = info.get("skip_start_trim", False)
                 trimmed_file = temp_path / f"trimmed_{idx:04d}.mp4"
                 actual_start_trim = 0 if skip_start else frames_to_cut_start
+
+                # v681 — text_card scenes: render via ffmpeg drawtext.
+                # NO Veo source video for these clips; clip_path is a
+                # placeholder that's never read. Caption + bg_color come
+                # from the assignment row (denorm'd by main.py to the
+                # info dict). Default duration 1.0s when missing.
+                if (info.get("scene_type") or "").lower() == "text_card":
+                    render_text_card(
+                        output_path=trimmed_file,
+                        caption=info.get("caption") or "",
+                        bg_color=info.get("bg_color") or "black",
+                        duration_s=float(info.get("duration_s") or info.get("target_duration_s") or 1.0),
+                    )
+                    return idx - 1, trimmed_file
+
                 # v668 — timeline-cut mode: ignore frame trim, ffmpeg-trim
                 # the clip to exactly target_duration_s seconds. Used for
                 # transformation montages where the cut should follow the

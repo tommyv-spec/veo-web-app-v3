@@ -5412,6 +5412,27 @@ async def export_final_video(
 
     def _download_clip(pos_clip):
         pos, clip = pos_clip
+        # v681 — text-card clips have NO Veo render and NO output_filename.
+        # Emit a synthetic clip_info entry that the video_processor's
+        # _trim_one branch will render via render_text_card directly. The
+        # placeholder path is never read — the text_card branch in
+        # video_processor.py:_trim_one returns the rendered file before
+        # any path access. Use temp_dir-style placeholder so it's clearly
+        # synthetic if anything inspects it.
+        if (clip.scene_type or "").lower() == "text_card":
+            return {
+                "path": output_dir / f"_text_card_{clip.clip_index:04d}.mp4",
+                "clip_index": clip.clip_index,
+                "skip_start_trim": True,
+                "dialogue_text": "",
+                "cut_mode": None,
+                "target_duration_s": None,
+                "scene_type": "text_card",
+                "caption": clip.caption or "",
+                "bg_color": clip.bg_color or "black",
+                "duration_s": 1.0,  # text-card default; ImageSceneAssignment.duration_s lookup is one query away if we ever need per-card override
+                "_order": pos,
+            }
         if not clip.output_filename:
             return None
         clip_path = output_dir / clip.output_filename
@@ -5440,6 +5461,11 @@ async def export_final_video(
                 # video_processor can branch trim/VAD strategy per clip.
                 "cut_mode": clip.cut_mode,
                 "target_duration_s": clip.target_duration_s,
+                # v681 — text-card / caption denorm (NULL for shot clips,
+                # so the text_card branch in _trim_one is a no-op for them).
+                "scene_type": clip.scene_type,
+                "caption": clip.caption,
+                "bg_color": clip.bg_color,
                 "_order": pos
             }
         return None
