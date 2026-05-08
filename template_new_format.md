@@ -587,7 +587,9 @@ Persona is always uploaded as image 1 (Flow slot 0). Product, when present in th
 
 **Note on cast types (v681):**
 - `character` rows speak. Only `character` rows can appear as `- **speaker:**` values. Single character per video in v681 (multi-speaker dialogue = v682).
-- `patient` rows are image-bound recurring non-speakers. Same upload binding as `character`. Used for testimonial subjects (Donna's BEFORE/AFTER frames in the Esther/Donna source).
+- `patient` rows are recurring non-speakers. **Reference column is OPTIONAL (v681e):**
+  - **Upload-backed**: Reference points to a real isolated photo (e.g. `patients/refs/donna.png`). Identity binds via the upload. Recommended when the photo exists.
+  - **Anchor-scene (no upload)**: Reference = `—`. The FIRST scene that has `cast: <patient>` becomes the anchor. Banana 2 generates the patient on that scene from the image_prompt body's identity prose (race + age + build + hair + clothing per v669 — REQUIRED on the first scene). Subsequent scenes with `cast: <patient>` chain back to the anchor's chosen variant via v512 — Flow uses the anchor scene's render as the reference. NO upload required, NO `reference_image:` needed for face continuity.
 - `extra` rows are prose-only one-shots (Donna's husband on the bed scrolling his phone). NO upload, NO `Reference`. Identity in image prompt per v669.
 
 **Note on stripped-down ingredients (v573):** Only the persona and the product are declared as uploaded ingredients. [List of inline-described props, e.g. "the kettle", "the half-lemon", "the surgical pen"] are all described inline in scene prompts — none would pass the isolated-reference test (no clean isolated photos available for those). When the video has no branded product on screen, drop the product row entirely and omit product mentions from all prompts.

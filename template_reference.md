@@ -5216,6 +5216,50 @@ Consistent phrasing across prompts helps Nano Banana 2 lock in continuity even w
 | 1 | character | the healer  | personas/refs/amish-grandmother.png          |
 | 2 | patient   | Donna       | —                                            |
 | 3 | extra     | husband     | —                                            |
+```
+
+**How the v512 chain locks Donna's face without an upload:**
+
+```
+### Image 1                       — FIRST appearance of Donna
+- **cast:** the healer, donna, the husband
+- **Image prompt:**
+```
+…Donna lies on her left side in the foreground. She is a white woman in
+her mid-40s, blonde shoulder-length hair parted center, blue eyes, average
+build with weight around the midsection, soft round facial features, no
+makeup. She wears a soft gray crew-neck sleep tee…
+```
+                                  ↑ identity prose REQUIRED on first scene
+                                    (race + age + build + hair + clothing)
+                                    — Banana 2 has no upload to bind, so
+                                    prose IS the only signal. v669 rule.
+
+### Image 2                       — second appearance of Donna
+- **reference_image:** image_1    ← optional; carries setting (bedroom) too
+- **cast:** donna
+- **Image prompt:**
+```
+…The main character stands in left-profile in front of a bedroom dresser…
+```
+                                  ↑ NO identity prose needed for Donna
+                                    — v512 chains image_2 to image_1
+                                    via the `cast: donna` lookup, so
+                                    Donna's face inherits from image_1's
+                                    chosen variant.
+
+# What the platform does at import:
+# 1. Image 1 has `cast: donna` AND donna has no upload (Reference: —).
+#    → image 1 is registered as the anchor scene for "donna".
+# 2. Image 2 has `cast: donna` (donna still has no upload).
+#    → platform looks up "donna" in ingredient_nodes (no upload, miss),
+#      then in anchor_scenes (hit: image 1) → attaches image 1's chosen
+#      variant as a parent edge on image 2.
+# 3. Flow receives image 1 as Donna's reference. Donna's face stays
+#    identical across image 2/3/5 without any upload.
+```
+
+**You do NOT need `reference_image: image_N` to carry Donna's face** — `cast: donna` + v512 anchor handles it automatically. Use `reference_image: image_N` only when you ALSO want the same setting/composition (e.g. follow-up scenes in the same bedroom).
 
 ## Storyboard
 
