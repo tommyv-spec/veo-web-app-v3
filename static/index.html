@@ -3511,12 +3511,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
             
             const lines = editor.querySelectorAll('.simple-line');
             let allTexts = [];
-            
+
+            // v681e.11 — keep empty .simple-line divs (silent / text_card
+            // scenes have intentionally empty dialogue but ARE storyboard
+            // scenes that need a slot). Pre-v681e.11 the `if(text && ...)`
+            // gate dropped them, which made syncFromSimpleEditor rewrite
+            // dialogueInput to a 3-line value when prepare_batch_for_video
+            // produced an 8-line value (3 with text + 5 empty for silent
+            // and text_card). Now we keep any non-placeholder line.
             lines.forEach((line) => {
-                const text = line.textContent.trim();
-                if(text && !line.classList.contains('placeholder-line')){
-                    allTexts.push(text);
-                }
+                if(line.classList.contains('placeholder-line')) return;
+                allTexts.push(line.textContent.trim());
             });
             
             if(isAutoSplitEnabled() && allTexts.length > 0){
@@ -4286,18 +4291,31 @@ Example: A realistic vertical video of a professional presenter speaking directl
         
         function renderStoryboard(){
             const fullText = document.getElementById('dialogueInput').value;
-            
+
             // NEVER re-split here — just read existing lines from dialogueInput.
             // Actual splitting only happens from explicit triggers:
             //   paste handlers, resplitDialogueText(), updateWordsPerLine(), toggleAutoSplit()
+            //
+            // v681e.11 — preserve numbered-empty lines (silent / text_card
+            // scenes intentionally have no dialogue but ARE scenes that need
+            // a slot in the storyboard). Pre-v681e.11 the filter dropped any
+            // empty line, which made silent scenes invisible to the editor
+            // even though prepare_batch_for_video emitted them. Now we keep
+            // any line with an `N|` prefix (numbered scene anchor) regardless
+            // of content, and drop only bare blank lines from raw paste.
             const lines = fullText
                 .split('\n')
                 .map(l => {
                     const match = l.match(/^\d+\|(.*)$/);
-                    return match ? match[1].trim() : l.trim();
+                    if (match) {
+                        return { keep: true, text: match[1].trim() };
+                    }
+                    const t = l.trim();
+                    return { keep: !!t, text: t };
                 })
-                .filter(l => l);
-            
+                .filter(o => o.keep)
+                .map(o => o.text);
+
             // Use the shared render function
             renderStoryboardWithLines(lines);
         }
