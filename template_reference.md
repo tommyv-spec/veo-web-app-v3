@@ -5259,7 +5259,31 @@ makeup. She wears a soft gray crew-neck sleep tee…
 #    identical across image 2/3/5 without any upload.
 ```
 
-**You do NOT need `reference_image: image_N` to carry Donna's face** — `cast: donna` + v512 anchor handles it automatically. Use `reference_image: image_N` only when you ALSO want the same setting/composition (e.g. follow-up scenes in the same bedroom).
+**Two pieces, both required, but they do different jobs:**
+
+| Piece | Where | Job |
+|---|---|---|
+| `cast: <patient>` bullet | Scene/image YAML | Platform-side: ensures the parent edge attaches the anchor scene's chosen variant. Without this, the platform doesn't know to bind the reference. |
+| `Use Image N as the visual reference for the previous scene — preserve <X>, <Y>, <Z> from there.` | First sentence of the image_prompt body | **Banana 2 prompt instruction**: tells the model HOW to use the attached reference. Per Nano Banana 2 official docs (ai.google.dev/gemini-api/docs/image-generation) and v608 — Banana 2 indexes references positionally and does NOT auto-figure-out what each ref is for. Without this line, the attached reference is treated as generic visual context and may be ignored. |
+
+**The `reference_image: image_N` BULLET is OPTIONAL when `cast:` declares the patient** — v512 already attaches the anchor scene as parent edge. Keep `reference_image:` only when:
+- You ALSO want the setting/composition to chain (e.g. follow-up scene in the same bedroom)
+- You're following a non-cast chain (e.g. continuing a prop or an environmental anchor)
+
+The PROMPT BODY's "Use Image N" line is **REQUIRED** every time you want Banana 2 to actually USE an attached reference — `cast:`-driven and explicit `reference_image:` chains both need it. The platform's `_resolve_flow_prompt_bindings` rewrites N at submission time to Flow's actual slot.
+
+**For the Donna anchor-scene example, Image 2's first body sentence:**
+
+```
+Use Image 1 as the visual reference for the previous scene — preserve Donna's
+facial features (mid-40s blonde, blue eyes, soft round features) and the
+suburban bedroom (dark-wood headboard, beige bedding, dresser) from there.
+
+Shot on iPhone with wide-angle lens, handheld, deep focus, vertical 9:16
+framing. Same suburban bedroom as image 1 ...
+```
+
+The cast: bullet handles binding; the body's "Use Image 1" line tells Banana 2 what to do with what was bound.
 
 ## Storyboard
 
