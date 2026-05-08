@@ -5285,6 +5285,31 @@ framing. Same suburban bedroom as image 1 ...
 
 The cast: bullet handles binding; the body's "Use Image 1" line tells Banana 2 what to do with what was bound.
 
+**Slot order — what the platform actually sends to Flow:**
+
+The author writes positional `Image K` references using the markdown's local numbering (`### Image 1`, `### Image 2`, ...). The platform's body-renumber pass (`_resolve_flow_prompt_bindings` in `image_platform.py:1283`) translates those at submission to Flow's actual slot positions.
+
+Slot ordering (v573 priority sort at `image_platform.py:4943`):
+
+| Priority | Slot | Edge type | Markdown source |
+|---|---|---|---|
+| 0 | Flow Image 1 | persona character upload | `cast: the healer` (or v607 force-bind safety net) |
+| 1 | Flow Image 2 | explicit upload (product, variant chain base) | `cast: the [product name]`, variant ingredients |
+| 2 | Flow Image 3 | anchor-scene chain (patient, anchor-scene ingredient) | `cast: donna` where Donna has Reference=`—` and was bound on a prior scene; OR `reference_image: image_K` |
+| 3+ | (capped at 3 parents) | additional chain references | extra cast members beyond the cap (rare) |
+
+**Renumber pass coverage** (v681e.8):
+- ✅ Persona role: `the uploaded character reference image` → `Image 1`
+- ✅ Product role: `the uploaded product reference image` → `Image 2`
+- ✅ Chain semantic phrases: `the prior-scene reference image`, `the previous scene's reference image` → `Image N` (the chain edge's actual slot)
+- ✅ Chain positional `Image K`: rewritten to actual Flow slot — works for both `chain_from_image_*` edges AND v681 anchor-scene patient edges (v681e.8 classifies anchor-scene patient edges as `chain`)
+- ❌ Settings or non-chain anchor-scene ingredients: not currently renumbered (rare; if you hit this, write the binding line using the semantic phrase `the prior-scene reference image` instead of a positional number)
+
+**Authoring rule (positional references):**
+1. In the chain binding sentence, use the LOCAL markdown image number (`Image 1` for `### Image 1`, etc.).
+2. The platform rewrites it to Flow's slot at emission. So if your image's parents are `[the healer (slot 0), Donna anchor=image_1 (slot 1)]`, your body's "Use Image 1 as the visual reference..." gets emitted as "Use Image 2 as the visual reference..." (because Donna's anchor lands at Flow slot 1+1=Image 2 from Banana 2's perspective).
+3. Verify in the platform UI: hover the per-image card → "Parents" lists the bound parents in slot order; Flow's "Image 1" = first parent, "Image 2" = second, etc.
+
 ## Storyboard
 
 ### Scene 1
