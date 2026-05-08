@@ -2069,26 +2069,47 @@ async def _setup_job_background(
                 use_gesture_enrichment=config_dict.get("use_gesture_enrichment", False),
             )
 
+            # v673 — fast lane for fully-prebuilt prompt jobs.
+            # When EVERY clip carries a veo_prompt_override, build_prompt
+            # short-circuits per clip (veo_generator.py:1358) and never
+            # reads frame_analysis / voice_profile / user_context_enriched
+            # / transition_cue. Running them anyway burns three OpenAI
+            # vision/chat calls + N transition-cue calls per export
+            # entirely for log decoration. Skip the whole upstream block.
+            _peek_dialogue_data = json.loads(job.dialogue_json) if job.dialogue_json else {}
+            _peek_lines = _peek_dialogue_data.get("lines", []) or []
+            _all_prebuilt = bool(_peek_lines) and all(
+                isinstance(_l, dict) and (_l.get("veo_prompt_override") or "").strip()
+                for _l in _peek_lines
+            )
+
             # ── One-time analysis ──
             # Download first frame to local temp for vision analysis
             _first_frame_local = None
-            if first_frame_local_path:
-                _first_frame_local = str(first_frame_local_path)
-            elif frames_storage_keys:
-                # Download from R2
-                try:
-                    from backends.storage import get_storage
-                    _storage = get_storage()
-                    _first_key = f"jobs/{job_id}/frames/{sorted(frames_storage_keys.keys())[0]}"
-                    _first_frame_local = tempfile.mktemp(suffix='.png')
-                    await asyncio.to_thread(_storage.download_file, _first_key, _first_frame_local)
-                except Exception as _dl:
-                    print(f"[Background] Could not download first frame for analysis: {_dl}")
-                    _first_frame_local = None
+            if not _all_prebuilt:
+                if first_frame_local_path:
+                    _first_frame_local = str(first_frame_local_path)
+                elif frames_storage_keys:
+                    # Download from R2
+                    try:
+                        from backends.storage import get_storage
+                        _storage = get_storage()
+                        _first_key = f"jobs/{job_id}/frames/{sorted(frames_storage_keys.keys())[0]}"
+                        _first_frame_local = tempfile.mktemp(suffix='.png')
+                        await asyncio.to_thread(_storage.download_file, _first_key, _first_frame_local)
+                    except Exception as _dl:
+                        print(f"[Background] Could not download first frame for analysis: {_dl}")
+                        _first_frame_local = None
+            else:
+                print(
+                    f"[Background] v673 fast lane: all {len(_peek_lines)} clip(s) have "
+                    f"prebuilt prompts — skipping first-frame analysis download",
+                    flush=True,
+                )
 
             # Process user context → enriched dict
             user_context_enriched = {}
-            if video_config.user_context and openai_key:
+            if not _all_prebuilt and video_config.user_context and openai_key:
                 try:
                     print(f"[Background] Analyzing user context...", flush=True)
                     add_job_log(db, job_id, "Analyzing user context...", "INFO", "system")
@@ -2100,7 +2121,7 @@ async def _setup_job_background(
 
             # Analyze frame → dict
             frame_analysis = {}
-            if _first_frame_local and openai_key and video_config.use_frame_vision:
+            if not _all_prebuilt and _first_frame_local and openai_key and video_config.use_frame_vision:
                 try:
                     print(f"[Background] Analyzing frame with vision...", flush=True)
                     add_job_log(db, job_id, "Analyzing frame with AI vision...", "INFO", "system")
@@ -2112,7 +2133,7 @@ async def _setup_job_background(
 
             # Generate voice profile
             voice_profile = get_default_voice_profile(language, config_dict.get('user_context', ''))
-            if video_config.use_openai_prompt_tuning and openai_key and frame_analysis:
+            if not _all_prebuilt and video_config.use_openai_prompt_tuning and openai_key and frame_analysis:
                 try:
                     print(f"[Background] Generating voice profile...", flush=True)
                     add_job_log(db, job_id, "Generating voice profile...", "INFO", "system")
@@ -2248,9 +2269,16 @@ async def _setup_job_background(
                 start_local = Path(local_frame_paths[start_fname]) if start_fname and start_fname in local_frame_paths else None
                 end_local = Path(local_frame_paths[end_fname]) if end_fname and end_fname in local_frame_paths else None
 
-                # Generate transition cue if start ≠ end (different frames)
+                # Generate transition cue if start ≠ end (different frames).
+                # v673 — skip when this clip has a prebuilt prompt; build_prompt
+                # short-circuits and never reads the cue.
                 _transition_cue = None
-                if start_local and end_local and str(start_local) != str(end_local) and openai_key:
+                if (
+                    not _veo_prompt_override
+                    and start_local and end_local
+                    and str(start_local) != str(end_local)
+                    and openai_key
+                ):
                     try:
                         _transition_cue = await asyncio.to_thread(
                             generate_transition_cue,
