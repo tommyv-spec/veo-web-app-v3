@@ -4692,9 +4692,45 @@ def _import_scene_table_impl(
             # cap still applies; if a scene mentions 4+ ingredients OR has
             # a ref_image plus 3 ingredients, the lowest-priority parent
             # is dropped with a warning.
-            mentioned = _extract_ingredient_names_in_prompt(
-                final_prompt, all_ingredient_names, max_matches=10
-            )
+            # v681 — when the image's parsed `cast:` bullet declares an
+            # explicit list, use it verbatim (lowercased to match the
+            # ingredient_names registry) and skip the v509 prompt-scan
+            # heuristic. v509 stays as the fallback for legacy / cast-less
+            # imports. `extra` rows have no upload (they're prose-only)
+            # and yield no ingredient_node match — they get logged + skipped
+            # quietly.
+            parsed_image_cast = img.get("cast") if isinstance(img, dict) else None
+            if parsed_image_cast:
+                mentioned = []
+                for cn in parsed_image_cast:
+                    cn_norm = cn.strip()
+                    if not cn_norm:
+                        continue
+                    if cn_norm in all_ingredient_names:
+                        mentioned.append(cn_norm)
+                    else:
+                        # Tolerate case differences. Find a case-insensitive match.
+                        match = next(
+                            (n for n in all_ingredient_names if n.lower() == cn_norm.lower()),
+                            None,
+                        )
+                        if match:
+                            mentioned.append(match)
+                        else:
+                            log.info(
+                                f"[v681/bind] image_{image_index}: cast='{cn_norm}' "
+                                f"has no Ingredients-table match (likely extra row, "
+                                f"prose-only); skipping bind"
+                            )
+                print(
+                    f"[v681/bind] image_{image_index} declared cast={parsed_image_cast} "
+                    f"→ {len(mentioned)} bound (v509 prompt-scan skipped)",
+                    flush=True,
+                )
+            else:
+                mentioned = _extract_ingredient_names_in_prompt(
+                    final_prompt, all_ingredient_names, max_matches=10
+                )
 
             # v581: if the image declares a product_image field, ensure
             # that ingredient is in the bind list even if the body scan
