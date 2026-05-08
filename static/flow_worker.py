@@ -15266,6 +15266,7 @@ class AccountWorker(threading.Thread):
             except Exception as _warmup_err:
                 print(f"[{self.name}] Browser died during warmup — relaunching...", flush=True)
                 try:
+                    print(f"[CLOSE_T1] [{self.name}] browser.close() reason=warmup_died", flush=True)
                     self.browser.close()
                 except Exception:
                     pass
@@ -15342,6 +15343,7 @@ class AccountWorker(threading.Thread):
                         print(f"[{self.name}] ✓ Login confirmed — proceeding with sync", flush=True)
 
                 print(f"\n[{self.name}] Closing submit browser to snapshot login state...")
+                print(f"[CLOSE_T2] [{self.name}] browser.close() reason=snapshot_login_state", flush=True)
                 self.browser.close()
                 time.sleep(2)
 
@@ -15659,6 +15661,7 @@ class AccountWorker(threading.Thread):
 
                         # Step 1: Close submit browser
                         try:
+                            print(f"[CLOSE_T3] [{self.name}] browser.close() reason=inner_session_recreate_a", flush=True)
                             self.browser.close()
                         except Exception as close_err:
                             print(f"[{self.name}] ⚠ Error closing browser during restore: {close_err}", flush=True)
@@ -15761,6 +15764,7 @@ class AccountWorker(threading.Thread):
                                 if confirmed:
                                     import shutil as _shutil
                                     golden_folder = get_golden_folder(self.session_folder)
+                                    print(f"[CLOSE_T4] [{self.name}] browser.close() reason=inner_session_recreate_b", flush=True)
                                     self.browser.close()
                                     time.sleep(2)
                                     if not os.path.exists(golden_folder):
@@ -15835,6 +15839,7 @@ class AccountWorker(threading.Thread):
             # Graceful shutdown
             print(f"[{self.name}] 🛑 Shutting down browser...", flush=True)
             try:
+                print(f"[CLOSE_T5] [{self.name}] browser.close() reason=post_run_cleanup", flush=True)
                 self.browser.close()
             except:
                 pass
@@ -16083,6 +16088,7 @@ class AccountWorker(threading.Thread):
 
         # Close current browser
         try:
+            print(f"[CLOSE_T6] [{self.name}] browser.close() reason=outer_run_cleanup", flush=True)
             self.browser.close()
         except:
             pass
@@ -16821,6 +16827,7 @@ def main(account_session=None, account_download=None, account_label=None):
         except Exception as _warmup_err:
             print(f"[Warmup] Browser died during warmup — relaunching before Flow navigation...", flush=True)
             try:
+                print(f"[CLOSE_T7] [main] browser.close() reason=main_path_a", flush=True)
                 browser.close()
             except Exception:
                 pass
@@ -16914,6 +16921,7 @@ def main(account_session=None, account_download=None, account_label=None):
 
             if needs_sync:
                 print("\n[Sync] Closing submit browser to snapshot login state...")
+                print(f"[CLOSE_T8] [main] browser.close() reason=main_path_b", flush=True)
                 browser.close()
                 time.sleep(2)
 
@@ -16980,6 +16988,7 @@ def main(account_session=None, account_download=None, account_label=None):
                 relaunch_login_required = ensure_logged_into_flow(page, "SYNC-RELAUNCH", timeout_minutes=10)
                 if relaunch_login_required:
                     print("[Sync] Login was required after relaunch — golden session was expired.", flush=True)
+                    print(f"[CLOSE_T9] [main] browser.close() reason=main_path_c", flush=True)
                     browser.close()
                     time.sleep(2)
                     if not os.path.exists(golden_folder):
@@ -17410,6 +17419,7 @@ def main(account_session=None, account_download=None, account_label=None):
                             # 20-40s on Windows 11 (WMIC deprecated, PowerShell CIM is slow).
                             _close_ok = False
                             try:
+                                print(f"[CLOSE_T10] [main] browser.close() reason=main_path_d", flush=True)
                                 browser.close()
                                 _close_ok = True
                             except Exception as close_err:
@@ -17568,6 +17578,7 @@ def main(account_session=None, account_download=None, account_label=None):
             print("\n\nShutting down...")
         finally:
             print("Closing browser...")
+            print(f"[CLOSE_T11] [main] browser.close() reason=main_path_e", flush=True)
             browser.close()
     
     print("\n✓ Worker stopped")
@@ -17680,6 +17691,7 @@ def main_multi_coordinator(accounts):
         
         if needs_sync:
             print(f"[{acc_name}] Closing submit browser to snapshot login state...")
+            print(f"[CLOSE_T12] [main] browser.close() reason=main_path_f", flush=True)
             browser.close()
             time.sleep(2)
 
