@@ -12866,8 +12866,32 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         </div>`;
                 }
 
+                // v679 — skip the destructive innerHTML rewrite while the
+                // user is interacting with the worker launcher. The 2s
+                // imgStartPolling tick used to blow away the parallel-slot
+                // <select>, the OS pills, and the reset checkbox mid-click.
+                // Triggers that mean "user is actively interacting":
+                //   - keyboard focus is inside the launcher
+                //   - mouse is hovering the launcher card
+                //   - a <select> inside the launcher is open (we approximate
+                //     this with focus, but also treat hover as a guard)
+                const ae = document.activeElement;
+                const focusInside = !!(ae && body.contains(ae) && ae !== document.body);
+                const hoverInside = !!body.matches(':hover') || !!body.querySelector(':hover');
+                if (focusInside || hoverInside) {
+                    // Skip this tick. The next tick will re-render once the
+                    // user moves focus/mouse away. Keep ONLY the lightweight
+                    // online indicator in sync without rebuilding the
+                    // launcher subtree.
+                    const onlineEl = body.querySelector('[data-worker-online-line]');
+                    if (onlineEl) {
+                        onlineEl.innerHTML = indicator + ageStr;
+                    }
+                    return;
+                }
+
                 body.innerHTML = `
-                    <div>${indicator}${ageStr}</div>
+                    <div data-worker-online-line>${indicator}${ageStr}</div>
                     ${queueLine}
                     ${helpLine}
                 `;
