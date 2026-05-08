@@ -1334,10 +1334,18 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
     if not edges or not body:
         return body
 
+    # v681e.9 diagnostic — log slot table + body deltas so authors can
+    # audit "Use Image N" → Flow slot translation post-hoc. One log line
+    # per node at submission time. Remove only after evidence lands that
+    # the renumber pass works generically across all cast combinations.
+    body_before = body
+    slot_table = []
+
     import re as _re
     for i, edge in enumerate(edges):
         flow_image_num = i + 1
         cls = _classify_edge_for_manifest(edge)
+        slot_table.append((flow_image_num, cls, (edge.role or "")[:32]))
 
         if cls == "persona":
             body = body.replace(
@@ -1387,6 +1395,18 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
             # Anchor-scene-bound named ingredient — v581 has no canonical
             # binding line for these; the role mapping happens via the
             # edge being attached to its slot at worker emission.
+            pass
+
+    # v681e.9 diagnostic emit — only when body actually changed OR an
+    # 'other'-classified edge remained (potential bypass).
+    if body != body_before or any(c == "other" for _, c, _ in slot_table):
+        try:
+            log.info(
+                f"[v681e.9/renumber] node={node.id} "
+                f"slots={slot_table} "
+                f"changed={body != body_before}"
+            )
+        except Exception:
             pass
 
     return body

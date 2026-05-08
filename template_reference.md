@@ -5310,6 +5310,56 @@ Slot ordering (v573 priority sort at `image_platform.py:4943`):
 2. The platform rewrites it to Flow's slot at emission. So if your image's parents are `[the healer (slot 0), Donna anchor=image_1 (slot 1)]`, your body's "Use Image 1 as the visual reference..." gets emitted as "Use Image 2 as the visual reference..." (because Donna's anchor lands at Flow slot 1+1=Image 2 from Banana 2's perspective).
 3. Verify in the platform UI: hover the per-image card → "Parents" lists the bound parents in slot order; Flow's "Image 1" = first parent, "Image 2" = second, etc.
 
+#### v681e.9 — generic cast composition matrix (every future video type)
+
+The slot-ordering contract is **deterministic** and works for any cast combination. This matrix enumerates every realistic composition so authors never need to guess what `Use Image N` will become at submission.
+
+**Inputs:** parent edges sorted by `slot_order` (set by the v573 priority sort during `import_scene_table`).
+**Output:** Flow receives parents at positions Image 1, Image 2, Image 3 (capped at 3).
+**Substitution:** `_resolve_flow_prompt_bindings` rewrites the body's role phrases + positional `Image K` references to match.
+
+| Cast composition | Bound parents (slot order) | Flow Image 1 | Flow Image 2 | Flow Image 3 | Body author writes | Body Banana 2 sees |
+|---|---|---|---|---|---|---|
+| **Talking-head — persona only** | `[persona]` | persona | — | — | `the uploaded character reference image` | `Image 1` |
+| **Listicle — persona + product** | `[persona, product]` | persona | product | — | `the uploaded character reference image` AND `the uploaded product reference image` | `Image 1`, `Image 2` |
+| **Recipe-pivot — persona + product + chain** | `[persona, product, chain]` | persona | product | prior scene | `... character ...`, `... product ...`, `the prior-scene reference image` | `Image 1`, `Image 2`, `Image 3` |
+| **Multi-character testimonial — persona + patient anchor (v681)** | `[persona, patient-anchor]` | persona | patient anchor scene | — | `the uploaded character reference image` AND `Use Image K as the visual reference for the previous scene` | `Image 1`, `Image 2` |
+| **Patient-alone scene — patient anchor only (no persona present)** | `[patient-anchor]` | patient anchor scene | — | — | `Use Image K as the visual reference for the previous scene` | `Image 1` |
+| **Patient + product transformation** | `[patient-anchor, product]` | patient anchor scene | product | — | `Use Image K ...` AND `the uploaded product reference image` | `Image 1`, `Image 2` |
+| **Variant chain — persona + her variant base** | `[persona, variant-base]` | persona | variant base | — | `... character ...` AND `Use Image K ...` | `Image 1`, `Image 2` |
+| **Establishing scene — no parents** | `[]` | — | — | — | (no reference phrases) | (body unchanged) |
+| **Text-card scene** | `[]` (no image_node, drawn at video assembly) | — | — | — | n/a — no Banana 2 render | n/a |
+
+**How to read this matrix as an author:**
+1. Look at your scene's `cast:` bullet and figure out which parent edges will attach (persona = character ingredient with upload; patient = anchor-scene chain; product = product ingredient with upload).
+2. Find the row matching your composition.
+3. The "Body author writes" column tells you which phrases to use in the image_prompt body. Use the canonical role phrases (`the uploaded character reference image`, `the uploaded product reference image`, `the prior-scene reference image`) OR positional `Image K` referring to the markdown image number for chain references.
+4. The "Body Banana 2 sees" column tells you what the platform actually emits at Flow submission. The `_resolve_flow_prompt_bindings` pass handles the translation.
+
+**Edge classification truth table** (`_classify_edge_for_manifest`):
+
+| `edge.kind` | `edge.role` | `edge.parent.kind` | Classification | Renumbered? |
+|---|---|---|---|---|
+| `character` | * | * | persona | ✅ role-phrase |
+| `product` | * | * | product | ✅ role-phrase |
+| (any) | `variant_chain:*` | * | persona | ✅ role-phrase |
+| (any) | `chain_from_image_*` | * | chain | ✅ semantic + positional |
+| (any) | `subject` (legacy) | * | persona | ✅ role-phrase |
+| (any) | `reference` (legacy) | * | chain | ✅ semantic + positional |
+| (any) | (persona alias text) | * | persona | ✅ role-phrase |
+| (none) | (other) | `generated` | chain (v681e.8) | ✅ semantic + positional |
+| (none) | (other) | `upload` / NULL | other | ❌ no rewrite |
+
+**Invariant:** every parent edge that the author intends Banana 2 to use MUST classify as `persona`, `product`, or `chain`. If a `cast:` member produces an edge classified as `other`, the body's `Use Image N` reference will NOT be rewritten to that edge's slot — Banana 2 receives the upload as input but gets no instruction what to do with it.
+
+**Detection in production:** `_resolve_flow_prompt_bindings` emits `[v681e.9/renumber]` log line on every body change OR when `other`-classified edges are present. Search Render logs after import to verify expected behavior:
+
+```
+[v681e.9/renumber] node=1234 slots=[(1, 'persona', 'the healer'), (2, 'chain', 'donna')] changed=True
+```
+
+If you see `(N, 'other', '...')` in the slot table, the renumber pass skipped that edge — investigate the edge classification (probably needs a kind/role fix at import-time OR a new pattern in `_classify_edge_for_manifest`).
+
 ## Storyboard
 
 ### Scene 1
