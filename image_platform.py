@@ -5099,7 +5099,21 @@ def _import_scene_table_impl(
                 image_index in variant_base_index_for_anchor
                 and variant_base_index_for_anchor[image_index] != -1
             )
-            if (attached_parents_count == 0 and ref_image is None
+            # v681e.7 — gate the subject-fallback safety net on the same
+            # explicit-cast respect rule as v607 force-bind (line 4840).
+            # When the operator declares `cast:`, that's authoritative —
+            # zero attached parents is INTENTIONAL for scenes with only
+            # anchor-scene patients + prose-only extras (e.g. Donna's
+            # Image 1: cast=[donna, the husband], donna has no upload AND
+            # is the anchor herself, husband is an extra with no upload).
+            # Pre-v681e.7 the safety net fired unconditionally here and
+            # attached the persona's upload as slot-0 subject — exactly
+            # the wrong-character bind the user reported on Image 1.
+            # Now: only run the safety net when cast: is ABSENT (legacy
+            # v509 prompt-scan path).
+            if (parsed_image_cast is None
+                    and attached_parents_count == 0
+                    and ref_image is None
                     and not will_receive_deferred_variant_chain):
                 log.warning(
                     f"[import] Image {image_index}: no ingredients matched and no ref_image "
@@ -5114,6 +5128,26 @@ def _import_scene_table_impl(
                     # the manifest emits the persona role line.
                     kind="character",
                 ))
+            elif (parsed_image_cast is not None
+                    and attached_parents_count == 0
+                    and ref_image is None
+                    and not will_receive_deferred_variant_chain):
+                # Explicit cast: declared but produced zero attached
+                # parents — likely an anchor-scene-first scene (patient
+                # has no upload AND this is her first appearance) + only
+                # prose-only extras. Log as info, do NOT attach the
+                # persona. Banana 2 generates from prose alone.
+                log.info(
+                    f"[import] Image {image_index}: v681e.7 explicit cast "
+                    f"declared with no upload-backed parents (anchor-scene "
+                    f"first appearance + prose-only extras). Subject-fallback "
+                    f"safety net SKIPPED — Banana 2 will render from prose alone."
+                )
+                print(
+                    f"[v681e.7] image_{image_index}: explicit cast, 0 parents — "
+                    f"subject-fallback skipped",
+                    flush=True,
+                )
         else:
             # Legacy single-subject mode (no Ingredients block in markdown)
             if ref_image is None:
