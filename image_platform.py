@@ -5734,6 +5734,11 @@ def prepare_batch_for_video(
     seen = set()
     for scene in storyboard:
         nid = scene["image_node_id"]
+        # v681 — text_card scenes have image_node_id=None by design (no
+        # Banana 2 render; ffmpeg drawtext renders the clip). Skip them
+        # here so we don't spam orphan-assignment warnings downstream.
+        if nid is None:
+            continue
         if nid not in seen:
             referenced_image_node_ids.append(nid)
             seen.add(nid)
@@ -5869,7 +5874,13 @@ def prepare_batch_for_video(
     for scene in storyboard:
         node_id = scene["image_node_id"]
         local_idx = node_id_to_local_index.get(node_id)
-        if local_idx is None:
+        # v681 — text_card scenes have image_node_id=None by design (no
+        # Banana 2 render). Don't emit the orphan warning; emit a
+        # synthetic flat row downstream so the Clip writer creates one
+        # text_card clip row that the video processor will render via
+        # ffmpeg drawtext at export time.
+        is_text_card = (scene.get("scene_type") or "").lower() == "text_card"
+        if local_idx is None and not is_text_card:
             # This scene references an image node that got skipped above
             # (orphaned assignment pointing at a deleted node). Skip the
             # whole scene rather than 500-ing. The prepare flow completes
