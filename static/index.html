@@ -12873,16 +12873,24 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 // Triggers that mean "user is actively interacting":
                 //   - keyboard focus is inside the launcher
                 //   - mouse is hovering the launcher card
-                //   - a <select> inside the launcher is open (we approximate
-                //     this with focus, but also treat hover as a guard)
+                //
+                // v679b — gate ONLY applies when the offline-launcher UI
+                // is currently showing AND the new state is still offline.
+                // When the state transitions to ONLINE, force the rewrite
+                // unconditionally — there's no launcher to preserve, and
+                // keeping the stale offline UI in the DOM after the worker
+                // comes online (because the user happened to be hovering
+                // the card) was the visible bug.
+                const launcherIsShowing = !!body.querySelector('#imgOsPillWin, #imgResetSessions, [data-v681-worker-launcher]');
                 const ae = document.activeElement;
                 const focusInside = !!(ae && body.contains(ae) && ae !== document.body);
                 const hoverInside = !!body.matches(':hover') || !!body.querySelector(':hover');
-                if (focusInside || hoverInside) {
-                    // Skip this tick. The next tick will re-render once the
-                    // user moves focus/mouse away. Keep ONLY the lightweight
-                    // online indicator in sync without rebuilding the
-                    // launcher subtree.
+                const userInteracting = focusInside || hoverInside;
+                const stillOffline = !isOnline;
+                if (userInteracting && stillOffline && launcherIsShowing) {
+                    // Skip this tick — preserve the open dropdown / focused
+                    // input / hovered button. Keep the lightweight online
+                    // indicator in sync.
                     const onlineEl = body.querySelector('[data-worker-online-line]');
                     if (onlineEl) {
                         onlineEl.innerHTML = indicator + ageStr;
