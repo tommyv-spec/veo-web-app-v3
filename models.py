@@ -277,6 +277,16 @@ class Clip(Base):
     target_duration_s = Column(Float, nullable=True)
     veo_render_duration_s = Column(Integer, nullable=True)
 
+    # v681 — text-card / caption denorm from ImageSceneAssignment.
+    # caption: source caption (informational on shot clips) OR the
+    # rendered text on text_card clips.
+    # scene_type: 'shot' | 'text_card' | NULL → shot.
+    # bg_color: solid color hex / CSS name used by ffmpeg drawtext for
+    # text_card clips. NULL on every legacy clip row.
+    caption = Column(Text, nullable=True)
+    scene_type = Column(String(20), nullable=True)
+    bg_color = Column(String(20), nullable=True)
+
     # Status
     status = Column(String(20), default=ClipStatus.PENDING.value)
     retry_count = Column(Integer, default=0)
@@ -368,6 +378,10 @@ class Clip(Base):
             "cut_mode": self.cut_mode,
             "target_duration_s": self.target_duration_s,
             "veo_render_duration_s": self.veo_render_duration_s,
+            # v681 — text-card / caption denorm.
+            "caption": self.caption,
+            "scene_type": self.scene_type,
+            "bg_color": self.bg_color,
         }
 
 
