@@ -5331,7 +5331,22 @@ v681e.3 fixes this — when `cast:` is declared on the image:
 
 When `cast:` is ABSENT (legacy / pre-v681 imports), v607 force-bind runs as before — every character ingredient with an upload is force-bound regardless of prose mentions.
 
-**Authoring rule:** if you want the persona BOUND on an image (face-reference safety), include them in `cast:`. If you want them OMITTED (truly persona-less scene like a Donna-alone shot), declare `cast:` without them. The platform now does what you say, not what v607 used to assume.
+**Authoring rule (HARD RULE):** the `cast:` bullet MUST list ONLY the characters that are VISUALLY PRESENT in the scene's frame. Not "characters mentioned in dialogue", not "characters relevant to the story" — only "characters whose body / face appears in this composition".
+
+Concrete checklist before writing a `cast:` bullet:
+1. Look at the source frame (decode) OR the planned composition (lift). Who is physically in frame?
+2. List ONLY those names. Order doesn't matter.
+3. If the persona is NOT in this scene's frame, OMIT her — even if she's the speaker via voiceover OR mentioned in another scene's dialogue.
+4. If a recurring patient is NOT in this scene's frame, OMIT her — even if her transformation is the video's subject.
+5. If a one-shot extra appears in this scene only, INCLUDE them — they have no upload (Reference: `—`) so binding is a no-op anyway, but cast: documents the prose-only character for the audit gate.
+
+Why this matters: per v681e.3, the `cast:` bullet is AUTHORITATIVE. Anyone listed gets their upload (or anchor scene) attached as a parent edge — Flow then receives that reference and Banana 2 will TRY to fit them into the composition. Listing the persona in a Donna-alone bedroom scene results in the persona being shoehorned in as a passive face element. Listing only the characters actually present is the correct authoring discipline.
+
+**Common authoring mistakes:**
+- ❌ `cast: the healer, donna, the husband` on a bedroom scene where ONLY Donna and her husband are visible (the healer is a different scene's character) — the healer's upload gets attached and Banana 2 will try to render her in the bedroom. Fix: drop her from cast.
+- ❌ `cast: the healer` on a Donna AFTER mirror-selfie scene where only Donna is visible — the healer's upload gets attached. Fix: `cast: donna`.
+- ✅ `cast: the healer, donna` on the apothecary examination scene where BOTH are visible.
+- ✅ `cast: the healer` on the apothecary talking-head scene where only the healer is visible.
 
 **Text-card scenes**
 
