@@ -2771,11 +2771,15 @@ def _normalize_speaker_mode(raw: Optional[str]) -> Optional[str]:
     """v537 — canonicalize the writer's `**speaker:**` value.
 
     The markdown convention accepts a few synonymous spellings so writers
-    don't have to remember the exact tokens. We collapse them to the three
+    don't have to remember the exact tokens. We collapse them to the four
     canonical values that the prompt-builder branches on:
 
         'on-camera' — visible main character speaks (lip-sync ON)
-        'voiceover' — off-screen narrator (lip-sync OFF)
+        'voiceover' — off-screen narrator (lip-sync OFF; deprecated for
+                      v681 generate-side, deferred to v682; still
+                      tolerated on read for legacy artifacts)
+        'silent'    — no dialogue this scene (music / SFX only); no
+                      `- **line:**` bullet required (v681)
         'auto'      — run _detect_voiceover_only (default if field absent)
 
     Accepted spellings (case-insensitive, ignoring spaces/dashes/underscores):
@@ -2785,7 +2789,20 @@ def _normalize_speaker_mode(raw: Optional[str]) -> Optional[str]:
       voiceover   ←  voiceover | voice-over | voice over | vo | narration |
                      off-screen | offscreen | off screen | narrator |
                      narrated
+      silent      ←  silent    | mute      | nodialogue| nospeech  |
+                     (v681)       (v681)      (v681)      (v681)
+                     music      | sfx       | broll     | b-roll    |
+                     (musiconly)  (sfx-only)  (b-roll)    (b-roll)
       auto        ←  auto | detect | default | "" (empty)
+
+    v681 — the speaker bullet may include a character name prefix:
+        `the healer on-camera`  →  the LAST whitespace-separated token
+                                   is the mode; preceding tokens are the
+                                   character name (handled separately by
+                                   the cast: bullet, not parsed here).
+        `silent`                →  no character name; whole value is mode.
+    The normalizer extracts the mode by checking the trailing token after
+    the character-name strip.
 
     Anything unrecognized is returned as-is (lower-cased + trimmed) so we
     can surface the raw value in error messages without silently dropping
@@ -2796,17 +2813,42 @@ def _normalize_speaker_mode(raw: Optional[str]) -> Optional[str]:
     s = raw.strip().lower()
     if not s:
         return None
-    # Strip everything except letters so "on-camera", "on camera", and
-    # "on_camera" all collapse to "oncamera"
-    flat = "".join(ch for ch in s if ch.isalpha())
-    if flat in ("oncamera", "dialogue", "speaks", "spoken", "lipsync",
-                "character", "characterspeaks"):
-        return "on-camera"
-    if flat in ("voiceover", "vo", "narration", "offscreen", "narrator",
-                "narrated"):
-        return "voiceover"
-    if flat in ("auto", "detect", "default"):
-        return "auto"
+
+    def _flat(token: str) -> str:
+        return "".join(ch for ch in token if ch.isalpha())
+
+    def _classify(flat: str) -> Optional[str]:
+        if flat in ("oncamera", "dialogue", "speaks", "spoken", "lipsync",
+                    "character", "characterspeaks"):
+            return "on-camera"
+        if flat in ("voiceover", "vo", "narration", "offscreen", "narrator",
+                    "narrated"):
+            return "voiceover"
+        if flat in ("silent", "mute", "nodialogue", "nospeech",
+                    "music", "musiconly", "sfx", "sfxonly",
+                    "broll", "brolloverlay"):
+            return "silent"
+        if flat in ("auto", "detect", "default"):
+            return "auto"
+        return None
+
+    # First try the entire string as a single token (legacy v537 path).
+    full_flat = _flat(s)
+    classified = _classify(full_flat)
+    if classified:
+        return classified
+
+    # v681 — try the LAST whitespace-separated token. The bullet's
+    # canonical form is `<character_name> <mode>` (e.g. "the healer
+    # on-camera"); the character name is handled by the cast: bullet
+    # so here we just want the mode.
+    parts = s.rsplit(None, 1)
+    if len(parts) >= 2:
+        last_flat = _flat(parts[-1])
+        classified = _classify(last_flat)
+        if classified:
+            return classified
+
     # Unrecognized — return the raw lowercased value. Caller decides
     # whether to error or pass through to auto-detect.
     return s
@@ -3266,13 +3308,18 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     pads[-1] = value
                 # else: pad before any line — ignore, likely malformed
 
-        # v681 — text_card scenes have no `- **line:**` bullets; tolerate
-        # missing lines on those. Regular shot scenes still require at
-        # least one dialogue line (legacy behavior).
-        if not lines_list and not is_text_card:
+        # v681 — text_card scenes AND silent scenes have no `- **line:**`
+        # bullets by design. Tolerate missing lines on those. Other scenes
+        # (on-camera / voiceover / auto / unset speaker_mode) still
+        # require at least one dialogue line (legacy behavior).
+        is_silent_scene = (speaker_mode or "").lower() == "silent"
+        if not lines_list and not is_text_card and not is_silent_scene:
             raise ValueError(
                 f"Scene {scene_index}: no '- **line:**' bullets found "
-                "(a scene must have at least one dialogue line)"
+                "(a scene must have at least one dialogue line — "
+                "OR set `- **speaker:** silent` if the scene is intentionally "
+                "non-speaking music/SFX/b-roll, OR set `- **scene_type:** text_card` "
+                "for a text-card transition)"
             )
 
         scenes.append({
@@ -5967,12 +6014,17 @@ def prepare_batch_for_video(
             "duration_s": scene_duration_s,
         })
 
-        # v681 — text_card scenes have NO `- **line:**` bullets but they
-        # still need ONE Clip row downstream so the renderer dispatches.
-        # Inject a synthetic flat row with empty dialogue, scene_type =
-        # text_card, caption + bg_color + duration carried over so the
-        # video_processor's _trim_one branch can render it.
-        if scene_type_v681 == "text_card" and not lines:
+        # v681 — scenes with no `- **line:**` bullets but a real video
+        # clip needed: text_card scenes (rendered via ffmpeg drawtext)
+        # AND silent scenes (Veo render with no dialogue, music/SFX or
+        # b-roll under voiceover). Both need ONE Clip row downstream so
+        # the renderer dispatches. Inject a synthetic flat row with
+        # empty dialogue + the scene's metadata so the Clip writer
+        # creates a row that the video processor will handle correctly.
+        scene_speaker_mode = (scene.get("speaker_mode") or "").lower()
+        scene_is_silent = scene_speaker_mode == "silent"
+        scene_is_text_card = scene_type_v681 == "text_card"
+        if (scene_is_text_card or scene_is_silent) and not lines:
             dialogue_lines_flat.append("")
             scenes_metadata_flat.append({
                 "scene_index": scene["scene_index"],
@@ -5980,19 +6032,24 @@ def prepare_batch_for_video(
                 "image_local_index": local_idx,
                 "clip_mode": clip_mode,
                 "transition": transition,
-                "action_note": "",
+                "action_note": (notes[0] if notes else "") or "",
                 "veo_prompt_override": None,
                 "veo_negative_prompt_override": None,
                 "dialogue_pad": None,
-                "cut_mode": None,
-                "target_duration_s": None,
-                "veo_render_duration_s": None,
-                # v681 — text_card metadata that the Clip writer in
-                # main.py reads.
-                "caption": scene_caption,
-                "scene_type": "text_card",
-                "bg_color": scene_bg_color,
-                "duration_s": scene_duration_s,
+                # v667/v668 — silent scenes typically use cut_mode=timeline
+                # so the clip is anchor-trimmed to a fixed duration.
+                # Carry the scene's cut_mode + target_duration_s so the
+                # downstream branch in video_processor handles it correctly.
+                "cut_mode": cut_mode if scene_is_silent else None,
+                "target_duration_s": target_duration_s if scene_is_silent else None,
+                "veo_render_duration_s": veo_render_duration_s if scene_is_silent else None,
+                # v681 — scene metadata. text_card carries caption+bg+duration;
+                # silent scenes carry scene_type=shot (or None) so the
+                # video processor doesn't try to drawtext-render them.
+                "caption": scene_caption if scene_is_text_card else None,
+                "scene_type": "text_card" if scene_is_text_card else (scene_type_v681 or None),
+                "bg_color": scene_bg_color if scene_is_text_card else None,
+                "duration_s": scene_duration_s if scene_is_text_card else None,
             })
             veo_prompts_flat.append(None)
             pads_flat.append(None)
