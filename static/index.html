@@ -10977,25 +10977,53 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const customPromptEl = document.getElementById('customPrompt');
                 if(customPromptEl && cfg.custom_prompt) customPromptEl.value = cfg.custom_prompt;
                 
-                // Dialogue lines
+                // Dialogue lines — populate textarea AND visible editor BEFORE
+                // any await on the slow image-fetch path. v676 hardening:
+                // pre-v676 the clone of an image-batch-promoted job left the
+                // dialogue area visually empty + cloneOverlay stuck whenever
+                // R2 image fetches hung or 4xx'd. Now the script is in place
+                // even if every image fetch fails.
                 const dialogueLines = data.dialogue_lines || [];
                 if(dialogueLines.length > 0) {
-                    const formattedLines = dialogueLines.map((l, i) => `${l.id || i+1}|${l.text}`).join('\n');
+                    const formattedLines = dialogueLines.map((l, i) => {
+                        // Defensive: an image-batch-promoted job stores each
+                        // line as a dict with text + clip_mode + scene_index +
+                        // veo_prompt_override etc. Support legacy plain
+                        // strings too (they show up in older jobs).
+                        const txt = (l && typeof l === 'object') ? (l.text || '') : String(l || '');
+                        const id = (l && l.id) || (i + 1);
+                        return `${id}|${txt}`;
+                    }).join('\n');
                     document.getElementById('dialogueInput').value = formattedLines;
+                    // Force the visible contenteditable editor to mirror the
+                    // textarea immediately — without this, simpleRichEditor
+                    // keeps its placeholder until the much later renderSimpleEditor
+                    // call, which is reached AFTER the image-fetch await chain
+                    // and therefore won't run if any image fetch hangs.
+                    if(typeof renderSimpleEditor === 'function') renderSimpleEditor();
+                    if(typeof validateDialogueLines === 'function') validateDialogueLines();
                 }
-                
-                // Load images from the job
+
+                // Load images from the job. v676: each fetch wrapped in a 10s
+                // timeout race so a hung R2 redirect (CORS / 4xx / cold edge)
+                // can't strand the entire clone flow. uploadedFilesData /
+                // uploadedImages stay [] on total failure; the user can drag
+                // the original files in manually.
                 if(data.images && data.images.length > 0) {
                     setStatus('Loading images...', `${data.images.length} image${data.images.length>1?'s':''} to clone`);
-                    // We need to re-upload the images or reference them
-                    // For now, show a message that images need to be re-uploaded
                     uploadedImages = [];
                     uploadedFilesData = [];
-                    
-                    // Try to load images as dataURLs
+
+                    const FETCH_TIMEOUT_MS = 10000;
+                    const fetchWithTimeout = (url) => Promise.race([
+                        fetch(url, { credentials: 'include' }),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('image-fetch timeout')), FETCH_TIMEOUT_MS)),
+                    ]);
+
                     const imageLoadPromises = data.images.map(async (img, idx) => {
                         try {
-                            const imgResponse = await fetch(img.url);
+                            const imgResponse = await fetchWithTimeout(img.url);
+                            if (!imgResponse.ok) throw new Error('image-fetch HTTP ' + imgResponse.status);
                             const blob = await imgResponse.blob();
                             return new Promise((resolve) => {
                                 const reader = new FileReader();
@@ -11010,39 +11038,43 @@ Example: A realistic vertical video of a professional presenter speaking directl
                                 reader.readAsDataURL(blob);
                             });
                         } catch(e) {
-                            console.error('Failed to load image:', img.filename, e);
+                            console.error('[Clone] Failed to load image:', img.filename, e);
                             return null;
                         }
                     });
-                    
+
                     const loadedImages = (await Promise.all(imageLoadPromises)).filter(img => img !== null);
-                    
+
                     if(loadedImages.length > 0) {
-                        // Re-upload images to create new job
-                        const fd = new FormData();
-                        setStatus('Uploading images...', `${loadedImages.length} image${loadedImages.length>1?'s':''}`);
-                        for(const img of loadedImages) {
-                            // Convert dataUrl back to blob
-                            const response = await fetch(img.dataUrl);
-                            const blob = await response.blob();
-                            fd.append('files', blob, img.name);
+                        try {
+                            const fd = new FormData();
+                            setStatus('Uploading images...', `${loadedImages.length} image${loadedImages.length>1?'s':''}`);
+                            for(const img of loadedImages) {
+                                const response = await fetchWithTimeout(img.dataUrl);
+                                const blob = await response.blob();
+                                fd.append('files', blob, img.name);
+                            }
+
+                            const uploadResponse = await fetch(`${API}/upload`, {method: 'POST', body: fd});
+                            if (!uploadResponse.ok) throw new Error('upload HTTP ' + uploadResponse.status);
+                            const uploadData = await uploadResponse.json();
+                            uploadJobId = uploadData.job_id;
+                            uploadedImages = uploadData.uploaded;
+
+                            uploadedFilesData = loadedImages.map((img, i) => {
+                                const serverInfo = uploadData.uploaded.find(u => u.original_filename === img.name || u.filename === img.name);
+                                return { ...img, index: serverInfo ? serverInfo.index : i };
+                            });
+
+                            document.getElementById('uploadedCount').textContent = `✓ ${uploadedImages.length} image${uploadedImages.length>1?'s':''} cloned`;
+                        } catch(e) {
+                            console.error('[Clone] Image upload step failed:', e);
+                            document.getElementById('uploadedCount').textContent =
+                                `⚠ Could not re-upload images (${e.message}). Drag images in manually.`;
                         }
-                        
-                        const uploadResponse = await fetch(`${API}/upload`, {method: 'POST', body: fd});
-                        const uploadData = await uploadResponse.json();
-                        uploadJobId = uploadData.job_id;
-                        uploadedImages = uploadData.uploaded;
-                        
-                        // CRITICAL: Update uploadedFilesData with correct server indices
-                        uploadedFilesData = loadedImages.map((img, i) => {
-                            const serverInfo = uploadData.uploaded.find(u => u.original_filename === img.name || u.filename === img.name);
-                            return {
-                                ...img,
-                                index: serverInfo ? serverInfo.index : i
-                            };
-                        });
-                        
-                        document.getElementById('uploadedCount').textContent = `✓ ${uploadedImages.length} image${uploadedImages.length>1?'s':''} cloned`;
+                    } else {
+                        document.getElementById('uploadedCount').textContent =
+                            `⚠ Could not fetch ${data.images.length} image${data.images.length>1?'s':''} from the source job. Drag images in manually.`;
                     }
                 }
                 
@@ -11089,14 +11121,20 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 }
                 validateDialogueLines();
                 
-                document.getElementById('cloneOverlay').style.display = 'none';
                 alert('Job settings cloned! Review and click Start Generation when ready.');
-                
+
             } catch(e) {
                 console.error('Clone error:', e);
+                alert('Failed to clone job: ' + e.message);
+            } finally {
+                // v676 — ALWAYS dismiss the overlay so a partial failure
+                // (hung R2 image fetch, etc.) can't strand the spinner on
+                // screen forever. Pre-v676 the dismiss only ran in the
+                // success branch; a thrown await in the image-fetch loop
+                // skipped both the success dismiss and (because of how
+                // Promise.race rejection bubbles) sometimes the catch too.
                 const ov = document.getElementById('cloneOverlay');
                 if(ov) ov.style.display = 'none';
-                alert('Failed to clone job: ' + e.message);
             }
         }
         
