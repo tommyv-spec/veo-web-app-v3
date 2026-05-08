@@ -4782,14 +4782,42 @@ def _import_scene_table_impl(
             # places `character` ingredients at slot 0, so this never pushes
             # a chain or product binding out of slot bounds (3-cap still
             # honors priority).
-            for _ing_name, _ing_type in ingredient_types.items():
-                if _ing_type == "character" and _ing_name in ingredient_nodes:
-                    if _ing_name not in mentioned:
-                        mentioned.append(_ing_name)
-                        log.info(
-                            f"[import] Image {image_index}: v607 force-bind "
-                            f"character '{_ing_name}' (not mentioned in body)"
-                        )
+            #
+            # v681e.3 — RESPECT EXPLICIT CAST. When the operator declared
+            # `cast: ...` on this image, treat it as authoritative — don't
+            # force-bind a character that was deliberately omitted. v607
+            # only runs as a safety net when cast: is ABSENT (v509 prompt-
+            # scan path). This lets authors author scenes where the persona
+            # is genuinely not present (e.g. Donna BEFORE bedroom alone in
+            # the Esther/Donna testimonial — `cast: donna` excludes Esther).
+            if parsed_image_cast is None:
+                for _ing_name, _ing_type in ingredient_types.items():
+                    if _ing_type == "character" and _ing_name in ingredient_nodes:
+                        if _ing_name not in mentioned:
+                            mentioned.append(_ing_name)
+                            log.info(
+                                f"[import] Image {image_index}: v607 force-bind "
+                                f"character '{_ing_name}' (not mentioned in body)"
+                            )
+            else:
+                # Explicit cast declared. If a character has an upload AND the
+                # operator INCLUDED them in cast:, they're already in
+                # `mentioned` from the v681 fast path above — no force-bind
+                # needed. If they were OMITTED, respect that decision.
+                included_chars = [
+                    n for n, t in ingredient_types.items()
+                    if t == "character" and n in mentioned
+                ]
+                excluded_chars = [
+                    n for n, t in ingredient_types.items()
+                    if t == "character" and n in ingredient_nodes and n not in mentioned
+                ]
+                if excluded_chars:
+                    log.info(
+                        f"[import] Image {image_index}: v681e.3 explicit cast — "
+                        f"{len(included_chars)} character(s) bound: {included_chars}; "
+                        f"{len(excluded_chars)} character(s) intentionally excluded: {excluded_chars}"
+                    )
 
             attached_parents_count = 0
             slot = 0

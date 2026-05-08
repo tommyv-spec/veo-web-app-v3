@@ -5320,6 +5320,19 @@ The cast: bullet handles binding; the body's "Use Image 1" line tells Banana 2 w
 
 For text-card scenes (`scene_type: text_card`), `cast:` is OMITTED.
 
+**v681e.3 — explicit `cast:` is authoritative; v607 force-bind respects it.**
+
+Pre-v681e.3 the v607 character-force-bind path ran UNCONDITIONALLY on every image — even when the operator declared `cast:` and DELIBERATELY omitted the persona (e.g. a Donna-alone BEFORE bedroom scene where the healer is genuinely not present). Result: Flow received the persona upload anyway, Banana 2 tried to fit the persona into the composition as a passive face element, and the rendered scene came out with the healer shoehorned into a frame that was supposed to be Donna alone.
+
+v681e.3 fixes this — when `cast:` is declared on the image:
+- INCLUDED character ingredients are bound (v681 fast path adds them to `mentioned` automatically).
+- OMITTED character ingredients are RESPECTED — v607 force-bind does NOT add them back.
+- Log line `[import] Image N: v681e.3 explicit cast — K char(s) bound: [...]; M char(s) intentionally excluded: [...]` documents what was excluded.
+
+When `cast:` is ABSENT (legacy / pre-v681 imports), v607 force-bind runs as before — every character ingredient with an upload is force-bound regardless of prose mentions.
+
+**Authoring rule:** if you want the persona BOUND on an image (face-reference safety), include them in `cast:`. If you want them OMITTED (truly persona-less scene like a Donna-alone shot), declare `cast:` without them. The platform now does what you say, not what v607 used to assume.
+
 **Text-card scenes**
 
 When `scene_type: text_card`:
