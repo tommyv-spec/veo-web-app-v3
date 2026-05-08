@@ -581,7 +581,14 @@ Persona is always uploaded as image 1 (Flow slot 0). Product, when present in th
 | Name (used in prompts) | Type | Description | Source |
 |---|---|---|---|
 | `the main character` | character | Persona — no description needed (passed externally) | External persona upload — Flow slot 0 (Image 1) |
+| `[patient name, e.g. Donna]` | patient | (v681) Recurring named non-speaker — testimonial subject who appears across BEFORE / AFTER / multiple scenes. NO description here; identity comes from the upload (same v602 rule as persona). | External patient upload — Flow slot N |
+| `[extra label, e.g. husband]` | extra | (v681) One-shot bystander — appears in exactly ONE scene, no upload, identity carried in prose per v669 (race + age + build + clothing). Reference column = `—`. | (no upload) |
 | `the [product name]` | product | [Brief product description — brand, label color, container shape. Used as fallback if upload fails.] | External product upload — Flow slot 1 (Image 2) |
+
+**Note on cast types (v681):**
+- `character` rows speak. Only `character` rows can appear as `- **speaker:**` values. Single character per video in v681 (multi-speaker dialogue = v682).
+- `patient` rows are image-bound recurring non-speakers. Same upload binding as `character`. Used for testimonial subjects (Donna's BEFORE/AFTER frames in the Esther/Donna source).
+- `extra` rows are prose-only one-shots (Donna's husband on the bed scrolling his phone). NO upload, NO `Reference`. Identity in image prompt per v669.
 
 **Note on stripped-down ingredients (v573):** Only the persona and the product are declared as uploaded ingredients. [List of inline-described props, e.g. "the kettle", "the half-lemon", "the surgical pen"] are all described inline in scene prompts — none would pass the isolated-reference test (no clean isolated photos available for those). When the video has no branded product on screen, drop the product row entirely and omit product mentions from all prompts.
 
@@ -622,11 +629,14 @@ The main character, same [setting anchor] as image 2, same framing — shot on i
 
 ### Scene 1
 - **image:** image_1
+- **scene_type:** shot                           # v681 — shot | text_card. (omitted) defaults to shot. text_card scenes use a different bullet set (see Scene 4 below).
+- **cast:** the main character                   # v681 — comma-separated Ingredients Name values present in this scene. Optional but encouraged when 2+ cast members. Empty/absent → v509 prompt-scan fallback (legacy behavior).
+- **caption:**                                   # v681 — source on-screen caption (decode-only capture; lift bundle ignores per v621). Leave blank for owned-content authoring.
 - **clip_mode:** fresh
 - **transition:** null
 - **visual register:** HOOK
 - **rhythm tier:** 
-- **speaker:** voiceover
+- **speaker:** the main character on-camera      # v681 — <character_name from Ingredients> <on-camera|silent>. (omitted) defaults to <persona> on-camera. NO `voiceover` in v681 (deferred to v682).
 - **cut_mode:** auto      # v668 — whisper | timeline | auto. Default `auto` picks `timeline` for bracket-annotation lines (`[music plays]`, `[SFX:...]`) and `whisper` otherwise. Set explicitly when overriding.
 - **line:** 
 - **pad:**           # v644 — optional suffix added AFTER line in Veo prompt only (target line+pad ≈ 20 words; pad is cut from final video by whisper-VAD)
@@ -651,6 +661,12 @@ The main character, same [setting anchor] as image 2, same framing — shot on i
 - **speaker:** on-camera
 - **line:** 
 - **action_note:** 
+
+### Scene 4 — example text_card scene (v681)
+- **scene_type:** text_card                    # v681 — text-card transition; ffmpeg drawtext renders this clip server-side, skipping Nano Banana 2 + Veo. NO image / cast / line bullets allowed.
+- **caption:** 2 months later...               # required when scene_type=text_card
+- **bg_color:** black                          # required when scene_type=text_card; CSS color name OR hex (`#000000`)
+- **duration:** 1.0s                           # optional; defaults to 1.0s when omitted
 
 ---
 
