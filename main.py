@@ -200,6 +200,14 @@ class DialogueLineInput(BaseModel):
     cut_mode: Optional[str] = None
     target_duration_s: Optional[float] = None
     veo_render_duration_s: Optional[int] = None
+    # v681 — text-card / caption denorm. caption is informational on
+    # shot clips and rendered text on text_card clips. scene_type
+    # 'text_card' bypasses Veo render and triggers the ffmpeg
+    # drawtext path. bg_color is the solid-color background for
+    # text_card clips (CSS color or hex).
+    caption: Optional[str] = None
+    scene_type: Optional[str] = None
+    bg_color: Optional[str] = None
 
 
 class SceneInput(BaseModel):
@@ -1868,6 +1876,12 @@ async def _create_job_impl(
         cut_mode = line.get('cut_mode') if isinstance(line, dict) else None
         target_duration_s = line.get('target_duration_s') if isinstance(line, dict) else None
         veo_render_duration_s = line.get('veo_render_duration_s') if isinstance(line, dict) else None
+        # v681 — text-card / caption denorm onto Clip rows. scene_type
+        # 'text_card' makes the video processor skip Veo and render
+        # via ffmpeg drawtext at export time.
+        caption_val = line.get('caption') if isinstance(line, dict) else None
+        scene_type_val = line.get('scene_type') if isinstance(line, dict) else None
+        bg_color_val = line.get('bg_color') if isinstance(line, dict) else None
         clip = Clip(
             job_id=job_id,
             clip_index=idx,
@@ -1880,6 +1894,9 @@ async def _create_job_impl(
             cut_mode=cut_mode,
             target_duration_s=target_duration_s,
             veo_render_duration_s=veo_render_duration_s,
+            caption=caption_val,            # v681
+            scene_type=scene_type_val,      # v681
+            bg_color=bg_color_val,          # v681
         )
         db.add(clip)
     db.commit()

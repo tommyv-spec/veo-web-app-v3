@@ -5881,6 +5881,14 @@ def prepare_batch_for_video(
                 target_duration_s = round(nxt - this_anchor, 3)
                 veo_render_duration_s = _ceil_to_veo_bucket(target_duration_s)
 
+        # v681 — text-card / caption / cast denorm. Scene-scoped fields
+        # — same value across all dialogue lines in the scene.
+        scene_caption = scene.get("caption")
+        scene_type_v681 = scene.get("scene_type")
+        scene_bg_color = scene.get("bg_color")
+        scene_duration_s = scene.get("duration_s")
+        scene_cast = scene.get("cast")
+
         scene_assignments_payload.append({
             "scene_index": scene["scene_index"],
             "image_local_index": local_idx,
@@ -5898,6 +5906,12 @@ def prepare_batch_for_video(
             "target_duration_s": target_duration_s,
             "veo_render_duration_s": veo_render_duration_s,
             "visual_delta": getattr(this_node, "visual_delta", None) if this_node else None,
+            # v681 — multi-character cast + text-card metadata.
+            "cast": scene_cast,
+            "scene_type": scene_type_v681,
+            "caption": scene_caption,
+            "bg_color": scene_bg_color,
+            "duration_s": scene_duration_s,
         })
 
         # Back-compat flat arrays — one entry per line across all scenes
@@ -5928,6 +5942,15 @@ def prepare_batch_for_video(
                 "cut_mode": cut_mode,
                 "target_duration_s": target_duration_s,
                 "veo_render_duration_s": veo_render_duration_s,
+                # v681 — text-card / caption denorm onto the flat row.
+                # Scene-scoped (same as clip_mode/transition convention):
+                # only the first line of a scene carries the values; later
+                # lines see None. The Clip writer in main.py handles None
+                # as "no override" — text_card scenes have a single line
+                # by construction so this is consistent.
+                "caption": scene_caption if i_in_scene == 0 else None,
+                "scene_type": scene_type_v681 if i_in_scene == 0 else None,
+                "bg_color": scene_bg_color if i_in_scene == 0 else None,
             })
             veo_prompts_flat.append(vp)
             pads_flat.append(pad)
