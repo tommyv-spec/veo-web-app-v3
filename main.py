@@ -2603,6 +2603,7 @@ async def clone_job_frames(
     without per-call branching.
     """
     import uuid as _uuid
+    import base64 as _b64
     from shutil import copy2
 
     job = get_user_job(db, src_job_id, current_user)
@@ -2610,6 +2611,18 @@ async def clone_job_frames(
     new_upload_job_id = str(_uuid.uuid4())
     new_job_dir = app_config.uploads_dir / new_upload_job_id
     new_job_dir.mkdir(parents=True, exist_ok=True)
+
+    _media_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+
+    def _build_data_url(path: Path) -> Optional[str]:
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            mt = _media_types.get(path.suffix.lower(), "image/png")
+            return f"data:{mt};base64," + _b64.b64encode(raw).decode("ascii")
+        except Exception as e:
+            print(f"[clone-frames] data-url build failed for {path.name}: {e}", flush=True)
+            return None
 
     uploaded: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
@@ -2630,6 +2643,7 @@ async def clone_job_frames(
                         "size": dst.stat().st_size,
                         "path": str(dst),
                         "index": next_index,
+                        "data_url": _build_data_url(dst),
                     })
                     next_index += 1
                 except Exception as e:
@@ -2664,6 +2678,7 @@ async def clone_job_frames(
                             "size": dst.stat().st_size,
                             "path": str(dst),
                             "index": next_index,
+                            "data_url": _build_data_url(dst),
                         })
                         next_index += 1
                     except Exception as e:

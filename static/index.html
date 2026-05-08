@@ -11027,10 +11027,16 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         const cloneData = await cloneResp.json();
                         uploadJobId = cloneData.job_id;
                         uploadedImages = cloneData.uploaded || [];
+                        // v677b — backend now returns data_url per frame so
+                        // every <img src="${dataUrl}"> in renderThumbnails /
+                        // renderStoryboard renders without a follow-up fetch.
+                        // Pre-v677b dataUrl was null and the browser issued
+                        // GET /null → 404 for every thumbnail and storyboard
+                        // tile (visible as empty placeholder boxes).
                         uploadedFilesData = (cloneData.uploaded || []).map((u, i) => ({
                             name: u.filename,
                             originalName: u.original_filename || u.filename,
-                            dataUrl: null,
+                            dataUrl: u.data_url || null,
                             index: u.index ?? i,
                         }));
                         document.getElementById('uploadedCount').textContent =
