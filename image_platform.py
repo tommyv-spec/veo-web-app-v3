@@ -4292,13 +4292,22 @@ def _import_scene_table_impl(
             ing_name = ing.get("name", "")
             ing_type = (ing.get("type") or "").strip().lower()
             ing_source = (ing.get("source") or "").strip()
-            # v681 — `patient` rows are image-bound recurring non-speakers;
-            # they validate the same as character/product (Reference path
-            # must resolve). `extra` rows are prose-only one-shots — skip
-            # validation entirely. `setting` rows skip too (existing
-            # behavior; settings may be anchor-scene defined).
-            if ing_type not in ("character", "patient", "product"):
-                continue
+            # v681 — only character + product rows REQUIRE an upload-backed
+            # Reference path. `patient` rows are OPTIONAL-upload: when
+            # Reference is empty (e.g. `—`), the patient enters anchor-scene
+            # mode — the first scene that includes them becomes the anchor
+            # and subsequent scenes chain via v512. When Reference IS set,
+            # patient validates the same as character/product.
+            # `extra` rows are prose-only (no upload, never anchor).
+            # `setting` rows skip (existing behavior; settings may anchor).
+            if ing_type not in ("character", "product"):
+                # Only validate patient when its Reference is non-empty —
+                # operators may legitimately ship a patient row with `—`
+                # to signal "use a generated image from earlier in the job".
+                if ing_type == "patient" and ing_source:
+                    pass  # fall through to validation below
+                else:
+                    continue
             if not ing_source:
                 # No Reference path declared — author may intend an
                 # anchor-scene ingredient (rare for type=character/product

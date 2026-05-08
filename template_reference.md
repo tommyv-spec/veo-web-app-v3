@@ -5171,15 +5171,30 @@ Consistent phrasing across prompts helps Nano Banana 2 lock in continuity even w
 
 **Cast type vocabulary**
 
-| Type | Speaks? | Image-bound? | Recurring? | Notes |
-|---|---|---|---|---|
-| `character` | yes (persona) | yes | always | The persona row. Existing v537/v602/v610 binding rules unchanged. |
-| `patient` | NO | yes | yes | Recurring named non-speaker (testimonial subject). Image upload binds identity per v602. |
-| `extra` | NO | NO | one-shot | Bystander mentioned/shown in a single scene. Identity carried in prose per v669. Reference column = `—`. |
-| `product` | n/a | yes | n/a | Existing product row. Unchanged. |
-| `setting` | n/a | yes | n/a | Existing recurring-location row. Unchanged. |
+| Type | Speaks? | Image-bound? | Recurring? | Reference column | Notes |
+|---|---|---|---|---|---|
+| `character` | yes (persona) | yes | always | REQUIRED | The persona row. Existing v537/v602/v610 binding rules unchanged. |
+| `patient` | NO | yes (optional) | yes | OPTIONAL — see below | Recurring named non-speaker (testimonial subject). Two binding modes (v681e). |
+| `extra` | NO | NO | one-shot | `—` | Bystander mentioned/shown in a single scene. Identity carried in prose per v669. |
+| `product` | n/a | yes | n/a | REQUIRED | Existing product row. Unchanged. |
+| `setting` | n/a | yes | n/a | OPTIONAL | Existing recurring-location row. Unchanged. |
 
-**Authoring example**
+**Patient binding modes (v681e):**
+
+| Mode | When | Behavior |
+|---|---|---|
+| **Upload-backed** | Reference column points to an uploaded reference (e.g. `patients/refs/donna-blonde.png`) | Same as a `character` row — every scene that includes the patient binds the upload via v509. Identity stays consistent because the SAME image is referenced every time. |
+| **Anchor-scene** (no upload) | Reference column is `—` / empty | The FIRST scene that mentions the patient by name becomes the anchor — Banana 2 generates the patient's appearance freely (informed by image-prompt prose per v669-style identity descriptors). SUBSEQUENT scenes that mention the patient chain back to that anchor scene's chosen variant via v512 — Flow receives the anchor scene's render as a reference image, locking the patient's appearance across the rest of the video. |
+
+**When to use anchor-scene mode for a patient:**
+- Operator doesn't have a clean isolated reference photo for the patient yet
+- Patient is fictional (a composite "Donna" character we're inventing for the testimonial)
+- Quick decode-to-test cycle where capturing the patient upload is too high-friction
+- The patient's appearance can be carried by the first scene's prose alone (v669 identity descriptors: race + age + build + clothing)
+
+**Authoring rule for anchor-scene patients:** the FIRST scene where the patient appears MUST include identity prose in the image_prompt body (race, age, build, hair, clothing) per v669 — this is the only place Banana 2 has to learn what the patient looks like. Subsequent scenes can drop the prose because the v512 chain references the anchor scene's variant.
+
+**Authoring example (upload-backed patient)**
 
 ```markdown
 ## Ingredients
@@ -5188,6 +5203,18 @@ Consistent phrasing across prompts helps Nano Banana 2 lock in continuity even w
 |---|-----------|-------------|----------------------------------------------|
 | 1 | character | the healer  | personas/refs/amish-grandmother.png          |
 | 2 | patient   | Donna       | patients/refs/donna-blonde.png               |
+| 3 | extra     | husband     | —                                            |
+```
+
+**Authoring example (anchor-scene patient — no upload, v681e)**
+
+```markdown
+## Ingredients
+
+| # | Type      | Name        | Reference                                    |
+|---|-----------|-------------|----------------------------------------------|
+| 1 | character | the healer  | personas/refs/amish-grandmother.png          |
+| 2 | patient   | Donna       | —                                            |
 | 3 | extra     | husband     | —                                            |
 
 ## Storyboard
@@ -5240,9 +5267,9 @@ Optional `- **caption:**` on a `scene_type: shot` scene records the source's on-
 
 **Decode-side rules**
 
-When the decoder identifies a non-speaking person who appears in 2+ scenes AND has visual continuity (same human, named or unnamed), emit a `patient` row. Synthetic reference filename like `patients/refs/<name>-<hair>.png` (placeholder; operator captures the actual upload at lift time).
+When the decoder identifies a non-speaking person who appears in 2+ scenes AND has visual continuity (same human, named or unnamed), emit a `patient` row. Set Reference column to a synthetic placeholder filename like `patients/refs/<name>-<hair>.png` (operator captures the actual upload at lift time) OR set it to `—` to defer the upload and rely on v681e anchor-scene mode (Banana 2 generates the patient on the FIRST scene; subsequent scenes chain via v512). When emitting `—`, MAKE SURE the first scene where the patient appears has full identity prose in its image_prompt body (race + age + build + hair + clothing) so Banana 2 has enough signal to render a stable face for the chain.
 
-When a non-speaking person appears in EXACTLY ONE scene AND is referenced incidentally, emit an `extra` row with no reference. The `extra`'s identity prose lives in the image prompt per v669 (race + age + build + clothing).
+When a non-speaking person appears in EXACTLY ONE scene AND is referenced incidentally, emit an `extra` row with Reference = `—`. The `extra`'s identity prose lives in the image prompt per v669 (race + age + build + clothing).
 
 When the decoder hears a single voice that does not match any visible mouth movement in the source frames, emit `on-camera` for whatever frames show the speaker AND `silent` scenes for everything else. DO NOT emit `voiceover` — it is reserved for v682. Add a comment in the artifact noting that the source's voiceover-overlay structure was not preserved.
 
