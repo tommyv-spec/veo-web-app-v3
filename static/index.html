@@ -10983,6 +10983,14 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 // dialogue area visually empty + cloneOverlay stuck whenever
                 // R2 image fetches hung or 4xx'd. Now the script is in place
                 // even if every image fetch fails.
+                //
+                // v678: also rebuild the three per-clip metadata globals
+                // (window._actionNotes, window._veoPromptOverrides,
+                // window._dialoguePads). Without them the create-job builder
+                // at line ~6462 ships every cloned line with action_note=null
+                // and veo_prompt_override=null — meaning the cloned job
+                // would lose the action notes and the prebuilt Veo prompts
+                // even though they were committed to the source job.
                 const dialogueLines = data.dialogue_lines || [];
                 if(dialogueLines.length > 0) {
                     const formattedLines = dialogueLines.map((l, i) => {
@@ -10995,6 +11003,30 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         return `${id}|${txt}`;
                     }).join('\n');
                     document.getElementById('dialogueInput').value = formattedLines;
+
+                    // v678 — per-clip metadata restoration. Each global is a
+                    // sparse array indexed by clip position; submit code at
+                    // line ~6462 reads window._X[i] and falls back to null.
+                    window._actionNotes = dialogueLines.map(l =>
+                        (l && typeof l === 'object' && l.action_note) ? l.action_note : null
+                    );
+                    window._veoPromptOverrides = dialogueLines.map(l => {
+                        if (!l || typeof l !== 'object') return null;
+                        const tp = l.veo_prompt_override || null;
+                        const np = l.veo_negative_prompt_override || null;
+                        if (!tp && !np) return null;
+                        return { text_prompt: tp, negative_prompt: np };
+                    });
+                    window._dialoguePads = dialogueLines.map(l =>
+                        (l && typeof l === 'object' && l.dialogue_pad) ? l.dialogue_pad : null
+                    );
+                    const _restoredCounts = {
+                        action_notes: window._actionNotes.filter(x => x).length,
+                        veo_prompts: window._veoPromptOverrides.filter(x => x).length,
+                        pads: window._dialoguePads.filter(x => x).length,
+                    };
+                    console.log('[Clone] per-clip metadata restored:', _restoredCounts);
+
                     // Force the visible contenteditable editor to mirror the
                     // textarea immediately — without this, simpleRichEditor
                     // keeps its placeholder until the much later renderSimpleEditor
