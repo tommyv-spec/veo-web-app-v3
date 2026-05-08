@@ -152,6 +152,105 @@ from datetime import datetime, timedelta
 
 
 # ============================================================
+# v681d — UUID-DEDUP HTTP-DL QUEUE
+# ============================================================
+# The Flow video URL listener (page.on('response', _capture_media_url))
+# captures `getMediaUrlRedirect?name=<UUID>` URLs. Submitter code
+# enqueues these URLs onto http_dl_queue keyed by clip_index. Pre-v681d
+# the matcher's Strategy 3 single-pending catchall could attribute a
+# stale gallery container's tile to the next pending clip — same UUID
+# enqueued twice for two different clip slots → both clips downloaded
+# byte-identical bytes from R2 (different filenames, same content).
+#
+# Smoking gun (production log, Heavy Legs Transformation CTA 2):
+#   [Account1-HTTP-DL] Clip 3 variant 1.1: ...01488778-db0b-45b
+#   [Account1-HTTP-DL] Clip 1 variant 1.1: ...01488778-db0b-45b  ← SAME UUID
+# Same with Account2 (Clip 4 ↔ Clip 2 cross-attribution).
+#
+# Fix: wrap http_dl_queue with a dedup filter. On every put with
+# 'urls' field, extract each URL's UUID. Reject any URL whose UUID
+# was already claimed for a DIFFERENT (job_id, clip_index) pair in
+# this process. UUIDs claimed for the same clip pass through (idempotent
+# re-enqueue from sweep / resume paths).
+_UUID_RE_HTTPDL = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+
+
+def _extract_uuid_from_url(url: str):
+    """Return the UUID embedded in a Flow video URL, or None.
+    Tolerates both URL forms: direct (`flow-content.google/image/<uuid>`)
+    and redirect (`labs.google/.../getMediaUrlRedirect?name=<uuid>`)."""
+    if not url:
+        return None
+    m = _UUID_RE_HTTPDL.search(url)
+    return m.group(0).lower() if m else None
+
+
+class UuidDedupQueue(queue.Queue):
+    """Drop-in queue.Queue replacement that rejects URL re-attribution
+    across different (job_id, clip_index) keys. Behavior:
+
+    - put(payload) where payload is a dict with 'urls', 'job_id',
+      'clip_index': filter `urls` to only those whose UUID isn't
+      already claimed by a different clip in the same job.
+    - put(payload) without those keys (control messages like
+      'limit_clips' / 'cancel'): pass through unchanged.
+    - If filtering empties the urls list, log + DROP the put silently
+      (with [v681d/dedup] log line) so the downstream worker doesn't
+      receive a phantom enqueue.
+    - Same (job_id, clip_index) re-enqueue with overlapping UUIDs is
+      tolerated (idempotent — sweep / resume paths re-enqueue).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # (job_id, uuid) → clip_index
+        self._claims = {}
+
+    def put(self, item, block=True, timeout=None):
+        if isinstance(item, dict) and "urls" in item and "clip_index" in item:
+            job_id = item.get("job_id") or "_default_"
+            ci = item.get("clip_index")
+            urls_in = list(item.get("urls") or [])
+            urls_kept = []
+            for u in urls_in:
+                uid = _extract_uuid_from_url(u)
+                if not uid:
+                    urls_kept.append(u)
+                    continue
+                key = (job_id, uid)
+                prev_ci = self._claims.get(key)
+                if prev_ci is None:
+                    self._claims[key] = ci
+                    urls_kept.append(u)
+                elif prev_ci == ci:
+                    # Same clip — idempotent re-enqueue. Keep the URL so
+                    # the downstream worker's own dedup (if any) decides.
+                    urls_kept.append(u)
+                else:
+                    # Cross-attribution attempt — REJECT this URL.
+                    print(
+                        f"[v681d/dedup] reject uuid={uid[:8]} → clip {ci} "
+                        f"(already claimed by clip {prev_ci} in this job)",
+                        flush=True,
+                    )
+            if not urls_kept:
+                print(
+                    f"[v681d/dedup] DROP enqueue clip {ci} job={str(job_id)[:8]} "
+                    f"— all {len(urls_in)} URL(s) cross-attribution rejected",
+                    flush=True,
+                )
+                return  # drop the put entirely
+            if len(urls_kept) != len(urls_in):
+                # Replace urls with the filtered set
+                item = dict(item)
+                item["urls"] = urls_kept
+        return super().put(item, block=block, timeout=timeout)
+
+
+# ============================================================
 # STEALTH SCRIPT - Anti reCAPTCHA Enterprise
 # ============================================================
 # reCAPTCHA Enterprise checks: webdriver flag, CDP artifacts,
@@ -15334,7 +15433,9 @@ class AccountWorker(threading.Thread):
             # Snapshot browser cookies into a requests.Session for pure-HTTP downloads.
             # No download tab, no DownloadHelper, no cross-thread page sharing.
             self._snapshot_cookies()
-            self._http_dl_queue = queue.Queue()
+            # v681d — UuidDedupQueue rejects cross-attribution UUID reuse.
+            # See module-level class definition for full bug context.
+            self._http_dl_queue = UuidDedupQueue()
             self._start_http_download_worker()
             print(f"[{self.name}] ✓ HTTP download worker ready (no browser download tab needed)", flush=True)
 
@@ -16927,7 +17028,8 @@ def main(account_session=None, account_download=None, account_label=None):
         # Pure-HTTP download queue — submit thread pushes ready clip URLs here.
         # HTTP download thread pulls and downloads via requests.Session only.
         # Zero browser interaction — completely immune to golden restore.
-        _http_dl_queue = queue.Queue()
+        # v681d — UuidDedupQueue rejects cross-attribution UUID reuse.
+        _http_dl_queue = UuidDedupQueue()
         # Flag: set by submit thread while a frame dialog is open.
         # Download thread waits for it before page refresh to avoid
         # dismissing the gallery dialog mid-selection.
