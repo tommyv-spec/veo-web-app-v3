@@ -175,6 +175,14 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN scene_type VARCHAR(20)"),
         ("clips", "bg_color",
          "ALTER TABLE clips ADD COLUMN bg_color VARCHAR(20)"),
+        # v681e.10: per-scene speaker_mode denormalized to ImageSceneAssignment.
+        # Without this, prepare_batch_for_video can't tell silent scenes apart
+        # from on-camera scenes when assignments-from-DB are loaded — the
+        # synthetic flat-row injection at the silent-scene branch never fires
+        # and silent scenes are dropped from the storyboard editor (becoming
+        # invisible to the user, even though they parsed correctly).
+        ("image_scene_assignments", "speaker_mode",
+         "ALTER TABLE image_scene_assignments ADD COLUMN speaker_mode VARCHAR(20)"),
     ]
     postgres_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -273,6 +281,11 @@ def run_image_platform_migrations():
         # the SQLite migration above).
         ("image_edges", "kind",
          "ALTER TABLE image_edges ADD COLUMN IF NOT EXISTS kind VARCHAR(32)"),
+        # v681e.10: per-scene speaker_mode denormalized to ImageSceneAssignment
+        # so prepare_batch_for_video can detect silent scenes when reading
+        # assignments back from DB. See SQLite migration above for rationale.
+        ("image_scene_assignments", "speaker_mode",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS speaker_mode VARCHAR(20)"),
     ]
 
     # v479: widen ImageJobBatch string columns to TEXT. The previous
@@ -1063,6 +1076,11 @@ class ImageSceneAssignment(Base):
     caption = Column(Text, nullable=True)
     bg_color = Column(String(20), nullable=True)
     duration_s = Column(Float, nullable=True)
+    # v681e.10: per-scene speaker_mode (NULL | 'on-camera' | 'voiceover' |
+    # 'silent' | 'auto'). Denorm of the parsed value so prepare_batch_for_video
+    # can detect silent scenes after assignments are loaded back from DB.
+    # Same set of values as ImageNode.speaker_mode.
+    speaker_mode = Column(String(20), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1120,6 +1138,10 @@ class ImageSceneAssignment(Base):
             "caption": self.caption,
             "bg_color": self.bg_color,
             "duration_s": self.duration_s,
+            # v681e.10 — silent scenes are detected by prepare_batch_for_video
+            # via this field; without it, silent scenes never reach the
+            # synthetic flat-row branch and disappear from the storyboard editor.
+            "speaker_mode": self.speaker_mode,
         }
 
 
@@ -5448,6 +5470,13 @@ def _import_scene_table_impl(
             caption=s.get("caption"),
             bg_color=s.get("bg_color"),
             duration_s=s.get("duration_s"),
+            # v681e.10 — denorm speaker_mode so prepare_batch_for_video
+            # can detect silent scenes when assignments are loaded back
+            # from DB. Without this, silent scenes are dropped from the
+            # storyboard editor (the synthetic flat-row injection branch
+            # at prepare_batch_for_video never fires for assignments
+            # whose to_dict() returns speaker_mode=None).
+            speaker_mode=s.get("speaker_mode"),
         )
         db.add(assignment)
         assignments_created += 1
@@ -5854,6 +5883,8 @@ def prepare_batch_for_video(
                 "transition": n.scene_transition,
                 "lines": [line_text],
                 "action_notes": [n.action_note or None],
+                # v681e.10 — silent-scene detection for legacy synthesized path.
+                "speaker_mode": n.speaker_mode,
             })
         storyboard = synthesized
     else:
@@ -6107,7 +6138,17 @@ def prepare_batch_for_video(
         # the renderer dispatches. Inject a synthetic flat row with
         # empty dialogue + the scene's metadata so the Clip writer
         # creates a row that the video processor will handle correctly.
+        # v681e.10 — read speaker_mode from the assignment row first; fall
+        # back to the linked ImageNode for legacy assignments (rows imported
+        # before the assignment.speaker_mode column landed). Without the
+        # fallback, every silent scene from a pre-v681e.10 import remains
+        # invisible to the storyboard editor even after the deploy lands —
+        # the user would have to re-import each batch.
         scene_speaker_mode = (scene.get("speaker_mode") or "").lower()
+        if not scene_speaker_mode:
+            fallback_node = nodes_by_id.get(node_id)
+            if fallback_node is not None:
+                scene_speaker_mode = (fallback_node.speaker_mode or "").lower()
         scene_is_silent = scene_speaker_mode == "silent"
         scene_is_text_card = scene_type_v681 == "text_card"
         if (scene_is_text_card or scene_is_silent) and not lines:
