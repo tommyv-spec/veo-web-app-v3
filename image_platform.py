@@ -6002,8 +6002,25 @@ def prepare_batch_for_video(
         anchors_in_order.append((s["scene_index"], a))
 
     def _next_anchor_after(scene_idx: int) -> Optional[float]:
+        # v682c — return the first DISTINCT anchor strictly greater than the
+        # current scene's anchor (not just the next scene's anchor). When
+        # multiple consecutive scenes share an image (e.g. scene 2 + 3 both
+        # using image_2 with frame_anchor=2.0s for a fresh→continue clip
+        # pair), the prior version returned the same anchor value and the
+        # `nxt > this_anchor` guard at the call-site rejected it, leaving
+        # target_duration_s=None for both scenes. Now we find the first
+        # anchor that's a real time delta forward, so each scene gets its
+        # own target_duration_s derived from when the source-video composition
+        # actually changes next.
+        current_anchor: Optional[float] = None
         for s_idx, a in anchors_in_order:
-            if s_idx > scene_idx and a is not None:
+            if s_idx == scene_idx and a is not None:
+                current_anchor = a
+                break
+        if current_anchor is None:
+            return None
+        for s_idx, a in anchors_in_order:
+            if s_idx > scene_idx and a is not None and a > current_anchor:
                 return a
         return None
 
