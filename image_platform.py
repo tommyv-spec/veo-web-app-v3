@@ -3251,11 +3251,19 @@ def _parse_ingredients_block(md_text: str) -> List[Dict[str, Any]]:
         name = cells[name_col]
         if not name:
             continue
+        # v681 — normalize em-dash, hyphen, and "(none)" placeholders in
+        # the Reference column to empty string. `extra` rows declare no
+        # upload via `Reference: —` per template_reference.md §"v681";
+        # without this the validator at line ~4105 tries to resolve the
+        # em-dash as a path and fails.
+        raw_source = cells[src_col] if src_col is not None else ""
+        if raw_source.strip() in ("—", "-", "(none)", "none", "null"):
+            raw_source = ""
         rows.append({
             "name": name,
             "type": cells[type_col],
             "description": cells[desc_col] if desc_col is not None else "",
-            "source": cells[src_col] if src_col is not None else "",
+            "source": raw_source,
         })
 
     # De-dupe by name, preserving first occurrence
@@ -4102,7 +4110,12 @@ def _import_scene_table_impl(
             ing_name = ing.get("name", "")
             ing_type = (ing.get("type") or "").strip().lower()
             ing_source = (ing.get("source") or "").strip()
-            if ing_type not in ("character", "product"):
+            # v681 — `patient` rows are image-bound recurring non-speakers;
+            # they validate the same as character/product (Reference path
+            # must resolve). `extra` rows are prose-only one-shots — skip
+            # validation entirely. `setting` rows skip too (existing
+            # behavior; settings may be anchor-scene defined).
+            if ing_type not in ("character", "patient", "product"):
                 continue
             if not ing_source:
                 # No Reference path declared — author may intend an
