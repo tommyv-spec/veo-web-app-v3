@@ -135,6 +135,27 @@ def run_image_platform_migrations():
         # read it without re-joining).
         ("clips", "dialogue_pad",
          "ALTER TABLE clips ADD COLUMN dialogue_pad TEXT"),
+        # v667: per-image transformation metadata (frame_anchor_s anchors
+        # the image to a source-video timestamp; visual_delta describes
+        # the diff vs the prior chained image; narrative_lens is an
+        # optional lens label). All NULL on pre-v667 imports.
+        ("image_nodes", "frame_anchor_s",
+         "ALTER TABLE image_nodes ADD COLUMN frame_anchor_s REAL"),
+        ("image_nodes", "visual_delta",
+         "ALTER TABLE image_nodes ADD COLUMN visual_delta TEXT"),
+        ("image_nodes", "narrative_lens",
+         "ALTER TABLE image_nodes ADD COLUMN narrative_lens VARCHAR(40)"),
+        # v668: per-scene cut mode (whisper | timeline | auto).
+        ("image_scene_assignments", "cut_mode",
+         "ALTER TABLE image_scene_assignments ADD COLUMN cut_mode VARCHAR(20)"),
+        # v667/v668: per-clip denorm of cut_mode plus anchor-derived
+        # target_duration_s and the Veo render-bucket pick.
+        ("clips", "cut_mode",
+         "ALTER TABLE clips ADD COLUMN cut_mode VARCHAR(20)"),
+        ("clips", "target_duration_s",
+         "ALTER TABLE clips ADD COLUMN target_duration_s REAL"),
+        ("clips", "veo_render_duration_s",
+         "ALTER TABLE clips ADD COLUMN veo_render_duration_s INTEGER"),
     ]
     postgres_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -174,6 +195,23 @@ def run_image_platform_migrations():
          "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS pads_json TEXT"),
         ("clips", "dialogue_pad",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS dialogue_pad TEXT"),
+        # v667: per-image transformation metadata.
+        ("image_nodes", "frame_anchor_s",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS frame_anchor_s DOUBLE PRECISION"),
+        ("image_nodes", "visual_delta",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS visual_delta TEXT"),
+        ("image_nodes", "narrative_lens",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS narrative_lens VARCHAR(40)"),
+        # v668: per-scene cut mode (whisper | timeline | auto).
+        ("image_scene_assignments", "cut_mode",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS cut_mode VARCHAR(20)"),
+        # v667/v668: per-clip cut-mode denorm + anchor-derived durations.
+        ("clips", "cut_mode",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS cut_mode VARCHAR(20)"),
+        ("clips", "target_duration_s",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS target_duration_s DOUBLE PRECISION"),
+        ("clips", "veo_render_duration_s",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS veo_render_duration_s INTEGER"),
         # v429
         ("image_job_batches", "video_mode",
          "ALTER TABLE image_job_batches ADD COLUMN IF NOT EXISTS video_mode VARCHAR(20)"),
@@ -664,6 +702,16 @@ class ImageNode(Base):
     # "her shoulders" misses face-on-camera detection).
     speaker_mode = Column(String(20), nullable=True)
 
+    # v667: transformation-video metadata copied from the decode artifact.
+    # frame_anchor_s = source-video timestamp this image is anchored to
+    # (seconds, float). visual_delta = one-line description of the change
+    # vs the prior chained image. narrative_lens = optional lens label
+    # ("transformation-state-2", "hook-state", etc.). All NULL on pre-v667
+    # imports — the lift-side composer falls back to whisper-VAD trim.
+    frame_anchor_s = Column(Float, nullable=True)
+    visual_delta = Column(Text, nullable=True)
+    narrative_lens = Column(String(40), nullable=True)
+
     # v572: per-clip Veo prompt overrides — when non-NULL, build_prompt
     # is bypassed and the prebuilt prompt is shipped to Veo verbatim.
     # These two columns are the DENORMALIZED first-clip overrides for
@@ -746,6 +794,10 @@ class ImageNode(Base):
             "speaker_mode": self.speaker_mode,  # v537
             "veo_prompt_override": self.veo_prompt_override,                    # v572
             "veo_negative_prompt_override": self.veo_negative_prompt_override,  # v572
+            # v667 — transformation-video metadata.
+            "frame_anchor_s": self.frame_anchor_s,
+            "visual_delta": self.visual_delta,
+            "narrative_lens": self.narrative_lens,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -938,6 +990,11 @@ class ImageSceneAssignment(Base):
     # NULL = no pads anywhere; populated with all-null entries =
     # equivalent. Migration: nullable column, no backfill needed.
     pads_json = Column(Text, nullable=True)
+    # v668: per-scene cut mode (whisper | timeline | auto). NULL → defaults
+    # to legacy whisper-VAD behavior. Distinct from clip_mode (which controls
+    # Veo render strategy: blend/fresh/continue) — cut_mode controls the
+    # post-render trim strategy on the rendered clip.
+    cut_mode = Column(String(20), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -988,6 +1045,7 @@ class ImageSceneAssignment(Base):
             "action_notes": notes,
             "veo_prompts": veo_prompts,  # v572
             "pads": pads,  # v644
+            "cut_mode": self.cut_mode,  # v668 — whisper | timeline | auto | None
         }
 
 
@@ -2842,11 +2900,52 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
             raise ValueError(f"Image {image_index}: no fenced 'Image prompt:' block found")
         prompt = prompt_match.group(1).strip()
 
+        # v667 — per-image transformation metadata. frame_anchor_s anchors
+        # this image to a source-video timestamp; visual_delta describes
+        # the diff vs the prior chained image; narrative_lens is an
+        # optional lens label. All three are NULL on pre-v667 imports.
+        frame_anchor_match = _re.search(
+            r"^\s*-\s*\*\*frame_anchor:\*\*\s*([0-9.]+)\s*s?\s*$",
+            block, flags=_re.MULTILINE,
+        )
+        frame_anchor_s: Optional[float] = None
+        if frame_anchor_match:
+            try:
+                frame_anchor_s = float(frame_anchor_match.group(1))
+            except ValueError:
+                frame_anchor_s = None
+
+        visual_delta_match = _re.search(
+            r"^\s*-\s*\*\*visual_delta:\*\*\s*(.+?)\s*$",
+            block, flags=_re.MULTILINE,
+        )
+        visual_delta: Optional[str] = None
+        if visual_delta_match:
+            visual_delta = visual_delta_match.group(1).strip()
+
+        narrative_lens_match = _re.search(
+            r"^\s*-\s*\*\*narrative_lens:\*\*\s*(.+?)\s*$",
+            block, flags=_re.MULTILINE,
+        )
+        narrative_lens: Optional[str] = None
+        if narrative_lens_match:
+            narrative_lens = narrative_lens_match.group(1).strip()
+
+        if frame_anchor_s is not None or visual_delta:
+            print(
+                f"[v667/parse] image_{image_index} "
+                f"anchor={frame_anchor_s} delta={visual_delta!r}",
+                flush=True,
+            )
+
         images.append({
             "image_index": image_index,
             "prompt": prompt,
             "reference_image": ref_parent,
             "product_image": product_image,  # v581 — None if field absent
+            "frame_anchor_s": frame_anchor_s,  # v667
+            "visual_delta": visual_delta,      # v667
+            "narrative_lens": narrative_lens,  # v667
         })
 
     if not images:
@@ -2947,6 +3046,21 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # state).
         speaker_mode = _normalize_speaker_mode(_parse_bullet_field(block, "speaker"))
 
+        # v668 — hybrid clip cut mode (whisper | timeline | auto). NULL
+        # → defaults to legacy whisper-VAD behavior. 'timeline' uses the
+        # anchor-derived target_duration_s from the chained images and
+        # skips whisper-VAD entirely (used for transformation montages
+        # where dialogue is decorative or absent and the cut should
+        # follow source-video timestamps).
+        cut_mode_raw = _parse_bullet_field(block, "cut_mode")
+        cut_mode: Optional[str] = None
+        if cut_mode_raw:
+            cm = cut_mode_raw.split()[0].strip().lower()
+            if cm in ("whisper", "timeline", "auto"):
+                cut_mode = cm
+        if cut_mode:
+            print(f"[v668/parse] scene_{scene_index} cut_mode={cut_mode}", flush=True)
+
         # Parse interleaved `- **line:**` / `- **action_note:**` / `- **pad:**`
         # bullets. Order matters: action_note and pad attach to the closest
         # preceding line within the same scene.
@@ -3003,6 +3117,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "action_notes": action_notes,
             "pads": pads,  # v644 — parallel to lines/action_notes; entries are str or None
             "speaker_mode": speaker_mode,  # v537
+            "cut_mode": cut_mode,  # v668 — None | 'whisper' | 'timeline' | 'auto'
         })
 
     if not scenes:
@@ -3233,6 +3348,10 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
             "image_index": s["scene_index"],
             "prompt": s["prompt"],
             "reference_image": s["reference_image"],
+            # v667 — legacy format predates frame_anchor; always None.
+            "frame_anchor_s": None,
+            "visual_delta": None,
+            "narrative_lens": None,
         }
         for s in legacy
     ]
@@ -3248,6 +3367,8 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
             "action_notes": [s.get("action_note")],
             # v572: legacy format predates per-clip overrides — always None.
             "veo_prompts": [None],
+            # v668 — legacy format predates cut_mode; always None (whisper).
+            "cut_mode": None,
         }
         for s in legacy
     ]
@@ -4324,6 +4445,10 @@ def _import_scene_table_impl(
             # v572 — first-clip Veo prompt overrides for the UI thumbnail
             veo_prompt_override=denorm_veo_prompt_override,
             veo_negative_prompt_override=denorm_veo_negative_prompt_override,
+            # v667 — transformation-video metadata from the parsed image dict
+            frame_anchor_s=img.get("frame_anchor_s"),
+            visual_delta=img.get("visual_delta"),
+            narrative_lens=img.get("narrative_lens"),
         )
         db.add(node)
         db.flush()
@@ -4904,6 +5029,7 @@ def _import_scene_table_impl(
             action_notes_json=_json.dumps(s.get("action_notes") or []),
             veo_prompts_json=_veo_prompts_json_value,  # v572
             pads_json=_pads_json_value,  # v644
+            cut_mode=s.get("cut_mode"),  # v668 — None | 'whisper' | 'timeline' | 'auto'
         )
         db.add(assignment)
         assignments_created += 1
@@ -5409,6 +5535,30 @@ def prepare_batch_for_video(
     # Each entry maps to one storyboard scene. image_local_index points
     # into the `uploaded[]` array. lines[] contains all dialogue lines
     # this scene owns; action_notes[] is parallel.
+    #
+    # v667/v668 — derive per-clip target_duration_s from frame_anchor_s
+    # diffs between consecutive images in the storyboard. The lookup uses
+    # the storyboard order (scene_index) so transformation chains where
+    # the same image appears once per chain step still get correct deltas.
+    storyboard_sorted = sorted(storyboard, key=lambda s: s["scene_index"])
+    anchors_in_order: List[Tuple[int, Optional[float]]] = []
+    for s in storyboard_sorted:
+        n = nodes_by_id.get(s["image_node_id"])
+        a = getattr(n, "frame_anchor_s", None) if n else None
+        anchors_in_order.append((s["scene_index"], a))
+
+    def _next_anchor_after(scene_idx: int) -> Optional[float]:
+        for s_idx, a in anchors_in_order:
+            if s_idx > scene_idx and a is not None:
+                return a
+        return None
+
+    def _ceil_to_veo_bucket(dur: float) -> int:
+        for b in (4, 6, 8):
+            if dur <= b:
+                return b
+        return 8
+
     scene_assignments_payload: List[Dict[str, Any]] = []
     dialogue_lines_flat: List[str] = []          # back-compat (one entry per line across all scenes)
     scenes_metadata_flat: List[Dict[str, Any]] = []  # back-compat per-line rows
@@ -5472,6 +5622,22 @@ def prepare_batch_for_video(
         if transition in ("", "null", "None"):
             transition = None
 
+        # v668 — per-scene cut mode (whisper | timeline | auto). NULL on
+        # legacy synthesized scenes (pre-v668 imports).
+        cut_mode = scene.get("cut_mode")
+        # v667 — anchor-derived target duration. this_anchor → next_anchor
+        # diff. None when either end is missing (no transformation chain
+        # data available) — apply_vad falls back to whisper-VAD.
+        this_node = nodes_by_id.get(node_id)
+        this_anchor = getattr(this_node, "frame_anchor_s", None) if this_node else None
+        target_duration_s: Optional[float] = None
+        veo_render_duration_s: Optional[int] = None
+        if this_anchor is not None:
+            nxt = _next_anchor_after(scene["scene_index"])
+            if nxt is not None and nxt > this_anchor:
+                target_duration_s = round(nxt - this_anchor, 3)
+                veo_render_duration_s = _ceil_to_veo_bucket(target_duration_s)
+
         scene_assignments_payload.append({
             "scene_index": scene["scene_index"],
             "image_local_index": local_idx,
@@ -5483,6 +5649,12 @@ def prepare_batch_for_video(
             "veo_prompts": veo_prompts,
             # v644 — per-line audio-padding suffixes parallel to lines.
             "pads": pads,
+            # v667/v668 — transformation-video metadata for the lift composer.
+            "cut_mode": cut_mode,
+            "frame_anchor_s": this_anchor,
+            "target_duration_s": target_duration_s,
+            "veo_render_duration_s": veo_render_duration_s,
+            "visual_delta": getattr(this_node, "visual_delta", None) if this_node else None,
         })
 
         # Back-compat flat arrays — one entry per line across all scenes
@@ -5503,6 +5675,16 @@ def prepare_batch_for_video(
                 "veo_negative_prompt_override": (vp or {}).get("negative_prompt") if vp else None,
                 # v644 — denorm pad onto flat row.
                 "dialogue_pad": pad,
+                # v667/v668 — denorm cut_mode + anchor-derived durations onto
+                # EVERY line in the scene (not just the first). All lines in
+                # a scene share the same image and therefore the same
+                # target_duration_s; the Clip rows downstream are 1:1 with
+                # dialogue lines, so each Clip needs its own copy of the
+                # cut_mode/target_duration_s to feed apply_vad's per-clip
+                # branch.
+                "cut_mode": cut_mode,
+                "target_duration_s": target_duration_s,
+                "veo_render_duration_s": veo_render_duration_s,
             })
             veo_prompts_flat.append(vp)
             pads_flat.append(pad)

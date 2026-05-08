@@ -263,7 +263,20 @@ class Clip(Base):
     # pipeline as unmatched filler. Nullable; absent = no padding,
     # Veo prompt uses bare dialogue_text.
     dialogue_pad = Column(Text, nullable=True)
-    
+
+    # v667/v668 — hybrid trim mode + anchor-derived durations.
+    # cut_mode: 'whisper' (default; existing apply_vad path) | 'timeline'
+    # (anchor-derived ffmpeg trim, skip whisper-VAD) | NULL → whisper.
+    # target_duration_s: derived at storyboard build from
+    # image_N.frame_anchor_s vs the next image's anchor. NULL on pre-v667
+    # clips; whisper path ignores it.
+    # veo_render_duration_s: ceil_to(target_duration_s, [4,6,8]); used to
+    # pick the Veo render bucket for transformation chains. NULL = no
+    # override (existing default duration logic applies).
+    cut_mode = Column(String(20), nullable=True)
+    target_duration_s = Column(Float, nullable=True)
+    veo_render_duration_s = Column(Integer, nullable=True)
+
     # Status
     status = Column(String(20), default=ClipStatus.PENDING.value)
     retry_count = Column(Integer, default=0)
@@ -351,6 +364,10 @@ class Clip(Base):
             "versions": versions,
             "total_variants": total_variants,
             "selected_variant": self.selected_variant or self.generation_attempt or 1,
+            # v667/v668 — transformation-video metadata.
+            "cut_mode": self.cut_mode,
+            "target_duration_s": self.target_duration_s,
+            "veo_render_duration_s": self.veo_render_duration_s,
         }
 
 

@@ -190,6 +190,16 @@ class DialogueLineInput(BaseModel):
     # from the final cut by the existing apply_vad pipeline as
     # unmatched filler. Optional; if None, Veo prompt uses bare line.
     dialogue_pad: Optional[str] = None
+    # v667/v668 — transformation-video metadata. cut_mode is the per-clip
+    # trim strategy ('whisper' | 'timeline' | 'auto' | null → whisper).
+    # target_duration_s is the anchor-derived target duration computed by
+    # prepare_batch_for_video from consecutive ImageNode.frame_anchor_s
+    # values. veo_render_duration_s is ceil_to(target_duration_s, [4,6,8])
+    # — the Veo render-bucket pick. All optional; null = legacy whisper-VAD
+    # path with no anchor-driven duration override.
+    cut_mode: Optional[str] = None
+    target_duration_s: Optional[float] = None
+    veo_render_duration_s: Optional[int] = None
 
 
 class SceneInput(BaseModel):
@@ -1850,6 +1860,14 @@ async def _create_job_impl(
         # `- **pad:**` bullet for this line. Veo prompt builder (in the
         # background task that follows) appends it after the bare line.
         dialogue_pad = line.get('dialogue_pad') if isinstance(line, dict) else None
+        # v667/v668 — propagate transformation-video metadata. cut_mode is
+        # 'whisper' (default behavior, NULL → whisper) | 'timeline' (skip
+        # whisper-VAD; ffmpeg-trim to target_duration_s). target_duration_s
+        # comes from frame_anchor_s diffs computed in prepare_batch_for_video.
+        # veo_render_duration_s is the ceil_to(target, [4,6,8]) bucket pick.
+        cut_mode = line.get('cut_mode') if isinstance(line, dict) else None
+        target_duration_s = line.get('target_duration_s') if isinstance(line, dict) else None
+        veo_render_duration_s = line.get('veo_render_duration_s') if isinstance(line, dict) else None
         clip = Clip(
             job_id=job_id,
             clip_index=idx,
@@ -1859,6 +1877,9 @@ async def _create_job_impl(
             status='preparing',  # Background task will set to pending after prompts are built
             clip_mode=clip_mode,
             scene_index=scene_idx,
+            cut_mode=cut_mode,
+            target_duration_s=target_duration_s,
+            veo_render_duration_s=veo_render_duration_s,
         )
         db.add(clip)
     db.commit()
@@ -5194,6 +5215,10 @@ async def export_final_video(
                 "clip_index": clip.clip_index,
                 "skip_start_trim": skip_start_trim,
                 "dialogue_text": clip.dialogue_text or "",
+                # v667/v668 — propagate cut_mode + target_duration_s so the
+                # video_processor can branch trim/VAD strategy per clip.
+                "cut_mode": clip.cut_mode,
+                "target_duration_s": clip.target_duration_s,
                 "_order": pos
             }
         return None

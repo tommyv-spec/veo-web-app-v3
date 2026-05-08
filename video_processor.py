@@ -3182,6 +3182,31 @@ def export_final_video(
     
     # Check if any trimming is needed
     needs_trimming = frames_to_cut_start > 0 or frames_to_cut_end > 0
+    # v668 — timeline-mode clips MUST go through the per-clip trim path so
+    # ffmpeg can cut them to exactly target_duration_s. Force the trim path
+    # on if any clip declares cut_mode='timeline' with a target duration.
+    # Also disable remove_silence: timeline clips were anchor-trimmed to
+    # exact duration; whisper-VAD would over-collapse silent transformation
+    # montages. Caller should split into two exports if mixing modes.
+    has_timeline_clips = any(
+        (c.get("cut_mode") or "").lower() == "timeline" and (c.get("target_duration_s") or 0) > 0
+        for c in clip_info
+    )
+    if has_timeline_clips:
+        if not needs_trimming:
+            print(
+                "[VideoProcessor] Forcing per-clip trim path: timeline-mode clip(s) "
+                "require ffmpeg trim",
+                flush=True,
+            )
+            needs_trimming = True
+        if remove_silence:
+            print(
+                "[VideoProcessor] VAD bypassed: timeline-mode clip(s) present "
+                "(target_duration_s already applied via ffmpeg trim)",
+                flush=True,
+            )
+            remove_silence = False
     
     stats = {
         "clips_processed": len(clip_info),
@@ -3211,8 +3236,43 @@ def export_final_video(
                 skip_start = info.get("skip_start_trim", False)
                 trimmed_file = temp_path / f"trimmed_{idx:04d}.mp4"
                 actual_start_trim = 0 if skip_start else frames_to_cut_start
-                logger.info(f"Clip {info.get('clip_index', idx)}: start_trim={actual_start_trim}, end_trim={frames_to_cut_end}")
-                trim_video(clip_path, trimmed_file, actual_start_trim, frames_to_cut_end)
+                # v668 — timeline-cut mode: ignore frame trim, ffmpeg-trim
+                # the clip to exactly target_duration_s seconds. Used for
+                # transformation montages where the cut should follow the
+                # source-video timestamps captured at decode time, not
+                # whisper-VAD speech detection. Falls back to legacy
+                # frame trim when target_duration_s is missing or invalid.
+                cm = (info.get("cut_mode") or "").lower()
+                td = info.get("target_duration_s")
+                if cm == "timeline" and td and td > 0:
+                    logger.info(
+                        f"Clip {info.get('clip_index', idx)}: cut_mode=timeline "
+                        f"target_duration_s={td:.3f}s (ffmpeg-trim, frame-trim ignored)"
+                    )
+                    print(
+                        f"[VideoProcessor/timeline] clip {info.get('clip_index', idx)} "
+                        f"→ trim to {td:.3f}s",
+                        flush=True,
+                    )
+                    cmd = [
+                        FFMPEG_BIN, "-y",
+                        "-i", str(clip_path),
+                        "-t", f"{td:.6f}",
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-movflags", "+faststart",
+                        str(trimmed_file),
+                    ]
+                    code, _, err = run(cmd)
+                    if code != 0:
+                        logger.warning(
+                            f"Clip {info.get('clip_index', idx)}: timeline trim failed "
+                            f"({err[:200]}); falling back to frame trim"
+                        )
+                        trim_video(clip_path, trimmed_file, actual_start_trim, frames_to_cut_end)
+                else:
+                    logger.info(f"Clip {info.get('clip_index', idx)}: start_trim={actual_start_trim}, end_trim={frames_to_cut_end}")
+                    trim_video(clip_path, trimmed_file, actual_start_trim, frames_to_cut_end)
                 # Free the downloaded source file immediately after trimming
                 try:
                     if clip_path.exists() and str(clip_path).startswith("/app/data/outputs"):
@@ -3258,6 +3318,11 @@ def export_final_video(
             concat_videos(files_to_concat, concat_output)
         
         # Step 3: Apply VAD (if enabled)
+        # v668 — note: when has_timeline_clips=True, remove_silence was
+        # forced False above so this branch is skipped. Stats reporting:
+        if has_timeline_clips:
+            stats["vad_applied"] = False
+            stats["vad_skipped_reason"] = "timeline_clips_present"
         if remove_silence:
             if not check_vad_available():
                 raise RuntimeError(
