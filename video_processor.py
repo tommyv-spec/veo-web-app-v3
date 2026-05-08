@@ -3324,13 +3324,33 @@ def export_final_video(
                 # placeholder that's never read. Caption + bg_color come
                 # from the assignment row (denorm'd by main.py to the
                 # info dict). Default duration 1.0s when missing.
+                # NOTE: target_duration_s is NOT used as a fallback —
+                # it's a Veo render duration (4/6/8s buckets), wrong for
+                # text-card transitions which default to 1.0s per spec.
                 if (info.get("scene_type") or "").lower() == "text_card":
-                    render_text_card(
-                        output_path=trimmed_file,
-                        caption=info.get("caption") or "",
-                        bg_color=info.get("bg_color") or "black",
-                        duration_s=float(info.get("duration_s") or info.get("target_duration_s") or 1.0),
-                    )
+                    try:
+                        render_text_card(
+                            output_path=trimmed_file,
+                            caption=info.get("caption") or "",
+                            bg_color=info.get("bg_color") or "black",
+                            duration_s=float(info.get("duration_s") or 1.0),
+                        )
+                    except Exception as e:
+                        # Preserve concat slot order: emit a 1s black-clip
+                        # fallback so files_to_concat[idx-1] gets populated.
+                        # Without this, the pre-allocated slot stays None
+                        # and concat would fail on slot order mismatch.
+                        logger.warning(
+                            f"render_text_card failed for clip "
+                            f"{info.get('clip_index', idx)}: {e}; "
+                            f"falling back to 1s black silent clip"
+                        )
+                        render_text_card(
+                            output_path=trimmed_file,
+                            caption="",
+                            bg_color="black",
+                            duration_s=1.0,
+                        )
                     return idx - 1, trimmed_file
 
                 # v668 — timeline-cut mode: ignore frame trim, ffmpeg-trim

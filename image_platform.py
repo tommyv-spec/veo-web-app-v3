@@ -3023,7 +3023,11 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
         cast_list: Optional[List[str]] = None
         if cast_match:
             raw = cast_match.group(1).strip()
-            cast_list = [c.strip() for c in raw.split(",") if c.strip()]
+            # v681 — lowercase normalization. Ingredients-table Name values
+            # are matched case-insensitively at bind time but cast_json
+            # is canonical lowercase so to_dict consumers don't have to
+            # normalize on read.
+            cast_list = [c.strip().lower() for c in raw.split(",") if c.strip()]
             if not cast_list:
                 cast_list = None
         if cast_list:
@@ -3175,7 +3179,8 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         scene_cast_raw = _parse_bullet_field(block, "cast")
         scene_cast: Optional[List[str]] = None
         if scene_cast_raw:
-            scene_cast = [c.strip() for c in scene_cast_raw.split(",") if c.strip()]
+            # v681 — lowercase normalize (same as per-image cast).
+            scene_cast = [c.strip().lower() for c in scene_cast_raw.split(",") if c.strip()]
             if not scene_cast:
                 scene_cast = None
 
@@ -5913,6 +5918,37 @@ def prepare_batch_for_video(
             "bg_color": scene_bg_color,
             "duration_s": scene_duration_s,
         })
+
+        # v681 — text_card scenes have NO `- **line:**` bullets but they
+        # still need ONE Clip row downstream so the renderer dispatches.
+        # Inject a synthetic flat row with empty dialogue, scene_type =
+        # text_card, caption + bg_color + duration carried over so the
+        # video_processor's _trim_one branch can render it.
+        if scene_type_v681 == "text_card" and not lines:
+            dialogue_lines_flat.append("")
+            scenes_metadata_flat.append({
+                "scene_index": scene["scene_index"],
+                "line_index_in_scene": 0,
+                "image_local_index": local_idx,
+                "clip_mode": clip_mode,
+                "transition": transition,
+                "action_note": "",
+                "veo_prompt_override": None,
+                "veo_negative_prompt_override": None,
+                "dialogue_pad": None,
+                "cut_mode": None,
+                "target_duration_s": None,
+                "veo_render_duration_s": None,
+                # v681 — text_card metadata that the Clip writer in
+                # main.py reads.
+                "caption": scene_caption,
+                "scene_type": "text_card",
+                "bg_color": scene_bg_color,
+                "duration_s": scene_duration_s,
+            })
+            veo_prompts_flat.append(None)
+            pads_flat.append(None)
+            continue  # skip the per-line loop (no lines to iterate)
 
         # Back-compat flat arrays — one entry per line across all scenes
         for i_in_scene, (line_text, note, vp, pad) in enumerate(

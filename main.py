@@ -208,6 +208,11 @@ class DialogueLineInput(BaseModel):
     caption: Optional[str] = None
     scene_type: Optional[str] = None
     bg_color: Optional[str] = None
+    # v681 — text_card duration in seconds. When scene_type='text_card'
+    # this overrides the renderer's 1.0s default. Stored on Clip rows
+    # via target_duration_s (overloaded for text_card; legacy clips
+    # use target_duration_s for v667/v668 anchor-derived Veo trim).
+    duration_s: Optional[float] = None
 
 
 class SceneInput(BaseModel):
@@ -1882,6 +1887,13 @@ async def _create_job_impl(
         caption_val = line.get('caption') if isinstance(line, dict) else None
         scene_type_val = line.get('scene_type') if isinstance(line, dict) else None
         bg_color_val = line.get('bg_color') if isinstance(line, dict) else None
+        # v681 — text_card duration overload. When scene_type=text_card
+        # AND duration_s is set, store it in target_duration_s (which is
+        # otherwise the v667/v668 Veo-trim duration; text_card has no
+        # Veo render so the field is unused for that meaning).
+        td_v681 = line.get('duration_s') if isinstance(line, dict) else None
+        if scene_type_val == 'text_card' and td_v681 is not None:
+            target_duration_s = float(td_v681)
         clip = Clip(
             job_id=job_id,
             clip_index=idx,
@@ -5420,6 +5432,11 @@ async def export_final_video(
         # any path access. Use temp_dir-style placeholder so it's clearly
         # synthetic if anything inspects it.
         if (clip.scene_type or "").lower() == "text_card":
+            # v681 — text_card scenes use clip.target_duration_s as the
+            # rendered duration (Clip writer overloads the field for
+            # text_card; see DialogueLineInput.duration_s comment).
+            # Falls back to 1.0s when the author didn't specify a duration.
+            tc_duration = float(clip.target_duration_s) if clip.target_duration_s else 1.0
             return {
                 "path": output_dir / f"_text_card_{clip.clip_index:04d}.mp4",
                 "clip_index": clip.clip_index,
@@ -5430,7 +5447,7 @@ async def export_final_video(
                 "scene_type": "text_card",
                 "caption": clip.caption or "",
                 "bg_color": clip.bg_color or "black",
-                "duration_s": 1.0,  # text-card default; ImageSceneAssignment.duration_s lookup is one query away if we ever need per-card override
+                "duration_s": tc_duration,
                 "_order": pos,
             }
         if not clip.output_filename:
