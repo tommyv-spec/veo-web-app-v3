@@ -6878,13 +6878,22 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     if(currentJobBackend !== 'prompt_only' && (
                         job.status === 'running' || job.status === 'pending' ||
                         job.status === 'processing' || job.status === 'preparing' ||
+                        job.status === 'queued_for_flow' ||
                         _hasActiveClipsNow
                     )) {
                         loadClips(id);
                     }
-                    // On status change to completed/failed, do a single incremental refresh
-                    // (the split-key diff will pick up any changes without destroying video elements)
-                    if(statusChanged && (job.status === 'completed' || job.status === 'failed')) {
+                    // On ANY status transition out of an interim state, force a
+                    // re-render so the body updates. v675 — without this, the
+                    // 'preparing → queued_for_flow' transition stranded the
+                    // "Building Prompts..." card on screen because loadClips
+                    // wasn't re-invoked when the job left 'preparing' fast
+                    // (typical of the v673 fast-lane path that skips frame
+                    // analysis and finishes prompts in <1s).
+                    if(statusChanged && (
+                        job.status === 'completed' || job.status === 'failed' ||
+                        job.status === 'queued_for_flow' || job.status === 'running'
+                    )) {
                         console.log('[Polling] Status changed to ' + job.status + ' — refreshing clips');
                         if(currentJobBackend !== 'prompt_only') loadClips(id);
                     }
@@ -7191,9 +7200,14 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if(currentJobStatus === 'preparing') {
                 const isAssemble = currentJobBackend === 'import';
                 const prepTitle = isAssemble ? 'Assembling Clips...' : 'Building Prompts...';
-                const prepDesc = isAssemble 
+                // v675 — describe BOTH paths so the message is correct whether
+                // the job uses the auto-build path (frame vision + voice
+                // profile + per-clip transition cue) or the v673 fast lane
+                // (every clip has a prebuilt prompt → all OpenAI calls
+                // skipped, finishes in 1–2s).
+                const prepDesc = isAssemble
                     ? 'Transcribing audio, matching clips to script, uploading to storage.<br>This takes 10–60 seconds. The page will update automatically.'
-                    : 'Uploading frames to cloud, analyzing images, generating prompts.<br>This takes 10–30 seconds. The page will update automatically.';
+                    : 'Building prompts. Fast lane (~1s) when the markdown ships prebuilt Veo prompts; auto-build path (~10–30s) runs frame vision + voice profile when not. The page will update automatically.';
                 const prepIcon = isAssemble ? '📦' : '🔧';
                 document.getElementById('clipsList').innerHTML = `
                     <div style="text-align:center;padding:40px 20px;">
