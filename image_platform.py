@@ -1274,9 +1274,23 @@ def _classify_edge_for_manifest(edge: "ImageEdge") -> str:
     if role.lower() == "reference":
         return "chain"
 
-    # Step 3: anchor-scene-bound named ingredients (e.g. a non-persona
-    # secondary character mentioned in a prompt and anchored to its
-    # first-mention scene).
+    # Step 3: anchor-scene-bound named ingredient (e.g. v681 patient with
+    # Reference: — whose first-appearance scene is bound here as a
+    # parent edge). v681e.8 — these ARE chain references from Banana 2's
+    # perspective: the parent is a generated ImageNode (a prior scene),
+    # not an upload. Classify as 'chain' so the renumber pass in
+    # _resolve_flow_prompt_bindings rewrites the markdown's "Image K"
+    # references to the actual Flow slot for this edge. Pre-v681e.8 these
+    # fell through to 'other' and the renumber pass skipped them — which
+    # left "Use Image 1" literal in the body even when the patient's
+    # anchor was bound at Flow slot 2.
+    try:
+        parent = edge.parent
+    except Exception:
+        parent = None
+    if parent is not None and getattr(parent, "kind", "") == "generated":
+        return "chain"
+
     return "other"
 
 
