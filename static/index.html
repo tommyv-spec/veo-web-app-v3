@@ -15221,12 +15221,55 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         </div>
                     </div>`;
             } else if (node.variants && node.variants.length) {
-                // Find the "previous scene" reference: the parent at slot 1
+                // Find the "previous scene" reference. v680 — the previous
+                // logic picked the first parent at slot >= 1, which lands
+                // on whichever ingredient/product upload happens to be
+                // bound first (e.g. the Korella saffron bottle), not the
+                // actual previous-scene chain image. The chain parent has
+                // role `chain_from_image_N` AND its parent NODE.kind is
+                // 'generated' (a real scene image), while ingredient parents
+                // point at NODE.kind === 'upload' (raw product photo).
+                //
+                // Priority order:
+                //   1. parent edge with role starting `chain_from_image`
+                //   2. parent edge whose target node is kind='generated'
+                //      (any scene image — last filed wins)
+                //   3. legacy fallback: highest slot_order, non-subject role
                 let refTileHtml = '';
+                let refEdge = null;
                 if (node.parents && node.parents.length) {
-                    let refEdge = node.parents.find(e => (e.slot_order || 0) >= 1);
+                    refEdge = node.parents.find(e =>
+                        (e.role || '').toLowerCase().startsWith('chain_from_image')
+                    );
                     if (!refEdge) {
-                        refEdge = node.parents.find(e => (e.role || '').toLowerCase() !== 'subject');
+                        const generatedParents = node.parents.filter(e => {
+                            const pn = imgState.nodesById[e.parent_node_id];
+                            return pn && pn.kind === 'generated';
+                        });
+                        if (generatedParents.length) {
+                            // Pick the highest scene_index_in_batch (most recent)
+                            generatedParents.sort((a, b) => {
+                                const an = imgState.nodesById[a.parent_node_id];
+                                const bn = imgState.nodesById[b.parent_node_id];
+                                const ai = (an && an.scene_index_in_batch != null) ? an.scene_index_in_batch : -1;
+                                const bi = (bn && bn.scene_index_in_batch != null) ? bn.scene_index_in_batch : -1;
+                                return bi - ai;
+                            });
+                            refEdge = generatedParents[0];
+                        }
+                    }
+                    if (!refEdge) {
+                        // Legacy fallback — pre-v680 behavior. Only triggers
+                        // when this scene has no chain edge and no generated
+                        // parent (typical for first-scene nodes that only
+                        // bind subject + ingredients).
+                        const nonSubject = node.parents.filter(e =>
+                            (e.role || '').toLowerCase() !== 'subject'
+                        );
+                        if (nonSubject.length) {
+                            nonSubject.sort((a, b) => (b.slot_order || 0) - (a.slot_order || 0));
+                            refEdge = nonSubject[0];
+                        }
                     }
                     if (refEdge) {
                         const refNode = imgState.nodesById[refEdge.parent_node_id];
