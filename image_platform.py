@@ -1376,9 +1376,12 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
             )
 
             # v581 LEGACY substitution — number-based reference. Kept
-            # for backward compatibility with pre-v589.1 markdowns.
-            # New decodes should NOT use "Image K" by markdown number;
-            # use the semantic phrase above instead.
+            # for backward compatibility with pre-v682 markdowns.
+            # New decodes / lifts (v682+) MUST use description-based
+            # references for non-persona subjects (no `Use Image K`
+            # except `Use Image 1` for persona). When this regex fires
+            # for K >= 2, we log a deprecation warning so authors can
+            # spot legacy bodies that still rely on positional rewrites.
             parent = edge.parent
             if parent is None or parent.scene_index_in_batch is None:
                 continue
@@ -1389,7 +1392,22 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
             # when looking for "Image 1".
             pattern = rf"\bImage {md_image_num}\b"
             replacement = f"Image {flow_image_num}"
-            body = _re.sub(pattern, replacement, body)
+            new_body = _re.sub(pattern, replacement, body)
+            if new_body != body:
+                # v682 deprecation log — count legacy positional rewrites
+                # for migration tracking. Persona-positional `Image 1`
+                # never fires this branch (md=1, flow=1, equal → continue
+                # above), so any hit here IS legacy non-persona usage.
+                try:
+                    log.warning(
+                        f"[v682/legacy] node={node.id} "
+                        f"positional 'Image {md_image_num}' rewritten to "
+                        f"'Image {flow_image_num}' — migrate body to "
+                        f"description-based references per v682 rule"
+                    )
+                except Exception:
+                    pass
+                body = new_body
 
         else:
             # Anchor-scene-bound named ingredient — v581 has no canonical

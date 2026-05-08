@@ -5360,6 +5360,74 @@ The slot-ordering contract is **deterministic** and works for any cast combinati
 
 If you see `(N, 'other', '...')` in the slot table, the renumber pass skipped that edge — investigate the edge classification (probably needs a kind/role fix at import-time OR a new pattern in `_classify_edge_for_manifest`).
 
+#### v682 — split-rule body references (persona positional, rest descriptive)
+
+**Replaces v581's positional `Image K` for non-persona references.** The renumber pass behavior of v681e.8 / v681e.9 stays as a deprecated fallback for legacy artifacts; new artifacts MUST follow the split rule below.
+
+**Why this rule exists:** the renumber pass works correctly for chain edges, but its `\bImage K\b` regex is aggressive — every `Image K` in body gets rewritten if any chain edge happens to land at flow slot N where md_image_num=K. Authors can't easily predict the rewrite at write-time. The split rule eliminates positional ambiguity for everything except the persona, and uses the description-based prompting pattern that Nano Banana 2's official docs explicitly recommend for "high-fidelity detail preservation" (citation: ai.google.dev/gemini-api/docs/image-generation §"High-fidelity detail preservation").
+
+**HARD RULE:**
+
+| Reference type | Body must use | Why |
+|---|---|---|
+| **Persona (main character)** | Positional only: `Use Image 1 for the main character (the <persona name>).` | Banana 2 has no prior knowledge of persona's face; description doesn't help — must point to the upload by position. v573 priority sort guarantees persona = slot 0 = Flow Image 1, so `Image 1` is the invariant. |
+| **All other references (chain, product, named cast, patient anchor)** | Description ONLY, no `Image K` | Decode/lift produces full identity prose (per v669 — Non-persona character identity prose mandatory on first appearance). Reuse that prose to identify the subject. Banana 2 binds the input to the description visually because the description matches what the input contains. |
+
+**FORBIDDEN in new artifacts:**
+- `Use Image 2 ...`, `Use Image 3 ...`, etc. — any non-`Image 1` positional reference for non-persona subjects
+- `Use Image K as the visual reference for the previous scene` — replaced by descriptive prose
+
+**Worked example — Donna Image 3 (cast: the healer, donna):**
+
+Slot order at submission: persona (healer) → slot 0 = Flow Image 1; chain (donna anchor=image_1) → slot 1 = Flow Image 2.
+
+Pre-v682 body (deprecated):
+```
+Use Image 1 as the visual reference to preserve Donna's facial features
+(mid-40s blonde, blue eyes, soft round features, average build) from the
+previous scene.
+
+Shot on iPhone with wide-angle lens ... Donna sits ... The healer stands ...
+```
+
+The `Use Image 1` was rewritten by v681e.8 renumber pass to `Use Image 2` because Donna's chain edge landed at flow slot 2. Worked — but author couldn't predict it.
+
+v682 body:
+```
+Use Image 1 for the main character (the apothecary healer).
+
+Donna: mid-40s woman, blonde hair pulled back, blue eyes, soft round
+features, average build. She wears jeans and a fitted grey sweatshirt.
+Preserve her facial features and body identity from the previous bedroom
+scene.
+
+Shot on iPhone with wide-angle lens ... Donna sits on a wooden exam bench
+in the foreground ... The healer stands beside her ...
+```
+
+Persona = `Image 1` literal (slot 0 invariant). Donna = full description, no positional ref. Banana 2 binds Donna's anchor (slot 1, Flow Image 2) by description match — sees a mid-40s blonde woman in the input that matches the body's description, uses her likeness for the rendered output.
+
+**Authoring source for descriptions:**
+
+| Subject | Where description comes from |
+|---|---|
+| Persona (excluded from rule — uses positional) | n/a |
+| Patient (recurring named character with anchor scene) | Identity prose at first appearance (v669) — copy into every later image where patient appears |
+| Product | Product card (e.g. `wiki/products/corella-saffron.md`) — full visual description |
+| One-shot extra | Identity prose in the image where they appear (one-time, no chain) |
+| Setting chain (apothecary kitchen, bedroom, living room) | Setting prose from the anchor image — copy into chained images with "preserve [setting elements] from the prior [scene name] scene" |
+
+**Backward compat:**
+- Legacy artifacts using `Use Image K` continue to work — v681e.9 renumber pass still fires
+- v681e.9 diagnostic `[v681e.9/renumber]` log line counts legacy fallback occurrences; track migration progress
+- Future v683: hard-error on `\bUse Image \d+\b` for non-persona refs after migration completes
+
+**Lint pattern (count remaining v581/v681e.x usage):**
+```bash
+grep -rEn "Use Image [2-9]" videos/ raw/decoded_*.md | wc -l
+```
+Image 1 references are exempt (persona-positional). All other `Use Image K` references for K ≥ 2 are migration backlog.
+
 ## Storyboard
 
 ### Scene 1
