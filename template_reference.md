@@ -5157,3 +5157,97 @@ Consistent phrasing across prompts helps Nano Banana 2 lock in continuity even w
 - ❌ (v573) Action_notes that re-describe the product's label, typography, color, or proportions ("the white plastic bottle with the navy SALVORA wordmark"). Veo SEES the start frame — the product appearance is already locked. Action_notes describe motion only: how the product is held, where it moves, what hits or pours from it. Use short generic naming in action_notes (`the bottle`, `the box`, `the product`) and let the start frame carry visual identity
 - ❌ (v573) Declaring more than one product in the Ingredients table as an upload. Only ONE product gets the upload slot — pick the hero/featured product. Other products in the same video (competitor comparisons, multi-product shelves) are described inline. The platform's three-parent cap (persona + product + chain) makes anything more complex fail at import
 - ❌ (v573) Treating the product as a required upload for every video. Many videos have no branded product on screen at all (pure educational, anatomy-focused, or persona-led content) — drop the product row from the Ingredients table entirely and omit product mentions from prompts. The product upload is opt-in per video, not a default
+
+---
+
+### v681 — Multi-character cast model + text-card scene type
+
+**What v681 introduces** (decode + lift, plus platform parser/schema/renderer changes):
+1. Two new `Type` values in the `## Ingredients` table — `patient` and `extra`.
+2. Optional per-scene `- **cast:** name1, name2, ...` bullet declaring presence.
+3. Simplified `- **speaker:** <character_name> <on-camera|silent>` (NO `voiceover` in v681 — defer to v682).
+4. New `scene_type: text_card` for "2 months later…" black-card transitions, with `caption:`, `bg_color:`, `duration:` bullets.
+5. Optional `- **caption:**` on regular scenes — decode capture only; generate ignores per v621.
+
+**Cast type vocabulary**
+
+| Type | Speaks? | Image-bound? | Recurring? | Notes |
+|---|---|---|---|---|
+| `character` | yes (persona) | yes | always | The persona row. Existing v537/v602/v610 binding rules unchanged. |
+| `patient` | NO | yes | yes | Recurring named non-speaker (testimonial subject). Image upload binds identity per v602. |
+| `extra` | NO | NO | one-shot | Bystander mentioned/shown in a single scene. Identity carried in prose per v669. Reference column = `—`. |
+| `product` | n/a | yes | n/a | Existing product row. Unchanged. |
+| `setting` | n/a | yes | n/a | Existing recurring-location row. Unchanged. |
+
+**Authoring example**
+
+```markdown
+## Ingredients
+
+| # | Type      | Name        | Reference                                    |
+|---|-----------|-------------|----------------------------------------------|
+| 1 | character | the healer  | personas/refs/amish-grandmother.png          |
+| 2 | patient   | Donna       | patients/refs/donna-blonde.png               |
+| 3 | extra     | husband     | —                                            |
+
+## Storyboard
+
+### Scene 1
+- **image:** image_1
+- **cast:** the healer, Donna, husband
+- **caption:** I felt invisible...
+- **speaker:** the healer on-camera
+- **clip_mode:** fresh
+- **line:** If you're facing the same issue Donna once did,
+
+### Scene 4
+- **scene_type:** text_card
+- **caption:** 2 months later...
+- **bg_color:** black
+- **duration:** 1.0s
+```
+
+**Speaker attribution**
+
+`<character_name> <mode>`. The character_name MUST match a row in the Ingredients table whose Type is `character` (i.e. the persona). `mode` is one of:
+
+| Mode | Veo audio | Lip-sync | When to use |
+|---|---|---|---|
+| `on-camera` | ON | ON | Persona speaks the line with visible mouth movement |
+| `silent` | (none) | n/a | No dialogue; music or SFX only. `- **line:**` bullet MUST be omitted. |
+| (omitted) | ON | ON | Default — equivalent to `<persona> on-camera` |
+
+**Removed in v681**: `voiceover` mode. v681 cannot author videos where the persona's voice plays UNDER b-roll visuals. Such videos require the v682 b-roll-overlay clip-pair construct (see "Out of scope" below).
+
+**Per-scene cast presence**
+
+`- **cast:** name1, name2, ...` is OPTIONAL but encouraged on every scene with 2+ cast members. When present, the platform binds ONLY the named cast members' uploads (skipping the v509 prompt-scan path for that scene). When absent or empty, v509 prompt-scan runs as before — pre-v681 markdown imports unchanged.
+
+For text-card scenes (`scene_type: text_card`), `cast:` is OMITTED.
+
+**Text-card scenes**
+
+When `scene_type: text_card`:
+- REQUIRED: `caption:`, `bg_color:`
+- OPTIONAL: `duration:` (defaults to 1.0s if omitted)
+- FORBIDDEN: `image:`, `cast:`, `line:`, `clip_mode:`, `transition:`
+
+The platform skips Nano Banana 2 image generation for these scenes; the video processor renders them via ffmpeg `drawtext` (solid color background + caption text) at export time.
+
+**Captions on regular scenes (decode-side capture)**
+
+Optional `- **caption:**` on a `scene_type: shot` scene records the source's on-screen caption verbatim. The lift bundle's prompt-build path IGNORES this field (v621 caption ban for owned content remains in force). Field exists strictly for analysis / reverse-engineering of the source's caption strategy.
+
+**Decode-side rules**
+
+When the decoder identifies a non-speaking person who appears in 2+ scenes AND has visual continuity (same human, named or unnamed), emit a `patient` row. Synthetic reference filename like `patients/refs/<name>-<hair>.png` (placeholder; operator captures the actual upload at lift time).
+
+When a non-speaking person appears in EXACTLY ONE scene AND is referenced incidentally, emit an `extra` row with no reference. The `extra`'s identity prose lives in the image prompt per v669 (race + age + build + clothing).
+
+When the decoder hears a single voice that does not match any visible mouth movement in the source frames, emit `on-camera` for whatever frames show the speaker AND `silent` scenes for everything else. DO NOT emit `voiceover` — it is reserved for v682. Add a comment in the artifact noting that the source's voiceover-overlay structure was not preserved.
+
+**Out of scope (v682)**
+
+Voiceover b-roll overlay (1 logical scene = 2 generated Veo clips: persona-on-camera audio source + silent b-roll visual overlay) is a separate v-rule deferred until lift-side authoring frequency justifies the platform composer work.
+
+Multi-speaker dialogue (2+ characters BOTH speaking — interviews, sketches) is also deferred. v681 explicitly forbids `patient` or `extra` rows from being a `speaker:` value.
