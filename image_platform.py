@@ -33,7 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, H
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey, Boolean
+    Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float
 )
 from sqlalchemy.orm import Session, relationship, joinedload, selectinload
 
