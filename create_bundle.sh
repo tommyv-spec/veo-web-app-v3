@@ -14,7 +14,7 @@
 #   ./code/create_bundle.sh                       — author from 0 (this script)
 #
 # What it does:
-#   - Concatenates the 15 canonical wiki + code files (per wiki/meta/lift-bundle.md)
+#   - Concatenates the 17 canonical wiki + code files (per wiki/meta/lift-bundle.md)
 #   - Pipes the concatenation to the system clipboard (with temp-file fallback)
 #   - Operator pastes the bundle into any LLM + a one-line cell spec:
 #         "create a new videos/*.md for [persona] [niche] [audience] —
@@ -53,11 +53,14 @@ BUNDLE_FILES=(
     "wiki/audience/audience-mapping.md"
     "wiki/audience/pain-point-language.md"
     "wiki/audience/video-types.md"
+    "wiki/audience/avatar-mike-henderson.md"
     "wiki/mechanics/hook-patterns.md"
     "wiki/mechanics/cta-patterns.md"
     "wiki/mechanics/scene-structure.md"
     "wiki/strategy/risky-vocabulary.md"
     "wiki/strategy/viral-recreation-method.md"
+    "wiki/products/_index.md"
+    "wiki/products/corella-saffron.md"
     "code/template_reference.md"
     "code/template_new_format.md"
 )
@@ -114,7 +117,7 @@ Required output discipline:
   - For DAY1/14 transformation niches: "$X surgery you didn't pay"
     anchor in EXPLAIN
 
-Read all 15 canonical bundle files below. Then identify which cell
+Read all 17 canonical bundle files below. Then identify which cell
 the operator wants from their task prompt, name the dominant move,
 and author the videos/*.md per code/template_new_format.md skeleton.
 

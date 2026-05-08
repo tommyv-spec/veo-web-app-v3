@@ -8,7 +8,7 @@
 #   ./code/lift_bundle.sh raw/decoded_healthylifesage_DX7iVuRMzUM.md
 #
 # What it does:
-#   - Concatenates the 14 canonical lift-bundle files (per wiki/meta/lift-bundle.md)
+#   - Concatenates the 17 canonical lift-bundle files (per wiki/meta/lift-bundle.md)
 #   - Appends the decoded source artifact at the end
 #   - Pipes the concatenation to the system clipboard (clip / pbcopy / xclip)
 #   - Operator pastes the bundle into any LLM + a one-line task prompt:
@@ -76,11 +76,14 @@ BUNDLE_FILES=(
     "wiki/audience/audience-mapping.md"
     "wiki/audience/pain-point-language.md"
     "wiki/audience/video-types.md"
+    "wiki/audience/avatar-mike-henderson.md"
     "wiki/mechanics/hook-patterns.md"
     "wiki/mechanics/cta-patterns.md"
     "wiki/mechanics/scene-structure.md"
     "wiki/strategy/risky-vocabulary.md"
     "wiki/strategy/viral-recreation-method.md"
+    "wiki/products/_index.md"
+    "wiki/products/corella-saffron.md"
     "code/template_reference.md"
     "code/template_new_format.md"
 )
@@ -130,7 +133,7 @@ Required output discipline:
   - psychology-of-conversion mandatory step: NAME the dominant cognitive
     move BEFORE writing a line
 
-Read all 14 canonical bundle files below, plus the decoded source at
+Read all 17 canonical bundle files below, plus the decoded source at
 the end. Then output the videos/*.md.
 
 Total bundle: $TOTAL_FILES files ($((${#BUNDLE_FILES[@]})) canonical + 1 decoded source)
