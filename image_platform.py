@@ -2938,6 +2938,23 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
                 flush=True,
             )
 
+        # v681 — per-image cast presence (optional). Comma-separated list
+        # of Ingredients-table Name values present in this composition.
+        # When non-empty, the binding loop in import_scene_table binds
+        # ONLY these names (skipping the v509 prompt-scan fallback).
+        cast_match = _re.search(
+            r"^\s*-\s*\*\*cast:\*\*\s*(.+?)\s*$",
+            block, flags=_re.MULTILINE,
+        )
+        cast_list: Optional[List[str]] = None
+        if cast_match:
+            raw = cast_match.group(1).strip()
+            cast_list = [c.strip() for c in raw.split(",") if c.strip()]
+            if not cast_list:
+                cast_list = None
+        if cast_list:
+            print(f"[v681/parse] image_{image_index} cast={cast_list}", flush=True)
+
         images.append({
             "image_index": image_index,
             "prompt": prompt,
@@ -2946,6 +2963,7 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
             "frame_anchor_s": frame_anchor_s,  # v667
             "visual_delta": visual_delta,      # v667
             "narrative_lens": narrative_lens,  # v667
+            "cast": cast_list,                 # v681 — None | list[str]
         })
 
     if not images:
@@ -2997,27 +3015,42 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             block = block[:header.end() + cut_m.start()]
         scene_index = int(header.group(1))
 
-        # Required: image reference
+        # v681 — pre-read scene_type so we can tolerate missing `image:`
+        # on text_card scenes (no Nano Banana 2 image; ffmpeg drawtext
+        # renders the clip directly).
+        scene_type_raw = _parse_bullet_field(block, "scene_type")
+        scene_type: Optional[str] = None
+        if scene_type_raw:
+            st = scene_type_raw.strip().lower()
+            if st in ("shot", "text_card"):
+                scene_type = st
+        is_text_card = scene_type == "text_card"
+
+        # Required: image reference (skipped for text_card scenes per v681)
         image_ref_m = _re.search(
             r"^\s*-\s*\*\*image:\*\*\s*(\S+)",
             block, flags=_re.MULTILINE,
         )
         if not image_ref_m:
-            raise ValueError(f"Scene {scene_index}: missing '- **image:** image_N' field")
-        image_ref_raw = image_ref_m.group(1).strip()
-        img_m = _re.match(r"image_(\d+)", image_ref_raw)
-        if not img_m:
-            raise ValueError(
-                f"Scene {scene_index}: invalid image ref '{image_ref_raw}' "
-                "(expected 'image_N')"
-            )
-        image_index = int(img_m.group(1))
-        if image_index not in known_image_indexes:
-            available = sorted(known_image_indexes) if known_image_indexes else []
-            raise ValueError(
-                f"Scene {scene_index} references image_{image_index} "
-                f"but no such image is defined. Available: {available}"
-            )
+            if is_text_card:
+                image_index = None  # type: ignore[assignment]
+            else:
+                raise ValueError(f"Scene {scene_index}: missing '- **image:** image_N' field")
+        else:
+            image_ref_raw = image_ref_m.group(1).strip()
+            img_m = _re.match(r"image_(\d+)", image_ref_raw)
+            if not img_m:
+                raise ValueError(
+                    f"Scene {scene_index}: invalid image ref '{image_ref_raw}' "
+                    "(expected 'image_N')"
+                )
+            image_index = int(img_m.group(1))
+            if image_index not in known_image_indexes:
+                available = sorted(known_image_indexes) if known_image_indexes else []
+                raise ValueError(
+                    f"Scene {scene_index} references image_{image_index} "
+                    f"but no such image is defined. Available: {available}"
+                )
 
         clip_mode = _parse_bullet_field(block, "clip_mode")
         if clip_mode:
@@ -3061,6 +3094,60 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         if cut_mode:
             print(f"[v668/parse] scene_{scene_index} cut_mode={cut_mode}", flush=True)
 
+        # v681 — per-scene cast presence (overrides per-image cast).
+        # Comma-separated list of Ingredients-table Name values present
+        # in this scene. When non-empty, image worker binds ONLY these
+        # rows (skipping the v509 prompt-scan path).
+        scene_cast_raw = _parse_bullet_field(block, "cast")
+        scene_cast: Optional[List[str]] = None
+        if scene_cast_raw:
+            scene_cast = [c.strip() for c in scene_cast_raw.split(",") if c.strip()]
+            if not scene_cast:
+                scene_cast = None
+
+        # v681 — caption (decode-side capture; generation ignores per
+        # v621). On text_card scenes, this is the rendered caption text.
+        caption = _parse_bullet_field(block, "caption")
+        if caption:
+            caption = caption.strip() or None
+
+        # v681 — bg_color (text_card scenes only). CSS color or hex.
+        bg_color = _parse_bullet_field(block, "bg_color")
+        if bg_color:
+            bg_color = bg_color.strip() or None
+
+        # v681 — duration in seconds (text_card scenes only). Trailing
+        # `s` tolerated. Defaults to 1.0 at render time when missing.
+        duration_raw = _parse_bullet_field(block, "duration")
+        duration_s: Optional[float] = None
+        if duration_raw:
+            cleaned = duration_raw.strip().rstrip("s").strip()
+            try:
+                duration_s = float(cleaned)
+            except ValueError:
+                duration_s = None
+
+        if scene_type or scene_cast or caption:
+            print(
+                f"[v681/parse] scene_{scene_index} "
+                f"type={scene_type} cast={scene_cast} caption={caption!r}",
+                flush=True,
+            )
+
+        # v681 — text_card validator: required caption + bg_color;
+        # forbidden image/cast/lines (soft-clear leftover bullets rather
+        # than raising — be tolerant of authoring slop).
+        if is_text_card:
+            if not caption:
+                raise ValueError(
+                    f"Scene {scene_index}: scene_type=text_card requires '- **caption:**'"
+                )
+            if not bg_color:
+                raise ValueError(
+                    f"Scene {scene_index}: scene_type=text_card requires '- **bg_color:**'"
+                )
+            scene_cast = None
+
         # Parse interleaved `- **line:**` / `- **action_note:**` / `- **pad:**`
         # bullets. Order matters: action_note and pad attach to the closest
         # preceding line within the same scene.
@@ -3100,7 +3187,10 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     pads[-1] = value
                 # else: pad before any line — ignore, likely malformed
 
-        if not lines_list:
+        # v681 — text_card scenes have no `- **line:**` bullets; tolerate
+        # missing lines on those. Regular shot scenes still require at
+        # least one dialogue line (legacy behavior).
+        if not lines_list and not is_text_card:
             raise ValueError(
                 f"Scene {scene_index}: no '- **line:**' bullets found "
                 "(a scene must have at least one dialogue line)"
@@ -3118,6 +3208,11 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "pads": pads,  # v644 — parallel to lines/action_notes; entries are str or None
             "speaker_mode": speaker_mode,  # v537
             "cut_mode": cut_mode,  # v668 — None | 'whisper' | 'timeline' | 'auto'
+            "cast": scene_cast,           # v681 — None | list[str]
+            "scene_type": scene_type,     # v681 — None | 'shot' | 'text_card'
+            "caption": caption,           # v681 — source caption (decode) OR text_card text
+            "bg_color": bg_color,         # v681 — text_card bg color (CSS / hex)
+            "duration_s": duration_s,     # v681 — text_card duration in seconds (None → 1.0 at render)
         })
 
     if not scenes:
@@ -3360,6 +3455,8 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
             "frame_anchor_s": None,
             "visual_delta": None,
             "narrative_lens": None,
+            # v681 — legacy format predates explicit cast; always None.
+            "cast": None,
         }
         for s in legacy
     ]
@@ -3377,6 +3474,12 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
             "veo_prompts": [None],
             # v668 — legacy format predates cut_mode; always None (whisper).
             "cut_mode": None,
+            # v681 — legacy format predates cast/text_card/caption; all None.
+            "cast": None,
+            "scene_type": None,
+            "caption": None,
+            "bg_color": None,
+            "duration_s": None,
         }
         for s in legacy
     ]
