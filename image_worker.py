@@ -6117,8 +6117,19 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 except Exception as _e:
                     print(f"[API:scan] ⚠ session snapshot failed: {_e}", flush=True)
                     cookies_v521, user_agent_v521 = [], ""
-            for u in ready_urls:
-                _claimed_tile_urls.add(u)
+            # v681c — call _mark_urls_claimed so the UUID set ALSO gets
+            # populated. Pre-v681c this loop only added URL strings to
+            # _claimed_tile_urls, leaving _claimed_tile_uuids empty for
+            # every job claimed via Tier A (v627 request-tag listener)
+            # or Tier B (v626 prompt-match listener). Strategy 3
+            # catchall (match_container_to_submission) then saw
+            # `claimed_uuids=∅` for the next pending job and accepted
+            # stale gallery containers whose URLs were Node N's tiles
+            # in redirect form (`labs.google/.../trpc/media.getMediaUrlRedirect?name=<UUID>`).
+            # Result: Node N+1 saved Node N's images byte-identical.
+            # Reproduced 2026-05-08 with Heavy Legs Transformation CTA 2:
+            # Node 1015 → Node 1017 cross-attribution; Node 1019 → Node 1018.
+            _mark_urls_claimed(ready_urls)
             http_queue.put({
                 'node_id': job.node_id,
                 'urls': ready_urls,
