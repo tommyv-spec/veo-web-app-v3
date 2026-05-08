@@ -4918,7 +4918,7 @@ def lookup_tiles_by_id(page, tile_ids):
         return {tid: {'status': 'not_found'} for tid in tile_ids}
 
 
-def match_container_to_submission(container, pending_jobs):
+def match_container_to_submission(container, pending_jobs, claimed_uuids=None):
     """Given a scanned container and the list of currently-pending InFlightJob
     objects, return the best-matching job (or None).
 
@@ -4929,6 +4929,14 @@ def match_container_to_submission(container, pending_jobs):
          substring-match. Handles minor whitespace differences.
       3. SINGLE-PENDING: if only one pending job is left, claim any tile
          that doesn't match a different submission's prompt.
+
+    v671 — `claimed_uuids` (optional set[str]): UUIDs of tile URLs that
+    were already attributed to a previous submission. When supplied,
+    Strategy 3 refuses to claim a container whose tile UUIDs intersect
+    this set — that container is a stale gallery re-scan of an
+    already-handled job, NOT a fresh result for the lone pending job.
+    Closes the misattribution path that wasted node 1002 on node 1000's
+    images (see v671 commit message).
 
     Returns: the matched InFlightJob or None.
     """
@@ -4968,6 +4976,24 @@ def match_container_to_submission(container, pending_jobs):
 
     # Strategy 3: if exactly one pending job left, claim any unmatched tile
     if len(pending_jobs) == 1:
+        # v671 — refuse the single-pending catchall when the container's
+        # UUIDs are already attributed elsewhere. This is the smoking-gun
+        # path for the wrong-set bug: gallery still shows node 1000's
+        # tiles, scan misses tile_id resolution, falls into Strategy 3,
+        # claims them for the lone pending job (1002). Reject.
+        if claimed_uuids:
+            _UUID_RE_LOCAL = re.compile(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                re.IGNORECASE,
+            )
+            container_uuids = set()
+            for url in (container.get("tile_image_urls") or []):
+                m = _UUID_RE_LOCAL.search(url or "")
+                if m:
+                    container_uuids.add(m.group(0).lower())
+            if container_uuids and (container_uuids & claimed_uuids):
+                # Stale gallery container — don't claim it.
+                return None
         return pending_jobs[0]
 
     return None
@@ -5131,21 +5157,54 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     # gallery that still visually contains tiles from an already-matched
     # submission. Symptom: same 4 URLs downloaded for two different
     # nodes. Set is capped to prevent unbounded growth on long runs.
+    #
+    # v671: parallel UUID set. Flow serves the SAME image under TWO
+    # different URL forms — direct `flow-content.google/image/<uuid>?...`
+    # AND redirect `labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=<uuid>`.
+    # Pre-v671 the dedup compared full URL strings, so the redirect form
+    # of an already-claimed direct URL would slip through and Strategy 3
+    # would re-attribute the gallery tile to a still-pending node.
+    # Logged smoking gun: node 1000 saved variants with `flow-content.google/image/<UUID>`,
+    # node 1002 then saved the SAME 4 UUIDs via `labs.google/.../getMediaUrlRedirect?name=<UUID>`.
+    # Fix: extract the UUID from the URL and dedup by UUID. Both forms
+    # contain the same UUID; one match = one image regardless of form.
     _claimed_tile_urls = set()
+    _claimed_tile_uuids = set()  # v671 — UUID-form-agnostic dedup
     _claimed_tile_urls_insert_order = []  # FIFO for bounded eviction
+    _claimed_tile_uuids_insert_order = []  # v671 — parallel FIFO
     _CLAIMED_URLS_CAP = 500
+
+    _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+
+    def _extract_url_uuid(url):
+        """v671 — pull the UUID from a Flow image URL regardless of form.
+        Returns None if no UUID is present. Both URL forms put the UUID
+        as the longest hex segment in the URL, so a simple regex grab is
+        sufficient."""
+        if not url:
+            return None
+        m = _UUID_RE.search(url)
+        return m.group(0).lower() if m else None
 
     def _mark_urls_claimed(urls):
         """Record these URLs as attributed to some submission. FIFO
-        eviction once we exceed the cap."""
+        eviction once we exceed the cap. v671 — also records UUIDs so
+        the dedup works across the direct and redirect URL forms Flow
+        uses for the same image."""
         for u in urls:
-            if u in _claimed_tile_urls:
-                continue
-            _claimed_tile_urls.add(u)
-            _claimed_tile_urls_insert_order.append(u)
+            if u not in _claimed_tile_urls:
+                _claimed_tile_urls.add(u)
+                _claimed_tile_urls_insert_order.append(u)
+            uid = _extract_url_uuid(u)
+            if uid and uid not in _claimed_tile_uuids:
+                _claimed_tile_uuids.add(uid)
+                _claimed_tile_uuids_insert_order.append(uid)
         while len(_claimed_tile_urls_insert_order) > _CLAIMED_URLS_CAP:
             old = _claimed_tile_urls_insert_order.pop(0)
             _claimed_tile_urls.discard(old)
+        while len(_claimed_tile_uuids_insert_order) > _CLAIMED_URLS_CAP:
+            old = _claimed_tile_uuids_insert_order.pop(0)
+            _claimed_tile_uuids.discard(old)
 
     # ─────────────────────────────────────────────────────────────
     # v624 NETWORK-LISTENER ATTRIBUTION
@@ -6342,7 +6401,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             pending_live = [j for j in in_flight.values() if j.status == "submitted"]
             if not pending_live:
                 break
-            match = match_container_to_submission(c, pending_live)
+            match = match_container_to_submission(c, pending_live, claimed_uuids=_claimed_tile_uuids)
             if not match:
                 continue
 
@@ -6353,10 +6412,22 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             # pending_live, and Strategy 3 catchall misdirected the match
             # to a different pending submission). Skip — the URLs are
             # already downloading for their real owner.
+            #
+            # v671: ALSO dedup by UUID. Flow serves the same image under
+            # TWO URL forms (direct flow-content.google + redirect via
+            # labs.google trpc). Pre-v671 the URL-string comparison missed
+            # form-aliasing and Strategy 3 mis-attributed the redirect
+            # form to a different node. UUID intersection catches it.
             container_urls_set_early = set(c.get("tile_image_urls") or [])
-            if container_urls_set_early and (container_urls_set_early & _claimed_tile_urls):
+            container_uuids_early = {
+                u for u in (_extract_url_uuid(x) for x in container_urls_set_early) if u
+            }
+            url_overlap = container_urls_set_early & _claimed_tile_urls
+            uuid_overlap = container_uuids_early & _claimed_tile_uuids
+            if container_urls_set_early and (url_overlap or uuid_overlap):
                 # Overlap found — the tile set has been claimed already.
-                overlap = container_urls_set_early & _claimed_tile_urls
+                overlap = url_overlap if url_overlap else uuid_overlap
+                overlap_kind = "url" if url_overlap else "uuid"
                 # v529 fix #5: dedup the log spam. The same claimed
                 # container gets re-skipped on every scan cycle (every
                 # 4s) for as long as ANY pending submission is in flight.
@@ -6371,7 +6442,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     _run_download_cycle._announced_claimed_sets = already_announced
                 if url_fingerprint not in already_announced:
                     already_announced.add(url_fingerprint)
-                    print(f"[API:scan] ⏭ Container already claimed ({len(overlap)}/{len(container_urls_set_early)} URLs overlap) — skipping to prevent duplicate attribution", flush=True)
+                    print(f"[API:scan] ⏭ Container already claimed ({len(overlap)}/{len(container_urls_set_early)} {overlap_kind} overlap) — skipping to prevent duplicate attribution", flush=True)
                 continue
 
             # Baseline filter: reject if all of the container's tile URLs
@@ -6456,7 +6527,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     # Safety: shouldn't happen (we already checked above)
                     continue
 
-            print(f"[API:scan] ✓ Node {match.node_id} matched → {len(download_urls)} variant(s) → enqueue", flush=True)
+            print(f"[API:scan] ✓ Node {match.node_id} matched → {len(download_urls)} variant(s) → enqueue (legacy fallback)", flush=True)
             http_queue.put({
                 "node_id": match.node_id,
                 "urls": download_urls,
