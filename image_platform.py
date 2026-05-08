@@ -250,6 +250,12 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS scene_type VARCHAR(20)"),
         ("clips", "bg_color",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS bg_color VARCHAR(20)"),
+        # v681 — text_card scenes have no image binding; drop NOT NULL on
+        # image_node_id. SQLite tolerates the existing column shape (it
+        # accepts NULL in INTEGER NOT NULL when re-bound at row-level —
+        # SQLite's strict mode is off by default), so no SQLite ALTER.
+        ("image_scene_assignments", "image_node_id_nullable",
+         "ALTER TABLE image_scene_assignments ALTER COLUMN image_node_id DROP NOT NULL"),
         # v429
         ("image_job_batches", "video_mode",
          "ALTER TABLE image_job_batches ADD COLUMN IF NOT EXISTS video_mode VARCHAR(20)"),
@@ -1013,7 +1019,11 @@ class ImageSceneAssignment(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     batch_id = Column(String(36), ForeignKey("image_job_batches.id"), nullable=False, index=True)
     scene_index = Column(Integer, nullable=False)      # 0, 1, 2, ...
-    image_node_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=False)
+    # v681 — nullable for text_card scenes (no Nano Banana 2 image render).
+    # Pre-v681 every scene had an image binding; new optional bullet
+    # `scene_type: text_card` allows scene rows with image_node_id=NULL,
+    # rendered via ffmpeg drawtext at export time.
+    image_node_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=True)
     clip_mode = Column(String(20), default="blend")   # blend | fresh | continue
     transition = Column(String(20), nullable=True)    # cut | blend | null
     # JSON arrays, parallel to each other. len(lines_json) == len(action_notes_json).
@@ -4629,6 +4639,12 @@ def _import_scene_table_impl(
             frame_anchor_s=img.get("frame_anchor_s"),
             visual_delta=img.get("visual_delta"),
             narrative_lens=img.get("narrative_lens"),
+            # v681 — per-image cast (decoded list of Ingredients Name strings).
+            # JSON-encoded for storage; None when the image_block didn't
+            # declare a `- **cast:**` bullet.
+            cast_json=(
+                json.dumps(img["cast"]) if img.get("cast") else None
+            ),
         )
         db.add(node)
         db.flush()
@@ -5199,10 +5215,15 @@ def _import_scene_table_impl(
             _json.dumps(_pads_for_scene) if _has_any_pad else None
         )
 
+        # v681 — text_card scenes have no image_node binding (no Nano
+        # Banana 2 render). For shot scenes the existing `node.id`
+        # binding stands. For text_card the column must be nullable
+        # (see migration entry below).
+        scene_image_node_id = None if s.get("scene_type") == "text_card" else node.id
         assignment = ImageSceneAssignment(
             batch_id=batch_id,
             scene_index=s["scene_index"],
-            image_node_id=node.id,
+            image_node_id=scene_image_node_id,
             clip_mode=(s.get("clip_mode") or "blend").lower(),
             transition=s.get("scene_transition"),
             lines_json=_json.dumps(s.get("lines") or []),
@@ -5210,6 +5231,12 @@ def _import_scene_table_impl(
             veo_prompts_json=_veo_prompts_json_value,  # v572
             pads_json=_pads_json_value,  # v644
             cut_mode=s.get("cut_mode"),  # v668 — None | 'whisper' | 'timeline' | 'auto'
+            # v681 — multi-character cast + text-card metadata.
+            cast_json=(_json.dumps(s["cast"]) if s.get("cast") else None),
+            scene_type=s.get("scene_type"),
+            caption=s.get("caption"),
+            bg_color=s.get("bg_color"),
+            duration_s=s.get("duration_s"),
         )
         db.add(assignment)
         assignments_created += 1
