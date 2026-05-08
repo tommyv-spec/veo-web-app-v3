@@ -2582,6 +2582,118 @@ async def get_job_config(
     }
 
 
+@app.post("/api/jobs/{src_job_id}/clone-frames")
+async def clone_job_frames(
+    src_job_id: str,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v677 — server-side clone of a source job's frames into a fresh upload job.
+
+    Replaces the previous frontend fetch+blob+reupload chain. That chain
+    failed for any image-batch-promoted job whose frames lived only on R2:
+    /api/jobs/{id}/images/{filename} returns a 302 redirect to a presigned
+    R2 URL, and the browser fetch() couldn't reliably read the redirected
+    response (CORS / credentials interaction with cross-origin redirect).
+    Result: clone overlay stuck on "Loading images..." forever, dialogue
+    area never populated, then in v676 the warning surfaced instead.
+
+    This endpoint mirrors POST /api/upload's response shape so the existing
+    frontend `uploadedImages` / `uploadedFilesData` plumbing keeps working
+    without per-call branching.
+    """
+    import uuid as _uuid
+    from shutil import copy2
+
+    job = get_user_job(db, src_job_id, current_user)
+
+    new_upload_job_id = str(_uuid.uuid4())
+    new_job_dir = app_config.uploads_dir / new_upload_job_id
+    new_job_dir.mkdir(parents=True, exist_ok=True)
+
+    uploaded: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    next_index = 0
+
+    # Source 1: existing local frames in the source job's images_dir
+    src_images_path = safe_images_dir(job.images_dir)
+    if src_images_path and src_images_path.exists():
+        for ext in (".png", ".jpg", ".jpeg", ".webp"):
+            for img_file in sorted(src_images_path.glob(f"image_*{ext}")):
+                try:
+                    new_filename = f"image_{next_index:02d}{img_file.suffix.lower()}"
+                    dst = new_job_dir / new_filename
+                    copy2(img_file, dst)
+                    uploaded.append({
+                        "filename": new_filename,
+                        "original_filename": img_file.name,
+                        "size": dst.stat().st_size,
+                        "path": str(dst),
+                        "index": next_index,
+                    })
+                    next_index += 1
+                except Exception as e:
+                    errors.append({"filename": img_file.name, "error": str(e)[:200]})
+
+    # Source 2: fall back to R2 when local frames aren't there (typical for
+    # any job older than the current container — Render ephemeral disk).
+    if not uploaded:
+        try:
+            from backends.storage import is_storage_configured, get_storage
+            if is_storage_configured():
+                storage = get_storage()
+                r2_prefix = f"jobs/{src_job_id}/frames/"
+                r2_keys = storage.list_objects(prefix=r2_prefix, max_keys=200)
+                for key in sorted(r2_keys):
+                    filename = key.split("/")[-1]
+                    if not filename:
+                        continue
+                    suffix = Path(filename).suffix.lower()
+                    if suffix not in (".png", ".jpg", ".jpeg", ".webp"):
+                        continue
+                    try:
+                        new_filename = f"image_{next_index:02d}{suffix}"
+                        dst = new_job_dir / new_filename
+                        storage.download_file(key, str(dst))
+                        if not dst.exists():
+                            errors.append({"filename": filename, "error": "R2 download produced no file"})
+                            continue
+                        uploaded.append({
+                            "filename": new_filename,
+                            "original_filename": filename,
+                            "size": dst.stat().st_size,
+                            "path": str(dst),
+                            "index": next_index,
+                        })
+                        next_index += 1
+                    except Exception as e:
+                        errors.append({"filename": filename, "error": str(e)[:200]})
+        except Exception as e:
+            print(f"[clone-frames] R2 fallback failed: {e}", flush=True)
+
+    if not uploaded:
+        raise HTTPException(
+            404,
+            f"No frames found for job {src_job_id} (no local files in "
+            f"{job.images_dir}, no R2 keys under jobs/{src_job_id}/frames/)"
+        )
+
+    print(
+        f"[clone-frames] {src_job_id[:8]} → {new_upload_job_id[:8]}: "
+        f"copied {len(uploaded)} frame(s)"
+        + (f", {len(errors)} error(s)" if errors else ""),
+        flush=True,
+    )
+
+    return {
+        "job_id": new_upload_job_id,
+        "uploaded": uploaded,
+        "errors": errors,
+        "total_uploaded": len(uploaded),
+        "total_errors": len(errors),
+    }
+
+
 @app.delete("/api/jobs/{job_id}")
 async def delete_job(
     job_id: str, 

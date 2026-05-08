@@ -11004,77 +11004,41 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     if(typeof validateDialogueLines === 'function') validateDialogueLines();
                 }
 
-                // Load images from the job. v676: each fetch wrapped in a 10s
-                // timeout race so a hung R2 redirect (CORS / 4xx / cold edge)
-                // can't strand the entire clone flow. uploadedFilesData /
-                // uploadedImages stay [] on total failure; the user can drag
-                // the original files in manually.
+                // v677 — server-side frame clone. Pre-v677 the frontend
+                // fetched each image from /api/jobs/{id}/images/{filename},
+                // which returns a 302 redirect to a presigned R2 URL.
+                // Browser fetch+blob across that cross-origin redirect was
+                // unreliable (CORS / credentials interaction) and failed
+                // entirely for jobs with R2-only frames. The new endpoint
+                // copies frames server-side into a fresh upload-job and
+                // returns the same shape POST /api/upload returns, so the
+                // existing uploadedImages / uploadedFilesData plumbing
+                // works without changes.
                 if(data.images && data.images.length > 0) {
-                    setStatus('Loading images...', `${data.images.length} image${data.images.length>1?'s':''} to clone`);
+                    setStatus('Cloning frames...', `${data.images.length} image${data.images.length>1?'s':''}`);
                     uploadedImages = [];
                     uploadedFilesData = [];
-
-                    const FETCH_TIMEOUT_MS = 10000;
-                    const fetchWithTimeout = (url) => Promise.race([
-                        fetch(url, { credentials: 'include' }),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('image-fetch timeout')), FETCH_TIMEOUT_MS)),
-                    ]);
-
-                    const imageLoadPromises = data.images.map(async (img, idx) => {
-                        try {
-                            const imgResponse = await fetchWithTimeout(img.url);
-                            if (!imgResponse.ok) throw new Error('image-fetch HTTP ' + imgResponse.status);
-                            const blob = await imgResponse.blob();
-                            return new Promise((resolve) => {
-                                const reader = new FileReader();
-                                reader.onload = (e) => {
-                                    resolve({
-                                        name: img.filename,
-                                        originalName: img.filename,
-                                        dataUrl: e.target.result,
-                                        index: idx
-                                    });
-                                };
-                                reader.readAsDataURL(blob);
-                            });
-                        } catch(e) {
-                            console.error('[Clone] Failed to load image:', img.filename, e);
-                            return null;
+                    try {
+                        const cloneResp = await fetch(`${API}/jobs/${id}/clone-frames`, { method: 'POST' });
+                        if (!cloneResp.ok) {
+                            const errBody = await cloneResp.text().catch(() => '');
+                            throw new Error('clone-frames HTTP ' + cloneResp.status + ' ' + errBody.slice(0, 200));
                         }
-                    });
-
-                    const loadedImages = (await Promise.all(imageLoadPromises)).filter(img => img !== null);
-
-                    if(loadedImages.length > 0) {
-                        try {
-                            const fd = new FormData();
-                            setStatus('Uploading images...', `${loadedImages.length} image${loadedImages.length>1?'s':''}`);
-                            for(const img of loadedImages) {
-                                const response = await fetchWithTimeout(img.dataUrl);
-                                const blob = await response.blob();
-                                fd.append('files', blob, img.name);
-                            }
-
-                            const uploadResponse = await fetch(`${API}/upload`, {method: 'POST', body: fd});
-                            if (!uploadResponse.ok) throw new Error('upload HTTP ' + uploadResponse.status);
-                            const uploadData = await uploadResponse.json();
-                            uploadJobId = uploadData.job_id;
-                            uploadedImages = uploadData.uploaded;
-
-                            uploadedFilesData = loadedImages.map((img, i) => {
-                                const serverInfo = uploadData.uploaded.find(u => u.original_filename === img.name || u.filename === img.name);
-                                return { ...img, index: serverInfo ? serverInfo.index : i };
-                            });
-
-                            document.getElementById('uploadedCount').textContent = `✓ ${uploadedImages.length} image${uploadedImages.length>1?'s':''} cloned`;
-                        } catch(e) {
-                            console.error('[Clone] Image upload step failed:', e);
-                            document.getElementById('uploadedCount').textContent =
-                                `⚠ Could not re-upload images (${e.message}). Drag images in manually.`;
-                        }
-                    } else {
+                        const cloneData = await cloneResp.json();
+                        uploadJobId = cloneData.job_id;
+                        uploadedImages = cloneData.uploaded || [];
+                        uploadedFilesData = (cloneData.uploaded || []).map((u, i) => ({
+                            name: u.filename,
+                            originalName: u.original_filename || u.filename,
+                            dataUrl: null,
+                            index: u.index ?? i,
+                        }));
                         document.getElementById('uploadedCount').textContent =
-                            `⚠ Could not fetch ${data.images.length} image${data.images.length>1?'s':''} from the source job. Drag images in manually.`;
+                            `✓ ${uploadedImages.length} image${uploadedImages.length>1?'s':''} cloned`;
+                    } catch(e) {
+                        console.error('[Clone] Server-side frame clone failed:', e);
+                        document.getElementById('uploadedCount').textContent =
+                            `⚠ Could not copy frames from the source job (${e.message}). Drag images in manually.`;
                     }
                 }
                 
