@@ -5497,8 +5497,18 @@ When `scene_type: text_card`:
 - REQUIRED: `caption:`, `bg_color:`
 - OPTIONAL: `duration:` (defaults to 1.0s if omitted)
 - FORBIDDEN: `image:`, `cast:`, `line:`, `clip_mode:`, `transition:`
+- **FORBIDDEN (v682d): a corresponding `### Image N` header in the `## Images` section.** Text-card scenes have no Banana 2 image — they are pure ffmpeg drawtext compositions at video assembly. Writing an `### Image N` block for them (even a stub) crashes the parser at the `**Image prompt:**` fenced-block requirement (`### Image N: no fenced 'Image prompt:' block found`). The text-card scene's metadata (caption + bg_color + duration) lives entirely on the `### Scene N` block in the `## Storyboard` section.
 
 The platform skips Nano Banana 2 image generation for these scenes; the video processor renders them via ffmpeg `drawtext` (solid color background + caption text) at export time.
+
+**Image numbering with text-card scenes (v682d):**
+
+Image numbers in the `## Images` section can be NON-CONTIGUOUS to leave gaps for text-card scenes. The Donna source illustrates this:
+- Images: 1, 2, 3, **(no Image 4)**, 5, 6, 7
+- Scenes: 1, 2, 3, 4, 5 (text_card), 6, 7, 8
+- Scene 5's text card sits between image_3 (apothecary palpation) and image_5 (living-room AFTER) — there is no image_4 because no Banana 2 render is needed for the black "2 months later..." card.
+
+The parser tolerates non-contiguous numbering — `image_5`/`image_6`/`image_7` references in storyboard scenes still resolve correctly. Don't renumber subsequent images down (image_5 → image_4) just because the text card is at scene-position 4 — the ImageJobBatch and chain references would break across artifacts.
 
 **Captions on regular scenes (decode-side capture)**
 
