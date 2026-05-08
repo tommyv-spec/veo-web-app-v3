@@ -13245,6 +13245,16 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     }
                     if (prefix) return 'prefix::' + prefix;
                 }
+                // v674: when no name prefix, key by batch_id BEFORE falling
+                // through to subject. Two imports without a prefix that
+                // share the same subject upload were merging into one
+                // group (`subject::<id>`) — the user's two unnamed
+                // markdowns landed in DIFFERENT batch_id rows but the
+                // sidebar collapsed them into one view because both
+                // pointed at the same subject. Keying by batch_id keeps
+                // each import as its own sidebar entry. Subject fallback
+                // remains for legacy nodes that predate batch_id.
+                if (n.batch_id) return 'batch::' + n.batch_id;
                 // Fallback: cluster by subject parent (slot 0)
                 const subjectEdge = (n.parents || []).find(e => (e.slot_order || 0) === 0);
                 if (subjectEdge) return 'subject::' + subjectEdge.parent_node_id;
@@ -13261,6 +13271,16 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 if (k === SUBJECTS_KEY) return '📦 Subjects & Uploads';
                 if (k === OTHER_KEY) return '🗂 Other';
                 if (k.startsWith('prefix::')) return '🎬 ' + k.slice('prefix::'.length);
+                if (k.startsWith('batch::')) {
+                    // v674 — unnamed-batch group key. Show the batch's stored
+                    // name (typically the markdown title or "Untitled batch")
+                    // so two imports under the same subject stay distinct.
+                    const batchId = k.slice('batch::'.length);
+                    const b = (imgState.batchesById || {})[batchId];
+                    const bname = b && b.name ? b.name : 'Batch ' + batchId.slice(0, 8);
+                    const short = bname.length > 30 ? (bname.slice(0, 27) + '…') : bname;
+                    return '🎬 ' + short;
+                }
                 if (k.startsWith('subject::')) {
                     const subjectId = parseInt(k.slice('subject::'.length), 10);
                     const sn = imgState.nodesById[subjectId];
@@ -13281,7 +13301,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
             function _topicTiebreaker(k) {
                 if (k === OTHER_KEY) return '3';
                 if (k.startsWith('prefix::')) return '1' + k.slice('prefix::'.length).toLowerCase();
-                if (k.startsWith('subject::')) return '2' + k;
+                if (k.startsWith('batch::')) {
+                    // v674 — sort batch:: groups alphabetically by their
+                    // stored name (so unnamed imports land near each other
+                    // by alpha order rather than by random UUID).
+                    const batchId = k.slice('batch::'.length);
+                    const b = (imgState.batchesById || {})[batchId];
+                    return '2' + ((b && b.name) || batchId).toLowerCase();
+                }
+                if (k.startsWith('subject::')) return '2z' + k;
                 return '4';
             }
             function _groupDayKey(k) {
@@ -13668,6 +13696,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 }
                 if (prefix) return 'prefix::' + prefix;
             }
+            // v674 — match keyFor()'s batch_id discriminator.
+            if (n.batch_id) return 'batch::' + n.batch_id;
             const subjectEdge = (n.parents || []).find(e => (e.slot_order || 0) === 0);
             if (subjectEdge) return 'subject::' + subjectEdge.parent_node_id;
             return '__other__';
@@ -14171,6 +14201,13 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if (groupKey === '__subjects__') title = '📦 Subjects & Uploads';
             else if (groupKey === '__other__') title = '🗂 Other';
             else if (groupKey.startsWith('prefix::')) title = '🎬 ' + groupKey.slice('prefix::'.length);
+            else if (groupKey.startsWith('batch::')) {
+                // v674 — unnamed-batch overview header. Use the stored
+                // batch name; fall back to the truncated batch id.
+                const batchId = groupKey.slice('batch::'.length);
+                const b = (imgState.batchesById || {})[batchId];
+                title = '🎬 ' + (b && b.name ? b.name : 'Batch ' + batchId.slice(0, 8));
+            }
             else if (groupKey.startsWith('subject::')) {
                 const subjectId = parseInt(groupKey.slice('subject::'.length), 10);
                 const sn = imgState.nodesById[subjectId];
