@@ -156,6 +156,25 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN target_duration_s REAL"),
         ("clips", "veo_render_duration_s",
          "ALTER TABLE clips ADD COLUMN veo_render_duration_s INTEGER"),
+        # v681: multi-character cast model + text-card scene type.
+        ("image_nodes", "cast_json",
+         "ALTER TABLE image_nodes ADD COLUMN cast_json TEXT"),
+        ("image_scene_assignments", "cast_json",
+         "ALTER TABLE image_scene_assignments ADD COLUMN cast_json TEXT"),
+        ("image_scene_assignments", "scene_type",
+         "ALTER TABLE image_scene_assignments ADD COLUMN scene_type VARCHAR(20)"),
+        ("image_scene_assignments", "caption",
+         "ALTER TABLE image_scene_assignments ADD COLUMN caption TEXT"),
+        ("image_scene_assignments", "bg_color",
+         "ALTER TABLE image_scene_assignments ADD COLUMN bg_color VARCHAR(20)"),
+        ("image_scene_assignments", "duration_s",
+         "ALTER TABLE image_scene_assignments ADD COLUMN duration_s REAL"),
+        ("clips", "caption",
+         "ALTER TABLE clips ADD COLUMN caption TEXT"),
+        ("clips", "scene_type",
+         "ALTER TABLE clips ADD COLUMN scene_type VARCHAR(20)"),
+        ("clips", "bg_color",
+         "ALTER TABLE clips ADD COLUMN bg_color VARCHAR(20)"),
     ]
     postgres_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -212,6 +231,25 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS target_duration_s DOUBLE PRECISION"),
         ("clips", "veo_render_duration_s",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS veo_render_duration_s INTEGER"),
+        # v681: multi-character cast model + text-card scene type.
+        ("image_nodes", "cast_json",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS cast_json TEXT"),
+        ("image_scene_assignments", "cast_json",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS cast_json TEXT"),
+        ("image_scene_assignments", "scene_type",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS scene_type VARCHAR(20)"),
+        ("image_scene_assignments", "caption",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS caption TEXT"),
+        ("image_scene_assignments", "bg_color",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS bg_color VARCHAR(20)"),
+        ("image_scene_assignments", "duration_s",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS duration_s DOUBLE PRECISION"),
+        ("clips", "caption",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS caption TEXT"),
+        ("clips", "scene_type",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS scene_type VARCHAR(20)"),
+        ("clips", "bg_color",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS bg_color VARCHAR(20)"),
         # v429
         ("image_job_batches", "video_mode",
          "ALTER TABLE image_job_batches ADD COLUMN IF NOT EXISTS video_mode VARCHAR(20)"),
@@ -712,6 +750,12 @@ class ImageNode(Base):
     visual_delta = Column(Text, nullable=True)
     narrative_lens = Column(String(40), nullable=True)
 
+    # v681: per-image cast presence (parallel to ImageSceneAssignment.cast_json
+    # but reflects what the IMAGE prompt depicts). NULL = scan prompt for
+    # ingredient names (v509 fallback). JSON array of Ingredients Name
+    # strings when present.
+    cast_json = Column(Text, nullable=True)
+
     # v572: per-clip Veo prompt overrides — when non-NULL, build_prompt
     # is bypassed and the prebuilt prompt is shipped to Veo verbatim.
     # These two columns are the DENORMALIZED first-clip overrides for
@@ -798,6 +842,8 @@ class ImageNode(Base):
             "frame_anchor_s": self.frame_anchor_s,
             "visual_delta": self.visual_delta,
             "narrative_lens": self.narrative_lens,
+            # v681 — per-image cast (decoded list of Ingredients Name strings).
+            "cast": (json.loads(self.cast_json) if self.cast_json else None),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -995,6 +1041,18 @@ class ImageSceneAssignment(Base):
     # Veo render strategy: blend/fresh/continue) — cut_mode controls the
     # post-render trim strategy on the rendered clip.
     cut_mode = Column(String(20), nullable=True)
+    # v681: multi-character cast model + text-card scene type.
+    # cast_json = JSON array of Ingredients Name strings present in this
+    # scene; when non-empty, image worker binds ONLY these (skipping v509
+    # prompt-scan). scene_type ∈ {None|'shot'|'text_card'} — text_card
+    # bypasses Nano Banana 2 + Veo. caption captures source caption text
+    # (decode-only on shot scenes; rendered text on text_card scenes).
+    # bg_color / duration_s used by ffmpeg drawtext renderer for text_card.
+    cast_json = Column(Text, nullable=True)
+    scene_type = Column(String(20), nullable=True)
+    caption = Column(Text, nullable=True)
+    bg_color = Column(String(20), nullable=True)
+    duration_s = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1046,6 +1104,12 @@ class ImageSceneAssignment(Base):
             "veo_prompts": veo_prompts,  # v572
             "pads": pads,  # v644
             "cut_mode": self.cut_mode,  # v668 — whisper | timeline | auto | None
+            # v681 — multi-character cast + text-card metadata.
+            "cast": (_json.loads(self.cast_json) if self.cast_json else None),
+            "scene_type": self.scene_type,
+            "caption": self.caption,
+            "bg_color": self.bg_color,
+            "duration_s": self.duration_s,
         }
 
 
