@@ -90,6 +90,37 @@
     the saved attention budget on foreground people + props +
     expression beats.
 
+  GATE 9 — scene with `speaker: voiceover` MUST have
+    `voiceover_anchor_image:` field pointing at an image_N defined in
+    `## Images` (v698A). The anchor image is the start frame for the
+    audio-twin Veo render; persona's face must be visible at t=0
+    there. Without the anchor field set, the platform cannot
+    render the audio source.
+
+  GATE 10 — voiceover_anchor_image's `cast:` MUST contain a persona
+    character (the main character). The anchor must show the
+    persona on-camera; b-roll / VFX images are NOT valid anchors
+    (no face for Veo to lip-sync to).
+
+  GATE 11 — every voiceover scene MUST have a `- **line:**` field
+    (lowercase per v693). The line is the voiceover spoken by the
+    audio-twin clip; without it there is no audio content to render.
+
+  GATE 12 — voiceover line word count MUST fit the visual scene's
+    `target_duration_s`. Rough rule: words ≤ 2.6 × target_duration_s.
+    A visual scene with target_duration_s=4.5 fits ~12 words. If the
+    line exceeds this, either split the scene OR shorten the line.
+    Whisper-VAD trims audio at export to match the visual; over-budget
+    lines lose tail words.
+
+  GATE 13 — every image with `role: voiceover_anchor` MUST have BOTH
+    a torso-framing keyword (`torso` / `waist-up` / `chest-up`) AND
+    a hands-visible keyword (`hands at chest` / `hands visible` /
+    `open-palm gesture` / `hands in frame`) in its prompt body.
+    Veo lip-syncs better when the persona has natural gestural
+    articulation; static-still torso renders awkward. Tight bottom
+    crop (no floor / no feet / no counter-front) per v603.
+
   GATE 5 — `- **line:**` field is FULLY LOWERCASE (v693)
     Veo TTS over-emphasizes capitalized words ("GUIDE" → shouted),
     Whisper-VAD then drops the over-emphasized syllables → the

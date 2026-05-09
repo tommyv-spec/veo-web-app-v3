@@ -5759,3 +5759,113 @@ for img_n, body in image_blocks:
 print('ALL v696 + v697 GATES PASS' if not errors else 'FAIL:\n  - ' + '\n  - '.join(errors))
 "
 ```
+
+---
+
+### v698A — per-scene clip-pair for voiceover-over-b-roll
+
+**Surfaced 2026-05-10** as the lift-side companion to v681's deferred voiceover handling. Since v681, scenes where the persona's face is NOT visible at clip-start (recipe b-roll, VFX overlays, hands-only close-ups) had to be authored as `speaker: silent` and the source's voiceover was DROPPED in our re-creation. The snapinsta donut-recipe decode (2026-05-09) made the cost obvious — 8 silent b-roll scenes lost ~40s of voiceover narration that's central to the source's hook + recipe pacing + cortisol-mechanism framing.
+
+v698A lifts the v681 limitation by rendering TWO Veo clips per voiceover scene:
+
+- **Visual clip** (what the audience SEES) — silent b-roll rendered from the scene's primary `image:`. Negative-prompt explicitly bans dialogue / mouth movement / lip-sync.
+- **Audio clip** (what the audience HEARS, visual discarded) — persona on-camera lip-syncing the line, rendered from a dedicated `voiceover_anchor_image:` (torso framing + hands visible, see anchor-image spec below). Visual is thrown away; only the audio track is extracted at export.
+
+At export, the visual clip's silent track is REPLACED by the audio clip's audio (post-Whisper-VAD). Concat proceeds on the swapped clips. The audio clip itself is NEVER concat'd — only its bytes are used.
+
+**Markdown schema (decode + lift, parser-facing):**
+
+```markdown
+### Scene 7
+- **image:** image_6                      ← b-roll visual (silent)
+- **scene_type:** shot
+- **speaker:** voiceover                  ← v698A trigger (was v681-deferred; now active)
+- **voiceover_anchor_image:** image_12    ← v698A — face-visible-t=0 image for audio twin
+- **action_arc:** WHISK → LIFT → DRIZZLE
+- **line:** then whisk coconut sugar maple syrup milk and vanilla into a glaze.
+- **action_note:** [Start beat 0-1s] WHISK — ...
+```
+
+`speaker: voiceover` was reserved by v538 (v681 deferred) and FORBIDDEN under v681. v698A repurposes it: from this commit forward, `speaker: voiceover` means "this scene is a v698A clip-pair." No production artifacts use the v538 voiceover token, so there's no backward-compat conflict.
+
+**Voiceover anchor image (the audio-source frame):**
+
+The voiceover_anchor_image is a DEDICATED image entry in `## Images` whose `role:` field is set to `voiceover_anchor`. The platform recognizes this role and:
+- Does NOT render this image as a visible scene clip (it has no scene reference)
+- DOES render Veo audio twins from it for any scene whose `voiceover_anchor_image:` points at it
+- DOES bind persona slot 0 + product slot 1 (if applicable) same as any other image
+
+**Anchor image framing requirements (mandatory):**
+- TORSO framing — waist-up to head, body squared to lens
+- HANDS VISIBLE at chest height in natural open-palm gesture
+- Face fully visible at t=0 (eyes locked to lens, mouth slightly parted in mid-speech)
+- Tight bottom crop — NO floor / NO feet / NO counter-front per v603
+- Setting matches the video's primary T1 / T2 location (kitchen / office / clinic — same as HOOK + CTA)
+- Persona in same wardrobe as HOOK + CTA (no costume change)
+
+Why torso + hands: Veo's lip-sync renders better when the persona has natural gestural articulation in-frame; static-still torso produces stiff awkward speech delivery. Hands at chest = neutral "explaining" body language, doesn't read as CTA pitch (v601 active demonstration) or HOOK aggression (v600 cartoon-physics). Visible mouth + relaxed jaw = clean lip-sync target. Visual is DISCARDED at export — framing only matters for Veo's render quality, not for what audience sees.
+
+**Anchor image example:**
+
+```markdown
+### Image 12
+- **role:** voiceover_anchor
+- **frame_anchor:** null    (not from source video)
+- **cast:** the main character
+
+**Image prompt:**
+\`\`\`
+Use the uploaded character reference image for the main character.
+
+Modern home kitchen background — same setting as the HOOK and CTA, white shaker
+cabinets, white marble counter at the lower edge, large window upper-background
+with soft greenery and natural daylight.
+
+Tight torso framing — waist-up to head, body squared to camera, eyes locked to
+lens, mouth slightly parted in mid-speech. The main character's hands are visible
+at chest height in a relaxed neutral open-palm gesture, fingers slightly spread,
+palms facing each other about a foot apart. Soft warm half-smile. Cropped at the
+waist; NO counter visible in front, NO floor, NO feet. Camera approximately one
+arm's length from the main character. iPhone HDR colors, deep focus.
+\`\`\`
+```
+
+**Cost model:**
+
+ONE Banana 2 generation of the anchor image (shared across ALL voiceover scenes in the video). N Veo audio-twin renders (one per voiceover scene), all starting from the SAME anchor image, each lip-syncing a different line. For snapinsta donut: 1 Banana anchor + 9 Veo audio twins = +1 Banana + +9 Veo vs current (10 single + 8 silent b-roll). Total: 12 Banana / 16 Veo. ~50% cost increase to gain full voiceover narration across the b-roll.
+
+**Pipeline stages (forward-looking — Phases 2-5 not yet implemented):**
+
+| Phase | Where | What |
+|---|---|---|
+| 1 (rules) | docs only | this deep-dive + skeleton gates 9-13 + wiki + retrofit decoded artifact |
+| 2 (parser + DB) | image_platform.py | recognize `speaker: voiceover` + `voiceover_anchor_image:` + `role: voiceover_anchor`; emit clip_role on dialogue_json lines; add 4 columns to Clip table |
+| 3 (render) | worker.py + flow_backend.py | visual_pair → silent prompt; audio_pair → normal lip-sync prompt; atomic completion gate |
+| 4 (export) | main.py + video_processor.py | audio swap pre-step (ffmpeg merge of visual + audio_pair); Whisper-VAD skip on visual_pair (cut_mode=voiceover_pair sentinel) |
+| 5 (UI) | static/index.html | paired-card render with two thumbnails + per-side variant nav + atomic redo + preview button |
+
+**Validation gates (extend v696/v697 with gates 9-13):**
+
+- Gate 9 — every scene with `speaker: voiceover` MUST have `voiceover_anchor_image:` field
+- Gate 10 — voiceover_anchor_image MUST reference an existing image_index AND that image's `cast:` must contain a persona character
+- Gate 11 — voiceover scenes MUST have a `line:` field (lowercase per v693)
+- Gate 12 — voiceover line word count must fit visual scene's `target_duration_s` (≈2.6 wpm × target_duration_s)
+- Gate 13 — every image with `role: voiceover_anchor` MUST have BOTH a torso-framing keyword (`torso` / `waist-up` / `chest-up`) AND a hands-visible keyword (`hands at chest` / `hands visible` / `open-palm gesture` / `hands in frame`) in its prompt body
+
+**Decode-side rule:** when decoding a source with voiceover-over-b-roll structure (continuous voice plays under hands-only / VFX scenes), the decoder MUST:
+1. Emit ONE dedicated `### Image N` entry with `role: voiceover_anchor` + the torso-hands framing prose (anchor image prompt example above)
+2. For every b-roll scene with voiceover playing over it in the source, mark `speaker: voiceover` + `voiceover_anchor_image: image_N` + lift the source's spoken line into `- **line:**` (lowercase per v693)
+3. text_card scenes are NOT voiceover scenes (they're title cards with no audio)
+4. v681 partial-voiceover-loss comments at the top of the artifact ARE removed once v698A retrofit is complete
+
+**Lift-side rule:** when authoring a `videos/*.md` lift from a v698A-decoded source, copy the `voiceover_anchor` image entry verbatim (or adapt to the lift's primary setting) and keep the per-scene `speaker: voiceover` + `voiceover_anchor_image:` references. The platform handles the rest at render + export time (Phases 3-4).
+
+**Open issues / deferred:**
+
+- v698B (master-audio overlay — single Veo render of full script as master audio with `master_align()` overlay) is a separate optimization for cost-bound videos. Deferred until v698A platform path is shipped + tested.
+- Audio/visual duration mismatch handling: line word budget gate (Gate 12) prevents authoring lines that don't fit. Edge cases (Whisper-VAD trims audio shorter than expected) handled by ffmpeg `-t` on visual side at export time per the post-VAD audio duration.
+- text_card scenes inside voiceover sequences: author splits the voiceover line at the text_card boundary into pre-card + post-card lines.
+- Variant independence: per-side `variants_json` allows independent variant selection (visual variant 2 + audio variant 1) — UI implementation in Phase 5.
+- Whisper-VAD on swapped clip: audio_pair runs through v691d normally; after swap, visual_pair has clean VAD'd audio embedded, marked `cut_mode=voiceover_pair` to skip a second VAD pass.
+
+Migration: existing artifacts are valid as-is; new artifacts from this commit forward MAY use v698A. The bundle TASK blocks should reference v698A as item [23] in the pre-output validation checklist.
