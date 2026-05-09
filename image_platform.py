@@ -2637,6 +2637,7 @@ async def upload_manual_variant(
 @router.get("/files/{path:path}")
 def serve_image_file(
     path: str,
+    direct: int = 0,
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -2682,31 +2683,27 @@ def serve_image_file(
     db.close()
 
     if not abs_path.exists():
-        # v561: redirect-to-R2 fast path for cold cache.
+        # v694 — proxy is now DEFAULT (correctness > performance). Pre-v694
+        # (v561) returned a 302 redirect to a presigned R2 URL when the file
+        # was missing locally — fast (~50-100ms via R2 edge) but breaks for
+        # users whose ISP/firewall blocks *.r2.cloudflarestorage.com (browser
+        # sees ERR_CONNECTION_TIMED_OUT). v687 already applied this same
+        # correctness flip to /api/jobs/{job_id}/images/{filename} in main.py;
+        # this endpoint missed the same fix → leaked R2 hosts to the browser
+        # via redirect on every variant tile during the onboarding upload
+        # step. The redirect-to-R2 fast path is now opt-in via `?direct=1`
+        # for clients that know they can reach R2 directly.
         #
-        # Pre-v561 behavior was: download the file synchronously from R2
-        # (~200ms-2s per file), then serve via FileResponse. That made
-        # post-deploy startup catastrophic — Render wipes /app/data/, the
-        # frontend immediately renders dozens of variant <img> tags, each
-        # triggering a blocking R2 download here, the eventloop starves
-        # under the load, health checks fail, Render SIGTERMs the worker
-        # before the deferred startup even finishes (observed: 63 seconds
-        # from "Application startup complete" to SIGTERM with hundreds of
-        # downloads still in flight).
-        #
-        # v561: when a variant is missing locally and IS in R2, return
-        # a 302 redirect to a presigned R2 URL. The browser fetches bytes
-        # directly from R2's edge — typically 50-100ms — and the app
-        # worker spends ~5ms on this request instead of 500-2000ms.
-        # Browser caches it via the presigned URL.
-        #
-        # We still kick off a background fetch to cache locally for the
-        # next request that needs the actual local file (worker reads
-        # for video pipelines, /worker/files/{token} downloads, etc.).
-        # That async backfill doesn't block this response.
+        # Default path now: synchronously download from R2 to local cache,
+        # then return FileResponse. ~200ms-2s on cold cache (one-time per
+        # file post-deploy), then sub-ms warm-cache hits forever after.
+        # The original v561 worker-starvation concern is mitigated by the
+        # local cache: each path downloads ONCE, subsequent requests are
+        # local file hits.
+        force_proxy = not bool(direct)
         from fastapi.responses import RedirectResponse
         storage = _storage_or_none()
-        if storage is not None and safe not in _r2_known_missing:
+        if storage is not None and safe not in _r2_known_missing and not force_proxy:
             try:
                 key = _r2_key_for(safe)
                 # HEAD first — cheap, confirms object exists, lets us

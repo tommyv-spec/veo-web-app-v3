@@ -1239,7 +1239,10 @@ class JobWorker:
                                     storage = get_storage()
                                     r2_key = f"jobs/{job_id}/outputs/{new_filename}"
                                     storage.upload_file(str(result["output_path"]), r2_key, content_type='video/mp4')
-                                    output_url = storage.get_presigned_url(r2_key, expires_in=86400 * 7)
+                                    # v694 — store backend proxy URL not presigned R2 URL.
+                                    # Direct R2 hosts (*.r2.cloudflarestorage.com) are blocked
+                                    # by some ISPs/firewalls. Proxy goes through the app server.
+                                    output_url = f"/api/jobs/{job_id}/outputs/{new_filename}"
                                     clip.output_url = output_url
                                     # Update version entry with URL
                                     versions[-1]["url"] = output_url
@@ -3062,8 +3065,10 @@ class JobWorker:
                                         storage = get_storage()
                                         r2_key = f"jobs/{job_id}/outputs/{new_filename}"
                                         storage.upload_file(video_path, r2_key, content_type='video/mp4')
-                                        # Get presigned URL for UI access
-                                        output_url = storage.get_presigned_url(r2_key, expires_in=86400 * 7)
+                                        # v694 — store backend proxy URL not presigned R2 URL.
+                                        # Direct R2 hosts (*.r2.cloudflarestorage.com) are blocked
+                                        # by some ISPs/firewalls. Proxy goes through the app server.
+                                        output_url = f"/api/jobs/{job_id}/outputs/{new_filename}"
                                         clip.output_url = output_url
                                         # Update version entry with URL
                                         versions[0]["url"] = output_url
@@ -3490,7 +3495,10 @@ class JobWorker:
                                         storage = get_storage()
                                         r2_key = f"jobs/{job_id}/outputs/{new_filename}"
                                         storage.upload_file(str(result["output_path"]), r2_key, content_type='video/mp4')
-                                        output_url = storage.get_presigned_url(r2_key, expires_in=86400 * 7)
+                                        # v694 — store backend proxy URL not presigned R2 URL.
+                                        # Direct R2 hosts (*.r2.cloudflarestorage.com) are blocked
+                                        # by some ISPs/firewalls. Proxy goes through the app server.
+                                        output_url = f"/api/jobs/{job_id}/outputs/{new_filename}"
                                         clip.output_url = output_url
                                         versions[0]["url"] = output_url
                                         clip.versions_json = json.dumps(versions)
@@ -4430,7 +4438,10 @@ class JobWorker:
                                         storage = get_storage()
                                         r2_key = f"jobs/{job_id}/outputs/{new_filename}"
                                         storage.upload_file(video_path, r2_key, content_type='video/mp4')
-                                        output_url = storage.get_presigned_url(r2_key, expires_in=86400 * 7)
+                                        # v694 — store backend proxy URL not presigned R2 URL.
+                                        # Direct R2 hosts (*.r2.cloudflarestorage.com) are blocked
+                                        # by some ISPs/firewalls. Proxy goes through the app server.
+                                        output_url = f"/api/jobs/{job_id}/outputs/{new_filename}"
                                         clip.output_url = output_url
                                         # Update version entry with URL
                                         if versions:
