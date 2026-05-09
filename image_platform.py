@@ -5895,6 +5895,53 @@ def prepare_batch_for_video(
         ImageSceneAssignment.batch_id == batch_id
     ).order_by(ImageSceneAssignment.scene_index).all()
 
+    # v682k — STALE-ASSIGNMENT AUTO-REPAIR.
+    # If any assignment has lines=[] but veo_prompts_json is NULL, the batch
+    # was imported BEFORE the v682f attach_veo_prompts_to_scenes zero-line
+    # patch + v682i parser format-tolerance landed. Re-parse the markdown
+    # stored on the batch and patch missing veo_prompts_json in-place. This
+    # spares the user from having to delete the batch and re-import every
+    # time a parser fix lands.
+    if assignments and batch.source_markdown:
+        stale_silent = [
+            a for a in assignments
+            if (not (a.veo_prompts_json or "").strip())
+            and a.image_node_id is not None  # not a text_card
+            and (not (a.lines_json or "").strip() or a.lines_json == "[]")
+        ]
+        if stale_silent:
+            log.info(
+                f"[v682k/auto-repair] batch {batch_id}: "
+                f"{len(stale_silent)} silent scene(s) missing veo_prompts_json — "
+                f"re-parsing source_markdown to patch in place."
+            )
+            try:
+                reparsed = parse_scene_table(batch.source_markdown)
+                reparsed_scenes = {s["scene_index"]: s for s in reparsed.get("scenes", [])}
+                for a in stale_silent:
+                    s = reparsed_scenes.get(a.scene_index)
+                    if s is None:
+                        continue
+                    veo_prompts = s.get("veo_prompts") or []
+                    if not any(vp for vp in veo_prompts):
+                        continue
+                    a.veo_prompts_json = _json.dumps(veo_prompts)
+                    log.info(
+                        f"[v682k/auto-repair] scene_index={a.scene_index} → "
+                        f"patched veo_prompts_json ({len(a.veo_prompts_json)} chars)"
+                    )
+                db.commit()
+                # Reload assignments after patch
+                assignments = db.query(ImageSceneAssignment).filter(
+                    ImageSceneAssignment.batch_id == batch_id
+                ).order_by(ImageSceneAssignment.scene_index).all()
+            except Exception as repair_err:
+                log.warning(
+                    f"[v682k/auto-repair] batch {batch_id}: re-parse failed "
+                    f"({type(repair_err).__name__}: {repair_err}) — falling back "
+                    f"to stored assignments. User can re-import to fix."
+                )
+
     if not assignments:
         # Legacy batch (pre-v432) — synthesize 1:1 assignments from the
         # per-node fields. Each node becomes its own one-line scene.
@@ -6214,6 +6261,35 @@ def prepare_batch_for_video(
                 if scene_is_silent and veo_prompts
                 else None
             )
+            # v682k diagnostic — surface silent-scene veo_prompts state
+            # in Render logs so we can tell whether the prompt came
+            # through the parser → attach → to_dict chain or was lost.
+            # Silent scene with silent_vp=None means assignment.veo_prompts_json
+            # is NULL or was truncated; user must re-import the markdown
+            # because their batch's assignments pre-date the v682f/v682i
+            # parser+attach fixes.
+            if scene_is_silent:
+                vp_len = len(veo_prompts) if veo_prompts else 0
+                if silent_vp:
+                    log.info(
+                        f"[v682k/silent] scene_index={scene['scene_index']} "
+                        f"veo_prompts=[{vp_len} entries] → silent_vp SET "
+                        f"({len((silent_vp or {}).get('text_prompt') or '')} chars)"
+                    )
+                else:
+                    log.warning(
+                        f"[v682k/silent] scene_index={scene['scene_index']} "
+                        f"veo_prompts=[{vp_len} entries] → silent_vp=None — "
+                        f"silent clip will fall through to build_prompt auto-construct. "
+                        f"If markdown HAS a `### Clip N — Scene N` entry for this scene, "
+                        f"RE-IMPORT the markdown (delete batch first) so a fresh "
+                        f"assignment row is written with the v682i parser's prompt capture."
+                    )
+            elif scene_is_text_card:
+                log.info(
+                    f"[v682k/text_card] scene_index={scene['scene_index']} "
+                    f"caption={scene_caption!r} — drawtext at video assembly"
+                )
             dialogue_lines_flat.append("")
             scenes_metadata_flat.append({
                 "scene_index": scene["scene_index"],
