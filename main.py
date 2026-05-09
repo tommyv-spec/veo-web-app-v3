@@ -5959,8 +5959,36 @@ async def export_final_video(
                 stats["audio_error"] = str(e)
         
         # Apply playback speed if > 1.0 (skip if master audio alignment was used — speeds already handled per-clip)
-        print(f"[Export] Speed check: playback_speed={settings.playback_speed}, master_audio={settings.master_audio_filename}, will_apply={settings.playback_speed and settings.playback_speed > 1.01 and not settings.master_audio_filename}", flush=True)
-        if settings.playback_speed and settings.playback_speed > 1.01 and not settings.master_audio_filename:
+        # v692b — skip speed-apply when concat output is unexpectedly huge.
+        # Re-encoding a 233s file under capture_output=True buffers MBs of
+        # ffmpeg stderr in Python and OOMs the worker. Cap at 90s; anything
+        # larger means concat already broke and speed-apply would crash the
+        # container before the file could land in R2. The unsped file still
+        # uploads to R2 below so the diagnostic + the partial result reach
+        # the user.
+        _final_dur_safe = float(stats.get("final_duration") or 0.0)
+        _speed_safe = (
+            settings.playback_speed and settings.playback_speed > 1.01
+            and not settings.master_audio_filename
+            and _final_dur_safe > 0
+            and _final_dur_safe <= 90.0
+        )
+        print(
+            f"[Export] Speed check: playback_speed={settings.playback_speed}, "
+            f"master_audio={settings.master_audio_filename}, "
+            f"final_duration={_final_dur_safe:.2f}s, will_apply={_speed_safe}",
+            flush=True,
+        )
+        if not _speed_safe and _final_dur_safe > 90.0:
+            print(
+                f"[Export][v692b] SKIPPING speed-apply: final_duration "
+                f"{_final_dur_safe:.2f}s > 90s. Re-encoding such a large "
+                f"file with capture_output=True risks OOM. Inspect "
+                f"[VideoProcessor/v692b] pre-concat / post-concat lines to "
+                f"localize the bloat. Unsped file still uploads to R2.",
+                flush=True,
+            )
+        if _speed_safe:
             try:
                 speed = round(settings.playback_speed, 3)
                 sped_filename = f"sped_{output_filename}"

@@ -3508,12 +3508,39 @@ def export_final_video(
         # Concatenate
         if progress_callback:
             progress_callback("Finalizing video...")
-        
+
         if remove_silence:
             concat_output = temp_path / "concatenated.mp4"
         else:
             concat_output = output_path
-        
+
+        # v692b — ffprobe each input to concat. Localizes whether a
+        # 233s final output came from the trim stage (input files are
+        # huge) or the concat stage (re-encode stretches them).
+        try:
+            _pre_concat_total = 0.0
+            for _slot, _f in enumerate(files_to_concat):
+                _d = None
+                if _f and Path(_f).exists():
+                    try:
+                        _d = get_duration(ffprobe_json(_f))
+                    except Exception as _ee:
+                        _d = f"ERR:{_ee}"
+                print(
+                    f"[VideoProcessor/v692b] pre-concat slot={_slot} "
+                    f"file={_f} dur={_d}",
+                    flush=True,
+                )
+                if isinstance(_d, (int, float)):
+                    _pre_concat_total += float(_d)
+            print(
+                f"[VideoProcessor/v692b] pre-concat sum_durations="
+                f"{_pre_concat_total:.3f}s across {len(files_to_concat)} files",
+                flush=True,
+            )
+        except Exception as _e:
+            print(f"[VideoProcessor/v692b] diag failed (non-fatal): {_e}", flush=True)
+
         if transition and transition != "none":
             concat_videos_with_transitions(
                 files_to_concat, concat_output,
@@ -3523,6 +3550,18 @@ def export_final_video(
             )
         else:
             concat_videos(files_to_concat, concat_output)
+
+        # v692b — ffprobe AFTER concat to confirm whether re-encode
+        # itself stretched duration. If pre-sum ≈ 32 but post = 233,
+        # bug is in concat_videos. If pre-sum ≈ 233, bug is upstream.
+        try:
+            _post_d = get_duration(ffprobe_json(concat_output))
+            print(
+                f"[VideoProcessor/v692b] post-concat duration={_post_d:.3f}s",
+                flush=True,
+            )
+        except Exception as _e:
+            print(f"[VideoProcessor/v692b] post-concat probe failed: {_e}", flush=True)
         
         # Step 3: Apply VAD (if enabled)
         # v668 — note: when has_timeline_clips=True, remove_silence was
