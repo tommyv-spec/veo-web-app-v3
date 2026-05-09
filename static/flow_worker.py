@@ -548,25 +548,32 @@ def _find_chrome_hwnd(page, label=""):
 
 
 def minimize_chrome_window(page, label=""):
-    """Minimize Chrome to taskbar using SW_SHOWMINNOACTIVE — window
-    is hidden without activating any other window (no focus jump).
-    Windows only; no-op elsewhere."""
-    import platform as _platform
-    if _platform.system() != "Windows":
-        return
-    try:
-        import ctypes
-        from ctypes import wintypes
-        hwnd = _find_chrome_hwnd(page, label=label)
-        if not hwnd:
-            return
-        user32 = ctypes.windll.user32
-        SW_SHOWMINNOACTIVE = 7
-        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.ShowWindow.restype = ctypes.c_bool
-        user32.ShowWindow(hwnd, SW_SHOWMINNOACTIVE)
-    except Exception:
-        pass
+    """v685 — DO NOT minimize. Pre-v685 used SW_SHOWMINNOACTIVE which
+    minimized the window and combined with WS_EX_NOACTIVATE could hide
+    the entry from the taskbar entirely (user reported "disappears from
+    taskbar and I can't open it again"). The user wants both worker
+    Chrome windows STAY VISIBLE on the desktop, just NEVER grab focus.
+
+    Now this function is a thin alias that pushes the window to the
+    BOTTOM of the Z-order (still visible behind other windows, still
+    in taskbar) without minimising and without activating. Same path
+    as send_chrome_to_back. Callers in older code that wanted to
+    "hide" the window during login flow now get a backgrounded-but-
+    visible window instead, which is what the user wants for the
+    multi-account video worker.
+
+    Note: we deliberately DO NOT call set_chrome_no_activate (which
+    sets WS_EX_NOACTIVATE) here. That style bit can interfere with
+    taskbar click-to-restore behavior on some Windows configs. The
+    HWND_BOTTOM placement alone is enough to keep the window from
+    stealing focus, and Playwright operations DON'T re-foreground
+    the window because there's nothing to restore from (window was
+    never minimized).
+
+    Windows only; no-op elsewhere.
+    """
+    # Delegate to the safe non-minimising backgrounder.
+    send_chrome_to_back(page, label=label)
 
 
 def restore_chrome_window(page, label=""):
@@ -698,13 +705,17 @@ def defocus_chrome(page, label=""):
         page.evaluate("window.blur()")
     except Exception:
         pass
-    # OS-level: enforce WS_EX_NOACTIVATE + send to back (Windows only)
+    # OS-level: send to back (Windows only). v685 — DO NOT call
+    # set_chrome_no_activate(). The WS_EX_NOACTIVATE style bit it
+    # applied could combine with minimization or shell quirks to
+    # remove the window from the taskbar entirely (user reported
+    # the window vanished from taskbar with no way to restore it).
+    # HWND_BOTTOM + SWP_NOACTIVATE is enough to keep the window
+    # from stealing focus while leaving the taskbar entry intact
+    # and click-to-restore working.
     try:
         if getattr(page, "_stay_visible", False):
             return
-        # v662 — set once-per-window WS_EX_NOACTIVATE so OS events
-        # never reactivate this Chrome window. Idempotent.
-        set_chrome_no_activate(page, label=label)
         send_chrome_to_back(page, label=label)
     except Exception:
         pass
