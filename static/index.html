@@ -14116,7 +14116,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     const pads = sc.pads || [];
                     const notes = sc.action_notes || [];
                     const vps = sc.veo_prompts || [];
-                    const lineRows = lines.map((ln, i) => {
+                    let lineRows = lines.map((ln, i) => {
                         const pad = pads[i];
                         const note = notes[i];
                         const vp = vps[i];
@@ -14124,6 +14124,25 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         const padWords = pad ? pad.split(/\s+/).filter(Boolean).length : 0;
                         return `<div style="padding:6px 8px;background:var(--bg-input);border-radius:4px;font-size:11px;margin-top:4px;"><div><b>line ${i+1}</b> <span style="color:var(--text-muted);">(${lnWords}w)</span>: ${imgEscape(ln)}</div>${pad ? `<div style="margin-top:4px;color:#fbbf24;"><b>pad</b> <span style="color:var(--text-muted);">(${padWords}w · total ${lnWords+padWords}w)</span>: ${imgEscape(pad)}</div>` : ''}${note ? `<div style="margin-top:4px;color:var(--text-muted);"><b>action</b>: ${imgEscape(note)}</div>` : ''}${vp ? `<details style="margin-top:4px;"><summary style="cursor:pointer;color:#a78bfa;">veo prompt override</summary><pre style="margin-top:4px;padding:6px;background:var(--bg-elevated);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;">${imgEscape((vp.text_prompt||'') + (vp.negative_prompt ? '\n\nNegative: ' + vp.negative_prompt : ''))}</pre></details>` : ''}</div>`;
                     }).join('');
+
+                    // v682n — render a synthetic row for silent / text_card
+                    // scenes (lines.length === 0). Pre-v682n the lines.map
+                    // above produced an empty string so silent scenes had no
+                    // veo prompt override toggle even when veo_prompts_json
+                    // was populated. Now: if there's a vps[0] entry but no
+                    // line, show a placeholder row with the speaker/scene_type
+                    // marker + the veo prompt toggle.
+                    if (!lines.length && vps && vps[0]) {
+                        const vp = vps[0];
+                        const speaker = (sc.speaker_mode || '').toLowerCase();
+                        const sceneType = (sc.scene_type || '').toLowerCase();
+                        const marker =
+                            sceneType === 'text_card' ? '[text card]' :
+                            speaker === 'silent' ? '[silent]' :
+                            '[no dialogue]';
+                        lineRows = `<div style="padding:6px 8px;background:var(--bg-input);border-radius:4px;font-size:11px;margin-top:4px;"><div style="color:var(--text-muted);font-style:italic;">${imgEscape(marker)}</div>${vp ? `<details style="margin-top:4px;"><summary style="cursor:pointer;color:#a78bfa;">veo prompt override</summary><pre style="margin-top:4px;padding:6px;background:var(--bg-elevated);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;">${imgEscape((vp.text_prompt||'') + (vp.negative_prompt ? '\n\nNegative: ' + vp.negative_prompt : ''))}</pre></details>` : ''}</div>`;
+                    }
+
                     return `<div style="padding:8px 10px;background:var(--bg-elevated);border-radius:4px;font-size:12px;"><b>Scene ${sc.scene_index}</b> · image_${sc.image_index} · ${imgEscape(sc.clip_mode||'blend')}${sc.scene_transition ? ` · ${imgEscape(sc.scene_transition)}` : ''}${sc.speaker_mode ? ` · speaker: ${imgEscape(sc.speaker_mode)}` : ''}${sc.visual_register ? ` · register: ${imgEscape(sc.visual_register)}` : ''}${lineRows}</div>`;
                 }).join('')}</div></details>`
                 : '';
