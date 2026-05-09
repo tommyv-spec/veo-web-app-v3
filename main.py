@@ -2478,6 +2478,105 @@ async def _setup_job_background(
             add_job_log(db, job_id, f"✓ All {total_clips} prompts built", "INFO", "system")
             db.commit()
 
+            # v698A Phase 3a — audio_pair Clip row creation for voiceover-paired
+            # scenes. After the main prompt-build loop completes, every clip
+            # with clip_role='visual_pair' gets a sibling audio_pair Clip
+            # created. The audio_pair carries the voiceover_line as
+            # dialogue_text and references the voiceover_anchor_image as its
+            # start frame. paired_clip_id is set bidirectionally so Phase 3c's
+            # render dispatch can resolve the pair atomically.
+            #
+            # Phase 3a behavior: audio_pair Clips are created at status
+            # 'preparing' (NOT pending). Phase 3b will build their prompts
+            # using the anchor image; Phase 3c will mark them pending +
+            # dispatch render; Phase 3d adds atomic completion gating. Until
+            # Phase 3b lands, audio_pair Clips sit dormant — visible in DB,
+            # not yet rendered, no UI surfacing.
+            try:
+                visual_pair_clips = db.query(Clip).filter(
+                    Clip.job_id == job_id,
+                    Clip.clip_role == 'visual_pair',
+                ).all()
+                if visual_pair_clips:
+                    # Audio-pair Clips use clip_index offset so they sort cleanly
+                    # in DB queries while not colliding with natural clip_index
+                    # values (which are 0..N-1 for the lineup). Convention:
+                    # audio_pair.clip_index = visual_pair.clip_index + 100000
+                    audio_pair_offset = 100000
+                    audio_pairs_created = 0
+                    for vp in visual_pair_clips:
+                        # Skip if already paired (idempotent — re-runs of
+                        # _setup_job_background after a partial failure)
+                        if vp.paired_clip_id is not None:
+                            continue
+                        if not vp.voiceover_line:
+                            print(
+                                f"[v698A/Phase3a] visual_pair clip {vp.id} "
+                                f"missing voiceover_line — skipping audio twin",
+                                flush=True,
+                            )
+                            continue
+                        if not vp.voiceover_anchor_image_node_id:
+                            print(
+                                f"[v698A/Phase3a] visual_pair clip {vp.id} "
+                                f"missing voiceover_anchor_image_node_id — skipping",
+                                flush=True,
+                            )
+                            continue
+
+                        ap = Clip(
+                            job_id=job_id,
+                            clip_index=audio_pair_offset + vp.clip_index,
+                            dialogue_id=vp.dialogue_id,
+                            dialogue_text=vp.voiceover_line,
+                            status='preparing',  # Phase 3b → 'pending' after prompt build
+                            scene_index=vp.scene_index,
+                            clip_role='audio_pair',
+                            paired_clip_id=vp.id,
+                            # Anchor image FK denormed from the visual_pair so
+                            # the worker render dispatch (Phase 3c) can pick it
+                            # up without re-resolving via dialogue_json.
+                            voiceover_anchor_image_node_id=vp.voiceover_anchor_image_node_id,
+                            voiceover_line=vp.voiceover_line,
+                            # cut_mode='auto' on audio_pair — its Whisper-VAD
+                            # runs at export time on the LINE script.
+                            cut_mode='auto',
+                            # text_card / caption / bg_color — all NULL on
+                            # audio_pair (visual is discarded at export anyway).
+                            scene_type='shot',
+                        )
+                        db.add(ap)
+                        db.flush()  # populate ap.id
+
+                        # Bidirectional link
+                        vp.paired_clip_id = ap.id
+                        audio_pairs_created += 1
+
+                    if audio_pairs_created:
+                        db.commit()
+                        print(
+                            f"[v698A/Phase3a] created {audio_pairs_created} "
+                            f"audio_pair Clip rows for {len(visual_pair_clips)} "
+                            f"visual_pair Clip rows",
+                            flush=True,
+                        )
+                        add_job_log(
+                            db, job_id,
+                            f"v698A: {audio_pairs_created} audio twins created "
+                            f"for voiceover-paired scenes",
+                            "INFO", "system",
+                        )
+            except Exception as _vp_err:
+                # Non-fatal — visual side will still render; audio twin can be
+                # created later via redo or a follow-up sweep
+                print(
+                    f"[v698A/Phase3a] audio_pair creation failed (non-fatal): "
+                    f"{_vp_err}",
+                    flush=True,
+                )
+                import traceback as _tb
+                _tb.print_exc()
+
             # Clean up local temp frames
             for _lp in local_frame_paths.values():
                 try:
