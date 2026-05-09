@@ -6274,16 +6274,27 @@ def prepare_batch_for_video(
         # v644 — same parallel-array convention for pads (audio-padding
         # suffix per line; None when no pad on that line).
         pads = scene.get("pads") or []
-        # Defensively zip — if asymmetric, pad notes with None to match lines
-        while len(notes) < len(lines):
-            notes.append(None)
-        notes = notes[:len(lines)]
-        while len(veo_prompts) < len(lines):
-            veo_prompts.append(None)
-        veo_prompts = veo_prompts[:len(lines)]
-        while len(pads) < len(lines):
-            pads.append(None)
-        pads = pads[:len(lines)]
+        # Defensively zip — if asymmetric, pad notes with None to match lines.
+        # v682s — gate truncation on `if lines:` (mirrors the v682f to_dict
+        # patch). For silent / text_card scenes lines=[] but the v682p
+        # override above just attached a 1-entry veo_prompts (the markdown's
+        # clip override). Pre-v682s the block below truncated veo_prompts
+        # to []  (and pads, notes likewise), wiping v682p's override —
+        # silent_vp at the synthetic injection branch then read [] and
+        # emitted veo_prompt_override=None, so silent clips fell through
+        # to build_prompt regen instead of using the markdown.
+        # Only truncate when the scene actually has lines; otherwise the
+        # 1-entry override survives intact for the synthetic injection.
+        if lines:
+            while len(notes) < len(lines):
+                notes.append(None)
+            notes = notes[:len(lines)]
+            while len(veo_prompts) < len(lines):
+                veo_prompts.append(None)
+            veo_prompts = veo_prompts[:len(lines)]
+            while len(pads) < len(lines):
+                pads.append(None)
+            pads = pads[:len(lines)]
 
         clip_mode = (scene.get("clip_mode") or "blend").lower()
         transition = scene.get("transition")

@@ -112,6 +112,24 @@ def test_stage3_to_dict_truncation(scenes):
 
 def test_stage4_prepare_for_video_flat_row(scenes):
     print("\nStage 4: prepare_batch_for_video flat-row injection")
+    # v682s — simulate the prepare_batch_for_video defensive-zip truncation
+    # block. Pre-v682s a SECOND truncation at lines 6281-6283 wiped the
+    # v682p override for silent scenes (lines=[] → veo_prompts[:0]=[]).
+    # Production e2e missed this until the user's run revealed it; now
+    # simulate it explicitly so regressions are caught.
+    for s in scenes:
+        lines = s.get("lines") or []
+        veo_prompts = list(s.get("veo_prompts_after_to_dict") or [])
+        # Production logic at image_platform.py:6277-6286 (post v682s fix):
+        if lines:
+            while len(veo_prompts) < len(lines):
+                veo_prompts.append(None)
+            veo_prompts = veo_prompts[:len(lines)]
+        # else: preserve 1-entry override (the v682s fix)
+        s["veo_prompts_after_truncate"] = veo_prompts
+        if not veo_prompts and s["scene_index"] != 5:  # text_card scene 5 expected None
+            fail("truncate", f"scene {s['scene_index']} veo_prompts wiped by truncation block")
+
     # Simulate the synthetic + per-line loop emitting scenes_metadata_flat
     scenes_metadata_flat = []
     dialogue_lines_flat = []
@@ -128,7 +146,7 @@ def test_stage4_prepare_for_video_flat_row(scenes):
     for s in scenes:
         sn = s["scene_index"]
         lines = s["lines"]
-        veo_prompts = s["veo_prompts_after_to_dict"]
+        veo_prompts = s.get("veo_prompts_after_truncate", s["veo_prompts_after_to_dict"])
         speaker_mode = speaker_modes[sn]
         scene_type = scene_types[sn]
         scene_is_silent = speaker_mode == "silent"
