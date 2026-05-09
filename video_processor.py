@@ -3413,7 +3413,14 @@ def export_final_video(
                     #   - silence_mode != 'whisper' (we only do per-clip
                     #     Whisper here; energy-mode runs post-concat)
                     #   - clip has no dialogue text (silent or other)
-                    _clip_text = (info.get("text") or "").strip()
+                    #
+                    # v691c — read 'dialogue_text' key (not 'text'). The
+                    # clip_info dict built by main.py's _download_clip uses
+                    # 'dialogue_text' (matching Clip.dialogue_text column).
+                    # Pre-v691c info.get('text') always returned None →
+                    # _full_clip_text empty → condition False → per-clip
+                    # VAD never fired regardless of v691b's hoisted save.
+                    _clip_text = (info.get("dialogue_text") or "").strip()
                     _clip_pad = (info.get("dialogue_pad") or "").strip()
                     _full_clip_text = (
                         f"{_clip_text} {_clip_pad}".strip()

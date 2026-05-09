@@ -5654,6 +5654,9 @@ async def export_final_video(
                 "scene_type": clip.scene_type,
                 "caption": clip.caption,
                 "bg_color": clip.bg_color,
+                # v691c — propagate dialogue_pad so per-clip Whisper-VAD
+                # has the full audio context (line + pad) for matching.
+                "dialogue_pad": clip.dialogue_pad or "",
                 "_order": pos
             }
         return None
