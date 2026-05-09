@@ -5895,52 +5895,58 @@ def prepare_batch_for_video(
         ImageSceneAssignment.batch_id == batch_id
     ).order_by(ImageSceneAssignment.scene_index).all()
 
-    # v682k — STALE-ASSIGNMENT AUTO-REPAIR.
-    # If any assignment has lines=[] but veo_prompts_json is NULL, the batch
-    # was imported BEFORE the v682f attach_veo_prompts_to_scenes zero-line
-    # patch + v682i parser format-tolerance landed. Re-parse the markdown
-    # stored on the batch and patch missing veo_prompts_json in-place. This
-    # spares the user from having to delete the batch and re-import every
-    # time a parser fix lands.
+    # v682m — UNCONDITIONAL re-parse + sync veo_prompts_json for silent
+    # scenes. Drop the stale-detection guard from v682k (which had subtle
+    # mismatches that left some batches unrepaired). On every prepare,
+    # re-parse the batch's stored source_markdown and rewrite each
+    # silent / zero-line assignment's veo_prompts_json. This is cheap
+    # (parse runs in milliseconds for an 8-scene markdown) and bullet-
+    # proof — no edge case where stale state slips through. The behavior
+    # is idempotent: re-parsing produces the same JSON each time, so
+    # only changed rows get committed.
+    #
+    # Diagnostic log fires per scene so production debugging can see
+    # exactly which silent scenes got patched.
     if assignments and batch.source_markdown:
-        stale_silent = [
-            a for a in assignments
-            if (not (a.veo_prompts_json or "").strip())
-            and a.image_node_id is not None  # not a text_card
-            and (not (a.lines_json or "").strip() or a.lines_json == "[]")
-        ]
-        if stale_silent:
-            log.info(
-                f"[v682k/auto-repair] batch {batch_id}: "
-                f"{len(stale_silent)} silent scene(s) missing veo_prompts_json — "
-                f"re-parsing source_markdown to patch in place."
-            )
-            try:
-                reparsed = parse_scene_table(batch.source_markdown)
-                reparsed_scenes = {s["scene_index"]: s for s in reparsed.get("scenes", [])}
-                for a in stale_silent:
-                    s = reparsed_scenes.get(a.scene_index)
-                    if s is None:
-                        continue
-                    veo_prompts = s.get("veo_prompts") or []
-                    if not any(vp for vp in veo_prompts):
-                        continue
-                    a.veo_prompts_json = _json.dumps(veo_prompts)
+        try:
+            reparsed = parse_scene_table(batch.source_markdown)
+            reparsed_scenes = {s["scene_index"]: s for s in reparsed.get("scenes", [])}
+            patched = 0
+            for a in assignments:
+                s = reparsed_scenes.get(a.scene_index)
+                if s is None:
+                    continue
+                veo_prompts = s.get("veo_prompts") or []
+                if not any(vp for vp in veo_prompts):
+                    # No prompts to attach — leave assignment as is.
+                    continue
+                fresh_json = _json.dumps(veo_prompts)
+                stored_json = (a.veo_prompts_json or "").strip()
+                if fresh_json != stored_json:
+                    a.veo_prompts_json = fresh_json
+                    patched += 1
                     log.info(
-                        f"[v682k/auto-repair] scene_index={a.scene_index} → "
-                        f"patched veo_prompts_json ({len(a.veo_prompts_json)} chars)"
+                        f"[v682m/sync] scene_index={a.scene_index} → "
+                        f"updated veo_prompts_json (stored={len(stored_json)} chars, "
+                        f"fresh={len(fresh_json)} chars)"
                     )
+            if patched:
+                log.info(
+                    f"[v682m/sync] batch {batch_id}: "
+                    f"patched {patched} assignment veo_prompts_json fields from "
+                    f"source_markdown re-parse."
+                )
                 db.commit()
-                # Reload assignments after patch
+                # Reload assignments after patch so to_dict picks up the new JSON.
                 assignments = db.query(ImageSceneAssignment).filter(
                     ImageSceneAssignment.batch_id == batch_id
                 ).order_by(ImageSceneAssignment.scene_index).all()
-            except Exception as repair_err:
-                log.warning(
-                    f"[v682k/auto-repair] batch {batch_id}: re-parse failed "
-                    f"({type(repair_err).__name__}: {repair_err}) — falling back "
-                    f"to stored assignments. User can re-import to fix."
-                )
+        except Exception as repair_err:
+            log.warning(
+                f"[v682m/sync] batch {batch_id}: re-parse failed "
+                f"({type(repair_err).__name__}: {repair_err}) — falling back "
+                f"to stored assignments."
+            )
 
     if not assignments:
         # Legacy batch (pre-v432) — synthesize 1:1 assignments from the
