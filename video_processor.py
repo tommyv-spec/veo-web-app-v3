@@ -2365,16 +2365,37 @@ def concat_videos(files: List[Path], output: Path) -> None:
     if n == 0:
         raise RuntimeError("concat_videos: no files to concatenate")
 
-    # Build per-input -i flags
+    # v692d — per-input video + audio NORMALIZE before concat. The
+    # concat filter requires every input to share resolution + pixel
+    # format + sar (video) AND sample_rate + channel_layout + sample_fmt
+    # (audio). text_card scenes render at 30fps with anullsrc audio @
+    # 44100Hz; Veo clips are 24fps @ 48000Hz — without per-input
+    # normalize, ffmpeg errors with "Input link parameters (sample_rate
+    # =44100...) do not match the corresponding output link parameters
+    # (sample_rate=48000...)" and aborts the concat.
     input_flags: List[str] = []
     for f in files:
         input_flags += ["-i", str(f)]
 
-    # Build filtergraph: [0:v][0:a][1:v][1:a]...concat=n=N:v=1:a=1[v][a]
-    streams = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(n))
+    norm_chunks: List[str] = []
+    concat_chunks: List[str] = []
+    for i in range(n):
+        norm_chunks.append(
+            f"[{i}:v:0]scale=720:1280:force_original_aspect_ratio=decrease,"
+            f"pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+            f"fps=24,format=yuv420p,setpts=PTS-STARTPTS[v{i}]"
+        )
+        norm_chunks.append(
+            f"[{i}:a:0]aresample=async=1:first_pts=0,"
+            f"aformat=sample_fmts=fltp:sample_rates=48000:"
+            f"channel_layouts=stereo,asetpts=PTS-STARTPTS[a{i}]"
+        )
+        concat_chunks.append(f"[v{i}][a{i}]")
     filtergraph = (
-        f"{streams}concat=n={n}:v=1:a=1[vraw][a];"
-        f"[vraw]fps=24,setpts=PTS-STARTPTS,format=yuv420p[v]"
+        ";".join(norm_chunks)
+        + ";"
+        + "".join(concat_chunks)
+        + f"concat=n={n}:v=1:a=1[v][a]"
     )
 
     cmd = [
@@ -2384,19 +2405,24 @@ def concat_videos(files: List[Path], output: Path) -> None:
         "-map", "[v]", "-map", "[a]",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-threads", "1",
-        "-c:a", "aac", "-b:a", "128k",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
         "-max_muxing_queue_size", "1024",
         "-movflags", "+faststart",
         str(output),
     ]
-    print(f"[VideoProcessor]   Concatenating (concat filter, n={n}, fps=24)...")
+    print(f"[VideoProcessor]   Concatenating (concat filter, n={n}, normalized 720x1280@24fps, 48kHz stereo)...")
     code, _, err = run(cmd)
     if code == 0:
         print(f"[VideoProcessor]   concat_videos completed")
         return
 
+    # Surface the FULL ffmpeg stderr tail (last 1.5KB) so the actual
+    # filtergraph error is visible, not just the version banner.
+    err_tail = err[-1500:] if err else "<no stderr>"
+    print(f"[VideoProcessor]   Initial concat failed. ffmpeg stderr tail:\n{err_tail}", flush=True)
+
     # Fallback: medium preset if veryfast somehow fails on encode
-    print(f"[VideoProcessor]   Initial concat failed, retrying with medium preset...")
+    print(f"[VideoProcessor]   Retrying with medium preset...")
     cmd_re = list(cmd)
     for i, tok in enumerate(cmd_re):
         if tok == "veryfast":
@@ -2404,8 +2430,9 @@ def concat_videos(files: List[Path], output: Path) -> None:
             break
     code, _, err = run(cmd_re)
     if code != 0:
-        print(f"[VideoProcessor]   ERROR: {err[:500]}")
-        raise RuntimeError(f"Failed to concatenate videos: {err[:300]}")
+        err_tail = err[-1500:] if err else "<no stderr>"
+        print(f"[VideoProcessor]   ERROR (medium preset stderr tail):\n{err_tail}", flush=True)
+        raise RuntimeError(f"Failed to concatenate videos. Last 500 chars of stderr: {err_tail[-500:]}")
     print(f"[VideoProcessor]   concat_videos completed (medium preset)")
 
 
