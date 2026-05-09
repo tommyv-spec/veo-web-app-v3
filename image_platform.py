@@ -5895,6 +5895,23 @@ def prepare_batch_for_video(
         ImageSceneAssignment.batch_id == batch_id
     ).order_by(ImageSceneAssignment.scene_index).all()
 
+    # v682o — TOP-OF-PREPARE diagnostic. Always fires so production
+    # debugging can confirm v682m sync block is reachable AND see
+    # the per-assignment veo_prompts_json state BEFORE any sync.
+    log.info(
+        f"[v682o/prepare-entry] batch={batch_id} "
+        f"assignments={len(assignments)} "
+        f"source_markdown={'SET' if batch.source_markdown else 'NULL'}"
+        f"({len(batch.source_markdown or '')} chars)"
+    )
+    for a in assignments:
+        vp_state = (a.veo_prompts_json or "").strip()
+        log.info(
+            f"[v682o/before-sync] scene_index={a.scene_index} "
+            f"lines_json={a.lines_json!r} "
+            f"veo_prompts_json={'EMPTY/NULL' if not vp_state else f'{len(vp_state)}_chars'}"
+        )
+
     # v682m — UNCONDITIONAL re-parse + sync veo_prompts_json for silent
     # scenes. Drop the stale-detection guard from v682k (which had subtle
     # mismatches that left some batches unrepaired). On every prepare,
