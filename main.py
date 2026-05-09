@@ -6925,38 +6925,16 @@ async def get_job_image(
             r2_key = f"jobs/{job_id}/frames/{filename}"
             
             if storage.exists(r2_key):
-                # v561: redirect to R2 presigned URL instead of blocking
-                # the eventloop on a synchronous download. Pre-v561 every
-                # job thumbnail on the dashboard was downloaded through
-                # the app worker on cold cache (post-deploy / first
-                # render), which combined with the image_platform variant
-                # downloads to swamp the worker for 30-60s. Browser fetches
-                # bytes directly from R2 edge — typically 50-100ms vs
-                # 200-2000ms through the app worker. Memory cache and
-                # local FileResponse paths above remain unchanged for
-                # the warm-cache case.
-                #
-                # v687 — only redirect on explicit opt-in via ?direct=1.
-                # Default (force_proxy=True) falls through to the
-                # download-and-stream path below, which works on any
-                # network that reaches the app server.
-                if not force_proxy:
-                    from fastapi.responses import RedirectResponse
-                    try:
-                        presigned = storage.get_presigned_url(r2_key, expires_in=3600)
-                        return RedirectResponse(
-                            url=presigned,
-                            status_code=302,
-                            headers={
-                                "Cache-Control": "public, max-age=3600, immutable",
-                            },
-                        )
-                    except Exception as _pe:
-                        print(f"[Images] Presigned URL generation failed, falling back to download: {_pe}", flush=True)
-                        # fall through to legacy download path
-
-                # Legacy fallback path (only reached if presigned URL
-                # generation itself fails — e.g. credentials issue):
+                # v695 — REDIRECT-TO-R2 PATH REMOVED ENTIRELY. v687 made it
+                # opt-in via ?direct=1; presigned R2 URLs continued to leak
+                # in cached responses. Only behavior now: download from R2
+                # → cache → return bytes. Browser never sees R2 host.
+                print(
+                    f"[Images/v695] cold-cache miss: r2_key={r2_key} — "
+                    f"downloading from R2 to local then streaming bytes "
+                    f"(no redirect)",
+                    flush=True,
+                )
                 import tempfile
                 temp_path = tempfile.mktemp(suffix=suffix)
                 storage.download_file(r2_key, temp_path)

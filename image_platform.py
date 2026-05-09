@@ -2683,62 +2683,18 @@ def serve_image_file(
     db.close()
 
     if not abs_path.exists():
-        # v694 — proxy is now DEFAULT (correctness > performance). Pre-v694
-        # (v561) returned a 302 redirect to a presigned R2 URL when the file
-        # was missing locally — fast (~50-100ms via R2 edge) but breaks for
-        # users whose ISP/firewall blocks *.r2.cloudflarestorage.com (browser
-        # sees ERR_CONNECTION_TIMED_OUT). v687 already applied this same
-        # correctness flip to /api/jobs/{job_id}/images/{filename} in main.py;
-        # this endpoint missed the same fix → leaked R2 hosts to the browser
-        # via redirect on every variant tile during the onboarding upload
-        # step. The redirect-to-R2 fast path is now opt-in via `?direct=1`
-        # for clients that know they can reach R2 directly.
-        #
-        # Default path now: synchronously download from R2 to local cache,
-        # then return FileResponse. ~200ms-2s on cold cache (one-time per
-        # file post-deploy), then sub-ms warm-cache hits forever after.
-        # The original v561 worker-starvation concern is mitigated by the
-        # local cache: each path downloads ONCE, subsequent requests are
-        # local file hits.
-        force_proxy = not bool(direct)
-        from fastapi.responses import RedirectResponse
-        storage = _storage_or_none()
-        if storage is not None and safe not in _r2_known_missing and not force_proxy:
-            try:
-                key = _r2_key_for(safe)
-                # HEAD first — cheap, confirms object exists, lets us
-                # distinguish "not in R2" from "in R2 but transient error"
-                storage.client.head_object(Bucket=storage.bucket_name, Key=key)
-                # Object exists; generate a 1-hour presigned URL and redirect.
-                presigned = storage.get_presigned_url(key, expires_in=3600)
-                # Schedule async backfill so subsequent requests hit local.
-                # Fire-and-forget — never blocks the redirect.
-                try:
-                    import threading
-                    def _bg_download():
-                        try:
-                            _storage_download_to_local(safe)
-                        except Exception:
-                            pass
-                    threading.Thread(target=_bg_download, daemon=True).start()
-                except Exception:
-                    pass
-                # 302 with Cache-Control to let the browser cache the
-                # bytes for the duration of the presigned URL.
-                return RedirectResponse(
-                    url=presigned,
-                    status_code=302,
-                    headers={"Cache-Control": "private, max-age=3600"},
-                )
-            except Exception as e:
-                # HEAD failed — either the object truly isn't in R2 (404)
-                # or there's a real R2 error. Fall through to the legacy
-                # path (synchronous download attempt + orphan cleanup).
-                # Mark known-missing in the 404 case to short-circuit
-                # future requests for the same path.
-                msg = str(e)
-                if "Not Found" in msg or "NoSuchKey" in msg or "(404)" in msg:
-                    _r2_known_missing.add(safe)
+        # v695 — REDIRECT-TO-R2 PATH REMOVED ENTIRELY. v694 made it opt-in
+        # via ?direct=1, but presigned R2 URLs continued to leak in cached
+        # responses and edge cases. Any redirect path is a footgun for
+        # users on networks that block *.r2.cloudflarestorage.com. The
+        # ONLY behavior now: download from R2 → cache locally → FileResponse.
+        # Browser never sees an R2 host. The diagnostic log below confirms
+        # which path the request takes.
+        print(
+            f"[image_platform/v695] /files cold-cache miss: path={safe!r} — "
+            f"downloading from R2 to local then FileResponse (no redirect)",
+            flush=True,
+        )
 
         # v561: fall-through legacy path — used when storage isn't
         # configured, when HEAD failed for non-404 reasons (the next
