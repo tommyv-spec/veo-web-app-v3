@@ -2239,11 +2239,42 @@ async def _setup_job_background(
                 # v682h — skip text_card clips entirely. They have no Veo
                 # render (rendered via ffmpeg drawtext at video assembly),
                 # no start_image_idx (it's null per text_card design), and
-                # no dialogue. Pre-v682h the loop crashed at
-                # `start_image_idx < num_images` because start_image_idx
-                # is None for text_card.
+                # no dialogue.
+                #
+                # v688 — additionally MARK the Clip as COMPLETED + auto-
+                # approved so the Flow worker doesn't pick it up. Pre-v688
+                # the clip stayed at status='preparing' (the initial value
+                # from main.py's Clip writer) which apparently wasn't
+                # filtered out everywhere — user reported scene 5 (text_card)
+                # showing up in the Review & Approve UI as 'REDO QUEUED' /
+                # 'Redo submission failed'. Now: clip immediately marks
+                # itself as completed with a placeholder prompt so the
+                # video assembly's drawtext path takes over without any
+                # Flow round-trip.
                 if (line_data.get("scene_type") or "").lower() == "text_card":
                     print(f"[Background] Clip {idx}: text_card — skipping Veo prompt build (drawtext at assembly)", flush=True)
+                    _tc_clip = db.query(Clip).filter(
+                        Clip.job_id == job_id, Clip.clip_index == idx
+                    ).first()
+                    if _tc_clip:
+                        _tc_clip.prompt_text = (
+                            f"[text_card placeholder — caption: "
+                            f"{(line_data.get('caption') or '').strip()!r}, "
+                            f"bg: {(line_data.get('bg_color') or 'black').strip()}, "
+                            f"duration: {line_data.get('duration_s') or 1.0}s]"
+                        )
+                        # Mark complete so Flow worker skips. Auto-approve so
+                        # it doesn't sit in pending_review state forever
+                        # (drawtext output isn't user-reviewable per-clip;
+                        # the final assembled video is the artifact users
+                        # review).
+                        _tc_clip.status = ClipStatus.COMPLETED.value
+                        _tc_clip.approval_status = "approved"
+                        # Stamp completed_at so progress calculations include it.
+                        if not _tc_clip.completed_at:
+                            _tc_clip.completed_at = datetime.utcnow()
+                        db.commit()
+                        print(f"[Background] Clip {idx}: text_card → marked COMPLETED + approved (drawtext path)", flush=True)
                     continue
 
                 # v682h — handle missing start_image_idx defensively
