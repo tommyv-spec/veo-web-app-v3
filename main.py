@@ -343,6 +343,14 @@ class ClipResponse(BaseModel):
     prompt_text: Optional[str] = None
     # Lineup
     in_lineup: bool = True
+    # v698A — clip-pair metadata for paired-card UI rendering. clip_role
+    # NULL/single = standard clip (default). 'visual_pair' = b-roll silent
+    # clip with paired audio twin. 'audio_pair' = audio source whose visual
+    # is discarded; frontend filters these out of the standalone clip list.
+    clip_role: Optional[str] = None
+    paired_clip_id: Optional[int] = None
+    voiceover_anchor_image_node_id: Optional[int] = None
+    voiceover_line: Optional[str] = None
 
 
 class RedoRequest(BaseModel):
@@ -3359,6 +3367,11 @@ async def get_job_clips(
             scene_index=c.scene_index or 0,
             prompt_text=c.prompt_text or None,
             in_lineup=c.id in lineup_set if lineup_set else True,
+            # v698A
+            clip_role=c.clip_role,
+            paired_clip_id=c.paired_clip_id,
+            voiceover_anchor_image_node_id=c.voiceover_anchor_image_node_id,
+            voiceover_line=c.voiceover_line,
         )
         for c in clips
     ]

@@ -7361,7 +7361,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         cachedClipsData = cachedClips; cachedJobId = id;
                         const cListEl = document.getElementById('clipsList');
                         const hasLineup = cachedClips.some(x => x.in_lineup === false);
-                        const visible = hasLineup ? cachedClips.filter(x => x.in_lineup !== false) : cachedClips;
+                        let visible = hasLineup ? cachedClips.filter(x => x.in_lineup !== false) : cachedClips;
+                        // v698A — hide audio_pair clips (paired-card sibling rendered via visual_pair).
+                        visible = visible.filter(c => (c.clip_role || '').toLowerCase() !== 'audio_pair');
                         // v657 — match the main-render path's #clipsToolbar
                         // structure so the diff-path doesn't insert a
                         // second expand button. Pre-v657 the cache-render
@@ -7403,7 +7405,16 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if(!clips.length){c.innerHTML='<p style="color:var(--text-muted);text-align:center;padding:10px">Starting...</p>';return;}
             // Filter out clips excluded from lineup (only when a custom lineup exists)
             const hasLineup = clips.some(x => x.in_lineup === false);
-            const visibleClips = hasLineup ? clips.filter(x => x.in_lineup !== false) : clips;
+            let visibleClips = hasLineup ? clips.filter(x => x.in_lineup !== false) : clips;
+            // v698A — hide audio_pair clips from the standalone card list.
+            // Their content (line + voice) is bound to a visual_pair sibling
+            // and surfaces via the paired-card badge on that visual_pair card.
+            // audio_pair clips have clip_index ≥ 100000 (Phase 3a offset) so
+            // they sort to the bottom even if not filtered, but they shouldn't
+            // appear as separate review cards at all.
+            visibleClips = visibleClips.filter(
+                c => (c.clip_role || '').toLowerCase() !== 'audio_pair'
+            );
             let container=c.querySelector('.clips-grid');
             if(!container){
                 const hasCompleted=clips.some(x=>x.status==='completed'),generating=clips.filter(x=>x.status==='generating'||x.status==='pending'||x.status==='redo_queued'||x.status==='flow_redo_queued'||x.status==='preparing');
@@ -7815,7 +7826,23 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 expandedActs = acts;
             }
             
-            return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}</div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}<div class="clip-text">${c.dialogue_text}</div><div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
+            // v698A — visual_pair badge. When a clip has clip_role='visual_pair'
+            // it's the b-roll silent visual whose audio comes from a paired
+            // audio_pair render (anchor torso+hands frame, persona lip-syncing
+            // the voiceover_line). Surface this in the clip header so users
+            // know the audio source isn't visible in this card; the full
+            // dual-thumbnail paired-card layout lands in a follow-up.
+            const _v698aPairedBadge = ((c.clip_role || '').toLowerCase() === 'visual_pair')
+                ? `<span class="badge" style="background:rgba(99,102,241,0.18);color:#818cf8;font-size:10px;font-weight:600;padding:2px 6px;border-radius:8px;margin-left:4px;" title="v698A — b-roll visual paired with audio twin (persona lip-sync from voiceover_anchor_image)">🎙️ paired</span>`
+                : '';
+            // Show the voiceover_line on visual_pair cards (the audio twin's
+            // line, since c.dialogue_text on the visual side is empty per
+            // Phase 3c silent override).
+            const _v698aDisplayText = ((c.clip_role || '').toLowerCase() === 'visual_pair' && c.voiceover_line)
+                ? `<span style="color:#818cf8;font-size:11px;" title="Audio twin lip-syncs this line">🎙 ${c.voiceover_line}</span>`
+                : c.dialogue_text;
+
+            return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}</div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${_v698aPairedBadge}${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}<div class="clip-text">${_v698aDisplayText}</div><div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
 
         }
         
