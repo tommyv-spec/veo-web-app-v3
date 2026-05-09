@@ -6579,22 +6579,40 @@ async def voice_swap_openvoice(
 
 @app.get("/api/jobs/{job_id}/images/{filename}")
 async def get_job_image(
-    job_id: str, 
-    filename: str, 
+    job_id: str,
+    filename: str,
+    proxy: int = 0,
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
     """Get an image from a job's images directory (local or R2).
-    
+
     Uses browser cache (1 hour) and an in-memory LRU cache to avoid
     repeated R2 downloads — thumbnails don't change after generation.
-    
+
     v527: previously held the dep-injected DB session through R2
     download (5-15s for cold-cache fetches). Under heavy frontend
     polling that exhausted the connection pool. Now: query needed
     job data, release session, do R2 work without DB held.
+
+    v686: `?proxy=1` query param OR `R2_PROXY_THUMBNAILS=1` env var
+    forces the server to download from R2 and stream bytes to the
+    browser instead of returning a 302 redirect to a presigned R2
+    URL. Use this when the user's network blocks
+    `*.r2.cloudflarestorage.com` (some ISP / firewall / VPN configs
+    drop direct R2 connections, browser sees ERR_CONNECTION_TIMED_OUT
+    on the redirect target). The app server's connection to R2 is
+    typically unaffected because Render's egress is not behind the
+    same network restrictions.
     """
     from fastapi.responses import Response
+
+    # v686 — global opt-in via env var (set R2_PROXY_THUMBNAILS=1 on
+    # the platform to force-proxy for all users) OR per-request via
+    # `?proxy=1` query param (frontend adds it when the user has
+    # opted-in via UI / localStorage flag).
+    _proxy_env = (os.environ.get("R2_PROXY_THUMBNAILS") or "").strip().lower()
+    force_proxy = bool(proxy) or _proxy_env in ("1", "true", "yes", "on")
     
     job = get_user_job(db, job_id, current_user)
     
@@ -6641,19 +6659,26 @@ async def get_job_image(
                 # 200-2000ms through the app worker. Memory cache and
                 # local FileResponse paths above remain unchanged for
                 # the warm-cache case.
-                from fastapi.responses import RedirectResponse
-                try:
-                    presigned = storage.get_presigned_url(r2_key, expires_in=3600)
-                    return RedirectResponse(
-                        url=presigned,
-                        status_code=302,
-                        headers={
-                            "Cache-Control": "public, max-age=3600, immutable",
-                        },
-                    )
-                except Exception as _pe:
-                    print(f"[Images] Presigned URL generation failed, falling back to download: {_pe}", flush=True)
-                    # fall through to legacy download path
+                #
+                # v686 — skip the redirect when force_proxy is set.
+                # User's network blocks *.r2.cloudflarestorage.com
+                # (browser ERR_CONNECTION_TIMED_OUT on the redirect target);
+                # the app server's R2 connection is typically unaffected,
+                # so download + stream-through bytes works fine.
+                if not force_proxy:
+                    from fastapi.responses import RedirectResponse
+                    try:
+                        presigned = storage.get_presigned_url(r2_key, expires_in=3600)
+                        return RedirectResponse(
+                            url=presigned,
+                            status_code=302,
+                            headers={
+                                "Cache-Control": "public, max-age=3600, immutable",
+                            },
+                        )
+                    except Exception as _pe:
+                        print(f"[Images] Presigned URL generation failed, falling back to download: {_pe}", flush=True)
+                        # fall through to legacy download path
 
                 # Legacy fallback path (only reached if presigned URL
                 # generation itself fails — e.g. credentials issue):
