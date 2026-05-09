@@ -2334,6 +2334,147 @@ def render_text_card(
         raise RuntimeError(f"render_text_card failed: {err[:300]}")
 
 
+def swap_audio_with_speed_match(
+    visual_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    speed_min: float = 1.0,
+    speed_max: float = 2.0,
+) -> Tuple[float, float, str]:
+    """v698A Phase 4 — broll-with-voice helper.
+
+    Takes a silent (or muted) visual_pair clip + an audio_pair's clean
+    voiceover audio, produces a single mp4 where:
+      - The visual is speed-adjusted to match the audio duration
+      - The audio is the voiceover (replacing the visual's original audio)
+
+    Speed-match rules (per v698A spec):
+      natural_factor = T_visual / T_audio
+      if natural_factor < speed_min (1.0):
+        → broll is SHORTER than audio. Clamp speed to 1.0 (no slowdown).
+          Visual plays at original speed and ends; ffmpeg pads with the
+          last frame frozen for the remaining audio duration.
+      if speed_min ≤ natural_factor ≤ speed_max:
+        → speed = natural_factor. Output duration ≈ T_audio. Perfect.
+      if natural_factor > speed_max (2.0):
+        → broll is LONGER than even 2x sped-up. Apply 2x speed-up.
+          Output duration after 2x = T_visual / 2 > T_audio.
+          ffmpeg -shortest cuts the broll tail when audio ends.
+
+    Returns (speed_factor_applied, output_duration, mode_label) where:
+      mode_label ∈ {'natural', 'min_clamped_freeze_tail',
+                    'max_clamped_audio_cut'}
+
+    Raises RuntimeError if the input files are missing or ffmpeg fails.
+    """
+    if not visual_path.exists():
+        raise RuntimeError(f"visual file missing: {visual_path}")
+    if not audio_path.exists():
+        raise RuntimeError(f"audio file missing: {audio_path}")
+
+    t_visual = get_duration(ffprobe_json(visual_path))
+    t_audio = get_duration(ffprobe_json(audio_path))
+    if t_visual <= 0 or t_audio <= 0:
+        raise RuntimeError(
+            f"swap_audio_with_speed_match: invalid durations "
+            f"visual={t_visual} audio={t_audio}"
+        )
+
+    natural_factor = t_visual / t_audio
+
+    if natural_factor < speed_min:
+        # Audio longer than visual. Don't slow visual. Visual plays at
+        # 1.0x and freezes its last frame for the remaining audio time.
+        speed = speed_min  # 1.0 — no setpts adjustment
+        mode_label = "min_clamped_freeze_tail"
+    elif natural_factor > speed_max:
+        # Visual much longer than audio. Speed up to max, then cut tail.
+        speed = speed_max
+        mode_label = "max_clamped_audio_cut"
+    else:
+        # Natural fit — visual matches audio exactly when sped to factor.
+        speed = natural_factor
+        mode_label = "natural"
+
+    print(
+        f"[v698A/swap] visual={t_visual:.3f}s audio={t_audio:.3f}s "
+        f"natural_factor={natural_factor:.3f} mode={mode_label} "
+        f"speed_applied={speed:.3f}",
+        flush=True,
+    )
+
+    # Build ffmpeg command per mode
+    if mode_label == "min_clamped_freeze_tail":
+        # Visual plays 1.0x then freezes last frame to fill audio length.
+        # tpad=stop_mode=clone:stop_duration=<gap> on the video stream;
+        # audio is taken from audio_path verbatim with -map 1:a:0;
+        # -shortest ensures output ends at audio length (the longer one).
+        gap = max(0.0, t_audio - t_visual)
+        cmd = [
+            FFMPEG_BIN, "-y",
+            "-i", str(visual_path),
+            "-i", str(audio_path),
+            "-filter_complex",
+            f"[0:v]tpad=stop_mode=clone:stop_duration={gap:.6f},setpts=PTS-STARTPTS,fps=24,format=yuv420p[v];"
+            f"[1:a]aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a]",
+            "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
+            "-shortest",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+    elif mode_label == "max_clamped_audio_cut":
+        # Speed visual to 2x; -shortest trims when audio ends.
+        cmd = [
+            FFMPEG_BIN, "-y",
+            "-i", str(visual_path),
+            "-i", str(audio_path),
+            "-filter_complex",
+            f"[0:v]setpts=PTS/{speed:.6f},setpts=PTS-STARTPTS,fps=24,format=yuv420p[v];"
+            f"[1:a]aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a]",
+            "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
+            "-shortest",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+    else:
+        # Natural fit — visual sped to match audio exactly.
+        cmd = [
+            FFMPEG_BIN, "-y",
+            "-i", str(visual_path),
+            "-i", str(audio_path),
+            "-filter_complex",
+            f"[0:v]setpts=PTS/{speed:.6f},setpts=PTS-STARTPTS,fps=24,format=yuv420p[v];"
+            f"[1:a]aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a]",
+            "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+
+    code, _, err = run(cmd)
+    if code != 0:
+        err_tail = err[-1500:] if err else "<no stderr>"
+        raise RuntimeError(
+            f"swap_audio_with_speed_match ffmpeg failed (mode={mode_label}): "
+            f"{err_tail[-500:]}"
+        )
+
+    out_dur = get_duration(ffprobe_json(output_path))
+    print(
+        f"[v698A/swap] output={out_dur:.3f}s (mode={mode_label})",
+        flush=True,
+    )
+    return speed, out_dur, mode_label
+
+
 def concat_videos(files: List[Path], output: Path) -> None:
     """Concatenate multiple videos into one.
 
