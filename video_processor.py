@@ -2365,75 +2365,131 @@ def concat_videos(files: List[Path], output: Path) -> None:
     if n == 0:
         raise RuntimeError("concat_videos: no files to concatenate")
 
-    # v692d — per-input video + audio NORMALIZE before concat. The
-    # concat filter requires every input to share resolution + pixel
-    # format + sar (video) AND sample_rate + channel_layout + sample_fmt
-    # (audio). text_card scenes render at 30fps with anullsrc audio @
-    # 44100Hz; Veo clips are 24fps @ 48000Hz — without per-input
-    # normalize, ffmpeg errors with "Input link parameters (sample_rate
-    # =44100...) do not match the corresponding output link parameters
-    # (sample_rate=48000...)" and aborts the concat.
-    input_flags: List[str] = []
-    for f in files:
-        input_flags += ["-i", str(f)]
+    # v692e — two-pass normalize-then-stream-copy strategy. v692d's single-pass
+    # concat filter failed with "matches no streams" because one of the inputs
+    # was missing an audio stream (Veo silent renders sometimes ship without
+    # audio; Whisper-VAD's apply_vad can also drop audio in edge cases). The
+    # concat filter binds [N:a:0] before running, so a single missing audio
+    # stream rejects the entire 8-input graph.
+    #
+    # Pass 1: normalize EACH input to a common spec (720x1280, 24fps, yuv420p,
+    #   48kHz stereo h264+aac). Injects anullsrc when source has no audio so
+    #   every normalized file has both streams. Single-input ffmpeg = simple,
+    #   predictable, can't fail in cross-input ways.
+    # Pass 2: concat demuxer + stream copy on the normalized files. Inputs are
+    #   now guaranteed identical specs so the demuxer just splices packets,
+    #   no PTS mangling, no encoder involvement.
+    #
+    # Memory: ~80MB per ffmpeg pass (sequential). Disk: ~5MB × N intermediates.
+    # CPU: 1× normalize per input + ~0 for stream-copy concat.
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        normalized: List[Path] = []
+        for i, f in enumerate(files):
+            norm_out = td_path / f"normalized_{i:04d}.mp4"
+            # Probe for audio stream presence
+            has_audio = False
+            try:
+                _info = ffprobe_json(f)
+                for s in _info.get("streams", []):
+                    if s.get("codec_type") == "audio":
+                        has_audio = True
+                        break
+            except Exception:
+                has_audio = False  # safe default — inject silence
 
-    norm_chunks: List[str] = []
-    concat_chunks: List[str] = []
-    for i in range(n):
-        norm_chunks.append(
-            f"[{i}:v:0]scale=720:1280:force_original_aspect_ratio=decrease,"
-            f"pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,"
-            f"fps=24,format=yuv420p,setpts=PTS-STARTPTS[v{i}]"
-        )
-        norm_chunks.append(
-            f"[{i}:a:0]aresample=async=1:first_pts=0,"
-            f"aformat=sample_fmts=fltp:sample_rates=48000:"
-            f"channel_layouts=stereo,asetpts=PTS-STARTPTS[a{i}]"
-        )
-        concat_chunks.append(f"[v{i}][a{i}]")
-    filtergraph = (
-        ";".join(norm_chunks)
-        + ";"
-        + "".join(concat_chunks)
-        + f"concat=n={n}:v=1:a=1[v][a]"
-    )
+            if has_audio:
+                cmd_norm = [
+                    FFMPEG_BIN, "-y",
+                    "-i", str(f),
+                    "-vf",
+                    "scale=720:1280:force_original_aspect_ratio=decrease,"
+                    "pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+                    "fps=24,format=yuv420p",
+                    "-af",
+                    "aresample=async=1:first_pts=0,"
+                    "aformat=sample_fmts=fltp:sample_rates=48000:"
+                    "channel_layouts=stereo",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-threads", "1",
+                    "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
+                    "-max_muxing_queue_size", "1024",
+                    "-movflags", "+faststart",
+                    str(norm_out),
+                ]
+                src_label = "video+audio"
+            else:
+                # Inject silent audio matching video duration
+                cmd_norm = [
+                    FFMPEG_BIN, "-y",
+                    "-i", str(f),
+                    "-f", "lavfi", "-i",
+                    "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-vf",
+                    "scale=720:1280:force_original_aspect_ratio=decrease,"
+                    "pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+                    "fps=24,format=yuv420p",
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-shortest",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-threads", "1",
+                    "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
+                    "-max_muxing_queue_size", "1024",
+                    "-movflags", "+faststart",
+                    str(norm_out),
+                ]
+                src_label = "video-only (audio injected)"
 
-    cmd = [
-        FFMPEG_BIN, "-y",
-        *input_flags,
-        "-filter_complex", filtergraph,
-        "-map", "[v]", "-map", "[a]",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-threads", "1",
-        "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
-        "-max_muxing_queue_size", "1024",
-        "-movflags", "+faststart",
-        str(output),
-    ]
-    print(f"[VideoProcessor]   Concatenating (concat filter, n={n}, normalized 720x1280@24fps, 48kHz stereo)...")
-    code, _, err = run(cmd)
-    if code == 0:
+            print(
+                f"[VideoProcessor/v692e] normalize slot={i} ({src_label}) "
+                f"-> {norm_out.name}",
+                flush=True,
+            )
+            code, _, err = run(cmd_norm)
+            if code != 0:
+                err_tail = err[-1500:] if err else "<no stderr>"
+                print(
+                    f"[VideoProcessor/v692e] normalize slot={i} FAILED. "
+                    f"stderr tail:\n{err_tail}",
+                    flush=True,
+                )
+                raise RuntimeError(
+                    f"v692e normalize failed for slot {i}: {err_tail[-300:]}"
+                )
+            normalized.append(norm_out)
+
+        # Pass 2: concat demuxer + stream-copy on identical-spec files
+        listfile = td_path / "concat_inputs.txt"
+        with listfile.open("w", encoding="utf-8") as lf:
+            for p in normalized:
+                lf.write(f"file {shlex.quote(str(p))}\n")
+
+        cmd_concat = [
+            FFMPEG_BIN, "-y",
+            "-f", "concat", "-safe", "0", "-i", str(listfile),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(output),
+        ]
+        print(
+            f"[VideoProcessor/v692e] concat-demux + stream-copy on "
+            f"{len(normalized)} normalized files",
+            flush=True,
+        )
+        code, _, err = run(cmd_concat)
+        if code != 0:
+            err_tail = err[-1500:] if err else "<no stderr>"
+            print(
+                f"[VideoProcessor/v692e] stream-copy concat failed. "
+                f"stderr tail:\n{err_tail}",
+                flush=True,
+            )
+            raise RuntimeError(
+                f"v692e concat failed: {err_tail[-300:]}"
+            )
         print(f"[VideoProcessor]   concat_videos completed")
-        return
-
-    # Surface the FULL ffmpeg stderr tail (last 1.5KB) so the actual
-    # filtergraph error is visible, not just the version banner.
-    err_tail = err[-1500:] if err else "<no stderr>"
-    print(f"[VideoProcessor]   Initial concat failed. ffmpeg stderr tail:\n{err_tail}", flush=True)
-
-    # Fallback: medium preset if veryfast somehow fails on encode
-    print(f"[VideoProcessor]   Retrying with medium preset...")
-    cmd_re = list(cmd)
-    for i, tok in enumerate(cmd_re):
-        if tok == "veryfast":
-            cmd_re[i] = "medium"
-            break
-    code, _, err = run(cmd_re)
-    if code != 0:
-        err_tail = err[-1500:] if err else "<no stderr>"
-        print(f"[VideoProcessor]   ERROR (medium preset stderr tail):\n{err_tail}", flush=True)
-        raise RuntimeError(f"Failed to concatenate videos. Last 500 chars of stderr: {err_tail[-500:]}")
-    print(f"[VideoProcessor]   concat_videos completed (medium preset)")
 
 
 def concat_videos_with_transitions(
