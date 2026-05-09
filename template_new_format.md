@@ -1,6 +1,85 @@
 <!--
-  KAVENO SCENE TABLE — NEW FORMAT (v590)
+  KAVENO SCENE TABLE — NEW FORMAT (v696)
   Fill in below. Key conventions (see template_reference.md for full docs):
+
+  ============================================================
+  v696 — HARD-FAIL PRE-OUTPUT VALIDATION GATES (read before write)
+  ============================================================
+  The platform parser (code/image_platform.py:parse_scene_table) is
+  STRICT and silent on failure — bad headers don't error, they're
+  skipped, and the import returns "Parse error: No scenes found"
+  or "Parse error: Image N: no fenced 'Image prompt:' block found".
+  These four classes of errors keep recurring across LLM-authored
+  decodes + lifts; treat them as PRE-OUTPUT VALIDATION GATES that
+  MUST pass before writing any markdown:
+
+  GATE 1 — text_card scenes have NO `### Image N` header (v682d)
+    A text_card scene exists ONLY as a `### Scene N` block in
+    `## Storyboard` with `scene_type: text_card` + `caption:` +
+    `bg_color:` + `duration:`. It MUST NOT have a corresponding
+    `### Image N` block in `## Images`. Image numbering is
+    NON-CONTIGUOUS by design — image_1, image_2, image_3, image_5,
+    image_6 (no image_4) is correct when scene 5 is a text_card.
+    Concrete failure: writing `### Image 4` + `scene_type: text_card`
+    in `## Images` → parser looks for the mandatory fenced
+    "Image prompt:" block, doesn't find it, aborts the whole import.
+    The text_card scene block in `## Storyboard` ALSO has NO
+    `- **image:**` bullet (no image to reference — the card is
+    rendered server-side by ffmpeg drawtext).
+
+  GATE 2 — every shot scene chains forward through state-evolution
+    (v580 + v604 visual continuity)
+    When N consecutive scenes share setting + persona + camera angle
+    and the only delta is prop / state / ingredient change (recipe
+    steps, before/after, transformation arc), each scene from #2
+    onward MUST have `reference_image:` pointing at the previous
+    image AND a non-empty `visual_delta:` line naming ONLY what
+    changed vs. the parent. text_card scenes ARE NOT a chain
+    breaker — chain references skip across them: image_3 is parent
+    of image_5 if image_4 is a text_card. Concrete failure: when
+    image_5's reference_image is missing (or `none`) on a recipe
+    chain, Banana 2 generates a fresh kitchen variation with new
+    cabinet colors / different counter / different lighting, and
+    the audience sees the cut as "different kitchen" instead of
+    "next recipe step in the same kitchen."
+
+  GATE 3 — `### Image N` / `### Scene N` headers are STRICT regex
+    `^###\s+Image\s+(\d+)\s*$` and `^###\s+Scene\s+(\d+)\s*$`. The
+    line ends immediately after the integer. Descriptive suffixes
+    like `### Scene 1 — HOOK clinical-exam (~5s)` are silently
+    skipped. h4 splits like `#### Scene 8a` / `#### Scene 8b` are
+    rejected. Splitting one scene across two clips is done by
+    adding a SECOND `- **line:** / - **action_note:**` pair inside
+    the same `### Scene N` block, never via h4 sub-scenes.
+
+  GATE 4 — every shot Image block has a fenced `**Image prompt:**`
+    code block, EVERY scene block has `- **image:** image_N`
+    (except text_card scenes which have neither bullet nor parent
+    image). Missing the fenced block is the most common parser
+    abort.
+
+  GATE 5 — `- **line:**` field is FULLY LOWERCASE (v693)
+    Veo TTS over-emphasizes capitalized words ("GUIDE" → shouted),
+    Whisper-VAD then drops the over-emphasized syllables → the
+    intended word is missing from the final audio. Even Title-Case
+    sentence starts trigger this in edge cases. Use lowercase
+    throughout: "comment guide and i will send you the recipe."
+    not "Comment GUIDE and I will send you the recipe."
+
+  Pre-output verification command (run BEFORE pushing):
+    python -c "
+    import re
+    t = open('videos/<file>.md', encoding='utf-8').read()
+    images = sorted(int(m.group(1)) for m in re.finditer(r'^###\\s+Image\\s+(\\d+)\\s*$', t, re.MULTILINE))
+    scenes = sorted(int(m.group(1)) for m in re.finditer(r'^###\\s+Scene\\s+(\\d+)\\s*$', t, re.MULTILINE))
+    print(f'Images: {images}')
+    print(f'Scenes: {scenes}')
+    text_card_scenes = re.findall(r'### Scene (\\d+)\\s*\\n[^#]*scene_type:\\s*text_card', t)
+    print(f'text_card scenes: {text_card_scenes}')
+    print(f'Image numbering NON-CONTIGUOUS (text_card gap is OK): {images}')
+    "
+
+  ============================================================
 
   • Image prompts: always open with "Shot on iPhone with wide-angle lens, handheld,
     deep focus throughout, vibrant natural HDR daylight." Never cinema camera specs.

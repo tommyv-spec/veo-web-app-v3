@@ -5527,3 +5527,143 @@ When the decoder hears a single voice that does not match any visible mouth move
 Voiceover b-roll overlay (1 logical scene = 2 generated Veo clips: persona-on-camera audio source + silent b-roll visual overlay) is a separate v-rule deferred until lift-side authoring frequency justifies the platform composer work.
 
 Multi-speaker dialogue (2+ characters BOTH speaking — interviews, sketches) is also deferred. v681 explicitly forbids `patient` or `extra` rows from being a `speaker:` value.
+
+---
+
+### v696 — pre-output validation gates (consolidate the recurring parser-abort + chain-break failures)
+
+**Surfaced 2026-05-09** from a snapinsta donut-recipe decode that hit
+`Parse error: Image 4: no fenced 'Image prompt:' block found` on import
+to the platform — the LLM had written `### Image 4` + `scene_type: text_card`
+in `## Images` despite v682d explicitly forbidding it. Same session also
+surfaced a second class of failure: image_5 onward was missing
+`reference_image:` / `visual_delta:` for a recipe-state-evolution chain,
+so the audience would have read each recipe step as a fresh kitchen
+generation with no continuity.
+
+v696 promotes FIVE recurring parser-abort + chain-break classes from
+"implicit per-rule judgment scattered across v521.1 / v580 / v593 /
+v604 / v682d / v693" into one consolidated **HARD-FAIL pre-output
+validation gate** that EVERY decode + lift MUST pass before writing
+any markdown:
+
+**Gate 1 — text_card scenes have NO `### Image N` header (v682d enforcement)**
+
+A text_card scene exists ONLY as a `### Scene N` block in `## Storyboard`
+with `scene_type: text_card` + `caption:` + `bg_color:` + `duration:`.
+It MUST NOT have a corresponding `### Image N` block in `## Images`.
+The text_card scene block in `## Storyboard` ALSO has NO `- **image:**`
+bullet (no image to reference — the card is rendered server-side by
+ffmpeg `drawtext`).
+
+Image numbering is NON-CONTIGUOUS by design — `image_1, image_2,
+image_3, image_5, image_6` (no image_4) is correct when scene 5 is a
+text_card. Concrete failure: writing `### Image 4` + `scene_type:
+text_card` in `## Images` → parser looks for the mandatory fenced
+`**Image prompt:**` block, doesn't find it, aborts the whole import
+with `Parse error: Image 4: no fenced 'Image prompt:' block found`.
+
+**Gate 2 — every shot scene chains forward through state-evolution**
+
+When N consecutive scenes share setting + persona + camera angle and
+the only delta is prop / state / ingredient change (recipe steps,
+before/after, transformation arc), each scene from #2 onward MUST have:
+- `reference_image:` pointing at the previous image (parent), AND
+- a non-empty `visual_delta:` line naming ONLY what changed vs. the
+  parent (per v604 — body prose then becomes "Use the prior-scene
+  reference image to preserve [setting], [lighting], [anchor props];
+  only change: <visual_delta value>").
+
+text_card scenes ARE NOT a chain breaker — chain references skip
+across them: image_3 is parent of image_5 if image_4 is a text_card.
+
+Concrete failure: when image_5's `reference_image:` is missing (or
+`none`) on a recipe chain, Banana 2 generates a fresh kitchen
+variation with new cabinet colors / different counter / different
+lighting, and the audience sees the cut as "different kitchen"
+instead of "next recipe step in the same kitchen." This silently
+collapses the recipe-pivot continuity that the source video relied on.
+
+**Gate 3 — `### Image N` / `### Scene N` headers are STRICT regex**
+
+`^###\s+Image\s+(\d+)\s*$` and `^###\s+Scene\s+(\d+)\s*$`. The line
+ends immediately after the integer. Descriptive suffixes like
+`### Scene 1 — HOOK clinical-exam (~5s)` are silently skipped (the
+parser sees zero scenes → import fails). h4 splits like
+`#### Scene 8a` / `#### Scene 8b` are rejected. Splitting one scene
+across two clips is done by adding a SECOND
+`- **line:** / - **action_note:**` pair inside the same `### Scene N`
+block, never via h4 sub-scenes.
+
+**Gate 4 — every shot Image block has a fenced `**Image prompt:**` code
+block, EVERY scene block has `- **image:** image_N`** (except text_card
+scenes which have neither bullet nor parent image). Missing the fenced
+block is the most common parser abort.
+
+**Gate 5 — `- **line:**` field is FULLY LOWERCASE (v693 enforcement)**
+
+Veo TTS over-emphasizes capitalized words ("GUIDE" → shouted), Whisper-VAD
+then drops the over-emphasized syllables → the intended word is missing
+from the final audio. Even Title-Case sentence starts trigger this in
+edge cases. Use lowercase throughout: `comment guide and i will send you
+the recipe.` not `Comment GUIDE and I will send you the recipe.`
+
+**Pre-output verification command** (run BEFORE pushing any decode or
+lift to git — prints `ALL FIVE GATES PASS` or `FAIL:` summary):
+
+```bash
+python -c "
+import re
+t = open('videos/<file>.md', encoding='utf-8').read()
+images = sorted(int(m.group(1)) for m in re.finditer(r'^###\s+Image\s+(\d+)\s*$', t, re.MULTILINE))
+scenes = sorted(int(m.group(1)) for m in re.finditer(r'^###\s+Scene\s+(\d+)\s*$', t, re.MULTILINE))
+print(f'Images: {images}')
+print(f'Scenes: {scenes}')
+errors = []
+matches = list(re.finditer(r'### Scene (\d+)([^#]+?)(?=\n### |\Z)', t, re.DOTALL))
+text_card_scene_indices = []
+for m in matches:
+    sn = int(m.group(1)); body = m.group(2)
+    is_tc = bool(re.search(r'^\s*-\s*\*\*scene_type:\*\*\s*text_card', body, re.MULTILINE))
+    if is_tc:
+        text_card_scene_indices.append(sn)
+    has_image_bullet = bool(re.search(r'^\s*-\s*\*\*image:\*\*\s*image_\d+', body, re.MULTILINE))
+    if not is_tc and not has_image_bullet:
+        errors.append(f'Gate 4: Scene {sn} is shot but missing - **image:** bullet')
+    if is_tc and has_image_bullet:
+        errors.append(f'Gate 1: Scene {sn} is text_card but has - **image:** bullet')
+print(f'text_card scenes: {text_card_scene_indices}')
+# Gate 4 — every ### Image N block must have a fenced **Image prompt:** code block
+for img_n in images:
+    img_block_match = re.search(r'### Image ' + str(img_n) + r'\s*\n(.+?)(?=\n### |\Z)', t, re.DOTALL)
+    if img_block_match:
+        body = img_block_match.group(1)
+        if not re.search(r'\*\*Image prompt:\*\*\s*\n+\`\`\`', body):
+            errors.append(f'Gate 4: Image {img_n} missing fenced **Image prompt:** code block')
+# Gate 5 — line: lowercase
+for m in matches:
+    sn = int(m.group(1)); body = m.group(2)
+    for lm in re.finditer(r'^\s*-\s*\*\*line:\*\*\s*(.+?)$', body, re.MULTILINE):
+        line = lm.group(1)
+        upper_words = [w for w in re.findall(r'\b[A-Z]{2,}\b', line) if w != 'I']
+        title_words = re.findall(r'\b[A-Z][a-z]+', line)
+        if upper_words or title_words:
+            errors.append(f'Gate 5: Scene {sn} line has capitals: {upper_words + title_words}')
+print('ALL FIVE GATES PASS' if not errors else 'FAIL:\n  - ' + '\n  - '.join(errors))
+"
+```
+
+NOTE on text_card image numbering: image numbering and scene numbering are
+INDEPENDENT integer namespaces. A text_card scene at scene_index K does NOT
+mean image_K must be absent — image numbering reflects compositional ordering
+with text_card storyboard slots typically skipped, but the parser doesn't
+enforce a relationship between the two. The actual v682d enforcement is:
+text_card scenes have no `- **image:**` bullet AND every existing
+`### Image N` block has a fenced `**Image prompt:**` code block. Both checked
+above.
+
+Migration: existing `videos/*.md` and `raw/decoded_*.md` artifacts authored
+under earlier rules are valid as-is; new artifacts from this commit forward
+MUST satisfy all five gates before being pushed. The bundle TASK blocks
+(`code/create_bundle.sh`, `code/lift_bundle.sh`, `code/decode_bundle.sh`)
+should reference v696 as item [21] in the pre-output validation checklist.
