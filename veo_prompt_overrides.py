@@ -70,10 +70,16 @@ _SECTION_HEADER_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 
-# Per-clip header. Captures scene index + line index from `### Clip S.L`.
-# The descriptive suffix (` — Scene 1, Line 1`) is consumed but ignored.
+# Per-clip header. Captures scene index + optional line index from
+# `### Clip S` or `### Clip S.L`. v682i — line index made optional so
+# decode-side artifacts that emit one clip per scene (e.g. silent +
+# text_card + on-camera 1:1 with scenes — like the Donna decode where
+# every scene has exactly one clip and the markdown writes them as
+# `### Clip 1 — Scene 1 (silent)` rather than `### Clip 1.1`) parse
+# correctly. Pre-v682i these artifacts hit zero matches → empty
+# prompts_by_key → no veo_prompt_override on any line at submission.
 _CLIP_HEADER_RE = re.compile(
-    r"^###\s+Clip\s+(\d+)\.(\d+)\b[^\n]*$",
+    r"^###\s+Clip\s+(\d+)(?:\.(\d+))?\b[^\n]*$",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -132,7 +138,8 @@ def _split_into_clip_blocks(section_body: str) -> List[Tuple[int, int, str]]:
     blocks: List[Tuple[int, int, str]] = []
     for i, m in enumerate(matches):
         scene_idx = int(m.group(1))
-        line_idx = int(m.group(2))
+        # v682i — line index optional; default to 1 when absent.
+        line_idx = int(m.group(2)) if m.group(2) else 1
         block_start = m.end()
         if i + 1 < len(matches):
             block_end = matches[i + 1].start()
@@ -178,13 +185,42 @@ def parse_veo_prompts_block(md_text: str) -> Dict[Tuple[int, int], Dict[str, Opt
 
     out: Dict[Tuple[int, int], Dict[str, Optional[str]]] = {}
     for scene_idx, line_idx, block in _split_into_clip_blocks(section):
+        # v682i — try the labeled format first (`**Text prompt:**`
+        # before the fence). If absent, fall back to the bare-fence
+        # format where the clip block has a single ```fence``` directly
+        # after the clip header, optionally with an inline
+        # "Negative prompt: ..." trailer line inside the same fence.
+        # Decode artifacts (Donna, etc.) use the bare-fence shape;
+        # the labeled shape is the original lift-side convention.
         text_prompt = _extract_fenced_content(block, _TEXT_PROMPT_LABEL_RE)
-        if text_prompt is None:
-            # Clip block without a text prompt fence is unusable —
-            # nothing to override with. Fall back to auto-build for
-            # this line by simply not registering an override.
-            continue
-        negative_prompt = _extract_fenced_content(block, _NEGATIVE_PROMPT_LABEL_RE)
+        negative_prompt: Optional[str]
+        if text_prompt is not None:
+            # Labeled format — read negative from its own fence.
+            negative_prompt = _extract_fenced_content(block, _NEGATIVE_PROMPT_LABEL_RE)
+        else:
+            # Bare-fence format — first fence in block is the whole prompt.
+            fence_m = _FENCE_RE.search(block)
+            if fence_m is None:
+                # Clip block without any fence is unusable.
+                continue
+            full_content = fence_m.group(1).strip()
+            # Split on a line starting with "Negative prompt:" (or
+            # "Negative Prompt:") into text + negative. If absent, the
+            # entire fence content is the text prompt.
+            split_m = re.search(
+                r"^\s*Negative\s+prompt\s*:\s*(.*)$",
+                full_content,
+                flags=re.MULTILINE | re.IGNORECASE | re.DOTALL,
+            )
+            if split_m:
+                text_prompt = full_content[: split_m.start()].rstrip()
+                negative_prompt = split_m.group(1).strip()
+            else:
+                text_prompt = full_content
+                negative_prompt = None
+            if not text_prompt:
+                # Empty text content — skip.
+                continue
         # Empty negative prompt fence ("```\n\n```") collapses to "" —
         # treat that the same as missing (no override on the negative
         # side, the auto-built negative defaults still apply downstream).

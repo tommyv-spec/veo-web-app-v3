@@ -15000,19 +15000,24 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     });
                     sceneBreaks = newBreaks;
 
-                    // Action notes → OBJECT keyed by flat line index
-                    // (video-tab at lines 4124/4130/4516/6061 indexes it this way)
+                    // v682i — build _actionNotes from data.scenes_metadata
+                    // (per-line flat array) instead of walking sceneAssignments
+                    // and incrementing flatLineIdx per LINE only. The old
+                    // walker had the same indexing bug as veoOverridesObj /
+                    // padsObj: silent / text_card scenes have lines.length=0
+                    // so flatLineIdx didn't advance past them, but the
+                    // dialogue payload builder looks up _actionNotes[i]
+                    // where i is the FULL dialogueInput line index. That
+                    // misaligned on-camera scenes' action_notes onto silent
+                    // scenes' rows (Donna's bedroom-silent id=1 ended up
+                    // with scene 7's healer action_note, etc.).
+                    // scenes_metadata's per-row keys are 1:1 with dialogueInput
+                    // — use them directly.
                     const notesObj = {};
-                    let flatLineIdx = 0;
-                    sceneAssignments.forEach(sa => {
-                        const lines = sa.lines || [];
-                        const notes = sa.action_notes || [];
-                        for (let i = 0; i < lines.length; i++) {
-                            const note = notes[i];
-                            if (note && String(note).trim().length > 0) {
-                                notesObj[flatLineIdx] = note;
-                            }
-                            flatLineIdx++;
+                    scenesMeta.forEach((sm, idx) => {
+                        const note = sm.action_note;
+                        if (note && String(note).trim().length > 0) {
+                            notesObj[idx] = note;
                         }
                     });
                     window._actionNotes = notesObj;
