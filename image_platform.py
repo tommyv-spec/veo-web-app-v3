@@ -199,6 +199,11 @@ def run_image_platform_migrations():
         # NULL = standard image (default).
         ("image_nodes", "role",
          "ALTER TABLE image_nodes ADD COLUMN role VARCHAR(40)"),
+        # v698A: ImageSceneAssignment carries the anchor binding so the
+        # prepare-for-video flow can resolve it to a local image index when
+        # building dialogue_json.
+        ("image_scene_assignments", "voiceover_anchor_image_node_id",
+         "ALTER TABLE image_scene_assignments ADD COLUMN voiceover_anchor_image_node_id INTEGER"),
     ]
     postgres_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -315,6 +320,8 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS voiceover_line TEXT"),
         ("image_nodes", "role",
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS role VARCHAR(40)"),
+        ("image_scene_assignments", "voiceover_anchor_image_node_id",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS voiceover_anchor_image_node_id INTEGER"),
     ]
 
     # v479: widen ImageJobBatch string columns to TEXT. The previous
@@ -1127,6 +1134,13 @@ class ImageSceneAssignment(Base):
     # can detect silent scenes after assignments are loaded back from DB.
     # Same set of values as ImageNode.speaker_mode.
     speaker_mode = Column(String(20), nullable=True)
+
+    # v698A: when speaker_mode='voiceover', this FK points at the ImageNode
+    # whose role='voiceover_anchor' image will serve as the start frame for
+    # the audio-pair Veo render. NULL on every non-voiceover assignment.
+    voiceover_anchor_image_node_id = Column(
+        Integer, ForeignKey("image_nodes.id"), nullable=True
+    )
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1198,6 +1212,9 @@ class ImageSceneAssignment(Base):
             # via this field; without it, silent scenes never reach the
             # synthetic flat-row branch and disappear from the storyboard editor.
             "speaker_mode": self.speaker_mode,
+            # v698A — anchor binding for voiceover-paired scenes. NULL on
+            # non-voiceover assignments.
+            "voiceover_anchor_image_node_id": self.voiceover_anchor_image_node_id,
         }
 
 
@@ -4922,6 +4939,10 @@ def _import_scene_table_impl(
             cast_json=(
                 json.dumps(img["cast"]) if img.get("cast") else None
             ),
+            # v698A — image role discriminator. NULL for standard images;
+            # 'voiceover_anchor' marks an audio-source-only image used by
+            # paired voiceover scenes.
+            role=img.get("role"),
         )
         db.add(node)
         db.flush()
@@ -5610,6 +5631,32 @@ def _import_scene_table_impl(
         # binding stands. For text_card the column must be nullable
         # (see migration entry below).
         scene_image_node_id = None if s.get("scene_type") == "text_card" else node.id
+
+        # v698A — resolve voiceover_anchor_image (markdown int) → ImageNode.id.
+        # The anchor must already exist in created_nodes_by_image_index because
+        # PHASE 1 created an ImageNode for every parsed `### Image N` block,
+        # including those marked role=voiceover_anchor. NULL on every
+        # non-voiceover scene.
+        anchor_md_idx = s.get("voiceover_anchor_image")
+        anchor_node_id_resolved = None
+        if anchor_md_idx is not None:
+            anchor_node = created_nodes_by_image_index.get(anchor_md_idx)
+            if anchor_node is None:
+                raise HTTPException(
+                    500,
+                    f"Scene {s['scene_index']}: voiceover_anchor_image references "
+                    f"image_{anchor_md_idx} but no PHASE 1 node was created for it"
+                )
+            # Sanity check the anchor is actually role=voiceover_anchor
+            if (anchor_node.role or "").lower() != "voiceover_anchor":
+                raise HTTPException(
+                    500,
+                    f"Scene {s['scene_index']}: voiceover_anchor_image points at "
+                    f"image_{anchor_md_idx} (node {anchor_node.id}) which has "
+                    f"role={anchor_node.role!r}, expected 'voiceover_anchor'"
+                )
+            anchor_node_id_resolved = anchor_node.id
+
         assignment = ImageSceneAssignment(
             batch_id=batch_id,
             scene_index=s["scene_index"],
@@ -5634,6 +5681,9 @@ def _import_scene_table_impl(
             # at prepare_batch_for_video never fires for assignments
             # whose to_dict() returns speaker_mode=None).
             speaker_mode=s.get("speaker_mode"),
+            # v698A — anchor binding for voiceover-paired scenes; NULL on
+            # all non-voiceover assignments.
+            voiceover_anchor_image_node_id=anchor_node_id_resolved,
         )
         db.add(assignment)
         assignments_created += 1
@@ -6151,6 +6201,13 @@ def prepare_batch_for_video(
         if nid not in seen:
             referenced_image_node_ids.append(nid)
             seen.add(nid)
+        # v698A — voiceover-paired scenes also need the anchor image
+        # uploaded so the audio-pair Veo render can use it as start
+        # frame. Add the anchor node id to the upload set if present.
+        anchor_nid = scene.get("voiceover_anchor_image_node_id")
+        if anchor_nid is not None and anchor_nid not in seen:
+            referenced_image_node_ids.append(anchor_nid)
+            seen.add(anchor_nid)
 
     # Build a map node_id → node object for quick lookup
     nodes_by_id = {n.id: n for n in nodes}
@@ -6469,6 +6526,16 @@ def prepare_batch_for_video(
         scene_is_silent = scene_speaker_mode == "silent"
         scene_is_text_card = scene_type_v681 == "text_card"
 
+        # v698A — resolve anchor image's local_idx (its position in the
+        # uploaded image list) for voiceover-paired scenes. None on every
+        # non-voiceover scene.
+        _anchor_node_id = scene.get("voiceover_anchor_image_node_id")
+        _anchor_local_idx = (
+            node_id_to_local_index.get(_anchor_node_id)
+            if _anchor_node_id is not None
+            else None
+        )
+
         scene_assignments_payload.append({
             "scene_index": scene["scene_index"],
             "image_local_index": local_idx,
@@ -6497,6 +6564,13 @@ def prepare_batch_for_video(
             # into sceneBreaks for the storyboard editor (mirrors how
             # cast / scene_type / caption flow through scene_assignments).
             "speaker_mode": scene_speaker_mode or None,
+            # v698A — clip-pair metadata for voiceover scenes. None on every
+            # non-voiceover scene; populated values flow through to the
+            # frontend storyboard editor + DialogueLineInput at job creation
+            # so Clip rows get clip_role='visual_pair' + voiceover_line +
+            # voiceover_anchor_image_node_id.
+            "voiceover_anchor_image_node_id": _anchor_node_id,
+            "voiceover_anchor_image_local_index": _anchor_local_idx,
         })
 
         # v681 — scenes with no `- **line:**` bullets but a real video
@@ -6635,6 +6709,36 @@ def prepare_batch_for_video(
                 # even if its text is empty (silent scenes are intentionally
                 # text-empty but ARE storyboard scenes that need a Clip row).
                 "speaker_mode": scene_speaker_mode or None,
+                # v698A — voiceover-paired clip metadata. When the scene's
+                # speaker_mode is 'voiceover', clip_role='visual_pair' tells
+                # the Clip writer downstream to mark this clip as needing a
+                # paired audio twin. voiceover_anchor_image_node_id +
+                # voiceover_anchor_image_local_index tell the worker which
+                # image to use as the audio twin's start frame.
+                # voiceover_line is just the line text; main.py's Clip
+                # writer can also read it from `dialogue_text` (they're
+                # equal) but having it explicit makes the role contract
+                # cleaner. None on every non-voiceover line.
+                "clip_role": (
+                    "visual_pair"
+                    if (scene_speaker_mode or "").lower() == "voiceover"
+                    else None
+                ),
+                "voiceover_anchor_image_node_id": (
+                    _anchor_node_id
+                    if (scene_speaker_mode or "").lower() == "voiceover"
+                    else None
+                ),
+                "voiceover_anchor_image_local_index": (
+                    _anchor_local_idx
+                    if (scene_speaker_mode or "").lower() == "voiceover"
+                    else None
+                ),
+                "voiceover_line": (
+                    line_text
+                    if (scene_speaker_mode or "").lower() == "voiceover"
+                    else None
+                ),
             })
             veo_prompts_flat.append(vp)
             pads_flat.append(pad)

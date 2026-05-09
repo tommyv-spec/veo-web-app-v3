@@ -213,6 +213,20 @@ class DialogueLineInput(BaseModel):
     # via target_duration_s (overloaded for text_card; legacy clips
     # use target_duration_s for v667/v668 anchor-derived Veo trim).
     duration_s: Optional[float] = None
+    # v698A — per-scene clip-pair metadata for voiceover-over-b-roll.
+    # clip_role = 'visual_pair' when the line is the visual side of a
+    # paired clip (silent b-roll); the platform creates a sibling
+    # audio_pair Clip from the voiceover_anchor_image at render time.
+    # NULL on every non-voiceover line. voiceover_anchor_image_node_id
+    # is the FK to the audio twin's start-frame ImageNode (resolved by
+    # prepare_batch_for_video). voiceover_anchor_image_local_index is
+    # the same image's position in the upload list (used by the worker
+    # to fetch the upload). voiceover_line is the line text (mirrors
+    # `text:` for clarity).
+    clip_role: Optional[str] = None
+    voiceover_anchor_image_node_id: Optional[int] = None
+    voiceover_anchor_image_local_index: Optional[int] = None
+    voiceover_line: Optional[str] = None
 
 
 class SceneInput(BaseModel):
@@ -1904,6 +1918,21 @@ async def _create_job_impl(
         td_v681 = line.get('duration_s') if isinstance(line, dict) else None
         if scene_type_val == 'text_card' and td_v681 is not None:
             target_duration_s = float(td_v681)
+
+        # v698A — per-scene clip-pair metadata. clip_role='visual_pair'
+        # when the line is the visual side of a voiceover-paired scene;
+        # the worker render flow (Phase 3) reads this and enqueues an
+        # additional audio-pair Veo job from voiceover_anchor_image.
+        # NULL on every non-voiceover clip — single-render path unchanged.
+        clip_role_val = line.get('clip_role') if isinstance(line, dict) else None
+        voiceover_anchor_node_id = (
+            line.get('voiceover_anchor_image_node_id')
+            if isinstance(line, dict) else None
+        )
+        voiceover_line_val = (
+            line.get('voiceover_line') if isinstance(line, dict) else None
+        )
+
         clip = Clip(
             job_id=job_id,
             clip_index=idx,
@@ -1919,6 +1948,11 @@ async def _create_job_impl(
             caption=caption_val,            # v681
             scene_type=scene_type_val,      # v681
             bg_color=bg_color_val,          # v681
+            # v698A — voiceover-pair fields. clip_role NULL = single-render
+            # path (default); 'visual_pair' = needs an audio twin.
+            clip_role=clip_role_val,
+            voiceover_anchor_image_node_id=voiceover_anchor_node_id,
+            voiceover_line=voiceover_line_val,
         )
         db.add(clip)
     db.commit()
