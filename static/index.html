@@ -15032,29 +15032,40 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     // auto-construction — silently regenerating prompts from
                     // action_note + voice profile and bypassing the
                     // LLM-decoded final prompts entirely.
+                    // v682h — build veoOverridesObj from data.scenes_metadata
+                    // (per-line flat array) instead of walking sceneAssignments
+                    // and incrementing per LINE only. Pre-v682h the index
+                    // accounting was misaligned for any video with silent or
+                    // text_card scenes:
+                    //   - silent / text_card scenes have lines=[] so the
+                    //     veoFlatIdx counter didn't advance for them
+                    //   - dialogue payload looks up window._veoPromptOverrides[i]
+                    //     where i is the FULL dialogueInput line index (which
+                    //     includes empty entries for silent / text_card scenes)
+                    //   - the two indexing schemes diverge as soon as ONE silent
+                    //     scene precedes any on-camera scene, so the on-camera
+                    //     scene's veo_prompt_override looks up at the wrong key
+                    //     and falls through to null → build_prompt regenerates
+                    //     instead of using the markdown's prompt.
+                    // Now we walk data.scenes_metadata (which is parallel to
+                    // dialogueInput line positions and has veo_prompt_override
+                    // already denormed onto every flat row) — the keys align
+                    // with payload-builder `i` automatically.
                     const veoOverridesObj = {};
-                    // v644 — parallel capture for per-line audio-padding
-                    // suffixes from `- **pad:**` storyboard bullets.
-                    // Same flat-index keying as veoOverridesObj.
                     const padsObj = {};
-                    let veoFlatIdx = 0;
-                    sceneAssignments.forEach(sa => {
-                        const lines = sa.lines || [];
-                        const veoPrompts = sa.veo_prompts || [];
-                        const pads = sa.pads || [];
-                        for (let i = 0; i < lines.length; i++) {
-                            const vp = veoPrompts[i];
-                            if (vp && (vp.text_prompt || vp.negative_prompt)) {
-                                veoOverridesObj[veoFlatIdx] = {
-                                    text_prompt: vp.text_prompt || null,
-                                    negative_prompt: vp.negative_prompt || null,
-                                };
-                            }
-                            const pad = pads[i];
-                            if (pad && typeof pad === 'string' && pad.trim()) {
-                                padsObj[veoFlatIdx] = pad.trim();
-                            }
-                            veoFlatIdx++;
+                    const scenesMeta = data.scenes_metadata || [];
+                    scenesMeta.forEach((sm, idx) => {
+                        const tp = sm.veo_prompt_override;
+                        const np = sm.veo_negative_prompt_override;
+                        if (tp || np) {
+                            veoOverridesObj[idx] = {
+                                text_prompt: tp || null,
+                                negative_prompt: np || null,
+                            };
+                        }
+                        const pad = sm.dialogue_pad;
+                        if (pad && typeof pad === 'string' && pad.trim()) {
+                            padsObj[idx] = pad.trim();
                         }
                     });
                     window._veoPromptOverrides = veoOverridesObj;

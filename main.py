@@ -2224,7 +2224,25 @@ async def _setup_job_background(
                 dialogue_text = line_data.get("text", "")
                 clip_mode = line_data.get("clip_mode", "blend")
                 action_note = line_data.get("action_note", None)
-                start_image_idx = line_data.get("start_image_idx", 0)
+
+                # v682h — skip text_card clips entirely. They have no Veo
+                # render (rendered via ffmpeg drawtext at video assembly),
+                # no start_image_idx (it's null per text_card design), and
+                # no dialogue. Pre-v682h the loop crashed at
+                # `start_image_idx < num_images` because start_image_idx
+                # is None for text_card.
+                if (line_data.get("scene_type") or "").lower() == "text_card":
+                    print(f"[Background] Clip {idx}: text_card — skipping Veo prompt build (drawtext at assembly)", flush=True)
+                    continue
+
+                # v682h — handle missing start_image_idx defensively
+                # (silent + on-camera scenes always have one, but
+                # legacy or malformed payloads might not).
+                start_image_idx_raw = line_data.get("start_image_idx")
+                if start_image_idx_raw is None:
+                    start_image_idx = 0
+                else:
+                    start_image_idx = start_image_idx_raw
                 # v644 — audio-padding suffix appended to the Veo prompt
                 # only. Whisper-VAD continues to use the bare `dialogue_text`
                 # as script truth, so the pad's spoken audio is trimmed
