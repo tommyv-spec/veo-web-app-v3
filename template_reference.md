@@ -5667,3 +5667,95 @@ under earlier rules are valid as-is; new artifacts from this commit forward
 MUST satisfy all five gates before being pushed. The bundle TASK blocks
 (`code/create_bundle.sh`, `code/lift_bundle.sh`, `code/decode_bundle.sh`)
 should reference v696 as item [21] in the pre-output validation checklist.
+
+---
+
+### v697 — explicit force-verb action arc + non-persona body-prose detail
+
+**Surfaced 2026-05-09** from a snapinsta donut-recipe decode where the HOOK action arc was misread by the decoder. Original decode (pre-v697) said: *"the donut box drops slightly out of frame as the main character steps forward."* The actual source HOOK was a SLAM-AWAY spectacle: the persona's hand visibly STRIKES the box out of the bystander's hands, donuts SCATTER to the floor, the bystander BENDS DOWN to gather them. The v588 mandatory walk lists only start/mid/end; the SLAM peak sat at the q3 frame which was extracted but not viewed. Result: the hook's spectacle (Q8 violent-act per v598) was downgraded to "box drops slightly" — psychologically dead. Veo would then render a gentle handover, killing the hook.
+
+Same decode also under-described the bystander as just *"white woman in her late 20s / early 30s with chin-length light-brown bob, soft-pink T-shirt and blue jeans"* — missing the build/weight signal. The bystander is visibly OVERWEIGHT in the source, and that body-type is what motivates the shame-proxy mechanic (Q8(i) per v598). Without the body-type detail in the image prompt, Banana 2 generates a slim average-build bystander → the hook's "donuts will set you back months" voiceover lands on a normal-weight person → the shame-proxy collapses.
+
+**Rule A — explicit force-verb action arc on EVERY shot scene**
+
+Every `### Scene N` shot block now carries an `- **action_arc:**` field listing the force-verb chain across the clip's duration with `→` separators. The chain is rendered into BOTH the `- **action_note:**` body (per scene, with each beat tagged by the active verb in CAPITALS) AND the corresponding Veo final prompt's "Across the X seconds" section (verbs in CAPITALS for prompt-attention emphasis). Veo receives the chain explicitly.
+
+Example (snapinsta scene 1):
+```
+- **action_arc:** LIFT → PRESENT → SLAM-AWAY → SCATTER → STEP-FORWARD
+- **action_note:** [Start beat 0-1s] LIFT — the bystander LIFTS the open green pastry box up to chest height...
+                   [Mid-clip beat 1-2.5s] PRESENT + SLAM-AWAY — on "back" the main character's hand SLAMS into the box, knocking it out of her grip.
+                   [Mid-clip beat 2.5-3.5s] SCATTER — the box and donuts CASCADE down out of frame...
+                   [End beat 3.5-5s] STEP-FORWARD — the main character STEPS FORWARD into a tight portrait...
+```
+
+Force-verb library (extends v600's verb classes; chain MUST use verbs from THIS list):
+
+| Class | Verbs |
+|---|---|
+| FORCE-ON-PROP | LIFT / SLAM / SLAP / KNOCK-OUT / PUSH-AWAY / SCATTER / RIP / SHATTER / COLLAPSE / SETTLE |
+| LIQUID-AGENT | POUR / DRIZZLE / SPRAY / CASCADE / BLEED / DISSOLVE / SPLATTER / RIBBON |
+| PRESSURE | TRIGGER / BLAST / ATOMIZE / SCATTER / ENGULF / IGNITE |
+| BODY-ANATOMY | POINT / TRACE / CARVE / MARK / REVEAL / PALPATE / PRESS |
+| WIND-UP-IMPACT | RAISE / WIND-UP / SMACK / THROW / SPLATTER / DRIP |
+| CONFRONT | STEP-FORWARD / LEAN-IN / TURN / LOCK-EYES / GRIP / BEND |
+| GESTURE | RAISE-HAND / GESTURE-FORWARD / POINT-TO-LENS / OPEN-PALM / LOWER |
+| RECIPE-MOTION | TILT / KNEAD / FOLD / ROTATE / WHISK / DIP / PINCH / PULL-APART |
+
+**Decode-side enforcement of dense walk for HOOK shots**: HOOK shots MUST be walked at start / q1 / mid / q3 / end (5 frames minimum; v588's start/mid/end alone is insufficient because SLAM-class spectacles peak at q3 = ~75% of the shot's duration). The action_arc field must reflect what visibly changes between q1 and q3. If only start/mid/end are walked, HOOK spectacles get downgraded.
+
+**Rule B — non-persona character body-prose detail (build / weight / body-type)**
+
+When a bystander / extra / patient appears in frame, their image prompt body MUST describe (in this order, per v669 + v681 + v697):
+1. RACE / SKIN-TONE
+2. AGE BAND
+3. **BUILD / WEIGHT / BODY-TYPE** (the v697 addition)
+4. HAIR (color + length + style)
+5. CLOTHING (specific items + colors)
+6. EXPRESSION beat for THIS frame (eyebrows / mouth / eyes)
+
+Body-type taxonomy (use ONE of these qualifiers + descriptive anchors):
+- **OVERWEIGHT / HEAVY BUILD** — soft round face, visible double-chin, fleshy upper arms, wide torso, protruding belly silhouette under shirt, thick thighs in jeans
+- **SLIM / ATHLETIC BUILD** — sharp jawline, lean arms, flat stomach, narrow waist, slim thighs in joggers
+- **STOCKY / MUSCULAR BUILD** — broad shoulders, thick neck, muscular forearms, barrel chest, thick legs
+- **PLUS-SIZE / CURVY BUILD** — full hips, full bust, soft upper arms, rounded silhouette in fitted clothing
+- **SKINNY / GAUNT BUILD** — sharp cheekbones, sunken eyes, thin arms, hollow chest, narrow shoulders
+
+The body-type entry is MANDATORY when the body-type carries narrative weight — almost always, because it carries audience-resonance (v598 Q7) + shame-proxy / aspirational signal (v598 Q8).
+
+**Background economy** (v697 corollary): backgrounds get ONE descriptive sentence; FOREGROUND + COMPOSITION + PEOPLE get rich detail. Pre-v697 some image prompts spent 3-4 sentences re-describing kitchen cabinets + counter + window + lighting direction. v697 collapses background to one opener sentence ("Modern home kitchen background — white shaker cabinets, white marble counter at the lower edge, large window upper-background with soft greenery and bright natural daylight") and spends the saved attention budget on foreground people + props + composition + expression beats.
+
+**Negative-prompt guard** (v697 corollary): when a non-persona character's body-type is critical for the hook, add an explicit negative-prompt clause to the Veo prompt: `"no slim or thin bystander build (the bystander MUST read as overweight / heavy build for the shame-proxy hook to land)"`. Catches Banana 2 / Veo drift toward average-build defaults.
+
+**Migration**: existing artifacts are valid as-is; new artifacts from this commit forward MUST satisfy: (A) every shot scene has `action_arc:` + verb-tagged action_note + matching verb chain in the Veo prompt's "Across the X seconds" section; (B) every non-persona character has BUILD / WEIGHT / BODY-TYPE in their image prompt body. Bundle TASK blocks should reference v697 as item [22] in the pre-output validation checklist.
+
+**Pre-output verification** — extends the v696 verification command:
+
+```bash
+python -c "
+import re
+t = open('videos/<file>.md', encoding='utf-8').read()
+matches = list(re.finditer(r'### Scene (\d+)([^#]+?)(?=\n### |\Z)', t, re.DOTALL))
+errors = []
+for m in matches:
+    sn = int(m.group(1)); body = m.group(2)
+    is_tc = bool(re.search(r'^\s*-\s*\*\*scene_type:\*\*\s*text_card', body, re.MULTILINE))
+    if is_tc:
+        continue
+    if not re.search(r'^\s*-\s*\*\*action_arc:\*\*\s*.+?→', body, re.MULTILINE):
+        errors.append('Gate 6 (v697A): Scene ' + str(sn) + ' missing - **action_arc:** field with verb chain (use → between verbs)')
+build_keywords = ['overweight','heavy build','slim','thin','athletic build','stocky','muscular build','lean','plus-size','curvy','skinny','gaunt']
+image_blocks = re.findall(r'### Image (\d+)([^#]+?)(?=\n### |\Z)', t, re.DOTALL)
+for img_n, body in image_blocks:
+    cast_match = re.search(r'^\s*-\s*\*\*cast:\*\*\s*(.+)$', body, re.MULTILINE)
+    if not cast_match:
+        continue
+    cast = [c.strip().lower() for c in cast_match.group(1).split(',')]
+    non_persona = [c for c in cast if c not in ('the main character', 'none')]
+    if not non_persona:
+        continue
+    if not any(k in body.lower() for k in build_keywords):
+        errors.append('Gate 7 (v697B): Image ' + img_n + ' has non-persona cast ' + str(non_persona) + ' but no build/weight/body-type keyword in body')
+print('ALL v696 + v697 GATES PASS' if not errors else 'FAIL:\n  - ' + '\n  - '.join(errors))
+"
+```

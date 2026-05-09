@@ -58,6 +58,38 @@
     image). Missing the fenced block is the most common parser
     abort.
 
+  GATE 6 — every shot scene has `- **action_arc:**` field with a
+    `→`-separated force-verb chain (v697 Rule A). The chain renders
+    into BOTH the action_note (each beat tagged with the active verb
+    in CAPITALS) AND the Veo final prompt's "Across the X seconds"
+    section. Force-verb library: FORCE-ON-PROP (LIFT / SLAM / SLAP /
+    KNOCK-OUT / PUSH-AWAY / SCATTER / RIP / SHATTER) / LIQUID-AGENT
+    (POUR / DRIZZLE / SPRAY / CASCADE / DISSOLVE / RIBBON) / PRESSURE
+    (TRIGGER / BLAST / ATOMIZE / ENGULF / IGNITE) / BODY-ANATOMY
+    (POINT / TRACE / MARK / PALPATE / PRESS / REVEAL) /
+    WIND-UP-IMPACT (RAISE / WIND-UP / SMACK / THROW / SPLATTER) /
+    CONFRONT (STEP-FORWARD / LEAN-IN / TURN / LOCK-EYES / GRIP /
+    BEND) / GESTURE (RAISE-HAND / GESTURE-FORWARD / POINT-TO-LENS /
+    OPEN-PALM / LOWER) / RECIPE-MOTION (TILT / KNEAD / FOLD / WHISK /
+    DIP / PINCH / PULL-APART). HOOK shots MUST be walked at 5 frames
+    minimum (start / q1 / mid / q3 / end) since SLAM-class spectacles
+    peak at q3.
+
+  GATE 7 — non-persona characters (bystander / extra / patient) have
+    BUILD / WEIGHT / BODY-TYPE in their image prompt body (v697
+    Rule B). Order: race → age → BUILD → hair → clothing → expression.
+    Use one of: OVERWEIGHT / HEAVY BUILD, SLIM / ATHLETIC BUILD,
+    STOCKY / MUSCULAR BUILD, PLUS-SIZE / CURVY BUILD, SKINNY / GAUNT
+    BUILD. Without this, Banana 2 generates average-build defaults
+    and the hook's audience-resonance + shame-proxy signal collapses.
+
+  GATE 8 — backgrounds get ONE descriptive sentence; foreground +
+    composition + people get rich detail. Pre-v697 image prompts
+    spent 3-4 sentences re-describing kitchen cabinets / counter /
+    window light; v697 collapses background to one opener and spends
+    the saved attention budget on foreground people + props +
+    expression beats.
+
   GATE 5 — `- **line:**` field is FULLY LOWERCASE (v693)
     Veo TTS over-emphasizes capitalized words ("GUIDE" → shouted),
     Whisper-VAD then drops the over-emphasized syllables → the
