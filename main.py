@@ -6047,6 +6047,17 @@ async def export_final_video(
                 # v691c — propagate dialogue_pad so per-clip Whisper-VAD
                 # has the full audio context (line + pad) for matching.
                 "dialogue_pad": clip.dialogue_pad or "",
+                # v698A — clip-pair metadata. clip_role lets the export
+                # dual-output branch filter visual_pair clips out of the
+                # speaker pipeline and out of (or into) the broll pipeline.
+                # paired_clip_id lets the broll audio swap step look up
+                # the audio_pair sibling.
+                "clip_role": clip.clip_role,
+                "paired_clip_id": clip.paired_clip_id,
+                "voiceover_anchor_image_node_id": clip.voiceover_anchor_image_node_id,
+                "voiceover_line": clip.voiceover_line,
+                "scene_index": clip.scene_index,
+                "_clip_db_id": clip.id,
                 "_order": pos
             }
         return None
@@ -6168,56 +6179,127 @@ async def export_final_video(
                 min_gap_for_black=settings.min_gap_for_black,
             )
         else:
-            # === Regular Export (no master audio) ===
-            # Process the export with per-clip trim settings (non-blocking)
-            stats = await asyncio.to_thread(
-                process_export,
-                clip_info=clip_info,
-                output_path=output_path,
-                frames_to_cut_start=settings.frames_to_cut_start,
-                frames_to_cut_end=settings.frames_to_cut_end,
-                remove_silence=settings.remove_silence,
-                silence_mode=settings.silence_mode,
-                vad_threshold=settings.silence_threshold,
-                silence_trigger=settings.silence_trigger,
-                silence_keep=settings.silence_keep,
-                transition=settings.transition,
-                transition_duration=settings.transition_duration,
-                # v553 — pass the user's ORIGINAL dialogue line to the
-                # matcher, NOT the prefixed version. Earlier versions
-                # passed `_apply_prefix(line)` so the matcher's script
-                # anchored on the "only" prefix word, and v542 then
-                # tried to drop "only" from the matched output. That
-                # was brittle: depending on punctuation, prefix flags,
-                # and whisper-timing edge cases, "only" leaked into
-                # the kept audio (clips 2/3/4/5 of the Nuri ED export).
+            # === v698A Phase 4b — DETECT clip-pair scenes ===
+            #
+            # If any Clip has clip_role='visual_pair', run the dual-output
+            # flow: speaker_video (single + audio_pair clips, full Whisper-VAD)
+            # AND broll_video (single + visual_pair speed-matched against
+            # audio_pair's VAD'd audio + text_card scenes).
+            #
+            # When no pairs present, fall through to the legacy single-output
+            # process_export path (existing behavior, zero breakage on
+            # non-v698A jobs).
+            _has_v698a_pairs = False
+            try:
+                _vp_count = db.query(Clip).filter(
+                    Clip.job_id == job_id,
+                    Clip.clip_role == "visual_pair",
+                ).count()
+                _has_v698a_pairs = _vp_count > 0
+                print(
+                    f"[Export/v698A] visual_pair clips in job: {_vp_count}",
+                    flush=True,
+                )
+            except Exception as _v698_err:
+                print(
+                    f"[Export/v698A] detection failed (non-fatal): {_v698_err}",
+                    flush=True,
+                )
+                _has_v698a_pairs = False
+
+            if _has_v698a_pairs:
+                # === DUAL-OUTPUT MODE ===
+                # Phase 4b-MVP: orchestrate two process_export passes.
+                # The current pass runs the SPEAKER pipeline using a
+                # filtered clip_info (drop visual_pair, keep single +
+                # audio_pair). After that completes, Phase 4b runs the
+                # BROLL pipeline with visual_pair clips pre-swapped to
+                # the audio_pair's VAD'd audio.
                 #
-                # The cleaner approach: keep prefix-short ON at PROMPT
-                # BUILD time (Veo still gets "only [line]" to speak,
-                # which gives it a clean-onset throwaway word), but
-                # tell the matcher only about the user's actual line.
-                # Veo's spoken "only" then becomes an unmatched whisper
-                # word that lives BEFORE the cursor's first match. The
-                # in-order matcher (line 1070) walks the user's words,
-                # finds "pick"/"what"/"you"/"and" past the "only", and
-                # cursor advances past it. "only" is in unmatched_words,
-                # the v549 padding clamp pushes the segment start past
-                # it, and the export contains only the user's line.
-                #
-                # The v542 prefix-drop in _match_whisper_to_dialogue is
-                # left in place but becomes a no-op (never triggers
-                # because clip_words[0] is no longer the prefix word).
-                # Kept for backward compatibility — harmless if never
-                # fired.
-                dialogue_texts=[c.get("dialogue_text", "") or "" for c in clip_info],
-                language=json.loads(job.config_json).get("language", "English") if job.config_json else "English",
-                # v553 — kept for back-compat. v542 prefix-drop is
-                # now a no-op because the matcher's script no longer
-                # contains the prefix word.
-                cut_prefix_audio=False,
-                prefix_word=_prefix_word,
-            )
-        
+                # Phase 4b-MVP NOTE: this block currently runs ONLY the
+                # speaker pipeline as a first slice. Phase 4b-ii ships the
+                # broll pipeline. The legacy single-output stays unaffected
+                # for non-v698A jobs.
+                print(
+                    f"[Export/v698A] DUAL-OUTPUT MODE — "
+                    f"speaker pipeline (single + audio_pair) running first",
+                    flush=True,
+                )
+                # Filter clip_info: drop visual_pair entries (their visuals
+                # aren't part of the speaker output; their audio twins are
+                # already in clip_info as audio_pair entries).
+                _speaker_clip_info = [
+                    c for c in clip_info
+                    if (c.get("clip_role") or "single").lower() != "visual_pair"
+                ]
+                print(
+                    f"[Export/v698A] speaker clip_info: "
+                    f"{len(_speaker_clip_info)} clips (filtered from "
+                    f"{len(clip_info)} total — {len(clip_info) - len(_speaker_clip_info)} "
+                    f"visual_pair entries dropped)",
+                    flush=True,
+                )
+
+                # The speaker output uses the standard output_path.
+                # Phase 4b-ii will add a second output_path for broll.
+                _speaker_output_path = output_path
+
+                stats = await asyncio.to_thread(
+                    process_export,
+                    clip_info=_speaker_clip_info,
+                    output_path=_speaker_output_path,
+                    frames_to_cut_start=settings.frames_to_cut_start,
+                    frames_to_cut_end=settings.frames_to_cut_end,
+                    remove_silence=settings.remove_silence,
+                    silence_mode=settings.silence_mode,
+                    vad_threshold=settings.silence_threshold,
+                    silence_trigger=settings.silence_trigger,
+                    silence_keep=settings.silence_keep,
+                    transition=settings.transition,
+                    transition_duration=settings.transition_duration,
+                    dialogue_texts=[
+                        c.get("dialogue_text", "") or "" for c in _speaker_clip_info
+                    ],
+                    language=(
+                        json.loads(job.config_json).get("language", "English")
+                        if job.config_json else "English"
+                    ),
+                    cut_prefix_audio=False,
+                    prefix_word=_prefix_word,
+                )
+                stats = stats or {}
+                stats["v698a_mode"] = "dual_output_speaker_only_phase4b_mvp"
+                stats["v698a_speaker_clips"] = len(_speaker_clip_info)
+                stats["v698a_visual_pair_clips_dropped"] = (
+                    len(clip_info) - len(_speaker_clip_info)
+                )
+                stats["v698a_phase4b_broll_pending"] = True
+                print(
+                    f"[Export/v698A] speaker pipeline complete. Stats: {stats}",
+                    flush=True,
+                )
+            else:
+                # === Regular Export (no master audio, no v698A pairs) ===
+                # Process the export with per-clip trim settings (non-blocking)
+                stats = await asyncio.to_thread(
+                    process_export,
+                    clip_info=clip_info,
+                    output_path=output_path,
+                    frames_to_cut_start=settings.frames_to_cut_start,
+                    frames_to_cut_end=settings.frames_to_cut_end,
+                    remove_silence=settings.remove_silence,
+                    silence_mode=settings.silence_mode,
+                    vad_threshold=settings.silence_threshold,
+                    silence_trigger=settings.silence_trigger,
+                    silence_keep=settings.silence_keep,
+                    transition=settings.transition,
+                    transition_duration=settings.transition_duration,
+                    dialogue_texts=[c.get("dialogue_text", "") or "" for c in clip_info],
+                    language=json.loads(job.config_json).get("language", "English") if job.config_json else "English",
+                    cut_prefix_audio=False,
+                    prefix_word=_prefix_word,
+                )
+
         print(f"[Export] Success! Stats: {stats}")
         
         # Apply audio enhancement if any audio toggle is enabled
