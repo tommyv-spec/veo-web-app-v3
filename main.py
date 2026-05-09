@@ -5443,6 +5443,31 @@ async def export_final_video(
     clip_info = []
     cut_scene_first_clips = set()
     
+    # v689 — auto-approve text_card clips at export time. Pre-v688 the
+    # Clip writer didn't auto-approve text_card scenes (they stayed at
+    # 'pending_review'), so the export's approval filter excluded them
+    # and the final video missed the text card entirely (e.g. Donna's
+    # "2 months later..." card was dropped from the 8-clip storyboard
+    # leaving 7 concatenated clips). v688 fixed the prompt-build path
+    # for future Generates; v689 handles existing jobs by auto-
+    # approving any text_card clip on export-start. Idempotent.
+    _text_card_clips = db.query(Clip).filter(
+        Clip.job_id == job_id,
+        Clip.scene_type == "text_card",
+        Clip.approval_status != "approved",
+    ).all()
+    if _text_card_clips:
+        for tc in _text_card_clips:
+            tc.approval_status = "approved"
+            if tc.status != ClipStatus.COMPLETED.value:
+                tc.status = ClipStatus.COMPLETED.value
+        db.commit()
+        print(
+            f"[Export][v689] auto-approved {len(_text_card_clips)} text_card "
+            f"clip(s) so the export includes them (drawtext at concat).",
+            flush=True,
+        )
+
     if job.clip_order_json:
         # Custom lineup order
         try:
