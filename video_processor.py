@@ -2337,66 +2337,76 @@ def render_text_card(
 def concat_videos(files: List[Path], output: Path) -> None:
     """Concatenate multiple videos into one.
 
-    v560: re-encodes video at concat time rather than stream-copying.
-    Previously used '-c:v copy' for speed, but stream-copy preserves
-    each input's encoded packet timestamps verbatim — and when those
-    inputs had variable frame rates (which the speedup path was
-    silently producing pre-v560 due to missing -r/-vsync flags), the
-    output container computed duration from the LAST PTS, producing
-    videos 4-5x longer than the sum of input durations.
+    v692c: switched to the ffmpeg concat **filter** (one `-i` per input
+    fed through `concat=n=N:v=1:a=1`) instead of the concat **demuxer**
+    + `-r 24 -vsync cfr` re-encode. The demuxer-based path was producing
+    output durations 7-8× the sum of input durations on Render's ffmpeg
+    when inputs mixed framerates (text_card scenes render at 30fps via
+    `color=...:r=30`, Veo clips at 24fps) — the per-input PTS handling
+    under `-vsync cfr` mangled the timeline. v692b diagnostic confirmed:
+    8 inputs summing to 31.9s produced a 233.5s concat output.
 
-    Re-encoding with constant 24fps adds ~2-5 seconds of CPU per
-    minute of output but guarantees the output duration matches the
-    sum of input durations regardless of what timing oddities the
-    inputs have.
+    The concat filter normalizes PTS internally (every input is decoded
+    into a single filtergraph timeline), so the output duration matches
+    the sum of input durations regardless of mixed framerates / audio
+    sample rates / PTS oddities. Output framerate is forced via
+    `fps=24` after concat for downstream playback consistency.
 
-    Audio is always re-encoded (mixed clip sources can have different
-    audio specs that silently corrupt under stream copy).
+    Memory cost: ~30MB per active decoder × N inputs. For typical
+    8-clip exports that's ~240MB peak — within Standard plan budget.
+
+    v560 history (see prior docstring): originally `-c:v copy`, then
+    re-encode + `-vsync cfr` to fix VFR durations. The re-encode fixed
+    the stream-copy PTS-preservation bug but introduced this CFR-stretch
+    bug for mixed-framerate inputs. Concat filter resolves both.
     """
     print(f"[VideoProcessor] concat_videos: {len(files)} files -> {output}")
+    n = len(files)
+    if n == 0:
+        raise RuntimeError("concat_videos: no files to concatenate")
 
-    with tempfile.TemporaryDirectory() as td:
-        listfile = Path(td) / "inputs.txt"
-        with listfile.open("w", encoding="utf-8") as f:
-            for p in files:
-                f.write(f"file {shlex.quote(str(p))}\n")
+    # Build per-input -i flags
+    input_flags: List[str] = []
+    for f in files:
+        input_flags += ["-i", str(f)]
 
-        # v560: video re-encode (was -c:v copy pre-v560, see docstring)
-        cmd = [
-            FFMPEG_BIN, "-y",
-            "-f", "concat", "-safe", "0", "-i", str(listfile),
-            "-r", "24", "-vsync", "cfr",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-threads", "1",
-            "-c:a", "aac", "-b:a", "128k",
-            "-max_muxing_queue_size", "1024",
-            str(output)
-        ]
-        print(f"[VideoProcessor]   Concatenating (video re-encode @ 24fps CFR + audio re-encode)...")
-        code, _, err = run(cmd)
-        if code == 0:
-            print(f"[VideoProcessor]   concat_videos completed")
-            return
+    # Build filtergraph: [0:v][0:a][1:v][1:a]...concat=n=N:v=1:a=1[v][a]
+    streams = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(n))
+    filtergraph = (
+        f"{streams}concat=n={n}:v=1:a=1[vraw][a];"
+        f"[vraw]fps=24,setpts=PTS-STARTPTS,format=yuv420p[v]"
+    )
 
-        # Fall back to a slower preset if veryfast somehow fails
-        print(f"[VideoProcessor]   Initial concat failed, retrying with slower preset...")
-        cmd_re = [
-            FFMPEG_BIN, "-y",
-            "-f", "concat", "-safe", "0", "-i", str(listfile),
-            "-r", "24", "-vsync", "cfr",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-threads", "1",
-            "-c:a", "aac", "-b:a", "128k",
-            "-max_muxing_queue_size", "1024",
-            str(output)
-        ]
-        code, _, err = run(cmd_re)
-        if code != 0:
-            print(f"[VideoProcessor]   ERROR: {err}")
-            raise RuntimeError(f"Failed to concatenate videos: {err}")
-        print(f"[VideoProcessor]   concat_videos completed (medium preset)")
+    cmd = [
+        FFMPEG_BIN, "-y",
+        *input_flags,
+        "-filter_complex", filtergraph,
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-threads", "1",
+        "-c:a", "aac", "-b:a", "128k",
+        "-max_muxing_queue_size", "1024",
+        "-movflags", "+faststart",
+        str(output),
+    ]
+    print(f"[VideoProcessor]   Concatenating (concat filter, n={n}, fps=24)...")
+    code, _, err = run(cmd)
+    if code == 0:
+        print(f"[VideoProcessor]   concat_videos completed")
+        return
+
+    # Fallback: medium preset if veryfast somehow fails on encode
+    print(f"[VideoProcessor]   Initial concat failed, retrying with medium preset...")
+    cmd_re = list(cmd)
+    for i, tok in enumerate(cmd_re):
+        if tok == "veryfast":
+            cmd_re[i] = "medium"
+            break
+    code, _, err = run(cmd_re)
+    if code != 0:
+        print(f"[VideoProcessor]   ERROR: {err[:500]}")
+        raise RuntimeError(f"Failed to concatenate videos: {err[:300]}")
+    print(f"[VideoProcessor]   concat_videos completed (medium preset)")
 
 
 def concat_videos_with_transitions(
