@@ -2429,6 +2429,27 @@ async def _setup_job_background(
                     except Exception:
                         pass
 
+                # v698A Phase 3c — visual_pair clips render SILENT visuals
+                # (b-roll, no lip-sync). Override the dialogue + force
+                # voiceover_only=False so build_prompt produces a silent
+                # b-roll prompt; the audio twin (Phase 3a/3b audio_pair Clip)
+                # carries the line on the anchor frame separately. The
+                # visual prompt's action_note still drives the b-roll
+                # motion arc per v697.
+                _line_clip_role = (
+                    line_data.get("clip_role")
+                    if isinstance(line_data, dict) else None
+                )
+                if (_line_clip_role or "").lower() == "visual_pair":
+                    _padded_dialogue_for_veo = ""  # silent visual
+                    _voiceover_only_override = False  # not narrated either
+                    print(
+                        f"[v698A/Phase3c] clip {idx} clip_role=visual_pair → "
+                        f"silent prompt (b-roll, no lip-sync). Audio twin "
+                        f"renders the voiceover separately.",
+                        flush=True,
+                    )
+
                 # Build prompt using the REAL function signature.
                 # v644: send the padded dialogue (line + " " + pad) to Veo
                 # so its experimental audio path has enough text to render.
@@ -2565,6 +2586,124 @@ async def _setup_job_background(
                             f"v698A: {audio_pairs_created} audio twins created "
                             f"for voiceover-paired scenes",
                             "INFO", "system",
+                        )
+
+                    # v698A Phase 3b — build prompts + set start_frame on
+                    # audio_pair Clips so Flow worker can dispatch them.
+                    # The audio_pair Clip's start frame is the
+                    # voiceover_anchor_image (resolved via
+                    # voiceover_anchor_image_local_index from the line metadata).
+                    # build_prompt is called with speaker_mode='on-camera' so
+                    # Veo's lip-sync runs normally; the line text is the
+                    # voiceover_line.
+                    audio_pair_clips = db.query(Clip).filter(
+                        Clip.job_id == job_id,
+                        Clip.clip_role == 'audio_pair',
+                        Clip.status == 'preparing',
+                    ).all()
+                    audio_prompts_built = 0
+                    for ap in audio_pair_clips:
+                        try:
+                            # Find visual_pair sibling to get the dialogue_raw
+                            # line (where voiceover_anchor_image_local_index lives)
+                            vp = db.query(Clip).filter(Clip.id == ap.paired_clip_id).first()
+                            if vp is None:
+                                print(
+                                    f"[v698A/Phase3b] audio_pair {ap.id} has "
+                                    f"no paired visual; skipping",
+                                    flush=True,
+                                )
+                                continue
+                            vp_idx = vp.clip_index
+                            if vp_idx >= len(dialogue_raw):
+                                continue
+                            line_data = (
+                                dialogue_raw[vp_idx]
+                                if isinstance(dialogue_raw[vp_idx], dict)
+                                else {}
+                            )
+                            anchor_local_idx = line_data.get(
+                                "voiceover_anchor_image_local_index"
+                            )
+                            if anchor_local_idx is None:
+                                print(
+                                    f"[v698A/Phase3b] audio_pair {ap.id} missing "
+                                    f"anchor_local_idx in line_data; skipping",
+                                    flush=True,
+                                )
+                                continue
+                            if anchor_local_idx >= len(uploaded_frames_list):
+                                print(
+                                    f"[v698A/Phase3b] audio_pair {ap.id} "
+                                    f"anchor_local_idx={anchor_local_idx} out of range "
+                                    f"(uploaded_frames_list len={len(uploaded_frames_list)})",
+                                    flush=True,
+                                )
+                                continue
+
+                            anchor_fname = uploaded_frames_list[anchor_local_idx]
+                            anchor_local_path = local_frame_paths.get(anchor_fname)
+                            if anchor_local_path is None or not os.path.exists(anchor_local_path):
+                                print(
+                                    f"[v698A/Phase3b] audio_pair {ap.id} anchor "
+                                    f"local file missing ({anchor_fname}); skipping",
+                                    flush=True,
+                                )
+                                continue
+
+                            # Build the audio_pair Veo prompt — speaker_mode=
+                            # 'on-camera' so Veo lip-syncs the line on the
+                            # torso+hands anchor frame.
+                            try:
+                                audio_prompt = await asyncio.to_thread(
+                                    build_prompt,
+                                    dialogue_line=ap.voiceover_line or vp.voiceover_line or "",
+                                    start_frame_path=anchor_local_path,
+                                    end_frame_path=None,
+                                    clip_index=ap.clip_index,
+                                    language=language,
+                                    voice_profile=voice_profile,
+                                    config=video_config,
+                                    openai_key=openai_key,
+                                    frame_analysis=frame_analysis,
+                                    user_context_override=(
+                                        user_context_enriched if user_context_enriched else None
+                                    ),
+                                    use_gesture_enrichment=False,
+                                    transition_cue=None,
+                                    action_note=None,
+                                    short_dialogue_mode=config_dict.get(
+                                        'short_dialogue_mode', 'optimized'
+                                    ),
+                                    voiceover_only=False,  # on-camera lip-sync
+                                )
+                            except Exception as _bp_err:
+                                print(
+                                    f"[v698A/Phase3b] build_prompt failed for "
+                                    f"audio_pair {ap.id}: {_bp_err}",
+                                    flush=True,
+                                )
+                                continue
+
+                            ap.prompt_text = audio_prompt
+                            ap.start_frame = (
+                                f"jobs/{job_id}/frames/{anchor_fname}"
+                            )
+                            ap.status = ClipStatus.PENDING.value
+                            audio_prompts_built += 1
+                        except Exception as _ap_err:
+                            print(
+                                f"[v698A/Phase3b] audio_pair {ap.id} prompt "
+                                f"build failed (non-fatal): {_ap_err}",
+                                flush=True,
+                            )
+                    if audio_prompts_built:
+                        db.commit()
+                        print(
+                            f"[v698A/Phase3b] built prompts + set "
+                            f"start_frame on {audio_prompts_built} audio_pair "
+                            f"Clips → status=pending (Flow worker pickup ready)",
+                            flush=True,
                         )
             except Exception as _vp_err:
                 # Non-fatal — visual side will still render; audio twin can be
