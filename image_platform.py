@@ -6125,6 +6125,30 @@ def prepare_batch_for_video(
                 return b
         return 8
 
+    # v682p — ALWAYS re-parse source_markdown right here and override
+    # scene["veo_prompts"] from the fresh parse, regardless of what
+    # to_dict returned from stored assignment.veo_prompts_json. This
+    # is the SHIP-OR-DIE path: stop trying to keep assignment rows
+    # in sync with the markdown, just always read the markdown.
+    # source_markdown is the source of truth at prepare time.
+    fresh_scenes_by_idx: Dict[int, Dict[str, Any]] = {}
+    if batch.source_markdown:
+        try:
+            _fresh_parse = parse_scene_table(batch.source_markdown)
+            for fs in _fresh_parse.get("scenes", []) or []:
+                fresh_scenes_by_idx[fs["scene_index"]] = fs
+            log.info(
+                f"[v682p/fresh-parse] batch={batch_id} "
+                f"parsed {len(fresh_scenes_by_idx)} scene(s); "
+                f"veo_prompts present per scene: "
+                f"{ {k: bool(v.get('veo_prompts')) for k, v in fresh_scenes_by_idx.items()} }"
+            )
+        except Exception as _pe:
+            log.warning(
+                f"[v682p/fresh-parse] batch={batch_id} parse failed "
+                f"({type(_pe).__name__}: {_pe}) — falling back to assignment data."
+            )
+
     scene_assignments_payload: List[Dict[str, Any]] = []
     dialogue_lines_flat: List[str] = []          # back-compat (one entry per line across all scenes)
     scenes_metadata_flat: List[Dict[str, Any]] = []  # back-compat per-line rows
@@ -6175,6 +6199,25 @@ def prepare_batch_for_video(
         # The legacy synthesized branch above doesn't include this key, so
         # default to all-None.
         veo_prompts = scene.get("veo_prompts") or []
+
+        # v682p — OVERRIDE veo_prompts from fresh markdown parse (built at
+        # top of this function). source_markdown is the source of truth;
+        # if it has prompts, use them, regardless of what stored
+        # assignment.veo_prompts_json has. Fixes the persistent issue where
+        # silent scenes had stale (or missing) veo_prompts_json that
+        # to_dict returned as [] — now re-parsing produces the prompts
+        # the markdown ACTUALLY has. Logs whether the override fired.
+        _fresh = fresh_scenes_by_idx.get(scene.get("scene_index"))
+        if _fresh is not None:
+            _fresh_vp = _fresh.get("veo_prompts") or []
+            if any(vp for vp in _fresh_vp):
+                if veo_prompts != _fresh_vp:
+                    log.info(
+                        f"[v682p/override] scene_index={scene.get('scene_index')} "
+                        f"replacing stored veo_prompts ({len(veo_prompts)} entries) "
+                        f"with fresh parse ({len(_fresh_vp)} entries)"
+                    )
+                veo_prompts = _fresh_vp
         # v644 — same parallel-array convention for pads (audio-padding
         # suffix per line; None when no pad on that line).
         pads = scene.get("pads") or []
