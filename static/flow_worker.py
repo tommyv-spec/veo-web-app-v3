@@ -1756,10 +1756,43 @@ def get_golden_folder(session_folder):
     return os.path.join(base, name + "-golden")
 
 
+def _parse_user_data_dir_from_cmdline(cmdline):
+    """Extract the --user-data-dir value from a Chrome commandline string.
+
+    Returns the path string, or None if not found. Handles three forms:
+        --user-data-dir=PATH                (no quotes, no spaces in PATH)
+        --user-data-dir="PATH WITH SPACES"  (double-quoted)
+        --user-data-dir PATH                (separate token; rare on Chrome)
+
+    The returned path is os.path.abspath-normalized for comparison.
+    """
+    if not cmdline:
+        return None
+    import re as _re
+    # Form 1+2: --user-data-dir=value (quoted or unquoted, captures up to
+    # closing quote OR up to next whitespace OR end-of-string).
+    m = _re.search(r'--user-data-dir=("([^"]*)"|(\S+))', cmdline)
+    if m:
+        return os.path.abspath(m.group(2) if m.group(2) is not None else m.group(3))
+    # Form 3: --user-data-dir PATH (separate token)
+    m = _re.search(r'--user-data-dir\s+(?:"([^"]*)"|(\S+))', cmdline)
+    if m:
+        return os.path.abspath(m.group(1) if m.group(1) is not None else m.group(2))
+    return None
+
+
 def kill_chrome_using_profile(profile_dir, label=""):
     """Force-kill any Chrome process holding a lock on the given profile directory.
     Also removes SingletonLock/Socket/Cookie files so the next launch starts clean.
     Works on both Linux (pgrep/kill) and Windows (WMIC/taskkill).
+
+    v684 — EXACT-MATCH on the parsed --user-data-dir value, not substring.
+    Pre-v684 used `commandline like '%PATH%'` which is substring match.
+    Concrete failure: if Account 1's profile is "...\\chrome-session" and
+    Account 2's is "...\\chrome-session-2", a kill targeting Account 1
+    matched BOTH accounts' Chrome processes (because "chrome-session" is
+    a substring of "chrome-session-2"). Result: killing one account
+    accidentally killed the other's browser window mid-session.
     """
     import subprocess as _sub
     import platform as _platform
@@ -1769,55 +1802,75 @@ def kill_chrome_using_profile(profile_dir, label=""):
 
     try:
         if _platform.system() == "Windows":
-            # Windows: use WMIC to find Chrome processes whose commandline contains
-            # the worker profile path — kills ONLY the worker Chrome, not the user's
-            # own Chrome windows.
-            #
-            # v486: use the FULL profile path only. The old basename fallback
-            # (matching on "chrome-session" when the full path returned zero)
-            # caused catastrophic cross-worker kills: both video worker
-            # (C:\Users\tomma\veo-worker\chrome-session) and image worker
-            # (C:\Users\tomma\KavenoImageWorker\chrome-session) share the
-            # basename "chrome-session". When the video worker started and
-            # the full-path search found nothing for ITS profile yet, the
-            # fallback killed EVERY Chrome with "chrome-session" in its
-            # commandline — including the image worker's Chrome.
-            # Evidence: log showed 9 PIDs killed for "chrome-session" when
-            # the video worker has only 1 Chrome per account.
-            pids_found = []
+            # v684 — fetch (PID, CommandLine) for every chrome.exe and filter
+            # in Python with EXACT match on the parsed --user-data-dir value.
+            # No substring LIKE in WMIC/PowerShell — too many false positives
+            # when account profile paths share a common prefix.
+            pid_to_cmdline = {}
 
             # Method 1: WMIC (Windows 10 and earlier)
             try:
                 r = _sub.run(
-                    ['wmic', 'process', 'where',
-                     f'name="chrome.exe" and commandline like "%{abs_profile}%"',
-                     'get', 'ProcessId', '/format:value'],
-                    capture_output=True, text=True, timeout=3
+                    ['wmic', 'process', 'where', 'name="chrome.exe"',
+                     'get', 'ProcessId,CommandLine', '/format:list'],
+                    capture_output=True, text=True, timeout=8
                 )
+                # WMIC /format:list emits blocks of `Key=Value` lines separated
+                # by blank lines. Group them into (PID, CommandLine) tuples.
+                current = {}
                 for line in r.stdout.splitlines():
                     line = line.strip()
-                    if line.startswith('ProcessId=') and line[10:].strip().isdigit():
-                        pids_found.append(line[10:].strip())
+                    if not line:
+                        if 'ProcessId' in current:
+                            pid = current.get('ProcessId', '').strip()
+                            cmd = current.get('CommandLine', '')
+                            if pid.isdigit() and cmd:
+                                pid_to_cmdline[pid] = cmd
+                        current = {}
+                    elif '=' in line:
+                        k, _, v = line.partition('=')
+                        current[k.strip()] = v
+                # Flush trailing block
+                if 'ProcessId' in current:
+                    pid = current.get('ProcessId', '').strip()
+                    cmd = current.get('CommandLine', '')
+                    if pid.isdigit() and cmd:
+                        pid_to_cmdline[pid] = cmd
             except Exception:
                 # WMIC not available (Windows 11+) — try PowerShell
                 try:
-                    # Escape single quotes in path for PowerShell
-                    escaped = abs_profile.replace("'", "''")
                     ps_cmd = (
-                        f"Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\""
-                        f" | Where-Object {{ $_.CommandLine -like '*{escaped}*' }}"
-                        f" | Select-Object -ExpandProperty ProcessId"
+                        "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\""
+                        " | Select-Object ProcessId,CommandLine"
+                        " | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
                     )
                     r2 = _sub.run(
                         ['powershell', '-NoProfile', '-Command', ps_cmd],
-                        capture_output=True, text=True, timeout=3
+                        capture_output=True, text=True, timeout=8
                     )
                     for line in r2.stdout.splitlines():
-                        line = line.strip()
-                        if line.isdigit():
-                            pids_found.append(line)
+                        line = line.rstrip('\r\n')
+                        if not line:
+                            continue
+                        # Tab-separated PID and CommandLine
+                        parts = line.split('\t', 1)
+                        if len(parts) == 2 and parts[0].strip().isdigit():
+                            pid_to_cmdline[parts[0].strip()] = parts[1]
                 except Exception as _ps_err:
                     print(f"{prefix}PowerShell CIM query failed (non-fatal): {_ps_err}", flush=True)
+
+            # v684 — EXACT match on parsed --user-data-dir value
+            pids_found = []
+            for pid, cmdline in pid_to_cmdline.items():
+                udd = _parse_user_data_dir_from_cmdline(cmdline)
+                if udd is None:
+                    # Browser process without --user-data-dir flag (probably
+                    # the user's personal Chrome) — skip.
+                    continue
+                # Normalize both sides for comparison: case-insensitive on
+                # Windows, trailing slash stripped, abspath-normalized.
+                if udd.rstrip('\\/').lower() == abs_profile.rstrip('\\/').lower():
+                    pids_found.append(pid)
 
             for pid in pids_found:
                 _sub.run(['taskkill', '/F', '/PID', pid], capture_output=True, timeout=5)
@@ -1825,20 +1878,42 @@ def kill_chrome_using_profile(profile_dir, label=""):
                 killed.append(pid)
 
             # NOTE: We intentionally do NOT fall back to 'taskkill /IM chrome.exe'
-            # OR to a basename search. Full-path match is the only safe way to
-            # distinguish this worker's Chrome from (a) the user's personal
-            # Chrome, and (b) OTHER workers' Chrome (e.g. image worker).
+            # OR to a basename search. Exact full-path match is the only safe way
+            # to distinguish this account's Chrome from (a) the user's personal
+            # Chrome, (b) OTHER accounts' Chrome (this video worker's accounts
+            # share parent paths), and (c) OTHER workers' Chrome (image worker).
             if not killed:
                 print(f"{prefix}No worker Chrome process found for profile {abs_profile}", flush=True)
         else:
-            # Linux/Mac: pgrep + kill -9. Same full-path-only policy.
+            # Linux/Mac: parse commandlines from /proc, do exact --user-data-dir
+            # match. v684 — same fix as Windows side above. pre-v684 used
+            # `pgrep -f abs_profile` which is substring match → cross-account kills.
             try:
-                result = _sub.run(['pgrep', '-f', abs_profile], capture_output=True, text=True, timeout=5)
-                for pid in result.stdout.strip().split():
-                    if pid:
-                        _sub.run(['kill', '-9', pid], capture_output=True, timeout=5)
-                        print(f"{prefix}Killed stale Chrome pid {pid} (profile: {os.path.basename(abs_profile)})", flush=True)
-                        killed.append(pid)
+                # Iterate /proc/<pid>/cmdline files
+                for pid_dir in os.listdir('/proc'):
+                    if not pid_dir.isdigit():
+                        continue
+                    cmdline_path = f'/proc/{pid_dir}/cmdline'
+                    try:
+                        with open(cmdline_path, 'rb') as f:
+                            raw = f.read()
+                    except Exception:
+                        continue
+                    # /proc cmdline is NUL-separated; reassemble with spaces
+                    # for the regex parser.
+                    cmdline = raw.replace(b'\x00', b' ').decode('utf-8', errors='replace').strip()
+                    if 'chrome' not in cmdline.lower():
+                        continue
+                    udd = _parse_user_data_dir_from_cmdline(cmdline)
+                    if udd is None:
+                        continue
+                    if udd.rstrip('/').lower() == abs_profile.rstrip('/').lower():
+                        try:
+                            _sub.run(['kill', '-9', pid_dir], capture_output=True, timeout=5)
+                            print(f"{prefix}Killed stale Chrome pid {pid_dir} (profile: {os.path.basename(abs_profile)})", flush=True)
+                            killed.append(pid_dir)
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
