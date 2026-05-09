@@ -2117,9 +2117,20 @@ async def _setup_job_background(
             # entirely for log decoration. Skip the whole upstream block.
             _peek_dialogue_data = json.loads(job.dialogue_json) if job.dialogue_json else {}
             _peek_lines = _peek_dialogue_data.get("lines", []) or []
+            # v682t — text_card clips bypass Veo entirely (rendered via
+            # ffmpeg drawtext at video assembly), so they legitimately
+            # have veo_prompt_override=None. Treat them as "doesn't
+            # need prebuilt" instead of failing the fast-lane gate.
+            # Otherwise a single text_card scene defeats the entire
+            # v673 optimization for an otherwise fully-prebuilt batch.
+            def _line_satisfies_fast_lane(_l):
+                if not isinstance(_l, dict):
+                    return False
+                if (_l.get("scene_type") or "").lower() == "text_card":
+                    return True  # drawtext, no Veo render needed
+                return bool((_l.get("veo_prompt_override") or "").strip())
             _all_prebuilt = bool(_peek_lines) and all(
-                isinstance(_l, dict) and (_l.get("veo_prompt_override") or "").strip()
-                for _l in _peek_lines
+                _line_satisfies_fast_lane(_l) for _l in _peek_lines
             )
 
             # ── One-time analysis ──
