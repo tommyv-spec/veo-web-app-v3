@@ -6581,7 +6581,7 @@ async def voice_swap_openvoice(
 async def get_job_image(
     job_id: str,
     filename: str,
-    proxy: int = 0,
+    direct: int = 0,
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -6595,24 +6595,28 @@ async def get_job_image(
     polling that exhausted the connection pool. Now: query needed
     job data, release session, do R2 work without DB held.
 
-    v686: `?proxy=1` query param OR `R2_PROXY_THUMBNAILS=1` env var
-    forces the server to download from R2 and stream bytes to the
-    browser instead of returning a 302 redirect to a presigned R2
-    URL. Use this when the user's network blocks
-    `*.r2.cloudflarestorage.com` (some ISP / firewall / VPN configs
-    drop direct R2 connections, browser sees ERR_CONNECTION_TIMED_OUT
-    on the redirect target). The app server's connection to R2 is
-    typically unaffected because Render's egress is not behind the
-    same network restrictions.
+    v687: PROXY IS NOW DEFAULT. Pre-v687 (v561) returned a 302
+    redirect to a presigned R2 URL so the browser fetched bytes
+    directly from Cloudflare's edge. Faster (~50-100ms vs
+    ~200-2000ms through app server) but breaks for users whose
+    network blocks `*.r2.cloudflarestorage.com` (some ISP / firewall
+    / VPN configs drop direct R2 connections, browser sees
+    ERR_CONNECTION_TIMED_OUT). The redirect was the optimization;
+    correctness wins. Now the default streams bytes through the
+    app server. The redirect-to-R2 fast path becomes opt-in via
+    `?direct=1` for users on networks that can reach R2.
+
+    The in-memory LRU cache + browser cache headers mitigate the
+    v561 worker-swamping concern: warm-cache requests are
+    sub-millisecond memory hits, not R2 fetches.
     """
     from fastapi.responses import Response
 
-    # v686 — global opt-in via env var (set R2_PROXY_THUMBNAILS=1 on
-    # the platform to force-proxy for all users) OR per-request via
-    # `?proxy=1` query param (frontend adds it when the user has
-    # opted-in via UI / localStorage flag).
-    _proxy_env = (os.environ.get("R2_PROXY_THUMBNAILS") or "").strip().lower()
-    force_proxy = bool(proxy) or _proxy_env in ("1", "true", "yes", "on")
+    # v687 — proxy is default. Only redirect when caller opts in
+    # via `?direct=1` (e.g. internal admin tool that knows it
+    # can reach R2 and wants the speed). Frontend doesn't append
+    # this; everyone gets the proxy by default.
+    force_proxy = not bool(direct)
     
     job = get_user_job(db, job_id, current_user)
     
@@ -6660,11 +6664,10 @@ async def get_job_image(
                 # local FileResponse paths above remain unchanged for
                 # the warm-cache case.
                 #
-                # v686 — skip the redirect when force_proxy is set.
-                # User's network blocks *.r2.cloudflarestorage.com
-                # (browser ERR_CONNECTION_TIMED_OUT on the redirect target);
-                # the app server's R2 connection is typically unaffected,
-                # so download + stream-through bytes works fine.
+                # v687 — only redirect on explicit opt-in via ?direct=1.
+                # Default (force_proxy=True) falls through to the
+                # download-and-stream path below, which works on any
+                # network that reaches the app server.
                 if not force_proxy:
                     from fastapi.responses import RedirectResponse
                     try:
