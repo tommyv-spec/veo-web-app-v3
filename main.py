@@ -2957,8 +2957,38 @@ async def resume_job(
 
 # ============ Clips ============
 
-def deduplicate_versions(versions_json: str) -> list:
-    """Deduplicate versions by version_key (attempt.variant), keeping all unique variants"""
+def _rewrite_r2_url_to_proxy(version: dict, job_id: str) -> dict:
+    """v693 — rewrite legacy presigned R2 URLs in versions[].url to the
+    backend proxy form. Pre-v693 the upload paths stored
+    `storage.get_presigned_url(...)` (URLs of the form
+    `https://<account>.r2.cloudflarestorage.com/<bucket>/...?Signature=...`)
+    in clip versions_json. Users on networks that block
+    *.r2.cloudflarestorage.com saw ERR_CONNECTION_TIMED_OUT when the
+    frontend used those URLs directly. v693 changes the upload paths to
+    store backend-proxy URLs instead, but legacy DB rows still carry the
+    R2 host. Rewrite on read so all callers see proxy URLs uniformly.
+    """
+    url = version.get("url")
+    if not url or not isinstance(url, str):
+        return version
+    if "r2.cloudflarestorage.com" in url or "amazonaws.com" in url:
+        filename = version.get("filename")
+        if not filename:
+            attempt = version.get("attempt", 1)
+            variant = version.get("variant", 1)
+            return version  # cannot derive proxy URL without a filename
+        version["url"] = f"/api/jobs/{job_id}/outputs/{filename}"
+    return version
+
+
+def deduplicate_versions(versions_json: str, job_id: Optional[str] = None) -> list:
+    """Deduplicate versions by version_key (attempt.variant), keeping all unique variants.
+
+    v693: when `job_id` is supplied, also rewrites any legacy presigned
+    R2 URLs in the `url` field to the backend proxy form. Callers that
+    don't have job_id handy can pass None and the rewrite is skipped
+    (legacy URLs survive — they only break for ISP-blocked users).
+    """
     if not versions_json:
         return []
     versions = json.loads(versions_json)
@@ -2971,10 +3001,14 @@ def deduplicate_versions(versions_json: str) -> list:
             attempt = v.get("attempt", 1)
             variant = v.get("variant", 1)
             version_key = f"{attempt}.{variant}"
-        
+
+        # v693 — rewrite legacy R2 URLs to proxy form on read
+        if job_id:
+            v = _rewrite_r2_url_to_proxy(v, job_id)
+
         # Keep the latest entry for each version_key
         seen[version_key] = v
-    
+
     # Sort by attempt, then variant
     return sorted(seen.values(), key=lambda x: (x.get("attempt", 1), x.get("variant", 1)))
 
@@ -3046,7 +3080,7 @@ async def get_job_clips(
             generation_attempt=c.generation_attempt or 1,
             attempts_remaining=3 - (c.generation_attempt or 1),
             redo_reason=c.redo_reason,
-            versions=deduplicate_versions(c.versions_json),
+            versions=deduplicate_versions(c.versions_json, job_id=c.job_id),
             selected_variant=c.selected_variant if c.selected_variant else 1,
             total_variants=get_actual_versions_count(c),
             clip_mode=c.clip_mode or "blend",
@@ -8835,9 +8869,20 @@ async def local_worker_upload_video(
         # NO DB connection held during this slow operation.
         r2_key = f"jobs/{job_id}/outputs/clip_{clip_index}_{attempt}.{variant}.mp4"
         await asyncio.to_thread(storage.upload_file, tmp_path, r2_key, 'video/mp4')
-        
-        # Generate URL
-        output_url = await asyncio.to_thread(storage.get_presigned_url, r2_key, 86400 * 7)
+
+        # v693 — store the BACKEND PROXY URL (not the presigned R2 URL).
+        # The proxy endpoint /api/jobs/{job_id}/outputs/{filename} streams
+        # bytes through the app server via FileResponse (with R2 download
+        # fallback) so the user's browser never has to reach
+        # *.r2.cloudflarestorage.com directly. Pre-v693 we stored
+        # `storage.get_presigned_url(r2_key, expires_in=86400*7)` here,
+        # which baked in a 7-day-valid R2 host URL. The frontend then used
+        # versions[].url verbatim for downloads (downloadClip in
+        # static/index.html) and the browser hit R2 → ERR_CONNECTION_TIMED_OUT
+        # for any user whose ISP/firewall blocks cloudflarestorage.com.
+        # Same fix v687 already applied to thumbnails.
+        output_filename = f"clip_{clip_index}_{attempt}.{variant}.mp4"
+        output_url = f"/api/jobs/{job_id}/outputs/{output_filename}"
         
         # Clean up temp file
         os.remove(tmp_path)
@@ -9725,7 +9770,9 @@ async def user_worker_upload_video(
         r2_key = f"jobs/{job_id}/outputs/clip_{clip_index}_{attempt}.{variant}.mp4"
         # asyncio.to_thread frees the event loop while R2 uploads.
         await asyncio.to_thread(storage.upload_file, tmp_path, r2_key, 'video/mp4')
-        output_url = await asyncio.to_thread(storage.get_presigned_url, r2_key, 86400 * 7)
+        # v693 — store backend proxy URL (see LocalWorker upload comment).
+        output_filename = f"clip_{clip_index}_{attempt}.{variant}.mp4"
+        output_url = f"/api/jobs/{job_id}/outputs/{output_filename}"
         os.remove(tmp_path)
         
         # === Brief DB session 2: write clip metadata ===
