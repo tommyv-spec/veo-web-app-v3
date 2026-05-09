@@ -6148,6 +6148,18 @@ def prepare_batch_for_video(
         scene_duration_s = scene.get("duration_s")
         scene_cast = scene.get("cast")
 
+        # v682g — compute scene_speaker_mode early (before any payload
+        # append so all three flat-row branches plus scene_assignments
+        # can reference it). v681e.10 fallback to ImageNode.speaker_mode
+        # for legacy assignments without the speaker_mode column.
+        scene_speaker_mode = (scene.get("speaker_mode") or "").lower()
+        if not scene_speaker_mode:
+            fallback_node = nodes_by_id.get(node_id)
+            if fallback_node is not None:
+                scene_speaker_mode = (fallback_node.speaker_mode or "").lower()
+        scene_is_silent = scene_speaker_mode == "silent"
+        scene_is_text_card = scene_type_v681 == "text_card"
+
         scene_assignments_payload.append({
             "scene_index": scene["scene_index"],
             "image_local_index": local_idx,
@@ -6171,6 +6183,11 @@ def prepare_batch_for_video(
             "caption": scene_caption,
             "bg_color": scene_bg_color,
             "duration_s": scene_duration_s,
+            # v682g — speaker_mode on the scene-level payload too so the
+            # frontend pre-fill at imgPrepareBatchForVideo can capture it
+            # into sceneBreaks for the storyboard editor (mirrors how
+            # cast / scene_type / caption flow through scene_assignments).
+            "speaker_mode": scene_speaker_mode or None,
         })
 
         # v681 — scenes with no `- **line:**` bullets but a real video
@@ -6180,19 +6197,9 @@ def prepare_batch_for_video(
         # the renderer dispatches. Inject a synthetic flat row with
         # empty dialogue + the scene's metadata so the Clip writer
         # creates a row that the video processor will handle correctly.
-        # v681e.10 — read speaker_mode from the assignment row first; fall
-        # back to the linked ImageNode for legacy assignments (rows imported
-        # before the assignment.speaker_mode column landed). Without the
-        # fallback, every silent scene from a pre-v681e.10 import remains
-        # invisible to the storyboard editor even after the deploy lands —
-        # the user would have to re-import each batch.
-        scene_speaker_mode = (scene.get("speaker_mode") or "").lower()
-        if not scene_speaker_mode:
-            fallback_node = nodes_by_id.get(node_id)
-            if fallback_node is not None:
-                scene_speaker_mode = (fallback_node.speaker_mode or "").lower()
-        scene_is_silent = scene_speaker_mode == "silent"
-        scene_is_text_card = scene_type_v681 == "text_card"
+        # scene_speaker_mode + scene_is_silent + scene_is_text_card are
+        # computed earlier (v682g moved them up so scene_assignments_payload
+        # can reference speaker_mode without forward-reference).
         if (scene_is_text_card or scene_is_silent) and not lines:
             # v682f — silent scenes carry a Veo render that needs the
             # markdown's per-clip prompt (e.g. Donna scene 1 = bedroom
@@ -6232,6 +6239,15 @@ def prepare_batch_for_video(
                 "scene_type": "text_card" if scene_is_text_card else (scene_type_v681 or None),
                 "bg_color": scene_bg_color if scene_is_text_card else None,
                 "duration_s": scene_duration_s if scene_is_text_card else None,
+                # v682g — speaker_mode denorm onto flat row so the
+                # frontend dialogue payload builder can flag silent
+                # scenes (`_isSilent`) and KEEP them in the payload.
+                # Without this field the frontend filter dropped silent
+                # scenes (filter `l.text || l._isTextCard || l._isSilent`
+                # found _isSilent always false), so the Clip writer
+                # received only on-camera lines and silent scenes never
+                # got Clip rows or Veo renders.
+                "speaker_mode": scene_speaker_mode or None,
             })
             veo_prompts_flat.append(silent_vp)
             pads_flat.append(None)
@@ -6274,6 +6290,13 @@ def prepare_batch_for_video(
                 "caption": scene_caption if i_in_scene == 0 else None,
                 "scene_type": scene_type_v681 if i_in_scene == 0 else None,
                 "bg_color": scene_bg_color if i_in_scene == 0 else None,
+                # v682g — speaker_mode denorm onto every line in the scene
+                # so the frontend payload builder can read it via
+                # window._pendingImagePromoteScenes[i].speaker_mode and
+                # decide whether to keep the line in the dialogue payload
+                # even if its text is empty (silent scenes are intentionally
+                # text-empty but ARE storyboard scenes that need a Clip row).
+                "speaker_mode": scene_speaker_mode or None,
             })
             veo_prompts_flat.append(vp)
             pads_flat.append(pad)
