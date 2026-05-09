@@ -6149,22 +6149,47 @@ def prepare_batch_for_video(
     # is the SHIP-OR-DIE path: stop trying to keep assignment rows
     # in sync with the markdown, just always read the markdown.
     # source_markdown is the source of truth at prepare time.
+    #
+    # v682r — convert log.info → print() so diagnostics appear in
+    # production logs (Render filters log.info but lets print through,
+    # same as how [v667/parse] / [v681/parse] are visible).
     fresh_scenes_by_idx: Dict[int, Dict[str, Any]] = {}
     if batch.source_markdown:
         try:
             _fresh_parse = parse_scene_table(batch.source_markdown)
             for fs in _fresh_parse.get("scenes", []) or []:
                 fresh_scenes_by_idx[fs["scene_index"]] = fs
-            log.info(
+            print(
                 f"[v682p/fresh-parse] batch={batch_id} "
                 f"parsed {len(fresh_scenes_by_idx)} scene(s); "
                 f"veo_prompts present per scene: "
-                f"{ {k: bool(v.get('veo_prompts')) for k, v in fresh_scenes_by_idx.items()} }"
+                f"{ {k: bool(v.get('veo_prompts') and any(v.get('veo_prompts'))) for k, v in fresh_scenes_by_idx.items()} }",
+                flush=True,
             )
+            # v682r — per-scene dump of veo_prompts content (truncated to
+            # 50 chars of text_prompt for readability) so we can see EXACTLY
+            # what attach_veo_prompts_to_scenes produced for each scene.
+            for sidx, sdata in fresh_scenes_by_idx.items():
+                vps = sdata.get("veo_prompts") or []
+                vp_summary = []
+                for i, vp in enumerate(vps):
+                    if vp is None:
+                        vp_summary.append(f"[{i}]=None")
+                    else:
+                        tp = (vp.get("text_prompt") or "")[:50]
+                        vp_summary.append(f"[{i}]={len(vp.get('text_prompt') or '')}ch:{tp!r}")
+                print(
+                    f"[v682p/scene-vp] scene_index={sidx} "
+                    f"lines={len(sdata.get('lines') or [])} "
+                    f"veo_prompts={vp_summary}",
+                    flush=True,
+                )
         except Exception as _pe:
-            log.warning(
-                f"[v682p/fresh-parse] batch={batch_id} parse failed "
-                f"({type(_pe).__name__}: {_pe}) — falling back to assignment data."
+            import traceback as _tb
+            print(
+                f"[v682p/fresh-parse] batch={batch_id} parse FAILED "
+                f"({type(_pe).__name__}: {_pe})\n{_tb.format_exc()}",
+                flush=True,
             )
 
     scene_assignments_payload: List[Dict[str, Any]] = []
@@ -6219,23 +6244,33 @@ def prepare_batch_for_video(
         veo_prompts = scene.get("veo_prompts") or []
 
         # v682p — OVERRIDE veo_prompts from fresh markdown parse (built at
-        # top of this function). source_markdown is the source of truth;
-        # if it has prompts, use them, regardless of what stored
-        # assignment.veo_prompts_json has. Fixes the persistent issue where
-        # silent scenes had stale (or missing) veo_prompts_json that
-        # to_dict returned as [] — now re-parsing produces the prompts
-        # the markdown ACTUALLY has. Logs whether the override fired.
+        # top of this function). source_markdown is the source of truth.
+        # v682r — print() so visible in production logs.
         _fresh = fresh_scenes_by_idx.get(scene.get("scene_index"))
         if _fresh is not None:
             _fresh_vp = _fresh.get("veo_prompts") or []
+            print(
+                f"[v682p/lookup] scene_index={scene.get('scene_index')} "
+                f"stored_vp_len={len(veo_prompts)} "
+                f"fresh_vp_len={len(_fresh_vp)} "
+                f"any_fresh={any(vp for vp in _fresh_vp)}",
+                flush=True,
+            )
             if any(vp for vp in _fresh_vp):
                 if veo_prompts != _fresh_vp:
-                    log.info(
+                    print(
                         f"[v682p/override] scene_index={scene.get('scene_index')} "
                         f"replacing stored veo_prompts ({len(veo_prompts)} entries) "
-                        f"with fresh parse ({len(_fresh_vp)} entries)"
+                        f"with fresh parse ({len(_fresh_vp)} entries)",
+                        flush=True,
                     )
                 veo_prompts = _fresh_vp
+        else:
+            print(
+                f"[v682p/lookup] scene_index={scene.get('scene_index')} "
+                f"NOT FOUND in fresh_scenes_by_idx (keys={list(fresh_scenes_by_idx.keys())})",
+                flush=True,
+            )
         # v644 — same parallel-array convention for pads (audio-padding
         # suffix per line; None when no pad on that line).
         pads = scene.get("pads") or []
