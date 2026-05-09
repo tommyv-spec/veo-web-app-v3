@@ -901,7 +901,13 @@ class ImageVariant(Base):
             # a distinct resource. Without it, regenerating a node produces
             # new bytes at the same file path ("nodes/N/variant_1.png") and
             # the old bytes stay pinned in the browser's HTTP cache.
-            "image_url": f"/api/images/files/{self.image_path}?v={self.id}",
+            # v695b — `&cb=v695` invalidates browser cache entries from
+            # pre-v695 deploys that stored Cache-Control: private,
+            # max-age=3600 on 302 redirects to *.r2.cloudflarestorage.com.
+            # Same URL would hit the stale cached redirect → ERR_TIMED_OUT
+            # for ISP-blocked users. New URL = new cache key = forced
+            # revalidation → post-v695 endpoint returns bytes directly.
+            "image_url": f"/api/images/files/{self.image_path}?v={self.id}&cb=v695",
             # v530: source = 'ai' or 'manual'. UI uses this to render the
             # 'M' badge / folder icon on manual variants.
             "source": self.source or 'ai',
