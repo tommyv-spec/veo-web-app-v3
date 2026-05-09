@@ -5535,6 +5535,90 @@ async def export_final_video(
     except Exception as _e:
         print(f"[Export][v690] text_card backfill skipped (non-fatal): {_e}", flush=True)
 
+    # v692 — backfill missing cut_mode + target_duration_s on Clip rows by
+    # re-parsing the source markdown's frame_anchor_s deltas. Required when
+    # the job was prepared BEFORE v667/v668 wired anchor-derived durations
+    # into prepare_batch_for_video. Without this, timeline-mode clips fall
+    # through _trim_one's `cm == "timeline" and td and td > 0` guard at
+    # video_processor.py:3377 and end up frame-trimmed to ~full source
+    # duration (~30s each * 8 clips ≈ 233s final, vs the intended ~32s).
+    # That oversized concat then OOMs the speed-apply ffmpeg pass.
+    try:
+        from image_platform import ImageJobBatch, parse_scene_table
+        _batch = db.query(ImageJobBatch).filter(
+            ImageJobBatch.promoted_video_job_id == job_id
+        ).first()
+        _md = _batch.source_markdown if _batch else None
+        if _md:
+            _parsed = parse_scene_table(_md)
+            _images = {img["image_index"]: img for img in _parsed.get("images", [])}
+            _scenes_md = _parsed.get("scenes", [])
+            # scene_index → frame_anchor_s (from image lookup)
+            _anchors_in_order = []
+            _scene_md_meta = {}
+            for s in sorted(_scenes_md, key=lambda x: x["scene_index"]):
+                img_idx = s.get("image_index")
+                anchor = None
+                if img_idx is not None:
+                    anchor = _images.get(img_idx, {}).get("frame_anchor_s")
+                _anchors_in_order.append((s["scene_index"], anchor))
+                _scene_md_meta[s["scene_index"]] = {
+                    "cut_mode": s.get("cut_mode"),
+                    "scene_type": s.get("scene_type"),
+                }
+
+            def _next_distinct_anchor(sidx: int):
+                cur = None
+                for s_idx, a in _anchors_in_order:
+                    if s_idx == sidx and a is not None:
+                        cur = a
+                        break
+                if cur is None:
+                    return None
+                for s_idx, a in _anchors_in_order:
+                    if s_idx > sidx and a is not None and a > cur:
+                        return a
+                return None
+
+            _scene_targets = {}
+            for sidx, a in _anchors_in_order:
+                if a is None:
+                    continue
+                nxt = _next_distinct_anchor(sidx)
+                if nxt is not None and nxt > a:
+                    _scene_targets[sidx] = round(nxt - a, 3)
+
+            _filled_cm = 0
+            _filled_td = 0
+            _all_clips = db.query(Clip).filter(Clip.job_id == job_id).all()
+            for c in _all_clips:
+                meta = _scene_md_meta.get(c.scene_index or 0)
+                if not meta:
+                    continue
+                if not c.cut_mode and meta.get("cut_mode"):
+                    c.cut_mode = meta["cut_mode"]
+                    _filled_cm += 1
+                if (c.cut_mode or "").lower() == "timeline" and not c.target_duration_s:
+                    td = _scene_targets.get(c.scene_index or 0)
+                    if td and td > 0:
+                        c.target_duration_s = float(td)
+                        _filled_td += 1
+            if _filled_cm or _filled_td:
+                db.commit()
+                print(
+                    f"[Export][v692] backfilled cut_mode on {_filled_cm} clip(s), "
+                    f"target_duration_s on {_filled_td} clip(s) from frame_anchor deltas",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[Export][v692] no cut_mode/target_duration_s gaps to backfill "
+                    f"(scenes_md={len(_scene_md_meta)}, targets_md={len(_scene_targets)})",
+                    flush=True,
+                )
+    except Exception as _e:
+        print(f"[Export][v692] anchor backfill skipped (non-fatal): {_e}", flush=True)
+
     if job.clip_order_json:
         # Custom lineup order
         try:
