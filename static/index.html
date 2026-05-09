@@ -14566,6 +14566,12 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const promotedJobId = cached ? cached.promoted_video_job_id : null;
                 if (promotedJobId) {
                     bulkActions.push(`<a class="btn btn-secondary" style="text-decoration:none;display:inline-flex;align-items:center;gap:4px;" href="#" onclick="imgOpenPromotedJob('${promotedJobId}'); return false;" title="This batch was already promoted — click to view the video job">↗ View video job</a>`);
+                    // v682l — allow re-promotion. Each Generate creates a NEW
+                    // video Job and overwrites promoted_video_job_id. Useful
+                    // during debug iteration: keep manual variants + storyboard
+                    // intact, just refresh the prompts via a new Job. The old
+                    // job becomes an orphan but stays in the Videos tab list.
+                    bulkActions.push(`<button class="btn btn-secondary" onclick="imgPrepareBatchForVideo('${sharedBatchId}')" title="Re-stage this batch and create a NEW video job (the old job stays in the Videos tab; new Job picks up latest markdown + parser fixes)">🔄 Re-promote (new video)</button>`);
                 } else {
                     bulkActions.push(`<button class="btn btn-primary" onclick="imgPrepareBatchForVideo('${sharedBatchId}')" title="Stage this batch in the Videos tab for visual review before generation">🎬 Promote to video</button>`);
                 }
