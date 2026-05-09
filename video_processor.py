@@ -3274,6 +3274,15 @@ def export_final_video(
         (c.get("cut_mode") or "").lower() == "timeline" and (c.get("target_duration_s") or 0) > 0
         for c in clip_info
     )
+    # v691 — preserve user's original VAD intent for per-clip application.
+    # Pre-v691 the bypass below set remove_silence=False globally, which
+    # killed Whisper-VAD on the on-camera clips too. Save the originals
+    # so the per-clip trim loop can apply Whisper-VAD ONLY to non-timeline
+    # clips (silent timeline scenes are anchor-trimmed; on-camera clips
+    # need Whisper-VAD to trim trailing dead-air around the spoken line).
+    _user_remove_silence = remove_silence
+    _user_silence_mode = silence_mode
+
     if has_timeline_clips:
         if not needs_trimming:
             print(
@@ -3284,8 +3293,8 @@ def export_final_video(
             needs_trimming = True
         if remove_silence:
             print(
-                "[VideoProcessor] VAD bypassed: timeline-mode clip(s) present "
-                "(target_duration_s already applied via ffmpeg trim)",
+                "[VideoProcessor] Global VAD bypassed (mixed timeline + auto modes); "
+                "v691 will run Whisper-VAD per-clip on non-timeline clips with dialogue.",
                 flush=True,
             )
             remove_silence = False
@@ -3390,6 +3399,65 @@ def export_final_video(
                 else:
                     logger.info(f"Clip {info.get('clip_index', idx)}: start_trim={actual_start_trim}, end_trim={frames_to_cut_end}")
                     trim_video(clip_path, trimmed_file, actual_start_trim, frames_to_cut_end)
+
+                    # v691 — per-clip Whisper-VAD for non-timeline clips with
+                    # dialogue text. Trims the trailing silence around the
+                    # actual spoken words so the on-camera clip ends right
+                    # after Esther finishes the line, not at the 8s Veo
+                    # render boundary. Skipped when:
+                    #   - user didn't enable remove_silence at all
+                    #   - silence_mode != 'whisper' (we only do per-clip
+                    #     Whisper here; energy-mode runs post-concat)
+                    #   - clip has no dialogue text (silent or other)
+                    _clip_text = (info.get("text") or "").strip()
+                    _clip_pad = (info.get("dialogue_pad") or "").strip()
+                    _full_clip_text = (
+                        f"{_clip_text} {_clip_pad}".strip()
+                        if _clip_pad else _clip_text
+                    )
+                    if (
+                        _user_remove_silence
+                        and (_user_silence_mode or "").lower() == "whisper"
+                        and _full_clip_text
+                    ):
+                        try:
+                            _vad_out = trimmed_file.with_suffix(".vad.mp4")
+                            apply_vad(
+                                src=trimmed_file,
+                                out=_vad_out,
+                                threshold=vad_threshold,
+                                min_gap_duration=silence_trigger,
+                                silence_keep_duration=silence_keep,
+                                silence_mode="whisper",
+                                dialogue_texts=[_full_clip_text],
+                                language=language,
+                                clip_boundaries=None,
+                                cut_prefix_audio=cut_prefix_audio,
+                                prefix_word=prefix_word,
+                            )
+                            # Replace trimmed_file with VAD-trimmed version
+                            try:
+                                trimmed_file.unlink()
+                            except Exception:
+                                pass
+                            _vad_out.rename(trimmed_file)
+                            logger.info(
+                                f"Clip {info.get('clip_index', idx)}: "
+                                f"per-clip Whisper-VAD applied "
+                                f"(dialogue: {_full_clip_text[:50]!r})"
+                            )
+                            print(
+                                f"[VideoProcessor/v691] clip "
+                                f"{info.get('clip_index', idx)} → per-clip Whisper-VAD",
+                                flush=True,
+                            )
+                        except Exception as _vad_err:
+                            print(
+                                f"[VideoProcessor/v691] per-clip VAD failed for "
+                                f"clip {info.get('clip_index', idx)}: {_vad_err} — "
+                                f"keeping un-VAD-trimmed clip",
+                                flush=True,
+                            )
                 # Free the downloaded source file immediately after trimming
                 try:
                     if clip_path.exists() and str(clip_path).startswith("/app/data/outputs"):
