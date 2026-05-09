@@ -5418,14 +5418,29 @@ def _import_scene_table_impl(
     assignments_created = 0
     for s in storyboard_scenes:
         img_idx = s["image_index"]
-        node = created_nodes_by_image_index.get(img_idx)
-        if node is None:
-            # Shouldn't happen — parser validates image refs up-front,
-            # but be defensive in case of parser bug
-            raise HTTPException(
-                500,
-                f"Scene {s['scene_index']} references image_{img_idx} with no matching ImageNode"
-            )
+        is_text_card_scene = (s.get("scene_type") or "").lower() == "text_card"
+
+        # v682d — text_card scenes legitimately have image_index=None
+        # (parser sets it to None per text_card design — no ### Image N
+        # block in markdown, no Banana 2 render). Skip the ImageNode
+        # lookup; the assignment is created with image_node_id=None
+        # below at the scene_image_node_id branch. Pre-v682d this loop
+        # crashed at the `if node is None: raise 500` guard with the
+        # error "Scene N references image_None with no matching
+        # ImageNode" the moment any text_card scene was imported.
+        if is_text_card_scene:
+            node = None
+        else:
+            node = created_nodes_by_image_index.get(img_idx)
+            if node is None:
+                # Real bug — shot scene references an image that no
+                # PHASE 1 node was created for. Could happen on parser
+                # regression or a malformed storyboard with a stale
+                # image_N reference. Defensive 500.
+                raise HTTPException(
+                    500,
+                    f"Scene {s['scene_index']} references image_{img_idx} with no matching ImageNode"
+                )
 
         # v572 — only write veo_prompts_json when the scene actually has
         # at least one override. All-null lists are stored as NULL on the
