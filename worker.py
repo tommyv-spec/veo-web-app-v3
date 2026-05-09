@@ -1831,8 +1831,16 @@ class JobWorker:
                                                     if is_last_in_scene and not is_last:
                                                         nsi = cur_si + 1
                                                         if nsi < len(scenes) and scenes[nsi].get("transition", "blend") != "cut":
-                                                            ni = scenes[nsi].get("imageIndex", 0)
-                                                            if ni < num_images:
+                                                            # v682e — text_card scenes have imageIndex=None.
+                                                            # Skip end-frame interpolation when next is
+                                                            # text_card (defaulting to 0 silently misroutes
+                                                            # interpolation to image 0).
+                                                            ni = scenes[nsi].get("imageIndex")
+                                                            if (
+                                                                ni is not None
+                                                                and isinstance(ni, int)
+                                                                and 0 <= ni < num_images
+                                                            ):
                                                                 end_fname = uploaded_frames[ni]
                                                     elif is_last:
                                                         lfi = dialogue_data.get("last_frame_index")

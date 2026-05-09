@@ -6258,7 +6258,22 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const isLastLine = idx === totalLines - 1;
                 let sc,st,si;
                 
-                if(isLastLine){
+                // v682e — detect silent / text_card lines from prepare-for-video
+                // metadata. These are intentionally short (silent scene = no
+                // dialogue; text_card = ffmpeg drawtext, not Veo render). Treat
+                // as OK regardless of word count so the user isn't told to
+                // "add 16+ more words" to a scene that has no spoken content.
+                const promoteScenes = (typeof window !== 'undefined' && window._pendingImagePromoteScenes) || [];
+                const promoteMeta = promoteScenes[idx] || {};
+                const isTextCard = (promoteMeta.scene_type || '').toLowerCase() === 'text_card';
+                const isSilent = (promoteMeta.speaker_mode || '').toLowerCase() === 'silent';
+
+                if(isTextCard){
+                    sc='line-ok';st='✓ Text card';si=`${promoteMeta.duration_s || 1}s drawtext`;okCount++;
+                } else if(isSilent){
+                    const td = promoteMeta.target_duration_s;
+                    sc='line-ok';st='✓ Silent';si=td ? `${td}s clip` : 'Veo silent render';okCount++;
+                } else if(isLastLine){
                     // LAST LINE: Always OK - can be 4-8 seconds, pick best duration dynamically
                     const estDuration = wordCount / wps;
                     const bestDuration = estDuration <= 4 ? 4 : (estDuration <= 6 ? 6 : 8);
@@ -6433,10 +6448,18 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         
                         return {
                             sceneIndex: idx,
-                            imageIndex: serverImageIndex,
+                            // v682e — text_card scenes have null imgIndex
+                            // (no upload); pass through as null so backend
+                            // SceneInput.imageIndex (Optional[int]) accepts.
+                            imageIndex: (scene.imgIndex === null || scene.imgIndex === undefined)
+                                ? null
+                                : serverImageIndex,
                             clipMode: scene.clipMode || 'blend',      // 'blend' | 'continue' | 'fresh'
                             transition: idx === 0 ? null : (scene.transition || 'blend'),  // 'blend' | 'cut' | null for first
-                            clips: clipIndices
+                            clips: clipIndices,
+                            // v682e — scene_type denorm so backend can branch
+                            // on text_card without inferring from null imageIndex.
+                            scene_type: scene.sceneType || null,
                         };
                     });
                     console.log('Scenes payload:', JSON.stringify(scenesPayload, null, 2));
@@ -14934,6 +14957,13 @@ Example: A realistic vertical video of a professional presenter speaking directl
                             clipMode: (sa.clip_mode || 'blend').toLowerCase(),
                             transition: transition,
                             interpolate: true,
+                            // v682e — preserve scene_type so the /api/jobs
+                            // payload builder can stamp it on SceneInput.
+                            // text_card scenes have image_local_index=null;
+                            // backend routes them to ffmpeg drawtext via
+                            // scene_type rather than re-deriving from null
+                            // imageIndex.
+                            sceneType: sa.scene_type || null,
                         };
                         cumulativeLineIdx += lineCount;
                         return brk;

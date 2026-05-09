@@ -217,10 +217,20 @@ class DialogueLineInput(BaseModel):
 
 class SceneInput(BaseModel):
     sceneIndex: int
-    imageIndex: int
+    # v682e — imageIndex is Optional because text_card scenes have no
+    # uploaded image (they render via ffmpeg drawtext at video assembly,
+    # not Veo). Pre-v682e the Pydantic int requirement rejected the
+    # whole job-creation request when ANY text_card scene was in the
+    # storyboard, with the error:
+    #   `body.scenes[N].imageIndex: Input should be a valid integer, input:null`
+    imageIndex: Optional[int] = None
     clipMode: str = "blend"        # 'blend' | 'continue' | 'fresh'
     transition: Optional[str] = None  # 'blend' | 'cut' | null for first scene
     clips: List[int] = []          # List of clip indices in this scene
+    # v682e — scene_type denorm so the backend can branch on text_card
+    # without inferring from imageIndex==None alone (more explicit and
+    # less error-prone). Mirrors DialogueLineInput.scene_type.
+    scene_type: Optional[str] = None
 
 
 class VideoConfigInput(BaseModel):
@@ -2272,8 +2282,17 @@ async def _setup_job_background(
                             if next_scene_idx < len(scenes):
                                 next_scene = scenes[next_scene_idx]
                                 if next_scene.get("transition", "blend") != "cut":
-                                    next_img = next_scene.get("imageIndex", 0)
-                                    if next_img < num_images:
+                                    # v682e — text_card scenes have imageIndex=None.
+                                    # Use .get() default of None (not 0 — defaulting
+                                    # to 0 silently misroutes text_card-following
+                                    # interpolation to image 0). Skip end-frame
+                                    # interpolation when next is text_card.
+                                    next_img = next_scene.get("imageIndex")
+                                    if (
+                                        next_img is not None
+                                        and isinstance(next_img, int)
+                                        and 0 <= next_img < num_images
+                                    ):
                                         end_fname = uploaded_frames_list[next_img]
                         elif is_last_clip:
                             lfi = dialogue_data.get("last_frame_index")
