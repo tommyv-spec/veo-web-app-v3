@@ -6268,16 +6268,187 @@ async def export_final_video(
                     prefix_word=_prefix_word,
                 )
                 stats = stats or {}
-                stats["v698a_mode"] = "dual_output_speaker_only_phase4b_mvp"
+                stats["v698a_mode"] = "dual_output"
                 stats["v698a_speaker_clips"] = len(_speaker_clip_info)
-                stats["v698a_visual_pair_clips_dropped"] = (
+                stats["v698a_visual_pair_clips_in_input"] = (
                     len(clip_info) - len(_speaker_clip_info)
                 )
-                stats["v698a_phase4b_broll_pending"] = True
                 print(
                     f"[Export/v698A] speaker pipeline complete. Stats: {stats}",
                     flush=True,
                 )
+
+                # === Phase 4b-ii — BROLL PIPELINE ===
+                # Pre-process visual_pair clips: swap their audio with the
+                # paired audio_pair's audio track via speed-matched ffmpeg
+                # filter (swap_audio_with_speed_match in video_processor).
+                # Then run process_export a SECOND time over the broll
+                # clip_info to produce final_broll_*.mp4.
+                #
+                # Build the broll list:
+                #   - 'single' clips (HOOK / CTA): keep verbatim (the source's
+                #     on-camera bookends)
+                #   - 'visual_pair' clips: swap audio with paired audio_pair's
+                #     mp4 audio (raw, no Whisper-VAD on broll side — the
+                #     audio_pair's full clip duration ≈ spoken duration since
+                #     Veo lip-syncs the line over the clip's length)
+                #   - 'audio_pair' clips: SKIP (their visual is discarded;
+                #     audio is consumed by the visual_pair swap)
+                #   - 'text_card' / scene_type=text_card: keep (drawtext
+                #     transitions appear in both outputs per source)
+                try:
+                    from video_processor import swap_audio_with_speed_match
+                    import tempfile as _tmp
+
+                    # Map clip_db_id → audio_pair clip_info entry for fast lookup
+                    audio_pair_by_id = {
+                        c.get("_clip_db_id"): c
+                        for c in clip_info
+                        if (c.get("clip_role") or "").lower() == "audio_pair"
+                    }
+
+                    broll_temp_dir = Path(_tmp.mkdtemp(prefix="v698a_broll_"))
+                    broll_clip_info: List[Dict[str, Any]] = []
+                    swap_failures = 0
+
+                    for c in clip_info:
+                        role = (c.get("clip_role") or "single").lower()
+                        if role == "audio_pair":
+                            continue  # visual discarded for broll
+                        if role != "visual_pair":
+                            # 'single' clip (HOOK / CTA) or text_card → keep
+                            broll_clip_info.append(dict(c))
+                            continue
+
+                        # visual_pair → find paired audio_pair, apply swap
+                        paired_id = c.get("paired_clip_id")
+                        ap_entry = audio_pair_by_id.get(paired_id)
+                        if ap_entry is None:
+                            print(
+                                f"[Export/v698A/broll] visual_pair clip {c.get('clip_index')} "
+                                f"missing audio_pair (paired_clip_id={paired_id}); "
+                                f"keeping visual silent",
+                                flush=True,
+                            )
+                            broll_clip_info.append(dict(c))
+                            continue
+
+                        swapped_path = broll_temp_dir / f"swapped_{c['clip_index']:04d}.mp4"
+                        try:
+                            speed_applied, out_dur, mode_label = await asyncio.to_thread(
+                                swap_audio_with_speed_match,
+                                visual_path=Path(c["path"]),
+                                audio_path=Path(ap_entry["path"]),
+                                output_path=swapped_path,
+                                speed_min=1.0,
+                                speed_max=2.0,
+                            )
+                            print(
+                                f"[Export/v698A/broll] swapped clip {c.get('clip_index')}: "
+                                f"speed={speed_applied:.3f} mode={mode_label} "
+                                f"out_dur={out_dur:.3f}s",
+                                flush=True,
+                            )
+                            broll_c = dict(c)
+                            broll_c["path"] = swapped_path
+                            # The swap output duration is now authoritative for
+                            # this clip — set target_duration_s to lock it and
+                            # mark cut_mode='voiceover_pair' so the v691d
+                            # serial Whisper-VAD post-loop SKIPS this clip
+                            # (audio is already trimmed via the swap).
+                            broll_c["target_duration_s"] = out_dur
+                            broll_c["cut_mode"] = "voiceover_pair"
+                            broll_c["dialogue_text"] = ""  # already in audio bytes
+                            broll_clip_info.append(broll_c)
+                        except Exception as _swap_err:
+                            print(
+                                f"[Export/v698A/broll] swap FAILED for clip "
+                                f"{c.get('clip_index')}: {_swap_err}",
+                                flush=True,
+                            )
+                            swap_failures += 1
+                            # Fall back to silent visual
+                            broll_clip_info.append(dict(c))
+
+                    # Generate broll output filename
+                    broll_filename = output_filename.replace(
+                        "final_export_", "final_broll_"
+                    )
+                    if broll_filename == output_filename:
+                        # Fallback if naming pattern differs
+                        broll_filename = f"final_broll_{output_filename}"
+                    broll_output_path = output_dir / broll_filename
+
+                    print(
+                        f"[Export/v698A/broll] running broll pipeline: "
+                        f"{len(broll_clip_info)} clips → {broll_filename}",
+                        flush=True,
+                    )
+
+                    broll_stats = await asyncio.to_thread(
+                        process_export,
+                        clip_info=broll_clip_info,
+                        output_path=broll_output_path,
+                        frames_to_cut_start=0,  # already trimmed via swap
+                        frames_to_cut_end=0,
+                        remove_silence=False,  # broll audio already VAD-clean via swap
+                        silence_mode=settings.silence_mode,
+                        vad_threshold=settings.silence_threshold,
+                        silence_trigger=settings.silence_trigger,
+                        silence_keep=settings.silence_keep,
+                        transition=settings.transition,
+                        transition_duration=settings.transition_duration,
+                        dialogue_texts=[
+                            c.get("dialogue_text", "") or "" for c in broll_clip_info
+                        ],
+                        language=(
+                            json.loads(job.config_json).get("language", "English")
+                            if job.config_json else "English"
+                        ),
+                        cut_prefix_audio=False,
+                        prefix_word=_prefix_word,
+                    )
+                    stats["v698a_broll_filename"] = broll_filename
+                    stats["v698a_broll_clips"] = len(broll_clip_info)
+                    stats["v698a_broll_swap_failures"] = swap_failures
+                    stats["v698a_broll_stats"] = broll_stats
+                    print(
+                        f"[Export/v698A/broll] broll pipeline complete. "
+                        f"final_broll → {broll_output_path}",
+                        flush=True,
+                    )
+
+                    # Upload broll to R2 (if configured)
+                    try:
+                        from backends.storage import is_storage_configured, get_storage as _gs2
+                        if is_storage_configured():
+                            _storage = _gs2()
+                            _r2_key = f"jobs/{job_id}/outputs/{broll_filename}"
+                            await asyncio.to_thread(
+                                _storage.upload_file,
+                                str(broll_output_path),
+                                _r2_key,
+                                'video/mp4',
+                            )
+                            print(
+                                f"[Export/v698A/broll] Uploaded to R2: {_r2_key}",
+                                flush=True,
+                            )
+                    except Exception as _r2_err:
+                        print(
+                            f"[Export/v698A/broll] R2 upload failed (non-fatal): "
+                            f"{_r2_err}",
+                            flush=True,
+                        )
+                except Exception as _broll_err:
+                    print(
+                        f"[Export/v698A/broll] broll pipeline FAILED (non-fatal): "
+                        f"{_broll_err}",
+                        flush=True,
+                    )
+                    import traceback as _tb_broll
+                    _tb_broll.print_exc()
+                    stats["v698a_broll_error"] = str(_broll_err)[:500]
             else:
                 # === Regular Export (no master audio, no v698A pairs) ===
                 # Process the export with per-clip trim settings (non-blocking)
@@ -8660,13 +8831,24 @@ async def local_worker_update_clip_status(
         job.images_dir = ""  # Empty string instead of None (DB has NOT NULL constraint)
     
     old_status = clip.status
-    
+
     if update.status:
         clip.status = update.status
         # Clear claim when clip is completed or failed
         if update.status in ['completed', 'failed']:
             clip.claimed_by_worker = None
             clip.claimed_at = None
+        # v698A — audio_pair clips are NOT user-reviewable as visuals
+        # (their visual is discarded at export; only their audio is used).
+        # Auto-approve them on completion so the export query picks them
+        # up alongside single + visual_pair clips.
+        if update.status == 'completed' and (clip.clip_role or '').lower() == 'audio_pair':
+            clip.approval_status = 'approved'
+            print(
+                f"[v698A] audio_pair clip {clip.id} auto-approved "
+                f"on completion (paired with visual_pair {clip.paired_clip_id})",
+                flush=True,
+            )
         # v464: if a clip transitions back to a non-completed state
         # (worker reclaim, retry loop, redo queueing), its prior
         # "approved" label no longer reflects reality — the video
