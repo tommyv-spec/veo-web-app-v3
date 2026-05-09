@@ -5446,11 +5446,7 @@ async def export_final_video(
     # v689 — auto-approve text_card clips at export time. Pre-v688 the
     # Clip writer didn't auto-approve text_card scenes (they stayed at
     # 'pending_review'), so the export's approval filter excluded them
-    # and the final video missed the text card entirely (e.g. Donna's
-    # "2 months later..." card was dropped from the 8-clip storyboard
-    # leaving 7 concatenated clips). v688 fixed the prompt-build path
-    # for future Generates; v689 handles existing jobs by auto-
-    # approving any text_card clip on export-start. Idempotent.
+    # and the final video missed the text card entirely.
     _text_card_clips = db.query(Clip).filter(
         Clip.job_id == job_id,
         Clip.scene_type == "text_card",
@@ -5467,6 +5463,77 @@ async def export_final_video(
             f"clip(s) so the export includes them (drawtext at concat).",
             flush=True,
         )
+
+    # v690 — RECREATE missing text_card clips from source_markdown /
+    # storyboard. User scenario: text_card clip got DELETED via the
+    # Review & Approve UI (because of an earlier blocking bug pre-v688
+    # where the clip was stuck at 'preparing' / 'redo failed'). The
+    # delete removed the Clip row entirely, so v689's auto-approve
+    # has nothing to update. The text card is now MISSING from the
+    # final mp4 even though the markdown's `## Storyboard` still has
+    # `scene_type: text_card` for that scene_index.
+    #
+    # Backfill: parse the dialogue_json's scenes structure (or the
+    # batch's storyboard via promoted_video_job_id). For each
+    # storyboard scene with scene_type='text_card', check if a Clip
+    # row exists at the clip_index that scene maps to. If missing,
+    # INSERT a synthetic clip row with the markdown's caption /
+    # bg_color / duration_s, mark COMPLETED + approved, and
+    # renumber following clip_index values is NOT needed — clip_index
+    # 0..N-1 stays the same as long as the missing slot's index
+    # is recreated.
+    try:
+        _dlg = json.loads(job.dialogue_json) if job.dialogue_json else {}
+        _scenes_md = _dlg.get("scenes", []) or []
+        _lines_md = _dlg.get("lines", []) or []
+        # Build clip_index → scene_type/caption/bg_color/duration map
+        # from the dialogue payload's lines (DialogueLineInput entries).
+        _missing_recreated = 0
+        for _idx, _line in enumerate(_lines_md):
+            if not isinstance(_line, dict):
+                continue
+            if (_line.get("scene_type") or "").lower() != "text_card":
+                continue
+            # Check if a Clip row exists at this clip_index
+            _existing = db.query(Clip).filter(
+                Clip.job_id == job_id,
+                Clip.clip_index == _idx,
+            ).first()
+            if _existing is not None:
+                continue
+            # Recreate
+            _new_clip = Clip(
+                job_id=job_id,
+                clip_index=_idx,
+                dialogue_id=_idx + 1,
+                dialogue_text=_line.get("text", "") or "",
+                status=ClipStatus.COMPLETED.value,
+                approval_status="approved",
+                scene_index=_line.get("scene_index"),
+                clip_mode=_line.get("clip_mode") or "blend",
+                caption=_line.get("caption"),
+                scene_type="text_card",
+                bg_color=_line.get("bg_color") or "black",
+                target_duration_s=float(_line.get("duration_s") or 1.0),
+                completed_at=datetime.utcnow(),
+                prompt_text=(
+                    f"[text_card placeholder — caption: "
+                    f"{(_line.get('caption') or '').strip()!r}, "
+                    f"bg: {(_line.get('bg_color') or 'black').strip()}, "
+                    f"duration: {_line.get('duration_s') or 1.0}s]"
+                ),
+            )
+            db.add(_new_clip)
+            _missing_recreated += 1
+        if _missing_recreated:
+            db.commit()
+            print(
+                f"[Export][v690] recreated {_missing_recreated} missing "
+                f"text_card clip(s) from dialogue_json (drawtext at concat).",
+                flush=True,
+            )
+    except Exception as _e:
+        print(f"[Export][v690] text_card backfill skipped (non-fatal): {_e}", flush=True)
 
     if job.clip_order_json:
         # Custom lineup order
