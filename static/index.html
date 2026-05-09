@@ -9618,10 +9618,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const data = await response.json();
                 const files = data.files || [];
                 
-                // Filter for export files (final_export_ and voice_cloned_)
-                const exportFiles = files.filter(f => 
-                    f.endsWith('.mp4') && 
-                    (f.startsWith('final_export_') || f.startsWith('voice_cloned'))
+                // Filter for export files (final_export_, final_broll_, voice_cloned_).
+                // v698A — final_broll_*.mp4 is the b-roll variant produced
+                // alongside final_export_*.mp4 when the job has voiceover-paired
+                // clips (broll visuals + persona's voice swapped + speed-matched).
+                const exportFiles = files.filter(f =>
+                    f.endsWith('.mp4') &&
+                    (f.startsWith('final_export_')
+                     || f.startsWith('final_broll_')
+                     || f.startsWith('voice_cloned'))
                 );
                 
                 if (exportFiles.length === 0) return;
@@ -9660,17 +9665,44 @@ Example: A realistic vertical video of a professional presenter speaking directl
                             const settingsLabel = tags.length > 0 ? ` • ${tags.join(' ')}` : '';
                             subtitle = `${metadata.duration || '?'}s • ${metadata.clips || '?'} clips • trim ${metadata.trimStart || 0}/${metadata.trimEnd || 7}${settingsLabel}`;
                         }
-                        
+
                         const cardHtml = `
                             <div class="export-complete" data-filename="${filename}" style="background:linear-gradient(90deg, #10b981 0%, #059669 100%);padding:12px 16px;border-radius:var(--radius-md);margin-bottom:8px;">
                                 <div style="display:flex;align-items:center;justify-content:space-between;width:100%;flex-wrap:wrap;gap:8px;">
                                     <div style="flex:1;min-width:0;">
-                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">✅ ${filename}</h3>
+                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🎙️ Speaker · ${filename}</h3>
                                         <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">${subtitle}</p>
                                     </div>
                                     <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
                                         <button onclick="openVoiceSwapForFile('${jobId}', '${filename}')" style="padding:5px 8px;background:rgba(255,255,255,0.2);color:white;border:none;border-radius:var(--radius-sm);font-size:11px;cursor:pointer;" title="Clone voice">🎤</button>
                                         <button onclick="downloadClip('${url}','${filename}')" style="padding:5px 8px;background:white;color:#059669;border:none;border-radius:var(--radius-sm);font-size:11px;font-weight:600;cursor:pointer;" title="Download video">📥</button>
+                                        <button onclick="this.closest('.export-complete').remove()" style="padding:5px 8px;background:rgba(255,255,255,0.2);color:white;border:none;border-radius:var(--radius-sm);font-size:11px;cursor:pointer;" title="Remove">✕</button>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        content.insertAdjacentHTML('beforeend', cardHtml);
+                    } else if (filename.startsWith('final_broll_')) {
+                        // v698A — broll variant. Same shape as final_export_
+                        // card but uses a distinct color + 🎬 b-roll badge so
+                        // the user can tell the two outputs apart at a glance.
+                        // Subtitle reuses the speaker-side metadata (the broll
+                        // pipeline doesn't produce its own metadata — it
+                        // mirrors the speaker's settings + trim values).
+                        let brollSubtitle = 'B-roll variant — voice swapped + speed-matched';
+                        if (metadata) {
+                            brollSubtitle = `${metadata.duration || '?'}s • broll visuals • voice from speaker variant`;
+                        }
+                        const cardHtml = `
+                            <div class="export-complete" data-filename="${filename}" style="background:linear-gradient(90deg, #6366f1 0%, #4f46e5 100%);padding:12px 16px;border-radius:var(--radius-md);margin-bottom:8px;">
+                                <div style="display:flex;align-items:center;justify-content:space-between;width:100%;flex-wrap:wrap;gap:8px;">
+                                    <div style="flex:1;min-width:0;">
+                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🎬 B-roll · ${filename}</h3>
+                                        <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">${brollSubtitle}</p>
+                                    </div>
+                                    <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
+                                        <button onclick="openVoiceSwapForFile('${jobId}', '${filename}')" style="padding:5px 8px;background:rgba(255,255,255,0.2);color:white;border:none;border-radius:var(--radius-sm);font-size:11px;cursor:pointer;" title="Clone voice">🎤</button>
+                                        <button onclick="downloadClip('${url}','${filename}')" style="padding:5px 8px;background:white;color:#4f46e5;border:none;border-radius:var(--radius-sm);font-size:11px;font-weight:600;cursor:pointer;" title="Download video">📥</button>
                                         <button onclick="this.closest('.export-complete').remove()" style="padding:5px 8px;background:rgba(255,255,255,0.2);color:white;border:none;border-radius:var(--radius-sm);font-size:11px;cursor:pointer;" title="Remove">✕</button>
                                     </div>
                                 </div>
@@ -10356,7 +10388,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
             let voiceClonedFiles = [];
             try {
                 const files = await fetch(`${API}/jobs/${jobId}/list-outputs`).then(r => r.json());
-                exportedFiles = (files.files || []).filter(f => f.endsWith('.mp4') && f.includes('final_export'));
+                // v698A — include final_broll_*.mp4 alongside final_export_*.mp4
+                // so the voice-clone source picker surfaces both speaker and
+                // broll variants when present.
+                exportedFiles = (files.files || []).filter(f => f.endsWith('.mp4') && (f.includes('final_export') || f.includes('final_broll')));
                 voiceClonedFiles = (files.files || []).filter(f => f.endsWith('.mp4') && f.includes('voice_cloned'));
             } catch(e) {}
             
@@ -10847,7 +10882,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const voiceRefName = voiceFile ? voiceFile.name : (clipVoiceRefs.length > 0 ? `${clipVoiceRefs.length} clip(s)` : 'unknown');
                 
                 // Shorten source filename for display
-                const sourceShort = videoFilename.replace('final_export_', '').replace('voice_cloned_', 'vc_').replace('.mp4', '');
+                const sourceShort = videoFilename.replace('final_export_', '').replace('final_broll_', 'broll_').replace('voice_cloned_', 'vc_').replace('.mp4', '');
                 
                 // Save metadata for persistence after refresh
                 const pitchLabelForSave = pitchNormalize > 0 ? `${(pitchNormalize*100).toFixed(0)}%` : null;
@@ -10965,7 +11000,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 }
                 
                 // Shorten source filename for display
-                const sourceShort = videoFilename.replace('final_export_', '').replace('voice_cloned_', 'vc_').replace('.mp4', '');
+                const sourceShort = videoFilename.replace('final_export_', '').replace('final_broll_', 'broll_').replace('voice_cloned_', 'vc_').replace('.mp4', '');
                 
                 // Save metadata for persistence after refresh
                 const stabLabel = (settings.stability ?? 0.5).toFixed(1);
