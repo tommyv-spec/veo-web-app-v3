@@ -121,6 +121,25 @@
     articulation; static-still torso renders awkward. Tight bottom
     crop (no floor / no feet / no counter-front) per v603.
 
+  GATE 14 — text_card detection discipline (v699). Before emitting any
+    `scene_type: text_card` scene, verify ALL FIVE of:
+      (1) PySceneDetect anchors it as its OWN shot (NOT the tail of
+          another shot — check shots.json)
+      (2) ≥80% solid background, no live-action footage visible
+      (3) sustained ≥0.5s duration (not a flicker / 1-frame cut-to-
+          black)
+      (4) audio is silent OR pure SFX — NO continuing voiceover from
+          surrounding scenes
+      (5) caption text dominates visible content (not a small overlay
+          on live frame)
+    If ANY criterion fails, it's NOT a text_card. Common false
+    positives: karaoke caption fading IN at a prior shot's tail
+    (criterion 1 fails — same PySceneDetect shot), cut-to-black
+    flicker (criterion 3 fails), logo splash (criterion 5 fails).
+    Karaoke captions are decode-only per v621 — record them on the
+    surrounding shot's `- **caption:**` bullet, NOT as a separate
+    text_card scene.
+
   GATE 5 — `- **line:**` field is FULLY LOWERCASE (v693)
     Veo TTS over-emphasizes capitalized words ("GUIDE" → shouted),
     Whisper-VAD then drops the over-emphasized syllables → the

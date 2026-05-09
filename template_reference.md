@@ -5869,3 +5869,55 @@ ONE Banana 2 generation of the anchor image (shared across ALL voiceover scenes 
 - Whisper-VAD on swapped clip: audio_pair runs through v691d normally; after swap, visual_pair has clean VAD'd audio embedded, marked `cut_mode=voiceover_pair` to skip a second VAD pass.
 
 Migration: existing artifacts are valid as-is; new artifacts from this commit forward MAY use v698A. The bundle TASK blocks should reference v698A as item [23] in the pre-output validation checklist.
+
+---
+
+### v699 — text_card detection discipline (don't promote karaoke captions to scene_type=text_card)
+
+**Surfaced 2026-05-10** from the snapinsta donut-recipe decode. The decoder (Claude in-session per v595) viewed shot 4's END frame, saw "golden" white text on a near-black backdrop, and emitted a `### Scene 5 — scene_type: text_card` between shots 4 and 5. The actual source had NO text_card transition — the "golden" rendering was the source's karaoke caption fading IN at shot 4's tail (the final ~0.3s) as the live-action frame faded to black during the cut to shot 5. PySceneDetect didn't even split it as a separate shot; it was contained inside shot 4. Promoting it to a text_card scene inflated the artifact by one fake scene + reserved an image slot the platform would never render + propagated a "text_card" tag into v681/v682 inventory + downstream broke the lift's scene → image numbering until the user caught it manually.
+
+**Rule.** A `scene_type: text_card` MUST satisfy ALL FIVE criteria below. Failing any single one means the visual is something else (karaoke caption / fade / flicker) and the decoder MUST NOT emit a text_card scene.
+
+**Five criteria (ALL required):**
+
+1. **PySceneDetect anchored.** The text_card MUST appear in `shots.json` as its OWN distinct shot, not as the tail of an adjacent shot. If the histogram-cut algorithm didn't split it from its neighbors, it isn't a discrete title card — it's a karaoke caption / tail fade / transition flicker that lives inside another shot.
+
+2. **Solid / near-solid background.** ≥80% of the frame surface is a single color (black, white, brand color). NO live-action footage visible (no hands, no counter, no kitchen, no persona). NO motion blur from a fade-out of preceding action. If you see any kitchen / persona / prop pixels under the text, it's a caption-over-shot, not a text_card.
+
+3. **Sustained duration ≥0.5s.** The text_card holds for at least half a second. A title card needs to be readable; anything ≤0.3s is too brief to be a deliberate card and is more likely a flash/flicker.
+
+4. **Audio matches the card semantic.** Either silent OR pure SFX (whoosh / chime / ambient bed). NO continuing voiceover from the prior scene. NO line dialogue starting on the card. If the source's voiceover narration runs UNDER the visual, it's a b-roll-with-voiceover scene (use `speaker: voiceover` per v698A), NOT a text_card.
+
+5. **Caption text dominates the visible content.** The text is the foreground subject. There's no other visible motion / object / persona competing for attention. If the text is a small overlay on a live frame, it's a caption (decode-only per v621), not a text_card.
+
+**Common false-positive triggers to recognise + reject:**
+
+- **Karaoke caption fade-in at shot tail.** Source videos commonly have karaoke-style word captions that animate ON during the last 0.2-0.5s of each shot, sometimes against a darkening background as the live-action fades. The decoder sees the LAST extracted frame (per v588 dense walk) and reads the text against the dim backdrop as a "title card." It isn't — PySceneDetect didn't split it from the prior shot, and the audio continues without a break.
+
+- **Cut-to-black flicker.** Some editing styles cut to one black frame between scenes for a punch effect. ≤1 frame at 24fps = 0.042s. Below criterion 3's threshold. Not a text_card.
+
+- **Logo / branded transition.** A 0.4s logo splash with a brand mark could LOOK text-card-ish. Per criterion 5, if the visible content is a logo (not text), it's a brand-stinger, not a text_card. Use `scene_type: shot` with a logo description.
+
+- **Karaoke caption that lingers AFTER the shot's content fades.** Watch carefully: does PySceneDetect cut at the moment the live-action fades, or does the caption persist into a new shot? If PySceneDetect stays in the same shot through the caption, criterion 1 fails — it's a tail fade, not a title card.
+
+**Decoder-side workflow change:**
+
+When the dense-frame walk (v588) reveals a frame that LOOKS like a title card, BEFORE emitting `scene_type: text_card`:
+
+1. Verify in `shots.json` that the frame's timestamp falls on a SHOT BOUNDARY (start of a new shot OR sole content of a shot ≥0.5s long), not inside another shot's window.
+2. View the previous and next adjacent frames (e.g. q3 of prior shot + start of next shot). If those show live-action with the title-frame in between as a discrete shot, criterion 1 + 2 + 3 likely pass.
+3. Verify whisper transcript at the title-frame's timestamp window. If the transcript shows continuous narration (no pause >0.3s), the visual is a karaoke caption / b-roll with voiceover, not a text_card.
+
+**If even ONE criterion fails, the visual is recorded as part of the surrounding shot** — typically as the karaoke caption on the prior shot's tail (decode-only, surfaced via the optional `- **caption:**` bullet on the shot's storyboard scene per v621) OR as the fade-out of the prior shot's b-roll.
+
+**Concrete worked example — snapinsta donut-recipe (2026-05-10 retrofit):**
+
+Pre-v699 decode: shot 4's q3 frame showed white "golden" text against a near-black backdrop. Decoder emitted `### Scene 5 — scene_type: text_card`. Wrong.
+
+Post-v699 audit:
+- Criterion 1 — FAIL. PySceneDetect's `shots.json` has shot 4 from 16.47s → 22.17s as ONE continuous shot. The "golden" frame is at ~21.5s (shot 4's tail), not its own shot.
+- Criterion 4 — also FAIL. Whisper transcript shows "...until golden." spoken continuously from 19.x to ~21s, with the next line "Then whisk coconut sugar..." starting at 22.28s. The voiceover doesn't pause at 21.5s.
+
+Result: NOT a text_card. The "golden" caption is the source's karaoke-style word callout at shot 4's tail, sitting on top of a darkening live-action frame as the air-fryer scene fades to the cut. Recorded retroactively as a karaoke caption note on shot 4's storyboard scene (decode-only); no separate scene_type=text_card emitted. Image numbering compacted from 1-3, 5-12 (with reserved image_4 gap) to 1-11 (no gap).
+
+**Migration:** existing decoded artifacts in `raw/` may have false-positive text_cards from pre-v699 decodes. Audit them on next touch. New decodes from this commit forward MUST satisfy all five criteria before emitting a `scene_type: text_card`.
