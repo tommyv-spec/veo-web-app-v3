@@ -5895,6 +5895,24 @@ def prepare_batch_for_video(
         ImageSceneAssignment.batch_id == batch_id
     ).order_by(ImageSceneAssignment.scene_index).all()
 
+    # v682q BEACON — must fire on EVERY prepare regardless of state.
+    # If you don't see this log line on a prepare-for-video request,
+    # the deploy isn't running v682p/v682q code yet — Render is still
+    # serving an older commit. Visible to confirm deploy state.
+    print(
+        f"\n========================\n"
+        f"[v682q BEACON] prepare-for-video ENTERED for batch={batch_id} "
+        f"@ commit d139b3f+ — this print PROVES the deploy is running "
+        f"v682p+ code. assignments={len(assignments)} "
+        f"source_markdown={len(batch.source_markdown or '')} chars\n"
+        f"========================\n",
+        flush=True,
+    )
+    log.info(
+        f"[v682q/BEACON] prepare-for-video entered for batch={batch_id} "
+        f"with v682p+ code live."
+    )
+
     # v682o — TOP-OF-PREPARE diagnostic. Always fires so production
     # debugging can confirm v682m sync block is reachable AND see
     # the per-assignment veo_prompts_json state BEFORE any sync.
