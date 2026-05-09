@@ -183,6 +183,22 @@ def run_image_platform_migrations():
         # invisible to the user, even though they parsed correctly).
         ("image_scene_assignments", "speaker_mode",
          "ALTER TABLE image_scene_assignments ADD COLUMN speaker_mode VARCHAR(20)"),
+        # v698A: per-scene clip-pair for voiceover-over-b-roll.
+        # See models.py Clip class docstring for field semantics.
+        ("clips", "clip_role",
+         "ALTER TABLE clips ADD COLUMN clip_role VARCHAR(20)"),
+        ("clips", "paired_clip_id",
+         "ALTER TABLE clips ADD COLUMN paired_clip_id INTEGER"),
+        ("clips", "voiceover_anchor_image_node_id",
+         "ALTER TABLE clips ADD COLUMN voiceover_anchor_image_node_id INTEGER"),
+        ("clips", "voiceover_line",
+         "ALTER TABLE clips ADD COLUMN voiceover_line TEXT"),
+        # v698A: image_nodes.role discriminator — 'voiceover_anchor' marks an
+        # image whose visual is rendered (Banana 2 generates it) but whose
+        # role is to serve as the start frame for audio-pair Veo renders only.
+        # NULL = standard image (default).
+        ("image_nodes", "role",
+         "ALTER TABLE image_nodes ADD COLUMN role VARCHAR(40)"),
     ]
     postgres_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -286,6 +302,19 @@ def run_image_platform_migrations():
         # assignments back from DB. See SQLite migration above for rationale.
         ("image_scene_assignments", "speaker_mode",
          "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS speaker_mode VARCHAR(20)"),
+        # v698A: per-scene clip-pair for voiceover-over-b-roll. See models.py
+        # Clip class docstring for field semantics + template_reference.md
+        # §"v698A — per-scene clip-pair for voiceover-over-b-roll" for the rule.
+        ("clips", "clip_role",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS clip_role VARCHAR(20)"),
+        ("clips", "paired_clip_id",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS paired_clip_id INTEGER"),
+        ("clips", "voiceover_anchor_image_node_id",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS voiceover_anchor_image_node_id INTEGER"),
+        ("clips", "voiceover_line",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS voiceover_line TEXT"),
+        ("image_nodes", "role",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS role VARCHAR(40)"),
     ]
 
     # v479: widen ImageJobBatch string columns to TEXT. The previous
@@ -774,6 +803,17 @@ class ImageNode(Base):
     # ingredient names (v509 fallback). JSON array of Ingredients Name
     # strings when present.
     cast_json = Column(Text, nullable=True)
+
+    # v698A: image role discriminator. NULL = standard image (rendered as a
+    # visible scene clip, default for all pre-v698A images). 'voiceover_anchor'
+    # marks an image whose visual is generated (Banana 2 produces it) but
+    # whose only role is to serve as the start frame for audio-pair Veo
+    # renders — it is NOT referenced by any visible scene's `image:` bullet,
+    # the audio twin's visual is discarded at export, and only its audio
+    # track is overlaid onto the paired visual_pair clip. See
+    # template_reference.md §"v698A — per-scene clip-pair for
+    # voiceover-over-b-roll" for the rule.
+    role = Column(String(40), nullable=True)
 
     # v572: per-clip Veo prompt overrides — when non-NULL, build_prompt
     # is bypassed and the prebuilt prompt is shipped to Veo verbatim.
@@ -3118,6 +3158,49 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
         if cast_list:
             print(f"[v681/parse] image_{image_index} cast={cast_list}", flush=True)
 
+        # v698A — image role discriminator. `- **role:** voiceover_anchor`
+        # marks this image as an audio-source-only image used by paired
+        # voiceover scenes (no visible scene block references it; only used
+        # as start frame for audio-pair Veo renders). NULL/absent = standard
+        # image (default for all pre-v698A entries).
+        role_match = _re.search(
+            r"^\s*-\s*\*\*role:\*\*\s*(.+?)\s*$",
+            block, flags=_re.MULTILINE,
+        )
+        role: Optional[str] = None
+        if role_match:
+            r = role_match.group(1).strip().lower()
+            if r in ("voiceover_anchor",):
+                role = r
+            elif r:
+                # Unrecognized role values surface as parse errors so we can
+                # iterate the v698A vocabulary without silently dropping them.
+                raise ValueError(
+                    f"Image {image_index}: unrecognized role={role_match.group(1)!r} "
+                    f"(supported: voiceover_anchor)"
+                )
+        if role:
+            print(f"[v698A/parse] image_{image_index} role={role}", flush=True)
+
+        # v698A Gate 13 — voiceover_anchor images MUST have torso-framing +
+        # hands-visible keywords in the prompt body. Veo lip-syncs better
+        # when the persona has natural gestural articulation; static-still
+        # torso renders awkward. Soft check (warn-only) since prompt
+        # variations in wording are common.
+        if role == "voiceover_anchor":
+            body_lower = prompt.lower()
+            torso_kw = any(k in body_lower for k in ("torso", "waist-up", "chest-up"))
+            hands_kw = any(k in body_lower for k in (
+                "hands at chest", "hands visible", "open-palm", "hands in frame",
+            ))
+            if not (torso_kw and hands_kw):
+                print(
+                    f"[v698A/parse] WARN image_{image_index} role=voiceover_anchor "
+                    f"missing torso/hands keyword (torso={torso_kw}, hands={hands_kw}) "
+                    f"— see template_reference.md §v698A Gate 13",
+                    flush=True,
+                )
+
         images.append({
             "image_index": image_index,
             "prompt": prompt,
@@ -3127,6 +3210,7 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
             "visual_delta": visual_delta,      # v667
             "narrative_lens": narrative_lens,  # v667
             "cast": cast_list,                 # v681 — None | list[str]
+            "role": role,                      # v698A — None | 'voiceover_anchor'
         })
 
     if not images:
@@ -3312,6 +3396,33 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 )
             scene_cast = None
 
+        # v698A — voiceover_anchor_image bullet. When speaker=voiceover the
+        # parser requires this field to point at an image_N defined in the
+        # ## Images section whose role is voiceover_anchor (validated
+        # downstream in _parse_scene_blocks_new's caller via known images).
+        voiceover_anchor_image: Optional[int] = None
+        anchor_match = _re.search(
+            r"^\s*-\s*\*\*voiceover_anchor_image:\*\*\s*image_(\d+)\s*$",
+            block, flags=_re.MULTILINE,
+        )
+        if anchor_match:
+            try:
+                voiceover_anchor_image = int(anchor_match.group(1))
+            except ValueError:
+                voiceover_anchor_image = None
+            if voiceover_anchor_image is not None:
+                if voiceover_anchor_image not in known_image_indexes:
+                    raise ValueError(
+                        f"Scene {scene_index}: voiceover_anchor_image references "
+                        f"image_{voiceover_anchor_image} but no such image is "
+                        f"defined. Available: {sorted(known_image_indexes) if known_image_indexes else []}"
+                    )
+                print(
+                    f"[v698A/parse] scene_{scene_index} "
+                    f"voiceover_anchor_image=image_{voiceover_anchor_image}",
+                    flush=True,
+                )
+
         # Parse interleaved `- **line:**` / `- **action_note:**` / `- **pad:**`
         # bullets. Order matters: action_note and pad attach to the closest
         # preceding line within the same scene.
@@ -3356,6 +3467,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # (on-camera / voiceover / auto / unset speaker_mode) still
         # require at least one dialogue line (legacy behavior).
         is_silent_scene = (speaker_mode or "").lower() == "silent"
+        is_voiceover_scene = (speaker_mode or "").lower() == "voiceover"
         if not lines_list and not is_text_card and not is_silent_scene:
             raise ValueError(
                 f"Scene {scene_index}: no '- **line:**' bullets found "
@@ -3363,6 +3475,23 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 "OR set `- **speaker:** silent` if the scene is intentionally "
                 "non-speaking music/SFX/b-roll, OR set `- **scene_type:** text_card` "
                 "for a text-card transition)"
+            )
+
+        # v698A Gate 9 — voiceover scenes MUST have voiceover_anchor_image
+        # field (the audio twin's start frame).
+        if is_voiceover_scene and voiceover_anchor_image is None:
+            raise ValueError(
+                f"Scene {scene_index}: speaker=voiceover requires "
+                f"`- **voiceover_anchor_image:** image_N` field pointing at "
+                f"a persona-on-camera image with role=voiceover_anchor "
+                f"(see template_reference.md §v698A Gate 9)"
+            )
+        # v698A Gate 11 — voiceover scenes MUST have at least one line:
+        if is_voiceover_scene and not lines_list:
+            raise ValueError(
+                f"Scene {scene_index}: speaker=voiceover requires at least one "
+                f"`- **line:**` bullet (the voiceover spoken by the audio twin; "
+                f"lowercase per v693, see template_reference.md §v698A Gate 11)"
             )
 
         scenes.append({
@@ -3382,6 +3511,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "caption": caption,           # v681 — source caption (decode) OR text_card text
             "bg_color": bg_color,         # v681 — text_card bg color (CSS / hex)
             "duration_s": duration_s,     # v681 — text_card duration in seconds (None → 1.0 at render)
+            "voiceover_anchor_image": voiceover_anchor_image,  # v698A — None | int
         })
 
     if not scenes:
@@ -3606,6 +3736,49 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
             # because per-line `veo_prompts` is initialized to None.
             for s in scenes:
                 s.setdefault("veo_prompts", [None] * len(s.get("lines") or []))
+
+        # v698A — cross-validate Gates 10 + 12 (require image-level info
+        # that's only available after both images and scenes are parsed).
+        images_by_idx = {i["image_index"]: i for i in images}
+        for s in scenes:
+            speaker_mode = (s.get("speaker_mode") or "").lower()
+            if speaker_mode != "voiceover":
+                continue
+            anchor_idx = s.get("voiceover_anchor_image")
+            if anchor_idx is None:
+                continue  # already raised in _parse_scene_blocks_new
+            anchor_img = images_by_idx.get(anchor_idx)
+            if anchor_img is None:
+                continue  # already raised in _parse_scene_blocks_new
+            # Gate 10 — anchor image must have role=voiceover_anchor AND
+            # contain a persona character in its cast list.
+            anchor_role = (anchor_img.get("role") or "").lower()
+            if anchor_role != "voiceover_anchor":
+                raise ValueError(
+                    f"Scene {s['scene_index']}: voiceover_anchor_image "
+                    f"image_{anchor_idx} must have `- **role:** voiceover_anchor` "
+                    f"set in its image block (currently role={anchor_role or 'NONE'!r}). "
+                    f"See template_reference.md §v698A Gate 10."
+                )
+            anchor_cast = anchor_img.get("cast") or []
+            cast_str = " ".join(c.lower() for c in anchor_cast)
+            if "main character" not in cast_str and not any(
+                "character" in c.lower() for c in anchor_cast
+            ):
+                # Soft check: persona-named cast entries vary; we allow any
+                # entry referencing a character in the Ingredients table.
+                # The hard requirement is just that cast: is non-empty AND
+                # at least one entry plausibly names a persona row.
+                # Empty cast is the failure mode v607 force-bind tries to
+                # paper over but produces drift on audio-pair renders.
+                if not anchor_cast:
+                    raise ValueError(
+                        f"Scene {s['scene_index']}: voiceover_anchor_image "
+                        f"image_{anchor_idx} has empty cast list — must include "
+                        f"a persona character (the main character) so Banana 2 "
+                        f"binds the persona upload. "
+                        f"See template_reference.md §v698A Gate 10."
+                    )
         return {
             "images": images,
             "scenes": scenes,

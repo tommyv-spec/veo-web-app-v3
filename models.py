@@ -287,6 +287,23 @@ class Clip(Base):
     scene_type = Column(String(20), nullable=True)
     bg_color = Column(String(20), nullable=True)
 
+    # v698A — per-scene clip-pair for voiceover-over-b-roll.
+    # clip_role: 'single' (default — current behavior) | 'visual_pair' (b-roll
+    #   silent visual that pairs with an audio twin) | 'audio_pair' (audio-only
+    #   source clip whose visual is discarded at export and audio is overlaid
+    #   onto the paired visual_pair).
+    # paired_clip_id: bidirectional FK between visual_pair and audio_pair rows.
+    # voiceover_anchor_image_node_id: (on visual_pair only) which ImageNode the
+    #   audio twin is rendered from — must be a persona-on-camera image with
+    #   role=voiceover_anchor.
+    # voiceover_line: (on visual_pair only) the line spoken by the audio twin.
+    #   Stored on the visual side so we can re-derive the audio job if a clip
+    #   gets deleted/recreated downstream.
+    clip_role = Column(String(20), nullable=True)
+    paired_clip_id = Column(Integer, ForeignKey("clips.id"), nullable=True)
+    voiceover_anchor_image_node_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=True)
+    voiceover_line = Column(Text, nullable=True)
+
     # Status
     status = Column(String(20), default=ClipStatus.PENDING.value)
     retry_count = Column(Integer, default=0)
