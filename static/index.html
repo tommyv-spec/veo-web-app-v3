@@ -15013,6 +15013,16 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     // with scene 7's healer action_note, etc.).
                     // scenes_metadata's per-row keys are 1:1 with dialogueInput
                     // — use them directly.
+                    //
+                    // v682j — declare scenesMeta HERE (was: declared inside the
+                    // veoOverridesObj block below). Pre-v682j the action_notes
+                    // builder above used scenesMeta before its declaration in
+                    // the next block → TDZ error
+                    // 'Cannot access scenesMeta before initialization'. The
+                    // entire pre-fill aborted → sceneBreaks never assigned →
+                    // storyboard rendered as 1 mega-scene (all 8 clips in
+                    // Scene 1 (Image 1) Clips #1-8).
+                    const scenesMeta = data.scenes_metadata || [];
                     const notesObj = {};
                     scenesMeta.forEach((sm, idx) => {
                         const note = sm.action_note;
@@ -15056,9 +15066,11 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     // dialogueInput line positions and has veo_prompt_override
                     // already denormed onto every flat row) — the keys align
                     // with payload-builder `i` automatically.
+                    // v682j — scenesMeta declared above (in the action_notes
+                    // block); reuse it here so we don't get a duplicate-const
+                    // SyntaxError.
                     const veoOverridesObj = {};
                     const padsObj = {};
-                    const scenesMeta = data.scenes_metadata || [];
                     scenesMeta.forEach((sm, idx) => {
                         const tp = sm.veo_prompt_override;
                         const np = sm.veo_negative_prompt_override;
@@ -15501,6 +15513,21 @@ Example: A realistic vertical video of a professional presenter speaking directl
         // node's chosen_variant_id, so this function refreshes node state
         // after upload to reflect the new selection in the UI.
         async function imgManualUploadClick(nodeId) {
+            // v682j — guard undefined nodeId. Caller is an inline onclick
+            // `imgManualUploadClick(${node.id})` rendered from the batch
+            // view. If a tile lacks a real ImageNode (e.g. text_card scene
+            // placeholder, empty `+` add-tile, or any future node-less
+            // slot), node.id interpolates as 'undefined' and the upload
+            // POSTs to /api/images/nodes/undefined/manual-variant → 422.
+            // The upload silently no-ops here; the user-facing toast tells
+            // them to upload to a specific image tile.
+            if (nodeId === undefined || nodeId === null || String(nodeId) === 'undefined') {
+                if (typeof showToast === 'function') {
+                    showToast('Pick a specific image tile to upload to', 'var(--warn)');
+                }
+                console.warn('[manual-upload] aborted — nodeId is undefined (no ImageNode for this tile)');
+                return;
+            }
             // Build a hidden file input on demand. Avoids needing a static
             // <input> in every variant grid. The element is removed after
             // selection so it doesn't leak across renders.
