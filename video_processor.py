@@ -3537,12 +3537,19 @@ def export_final_video(
                     st = (info.get("scene_type") or "").lower()
                     if cm == "timeline" or st == "text_card":
                         continue
+                    # v692f — pass ONLY the line (dialogue_text) to apply_vad,
+                    # NOT line+pad. Veo renders the full prompt (line + pad)
+                    # so the audio contains both, but the user only wants the
+                    # line in the final output. By feeding Whisper just the
+                    # line as the script, pad words come back as "unmatched"
+                    # and get cut from the audio. This drops the pad trailer
+                    # ("so you can see real results in your own life within
+                    # just two months too.") and keeps only the line ("I can
+                    # help. Comment GUIDE and I will send you...").
                     _ct = (info.get("dialogue_text") or "").strip()
-                    _cp = (info.get("dialogue_pad") or "").strip()
-                    _full = (f"{_ct} {_cp}".strip() if _cp else _ct)
-                    if not _full:
+                    if not _ct:
                         continue
-                    vad_targets.append((slot_zero, info, _full))
+                    vad_targets.append((slot_zero, info, _ct))
 
                 if vad_targets:
                     print(
