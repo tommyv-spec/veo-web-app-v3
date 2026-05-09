@@ -3245,6 +3245,17 @@ def export_final_video(
     # this stage (no Veo source exists for them). Force the per-clip
     # trim path so the renderer runs. Also disable remove_silence so
     # whisper-VAD can't collapse a silent text-card to zero seconds.
+    # v691b — capture user's ORIGINAL VAD intent BEFORE any bypass guard
+    # mutates remove_silence to False. The text_card and timeline bypasses
+    # below both downgrade the global flag, but v691's per-clip Whisper-VAD
+    # in the trim loop needs to know the user's original setting so it
+    # can apply VAD to on-camera clips even when text_card / timeline
+    # scenes coexist in the same export. Pre-v691b the save lived AFTER
+    # the text_card bypass so the saved value was always False on
+    # mixed-mode exports — Whisper-VAD never ran per-clip.
+    _user_remove_silence = remove_silence
+    _user_silence_mode = silence_mode
+
     has_text_cards = any(
         (c.get("scene_type") or "").lower() == "text_card"
         for c in clip_info
@@ -3259,8 +3270,8 @@ def export_final_video(
             needs_trimming = True
         if remove_silence:
             print(
-                "[VideoProcessor] VAD bypassed: text-card scene(s) present "
-                "(silent text cards would be collapsed by whisper-VAD)",
+                "[VideoProcessor] Global VAD bypassed (text-card present); "
+                "v691 will run Whisper-VAD per-clip on non-text_card clips with dialogue.",
                 flush=True,
             )
             remove_silence = False
@@ -3274,14 +3285,7 @@ def export_final_video(
         (c.get("cut_mode") or "").lower() == "timeline" and (c.get("target_duration_s") or 0) > 0
         for c in clip_info
     )
-    # v691 — preserve user's original VAD intent for per-clip application.
-    # Pre-v691 the bypass below set remove_silence=False globally, which
-    # killed Whisper-VAD on the on-camera clips too. Save the originals
-    # so the per-clip trim loop can apply Whisper-VAD ONLY to non-timeline
-    # clips (silent timeline scenes are anchor-trimmed; on-camera clips
-    # need Whisper-VAD to trim trailing dead-air around the spoken line).
-    _user_remove_silence = remove_silence
-    _user_silence_mode = silence_mode
+    # _user_remove_silence + _user_silence_mode hoisted above (v691b).
 
     if has_timeline_clips:
         if not needs_trimming:
