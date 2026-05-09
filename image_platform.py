@@ -1100,15 +1100,25 @@ class ImageSceneAssignment(Base):
             notes.append(None)
         notes = notes[:len(lines)]
         # v572: per-line Veo prompt overrides, parallel to lines + notes.
+        # v682f: don't truncate to len(lines) when lines is empty —
+        # silent / text_card scenes have lines=[] but their stored
+        # veo_prompts_json may carry a 1-entry list (the markdown's
+        # `### Clip N — Scene N` Veo prompt for that silent/text_card
+        # scene). Truncating to 0 discarded the silent prompt, so the
+        # synthetic flat-row injection in prepare_batch_for_video saw
+        # veo_prompts=[] and silent scenes always had no override
+        # downstream — meaning the LLM-decoded silent-clip prompts
+        # never reached the Veo render.
         try:
             veo_prompts = _json.loads(self.veo_prompts_json or "null")
             if veo_prompts is None:
                 veo_prompts = [None] * len(lines)
         except Exception:
             veo_prompts = [None] * len(lines)
-        while len(veo_prompts) < len(lines):
-            veo_prompts.append(None)
-        veo_prompts = veo_prompts[:len(lines)]
+        if lines:
+            while len(veo_prompts) < len(lines):
+                veo_prompts.append(None)
+            veo_prompts = veo_prompts[:len(lines)]
         # v644: per-line audio-padding suffixes (Veo-prompt-only; whisper
         # script uses the bare line so apply_vad trims pad audio).
         try:
@@ -6184,6 +6194,19 @@ def prepare_batch_for_video(
         scene_is_silent = scene_speaker_mode == "silent"
         scene_is_text_card = scene_type_v681 == "text_card"
         if (scene_is_text_card or scene_is_silent) and not lines:
+            # v682f — silent scenes carry a Veo render that needs the
+            # markdown's per-clip prompt (e.g. Donna scene 1 = bedroom
+            # Donna+husband silent — clip 1 prompt has the camera +
+            # composition + action arc). veo_prompt_overrides.py now
+            # emits a 1-entry veo_prompts when the scene has no lines
+            # but the markdown has a clip entry for it. Read that here.
+            # text_card scenes get None — they're rendered by ffmpeg
+            # drawtext, not Veo.
+            silent_vp = (
+                veo_prompts[0]
+                if scene_is_silent and veo_prompts
+                else None
+            )
             dialogue_lines_flat.append("")
             scenes_metadata_flat.append({
                 "scene_index": scene["scene_index"],
@@ -6192,8 +6215,8 @@ def prepare_batch_for_video(
                 "clip_mode": clip_mode,
                 "transition": transition,
                 "action_note": (notes[0] if notes else "") or "",
-                "veo_prompt_override": None,
-                "veo_negative_prompt_override": None,
+                "veo_prompt_override": (silent_vp or {}).get("text_prompt") if silent_vp else None,
+                "veo_negative_prompt_override": (silent_vp or {}).get("negative_prompt") if silent_vp else None,
                 "dialogue_pad": None,
                 # v667/v668 — silent scenes typically use cut_mode=timeline
                 # so the clip is anchor-trimmed to a fixed duration.
@@ -6210,7 +6233,7 @@ def prepare_batch_for_video(
                 "bg_color": scene_bg_color if scene_is_text_card else None,
                 "duration_s": scene_duration_s if scene_is_text_card else None,
             })
-            veo_prompts_flat.append(None)
+            veo_prompts_flat.append(silent_vp)
             pads_flat.append(None)
             continue  # skip the per-line loop (no lines to iterate)
 

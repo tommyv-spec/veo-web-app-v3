@@ -224,6 +224,22 @@ def attach_veo_prompts_to_scenes(
         for li in range(1, len(lines) + 1):
             override = prompts_by_key.get((scene_index, li))
             per_line.append(override)
+
+        # v682f — silent / text_card scenes have no `- **line:**` bullets
+        # but DO have a `### Clip N — Scene N` entry in the markdown's
+        # `## Veo 3.1 Final Prompts` section (every scene gets a clip
+        # entry, including the silent ones — clip 1 = bedroom Donna+husband
+        # silent, clip 5 = text card no-render placeholder, etc.).
+        # Pre-v682f the per_line list was empty (range(1, 1)=empty) so
+        # the parsed prompt was discarded. Now we look up (scene_index, 1)
+        # for zero-line scenes and emit a single-entry per_line so the
+        # synthetic flat-row injection downstream can pick up the
+        # silent-clip Veo prompt.
+        if not lines:
+            override = prompts_by_key.get((scene_index, 1))
+            if override is not None:
+                per_line = [override]
+
         scene["veo_prompts"] = per_line
 
 

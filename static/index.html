@@ -6508,6 +6508,19 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     
                     console.log(`Line ${i}: scene=${sceneIdx}, image=${imageIdx}, clipMode=${clipMode}, transition=${sceneTransition}`);
                     
+                    // v682f — pull text_card / silent metadata from the
+                    // backend's per-line flat list so silent and text_card
+                    // scenes carry their scene_type / caption / bg_color /
+                    // duration_s downstream into DialogueLineInput. Without
+                    // this the Clip writer drops them (no scene_type set →
+                    // looks like a regular Veo render with empty text).
+                    const promoteMeta =
+                        ((window._pendingImagePromoteScenes || [])[i]) || {};
+                    const isTextCardLine =
+                        (promoteMeta.scene_type || '').toLowerCase() === 'text_card';
+                    const isSilentLine =
+                        (promoteMeta.speaker_mode || '').toLowerCase() === 'silent';
+
                     return {
                         id: id,
                         text: text,
@@ -6541,9 +6554,26 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         // script truth; pad audio is trimmed by apply_vad
                         // as unmatched filler.
                         dialogue_pad:
-                            (window._dialoguePads && window._dialoguePads[i]) || null
+                            (window._dialoguePads && window._dialoguePads[i]) || null,
+                        // v667/v668 — anchor-derived clip duration (silent
+                        // scenes use these to drive timeline-mode trim).
+                        cut_mode: promoteMeta.cut_mode || null,
+                        target_duration_s: promoteMeta.target_duration_s || null,
+                        veo_render_duration_s: promoteMeta.veo_render_duration_s || null,
+                        // v681 + v682f — text_card / silent denorm so the
+                        // backend Clip writer creates rows for these scenes
+                        // (text_card → ffmpeg drawtext at video assembly,
+                        // silent → Veo render with no dialogue). Without
+                        // these the Clip writer dropped silent / text_card
+                        // entirely and only on-camera lines became clips.
+                        scene_type: promoteMeta.scene_type || null,
+                        caption: promoteMeta.caption || null,
+                        bg_color: promoteMeta.bg_color || null,
+                        duration_s: promoteMeta.duration_s || null,
+                        _isTextCard: isTextCardLine,  // used by filter below
+                        _isSilent: isSilentLine,
                     };
-                }).filter(l => l.text);
+                }).filter(l => l.text || l._isTextCard || l._isSilent);
                 
                 console.log('Final lines payload:', JSON.stringify(lines, null, 2));
                 
