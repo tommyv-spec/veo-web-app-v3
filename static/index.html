@@ -7581,10 +7581,30 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if(!container.dataset.exportsLoaded){container.dataset.exportsLoaded='true';loadExistingExports(id);}
             }catch(e){}
         }
-        function getClipStateKey(clip){return `${clip.status}|${clip.approval_status}|${clip.output_filename||''}|${clip.generation_attempt}|${clip.selected_variant||1}|${clip.total_variants||0}`;}
+        function getClipStateKey(clip){
+            // v701f — paired clips re-render when EITHER side changes.
+            // Without including audio twin's state in the diff key,
+            // visual_pair cards never refresh when only the audio side
+            // moves (e.g. user clicks "retry voice" → audio_pair flips
+            // to flow_redo_queued → visual_pair card shows stale "voice
+            // failed — retry" banner forever).
+            const t = clip._audioTwin || null;
+            const twinKey = t ? `|t:${t.status}|${t.approval_status}|${t.output_filename||''}|${t.generation_attempt}|${t.error_code||''}` : '';
+            return `${clip.status}|${clip.approval_status}|${clip.output_filename||''}|${clip.generation_attempt}|${clip.selected_variant||1}|${clip.total_variants||0}|${clip.error_code||''}${twinKey}`;
+        }
         // Split keys: video key changes → full re-render needed; UI-only changes → patch in-place (preserve <video>)
-        function getClipVideoKey(clip){return `${clip.status}|${clip.output_filename||''}|${clip.generation_attempt}`;}
-        function getClipUIKey(clip){return `${clip.approval_status}|${clip.selected_variant||1}|${clip.total_variants||0}`;}
+        function getClipVideoKey(clip){
+            // v701f — paired clips: include audio twin video state too.
+            const t = clip._audioTwin || null;
+            const twinKey = t ? `|t:${t.status}|${t.output_filename||''}|${t.generation_attempt}` : '';
+            return `${clip.status}|${clip.output_filename||''}|${clip.generation_attempt}${twinKey}`;
+        }
+        function getClipUIKey(clip){
+            // v701f — paired clips: include audio twin approval state.
+            const t = clip._audioTwin || null;
+            const twinKey = t ? `|t:${t.approval_status}|${t.selected_variant||1}|${t.total_variants||0}` : '';
+            return `${clip.approval_status}|${clip.selected_variant||1}|${clip.total_variants||0}${twinKey}`;
+        }
         // Surgical DOM patch: update badge, actions, variant nav WITHOUT destroying the <video> element
         function patchClipUI(card, clip, jobId){
             if(!card) return;
