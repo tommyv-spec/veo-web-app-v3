@@ -7381,6 +7381,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         const cListEl = document.getElementById('clipsList');
                         const hasLineup = cachedClips.some(x => x.in_lineup === false);
                         let visible = hasLineup ? cachedClips.filter(x => x.in_lineup !== false) : cachedClips;
+                        // v700c — attach audio_pair sibling to each visual_pair
+                        // BEFORE filtering audio_pair out of the visible list,
+                        // so renderClip can produce a dual-thumbnail paired card.
+                        const _v700cMapCache = {};
+                        cachedClips.forEach(x => { _v700cMapCache[x.id] = x; });
+                        visible.forEach(x => {
+                            if ((x.clip_role||'').toLowerCase() === 'visual_pair' && x.paired_clip_id) {
+                                const twin = _v700cMapCache[x.paired_clip_id];
+                                if (twin) x._audioTwin = twin;
+                            }
+                        });
                         // v698A — hide audio_pair clips (paired-card sibling rendered via visual_pair).
                         visible = visible.filter(c => (c.clip_role || '').toLowerCase() !== 'audio_pair');
                         // v657 — match the main-render path's #clipsToolbar
@@ -7425,6 +7436,18 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // Filter out clips excluded from lineup (only when a custom lineup exists)
             const hasLineup = clips.some(x => x.in_lineup === false);
             let visibleClips = hasLineup ? clips.filter(x => x.in_lineup !== false) : clips;
+            // v700c — attach the audio_pair sibling to every visual_pair
+            // clip (looked up by paired_clip_id) BEFORE filtering audio_pairs
+            // out of the visible list. renderClip switches to a dual-thumbnail
+            // paired-card layout when ._audioTwin is present.
+            const _v700cClipsById = {};
+            clips.forEach(x => { _v700cClipsById[x.id] = x; });
+            visibleClips.forEach(x => {
+                if ((x.clip_role||'').toLowerCase() === 'visual_pair' && x.paired_clip_id) {
+                    const twin = _v700cClipsById[x.paired_clip_id];
+                    if (twin) x._audioTwin = twin;
+                }
+            });
             // v698A — hide audio_pair clips from the standalone card list.
             // Their content (line + voice) is bound to a visual_pair sibling
             // and surfaces via the paired-card badge on that visual_pair card.
@@ -7695,6 +7718,18 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
         
         function renderClip(c,jid){
+            // v700c — paired card for v698A visual_pair clips. When the
+            // visual_pair has an attached audio twin (._audioTwin populated
+            // by loadClips via paired_clip_id lookup) we render a dual-
+            // thumbnail card: 🎬 b-roll left, 🎙️ voice right, each with
+            // its own variant nav + per-side actions, plus pair-level
+            // shortcuts ([approve both][redo both]) at the bottom. Speaker
+            // clips (HOOK / CTA, clip_role NULL) and audio_pair clips
+            // (already filtered out of the visible list) fall through to
+            // the standard renderer below.
+            if ((c.clip_role||'').toLowerCase() === 'visual_pair' && c._audioTwin) {
+                return renderClipPaired(c, jid);
+            }
             // v464: approved requires BOTH status=completed AND approval_status=approved.
             // The review-status endpoint counts with the same two-part check, so the UI
             // label and the banner count stay consistent even if a status-update path
@@ -7864,7 +7899,192 @@ Example: A realistic vertical video of a professional presenter speaking directl
             return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}</div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${_v698aPairedBadge}${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}<div class="clip-text">${_v698aDisplayText}</div><div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
 
         }
-        
+
+        // v700c — render a single side of a paired card (b-roll OR voice).
+        // Compact subset of renderClip: video tile + variant nav + 3 actions
+        // (✓ approve · 🔁 redo · in-queue/rendering placeholder). No reject
+        // button per side — for paired clips, "reject" is implicit via redo
+        // (cheaper round-trip; one click to re-render). Card-level 🗑 still
+        // available on the wrapper for full pair removal.
+        function renderPairedSide(clip, jid, icon, sideLabel) {
+            const approved = clip.status === 'completed' && clip.approval_status === 'approved';
+            const rejected = clip.approval_status === 'rejected';
+            const generating = clip.status === 'generating' || clip.status === 'redo_queued' || clip.status === 'flow_redo_queued';
+            const failed = clip.status === 'failed';
+            const pending = clip.status === 'pending' || clip.status === 'preparing';
+            const waitingApproval = clip.status === 'waiting_approval';
+            const canReview = clip.status === 'completed' && !approved && !rejected && clip.approval_status !== 'max_attempts';
+            const totalVariants = clip.total_variants || (clip.versions||[]).length || 1;
+            const selectedVariant = clip.selected_variant || totalVariants;
+            const hasMultipleVariants = totalVariants > 1;
+            const versions = clip.versions || [];
+            const currentVersion = selectedVariant > 0 && selectedVariant <= versions.length ? versions[selectedVariant - 1] : null;
+            const versionLabel = currentVersion && currentVersion.version_key ? currentVersion.version_key : (currentVersion ? `${currentVersion.attempt||1}.${currentVersion.variant||1}` : `${clip.generation_attempt||1}.1`);
+
+            let vid = '';
+            if (generating) {
+                vid = `<div class="generating-state"><div class="generating-spinner">🎬</div><div class="generating-text">${icon} rendering...</div></div>`;
+            } else if (failed) {
+                vid = `<div class="failed-state"><div class="failed-icon">❌</div><div class="failed-text">${icon} failed</div></div>`;
+            } else if (pending) {
+                vid = `<div class="pending-state"><div class="pending-icon">⏳</div><div class="pending-text">${icon} waiting...</div></div>`;
+            } else if (waitingApproval) {
+                vid = `<div class="pending-state"><div class="pending-icon">⏸️</div><div class="pending-text">awaiting approval</div></div>`;
+            } else if (clip.output_filename) {
+                const _vidSrc = `${API}/jobs/${jid}/outputs/${clip.output_filename}`;
+                vid = `<div class="video-container"><video controls preload="auto" playsinline><source src="${_vidSrc}" type="video/mp4"></video></div>`;
+            } else {
+                vid = `<div style="color:var(--text-muted);font-size:14px;text-align:center;padding:20px 0;">${icon}</div>`;
+            }
+
+            let variantNav = '';
+            if (hasMultipleVariants && clip.output_filename && !generating) {
+                variantNav = `<div class="variant-nav"><button class="variant-btn" onclick="switchVariant(${clip.id},${selectedVariant-1})" ${selectedVariant<=1?'disabled':''}>◀</button><span class="variant-indicator">${versionLabel} (${selectedVariant}/${totalVariants})</span><button class="variant-btn" onclick="switchVariant(${clip.id},${selectedVariant+1})" ${selectedVariant>=totalVariants?'disabled':''}>▶</button></div>`;
+            }
+
+            let acts = '';
+            if (approved) {
+                acts = `<div style="text-align:center;color:var(--success);font-size:11px;font-weight:600;">✓ approved</div>`;
+            } else if (rejected) {
+                acts = `<div style="text-align:center;color:var(--error);font-size:11px;">✗ rejected</div>`;
+            } else if (generating) {
+                acts = `<div style="text-align:center;color:var(--text-muted);font-size:10px;">rendering...</div>`;
+            } else if (failed) {
+                acts = `<div style="display:flex;justify-content:center;"><button class="btn btn-redo btn-sm" style="padding:4px 10px;font-size:11px" onclick="redoModal(${clip.id},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''}>↻ retry ${sideLabel}</button></div>`;
+            } else if (pending || waitingApproval) {
+                acts = `<div style="text-align:center;color:var(--text-muted);font-size:10px;">in queue</div>`;
+            } else if (canReview) {
+                acts = `<div class="clip-actions" style="display:flex;gap:4px;justify-content:center;">
+                    <button class="btn btn-approve btn-sm" style="padding:4px 8px;font-size:11px;" onclick="approve(${clip.id})" title="approve ${sideLabel}">✓</button>
+                    <button class="btn btn-redo btn-sm" style="padding:4px 8px;font-size:11px;" onclick="redoModal(${clip.id},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''} title="redo ${sideLabel}">↻${clip.attempts_remaining}</button>
+                </div>`;
+            } else {
+                acts = `<div style="text-align:center;color:var(--text-muted);font-size:10px;">—</div>`;
+            }
+
+            return `<div class="clip-video">${vid}</div>${variantNav}${acts}`;
+        }
+
+        // v700c — render a paired clip card (b-roll + audio twin side-by-side).
+        // Layout: Option A from the v700c design — 1.4fr 1fr columns so the
+        // b-roll (left) gets ~58% width since it's the visible side; voice
+        // (right) gets ~42% — still big enough to play and pick variants.
+        // Pair-level shortcuts at the bottom: approve both / redo both /
+        // remove pair entirely.
+        function renderClipPaired(c, jid) {
+            const audio = c._audioTwin;
+            const visualHtml = renderPairedSide(c, jid, '🎬', 'b-roll');
+            const audioHtml = renderPairedSide(audio, jid, '🎙️', 'voice');
+
+            const visualApproved = c.status === 'completed' && c.approval_status === 'approved';
+            const audioApproved = audio.status === 'completed' && audio.approval_status === 'approved';
+            const visualReady = c.status === 'completed' && !visualApproved && c.approval_status !== 'rejected' && c.approval_status !== 'max_attempts';
+            const audioReady = audio.status === 'completed' && !audioApproved && audio.approval_status !== 'rejected' && audio.approval_status !== 'max_attempts';
+            const bothApproved = visualApproved && audioApproved;
+            const visualFailed = c.status === 'failed';
+            const audioFailed = audio.status === 'failed';
+            const visualGenerating = c.status === 'generating' || c.status === 'pending' || c.status === 'preparing' || c.status === 'redo_queued' || c.status === 'flow_redo_queued';
+            const audioGenerating = audio.status === 'generating' || audio.status === 'pending' || audio.status === 'preparing' || audio.status === 'redo_queued' || audio.status === 'flow_redo_queued';
+
+            // Pair status label — single source of truth for the user about
+            // what to do next (review / wait / fix something / approved).
+            let pairStatusLabel = 'unknown', pairStatusClass = 'running';
+            if (bothApproved) { pairStatusLabel = 'PAIR READY'; pairStatusClass = 'approved'; }
+            else if (visualFailed && audioFailed) { pairStatusLabel = 'both failed'; pairStatusClass = 'failed'; }
+            else if (visualFailed) { pairStatusLabel = 'video failed — retry'; pairStatusClass = 'failed'; }
+            else if (audioFailed) { pairStatusLabel = 'voice failed — retry'; pairStatusClass = 'failed'; }
+            else if (visualGenerating && audioGenerating) { pairStatusLabel = 'rendering both...'; pairStatusClass = 'running'; }
+            else if (visualGenerating) { pairStatusLabel = 'video rendering...'; pairStatusClass = 'running'; }
+            else if (audioGenerating) { pairStatusLabel = 'voice rendering...'; pairStatusClass = 'running'; }
+            else if (visualReady && audioReady) { pairStatusLabel = 'review both'; pairStatusClass = 'pending_review'; }
+            else if (visualApproved && audioReady) { pairStatusLabel = 'review voice'; pairStatusClass = 'pending_review'; }
+            else if (audioApproved && visualReady) { pairStatusLabel = 'review video'; pairStatusClass = 'pending_review'; }
+
+            const dialogueText = c.voiceover_line || audio.dialogue_text || c.dialogue_text || '';
+            const clipId = c.id;
+            const audioId = audio.id;
+            const attemptsRemaining = Math.min(c.attempts_remaining || 0, audio.attempts_remaining || 0);
+
+            // Pair-level shortcuts. Visible only when both sides are reviewable.
+            const approveBothBtn = (visualReady && audioReady)
+                ? `<button class="btn btn-approve btn-sm" style="padding:6px 14px;font-size:12px;" onclick="approvePair(${clipId},${audioId})" title="approve both b-roll and voice">✓ approve both</button>`
+                : '';
+            const redoBothBtn = `<button class="btn btn-redo btn-sm" style="padding:6px 14px;font-size:12px;" onclick="redoPair(${clipId},${audioId},${attemptsRemaining})" ${attemptsRemaining<=0?'disabled':''} title="re-render b-roll AND voice">↻ redo both</button>`;
+            const removeBtn = `<button class="btn btn-secondary btn-sm" style="padding:6px 10px;font-size:12px;color:var(--text-muted);" onclick="confirmDelete(${clipId},${c.clip_index})" title="remove this paired clip from the lineup">🗑</button>`;
+
+            return `<div class="clip-card clip-paired ${bothApproved?'clip-approved':''} ${visualGenerating||audioGenerating?'clip-generating':''} ${visualFailed||audioFailed?'clip-rejected':''}"
+                        data-clip-id="${clipId}" data-clip-index="${c.clip_index}"
+                        style="grid-column: span 2;">
+                <div class="clip-content">
+                    <div class="clip-header">
+                        <span class="clip-idx">#${c.clip_index+1}</span>
+                        <span class="badge badge-${pairStatusClass}">${pairStatusLabel}</span>
+                        <span class="badge" style="background:rgba(99,102,241,0.18);color:#818cf8;font-size:10px;font-weight:600;padding:2px 6px;border-radius:8px;margin-left:4px;" title="this clip has a b-roll video paired with a voiceover audio twin">🎙️ paired</span>
+                        ${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}
+                    </div>
+                    <div class="clip-paired-grid" style="display:grid;grid-template-columns:1.4fr 1fr;gap:8px;align-items:start;">
+                        <div class="clip-paired-side" data-side="video" style="display:flex;flex-direction:column;gap:4px;">
+                            <div style="font-size:10px;color:#a78bfa;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">🎬 b-roll <span style="color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0;">(plays in final video)</span></div>
+                            ${visualHtml}
+                        </div>
+                        <div class="clip-paired-side" data-side="voice" style="display:flex;flex-direction:column;gap:4px;">
+                            <div style="font-size:10px;color:#818cf8;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">🎙️ voice <span style="color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0;">(audio over b-roll)</span></div>
+                            ${audioHtml}
+                        </div>
+                    </div>
+                    <div class="clip-text" style="margin-top:8px;font-style:italic;color:#94a3b8;font-size:12px;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:6px;">"${dialogueText}"</div>
+                    <div class="clip-paired-shortcuts" style="display:flex;gap:8px;justify-content:center;margin-top:8px;flex-wrap:wrap;">
+                        ${approveBothBtn}${redoBothBtn}${removeBtn}
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        // v700c — pair-level shortcut helpers. These operate on BOTH clip ids
+        // (visual_pair + audio_pair sibling) so the user gets a single-click
+        // approve / redo for the common case where both sides look fine or
+        // both need re-rendering.
+        async function approvePair(visualId, audioId) {
+            try {
+                markClipLocallyUpdated(visualId);
+                markClipLocallyUpdated(audioId);
+                // Optimistic — both POSTs in parallel; if either fails, the
+                // poll will sync the actual server state on the next tick.
+                await Promise.all([
+                    fetch(`${API}/clips/${visualId}/approve`, {method:'POST'}),
+                    fetch(`${API}/clips/${audioId}/approve`, {method:'POST'}),
+                ]);
+                showToast('paired clip approved (both sides)', '#10b981');
+                if (selectedJobId) loadClips(selectedJobId);
+            } catch(e) {
+                showToast('approve pair failed: ' + e.message, '#ef4444');
+            }
+        }
+        async function redoPair(visualId, audioId, attemptsRemaining) {
+            if (attemptsRemaining <= 0) { showToast('no redos remaining', '#f59e0b'); return; }
+            if (!confirm('redo BOTH the b-roll and the voice for this paired clip? this fires two new Veo renders.')) return;
+            try {
+                markClipLocallyUpdated(visualId);
+                markClipLocallyUpdated(audioId);
+                await Promise.all([
+                    fetch(`${API}/clips/${visualId}/redo`, {
+                        method:'POST',
+                        headers:{'Content-Type':'application/json'},
+                        body: JSON.stringify({reason: 'pair-level redo'}),
+                    }),
+                    fetch(`${API}/clips/${audioId}/redo`, {
+                        method:'POST',
+                        headers:{'Content-Type':'application/json'},
+                        body: JSON.stringify({reason: 'pair-level redo'}),
+                    }),
+                ]);
+                showToast('paired clip queued for redo (both sides)', '#3b82f6');
+                if (selectedJobId) loadClips(selectedJobId);
+            } catch(e) {
+                showToast('redo pair failed: ' + e.message, '#ef4444');
+            }
+        }
+
         async function loadLogs(id){if(id !== selectedJobId)return;try{const isInitial=lastLogId===0,url=isInitial?`${API}/jobs/${id}/logs?limit=100`:`${API}/jobs/${id}/logs?since_id=${lastLogId}&limit=30`;const r=await fetch(url);if(id !== selectedJobId)return;if(!r.ok)return;const logs=await r.json();if(!logs.length)return;lastLogId=logs[logs.length-1].id;const c=document.getElementById('logs');const logsHtml=logs.map(l=>`<div class="log"><span class="log-time">${new Date(l.created_at).toLocaleTimeString()}</span><span class="log-msg">${l.message}</span></div>`).join('');if(isInitial)c.innerHTML=logsHtml;else c.innerHTML+=logsHtml;c.scrollTop=c.scrollHeight;}catch(e){}}
         
         function copyPrompt(clipId){
