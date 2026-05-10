@@ -6570,6 +6570,25 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         caption: promoteMeta.caption || null,
                         bg_color: promoteMeta.bg_color || null,
                         duration_s: promoteMeta.duration_s || null,
+                        // v700b — v698A voiceover-pair fields. Plumb the
+                        // parser's per-line metadata through the payload
+                        // so the backend Clip writer marks `clip_role`
+                        // and the worker spawns the audio twin. Without
+                        // these the lift's `- **speaker:** voiceover` +
+                        // `- **voiceover_anchor_image:** image_N` are
+                        // silently dropped — every clip imports as a
+                        // single-render speaker clip and no paired badge
+                        // shows in the UI.
+                        clip_role: promoteMeta.clip_role || null,
+                        voiceover_anchor_image_node_id:
+                            (promoteMeta.voiceover_anchor_image_node_id !== undefined
+                                ? promoteMeta.voiceover_anchor_image_node_id
+                                : null),
+                        voiceover_anchor_image_local_index:
+                            (promoteMeta.voiceover_anchor_image_local_index !== undefined
+                                ? promoteMeta.voiceover_anchor_image_local_index
+                                : null),
+                        voiceover_line: promoteMeta.voiceover_line || null,
                         _isTextCard: isTextCardLine,  // used by filter below
                         _isSilent: isSilentLine,
                     };
