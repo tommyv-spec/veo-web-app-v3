@@ -4418,6 +4418,55 @@ def clear_job_aborted(job_id):
         _aborted_job_ids.discard(job_id)
 
 
+# v700d — clip-id → job-id reverse map so update_clip_status can mark
+# the parent job aborted when any per-clip API call returns 404. The
+# poll-piggyback aborted_jobs path (mark_job_aborted from /pending)
+# only fires while the worker is idle; mid-submission the worker
+# never sees that signal, so deletes that happen during clip submit
+# loops were going undetected. Update_clip_status returns 404 per
+# clip → we look up the parent job here → mark_job_aborted →
+# check_abort() at the top of each clip iteration breaks the loop.
+_CLIP_TO_JOB_LOCK = threading.Lock()
+_CLIP_TO_JOB = {}  # clip_id (int) -> job_id (str)
+
+
+def register_clip_for_job(clip_id, job_id):
+    """Bind clip_id → job_id so 404 propagation works without
+    threading job_id through every update_clip_status call site."""
+    if clip_id is None or job_id is None:
+        return
+    try:
+        cid = int(clip_id)
+    except (TypeError, ValueError):
+        return
+    with _CLIP_TO_JOB_LOCK:
+        _CLIP_TO_JOB[cid] = str(job_id)
+
+
+def lookup_job_for_clip(clip_id):
+    """Return the job_id last bound to this clip_id, or None."""
+    if clip_id is None:
+        return None
+    try:
+        cid = int(clip_id)
+    except (TypeError, ValueError):
+        return None
+    with _CLIP_TO_JOB_LOCK:
+        return _CLIP_TO_JOB.get(cid)
+
+
+def register_clips_for_job(clips, job_id):
+    """Convenience: bind every clip in `clips` (list of dicts with `id`
+    field) to `job_id`. Idempotent — safe to call at the top of each
+    submission cycle even if the same job is being resumed."""
+    if not clips or not job_id:
+        return
+    for c in clips:
+        cid = c.get('id') if isinstance(c, dict) else None
+        if cid:
+            register_clip_for_job(cid, job_id)
+
+
 def check_abort(job_id):
     """Raise JobAbortedException if this job has been aborted. Call at
     natural checkpoints in long-running processing loops (before clip
@@ -4588,6 +4637,13 @@ def update_clip_status(clip_id, status, output_url=None, error_message=None, ret
 
     v455: on 404, the clip/job has been deleted. Log once and return —
     no retry storm.
+
+    v700d: on 404, also propagate the abort to the job so the
+    submission loop can break out at its next check_abort() checkpoint.
+    Without this, the worker keeps clicking Generate for clip after
+    clip on a deleted job — burning Veo credits and fighting Flow's
+    UI for nothing. The clip→job mapping is populated by
+    register_clip_for_job() at the start of each submission cycle.
     """
     data = {
         "status": status,
@@ -4601,6 +4657,13 @@ def update_clip_status(clip_id, status, output_url=None, error_message=None, ret
             return result
         if code == 404:
             print(f"[API] 🛑 Clip {clip_id} returned 404 on status update — job may be deleted", flush=True)
+            try:
+                _jid = lookup_job_for_clip(clip_id)
+                if _jid and not is_job_aborted(_jid):
+                    print(f"[API] 🛑 Marking job {str(_jid)[:8]}... aborted (clip {clip_id} 404 propagation)", flush=True)
+                    mark_job_aborted(_jid)
+            except Exception:
+                pass
             return None
         if attempt < retries - 1:
             wait = 2 ** attempt
@@ -12389,10 +12452,27 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
     first_submission_in_project = True  # False after first clip is submitted; reuse path needs existing tiles
     
     download_queued = False
-    
+
+    # v700d — bind every clip → this job_id so update_clip_status can
+    # propagate 404 → mark_job_aborted automatically. Without this,
+    # mid-submission deletes go unnoticed and the worker keeps clicking
+    # Generate clip-after-clip on a dead job (burns Veo credits).
+    register_clips_for_job(clips, job_id)
+
     for i, clip in enumerate(clips):
+        # v700d — abort checkpoint at the TOP of each clip iteration.
+        # Catches deletes signalled via /pending poll OR via a 404 on a
+        # prior clip's update_clip_status (which now propagates the
+        # abort flag). Raising lets the surrounding job loop fall
+        # through to the next pending job.
+        try:
+            check_abort(job_id)
+        except JobAbortedException:
+            print(f"[Flow] 🛑 Job {str(job_id)[:8]}... aborted mid-submission — stopping at clip {clip.get('clip_index')}", flush=True)
+            raise
+
         clip_index = clip['clip_index']
-        
+
         if clip_index in clips_done:
             print(f"\n--- Clip {i+1}/{len(clips)} SKIPPED (cached) ---")
             prev_start_frame_key = clip.get('start_frame_key')
@@ -13367,13 +13447,20 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     
     job_id = job['id']
     clips = job['clips']
-    
+
+    # v700d — bind every clip → job_id so update_clip_status can mark
+    # the job aborted on 404 mid-submission. Without this the worker
+    # logs "🛑 Clip X returned 404" but keeps clicking Generate for the
+    # remaining clips, which both burns Veo credits and fights with
+    # Flow's UI for several more minutes after the user clicked Delete.
+    register_clips_for_job(clips, job_id)
+
     # Local HumanPacer instance — NOT a shared function attribute.
     # Previously used process_job_submission._pacer which is shared across
     # ALL threads, causing clip counters and page references to mix between
     # Account1 and Account2 when running concurrently. Local instance is safe.
     _pacer = HumanPacer(account_name="Flow")
-    
+
     # IMMEDIATELY mark as processing to prevent duplicate pickup
     update_job_status(job_id, 'processing')
     
