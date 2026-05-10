@@ -4739,13 +4739,20 @@ def update_clip_status(clip_id, status, output_url=None, error_message=None, ret
 
 
 def report_policy_violation(clip_id, rejected_image_key=None, detail=None):
-    """v701 — POST to /api/local-worker/clips/{id}/policy-violation when
-    Flow's PolicyScan persistently flags a tile (image content rejected,
-    no Retry button). Backend stamps error_code = CONTENT_POLICY_VIOLATION
+    """v701 — POST to /api/<prefix>/clips/{id}/policy-violation when Flow's
+    PolicyScan persistently flags a tile (image content rejected, no
+    Retry button). Backend stamps error_code = CONTENT_POLICY_VIOLATION
     on the Clip and stashes the rejected R2 key so the frontend renders
     the upload-replacement card. Returns the API response or None on
     error. Falls back to plain update_clip_status('failed') if the new
-    endpoint is unavailable (older deploy / 404)."""
+    endpoint is unavailable (older deploy / 404).
+
+    v701-prefix-fix: the endpoint path is RELATIVE — api_request_ex()
+    prepends API_PATH_PREFIX automatically (`/api/user-worker` in USER
+    mode, `/api/local-worker` in legacy mode). Pre-fix this helper
+    hardcoded `/local-worker/...` which produced
+    /api/user-worker/local-worker/... in USER mode = 404.
+    """
     payload = {
         "rejected_image_key": rejected_image_key,
         "detail": detail or "⚠️ Flow rejected this image's content. Upload a replacement to retry.",
@@ -4753,7 +4760,7 @@ def report_policy_violation(clip_id, rejected_image_key=None, detail=None):
     try:
         result, code = api_request_ex(
             "POST",
-            f"/local-worker/clips/{clip_id}/policy-violation",
+            f"/clips/{clip_id}/policy-violation",
             payload,
         )
     except Exception as e:

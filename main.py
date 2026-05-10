@@ -10361,6 +10361,103 @@ async def user_worker_update_job_status(
     return {"success": True, "job_id": job_id, "status": job.status}
 
 
+# v701-prefix-fix — user-worker policy-violation endpoint mirrors the
+# local-worker version. report_policy_violation in flow_worker.py uses a
+# RELATIVE path (`/clips/{id}/policy-violation`) and api_request_ex
+# prepends the active API_PATH_PREFIX (`/api/user-worker` in USER mode,
+# `/api/local-worker` in legacy mode). Without this mirror, USER-mode
+# workers got 404 → fallback path → no error_code stamped → no upload
+# card surfaced.
+@app.post("/api/user-worker/clips/{clip_id}/policy-violation")
+async def user_worker_report_policy_violation(
+    clip_id: int,
+    request: PolicyViolationRequest,
+    db: DBSession = Depends(get_db_session),
+    user_id: str = Depends(verify_user_worker_token),
+):
+    """v701 — User-mode equivalent of local-worker policy-violation.
+    Verifies ownership via user_id then runs the same Clip-stamping
+    + v701e preemptive image-shared cascade as the local-worker path."""
+    clip = db.query(Clip).join(Job).filter(
+        Clip.id == clip_id, Job.user_id == user_id
+    ).with_for_update().first()
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found or not yours")
+
+    rejected_key = (
+        request.rejected_image_key.strip()
+        if request.rejected_image_key
+        else (clip.start_frame or "").strip()
+    )
+    if rejected_key:
+        clip.replacement_start_frame = rejected_key
+
+    clip.status = ClipStatus.FAILED.value
+    clip.error_code = "CONTENT_POLICY_VIOLATION"
+    clip.error_message = (
+        request.detail
+        or "⚠️ Flow rejected this image's content. Upload a replacement to retry."
+    )
+    db.commit()
+
+    # v701e preemptive sibling cascade.
+    cascaded_marked = 0
+    try:
+        if rejected_key:
+            sibling_q = db.query(Clip).filter(
+                Clip.job_id == clip.job_id,
+                Clip.start_frame == rejected_key,
+                Clip.id != clip.id,
+                Clip.status.in_([
+                    ClipStatus.PENDING.value,
+                    ClipStatus.GENERATING.value,
+                    ClipStatus.REDO_QUEUED.value,
+                    ClipStatus.FLOW_REDO_QUEUED.value,
+                    ClipStatus.FAILED.value,
+                ]),
+            )
+            for sib in sibling_q.all():
+                if sib.status == ClipStatus.COMPLETED.value:
+                    continue
+                if sib.error_code and sib.error_code != "CONTENT_POLICY_VIOLATION":
+                    continue
+                sib.status = ClipStatus.FAILED.value
+                sib.error_code = "CONTENT_POLICY_VIOLATION"
+                sib.error_message = (
+                    "⚠️ Flow rejected this image's content (cascade from sibling). "
+                    "Upload a replacement to retry."
+                )
+                sib.replacement_start_frame = sib.replacement_start_frame or rejected_key
+                sib.claimed_by_worker = None
+                sib.claimed_at = None
+                cascaded_marked += 1
+            if cascaded_marked:
+                db.commit()
+    except Exception as _cascade_err:
+        print(f"[v701e/user-worker] preemptive cascade skipped: {_cascade_err}", flush=True)
+        db.rollback()
+
+    cascade_msg = (
+        f" (preemptively marked {cascaded_marked} sibling"
+        f"{'s' if cascaded_marked != 1 else ''} sharing same image)"
+        if cascaded_marked else ""
+    )
+    add_job_log(
+        db, clip.job_id,
+        f"Clip {clip.clip_index + 1}: image policy violation — awaiting user replacement{cascade_msg}",
+        "WARNING",
+        "policy",
+    )
+    db.commit()
+
+    return {
+        "ok": True,
+        "clip_id": clip_id,
+        "rejected_image_key": rejected_key or None,
+        "cascaded_sibling_count": cascaded_marked,
+    }
+
+
 @app.post("/api/user-worker/clips/{clip_id}/status")
 async def user_worker_update_clip_status(
     clip_id: str,
