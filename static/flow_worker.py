@@ -12959,45 +12959,85 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         time.sleep(FAILURE_CHECK_DELAY)
         clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1)
         
-        # Ghost submission detection: verify data-index=0 actually contains OUR clip.
-        # After FailCheck's 10s wait, if the newest tile doesn't match our dialogue,
-        # the Generate click silently failed — the old tile is still at position 0.
-        # v700f — for v698A visual_pair clips the SUBMITTED prompt is the silent
-        # b-roll prompt (Phase 3c override), but clip.dialogue_text still holds
-        # the voiceover line for accounting. The tile's innerText therefore
-        # NEVER contains the dialogue_text → ghost match always fails →
-        # every visual_pair gets flow_redo_queued in a tight loop, blocking
-        # all downloads. Switch the search key to whatever was actually
-        # submitted: prefer prompt_text head, fall back to dialogue_text.
+        # v700g — ghost detection with uuid-binding cross-check.
+        # Two independent signals confirm "this Generate-click actually
+        # produced a tile":
+        #   (A) v700 uuid binding present for (job_id, clip_index) — submit
+        #       response was captured, so tile DEFINITIVELY exists. Highest
+        #       confidence; skip the prompt match entirely.
+        #   (B) prompt match — search tile innerText for distinctive
+        #       substrings of the submitted prompt. Fallback when uuid
+        #       binding missed (network race / golden restore).
+        # Ghost is declared only when BOTH signals fail. v700f's bug —
+        # head[:30] collisions when many clips share boilerplate openers
+        # like "Static handheld camera at chest height" — replaced with
+        # multi-substring matching: any ONE of {dialogue line, last 60
+        # chars of prompt, prompt mid-section} found in tile = match.
         _is_ghost = False
         if not clip_failed:
             try:
-                _ghost_search_key = ""
-                _prompt_text_v700f = (clip.get('prompt_text') or '').strip()
-                if _prompt_text_v700f:
-                    _ghost_search_key = _prompt_text_v700f[:30]
+                # (A) primary: did v700 capture a binding for this clip?
+                _v700g_bound = False
+                with _PRIMARY_MEDIA_LOCK:
+                    for _b in _PRIMARY_MEDIA_BINDINGS.values():
+                        if _b.get('job_id') == job_id and _b.get('clip_index') == clip_index:
+                            _v700g_bound = True
+                            break
+                if _v700g_bound:
+                    print(
+                        f"[{account_name}] [v700g] clip {clip_index+1} uuid-bound — "
+                        f"submit response captured, tile confirmed; skipping prompt match",
+                        flush=True,
+                    )
+                    # short-circuit; tile exists per submit response. _is_ghost stays False.
                 else:
-                    _ghost_search_key = (clip.get('dialogue_text') or '')[:30]
-                _ghost_result = page.evaluate(f"""() => {{
-                    const c = document.querySelector("div[data-index='0']");
-                    if (!c) return {{found: false, tiles: 0}};
-                    const seen = new Set();
-                    c.querySelectorAll("[data-tile-id]").forEach(t => {{
-                        const id = t.getAttribute("data-tile-id"); if (id) seen.add(id);
-                    }});
-                    const text = c.innerText || c.textContent || '';
-                    const needle = {repr(_ghost_search_key)};
-                    return {{
-                        found: needle.length > 5 ? text.includes(needle) : true,
-                        tiles: seen.size
-                    }};
-                }}""")
-                if _ghost_result and _ghost_result.get('tiles', 0) == 0:
-                    _is_ghost = True
-                    print(f"[{account_name}] ⚠ GHOST: clip {clip_index+1} — no tiles at data-index=0", flush=True)
-                elif _ghost_result and not _ghost_result.get('found', True):
-                    _is_ghost = True
-                    print(f"[{account_name}] ⚠ GHOST: clip {clip_index+1} — data-index=0 doesn't contain submitted-prompt head (stale tile from previous clip)", flush=True)
+                    # (B) fallback: multi-substring prompt match.
+                    _prompt = (clip.get('prompt_text') or '').strip()
+                    _dialogue = (clip.get('dialogue_text') or '').strip()
+                    _needles = []
+                    if _prompt:
+                        # head + tail + mid → distinctive across all clips even
+                        # when boilerplate openers collide.
+                        _needles.append(_prompt[:30])
+                        if len(_prompt) > 90:
+                            _needles.append(_prompt[-60:])
+                            _mid = len(_prompt) // 2
+                            _needles.append(_prompt[_mid:_mid+40])
+                    if _dialogue and len(_dialogue) > 5:
+                        _needles.append(_dialogue[:60])
+                    # de-dupe + drop empty
+                    _needles = list({n.strip(): None for n in _needles if n and len(n.strip()) > 5}.keys())
+                    _ghost_result = page.evaluate(f"""() => {{
+                        const c = document.querySelector("div[data-index='0']");
+                        if (!c) return {{found: false, tiles: 0, needle_hits: 0}};
+                        const seen = new Set();
+                        c.querySelectorAll("[data-tile-id]").forEach(t => {{
+                            const id = t.getAttribute("data-tile-id"); if (id) seen.add(id);
+                        }});
+                        const text = c.innerText || c.textContent || '';
+                        const needles = {repr(_needles)};
+                        let hits = 0;
+                        for (const n of needles) {{ if (text.includes(n)) hits++; }}
+                        return {{
+                            found: needles.length === 0 ? true : hits > 0,
+                            tiles: seen.size,
+                            needle_hits: hits,
+                            needle_count: needles.length,
+                        }};
+                    }}""")
+                    if _ghost_result and _ghost_result.get('tiles', 0) == 0:
+                        _is_ghost = True
+                        print(f"[{account_name}] ⚠ GHOST: clip {clip_index+1} — no tiles at data-index=0", flush=True)
+                    elif _ghost_result and not _ghost_result.get('found', True):
+                        _is_ghost = True
+                        _hit = _ghost_result.get('needle_hits', 0)
+                        _cnt = _ghost_result.get('needle_count', 0)
+                        print(
+                            f"[{account_name}] ⚠ GHOST: clip {clip_index+1} — data-index=0 "
+                            f"matched 0/{_cnt} needles AND no uuid binding (stale tile from "
+                            f"previous clip)",
+                            flush=True,
+                        )
             except Exception as _ge:
                 print(f"[{account_name}] ⚠ Ghost check error for clip {clip_index+1}: {_ge}", flush=True)
 
@@ -14601,42 +14641,72 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         time.sleep(FAILURE_CHECK_DELAY)
         clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1)
 
-        # Ghost submission detection: verify data-index=0 actually contains OUR clip.
-        # After FailCheck's 10s wait, if the newest tile doesn't match our dialogue,
-        # the Generate click silently failed — the old tile is still at position 0.
-        # v700f — for v698A visual_pair clips the SUBMITTED prompt is the
-        # silent b-roll prompt (Phase 3c override), but clip.dialogue_text
-        # still holds the voiceover line for accounting. Search the tile's
-        # innerText for the SUBMITTED prompt's head, not the dialogue.
+        # v700g — ghost detection with uuid-binding cross-check (mirror
+        # of the parallel-mode site at ~12962). Two-signal check:
+        #   (A) v700 uuid binding present → tile DEFINITIVELY exists,
+        #       skip prompt match.
+        #   (B) prompt match via multiple distinctive substrings → tolerant
+        #       of boilerplate-opener collisions.
+        # Ghost only when BOTH fail.
         _is_ghost = False
         if not clip_failed:
             try:
-                _ghost_search_key = ""
-                _prompt_text_v700f = (clip.get('prompt_text') or '').strip()
-                if _prompt_text_v700f:
-                    _ghost_search_key = _prompt_text_v700f[:30]
+                _v700g_bound = False
+                with _PRIMARY_MEDIA_LOCK:
+                    for _b in _PRIMARY_MEDIA_BINDINGS.values():
+                        if _b.get('job_id') == job_id and _b.get('clip_index') == clip_index:
+                            _v700g_bound = True
+                            break
+                if _v700g_bound:
+                    print(
+                        f"[Flow] [v700g] clip {clip_index+1} uuid-bound — "
+                        f"submit response captured, tile confirmed; skipping prompt match",
+                        flush=True,
+                    )
                 else:
-                    _ghost_search_key = (clip.get('dialogue_text') or '')[:30]
-                _ghost_result = page.evaluate(f"""() => {{
-                    const c = document.querySelector("div[data-index='0']");
-                    if (!c) return {{found: false, tiles: 0}};
-                    const seen = new Set();
-                    c.querySelectorAll("[data-tile-id]").forEach(t => {{
-                        const id = t.getAttribute("data-tile-id"); if (id) seen.add(id);
-                    }});
-                    const text = c.innerText || c.textContent || '';
-                    const needle = {repr(_ghost_search_key)};
-                    return {{
-                        found: needle.length > 5 ? text.includes(needle) : true,
-                        tiles: seen.size
-                    }};
-                }}""")
-                if _ghost_result and _ghost_result.get('tiles', 0) == 0:
-                    _is_ghost = True
-                    print(f"[Flow] ⚠ GHOST: clip {clip_index+1} — no tiles at data-index=0", flush=True)
-                elif _ghost_result and not _ghost_result.get('found', True):
-                    _is_ghost = True
-                    print(f"[Flow] ⚠ GHOST: clip {clip_index+1} — data-index=0 doesn't contain submitted-prompt head (stale tile from previous clip)", flush=True)
+                    _prompt = (clip.get('prompt_text') or '').strip()
+                    _dialogue = (clip.get('dialogue_text') or '').strip()
+                    _needles = []
+                    if _prompt:
+                        _needles.append(_prompt[:30])
+                        if len(_prompt) > 90:
+                            _needles.append(_prompt[-60:])
+                            _mid = len(_prompt) // 2
+                            _needles.append(_prompt[_mid:_mid+40])
+                    if _dialogue and len(_dialogue) > 5:
+                        _needles.append(_dialogue[:60])
+                    _needles = list({n.strip(): None for n in _needles if n and len(n.strip()) > 5}.keys())
+                    _ghost_result = page.evaluate(f"""() => {{
+                        const c = document.querySelector("div[data-index='0']");
+                        if (!c) return {{found: false, tiles: 0, needle_hits: 0}};
+                        const seen = new Set();
+                        c.querySelectorAll("[data-tile-id]").forEach(t => {{
+                            const id = t.getAttribute("data-tile-id"); if (id) seen.add(id);
+                        }});
+                        const text = c.innerText || c.textContent || '';
+                        const needles = {repr(_needles)};
+                        let hits = 0;
+                        for (const n of needles) {{ if (text.includes(n)) hits++; }}
+                        return {{
+                            found: needles.length === 0 ? true : hits > 0,
+                            tiles: seen.size,
+                            needle_hits: hits,
+                            needle_count: needles.length,
+                        }};
+                    }}""")
+                    if _ghost_result and _ghost_result.get('tiles', 0) == 0:
+                        _is_ghost = True
+                        print(f"[Flow] ⚠ GHOST: clip {clip_index+1} — no tiles at data-index=0", flush=True)
+                    elif _ghost_result and not _ghost_result.get('found', True):
+                        _is_ghost = True
+                        _hit = _ghost_result.get('needle_hits', 0)
+                        _cnt = _ghost_result.get('needle_count', 0)
+                        print(
+                            f"[Flow] ⚠ GHOST: clip {clip_index+1} — data-index=0 "
+                            f"matched 0/{_cnt} needles AND no uuid binding (stale tile from "
+                            f"previous clip)",
+                            flush=True,
+                        )
             except Exception as _ge:
                 print(f"[Flow] ⚠ Ghost check error for clip {clip_index+1}: {_ge}", flush=True)
         
