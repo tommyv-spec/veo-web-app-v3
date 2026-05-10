@@ -211,6 +211,24 @@ class UuidDedupQueue(queue.Queue):
 
     def put(self, item, block=True, timeout=None):
         if isinstance(item, dict) and "urls" in item and "clip_index" in item:
+            # v700 — uuid-binding rewrite: if any URL has a recorded
+            # primaryMediaId binding (captured at Generate-click time), re-key
+            # the put to the bound (clip_index, clip_id) before any dedup
+            # logic runs. Fixes parallel-mode wrong-clip-attribution that
+            # tile-data-index ordering can't see (Flow tile order != submit
+            # order, especially after golden-restore + resume).
+            try:
+                items = _split_item_by_uuid_binding(item)
+            except Exception as _e:
+                items = [item]
+            if len(items) > 1 or (items and items[0] is not item):
+                # Rebound or split — recurse for each piece (each goes through
+                # cross-attribution dedup below).
+                rc = None
+                for sub_item in items:
+                    rc = self.put(sub_item, block=block, timeout=timeout)
+                return rc
+
             job_id = item.get("job_id") or "_default_"
             ci = item.get("clip_index")
             urls_in = list(item.get("urls") or [])
@@ -248,6 +266,259 @@ class UuidDedupQueue(queue.Queue):
                 item = dict(item)
                 item["urls"] = urls_kept
         return super().put(item, block=block, timeout=timeout)
+
+
+# ============================================================
+# v700 — primaryMediaId binding (uuid-at-submit attribution)
+# ============================================================
+# The Flow submit endpoint
+# (`labs.google/fx/api/trpc/video:batchAsyncGenerateVideoStartImage`)
+# returns `workflows[].metadata.primaryMediaId` — the SAME uuid that the
+# later `media.getMediaUrlRedirect?name=<uuid>` download path uses. We
+# capture submit responses at Generate-click time and bind each
+# primaryMediaId to (job_id, clip_index, clip_id). Download attribution
+# then becomes a deterministic uuid map lookup instead of a guess based
+# on tile data-index order (which Flow renders newest-first and which
+# breaks down on golden-restore + resume).
+#
+# State is process-global (UUIDs are universally unique). Per-thread
+# capture buffers separate the two parallel-account workers.
+
+_PRIMARY_MEDIA_BINDINGS = {}                # uuid (lower) -> dict(job_id, clip_index, clip_id, batch_id, workflow_id, submit_time, account)
+_PRIMARY_MEDIA_LOCK = threading.Lock()
+_SUBMIT_RESPONSE_BUFFERS = {}               # buffer_key -> list[dict(data, captured_at, url)]
+_SUBMIT_RESPONSE_BUFFERS_LOCK = threading.Lock()
+
+
+def _submit_buffer_key(account_label):
+    """Buffer key per account so parallel workers don't see each other's
+    submit responses. Falls back to thread id if no label given."""
+    if account_label:
+        return f"acct:{account_label}"
+    return f"tid:{threading.get_ident()}"
+
+
+def _install_submit_response_listener(page, account_label=""):
+    """v700 — install a one-shot Playwright `response` handler on `page`
+    that captures `batchAsyncGenerateVideoStartImage` 200 responses into
+    the per-account buffer. Idempotent — flagged on the page object so
+    duplicate calls (from multiple `_stash_profile_on_page` sites and
+    from page-relaunch) are no-ops."""
+    if page is None:
+        return
+    try:
+        if getattr(page, '_v700_submit_listener_installed', False):
+            return
+    except Exception:
+        return
+    buf_key = _submit_buffer_key(account_label)
+
+    def _on_response(resp):
+        try:
+            url = resp.url
+            if 'batchAsyncGenerateVideoStartImage' not in url:
+                return
+            try:
+                if resp.status != 200:
+                    return
+            except Exception:
+                return
+            try:
+                data = resp.json()
+            except Exception:
+                return
+            entry = {'data': data, 'captured_at': time.time(), 'url': url}
+            with _SUBMIT_RESPONSE_BUFFERS_LOCK:
+                buf = _SUBMIT_RESPONSE_BUFFERS.setdefault(buf_key, [])
+                buf.append(entry)
+                if len(buf) > 32:
+                    del buf[:-32]
+        except Exception:
+            # Never let a listener error propagate into Playwright.
+            pass
+
+    try:
+        page.on('response', _on_response)
+        try:
+            page._v700_submit_listener_installed = True
+        except Exception:
+            pass
+        try:
+            page._v700_submit_buffer_key = buf_key
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[v700] failed to install submit listener for {account_label}: {e}", flush=True)
+
+
+def _drain_submit_responses(account_label=""):
+    """Pop and return all currently-buffered submit responses for this
+    account. Caller is expected to call this immediately after a
+    Generate-click so the responses belong to that click."""
+    buf_key = _submit_buffer_key(account_label)
+    with _SUBMIT_RESPONSE_BUFFERS_LOCK:
+        buf = _SUBMIT_RESPONSE_BUFFERS.get(buf_key, [])
+        out = list(buf)
+        if buf_key in _SUBMIT_RESPONSE_BUFFERS:
+            _SUBMIT_RESPONSE_BUFFERS[buf_key] = []
+    return out
+
+
+def _bind_pending_submits_for_page(page, job_id, clip_index, clip_id=None,
+                                    drain_timeout=8.0, expected_min=1):
+    """Convenience wrapper — resolves the buffer key from the page's
+    `_v700_submit_buffer_key` attribute (set by
+    `_install_submit_response_listener`). Use this from sites that don't
+    know the account label directly (e.g. shared submission helpers)."""
+    label = ""
+    try:
+        label = getattr(page, '_v700_submit_buffer_key', '') or ''
+        if label.startswith('acct:'):
+            label = label[len('acct:'):]
+    except Exception:
+        label = ""
+    return _bind_pending_submits(
+        job_id=job_id,
+        clip_index=clip_index,
+        clip_id=clip_id,
+        account_label=label,
+        drain_timeout=drain_timeout,
+        expected_min=expected_min,
+    )
+
+
+def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
+                          drain_timeout=8.0, expected_min=1):
+    """v700 — drain any submit responses captured since the last call and
+    bind their primaryMediaIds to (job_id, clip_index, clip_id). Wait up
+    to `drain_timeout` seconds for at least `expected_min` workflows to
+    arrive (submit response races with the post-Generate sleep). Returns
+    list of bound uuids."""
+    bound = []
+    deadline = time.time() + max(0.5, float(drain_timeout))
+    seen_workflows = 0
+    while True:
+        entries = _drain_submit_responses(account_label)
+        if entries:
+            with _PRIMARY_MEDIA_LOCK:
+                for e in entries:
+                    data = e.get('data') or {}
+                    for w in (data.get('workflows') or []):
+                        meta = (w.get('metadata') or {}) if isinstance(w, dict) else {}
+                        media_id = (meta.get('primaryMediaId') or '').lower()
+                        if not media_id:
+                            continue
+                        _PRIMARY_MEDIA_BINDINGS[media_id] = {
+                            'job_id': job_id,
+                            'clip_index': clip_index,
+                            'clip_id': clip_id,
+                            'batch_id': meta.get('batchId'),
+                            'workflow_id': (w.get('name') if isinstance(w, dict) else None),
+                            'submit_time': e.get('captured_at') or time.time(),
+                            'account': account_label,
+                        }
+                        bound.append(media_id)
+                        seen_workflows += 1
+        if seen_workflows >= expected_min:
+            break
+        if time.time() >= deadline:
+            break
+        time.sleep(0.25)
+    if bound:
+        print(
+            f"[v700] bound clip {clip_index} (id={clip_id}) → {len(bound)} mediaId(s): "
+            f"{', '.join(b[:8] for b in bound)}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[v700] WARNING clip {clip_index} (id={clip_id}) — no submit response "
+            f"captured within {drain_timeout:.0f}s; downloads will fall back to "
+            f"declared clip_index (legacy tile-position attribution)",
+            flush=True,
+        )
+    return bound
+
+
+def _lookup_uuid_binding(uuid_str, current_job_id=None):
+    """Return binding dict for `uuid_str`, or None. If `current_job_id`
+    is supplied, only return bindings whose job matches (cross-job uuid
+    collision is impossible in practice but defensive anyway)."""
+    if not uuid_str:
+        return None
+    with _PRIMARY_MEDIA_LOCK:
+        b = _PRIMARY_MEDIA_BINDINGS.get(uuid_str.lower())
+    if not b:
+        return None
+    if current_job_id and b.get('job_id') and b['job_id'] != current_job_id:
+        return None
+    return dict(b)
+
+
+def _split_item_by_uuid_binding(item):
+    """If `item` (an http_dl_queue payload) contains URLs that bind to
+    DIFFERENT clip_indices than declared, split it into one or more new
+    items each with the correct (clip_index, clip_id). URLs with no
+    binding stay attached to the original declared clip_index (legacy
+    fallback). Returns the list of items to enqueue. Returns `[item]`
+    unchanged when no binding mismatch exists."""
+    if not isinstance(item, dict):
+        return [item]
+    if 'urls' not in item or 'clip_index' not in item:
+        return [item]
+    declared_ci = item.get('clip_index')
+    declared_id = item.get('clip_id')
+    job_id = item.get('job_id')
+    urls = list(item.get('urls') or [])
+    if not urls:
+        return [item]
+
+    # group urls by target (clip_index, clip_id). None binding => declared.
+    groups = {}  # (ci, cid) -> list[url]
+    rewrites = 0
+    for u in urls:
+        uid = _extract_uuid_from_url(u)
+        binding = _lookup_uuid_binding(uid, current_job_id=job_id) if uid else None
+        if binding is None:
+            tgt = (declared_ci, declared_id)
+        else:
+            tgt = (binding.get('clip_index'), binding.get('clip_id') or declared_id)
+            if tgt[0] != declared_ci:
+                rewrites += 1
+                print(
+                    f"[v700] REBIND uuid={uid[:8]} → clip {tgt[0]} "
+                    f"(was declared clip {declared_ci}; tile-position attribution would have mis-routed)",
+                    flush=True,
+                )
+        groups.setdefault(tgt, []).append(u)
+
+    # No rebinds and no splits → return unchanged.
+    if rewrites == 0 and len(groups) == 1 and next(iter(groups.keys())) == (declared_ci, declared_id):
+        return [item]
+
+    new_items = []
+    for (ci, cid), gurls in groups.items():
+        sub = dict(item)
+        sub['clip_index'] = ci
+        if cid is not None:
+            sub['clip_id'] = cid
+        sub['urls'] = gurls
+        new_items.append(sub)
+    return new_items
+
+
+def _purge_uuid_bindings_for_job(job_id):
+    """Drop bindings whose job_id matches. Called on job-end / job-cancel
+    so resubmitted jobs don't inherit stale uuids."""
+    if not job_id:
+        return
+    with _PRIMARY_MEDIA_LOCK:
+        stale = [k for k, v in _PRIMARY_MEDIA_BINDINGS.items()
+                 if v.get('job_id') == job_id]
+        for k in stale:
+            _PRIMARY_MEDIA_BINDINGS.pop(k, None)
+    if stale:
+        print(f"[v700] purged {len(stale)} uuid binding(s) for job {str(job_id)[:8]}", flush=True)
 
 
 # ============================================================
@@ -357,18 +628,30 @@ def human_delay(min_sec=0.5, max_sec=1.5):
     return delay
 
 
-def _stash_profile_on_page(page, profile_dir):
+def _stash_profile_on_page(page, profile_dir, account_label=None):
     """Attach profile_dir to a Playwright page as _user_data_dir so
     _find_chrome_hwnd can identify the worker's Chrome by owning PID.
 
     v486: called at every page creation site (initial launch +
     relaunches) to ensure the HWND lookup stays correct across
     browser restarts.
+
+    v700: also install the submit-response listener on the same page
+    so primaryMediaId bindings are captured at Generate-click time. The
+    label defaults to the basename of profile_dir (e.g. "chrome-session"
+    or "chrome-session-2") when not explicitly provided so parallel-
+    worker buffers stay separate.
     """
     if page is None:
         return
     try:
         page._user_data_dir = profile_dir
+    except Exception:
+        pass
+    try:
+        if not account_label:
+            account_label = os.path.basename(profile_dir.rstrip('\\/')) if profile_dir else ""
+        _install_submit_response_listener(page, account_label=account_label)
     except Exception:
         pass
 
@@ -3367,6 +3650,18 @@ class HumanPacer:
                                             click_generate_button(page, f"Between-clip retry clip {_ci}")
                                             # Reset submit time so the 70s wait starts fresh
                                             clip_submit_times[_ci] = datetime.now()
+                                            # v700 — re-bind primaryMediaId after resubmit
+                                            try:
+                                                _v700_clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
+                                                _v700_clip_id = _v700_clip_obj.get('id') if _v700_clip_obj else None
+                                                _bind_pending_submits_for_page(
+                                                    page, job_id, _ci,
+                                                    clip_id=_v700_clip_id,
+                                                    drain_timeout=8.0,
+                                                    expected_min=1,
+                                                )
+                                            except Exception as _v700_err:
+                                                print(f"[v700] bind failed for between-clip retry {_ci}: {_v700_err}", flush=True)
                                             print(f"[{self.account_name}] ✓ Between-clip: clip {_ci+1} resubmitted via Reuse Prompt", flush=True)
                                         else:
                                             print(f"[{self.account_name}] ⚠ Between-clip: could not find Reuse Prompt for clip {_ci}", flush=True)
@@ -3390,6 +3685,18 @@ class HumanPacer:
                                 clip_submit_times[_retry_ci] = datetime.now()
                                 if _retry_ci in _dl_checked:
                                     _dl_checked.discard(_retry_ci)
+                                # v700 — re-bind primaryMediaId after policy retry
+                                try:
+                                    _v700_clip_obj = next((c for c in clips if c.get('clip_index') == _retry_ci), None)
+                                    _v700_clip_id = _v700_clip_obj.get('id') if _v700_clip_obj else None
+                                    _bind_pending_submits_for_page(
+                                        page, job_id, _retry_ci,
+                                        clip_id=_v700_clip_id,
+                                        drain_timeout=6.0,
+                                        expected_min=1,
+                                    )
+                                except Exception as _v700_err:
+                                    print(f"[v700] bind failed for policy retry {_retry_ci}: {_v700_err}", flush=True)
                                 print(f"[{self.account_name}] [PolicyScan] Reset timer for clip {_retry_ci+1} after policy retry", flush=True)
                     if _persistent:
                         for _pi in _persistent:
@@ -12549,7 +12856,24 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         # Record submission time BEFORE failcheck (needed for download timing)
         clip_submit_times[clip_index] = datetime.now()
         print(f"[{account_name}] Clip {clip_index+1} submitted at {clip_submit_times[clip_index].strftime('%H:%M:%S')}", flush=True)
-        
+
+        # v700 — bind primaryMediaId(s) from the just-captured submit response(s)
+        # so download attribution can use uuid lookup instead of tile-data-index
+        # ordering. expected_min counts variants (Flow fires one POST per variant).
+        try:
+            _v700_expected = max(1, int(job.get('flow_variants_count', 2) or 2))
+        except Exception:
+            _v700_expected = 2
+        try:
+            _bind_pending_submits_for_page(
+                page, job_id, clip_index,
+                clip_id=clip.get('id'),
+                drain_timeout=10.0,
+                expected_min=_v700_expected,
+            )
+        except Exception as _v700_err:
+            print(f"[v700] bind failed for clip {clip_index}: {_v700_err}", flush=True)
+
         # Wait 3 seconds then check for immediate failure
         # IMPORTANT: We do this BEFORE queuing for download on first clip
         time.sleep(FAILURE_CHECK_DELAY)
@@ -14158,11 +14482,26 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # Record submission time BEFORE failcheck (needed for download timing)
         clip_submit_times[clip_index] = datetime.now()
         print(f"[Flow] Clip {clip_index+1} submitted at {clip_submit_times[clip_index].strftime('%H:%M:%S')}", flush=True)
-        
+
+        # v700 — bind primaryMediaId(s) from the just-captured submit response(s).
+        try:
+            _v700_expected = max(1, int(job.get('flow_variants_count', 2) or 2))
+        except Exception:
+            _v700_expected = 2
+        try:
+            _bind_pending_submits_for_page(
+                page, job_id, clip_index,
+                clip_id=clip.get('id'),
+                drain_timeout=10.0,
+                expected_min=_v700_expected,
+            )
+        except Exception as _v700_err:
+            print(f"[v700] bind failed for clip {clip_index}: {_v700_err}", flush=True)
+
         # Wait 3 seconds then check for immediate failure
         time.sleep(FAILURE_CHECK_DELAY)
         clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1)
-        
+
         # Ghost submission detection: verify data-index=0 actually contains OUR clip.
         # After FailCheck's 10s wait, if the newest tile doesn't match our dialogue,
         # the Generate click silently failed — the old tile is still at position 0.
@@ -14639,6 +14978,21 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 clip_project_map[clip_index] = retry_project_url
                 # Update submission time for the retry
                 clip_submit_times[clip_index] = datetime.now()
+                # v700 — bind primaryMediaId(s) from the retry-project submit
+                try:
+                    _v700_expected = max(1, int(job.get('flow_variants_count', 2) or 2))
+                except Exception:
+                    _v700_expected = 2
+                try:
+                    _v700_clip_id = (clip_data.get('id') or clip_data.get('clip_id')) if isinstance(clip_data, dict) else None
+                    _bind_pending_submits_for_page(
+                        page, job_id, clip_index,
+                        clip_id=_v700_clip_id,
+                        drain_timeout=10.0,
+                        expected_min=_v700_expected,
+                    )
+                except Exception as _v700_err:
+                    print(f"[v700] bind failed for retry clip {clip_index}: {_v700_err}", flush=True)
                 print(f"[Flow] ✓ Clip {clip_index+1} retry submitted in: {retry_project_url}", flush=True)
                 
                 # Navigate back to main project for next retry
@@ -14817,6 +15171,18 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                 clip_submit_times[_retry_ci] = datetime.now()
                                 if _retry_ci in http_enqueued_clips:
                                     http_enqueued_clips.discard(_retry_ci)
+                                # v700 — re-bind primaryMediaId after policy retry
+                                try:
+                                    _v700_clip_obj = next((c for c in clips if c.get('clip_index') == _retry_ci), None)
+                                    _v700_clip_id = _v700_clip_obj.get('id') if _v700_clip_obj else None
+                                    _bind_pending_submits_for_page(
+                                        page, job_id, _retry_ci,
+                                        clip_id=_v700_clip_id,
+                                        drain_timeout=6.0,
+                                        expected_min=1,
+                                    )
+                                except Exception as _v700_err:
+                                    print(f"[v700] bind failed for policy retry {_retry_ci}: {_v700_err}", flush=True)
                                 print(f"[Flow] [PolicyScan] Reset timer for clip {_retry_ci+1} after policy retry", flush=True)
                     if _persistent:
                         for _pi in _persistent:
@@ -15305,11 +15671,11 @@ class AccountWorker(threading.Thread):
             # v486: stash profile path on page so _find_chrome_hwnd can
             # identify THIS worker's Chrome by owning process ID (instead
             # of the fragile title-match that hit the user's personal
-            # Chrome).
-            try:
-                self.page._user_data_dir = self.session_folder
-            except Exception:
-                pass
+            # Chrome). v700: also install submit-response listener.
+            _stash_profile_on_page(
+                self.page, self.session_folder,
+                account_label=getattr(self, 'account_name', None) or getattr(self, 'name', None),
+            )
 
             print(f"[{self.name}] ✓ Browser started", flush=True)
 
@@ -15359,11 +15725,11 @@ class AccountWorker(threading.Thread):
                 time.sleep(2)
                 self.browser = p.chromium.launch_persistent_context(**acct_launch_kwargs)
                 self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
-                # v486: stash profile path on page for _find_chrome_hwnd
-                try:
-                    self.page._user_data_dir = self.session_folder
-                except Exception:
-                    pass
+                # v486 + v700: stash profile + install submit-response listener
+                _stash_profile_on_page(
+                    self.page, self.session_folder,
+                    account_label=getattr(self, 'account_name', None) or getattr(self, 'name', None),
+                )
                 print(f"[{self.name}] ✓ Browser relaunched — proceeding to Flow without warmup", flush=True)
             
             # === Match single-account main() startup exactly ===
@@ -15501,7 +15867,7 @@ class AccountWorker(threading.Thread):
                     self.browser = p.firefox.launch_persistent_context(**relaunch_kwargs)
                 
                 self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
-                _stash_profile_on_page(self.page, self.session_folder)  # v486
+                _stash_profile_on_page(self.page, self.session_folder, account_label=getattr(self, 'account_name', None))  # v486 + v700
                 
                 # Warm up Chrome — sync variations seed
                 chrome_warmup(self.page)
@@ -15787,7 +16153,7 @@ class AccountWorker(threading.Thread):
                                 self.browser = self._playwright.chromium.launch_persistent_context(**acct_launch_kwargs)
 
                             self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
-                            _stash_profile_on_page(self.page, self.session_folder)  # v486
+                            _stash_profile_on_page(self.page, self.session_folder, account_label=getattr(self, 'account_name', None))  # v486 + v700
                             chrome_warmup(self.page)
                             self.page.goto(FLOW_HOME_URL)
                             human_delay(1, 2)
@@ -15836,7 +16202,7 @@ class AccountWorker(threading.Thread):
                                         user_data_dir=self.session_folder, headless=False,
                                         viewport={"width": 1280, "height": 720}, args=self._launch_args)
                                 self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
-                                _stash_profile_on_page(self.page, self.session_folder)  # v486
+                                _stash_profile_on_page(self.page, self.session_folder, account_label=getattr(self, 'account_name', None))  # v486 + v700
                                 chrome_warmup(self.page)
                                 self.page.goto(FLOW_HOME_URL)
                                 human_delay(1, 2)
@@ -15870,7 +16236,7 @@ class AccountWorker(threading.Thread):
                                             user_data_dir=self.session_folder, headless=False,
                                             viewport={"width": 1280, "height": 720}, args=self._launch_args)
                                     self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
-                                    _stash_profile_on_page(self.page, self.session_folder)  # v486
+                                    _stash_profile_on_page(self.page, self.session_folder, account_label=getattr(self, 'account_name', None))  # v486 + v700
                                     self.page.goto(FLOW_HOME_URL)
                                     ensure_logged_into_flow(self.page, self.name)
                                     account_health.reset_failures(self.name)
@@ -16265,7 +16631,7 @@ class AccountWorker(threading.Thread):
             self.browser = p.firefox.launch_persistent_context(**relaunch_kwargs)
 
         self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
-        _stash_profile_on_page(self.page, self.session_folder)  # v486
+        _stash_profile_on_page(self.page, self.session_folder, account_label=getattr(self, 'account_name', None))  # v486 + v700
 
         # Warm up
         chrome_warmup(self.page)
