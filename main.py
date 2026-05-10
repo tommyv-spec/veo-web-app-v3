@@ -3611,9 +3611,69 @@ async def replace_clip_image(
         clip.claimed_at = None
         db.commit()
 
+        # v701d — anchor cascade.
+        # If this clip is an audio_pair (its start_frame is the v698A
+        # voiceover anchor image, which is SHARED across every audio_pair
+        # in the job), the user's upload should propagate to ALL sibling
+        # audio_pairs using the same anchor. Otherwise the user would have
+        # to upload the same replacement N times — once per voiceover scene.
+        cascade_count = 0
+        try:
+            clip_role = (clip.clip_role or '').lower()
+            if clip_role == 'audio_pair' and clip.paired_clip_id:
+                # Resolve the anchor binding via this clip's visual_pair sibling.
+                # Phase 3a stores voiceover_anchor_image_node_id on the
+                # visual_pair, NOT the audio_pair. So we hop:
+                #   audio_pair → paired_clip_id → visual_pair → anchor_id
+                visual_sibling = db.query(Clip).filter(
+                    Clip.id == clip.paired_clip_id
+                ).first()
+                anchor_node_id = (
+                    visual_sibling.voiceover_anchor_image_node_id
+                    if visual_sibling else None
+                )
+                if anchor_node_id is not None:
+                    # Find every OTHER audio_pair in this job whose visual_pair
+                    # sibling references the same anchor. Skip the clip we
+                    # just patched.
+                    visual_with_same_anchor = db.query(Clip).filter(
+                        Clip.job_id == clip.job_id,
+                        Clip.clip_role == 'visual_pair',
+                        Clip.voiceover_anchor_image_node_id == anchor_node_id,
+                    ).all()
+                    sibling_audio_ids = [
+                        v.paired_clip_id for v in visual_with_same_anchor
+                        if v.paired_clip_id and v.paired_clip_id != clip.id
+                    ]
+                    if sibling_audio_ids:
+                        siblings = db.query(Clip).filter(
+                            Clip.id.in_(sibling_audio_ids)
+                        ).all()
+                        for sib in siblings:
+                            sib.start_frame = new_key
+                            sib.replacement_start_frame = (
+                                sib.replacement_start_frame or sib.start_frame
+                            )
+                            sib.error_code = None
+                            sib.error_message = None
+                            sib.status = ClipStatus.PENDING.value
+                            sib.approval_status = "pending_review"
+                            sib.claimed_by_worker = None
+                            sib.claimed_at = None
+                            cascade_count += 1
+                        db.commit()
+        except Exception as _cascade_err:
+            print(f"[v701d] anchor cascade skipped: {_cascade_err}", flush=True)
+            db.rollback()
+
+        cascade_msg = (
+            f" (cascaded to {cascade_count} sibling audio twin"
+            f"{'s' if cascade_count != 1 else ''})"
+            if cascade_count else ""
+        )
         add_job_log(
             db, clip.job_id,
-            f"Clip {clip.clip_index + 1}: user uploaded replacement image → re-queued",
+            f"Clip {clip.clip_index + 1}: user uploaded replacement image → re-queued{cascade_msg}",
             "INFO",
             "policy",
         )
@@ -3630,6 +3690,7 @@ async def replace_clip_image(
             "clip_id": clip_id,
             "new_start_frame": new_key,
             "previous_rejected_frame": previous_rejected,
+            "cascaded_audio_pair_count": cascade_count,  # v701d
         }
     except HTTPException:
         raise
