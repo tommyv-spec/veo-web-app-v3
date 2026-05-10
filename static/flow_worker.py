@@ -12209,10 +12209,21 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                         # replacement image" card instead of leaving the
                         # clip dead. Falls back to plain failed status if
                         # the endpoint is unavailable.
+                        # v701-fix — `clip` is the in-scope dict in
+                        # process_redo_clip (was incorrectly `clip_data`
+                        # which raised NameError on every persistent
+                        # failure).
                         print(f"[REDO] ❌ Clip {clip_index+1} failed persistently after retry — likely policy violation", flush=True)
+                        try:
+                            _v701_rejected_key = (
+                                (clip.get('start_frame') if isinstance(clip, dict) else None)
+                                or (clip.get('start_frame_key') if isinstance(clip, dict) else None)
+                            )
+                        except Exception:
+                            _v701_rejected_key = None
                         report_policy_violation(
                             clip_id,
-                            rejected_image_key=(clip_data.get('start_frame') or clip_data.get('start_frame_key') if isinstance(clip_data, dict) else None),
+                            rejected_image_key=_v701_rejected_key,
                         )
                         shutil.rmtree(temp_dir, ignore_errors=True)
                         return False
