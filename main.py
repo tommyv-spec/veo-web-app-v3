@@ -3513,6 +3513,10 @@ async def reject_clip(
 
 
 # ============ v701 — Image Policy Violation Replacement ============
+# NOTE: the worker-auth /policy-violation endpoint is defined further
+# below (after verify_local_worker_key is defined ~line 8553+) to avoid
+# a NameError at module load. This block holds the user-auth half plus
+# the request schema.
 
 class PolicyViolationRequest(BaseModel):
     """Worker → backend report when Flow rejects start_frame for content
@@ -3520,60 +3524,6 @@ class PolicyViolationRequest(BaseModel):
     show it back to the user inside the replace-image card."""
     rejected_image_key: Optional[str] = None
     detail: Optional[str] = None  # Worker-side description if any
-
-
-@app.post("/api/local-worker/clips/{clip_id}/policy-violation")
-async def local_worker_report_policy_violation(
-    clip_id: int,
-    request: PolicyViolationRequest,
-    authorized: bool = Depends(verify_local_worker_key),
-):
-    """v701 — Worker reports that Flow rejected the clip's start_frame on
-    content-policy grounds. Backend stamps error_code = CONTENT_POLICY_VIOLATION
-    and stashes the rejected R2 key so the frontend can render the
-    replace-image card. Status stays 'failed' so the existing review
-    banner counts it correctly; the UI branches on error_code."""
-    from models import get_db
-    db = next(get_db())
-    try:
-        clip = db.query(Clip).filter(Clip.id == clip_id).first()
-        if not clip:
-            raise HTTPException(status_code=404, detail="Clip not found")
-
-        # Stash the rejected frame for audit + UI render. Prefer the worker-
-        # supplied key; fall back to whatever start_frame held at violation
-        # time (which IS the offending frame by definition).
-        rejected_key = (
-            request.rejected_image_key.strip()
-            if request.rejected_image_key
-            else (clip.start_frame or "").strip()
-        )
-        if rejected_key:
-            clip.replacement_start_frame = rejected_key
-
-        clip.status = ClipStatus.FAILED.value
-        clip.error_code = "CONTENT_POLICY_VIOLATION"
-        clip.error_message = (
-            request.detail
-            or "⚠️ Flow rejected this image's content. Upload a replacement to retry."
-        )
-        db.commit()
-
-        add_job_log(
-            db, clip.job_id,
-            f"Clip {clip.clip_index + 1}: image policy violation — awaiting user replacement",
-            "WARNING",
-            "policy",
-        )
-        db.commit()
-
-        return {
-            "ok": True,
-            "clip_id": clip_id,
-            "rejected_image_key": rejected_key or None,
-        }
-    finally:
-        db.close()
 
 
 @app.post("/api/clips/{clip_id}/replace-image")
@@ -8565,6 +8515,65 @@ def verify_local_worker_key(authorization: str = Header(None)):
 async def local_worker_health():
     """Health check for local worker"""
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
+
+# v701 — policy-violation worker endpoint. Defined here (rather than next
+# to the user-auth /replace-image endpoint at ~line 3525) because
+# `verify_local_worker_key` is declared above. Putting the Depends call
+# above the def-site causes NameError at module load (Python evaluates
+# default arg values at function-definition time).
+@app.post("/api/local-worker/clips/{clip_id}/policy-violation")
+async def local_worker_report_policy_violation(
+    clip_id: int,
+    request: PolicyViolationRequest,
+    authorized: bool = Depends(verify_local_worker_key),
+):
+    """v701 — Worker reports that Flow rejected the clip's start_frame on
+    content-policy grounds. Backend stamps error_code = CONTENT_POLICY_VIOLATION
+    and stashes the rejected R2 key so the frontend can render the
+    replace-image card. Status stays 'failed' so the existing review
+    banner counts it correctly; the UI branches on error_code."""
+    from models import get_db
+    db = next(get_db())
+    try:
+        clip = db.query(Clip).filter(Clip.id == clip_id).first()
+        if not clip:
+            raise HTTPException(status_code=404, detail="Clip not found")
+
+        # Stash the rejected frame for audit + UI render. Prefer the worker-
+        # supplied key; fall back to whatever start_frame held at violation
+        # time (which IS the offending frame by definition).
+        rejected_key = (
+            request.rejected_image_key.strip()
+            if request.rejected_image_key
+            else (clip.start_frame or "").strip()
+        )
+        if rejected_key:
+            clip.replacement_start_frame = rejected_key
+
+        clip.status = ClipStatus.FAILED.value
+        clip.error_code = "CONTENT_POLICY_VIOLATION"
+        clip.error_message = (
+            request.detail
+            or "⚠️ Flow rejected this image's content. Upload a replacement to retry."
+        )
+        db.commit()
+
+        add_job_log(
+            db, clip.job_id,
+            f"Clip {clip.clip_index + 1}: image policy violation — awaiting user replacement",
+            "WARNING",
+            "policy",
+        )
+        db.commit()
+
+        return {
+            "ok": True,
+            "clip_id": clip_id,
+            "rejected_image_key": rejected_key or None,
+        }
+    finally:
+        db.close()
 
 
 @app.get("/api/local-worker/jobs/pending")
