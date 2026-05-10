@@ -311,6 +311,13 @@ class Clip(Base):
     # Frame info
     start_frame = Column(String(255), nullable=True)
     end_frame = Column(String(255), nullable=True)
+    # v701 — when Flow rejects start_frame for content-policy reasons,
+    # the worker stamps `error_code='CONTENT_POLICY_VIOLATION'` and the
+    # original rejected frame R2 key gets stashed here so the frontend
+    # can show it back to the user. After the user uploads a replacement,
+    # `start_frame` is rewritten to the new key and `replacement_start_frame`
+    # carries the audit trail of the previous rejected frame(s).
+    replacement_start_frame = Column(String(512), nullable=True)
     
     # === Storyboard/Scene Mode Fields ===
     clip_mode = Column(String(20), default="blend")  # 'blend' | 'continue' | 'fresh'

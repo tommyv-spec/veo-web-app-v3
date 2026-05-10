@@ -204,6 +204,14 @@ def run_image_platform_migrations():
         # building dialogue_json.
         ("image_scene_assignments", "voiceover_anchor_image_node_id",
          "ALTER TABLE image_scene_assignments ADD COLUMN voiceover_anchor_image_node_id INTEGER"),
+        # v701: when Flow rejects start_frame for content-policy reasons,
+        # the worker stamps error_code=CONTENT_POLICY_VIOLATION and the
+        # rejected frame's R2 key gets stashed here so the frontend can
+        # render a replace-image card. Once the user uploads a replacement,
+        # `start_frame` is overwritten and `replacement_start_frame` keeps
+        # the audit trail of the previous rejected frame.
+        ("clips", "replacement_start_frame",
+         "ALTER TABLE clips ADD COLUMN replacement_start_frame VARCHAR(512)"),
     ]
     postgres_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -322,6 +330,9 @@ def run_image_platform_migrations():
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS role VARCHAR(40)"),
         ("image_scene_assignments", "voiceover_anchor_image_node_id",
          "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS voiceover_anchor_image_node_id INTEGER"),
+        # v701: see SQLite migration above for the rationale.
+        ("clips", "replacement_start_frame",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS replacement_start_frame VARCHAR(512)"),
     ]
 
     # v479: widen ImageJobBatch string columns to TEXT. The previous

@@ -351,6 +351,10 @@ class ClipResponse(BaseModel):
     paired_clip_id: Optional[int] = None
     voiceover_anchor_image_node_id: Optional[int] = None
     voiceover_line: Optional[str] = None
+    # v701 — when error_code == 'CONTENT_POLICY_VIOLATION', the previously
+    # rejected start_frame R2 key is exposed here so the frontend can
+    # render the offending image inside the "upload replacement" card.
+    replacement_start_frame: Optional[str] = None
 
 
 class RedoRequest(BaseModel):
@@ -3405,6 +3409,7 @@ async def get_job_clips(
             paired_clip_id=c.paired_clip_id,
             voiceover_anchor_image_node_id=c.voiceover_anchor_image_node_id,
             voiceover_line=c.voiceover_line,
+            replacement_start_frame=c.replacement_start_frame,  # v701
         )
         for c in clips
     ]
@@ -3505,6 +3510,182 @@ async def reject_clip(
         message="Clip has been rejected. You can redo it or leave as is.",
         attempts_remaining=3 - clip.generation_attempt
     )
+
+
+# ============ v701 — Image Policy Violation Replacement ============
+
+class PolicyViolationRequest(BaseModel):
+    """Worker → backend report when Flow rejects start_frame for content
+    policy. Carries the rejected frame's R2 key so the frontend can
+    show it back to the user inside the replace-image card."""
+    rejected_image_key: Optional[str] = None
+    detail: Optional[str] = None  # Worker-side description if any
+
+
+@app.post("/api/local-worker/clips/{clip_id}/policy-violation")
+async def local_worker_report_policy_violation(
+    clip_id: int,
+    request: PolicyViolationRequest,
+    authorized: bool = Depends(verify_local_worker_key),
+):
+    """v701 — Worker reports that Flow rejected the clip's start_frame on
+    content-policy grounds. Backend stamps error_code = CONTENT_POLICY_VIOLATION
+    and stashes the rejected R2 key so the frontend can render the
+    replace-image card. Status stays 'failed' so the existing review
+    banner counts it correctly; the UI branches on error_code."""
+    from models import get_db
+    db = next(get_db())
+    try:
+        clip = db.query(Clip).filter(Clip.id == clip_id).first()
+        if not clip:
+            raise HTTPException(status_code=404, detail="Clip not found")
+
+        # Stash the rejected frame for audit + UI render. Prefer the worker-
+        # supplied key; fall back to whatever start_frame held at violation
+        # time (which IS the offending frame by definition).
+        rejected_key = (
+            request.rejected_image_key.strip()
+            if request.rejected_image_key
+            else (clip.start_frame or "").strip()
+        )
+        if rejected_key:
+            clip.replacement_start_frame = rejected_key
+
+        clip.status = ClipStatus.FAILED.value
+        clip.error_code = "CONTENT_POLICY_VIOLATION"
+        clip.error_message = (
+            request.detail
+            or "⚠️ Flow rejected this image's content. Upload a replacement to retry."
+        )
+        db.commit()
+
+        add_job_log(
+            db, clip.job_id,
+            f"Clip {clip.clip_index + 1}: image policy violation — awaiting user replacement",
+            "WARNING",
+            "policy",
+        )
+        db.commit()
+
+        return {
+            "ok": True,
+            "clip_id": clip_id,
+            "rejected_image_key": rejected_key or None,
+        }
+    finally:
+        db.close()
+
+
+@app.post("/api/clips/{clip_id}/replace-image")
+async def replace_clip_image(
+    clip_id: int,
+    file: UploadFile = File(...),
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v701 — User uploads a replacement start_frame after Flow rejected
+    the original on content policy. Uploads to R2 under the job's frames
+    prefix, swaps Clip.start_frame to the new key, clears the policy-
+    violation error, and resets clip status to PENDING so the worker
+    redo path picks it up on the next poll.
+
+    For audio_pair clips with a shared anchor: this endpoint replaces
+    the start_frame on THE CALLED clip only. Cascading to all sibling
+    audio_pairs that share the anchor is a Phase-2 enhancement; for now
+    user re-uploads per affected clip (Phase 3a logic still binds them
+    via paired_clip_id, so a future cascade can iterate that link).
+    """
+    from backends.storage import is_storage_configured, get_storage
+
+    clip = get_user_clip(db, clip_id, current_user)
+
+    if clip.error_code != "CONTENT_POLICY_VIOLATION":
+        raise HTTPException(
+            status_code=400,
+            detail="This clip is not awaiting an image replacement.",
+        )
+
+    if not is_storage_configured():
+        raise HTTPException(status_code=503, detail="Storage not configured")
+
+    try:
+        storage = get_storage()
+
+        # Validate + read upload
+        filename = (file.filename or "").lower()
+        if not filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
+            raise HTTPException(
+                status_code=400,
+                detail="Image must be png / jpg / jpeg / webp.",
+            )
+        contents = await file.read()
+        if len(contents) > 25 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Image too large (>25MB).")
+        if len(contents) < 1024:
+            raise HTTPException(status_code=400, detail="Image too small / empty.")
+
+        # Stash to local temp for storage.upload_job_frame.
+        import tempfile
+        ext = ".png"
+        for _e in (".png", ".jpg", ".jpeg", ".webp"):
+            if filename.endswith(_e):
+                ext = _e
+                break
+        tmpfd, tmppath = tempfile.mkstemp(suffix=ext)
+        try:
+            os.write(tmpfd, contents)
+        finally:
+            os.close(tmpfd)
+
+        # Build a new R2 key under the job's frames prefix. Timestamped to
+        # keep audit history if the user uploads multiple replacements.
+        from datetime import datetime as _dt
+        ts = _dt.utcnow().strftime("%Y%m%dT%H%M%S")
+        new_key_basename = f"replacement_clip{clip.id}_{ts}{ext}"
+        await asyncio.to_thread(
+            storage.upload_job_frame, clip.job_id, new_key_basename, tmppath
+        )
+        new_key = f"jobs/{clip.job_id}/frames/{new_key_basename}"
+
+        # Audit: keep PREVIOUS rejected key in error_message tail; bump
+        # start_frame to the fresh key so the worker's redo flow uses it.
+        previous_rejected = clip.replacement_start_frame
+        clip.start_frame = new_key
+        clip.replacement_start_frame = previous_rejected  # keep audit
+        clip.error_code = None
+        clip.error_message = None
+        clip.status = ClipStatus.PENDING.value
+        clip.approval_status = "pending_review"
+        # Reset claim so worker picks it up.
+        clip.claimed_by_worker = None
+        clip.claimed_at = None
+        db.commit()
+
+        add_job_log(
+            db, clip.job_id,
+            f"Clip {clip.clip_index + 1}: user uploaded replacement image → re-queued",
+            "INFO",
+            "policy",
+        )
+        db.commit()
+
+        # Cleanup tmp
+        try:
+            os.unlink(tmppath)
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "clip_id": clip_id,
+            "new_start_frame": new_key,
+            "previous_rejected_frame": previous_rejected,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Replace failed: {e}")
 
 
 @app.delete("/api/clips/{clip_id}")

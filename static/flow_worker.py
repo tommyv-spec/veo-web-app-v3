@@ -3735,7 +3735,14 @@ class HumanPacer:
                                 if _clip_obj:
                                     clip_id = _clip_obj.get('id')
                                     if clip_id:
-                                        update_clip_status(clip_id, 'failed', error_message="⚠️ Image flagged by Flow content policy — try a different image")
+                                        # v701 — report via dedicated endpoint so the frontend can
+                                        # render an "upload replacement image" card. Helper
+                                        # falls back to plain update_clip_status('failed') if
+                                        # the endpoint is unavailable.
+                                        report_policy_violation(
+                                            clip_id,
+                                            rejected_image_key=(_clip_obj.get('start_frame') or _clip_obj.get('start_frame_key')),
+                                        )
                                         print(f"[{self.account_name}] [PolicyScan] ❌ Clip {_fail_ci+1} permanently failed (policy violation)", flush=True)
                 except Exception:
                     pass
@@ -4697,6 +4704,51 @@ def update_clip_status(clip_id, status, output_url=None, error_message=None, ret
             print(f"[API] ⚠ update_clip_status failed (attempt {attempt+1}/{retries}), retrying in {wait}s...", flush=True)
             time.sleep(wait)
     print(f"[API] ❌ update_clip_status({status}) failed after {retries} attempts for clip {clip_id}", flush=True)
+    return None
+
+
+def report_policy_violation(clip_id, rejected_image_key=None, detail=None):
+    """v701 — POST to /api/local-worker/clips/{id}/policy-violation when
+    Flow's PolicyScan persistently flags a tile (image content rejected,
+    no Retry button). Backend stamps error_code = CONTENT_POLICY_VIOLATION
+    on the Clip and stashes the rejected R2 key so the frontend renders
+    the upload-replacement card. Returns the API response or None on
+    error. Falls back to plain update_clip_status('failed') if the new
+    endpoint is unavailable (older deploy / 404)."""
+    payload = {
+        "rejected_image_key": rejected_image_key,
+        "detail": detail or "⚠️ Flow rejected this image's content. Upload a replacement to retry.",
+    }
+    try:
+        result, code = api_request_ex(
+            "POST",
+            f"/local-worker/clips/{clip_id}/policy-violation",
+            payload,
+        )
+    except Exception as e:
+        print(f"[v701] policy-violation report failed for clip {clip_id}: {e}", flush=True)
+        result, code = None, 0
+
+    if result is not None:
+        print(
+            f"[v701] reported content-policy violation for clip {clip_id}; "
+            f"awaiting user image replacement",
+            flush=True,
+        )
+        return result
+    # Fallback so the clip doesn't dangle in 'generating' if the endpoint
+    # is missing on the deployed server (e.g. mid-rollout).
+    print(
+        f"[v701] policy endpoint unavailable (code={code}); falling back to "
+        f"legacy update_clip_status('failed') for clip {clip_id}",
+        flush=True,
+    )
+    update_clip_status(
+        clip_id, 'failed',
+        error_message=(
+            "⚠️ Image flagged by Flow content policy — try a different image"
+        ),
+    )
     return None
 
 
@@ -12098,9 +12150,17 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                         except Exception as _re:
                             print(f"[REDO] ⚠ Retry failed: {_re}", flush=True)
                     else:
-                        # Already retried once and still failed — this is a persistent failure (likely policy)
+                        # Already retried once and still failed — this is a persistent failure (likely policy).
+                        # v701 — report via the dedicated policy-violation
+                        # endpoint so the frontend can render an "upload
+                        # replacement image" card instead of leaving the
+                        # clip dead. Falls back to plain failed status if
+                        # the endpoint is unavailable.
                         print(f"[REDO] ❌ Clip {clip_index+1} failed persistently after retry — likely policy violation", flush=True)
-                        update_clip_status(clip_id, 'failed', error_message="⚠️ Content flagged by Flow policy — try different images or dialogue")
+                        report_policy_violation(
+                            clip_id,
+                            rejected_image_key=(clip_data.get('start_frame') or clip_data.get('start_frame_key') if isinstance(clip_data, dict) else None),
+                        )
                         shutil.rmtree(temp_dir, ignore_errors=True)
                         return False
                 
@@ -15448,7 +15508,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                 if _clip_obj:
                                     clip_id = _clip_obj.get('id')
                                     if clip_id:
-                                        update_clip_status(clip_id, 'failed', error_message="⚠️ Image flagged by Flow content policy — try a different image")
+                                        # v701 — report via dedicated endpoint so frontend
+                                        # renders the upload-replacement card.
+                                        report_policy_violation(
+                                            clip_id,
+                                            rejected_image_key=(_clip_obj.get('start_frame') or _clip_obj.get('start_frame_key')),
+                                        )
                                         permanently_failed_clips.add(_fail_ci)
                                         _pending_left.discard(_fail_ci)
                                         print(f"[Flow] [PolicyScan] ❌ Clip {_fail_ci+1} permanently failed — image policy violation", flush=True)

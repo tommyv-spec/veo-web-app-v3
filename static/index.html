@@ -7718,6 +7718,12 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
         
         function renderClip(c,jid){
+            // v701 — image-policy-violation card. Surfaces the rejected
+            // frame back to the user with an "upload replacement" button
+            // so a flagged image doesn't dead-end the clip.
+            if ((c.error_code || '') === 'CONTENT_POLICY_VIOLATION') {
+                return renderClipPolicyViolation(c, jid);
+            }
             // v700c — paired card for v698A visual_pair clips. When the
             // visual_pair has an attached audio twin (._audioTwin populated
             // by loadClips via paired_clip_id lookup) we render a dual-
@@ -8082,6 +8088,89 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 if (selectedJobId) loadClips(selectedJobId);
             } catch(e) {
                 showToast('redo pair failed: ' + e.message, '#ef4444');
+            }
+        }
+
+        // v701 — render an image-policy-violation card. Triggered by
+        // renderClip() at the top when c.error_code === 'CONTENT_POLICY_VIOLATION'.
+        // Shows the rejected frame (red border) + dialogue line + an
+        // "upload replacement" button that wires to replaceClipImage().
+        // The card spans 2 grid columns when the clip is part of a pair;
+        // otherwise stays in its single-cell slot.
+        function renderClipPolicyViolation(c, jid) {
+            const clipId = c.id;
+            const isPaired = (c.clip_role || '').toLowerCase() === 'visual_pair';
+            // Try to surface a preview of the rejected frame. Clip.start_frame
+            // is an R2 key like jobs/<jid>/frames/image_NN.png — extract the
+            // basename and serve via /api/jobs/{job_id}/images/{filename}.
+            let rejectedSrc = '';
+            const _key = c.replacement_start_frame || c.start_frame || '';
+            if (_key) {
+                const _basename = _key.split('/').pop();
+                if (_basename) {
+                    rejectedSrc = `${API}/jobs/${jid}/images/${encodeURIComponent(_basename)}`;
+                }
+            }
+            const rejectedPreview = rejectedSrc
+                ? `<img src="${rejectedSrc}" alt="rejected frame" style="max-width:100%;max-height:240px;display:block;margin:0 auto;border-radius:6px;">`
+                : `<div style="display:flex;align-items:center;justify-content:center;aspect-ratio:9/16;max-height:240px;background:rgba(239,68,68,0.1);border-radius:6px;color:#ef4444;">⚠ image</div>`;
+            const dialogueText = (c.voiceover_line || c.dialogue_text || '').trim();
+            const cascadeNotice = isPaired
+                ? `<div style="font-size:11px;color:#fbbf24;margin-top:6px;">⚠ this clip is part of a paired voice clip — uploading a replacement only affects the b-roll side</div>`
+                : '';
+            return `<div class="clip-card clip-rejected" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"
+                        style="${isPaired ? 'grid-column: span 2;' : ''}border: 2px solid rgba(239,68,68,0.6);">
+                <div class="clip-content">
+                    <div class="clip-header">
+                        <span class="clip-idx">#${c.clip_index+1}</span>
+                        <span class="badge badge-failed" style="background:rgba(239,68,68,0.18);color:#ef4444;">⚠ image rejected</span>
+                        ${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}
+                    </div>
+                    <div style="margin-top:8px;padding:8px;background:rgba(0,0,0,0.25);border-radius:8px;">
+                        <div style="font-size:10px;color:#ef4444;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">🚫 rejected by flow content policy</div>
+                        ${rejectedPreview}
+                    </div>
+                    ${dialogueText ? `<div class="clip-text" style="margin-top:8px;font-style:italic;color:#94a3b8;font-size:12px;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:6px;">"${dialogueText}"</div>` : ''}
+                    <div style="margin-top:10px;font-size:11px;color:var(--text-muted);line-height:1.4;">
+                        Flow rejected this image's content. Upload a replacement
+                        to retry — the worker will re-submit automatically.
+                    </div>
+                    ${cascadeNotice}
+                    <div style="display:flex;gap:8px;justify-content:center;margin-top:10px;">
+                        <input type="file" id="replaceImageInput_${clipId}" accept="image/png,image/jpeg,image/webp" style="display:none;" onchange="replaceClipImage(${clipId}, '${jid}', this.files[0])">
+                        <button class="btn btn-primary btn-sm" style="padding:6px 14px;font-size:12px;" onclick="document.getElementById('replaceImageInput_${clipId}').click()" title="upload a new image">📁 upload replacement</button>
+                        <button class="btn btn-secondary btn-sm" style="padding:6px 10px;font-size:12px;color:var(--text-muted);" onclick="confirmDelete(${clipId},${c.clip_index})" title="remove this clip from the lineup">🗑</button>
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        // v701 — POST the user-uploaded replacement image to the backend.
+        // On success: clip status flips back to 'pending' server-side; the
+        // poll picks up the new state on the next tick and the standard
+        // renderClip path takes over.
+        async function replaceClipImage(clipId, jobId, file) {
+            if (!file) return;
+            try {
+                markClipLocallyUpdated(clipId);
+                showToast('uploading replacement image...', '#3b82f6');
+                const fd = new FormData();
+                fd.append('file', file);
+                const r = await fetch(`${API}/clips/${clipId}/replace-image`, {
+                    method: 'POST',
+                    body: fd,
+                });
+                if (!r.ok) {
+                    let _msg = `HTTP ${r.status}`;
+                    try { const j = await r.json(); _msg = j.detail || _msg; } catch(_){}
+                    throw new Error(_msg);
+                }
+                const data = await r.json();
+                showToast(`replacement uploaded — clip re-queued`, '#10b981');
+                if (selectedJobId) loadClips(selectedJobId);
+            } catch(e) {
+                console.error('[v701] replace-image failed:', e);
+                showToast('upload failed: ' + e.message, '#ef4444');
             }
         }
 
