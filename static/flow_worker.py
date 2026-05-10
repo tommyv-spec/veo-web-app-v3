@@ -12962,10 +12962,22 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         # Ghost submission detection: verify data-index=0 actually contains OUR clip.
         # After FailCheck's 10s wait, if the newest tile doesn't match our dialogue,
         # the Generate click silently failed — the old tile is still at position 0.
+        # v700f — for v698A visual_pair clips the SUBMITTED prompt is the silent
+        # b-roll prompt (Phase 3c override), but clip.dialogue_text still holds
+        # the voiceover line for accounting. The tile's innerText therefore
+        # NEVER contains the dialogue_text → ghost match always fails →
+        # every visual_pair gets flow_redo_queued in a tight loop, blocking
+        # all downloads. Switch the search key to whatever was actually
+        # submitted: prefer prompt_text head, fall back to dialogue_text.
         _is_ghost = False
         if not clip_failed:
             try:
-                _dialogue_key = (clip.get('dialogue_text') or '')[:30]
+                _ghost_search_key = ""
+                _prompt_text_v700f = (clip.get('prompt_text') or '').strip()
+                if _prompt_text_v700f:
+                    _ghost_search_key = _prompt_text_v700f[:30]
+                else:
+                    _ghost_search_key = (clip.get('dialogue_text') or '')[:30]
                 _ghost_result = page.evaluate(f"""() => {{
                     const c = document.querySelector("div[data-index='0']");
                     if (!c) return {{found: false, tiles: 0}};
@@ -12974,9 +12986,9 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                         const id = t.getAttribute("data-tile-id"); if (id) seen.add(id);
                     }});
                     const text = c.innerText || c.textContent || '';
-                    const dialogue = {repr(_dialogue_key)};
+                    const needle = {repr(_ghost_search_key)};
                     return {{
-                        found: dialogue.length > 5 ? text.includes(dialogue) : true,
+                        found: needle.length > 5 ? text.includes(needle) : true,
                         tiles: seen.size
                     }};
                 }}""")
@@ -12985,10 +12997,10 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                     print(f"[{account_name}] ⚠ GHOST: clip {clip_index+1} — no tiles at data-index=0", flush=True)
                 elif _ghost_result and not _ghost_result.get('found', True):
                     _is_ghost = True
-                    print(f"[{account_name}] ⚠ GHOST: clip {clip_index+1} — data-index=0 doesn't contain our dialogue (stale tile from previous clip)", flush=True)
+                    print(f"[{account_name}] ⚠ GHOST: clip {clip_index+1} — data-index=0 doesn't contain submitted-prompt head (stale tile from previous clip)", flush=True)
             except Exception as _ge:
                 print(f"[{account_name}] ⚠ Ghost check error for clip {clip_index+1}: {_ge}", flush=True)
-        
+
         if _is_ghost:
             print(f"[{account_name}] Ghost clip {clip_index+1} — queuing for redo resubmission", flush=True)
             update_clip_status(clip['id'], 'flow_redo_queued', error_message="Ghost submission — Generate click had no effect")
@@ -14592,10 +14604,19 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # Ghost submission detection: verify data-index=0 actually contains OUR clip.
         # After FailCheck's 10s wait, if the newest tile doesn't match our dialogue,
         # the Generate click silently failed — the old tile is still at position 0.
+        # v700f — for v698A visual_pair clips the SUBMITTED prompt is the
+        # silent b-roll prompt (Phase 3c override), but clip.dialogue_text
+        # still holds the voiceover line for accounting. Search the tile's
+        # innerText for the SUBMITTED prompt's head, not the dialogue.
         _is_ghost = False
         if not clip_failed:
             try:
-                _dialogue_key = (clip.get('dialogue_text') or '')[:30]
+                _ghost_search_key = ""
+                _prompt_text_v700f = (clip.get('prompt_text') or '').strip()
+                if _prompt_text_v700f:
+                    _ghost_search_key = _prompt_text_v700f[:30]
+                else:
+                    _ghost_search_key = (clip.get('dialogue_text') or '')[:30]
                 _ghost_result = page.evaluate(f"""() => {{
                     const c = document.querySelector("div[data-index='0']");
                     if (!c) return {{found: false, tiles: 0}};
@@ -14604,9 +14625,9 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         const id = t.getAttribute("data-tile-id"); if (id) seen.add(id);
                     }});
                     const text = c.innerText || c.textContent || '';
-                    const dialogue = {repr(_dialogue_key)};
+                    const needle = {repr(_ghost_search_key)};
                     return {{
-                        found: dialogue.length > 5 ? text.includes(dialogue) : true,
+                        found: needle.length > 5 ? text.includes(needle) : true,
                         tiles: seen.size
                     }};
                 }}""")
@@ -14615,7 +14636,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     print(f"[Flow] ⚠ GHOST: clip {clip_index+1} — no tiles at data-index=0", flush=True)
                 elif _ghost_result and not _ghost_result.get('found', True):
                     _is_ghost = True
-                    print(f"[Flow] ⚠ GHOST: clip {clip_index+1} — data-index=0 doesn't contain our dialogue (stale tile from previous clip)", flush=True)
+                    print(f"[Flow] ⚠ GHOST: clip {clip_index+1} — data-index=0 doesn't contain submitted-prompt head (stale tile from previous clip)", flush=True)
             except Exception as _ge:
                 print(f"[Flow] ⚠ Ghost check error for clip {clip_index+1}: {_ge}", flush=True)
         
