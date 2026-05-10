@@ -22,7 +22,7 @@ def _compute_build():
     except Exception:
         return "unknown"
 WORKER_BUILD = _compute_build()
-WORKER_VERSION = "v367"
+WORKER_VERSION = "v701g"
 
 import subprocess, sys, shutil
 
@@ -2229,6 +2229,16 @@ def kill_chrome_using_profile(profile_dir, label=""):
                 print(f"{prefix}Killed worker Chrome pid {pid} (profile: {os.path.basename(abs_profile)})", flush=True)
                 killed.append(pid)
 
+            # v701g — give Windows a moment to release the killed processes'
+            # file handles BEFORE the caller does the golden-restore copy.
+            # Without this, restore hits WinError 1224 ("file with user-
+            # mapped section open") on Chrome's cookie / cache databases
+            # because their shared-memory mappings outlive the process exit
+            # by a couple of seconds. Restore retry loop will still catch
+            # leftovers but a 1.5s breather here cuts most of them.
+            if killed and len(killed) > 0:
+                time.sleep(1.5)
+
             # NOTE: We intentionally do NOT fall back to 'taskkill /IM chrome.exe'
             # OR to a basename search. Exact full-path match is the only safe way
             # to distinguish this account's Chrome from (a) the user's personal
@@ -2332,21 +2342,65 @@ def restore_from_golden(session_folder, account_label="", restore_session=True,
         return True
 
     print(f"{prefix}🔄 GOLDEN RESTORE: Restoring session profile from {golden_folder}", flush=True)
-    try:
-        if os.path.exists(session_folder):
-            shutil.rmtree(session_folder, ignore_errors=True)
-        # Use dirs_exist_ok=True so if rmtree left locked files behind,
-        # copytree still overwrites everything from golden rather than failing
-        # with FileExistsError — session is always a clean copy of golden.
-        shutil.copytree(
-            golden_folder, session_folder,
-            dirs_exist_ok=True,
-            ignore_dangling_symlinks=True,
-            ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'),
-        )
-        print(f"{prefix}  ✓ Session profile restored → {session_folder}", flush=True)
-    except Exception as e:
-        print(f"{prefix}  ⚠ Failed to restore session profile: {e}", flush=True)
+
+    # v701g — Windows file-handle release loop. After taskkill on a Chrome
+    # PID, the OS may hold memory-mapped file handles open for several
+    # seconds. shutil.copytree then fails with WinError 1224 ("file with
+    # a user-mapped section open") on cookie/cache databases. Old code
+    # gave up immediately and shipped a partially-restored profile —
+    # session has stale fragments mixed with golden state, reCAPTCHA
+    # flags as suspicious, login drifts.
+    #
+    # Retry with backoff: 0.5s, 2s, 5s. After each failed attempt, force
+    # one more pass at SingletonLock cleanup + small sleep so any
+    # lingering chrome subprocess gets to release handles.
+    last_err = None
+    for _attempt in range(3):
+        try:
+            if os.path.exists(session_folder):
+                shutil.rmtree(session_folder, ignore_errors=True)
+            # Use dirs_exist_ok=True so if rmtree left locked files behind,
+            # copytree still overwrites everything from golden rather than
+            # failing with FileExistsError — session is always a clean copy
+            # of golden.
+            shutil.copytree(
+                golden_folder, session_folder,
+                dirs_exist_ok=True,
+                ignore_dangling_symlinks=True,
+                ignore=shutil.ignore_patterns(
+                    'SingletonLock', 'SingletonSocket', 'SingletonCookie',
+                ),
+            )
+            print(f"{prefix}  ✓ Session profile restored → {session_folder}", flush=True)
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            # WinError 1224 = file mapped by another process. WinError 32 =
+            # file in use. Both indicate "wait for handle release".
+            if '1224' in err_str or 'WinError 32' in err_str or 'in use' in err_str.lower():
+                _wait = (0.5, 2.0, 5.0)[_attempt] if _attempt < 3 else 5.0
+                print(
+                    f"{prefix}  ⚠ Restore attempt {_attempt+1}/3 hit Windows file-lock; "
+                    f"waiting {_wait:.1f}s for handles to release",
+                    flush=True,
+                )
+                # Aggressive cleanup between retries: also try to remove the
+                # locked Singleton* files from session_folder if they exist.
+                for _lock in ('SingletonLock', 'SingletonSocket', 'SingletonCookie'):
+                    _lp = os.path.join(session_folder, _lock)
+                    if os.path.exists(_lp):
+                        try:
+                            os.remove(_lp)
+                        except Exception:
+                            pass
+                time.sleep(_wait)
+                continue
+            # Non-lock error — don't waste time retrying.
+            break
+    if last_err is not None:
+        print(f"{prefix}  ⚠ Failed to restore session profile after retries: {last_err}", flush=True)
         return False
 
     # Purge GPU/shader caches — identical to what startup does after golden copy.
@@ -4776,17 +4830,39 @@ def report_policy_violation(clip_id, rejected_image_key=None, detail=None):
         return result
     # Fallback so the clip doesn't dangle in 'generating' if the endpoint
     # is missing on the deployed server (e.g. mid-rollout).
+    # v701-cleanup — ALSO stamp error_code via the generic /status endpoint
+    # so the frontend still renders the upload-replacement card. Pre-cleanup
+    # the fallback only set status='failed' with error_message → frontend's
+    # renderClip checked error_code and saw NULL → rendered plain failed
+    # state without the upload button → user stuck.
     print(
         f"[v701] policy endpoint unavailable (code={code}); falling back to "
-        f"legacy update_clip_status('failed') for clip {clip_id}",
+        f"/status with error_code=CONTENT_POLICY_VIOLATION for clip {clip_id}",
         flush=True,
     )
-    update_clip_status(
-        clip_id, 'failed',
-        error_message=(
-            "⚠️ Image flagged by Flow content policy — try a different image"
-        ),
-    )
+    try:
+        # POST directly so we can include error_code (the legacy
+        # update_clip_status helper doesn't expose it).
+        api_request_ex(
+            "POST",
+            f"/clips/{clip_id}/status",
+            {
+                "status": "failed",
+                "error_message": (
+                    "⚠️ Image flagged by Flow content policy — upload a replacement to retry."
+                ),
+                "error_code": "CONTENT_POLICY_VIOLATION",
+            },
+        )
+    except Exception as _fb_err:
+        print(f"[v701] fallback /status call failed: {_fb_err}", flush=True)
+        # Last-ditch: legacy helper, no error_code.
+        update_clip_status(
+            clip_id, 'failed',
+            error_message=(
+                "⚠️ Image flagged by Flow content policy — try a different image"
+            ),
+        )
     return None
 
 

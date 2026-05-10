@@ -3663,7 +3663,17 @@ async def replace_clip_image(
                             cascade_count += 1
                         db.commit()
         except Exception as _cascade_err:
-            print(f"[v701d] anchor cascade skipped: {_cascade_err}", flush=True)
+            # v701-cleanup — full traceback so silent cascade failures
+            # are visible. cavecrew flagged the bare except as a trap:
+            # user uploads replacement, cascade fails, audio_pair siblings
+            # silently NOT patched, user thinks job is fixed.
+            import traceback
+            print(
+                f"[v701d] anchor cascade FAILED for clip {clip_id}: "
+                f"{type(_cascade_err).__name__}: {_cascade_err}",
+                flush=True,
+            )
+            traceback.print_exc()
             db.rollback()
 
         cascade_msg = (
@@ -8647,13 +8657,11 @@ async def local_worker_report_policy_violation(
                     ]),
                 )
                 for sib in sibling_q.all():
-                    # Skip clips that are already approved/completed
-                    # via auto-approve (would only be true on audio_pair
-                    # which auto-approve at status=completed; FAILED
-                    # passes status filter so handle here).
-                    if sib.status == ClipStatus.COMPLETED.value:
-                        continue
-                    # Don't clobber a non-policy error_code (e.g. CELEBRITY_FILTER).
+                    # Status filter above explicitly excludes COMPLETED so
+                    # already-rendered siblings are never touched by the
+                    # cascade (rendered b-roll is the user's truth, not
+                    # something to clobber). Don't clobber a non-policy
+                    # error_code (e.g. CELEBRITY_FILTER) either.
                     if sib.error_code and sib.error_code != "CONTENT_POLICY_VIOLATION":
                         continue
                     sib.status = ClipStatus.FAILED.value
@@ -8669,7 +8677,15 @@ async def local_worker_report_policy_violation(
                 if cascaded_marked:
                     db.commit()
         except Exception as _cascade_err:
-            print(f"[v701e] preemptive cascade skipped: {_cascade_err}", flush=True)
+            # v701-cleanup — full traceback so silent cascade failures
+            # are visible (cavecrew finding).
+            import traceback
+            print(
+                f"[v701e] preemptive cascade FAILED for clip {clip_id}: "
+                f"{type(_cascade_err).__name__}: {_cascade_err}",
+                flush=True,
+            )
+            traceback.print_exc()
             db.rollback()
 
         cascade_msg = (
@@ -9163,6 +9179,12 @@ class LocalWorkerClipUpdate(BaseModel):
     output_url: Optional[str] = None
     output_key: Optional[str] = None
     error_message: Optional[str] = None
+    # v701-cleanup — let the worker stamp error_code via the generic
+    # status endpoint. Used as a fallback when the dedicated
+    # /policy-violation endpoint is unavailable (404 mid-rollout) so
+    # the frontend still sees CONTENT_POLICY_VIOLATION and renders the
+    # upload-replacement card. Optional to preserve backwards-compat.
+    error_code: Optional[str] = None
 
 
 @app.post("/api/local-worker/clips/{clip_id}/status")
@@ -9250,6 +9272,8 @@ async def local_worker_update_clip_status(
         clip.output_key = update.output_key
     if update.error_message:
         clip.error_message = update.error_message
+    if update.error_code:  # v701-cleanup
+        clip.error_code = update.error_code
     
     # When completing a clip (from redo or initial generation), update approval status
     # Include flow_redo_queued for Flow backend redos
@@ -10417,8 +10441,9 @@ async def user_worker_report_policy_violation(
                 ]),
             )
             for sib in sibling_q.all():
-                if sib.status == ClipStatus.COMPLETED.value:
-                    continue
+                # Status filter above explicitly excludes COMPLETED so
+                # already-rendered siblings are never touched. Don't
+                # clobber non-policy error_code (e.g. CELEBRITY_FILTER).
                 if sib.error_code and sib.error_code != "CONTENT_POLICY_VIOLATION":
                     continue
                 sib.status = ClipStatus.FAILED.value
@@ -10434,7 +10459,17 @@ async def user_worker_report_policy_violation(
             if cascaded_marked:
                 db.commit()
     except Exception as _cascade_err:
-        print(f"[v701e/user-worker] preemptive cascade skipped: {_cascade_err}", flush=True)
+        # v701-cleanup — log full traceback so silent cascade failures are
+        # visible in Render logs (cavecrew flagged the bare except as a
+        # hidden trap: user uploads replacement, cascade fails, no error
+        # surface).
+        import traceback
+        print(
+            f"[v701e/user-worker] preemptive cascade FAILED for clip {clip_id}: "
+            f"{type(_cascade_err).__name__}: {_cascade_err}",
+            flush=True,
+        )
+        traceback.print_exc()
         db.rollback()
 
     cascade_msg = (
@@ -10512,6 +10547,8 @@ async def user_worker_update_clip_status(
         clip.output_key = update.output_key
     if update.error_message:
         clip.error_message = update.error_message
+    if update.error_code:  # v701-cleanup
+        clip.error_code = update.error_code
     
     if update.status == 'completed' and old_status in ['generating', 'redo_queued', 'flow_redo_queued']:
         clip.approval_status = 'pending_review'
