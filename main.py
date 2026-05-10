@@ -8620,9 +8620,66 @@ async def local_worker_report_policy_violation(
         )
         db.commit()
 
+        # v701e — preemptive image-shared cascade.
+        # Once Flow rejects an image on policy, every OTHER pending /
+        # generating / redo-queued clip in the same job using the SAME
+        # start_frame is going to fail too. Mark them all as awaiting-
+        # replacement now so the worker stops wasting cycles + Veo
+        # credits retrying the same flagged image. Once the user uploads
+        # a replacement on ANY ONE of them, the v701d cascade in
+        # /replace-image patches the siblings back to pending.
+        cascaded_marked = 0
+        try:
+            if rejected_key:
+                # Statuses worth preempting: anything that hasn't completed
+                # successfully and isn't already stamped with a different
+                # error_code (don't overwrite a non-policy failure).
+                sibling_q = db.query(Clip).filter(
+                    Clip.job_id == clip.job_id,
+                    Clip.start_frame == rejected_key,
+                    Clip.id != clip.id,
+                    Clip.status.in_([
+                        ClipStatus.PENDING.value,
+                        ClipStatus.GENERATING.value,
+                        ClipStatus.REDO_QUEUED.value,
+                        ClipStatus.FLOW_REDO_QUEUED.value,
+                        ClipStatus.FAILED.value,
+                    ]),
+                )
+                for sib in sibling_q.all():
+                    # Skip clips that are already approved/completed
+                    # via auto-approve (would only be true on audio_pair
+                    # which auto-approve at status=completed; FAILED
+                    # passes status filter so handle here).
+                    if sib.status == ClipStatus.COMPLETED.value:
+                        continue
+                    # Don't clobber a non-policy error_code (e.g. CELEBRITY_FILTER).
+                    if sib.error_code and sib.error_code != "CONTENT_POLICY_VIOLATION":
+                        continue
+                    sib.status = ClipStatus.FAILED.value
+                    sib.error_code = "CONTENT_POLICY_VIOLATION"
+                    sib.error_message = (
+                        "⚠️ Flow rejected this image's content (cascade from sibling). "
+                        "Upload a replacement to retry."
+                    )
+                    sib.replacement_start_frame = sib.replacement_start_frame or rejected_key
+                    sib.claimed_by_worker = None
+                    sib.claimed_at = None
+                    cascaded_marked += 1
+                if cascaded_marked:
+                    db.commit()
+        except Exception as _cascade_err:
+            print(f"[v701e] preemptive cascade skipped: {_cascade_err}", flush=True)
+            db.rollback()
+
+        cascade_msg = (
+            f" (preemptively marked {cascaded_marked} sibling"
+            f"{'s' if cascaded_marked != 1 else ''} sharing same image)"
+            if cascaded_marked else ""
+        )
         add_job_log(
             db, clip.job_id,
-            f"Clip {clip.clip_index + 1}: image policy violation — awaiting user replacement",
+            f"Clip {clip.clip_index + 1}: image policy violation — awaiting user replacement{cascade_msg}",
             "WARNING",
             "policy",
         )
@@ -8632,6 +8689,7 @@ async def local_worker_report_policy_violation(
             "ok": True,
             "clip_id": clip_id,
             "rejected_image_key": rejected_key or None,
+            "cascaded_sibling_count": cascaded_marked,  # v701e
         }
     finally:
         db.close()
