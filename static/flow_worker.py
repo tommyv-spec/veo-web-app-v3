@@ -369,7 +369,12 @@ def _bind_pending_submits_for_page(page, job_id, clip_index, clip_id=None,
     """Convenience wrapper — resolves the buffer key from the page's
     `_v700_submit_buffer_key` attribute (set by
     `_install_submit_response_listener`). Use this from sites that don't
-    know the account label directly (e.g. shared submission helpers)."""
+    know the account label directly (e.g. shared submission helpers).
+
+    v700j — also passes the page's `_v700j_last_click_at` timestamp so
+    `_bind_pending_submits` can ignore late-arriving responses from
+    previous submit attempts (which would otherwise leak across clips
+    and bind the WRONG uuids to this clip)."""
     label = ""
     try:
         label = getattr(page, '_v700_submit_buffer_key', '') or ''
@@ -377,6 +382,11 @@ def _bind_pending_submits_for_page(page, job_id, clip_index, clip_id=None,
             label = label[len('acct:'):]
     except Exception:
         label = ""
+    last_click = None
+    try:
+        last_click = getattr(page, '_v700j_last_click_at', None)
+    except Exception:
+        last_click = None
     return _bind_pending_submits(
         job_id=job_id,
         clip_index=clip_index,
@@ -384,11 +394,13 @@ def _bind_pending_submits_for_page(page, job_id, clip_index, clip_id=None,
         account_label=label,
         drain_timeout=drain_timeout,
         expected_min=expected_min,
+        min_captured_at=last_click,
     )
 
 
 def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
-                          drain_timeout=8.0, expected_min=1):
+                          drain_timeout=8.0, expected_min=1,
+                          min_captured_at=None):
     """v700 — drain any submit responses captured since the last call and
     bind their primaryMediaIds to (job_id, clip_index, clip_id). Wait up
     to `drain_timeout` seconds for at least `expected_min` workflows to
@@ -424,11 +436,23 @@ def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
     bound = []
     deadline = time.time() + max(0.5, float(drain_timeout))
     seen_workflows = 0
+    discarded_stale = 0
     while True:
         entries = _drain_submit_responses(account_label)
         if entries:
             with _PRIMARY_MEDIA_LOCK:
                 for e in entries:
+                    # v700j — ignore responses captured BEFORE this submit
+                    # window. Without this filter, a late-arriving response
+                    # from a previous clip (where the bind timeout already
+                    # fired with WARNING) leaks into the next clip's drain
+                    # and binds the WRONG uuids to it. Symptom: clip 0's
+                    # HOOK render uuids end up bound to clip 2 → clip 0's
+                    # video lands in clip 2's slot.
+                    cap_at = e.get('captured_at') or 0
+                    if min_captured_at is not None and cap_at < float(min_captured_at):
+                        discarded_stale += 1
+                        continue
                     data = e.get('data') or {}
                     for w in (data.get('workflows') or []):
                         meta = (w.get('metadata') or {}) if isinstance(w, dict) else {}
@@ -441,7 +465,7 @@ def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
                             'clip_id': clip_id,
                             'batch_id': meta.get('batchId'),
                             'workflow_id': (w.get('name') if isinstance(w, dict) else None),
-                            'submit_time': e.get('captured_at') or time.time(),
+                            'submit_time': cap_at or time.time(),
                             'account': account_label,
                         }
                         bound.append(media_id)
@@ -451,6 +475,13 @@ def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
         if time.time() >= deadline:
             break
         time.sleep(0.25)
+    if discarded_stale:
+        print(
+            f"[v700j] discarded {discarded_stale} pre-click submit-response(s) for "
+            f"clip {clip_index} (captured before _v700j_last_click_at); these would "
+            f"have leaked uuids from a prior submit",
+            flush=True,
+        )
     if bound:
         print(
             f"[v700] bound clip {clip_index} (id={clip_id}) → {len(bound)} mediaId(s): "
@@ -5647,6 +5678,28 @@ def click_generate_button(page, context_name="", max_retries=3):
             except Exception:
                 page._v700h_pre_tile_ids = set()
                 page._v700h_snapshot_at = time.time()
+
+            # v700j — stamp the click time on the page so _bind_pending_submits
+            # can REJECT any submit-response that was captured BEFORE this
+            # click. Without this filter, late-arriving responses from a
+            # previous clip (where the 10s bind timeout already fired with
+            # WARNING) sit in the per-account submit buffer; the next
+            # clip's submit-bind drains the buffer and accidentally binds
+            # those stale uuids to the NEW clip — producing the
+            # "right slot, wrong content" misroute the user reported.
+            # Also drain + discard any pre-existing buffer entries so the
+            # window for this click starts clean.
+            try:
+                page._v700j_last_click_at = time.time()
+                _drained = _drain_submit_responses(getattr(page, '_v700_submit_buffer_key', '').replace('acct:', '') if getattr(page, '_v700_submit_buffer_key', None) else "")
+                if _drained:
+                    print(
+                        f"[v700j] discarded {len(_drained)} stale submit-response(s) "
+                        f"from buffer before Generate-click",
+                        flush=True,
+                    )
+            except Exception:
+                page._v700j_last_click_at = time.time()
 
             # Click Generate — use human_click for natural mouse movement + real click events
             # This is THE click that triggers the API call with reCAPTCHA token
