@@ -8244,9 +8244,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 }
                 const data = await r.json();
                 // v701h — backend cascade may have re-keyed N sibling
-                // audio_pairs sharing the same anchor image. Show the
-                // count so the user knows ALL the "image rejected"
-                // cards on this job will flip back to "rendering".
+                // audio_pairs sharing the same anchor image.
                 const cascaded = data && data.cascaded_audio_pair_count;
                 if (cascaded && cascaded > 0) {
                     showToast(
@@ -8256,10 +8254,29 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 } else {
                     showToast(`replacement uploaded — clip re-queued`, '#10b981');
                 }
-                // v701h — clear THIS job's localStorage cache so the
-                // next loadClips paints from fresh DB state instead of
-                // briefly flashing the old "image rejected" cards on
-                // siblings that were just patched server-side.
+                // v701k — OPTIMISTIC card removal. Backend cascade clears
+                // error_code on ALL clips sharing the rejected image, but
+                // the next loadClips poll may briefly re-render the card
+                // from cached state before the fresh fetch lands. Clear
+                // error_code locally on every clip whose start_frame OR
+                // replacement_start_frame matches the just-uploaded clip's
+                // rejected key — the dedup helper then skips them and the
+                // cards disappear immediately.
+                try {
+                    const uploaded = (cachedClipsData || []).find(x => x.id === clipId);
+                    const rejectedKey = (uploaded && (uploaded.replacement_start_frame || uploaded.start_frame)) || '';
+                    if (rejectedKey && Array.isArray(cachedClipsData)) {
+                        for (const cc of cachedClipsData) {
+                            const k = (cc.replacement_start_frame || cc.start_frame || '');
+                            if (k === rejectedKey && (cc.error_code || '') === 'CONTENT_POLICY_VIOLATION') {
+                                cc.error_code = null;
+                                cc.error_message = null;
+                            }
+                        }
+                    }
+                } catch (_) {}
+                // v701h — clear localStorage cache so the next poll
+                // paints from fresh DB state instead of cached old.
                 try {
                     if (selectedJobId) localStorage.removeItem(`clips_${selectedJobId}`);
                 } catch (_) {}
