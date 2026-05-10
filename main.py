@@ -2174,6 +2174,39 @@ async def _setup_job_background(
             _all_prebuilt = bool(_peek_lines) and all(
                 _line_satisfies_fast_lane(_l) for _l in _peek_lines
             )
+            # v700e — surface fast-lane gate decision so users can see WHY
+            # it skipped. When the gate fails on a "should-be-prebuilt" job
+            # (every scene has a `## Veo 3.1 Final Prompts` entry in the
+            # source markdown but the override didn't make it through to
+            # DialogueLineInput), this print shows exactly which line
+            # indexes lack the override and what their scene_type / clip_role
+            # / dialogue snippet are. Pre-v700e the only way to debug a
+            # gate miss was to dump dialogue_json from psql.
+            if not _all_prebuilt and bool(_peek_lines):
+                _missing = [
+                    {
+                        "i": _i,
+                        "scene_type": (_l.get("scene_type") if isinstance(_l, dict) else None),
+                        "clip_role": (_l.get("clip_role") if isinstance(_l, dict) else None),
+                        "scene_index": (_l.get("scene_index") if isinstance(_l, dict) else None),
+                        "text_head": ((_l.get("text") or "")[:40] if isinstance(_l, dict) else ""),
+                        "has_text_prompt": bool((_l.get("veo_prompt_override") or "").strip()) if isinstance(_l, dict) else False,
+                    }
+                    for _i, _l in enumerate(_peek_lines)
+                    if not _line_satisfies_fast_lane(_l)
+                ]
+                print(
+                    f"[Background] v673 fast lane SKIPPED for job {job_id[:8]}... — "
+                    f"{len(_missing)}/{len(_peek_lines)} line(s) missing veo_prompt_override:",
+                    flush=True,
+                )
+                for _m in _missing:
+                    print(
+                        f"  [v700e] line {_m['i']} scene={_m['scene_index']} "
+                        f"role={_m['clip_role']!r} type={_m['scene_type']!r} "
+                        f"has_prompt={_m['has_text_prompt']} text={_m['text_head']!r}",
+                        flush=True,
+                    )
 
             # ── One-time analysis ──
             # Download first frame to local temp for vision analysis
