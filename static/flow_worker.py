@@ -11926,6 +11926,30 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
         if _fresh and _fresh.get('status') in ('completed', 'approved'):
             print(f"[REDO] Clip {clip.get('clip_index', '?')} already completed in DB — skipping", flush=True)
             return True
+        # v701i — also skip clips that were preemptively marked
+        # CONTENT_POLICY_VIOLATION by a sibling's policy report (v701e
+        # cascade). Continuing to submit a flagged image is guaranteed
+        # to fail again and burn Veo + Flow rate-limit budget. Bail
+        # out and release the redo claim so the clip can sit in the
+        # "awaiting user replacement" UI state.
+        if _fresh and (_fresh.get('error_code') or '') == 'CONTENT_POLICY_VIOLATION':
+            print(
+                f"[REDO] Clip {clip.get('clip_index', '?')} preempted by sibling "
+                f"policy violation — skipping; user must upload replacement first",
+                flush=True,
+            )
+            # Release any claim so this clip doesn't sit hot in the
+            # redo-pending queue with our worker_id locked on it.
+            try:
+                update_clip_status(
+                    clip_id, 'failed',
+                    error_message=(
+                        "⚠️ Image flagged by Flow content policy — upload a replacement to retry."
+                    ),
+                )
+            except Exception:
+                pass
+            return True
     except Exception:
         pass  # DB check failed — proceed with redo (safe fallback)
     

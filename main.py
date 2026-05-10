@@ -9710,7 +9710,13 @@ async def local_worker_get_clip_approval_status(
         "selected_variant": selected_variant,
         "output_url": selected_video_url or clip.output_url,
         "has_video": clip.status == "completed" or bool(versions),
-        "status": clip.status
+        "status": clip.status,
+        # v701i — surface error_code so the worker's pre-submit check can
+        # skip clips that were preemptively marked CONTENT_POLICY_VIOLATION
+        # by a sibling's policy report. Without this the worker keeps
+        # clicking Generate on flagged-image clips that are guaranteed
+        # to fail again, burning Veo credits + Flow rate-limit budget.
+        "error_code": clip.error_code,
     }
 
 
