@@ -393,7 +393,34 @@ def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
     bind their primaryMediaIds to (job_id, clip_index, clip_id). Wait up
     to `drain_timeout` seconds for at least `expected_min` workflows to
     arrive (submit response races with the post-Generate sleep). Returns
-    list of bound uuids."""
+    list of bound uuids.
+
+    v700i — PURGE pre-existing bindings for (job_id, clip_index) BEFORE
+    adding the new ones. Without this, redo / golden-restore / Phase 3a
+    cycles leave OLD uuids in the map mapped to this clip. If Flow's
+    CDN later serves a download URL containing the old uuid (e.g. a
+    leftover variant that finished AFTER the worker moved on), v700
+    routes that bad render into the clip's slot — visible as "wrong
+    content in the right place". Purging the slot at re-submit guarantees
+    only the freshest uuids own this clip.
+    """
+    # v700i — clear stale bindings for this slot before the new submit lands.
+    purged = 0
+    with _PRIMARY_MEDIA_LOCK:
+        stale = [
+            uid for uid, b in _PRIMARY_MEDIA_BINDINGS.items()
+            if b.get('job_id') == job_id and b.get('clip_index') == clip_index
+        ]
+        for uid in stale:
+            _PRIMARY_MEDIA_BINDINGS.pop(uid, None)
+            purged += 1
+    if purged:
+        print(
+            f"[v700i] purged {purged} stale uuid binding(s) for clip {clip_index} "
+            f"(job {str(job_id)[:8]}) before new submit",
+            flush=True,
+        )
+
     bound = []
     deadline = time.time() + max(0.5, float(drain_timeout))
     seen_workflows = 0
