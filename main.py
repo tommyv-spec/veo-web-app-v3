@@ -3604,7 +3604,13 @@ async def replace_clip_image(
         clip.replacement_start_frame = previous_rejected  # keep audit
         clip.error_code = None
         clip.error_message = None
-        clip.status = ClipStatus.PENDING.value
+        # v701h — status MUST be flow_redo_queued so the worker's
+        # /local-worker/clips/redo-pending poll picks the clip up. PENDING
+        # status only gets re-submitted by the main /jobs/pending poll
+        # which doesn't run for jobs already past initial submission. The
+        # symptom: user uploaded replacement, clips sat in PENDING forever
+        # because redo-pending query filters on FLOW_REDO_QUEUED.
+        clip.status = ClipStatus.FLOW_REDO_QUEUED.value
         clip.approval_status = "pending_review"
         # Reset claim so worker picks it up.
         clip.claimed_by_worker = None
@@ -3656,7 +3662,8 @@ async def replace_clip_image(
                             )
                             sib.error_code = None
                             sib.error_message = None
-                            sib.status = ClipStatus.PENDING.value
+                            # v701h — FLOW_REDO_QUEUED so redo-pending poll picks up.
+                            sib.status = ClipStatus.FLOW_REDO_QUEUED.value
                             sib.approval_status = "pending_review"
                             sib.claimed_by_worker = None
                             sib.claimed_at = None

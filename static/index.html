@@ -8187,7 +8187,26 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     throw new Error(_msg);
                 }
                 const data = await r.json();
-                showToast(`replacement uploaded — clip re-queued`, '#10b981');
+                // v701h — backend cascade may have re-keyed N sibling
+                // audio_pairs sharing the same anchor image. Show the
+                // count so the user knows ALL the "image rejected"
+                // cards on this job will flip back to "rendering".
+                const cascaded = data && data.cascaded_audio_pair_count;
+                if (cascaded && cascaded > 0) {
+                    showToast(
+                        `replacement uploaded — also retried ${cascaded} sibling voice clip${cascaded === 1 ? '' : 's'}`,
+                        '#10b981',
+                    );
+                } else {
+                    showToast(`replacement uploaded — clip re-queued`, '#10b981');
+                }
+                // v701h — clear THIS job's localStorage cache so the
+                // next loadClips paints from fresh DB state instead of
+                // briefly flashing the old "image rejected" cards on
+                // siblings that were just patched server-side.
+                try {
+                    if (selectedJobId) localStorage.removeItem(`clips_${selectedJobId}`);
+                } catch (_) {}
                 if (selectedJobId) loadClips(selectedJobId);
             } catch(e) {
                 console.error('[v701] replace-image failed:', e);
