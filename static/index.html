@@ -7393,7 +7393,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                             }
                         });
                         // v698A — hide audio_pair clips (paired-card sibling rendered via visual_pair).
-                        visible = visible.filter(c => (c.clip_role || '').toLowerCase() !== 'audio_pair');
+                        visible = visible.filter(c => (c.clip_role || '').toLowerCase() !== 'audio_pair' || (c.error_code || '') === 'CONTENT_POLICY_VIOLATION');
                         // v657 — match the main-render path's #clipsToolbar
                         // structure so the diff-path doesn't insert a
                         // second expand button. Pre-v657 the cache-render
@@ -7456,6 +7456,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // appear as separate review cards at all.
             visibleClips = visibleClips.filter(
                 c => (c.clip_role || '').toLowerCase() !== 'audio_pair'
+                  || (c.error_code || '') === 'CONTENT_POLICY_VIOLATION'
             );
             let container=c.querySelector('.clips-grid');
             if(!container){
