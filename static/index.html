@@ -7394,6 +7394,13 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         });
                         // v698A — hide audio_pair clips (paired-card sibling rendered via visual_pair).
                         visible = visible.filter(c => (c.clip_role || '').toLowerCase() !== 'audio_pair' || (c.error_code || '') === 'CONTENT_POLICY_VIOLATION');
+                        // v701j — collapse all CONTENT_POLICY_VIOLATION clips
+                        // sharing the SAME rejected image into ONE upload card.
+                        // Backend's v701d cascade retries every sibling on a
+                        // single upload, so the user only needs to act once.
+                        // Showing N identical "image rejected" cards spams
+                        // the grid (8+ cards in a single voiceover-job).
+                        visible = _dedupePolicyViolations(visible);
                         // v657 — match the main-render path's #clipsToolbar
                         // structure so the diff-path doesn't insert a
                         // second expand button. Pre-v657 the cache-render
@@ -7458,6 +7465,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 c => (c.clip_role || '').toLowerCase() !== 'audio_pair'
                   || (c.error_code || '') === 'CONTENT_POLICY_VIOLATION'
             );
+            // v701j — collapse all CONTENT_POLICY_VIOLATION clips sharing
+            // the SAME rejected image into ONE upload card. See
+            // _dedupePolicyViolations for the grouping logic.
+            visibleClips = _dedupePolicyViolations(visibleClips);
             let container=c.querySelector('.clips-grid');
             if(!container){
                 const hasCompleted=clips.some(x=>x.status==='completed'),generating=clips.filter(x=>x.status==='generating'||x.status==='pending'||x.status==='redo_queued'||x.status==='flow_redo_queued'||x.status==='preparing');
@@ -7580,6 +7591,40 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // Load existing exports after clips are rendered (only on first load)
             if(!container.dataset.exportsLoaded){container.dataset.exportsLoaded='true';loadExistingExports(id);}
             }catch(e){}
+        }
+        // v701j — collapse multiple CONTENT_POLICY_VIOLATION clips
+        // sharing the SAME rejected image into ONE upload card.
+        // Backend cascades a single user upload to every sibling sharing
+        // that image (v701d), so showing N upload cards is duplicate
+        // noise. The first clip in each group becomes the representative;
+        // it carries `_violationGroupCount` (the group size) and
+        // `_violationGroupIds` (every clip_id covered) so the upload
+        // card can show "this affects N clips" and the cascade-success
+        // toast can mention how many were retried.
+        function _dedupePolicyViolations(visible) {
+            const groups = {};   // key = rejected image key → first clip + count + ids
+            const out = [];
+            for (const c of visible) {
+                const isPolicy = (c.error_code || '') === 'CONTENT_POLICY_VIOLATION';
+                if (!isPolicy) { out.push(c); continue; }
+                // Group by replacement_start_frame (preferred) or current
+                // start_frame. Both reflect the rejected image; a clip
+                // that just got cascade-marked may have replacement_start_frame
+                // set to the original, current-deployments use start_frame.
+                const groupKey = (c.replacement_start_frame || c.start_frame || `__clip_${c.id}`).trim();
+                if (!groups[groupKey]) {
+                    const rep = Object.assign({}, c);  // shallow clone so we don't mutate cache
+                    rep._violationGroupCount = 1;
+                    rep._violationGroupIds = [c.id];
+                    rep._violationGroupKey = groupKey;
+                    groups[groupKey] = rep;
+                    out.push(rep);
+                } else {
+                    groups[groupKey]._violationGroupCount += 1;
+                    groups[groupKey]._violationGroupIds.push(c.id);
+                }
+            }
+            return out;
         }
         function getClipStateKey(clip){
             // v701f — paired clips re-render when EITHER side changes.
@@ -8136,7 +8181,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 ? `<img src="${rejectedSrc}" alt="rejected frame" style="max-width:100%;max-height:240px;display:block;margin:0 auto;border-radius:6px;">`
                 : `<div style="display:flex;align-items:center;justify-content:center;aspect-ratio:9/16;max-height:240px;background:rgba(239,68,68,0.1);border-radius:6px;color:#ef4444;">⚠ image</div>`;
             const dialogueText = (c.voiceover_line || c.dialogue_text || '').trim();
-            const cascadeNotice = isPaired
+            // v701j — group count badge. When this card represents N
+            // sibling clips sharing the same rejected image (collapsed
+            // by _dedupePolicyViolations), tell the user one upload
+            // retries all N. Hide the line when group size is 1.
+            const groupCount = (c._violationGroupCount || 1);
+            const groupBadge = groupCount > 1
+                ? `<div style="margin-top:6px;font-size:11px;color:#fbbf24;background:rgba(245,158,11,0.12);padding:6px 8px;border-radius:6px;border:1px solid rgba(245,158,11,0.35);">
+                       🔁 this image is shared by <strong>${groupCount}</strong> clips — one upload retries all of them
+                   </div>`
+                : '';
+            const cascadeNotice = (groupCount === 1 && isPaired)
                 ? `<div style="font-size:11px;color:#fbbf24;margin-top:6px;">⚠ this clip is part of a paired voice clip — uploading a replacement only affects the b-roll side</div>`
                 : '';
             return `<div class="clip-card clip-rejected" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"
@@ -8156,6 +8211,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         Flow rejected this image's content. Upload a replacement
                         to retry — the worker will re-submit automatically.
                     </div>
+                    ${groupBadge}
                     ${cascadeNotice}
                     <div style="display:flex;gap:8px;justify-content:center;margin-top:10px;">
                         <input type="file" id="replaceImageInput_${clipId}" accept="image/png,image/jpeg,image/webp" style="display:none;" onchange="replaceClipImage(${clipId}, '${jid}', this.files[0])">
