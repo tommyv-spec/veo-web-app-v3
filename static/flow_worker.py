@@ -5541,15 +5541,42 @@ def click_generate_button(page, context_name="", max_retries=3):
             human_delay(1, 2)
             scroll_randomly(page)
             human_delay(0.5, 1)
-            
+
+            # v700h — snapshot the data-index=0 tile_ids RIGHT BEFORE the
+            # Generate-click. After the click, ANY tile_id that appears
+            # which wasn't in the snapshot = the tile this click created.
+            # Used by ghost detection as a third confirmation signal
+            # (alongside v700 uuid binding + multi-needle prompt match).
+            # The new-tile-id signal is content-agnostic: it doesn't
+            # depend on the prompt text matching what Flow actually wrote
+            # into the tile, and it doesn't depend on the listener
+            # capturing the submit response in time. Bulletproof DOM
+            # signal at the cost of one quick page.evaluate.
+            try:
+                _v700h_pre_ids = page.evaluate("""() => {
+                    const c = document.querySelector("div[data-index='0']");
+                    if (!c) return [];
+                    const out = new Set();
+                    c.querySelectorAll("[data-tile-id]").forEach(t => {
+                        const id = t.getAttribute("data-tile-id");
+                        if (id) out.add(id);
+                    });
+                    return Array.from(out);
+                }""") or []
+                page._v700h_pre_tile_ids = set(_v700h_pre_ids)
+                page._v700h_snapshot_at = time.time()
+            except Exception:
+                page._v700h_pre_tile_ids = set()
+                page._v700h_snapshot_at = time.time()
+
             # Click Generate — use human_click for natural mouse movement + real click events
             # This is THE click that triggers the API call with reCAPTCHA token
             arrow_btn = page.locator("button:has(i:text('arrow_forward')), i:text('arrow_forward')").first
             human_click_element(page, arrow_btn, "", timeout=30000)
-            
+
             if prefix:
                 print(f"{prefix}✓ Clicked Generate button", flush=True)
-            
+
             time.sleep(1)
             return True
             
@@ -12959,24 +12986,22 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         time.sleep(FAILURE_CHECK_DELAY)
         clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1)
         
-        # v700g — ghost detection with uuid-binding cross-check.
-        # Two independent signals confirm "this Generate-click actually
-        # produced a tile":
+        # v700h — ghost detection with THREE-signal cross-check.
+        # Signals (in order of confidence):
         #   (A) v700 uuid binding present for (job_id, clip_index) — submit
-        #       response was captured, so tile DEFINITIVELY exists. Highest
-        #       confidence; skip the prompt match entirely.
-        #   (B) prompt match — search tile innerText for distinctive
-        #       substrings of the submitted prompt. Fallback when uuid
-        #       binding missed (network race / golden restore).
-        # Ghost is declared only when BOTH signals fail. v700f's bug —
-        # head[:30] collisions when many clips share boilerplate openers
-        # like "Static handheld camera at chest height" — replaced with
-        # multi-substring matching: any ONE of {dialogue line, last 60
-        # chars of prompt, prompt mid-section} found in tile = match.
+        #       response was captured, tile DEFINITIVELY exists.
+        #   (B) NEW tile-id at data-index=0 vs the pre-Generate snapshot —
+        #       click_generate_button stashed pre_tile_ids on the page
+        #       object right before the click. Any new id at this position
+        #       MUST be the click we just made. Content-agnostic; survives
+        #       prompt collisions AND missed submit responses.
+        #   (C) prompt match via multi-substring needles — fallback when
+        #       (A) and (B) both fail.
+        # Ghost is declared only when ALL THREE signals fail.
         _is_ghost = False
         if not clip_failed:
             try:
-                # (A) primary: did v700 capture a binding for this clip?
+                # (A) v700 uuid binding
                 _v700g_bound = False
                 with _PRIMARY_MEDIA_LOCK:
                     for _b in _PRIMARY_MEDIA_BINDINGS.values():
@@ -12989,15 +13014,12 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                         f"submit response captured, tile confirmed; skipping prompt match",
                         flush=True,
                     )
-                    # short-circuit; tile exists per submit response. _is_ghost stays False.
                 else:
-                    # (B) fallback: multi-substring prompt match.
+                    # Need (B) and (C). Fetch current tiles + needle match in one evaluate.
                     _prompt = (clip.get('prompt_text') or '').strip()
                     _dialogue = (clip.get('dialogue_text') or '').strip()
                     _needles = []
                     if _prompt:
-                        # head + tail + mid → distinctive across all clips even
-                        # when boilerplate openers collide.
                         _needles.append(_prompt[:30])
                         if len(_prompt) > 90:
                             _needles.append(_prompt[-60:])
@@ -13005,11 +13027,10 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                             _needles.append(_prompt[_mid:_mid+40])
                     if _dialogue and len(_dialogue) > 5:
                         _needles.append(_dialogue[:60])
-                    # de-dupe + drop empty
                     _needles = list({n.strip(): None for n in _needles if n and len(n.strip()) > 5}.keys())
                     _ghost_result = page.evaluate(f"""() => {{
                         const c = document.querySelector("div[data-index='0']");
-                        if (!c) return {{found: false, tiles: 0, needle_hits: 0}};
+                        if (!c) return {{found: false, tiles: 0, needle_hits: 0, tile_ids: []}};
                         const seen = new Set();
                         c.querySelectorAll("[data-tile-id]").forEach(t => {{
                             const id = t.getAttribute("data-tile-id"); if (id) seen.add(id);
@@ -13021,11 +13042,25 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                         return {{
                             found: needles.length === 0 ? true : hits > 0,
                             tiles: seen.size,
+                            tile_ids: Array.from(seen),
                             needle_hits: hits,
                             needle_count: needles.length,
                         }};
                     }}""")
-                    if _ghost_result and _ghost_result.get('tiles', 0) == 0:
+                    # (B) new-tile-id detection
+                    _pre_ids = getattr(page, '_v700h_pre_tile_ids', set()) or set()
+                    _post_ids = set((_ghost_result or {}).get('tile_ids') or [])
+                    _new_ids = _post_ids - _pre_ids
+                    _has_new_tile = bool(_new_ids)
+                    if _has_new_tile:
+                        print(
+                            f"[{account_name}] [v700h] clip {clip_index+1} new-tile-id "
+                            f"detected at data-index=0 ({len(_new_ids)} new id(s)) — "
+                            f"tile confirmed; uuid binding missed but DOM proves submit landed",
+                            flush=True,
+                        )
+                        # short-circuit; tile is ours.
+                    elif _ghost_result and _ghost_result.get('tiles', 0) == 0:
                         _is_ghost = True
                         print(f"[{account_name}] ⚠ GHOST: clip {clip_index+1} — no tiles at data-index=0", flush=True)
                     elif _ghost_result and not _ghost_result.get('found', True):
@@ -13033,9 +13068,9 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                         _hit = _ghost_result.get('needle_hits', 0)
                         _cnt = _ghost_result.get('needle_count', 0)
                         print(
-                            f"[{account_name}] ⚠ GHOST: clip {clip_index+1} — data-index=0 "
-                            f"matched 0/{_cnt} needles AND no uuid binding (stale tile from "
-                            f"previous clip)",
+                            f"[{account_name}] ⚠ GHOST: clip {clip_index+1} — no uuid binding, "
+                            f"no new tile-id, AND matched 0/{_cnt} prompt needles (stale tile "
+                            f"from previous clip)",
                             flush=True,
                         )
             except Exception as _ge:
@@ -14664,6 +14699,8 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         flush=True,
                     )
                 else:
+                    # v700h — also use NEW-tile-id detection vs the
+                    # pre-Generate snapshot stashed by click_generate_button.
                     _prompt = (clip.get('prompt_text') or '').strip()
                     _dialogue = (clip.get('dialogue_text') or '').strip()
                     _needles = []
@@ -14678,7 +14715,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     _needles = list({n.strip(): None for n in _needles if n and len(n.strip()) > 5}.keys())
                     _ghost_result = page.evaluate(f"""() => {{
                         const c = document.querySelector("div[data-index='0']");
-                        if (!c) return {{found: false, tiles: 0, needle_hits: 0}};
+                        if (!c) return {{found: false, tiles: 0, needle_hits: 0, tile_ids: []}};
                         const seen = new Set();
                         c.querySelectorAll("[data-tile-id]").forEach(t => {{
                             const id = t.getAttribute("data-tile-id"); if (id) seen.add(id);
@@ -14690,11 +14727,23 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         return {{
                             found: needles.length === 0 ? true : hits > 0,
                             tiles: seen.size,
+                            tile_ids: Array.from(seen),
                             needle_hits: hits,
                             needle_count: needles.length,
                         }};
                     }}""")
-                    if _ghost_result and _ghost_result.get('tiles', 0) == 0:
+                    _pre_ids = getattr(page, '_v700h_pre_tile_ids', set()) or set()
+                    _post_ids = set((_ghost_result or {}).get('tile_ids') or [])
+                    _new_ids = _post_ids - _pre_ids
+                    _has_new_tile = bool(_new_ids)
+                    if _has_new_tile:
+                        print(
+                            f"[Flow] [v700h] clip {clip_index+1} new-tile-id detected "
+                            f"at data-index=0 ({len(_new_ids)} new id(s)) — tile confirmed; "
+                            f"uuid binding missed but DOM proves submit landed",
+                            flush=True,
+                        )
+                    elif _ghost_result and _ghost_result.get('tiles', 0) == 0:
                         _is_ghost = True
                         print(f"[Flow] ⚠ GHOST: clip {clip_index+1} — no tiles at data-index=0", flush=True)
                     elif _ghost_result and not _ghost_result.get('found', True):
@@ -14702,9 +14751,9 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         _hit = _ghost_result.get('needle_hits', 0)
                         _cnt = _ghost_result.get('needle_count', 0)
                         print(
-                            f"[Flow] ⚠ GHOST: clip {clip_index+1} — data-index=0 "
-                            f"matched 0/{_cnt} needles AND no uuid binding (stale tile from "
-                            f"previous clip)",
+                            f"[Flow] ⚠ GHOST: clip {clip_index+1} — no uuid binding, "
+                            f"no new tile-id, AND matched 0/{_cnt} prompt needles "
+                            f"(stale tile from previous clip)",
                             flush=True,
                         )
             except Exception as _ge:
