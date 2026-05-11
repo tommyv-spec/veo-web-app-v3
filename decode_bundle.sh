@@ -43,10 +43,17 @@ else
 fi
 
 # Decode bundle file list — must match wiki/meta/lift-bundle.md decode-bundle table
+# 2026-05-11: expanded 3 → 6 files. Pre-expansion decoder couldn't classify hook
+# family (no hook-patterns.md), persona archetype (no persona-map.md), or v-rule
+# version (no conventions.md). Added these three to fix systematic gaps in
+# decoded artifacts (verified via JUPI gut-health decode 2026-05-11).
 BUNDLE_FILES=(
     "code/template_new_format.md"
     "code/template_reference.md"
     "wiki/meta/decode-grammar-checklist.md"
+    "wiki/mechanics/hook-patterns.md"
+    "wiki/persona-map.md"
+    "wiki/patterns/conventions.md"
 )
 
 # Verify
