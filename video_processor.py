@@ -991,6 +991,50 @@ def detect_speech_segments_whisper(
 
             speech_groups = frame_snapped
 
+            # === v701p — 1-frame breathing room around each kept segment ===
+            # v616b's frame-snap is correct for avoiding mid-frame cuts but
+            # widens NOTHING — segments stay tight to the matched word's
+            # acoustic edges. User-reported symptom: clipped onsets/offsets
+            # (consonants like /t/ /k/ /s/ chopped). Add ONE source-frame on
+            # each side, then merge segments whose widened intervals now
+            # overlap or touch — so adjacent kept regions don't double-pad
+            # the boundary and create a frame stutter. Bounded by the clip's
+            # own [0, total_duration] window to prevent negative starts /
+            # overshoots that would later be clamped silently.
+            if src_fps > 0 and frame_snapped:
+                _f = 1.0 / src_fps
+                widened = []
+                for (s, e) in frame_snapped:
+                    ws = max(0.0, s - _f)
+                    we = min(total_duration, e + _f)
+                    widened.append((ws, we))
+                # Merge any segments whose widened intervals overlap or
+                # touch (prev_end >= curr_start). Touching counts as merge
+                # to avoid a back-to-back zero-gap concat that produces a
+                # one-frame visual stutter.
+                merged_widened = []
+                for (s, e) in sorted(widened):
+                    if merged_widened and s <= merged_widened[-1][1]:
+                        merged_widened[-1] = (
+                            merged_widened[-1][0],
+                            max(merged_widened[-1][1], e),
+                        )
+                    else:
+                        merged_widened.append((s, e))
+                if len(merged_widened) != len(widened):
+                    print(
+                        f"[WhisperVAD] 🫁 v701p widen+merge: {len(frame_snapped)} → "
+                        f"{len(merged_widened)} segments (+{_f*1000:.0f}ms each side)",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[WhisperVAD] 🫁 v701p widen: +{_f*1000:.0f}ms each side, "
+                        f"{len(merged_widened)} segments unchanged",
+                        flush=True,
+                    )
+                speech_groups = merged_widened
+
             result = speech_groups
             
             # Log results
