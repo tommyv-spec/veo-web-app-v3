@@ -6605,12 +6605,49 @@ async def export_final_video(
                     broll_clip_info: List[Dict[str, Any]] = []
                     swap_failures = 0
 
+                    # v701o — Re-download missing single-clip sources. The
+                    # speaker pipeline (process_export at
+                    # video_processor.py:3647-3652) deletes each source
+                    # clip from /app/data/outputs/<job>/ immediately after
+                    # trimming, to free disk. Visual_pair sources are
+                    # untouched (speaker pipeline filtered them out). But
+                    # 'single' clips (HOOK + CTA) and text_card placeholders
+                    # were processed and their source files are now gone.
+                    # When broll's process_export runs, trim_video raises
+                    # "Source file does not exist: clip_<n>_1.1.mp4" and the
+                    # entire broll pipeline crashes inside the outer
+                    # try/except. Rehydrate from R2 before swap/process.
+                    def _rehydrate_path(c):
+                        p = Path(c.get("path") or "")
+                        if not p or p.exists():
+                            return
+                        # text_card synthetic placeholder — never on disk
+                        if (c.get("scene_type") or "").lower() == "text_card":
+                            return
+                        if storage is None:
+                            return
+                        try:
+                            r2_key = f"jobs/{job_id}/outputs/{p.name}"
+                            if storage.exists(r2_key):
+                                print(
+                                    f"[Export/v698A/broll] rehydrating from R2: {p.name}",
+                                    flush=True,
+                                )
+                                storage.download_file(r2_key, str(p))
+                        except Exception as _rh_err:
+                            print(
+                                f"[Export/v698A/broll] rehydrate failed for "
+                                f"{p.name}: {_rh_err}",
+                                flush=True,
+                            )
+
                     for c in clip_info:
                         role = (c.get("clip_role") or "single").lower()
                         if role == "audio_pair":
                             continue  # visual discarded for broll
                         if role != "visual_pair":
                             # 'single' clip (HOOK / CTA) or text_card → keep
+                            _rehydrate_path(c)
                             broll_clip_info.append(dict(c))
                             continue
 
@@ -6627,6 +6664,13 @@ async def export_final_video(
                             broll_clip_info.append(dict(c))
                             continue
 
+                        # v701o — defensive rehydrate: even though speaker
+                        # pipeline filters visual_pair out, the audio_pair
+                        # sibling's source WAS in the speaker pass and got
+                        # deleted by process_export's per-clip cleanup. Swap
+                        # reads audio_path from ap_entry; rehydrate both.
+                        _rehydrate_path(c)
+                        _rehydrate_path(ap_entry)
                         swapped_path = broll_temp_dir / f"swapped_{c['clip_index']:04d}.mp4"
                         try:
                             speed_applied, out_dur, mode_label = await asyncio.to_thread(
