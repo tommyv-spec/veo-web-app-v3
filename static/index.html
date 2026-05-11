@@ -10096,12 +10096,42 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 // v698A — final_broll_*.mp4 is the b-roll variant produced
                 // alongside final_export_*.mp4 when the job has voiceover-paired
                 // clips (broll visuals + persona's voice swapped + speed-matched).
-                const exportFiles = files.filter(f =>
+                let exportFiles = files.filter(f =>
                     f.endsWith('.mp4') &&
                     (f.startsWith('final_export_')
                      || f.startsWith('final_broll_')
                      || f.startsWith('voice_cloned'))
                 );
+
+                // v701m — order exports newest-first, with speaker + broll
+                // pair grouped together. Filename schema:
+                //   final_export_YYYYMMDD_HHMMSS_<hash>.mp4
+                //   final_broll_YYYYMMDD_HHMMSS_<hash>.mp4
+                //   voice_cloned_<voice>_<orig_filename>.mp4
+                // Pre-v701m the iteration order was whatever the
+                // /list-outputs endpoint returned (R2 list order =
+                // alphabetical-ish, broll preceded speaker for the same
+                // timestamp because "broll" < "export"). User sees the
+                // OLDER speaker export above the newer one. Sort key:
+                // extract the timestamp segment and sort DESC.
+                const _exportTimestamp = (fn) => {
+                    const m = fn.match(/(\d{8}_\d{6})/);
+                    return m ? m[1] : '';
+                };
+                const _exportKindRank = (fn) => {
+                    // Within the same timestamp: speaker first, then broll,
+                    // then voice_cloned (which references the speaker file).
+                    if (fn.startsWith('final_export_')) return 0;
+                    if (fn.startsWith('final_broll_')) return 1;
+                    if (fn.startsWith('voice_cloned')) return 2;
+                    return 9;
+                };
+                exportFiles.sort((a, b) => {
+                    const ta = _exportTimestamp(a);
+                    const tb = _exportTimestamp(b);
+                    if (ta !== tb) return tb.localeCompare(ta); // DESC by timestamp
+                    return _exportKindRank(a) - _exportKindRank(b);
+                });
                 
                 if (exportFiles.length === 0) return;
                 
