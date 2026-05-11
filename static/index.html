@@ -10560,7 +10560,22 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 // Remove floating banner
                 const floatingDone = document.getElementById('floatingExportBanner');
                 if (floatingDone) floatingDone.remove();
-                
+
+                // v701u — pull the freshly-uploaded exports (speaker + broll)
+                // from /list-outputs so both cards show up. Inline insert
+                // below adds only the speaker card; broll lives in R2 but
+                // wouldn't appear until a tab switch otherwise. Reset the
+                // guard flag so loadExistingExports actually runs.
+                try {
+                    const _list = document.getElementById('clipsList');
+                    if (_list) _list.dataset.exportsLoaded = '';
+                    if (typeof loadExistingExports === 'function' && selectedJobId === jobId) {
+                        loadExistingExports(jobId);
+                    }
+                } catch (_lerr) {
+                    console.log('[Export] success-path list refresh skipped:', _lerr);
+                }
+
                 // Add success banner to clips panel ONLY if user is still viewing this job
                 if (selectedJobId === jobId) {
                 const container = document.getElementById('clipsList');
@@ -10640,6 +10655,19 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         const exportedFile = outputs.videos?.find(v => v.filename?.startsWith('final_export_'));
                         if (exportedFile) {
                             exportSucceeded = true;
+                            // v701u — refresh the exports list immediately so the new
+                            // speaker + broll cards appear without requiring a manual
+                            // tab switch. Reset the data-exports-loaded flag first so
+                            // the guard at line 7598 doesn't short-circuit the call.
+                            try {
+                                const _list = document.getElementById('clipsList');
+                                if (_list) _list.dataset.exportsLoaded = '';
+                                if (typeof loadExistingExports === 'function' && selectedJobId === jobId) {
+                                    loadExistingExports(jobId);
+                                }
+                            } catch (_lerr) {
+                                console.log('[Export] hiccup-path list refresh skipped:', _lerr);
+                            }
                             const floatingOk = document.getElementById('floatingExportBanner');
                             if (floatingOk) {
                                 floatingOk.querySelector('div').style.background = 'var(--success)';
@@ -10648,7 +10676,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                                         <div>
                                             <h3 style="margin:0;font-size:14px;color:white;">✅ Export Complete!</h3>
                                             <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">
-                                                Network hiccup, but export succeeded.
+                                                Server took longer than the browser waited. File is on disk.
                                             </p>
                                         </div>
                                         <div style="display:flex;gap:6px;">
