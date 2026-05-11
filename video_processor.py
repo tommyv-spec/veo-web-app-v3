@@ -3814,6 +3814,7 @@ def export_final_video(
             # Iterates clip_info in order, applies VAD only to clips that
             # match the v691 condition (user enabled whisper + clip has
             # dialogue + clip is NOT timeline-mode + NOT text_card).
+            _per_clip_whisper_ran = False  # v701w — sentinel for final-pass skip
             if _user_remove_silence and (_user_silence_mode or "").lower() == "whisper":
                 vad_targets = []
                 for slot_zero, info in enumerate(clip_info):
@@ -3836,6 +3837,7 @@ def export_final_video(
                     vad_targets.append((slot_zero, info, _ct))
 
                 if vad_targets:
+                    _per_clip_whisper_ran = True  # v701w
                     print(
                         f"[VideoProcessor/v691d] running serial Whisper-VAD on "
                         f"{len(vad_targets)} clip(s) (single model load)",
@@ -3954,12 +3956,39 @@ def export_final_video(
             stats["vad_applied"] = False
             stats["vad_skipped_reason"] = "timeline_clips_present"
         if remove_silence:
+            # v701w — SKIP the final-pass apply_vad over the assembled
+            # concat when the per-clip Whisper-VAD post-loop already
+            # trimmed each clip individually. Final pass would load
+            # Whisper-small a SECOND time and run it over the full ~50s
+            # concat → Render OOM-kills at the 2GB ceiling (verified
+            # 2026-05-11 with the donut-glaze v698A dual-output export).
+            # Per-clip pass + concat is already "spoken-words-only" per
+            # clip; no benefit to re-trimming the concatenation.
+            if _per_clip_whisper_ran:
+                print(
+                    "[VideoProcessor/v701w] skipping final-pass VAD — per-clip "
+                    "Whisper-VAD already trimmed each clip; promoting concat → "
+                    "output_path directly (saves Whisper-small reload, ~500MB).",
+                    flush=True,
+                )
+                import shutil as _sh
+                if str(concat_output) != str(output_path):
+                    _sh.move(str(concat_output), str(output_path))
+                info = ffprobe_json(output_path)
+                stats["final_duration"] = get_duration(info)
+                stats["vad_applied"] = True
+                stats["vad_pass"] = "per_clip_only_v701w"
+                # Skip the rest of the final-pass block
+                if progress_callback:
+                    progress_callback("Export complete!")
+                return stats
+
             if not check_vad_available():
                 raise RuntimeError(
                     "VAD requires torch and numpy. "
                     "Install with: pip install torch numpy"
                 )
-            
+
             # Compute per-clip time boundaries in the concatenated video
             clip_boundaries = None
             if dialogue_texts:
