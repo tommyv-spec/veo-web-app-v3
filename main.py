@@ -6719,6 +6719,7 @@ async def export_final_video(
                         transition_duration=settings.transition_duration,
                         max_clip_speed=2.0,         # visual_pair clips need ≤2x
                         min_gap_for_black=1.0,      # gaps ≥1s → black; smaller → extend prev clip
+                        sequential_alignment=True,  # v701t — broll lines are in master order
                     )
                     stats["v698a_broll_filename"] = broll_filename
                     stats["v698a_broll_clips"] = len(broll_clip_info)

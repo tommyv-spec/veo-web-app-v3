@@ -3049,32 +3049,58 @@ def find_line_in_master(master_words: list, master_text: str, dialogue_text: str
     }
 
 
-def calculate_clip_targets(master_words: list, dialogue_lines: list, master_duration: float = None) -> list:
+def calculate_clip_targets(master_words: list, dialogue_lines: list, master_duration: float = None, sequential: bool = False) -> list:
     """
     Given master word timestamps and ordered dialogue lines,
     compute each clip's target start time and duration.
-    
+
     Each clip is matched independently against the full master transcript
     (clips may appear in a different order than the voiceover).
     Each clip covers only its own dialogue timestamps (gaps filled with black).
-    
+
+    v701t — `sequential` flag. When True, each line's search window starts
+    after the prior line's end-word in the master. Required for broll
+    where dialogue_lines are in master source order; without it, lines
+    like "no fryer..." / "no cortisol..." / "no inflammatory..." (all
+    starting with "no") match the SAME early position in master, causing
+    every clip to collapse to one timestamp. Default False preserves the
+    legacy assemble-job behavior (operator master, clips may be reordered).
+
     Returns: [{start: float, end: float, target_duration: float, confidence: float}, ...]
     """
-    print(f"[MasterAlign] Calculating targets for {len(dialogue_lines)} clips (independent matching)")
-    
+    mode = "sequential" if sequential else "independent"
+    print(f"[MasterAlign] Calculating targets for {len(dialogue_lines)} clips ({mode} matching)")
+
     if master_duration is None:
         master_duration = master_words[-1]["end"] if master_words else 30.0
-    
+
+    # v701t — sanity check on master length. If master_duration is wildly
+    # shorter than the dialogue would naturally take (~3 words/s loose
+    # baseline) something upstream over-trimmed the master audio. Log
+    # loudly so the next debug session has the evidence at hand.
+    _total_script_words = sum(len((l or "").split()) for l in dialogue_lines)
+    _expected_min_s = _total_script_words / 4.0  # generous ~4 wps
+    if master_duration < _expected_min_s * 0.6 and _total_script_words > 10:
+        print(
+            f"[MasterAlign] ⚠ master_duration={master_duration:.1f}s is short for "
+            f"{_total_script_words} dialogue words (≥{_expected_min_s:.1f}s expected). "
+            f"Upstream may have over-trimmed the master.",
+            flush=True,
+        )
+
     # Build full normalized master text for substring matching
     master_norm = [_normalize(w["word"]) for w in master_words]
     master_text = " ".join(master_norm)
-    print(f"[MasterAlign] Master transcript ({len(master_words)} words): '{master_text[:120]}...'")
-    
-    # Match each clip independently (no sequential constraint — clips may be in any order)
+    print(f"[MasterAlign] Master transcript ({len(master_words)} words, {master_duration:.1f}s): '{master_text[:120]}...'")
+
+    # v701t — sequential cursor advances after each matched line so later
+    # lines can't backtrack into earlier-line spans.
+    _seq_cursor = 0
     targets = []
     for i, line in enumerate(dialogue_lines):
-        b = find_line_in_master(master_words, master_text, line, search_from_word=0)
-        
+        _from = _seq_cursor if sequential else 0
+        b = find_line_in_master(master_words, master_text, line, search_from_word=_from)
+
         if b is None:
             prev_end = targets[-1]["end"] if targets else 0.0
             targets.append({
@@ -3083,20 +3109,26 @@ def calculate_clip_targets(master_words: list, dialogue_lines: list, master_dura
                 "target_duration": 5.0,
                 "confidence": 0.0,
             })
+            # Don't advance cursor on a fallback — next line still gets
+            # to search from the same position.
             continue
-        
+
         start = b["start"]
         end = b["end"]
-        
+
         if end <= start:
             end = start + 3.0
-        
+
         targets.append({
             "start": start,
             "end": end,
             "target_duration": end - start,
             "confidence": b["confidence"],
         })
+
+        # Advance sequential cursor past this match's end-word.
+        if sequential:
+            _seq_cursor = b.get("end_word_idx", _seq_cursor) + 1
     
     for i, t in enumerate(targets):
         print(f"[MasterAlign]   Clip {i}: {t['start']:.2f}s → {t['end']:.2f}s "
@@ -3319,6 +3351,7 @@ def export_with_master_audio(
     transition_duration: float = 0.5,
     max_clip_speed: float = 1.5,
     min_gap_for_black: float = 2.0,
+    sequential_alignment: bool = False,
 ) -> dict:
     """
     Full pipeline: align clips to master audio, speed-adjust, concat with black gaps, mux audio.
@@ -3361,7 +3394,12 @@ def export_with_master_audio(
     print(f"[MasterAlign] Master audio duration: {master_duration:.2f}s (last word ends at {master_words[-1]['end']:.2f}s)")
     
     # Step 2: Calculate target durations (each clip = its own dialogue only)
-    targets = calculate_clip_targets(master_words, dialogue_lines, master_duration=master_duration)
+    targets = calculate_clip_targets(
+        master_words,
+        dialogue_lines,
+        master_duration=master_duration,
+        sequential=sequential_alignment,
+    )
     
     # Fill small gaps by extending the previous clip (avoids black flashes between words)
     # Sort clips by start time, then for each small gap, extend the earlier clip's end
