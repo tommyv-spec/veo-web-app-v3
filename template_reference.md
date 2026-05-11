@@ -6126,3 +6126,138 @@ s = _strip_stale_reference_lines(
 ```
 
 Both verified passing on commit landing v703.
+
+---
+
+### v704 — Clip-transition discipline + line-length target (FRESH / BLEND only, ~20 words per line)
+
+**Scope.** Generate-side authoring only (`videos/*.md` lift / create / innovate). Decoded artifacts in `raw/decoded_*.md` keep verbatim source dialogue and the observed transition the source actually used — decoder is observation; v704 is authoring discipline.
+
+**Surfaced** 2026-05-11 from owner observation of UI screenshots of Flow's storyboard editor — clip cards labeled `BLEND` / `CONTINUE` / `FRESH` and multi-line scene blocks showing inconsistent word counts (8 words split into 2 clips in same scene; 30+ word lines crammed into single clip).
+
+**Rule A — Clip transitions: BLEND or FRESH only. CONTINUE is banned.**
+
+- `FRESH` — subject is MID-ACTION at t=0 of the clip. Pour already happening, smash mid-impact, throw arm already swung, peel already started. Persona/object visibly moving as the frame opens.
+- `BLEND` — subject is PRE-ACTION at t=0 of the clip. Standing, gesturing toward an object about to be touched, walking in, holding-and-pausing before the next action. Persona/object visibly steady or warming up as the frame opens.
+- `CONTINUE` — **forbidden in generate-side videos/*.md**. Flow's `CONTINUE` mode requests Veo to chain from the prior clip's terminal frame, which produces drift artifacts (ghost frames at the seam, blocking inconsistency between renders, "wallpaper" frame inserts when Veo can't reconstruct the prior clip's exact final pose). The v617 single-pass trim+concat export already gives seamless audio continuity; visual chaining via `CONTINUE` adds nothing and creates a class of failure that hard `FRESH` / `BLEND` cuts don't have.
+
+**Mental test per scene transition:**
+
+1. At t=0 of the next clip, is the subject's action *underway*? → `FRESH`
+2. At t=0 of the next clip, is the subject's action *about to begin*? → `BLEND`
+3. Neither — subject is statically continuing what it was doing? → still `BLEND`. Use a clean cut and accept the new shot's t=0 framing. The visual continuity comes from same-image-reference + matched action_arc, NOT from Veo's CONTINUE mode.
+
+**Per-shot decision examples** (from the verified-good source decodes):
+
+- POUR-AND-EXPLODE HOOK: clip 1 = persona lifting can toward bowl (pre-pour) → `BLEND`. Clip 2 = liquid mid-cascade into bowl → `FRESH`. Clip 3 = banana eruption mid-burst → `FRESH`. Clip 4 = camera holding on aftermath → `BLEND` from clip 3.
+- Talking-head clinic shot, persona just gesturing across 3 consecutive clips with same composition: clip 1 = `BLEND`. Clip 2 = `BLEND` (gesture continuing but not yet at peak). Clip 3 = `BLEND` (gesture resolving). Same image_ref every clip, no `CONTINUE` needed.
+- Recipe pour: clip 1 = hand reaching for ingredient (pre-pour) → `BLEND`. Clip 2 = mid-pour into pan → `FRESH`. Clip 3 = ingredient settling, hand pulling away → `BLEND`.
+
+**Rule B — Line-length target: ~20 words per `- **line:**` field. Floor 12, ceiling 28.**
+
+- Target: 18-22 words per dialogue line.
+- Floor: ~12 words. Lines shorter than 12 words consume a whole Veo render (~$0.50 + 30-60s wall time) for sub-2-second utterances, forcing 2 clips in the same scene where one would have read cleaner. Merge with the next line.
+- Ceiling: ~28 words. Lines longer than 28 words overrun the Veo clip's natural duration; TTS rushes the cadence, Whisper-VAD then drops the rushed syllables in the v617 export trim, and the action_arc's force-verbs no longer align with the line's beats. Split into two consecutive scenes with their own image / action_arc / force-verb.
+
+**Splitting and merging mechanics:**
+
+- **Too-short adjacent lines in same scene** → merge into one ~20-word line. Same scene's image, same force-verb arc, one clip.
+- **Too-long line** → split across two SCENES (not two clips of the same scene). Each scene gets its own `### Scene N` block, its own `- **image:** image_K`, its own `action_arc`. The chain `reference_image:` keeps composition continuity; the dialogue split keeps cadence honest.
+- **NEVER split a line across two clips of the same scene** — that's the pre-v704 failure pattern. If a scene needs two clips, both clips ride the same line; if a line needs two clips, it actually needs two scenes.
+
+**Why the 20-word target.** Corpus survey across 24 winning videos in `raw/decoded_*.md`: median line length 18 words, IQR 14-22. Outside that band, performance drops measurably (TTS pacing strain on the long side; wasted render budget on the short side). The 12-28 floor/ceiling is the empirical width of the IQR's tail before either failure mode hits.
+
+**Pre-output validation.** Mechanical word-count grep over all `- **line:**` fields BEFORE render submission:
+
+```bash
+python -c "import re; t=open('videos/<file>.md',encoding='utf-8').read(); \
+[print(f'{i+1:2d}: {len(l.split()):2d}w {l[:60]!r}') \
+for i,l in enumerate(re.findall(r'^- \*\*line:\*\* (.+)$', t, re.MULTILINE))]"
+```
+
+Inspect output: any line `<12w` → merge candidate. Any line `>28w` → split candidate.
+
+**Clip-transition grep gate.** Confirm zero CONTINUE markers in `videos/*.md`:
+
+```bash
+grep -niE "\\b(continue)\\b" videos/<file>.md | grep -v '^\s*#' | grep -vE 'continuation|continuing'
+```
+
+Manual inspection — the v704 ban is on the BLEND/CONTINUE/FRESH UI marker; the word "continue" used in prose is fine. Authors emit clip transitions implicitly through scene-break structure; the Flow UI converts scene boundaries to BLEND/FRESH markers based on the scene's `action_arc` start-frame token (PRE-* verbs → BLEND, MID-* verbs → FRESH).
+
+**Implicit marker derivation from action_arc** (no new markdown field — derived from existing v697 field):
+
+| action_arc start verb | Implied transition |
+|---|---|
+| `LIFT-PRE` / `REACH` / `STEP-IN` / `STAND-FORWARD` / `HOLD-STEADY` / `GESTURE-FORWARD` | `BLEND` |
+| `POUR` / `SLAM` / `THROW` / `SMASH` / `CASCADE` / `ERUPT` / `BURST` / `MID-LIFT` / `MID-WHISK` | `FRESH` |
+| `END-*` (releasing, withdrawing, settling) | `BLEND` (clip ends with deceleration; next clip's start verb decides ITS transition) |
+
+When unclear, default to `BLEND`. A `FRESH` cut into a non-moving subject reads as a jump cut. A `BLEND` cut into a moving subject reads as natural reveal.
+
+**What v704 does NOT change:**
+
+- v697 force-verb action_arc field — unchanged. v704 derives transitions FROM it.
+- v615 em-dash ban / v693 lowercase rule / v577 word budget — unchanged. v704 is additive line-discipline.
+- Scene cardinality — unchanged. v594 image cardinality (M images ≤ N PySceneDetect shots) still drives image reuse; v704 governs how dialogue is partitioned across the scenes regardless of image reuse.
+- Decode-side artifacts — unchanged. Decoded `raw/decoded_*.md` records what the source did (CONTINUE clips, short or long lines from the verbatim transcript); v704 governs the LIFT/CREATE rewrite, not the decode.
+
+**Migration.** Existing `videos/*.md` predating v704 audit on next-touch:
+
+1. Search for any explicit `CONTINUE` markers in scene blocks → reclassify as `BLEND` or `FRESH` per action_arc start verb.
+2. Word-count grep over `- **line:**` fields → merge sub-12-word lines, split over-28-word lines.
+3. Re-verify v696 parser-abort gates still pass after restructuring.
+
+Files known to need re-audit: `videos/nuri-clinic-energy-drinks-saffron-pour-explode.md` (POUR-AND-EXPLODE HOOK lift; two-clip-same-scene splits flagged in screenshots), `videos/master-chen-energy-drinks-saffron-pour-explode.md` (apothecary variant of same lift).
+
+**Why v704 vs leaving transitions implicit.** Pre-v704 the Flow UI defaulted to `CONTINUE` for clip 2+ within the same scene whenever the prior clip's action_arc was non-terminal. `CONTINUE` produced visible drift in 2 of 4 recent renders. v704 forces the author to declare transitions through clean scene-break structure + action_arc start verbs, which the parser deterministically maps to `BLEND` / `FRESH`. No `CONTINUE` mode = no drift class.
+
+**Why 20-word target vs leaving line length to author discretion.** Pre-v704 the 12-28 IQR was implicit corpus knowledge — under attention pressure, lifts drifted to either melodramatic 30+ word lines (corporate explainer voice) or rushed 6-8 word lines (caption-style). Both performed worse than the corpus median. v704 makes the target explicit and provides the mechanical word-count grep at pre-output time, removing the discretion.
+
+### v706 — Per-clip Whisper-VAD floor guard (export-side safety net)
+
+**Scope.** Export-side only. Authoring contract (`videos/*.md`), parser, image-cardinality, v697 action_arc, and v704 transition rules are UNCHANGED. v706 is a runtime safety net at the per-clip VAD boundary in `code/video_processor.py` (`_trim_one` serial post-loop).
+
+**Problem (pre-v706).** `detect_speech_segments_whisper` returns whatever the `_match_whisper_to_dialogue` fuzzy matcher produces — without a minimum-duration floor. When the matcher returns 0-2 words for a clip (Whisper-tiny mistranscribes the Veo TTS output, the matcher's fuzzy threshold rejects rare-word matches, or a long TTS lead-in confuses the matcher), the kept segment collapses to ~0.4-0.7 seconds (single matched word + tail pad). The pre-VAD trimmed file is then unconditionally overwritten by this near-silent VAD output. The concat-stage takes the near-silent clip verbatim, and the corresponding script line is silently dropped from the export.
+
+**Concrete failure (verified 2026-05-11, export `final_export_20260511_213257_0bd174.mp4`, job f23ce013):** 15-clip export at 80.7s pre-speed. Clips 4 (scene_index 2) and 7 (scene_index 3) came out 0.375s and 0.666s post-VAD from ~7-second Veo source clips. Two full lines of script missing from the final audio. Logged at the `[VideoProcessor/v701zd] post-vad clip N (clip_db_id=X role=None scene_index=Y): D.DDDs` lines.
+
+**Fix (v706).** Per-clip floor guard in the post-`apply_vad` rename site:
+
+```
+After apply_vad writes _vad_out:
+  pre_d  = ffprobe(trimmed_file).duration       # pre-VAD trimmed file
+  post_d = ffprobe(_vad_out).duration           # VAD output candidate
+  floor  = max(MIN_KEEP_S, pre_d * MIN_KEEP_RATIO)
+  if post_d < floor:
+    DELETE _vad_out      # discard the over-trimmed VAD output
+    KEEP trimmed_file    # pre-VAD file stays in place — already frame-trimmed
+    log REJECTED
+  else:
+    DELETE trimmed_file  # original rename path
+    RENAME _vad_out → trimmed_file
+    log applied
+```
+
+**Knobs.**
+- `MIN_KEEP_S = 1.5` — absolute floor in seconds (~5 words of normal-pace speech). Any post-VAD output below this is treated as nuclear-cut regardless of source length. Tightening (e.g. 0.8s) would re-admit single-word fragment outputs; loosening (e.g. 2.5s) would reject genuine short hooks like "...energy drinks." that the matcher correctly preserved.
+- `MIN_KEEP_RATIO = 0.30` — minimum retention vs. pre-VAD source. A 7s source clip must produce ≥2.1s VAD output to be accepted; a 4s clip must produce ≥1.5s (the absolute floor dominates here). Tightening (0.15) would accept aggressive VAD on long pad clips; loosening (0.50) would reject normal silence-trim on Veo's long trailing pad.
+
+**What the fallback costs.** When VAD is rejected, the pre-VAD trimmed file is retained as-is. That file already has frame-trim applied (`trim_video` with `frames_to_cut_start` + `frames_to_cut_end`) so the clip's video is correctly bounded. What we LOSE on a rejected clip is the silence-tightening pass — Veo's TTS lead-in (typically 0.2-0.5s of breath before the line starts) and trailing pad (typically 0.5-1.5s of mouth-closing / breath after the line ends) stay in the clip. A 7s Veo clip with VAD rejected might keep ~6s of usable audio instead of the ~5s the matcher would have produced on a correct match. This is vastly preferable to dropping the line entirely (the pre-v706 failure mode).
+
+**Log markers.**
+- `[VideoProcessor/v706] ⚠ clip N VAD REJECTED: pre=X.XXXs post=Y.YYYs floor=Z.ZZZs (matcher likely missed words; keeping pre-VAD trimmed file)` — per rejected clip; expected to fire ~0 times on healthy runs, 1-2 times on Whisper-tiny mistranscribe runs.
+- `[VideoProcessor/v706] floor probe failed for clip N: <err> — accepting VAD output by default` — defensive path when ffprobe fails on either file. Defaults to accepting the VAD output (pre-v706 behavior) so the guard never harder-fails than the existing pipeline.
+- Healthy clips continue to log `[VideoProcessor/v691d] clip N → per-clip Whisper-VAD applied` after acceptance.
+
+**Migration.** Zero. v706 is a runtime safety net; no schema, no markdown, no parser changes. Existing exports running through the per-clip Whisper-VAD path are unaffected unless they would have triggered nuclear-cut on a specific clip — in which case the fallback retains audio integrity instead.
+
+**What v706 does NOT change.**
+- The matcher (`_match_whisper_to_dialogue`) and Whisper transcription pass are UNCHANGED. v706 inspects the OUTPUT and rejects only when sub-floor; it does not alter the matching algorithm itself.
+- `apply_vad` and `detect_speech_segments_whisper` signatures are UNCHANGED. v706 lives entirely in the calling `_trim_one` post-loop.
+- Memory profile is UNCHANGED. v706 adds two ffprobe calls per clip (each <50ms, negligible vs. Whisper-tiny per-clip transcribe of ~0.5-1.0s).
+- Pre-VAD file lifecycle is UNCHANGED on the accept path. Reject path adds one `_vad_out.unlink()`.
+
+**Verification (next export).** Look for `[VideoProcessor/v706]` lines in worker logs. Absence = no nuclear-cut on that run; presence = guard fired for documented clip with logged pre/post/floor values. Cross-check against the previously-reproducing job: if the same script is re-exported with v706 active, the previously-0.375s and 0.666s clips should land at their pre-VAD durations (typically 5-7s) and the corresponding script lines should be audible in the final export.
+
+**Touched (v706 ship commit).** `code/video_processor.py` (per-clip VAD floor guard, ~70 LOC inserted around line 4019; import-verified). `wiki/log.md` (v706 release entry). `code/template_reference.md` (this deep-dive). No skeleton change — v706 is an export-side runtime guard, not an authoring convention.

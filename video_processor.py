@@ -4017,17 +4017,64 @@ def export_final_video(
                                 prefix_word=prefix_word,
                                 whisper_model=_shared_whisper,  # v701y — reuse
                             )
+                            # v706 — Per-clip VAD floor guard. apply_vad has no
+                            # minimum-duration safety: if the Whisper-tiny matcher
+                            # returns 0-2 words (TTS lead-in, mispronunciation,
+                            # fuzzy-match collapse on rare words), the kept segment
+                            # is ~0.4-0.7s — a near-silent clip that drops most of
+                            # the line's audio from the final concat. Concrete
+                            # failure (export 20260511_213257_0bd174): clip 4
+                            # 0.375s, clip 7 0.666s out of ~7s source → 2 lines of
+                            # script lost. Fix: ffprobe pre-VAD + post-VAD; if
+                            # post < MAX(MIN_KEEP_S, pre * MIN_KEEP_RATIO), DROP
+                            # the VAD result and keep the pre-VAD trimmed file.
+                            # Pre-VAD file is already frame-trimmed (skip_start +
+                            # frames_to_cut_end applied) so fallback retains the
+                            # line; we only lose silence-tightening on that one
+                            # clip — vastly better than losing dialogue.
+                            MIN_KEEP_S = 1.5            # absolute floor (~5w of speech)
+                            MIN_KEEP_RATIO = 0.30       # ≥30% retention vs pre-VAD
+                            _vad_accepted = True
                             try:
-                                Path(trimmed_file).unlink()
-                            except Exception:
-                                pass
-                            _vad_out.rename(trimmed_file)
-                            print(
-                                f"[VideoProcessor/v691d] clip "
-                                f"{info.get('clip_index', slot_zero)} → "
-                                f"per-clip Whisper-VAD applied",
-                                flush=True,
-                            )
+                                _pre_d = float(get_duration(ffprobe_json(Path(trimmed_file))))
+                                _post_d = float(get_duration(ffprobe_json(_vad_out)))
+                                _floor = max(MIN_KEEP_S, _pre_d * MIN_KEEP_RATIO)
+                                if _post_d < _floor:
+                                    _vad_accepted = False
+                                    print(
+                                        f"[VideoProcessor/v706] ⚠ clip "
+                                        f"{info.get('clip_index', slot_zero)} VAD "
+                                        f"REJECTED: pre={_pre_d:.3f}s post={_post_d:.3f}s "
+                                        f"floor={_floor:.3f}s (matcher likely missed "
+                                        f"words; keeping pre-VAD trimmed file)",
+                                        flush=True,
+                                    )
+                            except Exception as _gd_err:
+                                print(
+                                    f"[VideoProcessor/v706] floor probe failed for "
+                                    f"clip {info.get('clip_index', slot_zero)}: "
+                                    f"{_gd_err} — accepting VAD output by default",
+                                    flush=True,
+                                )
+
+                            if _vad_accepted:
+                                try:
+                                    Path(trimmed_file).unlink()
+                                except Exception:
+                                    pass
+                                _vad_out.rename(trimmed_file)
+                                print(
+                                    f"[VideoProcessor/v691d] clip "
+                                    f"{info.get('clip_index', slot_zero)} → "
+                                    f"per-clip Whisper-VAD applied",
+                                    flush=True,
+                                )
+                            else:
+                                # Discard the VAD output, keep pre-VAD file in place.
+                                try:
+                                    _vad_out.unlink()
+                                except Exception:
+                                    pass
                             _mem_trim()  # v701x — return freed pages to OS between clips
                         except Exception as _vad_err:
                             print(
