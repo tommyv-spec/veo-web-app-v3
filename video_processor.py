@@ -187,6 +187,7 @@ def detect_speech_segments_whisper(
     clip_boundaries: List[Tuple[float, float]] = None,
     cut_prefix_audio: bool = False,  # v542
     prefix_word: str = "only",  # v542
+    whisper_model=None,  # v701y — caller-supplied model to skip 11x reload
 ) -> List[Tuple[float, float]]:
     """
     Detect speech segments using Whisper + dialogue-anchored matching.
@@ -218,16 +219,18 @@ def detect_speech_segments_whisper(
         
         try:
             from faster_whisper import WhisperModel
-            # v701x — switched "small" → "tiny" to keep Render under the 2GB
-            # ceiling. small = ~250MB resident + ~200MB inference buffers per
-            # call; for 11 clips on a v698A dual-output run that piles up
-            # faster than Python+CTranslate2 frees, → OOM-kill. tiny = ~50MB
-            # resident + ~60MB inference. With v701q initial_prompt biasing
-            # decoding toward the known script + the per-clip dialogue
-            # matcher being the actual filter (Whisper just needs to locate
-            # first + last script-word edges), tiny suffices. Accuracy on
-            # OTHER words is irrelevant — they're filler, cut anyway.
-            model = WhisperModel("tiny", device="cpu", compute_type="int8")
+            # v701x — tiny model (50MB) keeps Render under the 2GB ceiling.
+            # v701y — accept caller-supplied model so the v691d per-clip
+            # loop loads Whisper ONCE for all N clips instead of N times.
+            # Loading tiny costs ~0.5s + ~50MB resident on each call; for
+            # an 11-clip v698A run that's 5.5s wasted and 11x RSS churn
+            # that glibc won't fully reclaim even with malloc_trim. Caller
+            # owns the lifecycle when whisper_model is passed in.
+            _model_owned_here = whisper_model is None
+            if whisper_model is None:
+                model = WhisperModel("tiny", device="cpu", compute_type="int8")
+            else:
+                model = whisper_model
             
             # Map language name to Whisper ISO code
             _LANG_MAP = {
@@ -1091,8 +1094,10 @@ def detect_speech_segments_whisper(
             for i, (s, e) in enumerate(result):
                 print(f"[WhisperVAD]   segment {i+1}: {s:.3f}s → {e:.3f}s ({e-s:.3f}s)")
             
-            del model
-            import gc; gc.collect()
+            # v701y — only dispose if we created the model here.
+            if _model_owned_here:
+                del model
+                import gc; gc.collect()
             return result
             
         except ImportError:
@@ -2027,6 +2032,7 @@ def apply_vad(
     clip_boundaries: List[Tuple[float, float]] = None,
     cut_prefix_audio: bool = False,  # v542
     prefix_word: str = "only",  # v542
+    whisper_model=None,  # v701y — pre-loaded model from caller; skips 11x reload in per-clip loop
 ) -> dict:
     """
     Remove non-dialogue segments using Voice Activity Detection.
@@ -2073,6 +2079,7 @@ def apply_vad(
             clip_boundaries=clip_boundaries,
             cut_prefix_audio=cut_prefix_audio,  # v542
             prefix_word=prefix_word,  # v542
+            whisper_model=whisper_model,  # v701y — pass through
         )
     else:
         speech_segments = detect_speech_segments(
@@ -3853,12 +3860,10 @@ def export_final_video(
                         flush=True,
                     )
                     # v701x — malloc_trim(0) helper. After each per-clip
-                    # apply_vad, glibc holds onto freed pages (~150-300MB
-                    # of Whisper buffers + CTranslate2 state) instead of
+                    # apply_vad, glibc holds onto freed pages instead of
                     # returning them to the OS. Render's 2GB ceiling is
                     # measured against RSS, not Python's heap, so unless
-                    # we explicitly trim, peak RSS climbs across the
-                    # 11-clip loop until OOM-kill.
+                    # we explicitly trim, peak RSS climbs across the loop.
                     def _mem_trim():
                         try:
                             import gc as _gc
@@ -3868,6 +3873,35 @@ def export_final_video(
                             _libc.malloc_trim(0)
                         except Exception:
                             pass
+
+                    # v701y — Load Whisper ONCE for the whole per-clip loop.
+                    # Pre-v701y each iteration loaded + unloaded its own
+                    # WhisperModel; even with tiny that's 11x ~50MB resident
+                    # churn that glibc doesn't reliably reclaim → climbing
+                    # RSS → eventual OOM. Single-load = constant memory plus
+                    # ~5s saved on loader overhead. Passed down via the new
+                    # whisper_model= kwarg on apply_vad +
+                    # detect_speech_segments_whisper; receivers skip their
+                    # internal load + skip the `del model` cleanup when the
+                    # model is supplied from the outside (we own the
+                    # lifecycle out here).
+                    _shared_whisper = None
+                    try:
+                        from faster_whisper import WhisperModel as _WM
+                        _shared_whisper = _WM("tiny", device="cpu", compute_type="int8")
+                        print(
+                            f"[VideoProcessor/v701y] pre-loaded Whisper-tiny once for "
+                            f"{len(vad_targets)} clips (saves {len(vad_targets) - 1}× reload)",
+                            flush=True,
+                        )
+                    except Exception as _wm_err:
+                        print(
+                            f"[VideoProcessor/v701y] shared model preload failed: "
+                            f"{_wm_err} — falling back to per-clip load",
+                            flush=True,
+                        )
+                        _shared_whisper = None
+
                     for slot_zero, info, full_text in vad_targets:
                         trimmed_file = files_to_concat[slot_zero]
                         if trimmed_file is None or not Path(trimmed_file).exists():
@@ -3892,6 +3926,7 @@ def export_final_video(
                                 clip_boundaries=None,
                                 cut_prefix_audio=cut_prefix_audio,
                                 prefix_word=prefix_word,
+                                whisper_model=_shared_whisper,  # v701y — reuse
                             )
                             try:
                                 Path(trimmed_file).unlink()
@@ -3912,6 +3947,22 @@ def export_final_video(
                                 f"{_vad_err} — keeping un-VAD-trimmed clip",
                                 flush=True,
                             )
+
+                    # v701y — dispose the shared Whisper model after the
+                    # per-clip loop completes. malloc_trim returns the
+                    # ~50MB resident + buffers back to the OS in one go.
+                    if _shared_whisper is not None:
+                        try:
+                            del _shared_whisper
+                        except Exception:
+                            pass
+                        _shared_whisper = None
+                        _mem_trim()
+                        print(
+                            "[VideoProcessor/v701y] shared Whisper-tiny disposed; "
+                            "memory returned to OS",
+                            flush=True,
+                        )
         else:
             # Clips are pre-trimmed - just use them directly (FAST PATH)
             print(f"[VideoProcessor] Using pre-trimmed clips (fast concat)")
