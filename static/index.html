@@ -7588,8 +7588,14 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 container.insertAdjacentHTML('beforebegin', `<div id="clipsToolbar" style="display:flex;justify-content:flex-end;margin-bottom:8px;">${retryHtml + expandHtml}</div>`);
             }
             updateBanner(id,clips);
-            // Load existing exports after clips are rendered (only on first load)
-            if(!container.dataset.exportsLoaded){container.dataset.exportsLoaded='true';loadExistingExports(id);}
+            // Load existing exports after clips are rendered (only on first load).
+            // v701l — explicit string compare. Cache-render path stamps
+            // data-exports-loaded="false" (the STRING "false") which the
+            // legacy `!container.dataset.exportsLoaded` check treated as
+            // truthy → skipped the export load → hard-refresh wiped the
+            // exports list since cache-render runs before main-fetch and
+            // sets the false-flag, so neither path ever called loadExistingExports.
+            if(container.dataset.exportsLoaded !== 'true'){container.dataset.exportsLoaded='true';loadExistingExports(id);}
             }catch(e){}
         }
         // v701j — collapse multiple CONTENT_POLICY_VIOLATION clips
