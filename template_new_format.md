@@ -739,12 +739,14 @@
 
 Persona is always uploaded as image 1 (Flow slot 0). Product, when present in the video as a branded item with a visible label, is uploaded as image 2 (Flow slot 1). The "image 1 / image 2" labels here refer to the platform's positional slots — body text references the persona and product BY NAME, not by slot number. Everything else (mannequin, kettle, generic bottles, etc.) is described inline in the image prompts and is NOT listed here.
 
-| Name (used in prompts) | Type | Description | Source |
-|---|---|---|---|
-| `the main character` | character | Persona — no description needed (passed externally) | External persona upload — Flow slot 0 (Image 1) |
-| `[patient name, e.g. Donna]` | patient | (v681) Recurring named non-speaker — testimonial subject who appears across BEFORE / AFTER / multiple scenes. NO description here; identity comes from the upload (same v602 rule as persona). | External patient upload — Flow slot N |
-| `[extra label, e.g. husband]` | extra | (v681) One-shot bystander — appears in exactly ONE scene, no upload, identity carried in prose per v669 (race + age + build + clothing). Reference column = `—`. | (no upload) |
-| `the [product name]` | product | [Brief product description — brand, label color, container shape. Used as fallback if upload fails.] | External product upload — Flow slot 1 (Image 2) |
+| Name (used in prompts) | Type | Description | Source | Attached to |
+|---|---|---|---|---|
+| `the main character` | character | Persona — no description needed (passed externally) | External persona upload — Flow slot 0 (Image 1) | `image_1, image_2, ..., image_N` (typically every image) |
+| `[patient name, e.g. Donna]` | patient | (v681) Recurring named non-speaker — testimonial subject who appears across BEFORE / AFTER / multiple scenes. NO description here; identity comes from the upload (same v602 rule as persona). | External patient upload — Flow slot N | `image_K, image_L, ...` (only images where patient appears) |
+| `[extra label, e.g. husband]` | extra | (v681) One-shot bystander — appears in exactly ONE scene, no upload, identity carried in prose per v669 (race + age + build + clothing). Reference column = `—`. | (no upload) | `image_K` (single image — extras are one-shot) |
+| `the [product name]` | product | [Brief product description — brand, label color, container shape. Used as fallback if upload fails.] | External product upload — Flow slot 1 (Image 2) | `image_K, image_N` (typically only product-reveal scene + CTA hero-shot per v599 matrix) |
+
+**The `Attached to` column declares per-image binding scope (v707).** Platform reads via `_parse_ingredients_block` (v618a header-aware, recognizes column via substring match `attached`), populates per-ingredient `attached_to: list[int]`, binding loop resolves `parent_edges[i] = ingredients_with_image_i_in_attached_to`. Value format: comma-separated `image_N` tokens (lowercase `image_` prefix + integer); range form `image_K-image_N` accepted. Missing column falls back to v619 auto-infer (N1-N5 normalization) for backward compatibility with pre-v707 artifacts.
 
 **Note on cast types (v681):**
 - `character` rows speak. Only `character` rows can appear as `- **speaker:**` values. Single character per video in v681 (multi-speaker dialogue = v682).

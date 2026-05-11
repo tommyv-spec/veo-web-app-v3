@@ -3368,7 +3368,11 @@ The frame_anchor field forces the decoder to pin the image to a real moment, not
 
 #### `visual_delta` — only-change description for chained images
 
-For images where `reference_image:` is set (state-evolution chain or same-setup-bottle-enters-frame chain), the body prose should NOT rewrite the entire scene. Instead, declare a `visual_delta:` field that names ONLY the change from the parent image, then the body prose reduces to:
+For images where `reference_image:` is set (state-evolution chain or same-setup-bottle-enters-frame chain), the body prose should NOT rewrite the entire scene. Instead, declare a `visual_delta:` field that names ONLY the change from the parent image.
+
+**DEPRECATED 2026-05-12 per v707**: the body-line reduction form below is no longer emitted. Chained Image bodies use ONLY the 3-line binding stack (v609 persona + v609 product + v589.1 chain semantic phrase) followed by scene-specific delta in plain prose. The frontmatter `visual_delta:` field carries the structured delta. v604's `frame_anchor:` + `visual_delta:` fields are PRESERVED — only the literal body line is removed. See §"v707 — Ingredients `Attached to` column + deprecate v604 verbose body-line form" for full rationale (v589.1 contradiction + v703 redundancy + frontmatter duplication + verified Banana 2 drift).
+
+**Historical form (DO NOT EMIT in new artifacts):**
 
 > Use image_K as the exact base frame. Keep everything from image_K identical. Only change: [visual_delta value].
 
@@ -6213,6 +6217,106 @@ Files known to need re-audit: `videos/nuri-clinic-energy-drinks-saffron-pour-exp
 **Why v704 vs leaving transitions implicit.** Pre-v704 the Flow UI defaulted to `CONTINUE` for clip 2+ within the same scene whenever the prior clip's action_arc was non-terminal. `CONTINUE` produced visible drift in 2 of 4 recent renders. v704 forces the author to declare transitions through clean scene-break structure + action_arc start verbs, which the parser deterministically maps to `BLEND` / `FRESH`. No `CONTINUE` mode = no drift class.
 
 **Why 20-word target vs leaving line length to author discretion.** Pre-v704 the 12-28 IQR was implicit corpus knowledge — under attention pressure, lifts drifted to either melodramatic 30+ word lines (corporate explainer voice) or rushed 6-8 word lines (caption-style). Both performed worse than the corpus median. v704 makes the target explicit and provides the mechanical word-count grep at pre-output time, removing the discretion.
+
+---
+
+### v707 — Ingredients `Attached to` column + deprecate v604 verbose body-line form
+
+**Scope.** Both decode-side and generate-side authoring (`raw/decoded_*.md` + `videos/*.md`). Single rule covering two paired changes: (a) Ingredients table gains an `Attached to` column declaring per-image binding scope; (b) v604's verbose body-line form `Use image_K as the exact base frame. Keep everything from image_K identical. Only change: ...` is DEPRECATED — chained Image bodies use the v589.1 semantic chain line ONLY, with the delta carried by the frontmatter `visual_delta:` field.
+
+**Surfaced** 2026-05-12 from operator observation of re-decoded JUPI gut-health video: decoder dutifully emitted 3-line binding stack (v609 persona line + v589.1 chain line + v604 verbose body line). The v604 line contradicted v589.1's lowercase-image-in-body-prose ban AND duplicated information already declared in the frontmatter `visual_delta:` field AND overlapped with v703's worker-injected manifest. Three rules pulling in different directions = decoder + Banana 2 receive contradictory signals.
+
+**Part A — Ingredients `Attached to` column.**
+
+The Ingredients table gains a fifth column declaring per-image binding scope:
+
+```markdown
+| Name | Type | Description | Source | Attached to |
+|---|---|---|---|---|
+| the main character | character | persona identity carried by upload — face, hair, build, wardrobe, all identity attributes bound to the reference image per v553.1 | upload — wiki/personas/refs/nuri.png | image_1, image_2, image_3, image_4 |
+| the korella saffron bottle | product | navy-and-cream supplement bottle with brand wordmark on a clean label panel, ~5 inches tall, ~2 inches diameter, dark cap | upload — Korella Saffron product reference | image_4 |
+```
+
+The `Attached to` column is the AUTHORITATIVE per-image binding scope contract. Platform reads this column to determine which uploaded references attach as parents to each image generation — the Korella Saffron bottle attaches ONLY at image_4, not at images 1/2/3. Persona references typically attach to every image; product references usually attach only at product-reveal scenes per v599 matrix; chain references resolve via `reference_image:` field on each Image block.
+
+**Value format**: comma-separated list of `image_N` tokens (lowercase `image_` prefix + integer). Examples:
+- `image_1, image_2, image_3, image_4, image_5, image_6, image_7` — full-video binding (typical for persona)
+- `image_4` — single-image binding (typical for product reveal)
+- `image_4, image_7` — sparse binding (product visible in two scenes)
+- `image_1-image_3` — RANGE FORM ALLOWED (parser tolerates `image_K-image_N` notation)
+
+**What the platform does with it**: at import time, `image_platform.py:_parse_ingredients_block` (v618a header-aware parser) reads the `Attached to` column, expands ranges, and populates a per-ingredient `attached_to: list[int]` field on the Ingredient row. The platform's image-binding loop then resolves `parent_edges[i] = ingredients_with_image_i_in_attached_to` for each Image i.
+
+**Pre-v707 behavior** (still works for backward compatibility): if `Attached to` column is missing, platform falls back to v619 auto-infer (N1-N5 normalization rules) — character ingredient binds to every image, product ingredient binds where prompt body mentions product. v707 makes the binding scope EXPLICIT instead of inferred.
+
+**Part B — Deprecate v604 verbose body-line form.**
+
+v604's body-line form for chained images:
+
+```
+Use image_K as the exact base frame. Keep everything from image_K identical. Only change: [visual_delta value].
+```
+
+is DEPRECATED. Chained Image bodies now use ONLY:
+- Line 1: persona binding (v609 concise) — `Use the uploaded character reference image for the main character.`
+- Line 2: product binding if present (v609 concise) — `Use the uploaded product reference image for the korella saffron bottle.`
+- Line 3: chain semantic phrase (v589.1) — `Use the prior-scene reference image to preserve the [setting], [lighting], [anchor props], and continuity from the previous scene.`
+- Body: scene-specific delta description in plain prose. The delta is what's NEW/DIFFERENT compared to the prior scene.
+- Frontmatter `visual_delta:` carries the structured one-line delta declaration (UNCHANGED from v604).
+
+**Why deprecate v604's body line.**
+
+1. **v589.1 contradiction.** v589.1 explicitly bans lowercase `image K` references in body prose because "the platform's case-sensitive substitution doesn't rewrite lowercase, so Banana 2 sees a phantom reference." v604's body line writes `Use image_K as the exact base frame` — lowercase `image_K` in body prose. Two rules pulling opposite directions.
+
+2. **v703 redundancy.** v703 worker-injected manifest handles ALL positional `Image N` binding at submit time via filename → display-name mapping from `input_paths` order. The body line's `image_K` reference duplicates information the worker already owns authoritatively.
+
+3. **Frontmatter `visual_delta:` redundancy.** The structured field declares the delta. The body line restates it in prose. Duplicate declaration = drift risk when one is edited and the other isn't.
+
+4. **Verified Banana 2 confusion.** JUPI re-decode 2026-05-12: artifact had v589.1 semantic chain line + v604 verbose body line + frontmatter visual_delta. Banana 2 received three overlapping signals about what to preserve and what to change. Drift increased relative to single-signal artifacts.
+
+**What's NOT deprecated.**
+
+- `reference_image: image_K` frontmatter field — KEPT (declares chain).
+- `visual_delta: <one-line description>` frontmatter field — KEPT (structured delta).
+- v589.1 chain semantic line — KEPT (preserves setting / lighting / composition anchors).
+- Negative-constraint block at end of body — KEPT (anti-drift discipline).
+- Decode-side v604 fields `frame_anchor:` + `visual_delta:` — KEPT (frame-locked decode anchors are still required).
+
+Only the literal body-prose line `Use image_K as the exact base frame. Keep everything from image_K identical. Only change: ...` is removed.
+
+**Implementation surface.**
+
+- `code/template_reference.md` — this section (v707 deep-dive). v604 section updated to mark verbose body-line form as DEPRECATED with a forward reference to v707.
+- `code/template_new_format.md` — skeleton updated: Ingredients table gains `Attached to` column header; chained Image block example shows the 3-line binding stack (NOT 4-line) with delta as plain-prose body description after the chain line.
+- `code/image_platform.py` — `_parse_ingredients_block` (v618a) already accepts arbitrary trailing columns (header-aware). `Attached to` column gets recognized via header substring match `attached`. Parser populates per-ingredient `attached_to: list[int]` field. Backward-compat fallback to v619 auto-infer if column missing.
+- `wiki/meta/decode-grammar-checklist.md` — v707 operator workflow section added.
+- `wiki/meta/generate-video-checklist.md` — v707 operator workflow section added.
+- `wiki/patterns/conventions.md` — v707 index row.
+- `CLAUDE.md` — v707 quickref bullet.
+
+**Migration.**
+
+- New decoded artifacts and lifts: emit Ingredients table with `Attached to` column. Chained Image bodies use 3-line stack only (no v604 verbose body line).
+- Existing `raw/decoded_*.md` and `videos/*.md` predating v707: NO required migration. Platform's v619 auto-infer fallback handles missing `Attached to` column. v703 worker-manifest tolerates pre-existing verbose body lines (the lines persist but worker's manifest header is authoritative). On next-touch, audit and strip the v604 verbose body line + add `Attached to` column.
+
+**Validation.**
+
+Pre-output grep gates:
+
+```bash
+# v707 Part A — Ingredients table has Attached to column (decoded artifacts + lifts)
+grep -E "^\| Name \| Type \| Description \| Source \| Attached to \|" raw/decoded_*.md videos/*.md
+
+# v707 Part B — no v604 verbose body line in new files
+grep -nE "Use image_[0-9]+ as the (exact )?base frame\.\s*Keep" raw/decoded_*.md videos/*.md
+# → ANY hit on a newly-authored file = NOT v707-compliant, strip the line
+```
+
+For existing files, the second grep counts pre-v707 artifacts that need eventual cleanup on next-touch. Not a hard gate; migration is opportunistic.
+
+**Why v707 vs amending v604.**
+
+v604 introduced two valuable artifacts: `frame_anchor:` (frame-locked decode) and `visual_delta:` (structured delta declaration). Those stay. v604's body-line reduction was correct AT THE TIME (pre-v589.1 lowercase ban, pre-v703 worker manifest, pre-frontmatter-discipline maturity). Three subsequent rules made it redundant. v707 cleanly deprecates the body-line form while preserving v604's structural contributions, rather than rewriting v604 wholesale and breaking cross-references.
 
 ### v706 — Per-clip Whisper-VAD floor guard (export-side safety net)
 
