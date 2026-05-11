@@ -10463,7 +10463,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     const _statusEl = document.getElementById('exportStatusText');
                     if (_statusEl) _statusEl.textContent = '⏳ Server still processing — waiting for the export to land in R2...';
                     const _pollStart = Date.now();
-                    const _pollMaxMs = exportSettings.master_audio_filename ? 600000 : 480000;  // 10min master-audio, 8min default
+                    const _pollMaxMs = exportSettings.master_audio_filename ? 900000 : 900000;  // v701x — 15min cap (was 8min default); a v698A dual-output run with 11 clips can run 10-12min on Render's cpu tier
                     let _foundFilename = null;
                     while (Date.now() - _pollStart < _pollMaxMs) {
                         await new Promise(r => setTimeout(r, 3000));

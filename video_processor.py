@@ -218,7 +218,16 @@ def detect_speech_segments_whisper(
         
         try:
             from faster_whisper import WhisperModel
-            model = WhisperModel("small", device="cpu", compute_type="int8")
+            # v701x — switched "small" → "tiny" to keep Render under the 2GB
+            # ceiling. small = ~250MB resident + ~200MB inference buffers per
+            # call; for 11 clips on a v698A dual-output run that piles up
+            # faster than Python+CTranslate2 frees, → OOM-kill. tiny = ~50MB
+            # resident + ~60MB inference. With v701q initial_prompt biasing
+            # decoding toward the known script + the per-clip dialogue
+            # matcher being the actual filter (Whisper just needs to locate
+            # first + last script-word edges), tiny suffices. Accuracy on
+            # OTHER words is irrelevant — they're filler, cut anyway.
+            model = WhisperModel("tiny", device="cpu", compute_type="int8")
             
             # Map language name to Whisper ISO code
             _LANG_MAP = {
@@ -266,7 +275,7 @@ def detect_speech_segments_whisper(
                 audio_path,
                 language=whisper_lang,
                 word_timestamps=True,
-                beam_size=5,                            # Best decoding accuracy
+                beam_size=1,                            # v701x — was 5; greedy decode is faster + less memory; the matcher does the actual word-aligning
                 vad_filter=True,                        # Pre-filter with Silero VAD
                 condition_on_previous_text=False,       # Prevent cascading hallucinations
                 initial_prompt=_initial_prompt,         # v701q — bias toward script
@@ -3843,6 +3852,22 @@ def export_final_video(
                         f"{len(vad_targets)} clip(s) (single model load)",
                         flush=True,
                     )
+                    # v701x — malloc_trim(0) helper. After each per-clip
+                    # apply_vad, glibc holds onto freed pages (~150-300MB
+                    # of Whisper buffers + CTranslate2 state) instead of
+                    # returning them to the OS. Render's 2GB ceiling is
+                    # measured against RSS, not Python's heap, so unless
+                    # we explicitly trim, peak RSS climbs across the
+                    # 11-clip loop until OOM-kill.
+                    def _mem_trim():
+                        try:
+                            import gc as _gc
+                            _gc.collect()
+                            import ctypes as _ct
+                            _libc = _ct.CDLL("libc.so.6")
+                            _libc.malloc_trim(0)
+                        except Exception:
+                            pass
                     for slot_zero, info, full_text in vad_targets:
                         trimmed_file = files_to_concat[slot_zero]
                         if trimmed_file is None or not Path(trimmed_file).exists():
@@ -3879,6 +3904,7 @@ def export_final_video(
                                 f"per-clip Whisper-VAD applied",
                                 flush=True,
                             )
+                            _mem_trim()  # v701x — return freed pages to OS between clips
                         except Exception as _vad_err:
                             print(
                                 f"[VideoProcessor/v691d] per-clip VAD failed for "
