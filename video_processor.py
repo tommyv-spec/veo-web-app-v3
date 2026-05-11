@@ -2909,13 +2909,19 @@ def transcribe_master_audio(audio_path: Path, initial_prompt: str = None) -> lis
             word_timestamps=True,
             initial_prompt=initial_prompt,
             beam_size=5,                            # v701zb — small benefits from beam>1
-            vad_filter=True,                        # v701zb — Silero pre-filter; skip silent regions
-            condition_on_previous_text=False,       # v701zb — KILL HALLUCINATION; default True
-                                                    # cascaded "please subscribe to my channel" from
-                                                    # training data, transcribed 61 words for a 55s
-                                                    # audio that has 127 dialogue words
-            # v701s — keep faster-whisper's default temperature ladder
-            # [0.0,0.2,0.4,0.6,0.8,1.0] for fallback decoding.
+            condition_on_previous_text=False,       # v701zb — kill hallucination cascade
+            # v701zc — DROP vad_filter=True. On a 55s assembled-concat
+            # master Silero wrongly classifies portions of the HOOK +
+            # opening voiceover lines as non-speech and skips them →
+            # Whisper transcribes 64 words for a 127-word script →
+            # find_line_in_master fails for the dropped lines →
+            # fallback targets walk past master end. Speaker concat is
+            # already speech-only (per-clip Whisper-VAD trimmed pads),
+            # so a Silero pre-filter is redundant work that introduces
+            # this very bug. Per-clip path keeps vad_filter=True because
+            # individual ~8s clips contain Veo's prompt-pad silences
+            # Silero handles correctly at that scale.
+            # v701s — keep faster-whisper's default temperature ladder.
         )
         
         words = []
@@ -3159,11 +3165,21 @@ def calculate_clip_targets(master_words: list, dialogue_lines: list, master_dura
         b = find_line_in_master(master_words, master_text, line, search_from_word=_from)
 
         if b is None:
+            # v701zc — clamp fallback to master_duration. Previously each
+            # unmatched line added 5s to prev_end, walking the cursor past
+            # master end on multiple consecutive failures. Result: target
+            # spans extended to 70s on a 55s master, then process_clip_for_alignment
+            # speed-pad-trimmed clips into a nonsense timeline. Clamp to
+            # the available remaining window; if no room remains, allocate
+            # a 0.5s slot at master_end (clip will be cut anyway).
             prev_end = targets[-1]["end"] if targets else 0.0
+            available = max(0.0, master_duration - prev_end)
+            fallback_dur = min(5.0, available) if available > 0.5 else 0.5
+            fallback_end = min(prev_end + fallback_dur, master_duration)
             targets.append({
                 "start": prev_end,
-                "end": prev_end + 5.0,
-                "target_duration": 5.0,
+                "end": fallback_end,
+                "target_duration": fallback_end - prev_end,
                 "confidence": 0.0,
             })
             # Don't advance cursor on a fallback — next line still gets
