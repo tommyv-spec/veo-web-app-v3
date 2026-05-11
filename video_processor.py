@@ -232,8 +232,36 @@ def detect_speech_segments_whisper(
                 "romanian": "ro", "hungarian": "hu", "ukrainian": "uk",
             }
             whisper_lang = _LANG_MAP.get(language.lower(), None)  # None = auto-detect
+
+            # v701q — initial_prompt biases the Whisper decoder toward
+            # words it expects to hear. Without it, Whisper mistranscribes
+            # rare/compound terms in Veo TTS output: "self-rising" → "all-
+            # fries", "crispy-cream" → "crisp", "pull apart" → "pull-
+            # apartles". Misheard script words land in the matcher's
+            # UNMATCHED set, then their audio gets cut as filler →
+            # user-visible "missing syllables" inside the line.
+            # Passing the joined script as initial_prompt is the standard
+            # whisper.cpp / faster-whisper fix: the decoder weighs those
+            # tokens higher during beam search. faster-whisper truncates
+            # the prompt at 224 tokens internally so we don't need to clip;
+            # typical line corpus fits well under.
+            _initial_prompt = None
+            if dialogue_texts:
+                _joined = " ".join(
+                    (t or "").strip() for t in dialogue_texts if (t or "").strip()
+                )
+                _joined = _joined.strip()
+                if _joined:
+                    _initial_prompt = _joined
+                    print(
+                        f"[WhisperVAD] v701q initial_prompt: "
+                        f"{len(_joined.split())} script words "
+                        f"(first 80 chars: {_joined[:80]!r})",
+                        flush=True,
+                    )
+
             print(f"[WhisperVAD] Model: small | Language: {language} → whisper={whisper_lang or 'auto'}", flush=True)
-            
+
             segments, info_w = model.transcribe(
                 audio_path,
                 language=whisper_lang,
@@ -241,6 +269,8 @@ def detect_speech_segments_whisper(
                 beam_size=5,                            # Best decoding accuracy
                 vad_filter=True,                        # Pre-filter with Silero VAD
                 condition_on_previous_text=False,       # Prevent cascading hallucinations
+                initial_prompt=_initial_prompt,         # v701q — bias toward script
+                temperature=0.0,                        # v701q — deterministic decode
             )
             
             # Collect all words with timestamps + probability
