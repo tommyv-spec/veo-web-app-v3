@@ -2831,10 +2831,15 @@ def concat_videos_with_transitions(
 # Master Audio Alignment (for assemble/import jobs)
 ##############################################################################
 
-def transcribe_master_audio(audio_path: Path) -> list:
+def transcribe_master_audio(audio_path: Path, initial_prompt: str = None) -> list:
     """
     Transcribe master audio with word-level timestamps using faster-whisper.
     Returns list of dicts: [{word, start, end}, ...]
+
+    v701r — optional initial_prompt biases the decoder toward expected
+    words. Same fix as v701q on the per-clip path: without it Whisper
+    mistranscribes Veo TTS compound terms ("self-rising" → "all-fries")
+    and the master-audio matcher can't align those script lines.
     """
     print(f"[MasterAlign] Transcribing master audio: {audio_path}")
     
@@ -2852,7 +2857,20 @@ def transcribe_master_audio(audio_path: Path) -> list:
     try:
         from faster_whisper import WhisperModel
         model = WhisperModel("base", device="cpu", compute_type="int8")
-        segments, info = model.transcribe(str(wav_path), language="en", word_timestamps=True)
+        if initial_prompt:
+            print(
+                f"[MasterAlign] v701r initial_prompt: "
+                f"{len(initial_prompt.split())} script words "
+                f"(first 80 chars: {initial_prompt[:80]!r})",
+                flush=True,
+            )
+        segments, info = model.transcribe(
+            str(wav_path),
+            language="en",
+            word_timestamps=True,
+            initial_prompt=initial_prompt,
+            temperature=0.0,
+        )
         
         words = []
         for segment in segments:
@@ -3319,8 +3337,12 @@ def export_with_master_audio(
             f"Each clip must have a corresponding dialogue line."
         )
     
-    # Step 1: Transcribe master audio
-    master_words = transcribe_master_audio(master_audio_path)
+    # Step 1: Transcribe master audio (v701r — bias decoder via initial_prompt
+    # built from the dialogue_lines so compound terms in Veo TTS survive).
+    _master_prompt = " ".join((l or "").strip() for l in dialogue_lines if (l or "").strip()).strip()
+    master_words = transcribe_master_audio(
+        master_audio_path, initial_prompt=_master_prompt or None
+    )
     if not master_words:
         raise RuntimeError("Master audio transcription produced no words")
     

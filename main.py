@@ -6572,51 +6572,37 @@ async def export_final_video(
                     flush=True,
                 )
 
-                # === Phase 4b-ii — BROLL PIPELINE ===
-                # Pre-process visual_pair clips: swap their audio with the
-                # paired audio_pair's audio track via speed-matched ffmpeg
-                # filter (swap_audio_with_speed_match in video_processor).
-                # Then run process_export a SECOND time over the broll
-                # clip_info to produce final_broll_*.mp4.
+                # === Phase 4b-ii — BROLL PIPELINE (v701r) ===
+                # Master-audio-alignment mode. The finished speaker output's
+                # audio track IS the broll master timeline. Each broll visual
+                # (HOOK + visual_pair + CTA) is placed at the timestamp where
+                # ITS dialogue line is spoken in that master audio. Gaps with
+                # no paired clip render as BLACK frames. audio_pair clips
+                # (face-anchor visuals) are dropped — they were never meant to
+                # appear in broll. text_card scenes are dropped (no dialogue
+                # line to align against; their gap fills with black).
                 #
-                # Build the broll list:
-                #   - 'single' clips (HOOK / CTA): keep verbatim (the source's
-                #     on-camera bookends)
-                #   - 'visual_pair' clips: swap audio with paired audio_pair's
-                #     mp4 audio (raw, no Whisper-VAD on broll side — the
-                #     audio_pair's full clip duration ≈ spoken duration since
-                #     Veo lip-syncs the line over the clip's length)
-                #   - 'audio_pair' clips: SKIP (their visual is discarded;
-                #     audio is consumed by the visual_pair swap)
-                #   - 'text_card' / scene_type=text_card: keep (drawtext
-                #     transitions appear in both outputs per source)
+                # Replaces the v701o per-clip swap+concat pipeline which (a)
+                # left audio_pair lip-sync visuals visible in broll, (b) did
+                # not handle gaps, and (c) speed-matched each clip independently
+                # without honoring the master speaker timing.
+                #
+                # Reuses video_processor.export_with_master_audio (already
+                # wired for assemble-jobs-with-uploaded-master flow). Master
+                # = audio extracted from the speaker output (which already
+                # passed VAD + Whisper alignment + v701q script bias).
                 try:
-                    from video_processor import swap_audio_with_speed_match
+                    from video_processor import export_with_master_audio
                     import tempfile as _tmp
 
-                    # Map clip_db_id → audio_pair clip_info entry for fast lookup
-                    audio_pair_by_id = {
-                        c.get("_clip_db_id"): c
-                        for c in clip_info
-                        if (c.get("clip_role") or "").lower() == "audio_pair"
-                    }
-
-                    broll_temp_dir = Path(_tmp.mkdtemp(prefix="v698a_broll_"))
-                    broll_clip_info: List[Dict[str, Any]] = []
-                    swap_failures = 0
-
-                    # v701o — Re-download missing single-clip sources. The
-                    # speaker pipeline (process_export at
-                    # video_processor.py:3647-3652) deletes each source
-                    # clip from /app/data/outputs/<job>/ immediately after
-                    # trimming, to free disk. Visual_pair sources are
-                    # untouched (speaker pipeline filtered them out). But
-                    # 'single' clips (HOOK + CTA) and text_card placeholders
-                    # were processed and their source files are now gone.
-                    # When broll's process_export runs, trim_video raises
-                    # "Source file does not exist: clip_<n>_1.1.mp4" and the
-                    # entire broll pipeline crashes inside the outer
-                    # try/except. Rehydrate from R2 before swap/process.
+                    # v701o — Rehydrate missing source files. The speaker
+                    # pipeline (process_export at video_processor.py:3647-3652)
+                    # deletes each clip from /app/data/outputs/<job>/ after
+                    # trimming. Singles + audio_pair sources are gone post-
+                    # speaker. Visual_pair sources are untouched (speaker
+                    # filtered them out). master-audio mode reads visual
+                    # sources for its trim+speed-adjust pass; rehydrate
+                    # everything broll needs.
                     def _rehydrate_path(c):
                         p = Path(c.get("path") or "")
                         if not p or p.exists():
@@ -6641,114 +6627,102 @@ async def export_final_video(
                                 flush=True,
                             )
 
+                    # Build broll clip list:
+                    #   - single (HOOK / CTA)   → keep, dialogue = clip.dialogue_text
+                    #   - visual_pair           → keep, dialogue = clip.voiceover_line
+                    #   - audio_pair            → SKIP (face-anchor visual)
+                    #   - text_card             → SKIP (no dialogue to align; gap → black)
+                    broll_clip_info: List[Dict[str, Any]] = []
+                    broll_dialogue_lines: List[str] = []
                     for c in clip_info:
                         role = (c.get("clip_role") or "single").lower()
+                        scene_type = (c.get("scene_type") or "").lower()
                         if role == "audio_pair":
-                            continue  # visual discarded for broll
-                        if role != "visual_pair":
-                            # 'single' clip (HOOK / CTA) or text_card → keep
-                            _rehydrate_path(c)
-                            broll_clip_info.append(dict(c))
                             continue
-
-                        # visual_pair → find paired audio_pair, apply swap
-                        paired_id = c.get("paired_clip_id")
-                        ap_entry = audio_pair_by_id.get(paired_id)
-                        if ap_entry is None:
-                            print(
-                                f"[Export/v698A/broll] visual_pair clip {c.get('clip_index')} "
-                                f"missing audio_pair (paired_clip_id={paired_id}); "
-                                f"keeping visual silent",
-                                flush=True,
-                            )
-                            broll_clip_info.append(dict(c))
+                        if scene_type == "text_card":
                             continue
-
-                        # v701o — defensive rehydrate: even though speaker
-                        # pipeline filters visual_pair out, the audio_pair
-                        # sibling's source WAS in the speaker pass and got
-                        # deleted by process_export's per-clip cleanup. Swap
-                        # reads audio_path from ap_entry; rehydrate both.
+                        if role == "visual_pair":
+                            line = (c.get("voiceover_line") or "").strip()
+                            if not line:
+                                print(
+                                    f"[Export/v698A/broll] visual_pair clip "
+                                    f"{c.get('clip_index')} missing voiceover_line; "
+                                    f"skipping (would orphan in master timeline)",
+                                    flush=True,
+                                )
+                                continue
+                        else:
+                            line = (c.get("dialogue_text") or "").strip()
+                            if not line:
+                                print(
+                                    f"[Export/v698A/broll] single clip "
+                                    f"{c.get('clip_index')} missing dialogue_text; "
+                                    f"skipping",
+                                    flush=True,
+                                )
+                                continue
                         _rehydrate_path(c)
-                        _rehydrate_path(ap_entry)
-                        swapped_path = broll_temp_dir / f"swapped_{c['clip_index']:04d}.mp4"
-                        try:
-                            speed_applied, out_dur, mode_label = await asyncio.to_thread(
-                                swap_audio_with_speed_match,
-                                visual_path=Path(c["path"]),
-                                audio_path=Path(ap_entry["path"]),
-                                output_path=swapped_path,
-                                speed_min=1.0,
-                                speed_max=2.0,
-                            )
-                            print(
-                                f"[Export/v698A/broll] swapped clip {c.get('clip_index')}: "
-                                f"speed={speed_applied:.3f} mode={mode_label} "
-                                f"out_dur={out_dur:.3f}s",
-                                flush=True,
-                            )
-                            broll_c = dict(c)
-                            broll_c["path"] = swapped_path
-                            # The swap output duration is now authoritative for
-                            # this clip — set target_duration_s to lock it and
-                            # mark cut_mode='voiceover_pair' so the v691d
-                            # serial Whisper-VAD post-loop SKIPS this clip
-                            # (audio is already trimmed via the swap).
-                            broll_c["target_duration_s"] = out_dur
-                            broll_c["cut_mode"] = "voiceover_pair"
-                            broll_c["dialogue_text"] = ""  # already in audio bytes
-                            broll_clip_info.append(broll_c)
-                        except Exception as _swap_err:
-                            print(
-                                f"[Export/v698A/broll] swap FAILED for clip "
-                                f"{c.get('clip_index')}: {_swap_err}",
-                                flush=True,
-                            )
-                            swap_failures += 1
-                            # Fall back to silent visual
-                            broll_clip_info.append(dict(c))
+                        broll_clip_info.append(dict(c))
+                        broll_dialogue_lines.append(line)
+
+                    # Extract master audio from the speaker output. The speaker
+                    # MP4 just landed at output_path with VAD-trimmed audio +
+                    # correct concat timing. ffmpeg -vn -acodec libmp3lame to
+                    # mp3 (smaller than wav, sufficient for Whisper).
+                    broll_temp_dir = Path(_tmp.mkdtemp(prefix="v698a_broll_"))
+                    speaker_master_audio = broll_temp_dir / "speaker_master.mp3"
+                    import subprocess as _sp
+                    _audio_cmd = [
+                        "ffmpeg", "-y", "-i", str(output_path),
+                        "-vn", "-acodec", "libmp3lame", "-q:a", "2",
+                        str(speaker_master_audio),
+                    ]
+                    _audio_res = await asyncio.to_thread(
+                        _sp.run, _audio_cmd, capture_output=True, text=True,
+                    )
+                    if _audio_res.returncode != 0 or not speaker_master_audio.exists():
+                        raise RuntimeError(
+                            f"speaker audio extraction failed: rc="
+                            f"{_audio_res.returncode} stderr={_audio_res.stderr[:300]}"
+                        )
+                    print(
+                        f"[Export/v698A/broll] extracted speaker master audio: "
+                        f"{speaker_master_audio.name} "
+                        f"({speaker_master_audio.stat().st_size // 1024}KB)",
+                        flush=True,
+                    )
 
                     # Generate broll output filename
                     broll_filename = output_filename.replace(
                         "final_export_", "final_broll_"
                     )
                     if broll_filename == output_filename:
-                        # Fallback if naming pattern differs
                         broll_filename = f"final_broll_{output_filename}"
                     broll_output_path = output_dir / broll_filename
 
                     print(
-                        f"[Export/v698A/broll] running broll pipeline: "
-                        f"{len(broll_clip_info)} clips → {broll_filename}",
+                        f"[Export/v698A/broll] master-audio alignment: "
+                        f"{len(broll_clip_info)} visuals against speaker master → "
+                        f"{broll_filename}",
                         flush=True,
                     )
 
                     broll_stats = await asyncio.to_thread(
-                        process_export,
+                        export_with_master_audio,
                         clip_info=broll_clip_info,
+                        dialogue_lines=broll_dialogue_lines,
+                        master_audio_path=speaker_master_audio,
                         output_path=broll_output_path,
-                        frames_to_cut_start=0,  # already trimmed via swap
+                        frames_to_cut_start=0,
                         frames_to_cut_end=0,
-                        remove_silence=False,  # broll audio already VAD-clean via swap
-                        silence_mode=settings.silence_mode,
-                        vad_threshold=settings.silence_threshold,
-                        silence_trigger=settings.silence_trigger,
-                        silence_keep=settings.silence_keep,
                         transition=settings.transition,
                         transition_duration=settings.transition_duration,
-                        dialogue_texts=[
-                            c.get("dialogue_text", "") or "" for c in broll_clip_info
-                        ],
-                        language=(
-                            json.loads(job.config_json).get("language", "English")
-                            if job.config_json else "English"
-                        ),
-                        cut_prefix_audio=False,
-                        prefix_word=_prefix_word,
+                        max_clip_speed=2.0,         # visual_pair clips need ≤2x
+                        min_gap_for_black=1.0,      # gaps ≥1s → black; smaller → extend prev clip
                     )
                     stats["v698a_broll_filename"] = broll_filename
                     stats["v698a_broll_clips"] = len(broll_clip_info)
-                    stats["v698a_broll_swap_failures"] = swap_failures
+                    stats["v698a_broll_mode"] = "master_audio_alignment"
                     stats["v698a_broll_stats"] = broll_stats
                     print(
                         f"[Export/v698A/broll] broll pipeline complete. "
