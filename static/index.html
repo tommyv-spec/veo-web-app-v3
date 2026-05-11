@@ -8306,7 +8306,14 @@ Example: A realistic vertical video of a professional presenter speaking directl
         function approve(cid){
             const btn=event.target;
             const card=btn.closest('.clip-card');
-            const clipIdx = Array.from(document.querySelectorAll('.clip-card')).indexOf(card);
+            // v705: use server clip_index from data attribute, not DOM position.
+            // After a delete, DOM position drifts vs clip_index — the old
+            // querySelectorAll().indexOf(card) form poisoned the wrong cache slot
+            // and embedded the wrong clipIdx in the optimistic redo button onclick,
+            // causing "approve #15 → #16 flips approved" and "redo on A → spinner on B".
+            const _domPos = Array.from(document.querySelectorAll('.clip-card')).indexOf(card);
+            const clipIdx = parseInt(card.dataset.clipIndex, 10);
+            if (_domPos !== clipIdx) console.warn(`[approve v705] drift cid=${cid} dom-pos=${_domPos} clip_index=${clipIdx}`);
             const clipData = cachedClipsData?.find(c => c.clip_index === clipIdx);
             const _ar = clipData?.attempts_remaining||0;
 
@@ -8438,7 +8445,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             return updateReviewBannerOnly(jobId);
         }
         function confirmDelete(cid,clipIdx){if(confirm(`Delete Clip #${clipIdx+1}? This removes it permanently.`))deleteClip(cid,clipIdx);}
-        function deleteClip(cid,clipIdx){const card=document.querySelector(`.clip-card[data-clip-id="${cid}"]`)||document.querySelectorAll('.clip-card')[clipIdx];if(card){card.style.opacity='0.5';card.style.pointerEvents='none';}fetch(`${API}/clips/${cid}`,{method:'DELETE'}).then(r=>{if(!r.ok)throw new Error();return r.json();}).then(()=>{if(card)card.remove();clipStates={};clipVideoKeys={};clipUIKeys={};loadClips(selectedJobId);}).catch(e=>{if(card){card.style.opacity='1';card.style.pointerEvents='auto';}alert('Failed');});}
+        function deleteClip(cid,clipIdx){const card=document.querySelector(`.clip-card[data-clip-id="${cid}"]`)||document.querySelector(`.clip-card[data-clip-index="${clipIdx}"]`);if(card){card.style.opacity='0.5';card.style.pointerEvents='none';}fetch(`${API}/clips/${cid}`,{method:'DELETE'}).then(r=>{if(!r.ok)throw new Error();return r.json();}).then(()=>{if(card)card.remove();clipStates={};clipVideoKeys={};clipUIKeys={};loadClips(selectedJobId);}).catch(e=>{if(card){card.style.opacity='1';card.style.pointerEvents='auto';}alert('Failed');});}
         function cancelClip(cid,clipIdx){
             if(!confirm(`Skip Clip #${clipIdx+1}?`))return;
             const card=document.querySelector(`.clip-card[data-clip-id="${cid}"]`);
@@ -8921,7 +8928,21 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 loadClips(selectedJobId);
             });
         }
-        function markClipRegenerating(clipIdx){const container=document.querySelector('.clips-grid');if(container){const cards=container.querySelectorAll('.clip-card');if(cards[clipIdx]){cards[clipIdx].classList.remove('clip-rejected','clip-failed');cards[clipIdx].classList.add('clip-redo_queued');const badge=cards[clipIdx].querySelector('.badge');if(badge){badge.className='badge badge-redo_queued';badge.textContent='redo queued';}const video=cards[clipIdx].querySelector('.clip-video');if(video)video.innerHTML='<div class="generating-state"><div class="generating-spinner">🔄</div><div class="generating-text">Redo queued...</div></div>';}}}
+        function markClipRegenerating(clipIdx){
+            // v705: look up by data-clip-index (server clip_index), not DOM array
+            // position. cards[clipIdx] painted the spinner on the neighbor tile
+            // after a delete shifted DOM positions out of sync with clip_index.
+            const container=document.querySelector('.clips-grid');
+            if(!container) return;
+            const card=container.querySelector(`.clip-card[data-clip-index="${clipIdx}"]`);
+            if(!card) { console.warn(`[markClipRegenerating v705] no card for clip_index=${clipIdx}`); return; }
+            card.classList.remove('clip-rejected','clip-failed');
+            card.classList.add('clip-redo_queued');
+            const badge=card.querySelector('.badge');
+            if(badge){badge.className='badge badge-redo_queued';badge.textContent='redo queued';}
+            const video=card.querySelector('.clip-video');
+            if(video) video.innerHTML='<div class="generating-state"><div class="generating-spinner">🔄</div><div class="generating-text">Redo queued...</div></div>';
+        }
         
         function cancelJob(id){if(!confirm('Cancel?'))return;fetch(`${API}/jobs/${id}/cancel`,{method:'POST'}).then(()=>{loadJob(id);refreshJobsList();});}
         
