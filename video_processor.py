@@ -2880,7 +2880,12 @@ def transcribe_master_audio(audio_path: Path, initial_prompt: str = None) -> lis
     
     try:
         from faster_whisper import WhisperModel
-        model = WhisperModel("base", device="cpu", compute_type="int8")
+        # v701z — switched master-audio Whisper from "base" → "tiny" to
+        # keep peak RSS under the 2GB ceiling. With v701q initial_prompt
+        # biasing the decoder toward the known script + find_line_in_master
+        # being substring-based fuzzy match, tiny's lower acoustic accuracy
+        # is fine for locating each line in the master timeline.
+        model = WhisperModel("tiny", device="cpu", compute_type="int8")
         if initial_prompt:
             print(
                 f"[MasterAlign] v701r initial_prompt: "
@@ -2912,7 +2917,14 @@ def transcribe_master_audio(audio_path: Path, initial_prompt: str = None) -> lis
             print(f"[MasterAlign] Last:  '{words[-1]['word']}' @ {words[-1]['end']:.2f}s")
         
         del model
+        # v701z — gc + malloc_trim so master-audio Whisper memory returns
+        # to OS before the alignment + clip-processing phase starts.
         import gc; gc.collect()
+        try:
+            import ctypes as _ct
+            _ct.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
         return words
     finally:
         # Cleanup temp wav
