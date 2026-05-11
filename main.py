@@ -6701,10 +6701,72 @@ async def export_final_video(
                         broll_filename = f"final_broll_{output_filename}"
                     broll_output_path = output_dir / broll_filename
 
+                    # v701zd — build pre-computed targets from speaker's
+                    # per-clip post-VAD durations. Speaker pipeline already
+                    # trimmed each clip via Whisper-VAD; the resulting
+                    # files_to_concat durations ARE the master timeline
+                    # positions. No second Whisper master transcription
+                    # needed (the legacy path repeatedly under-transcribed
+                    # to ~half the script words and bricked alignment).
+                    _pre_targets = None
+                    _speaker_durs = stats.get("per_clip_post_vad_durations") or []
+                    _speaker_db_ids = stats.get("per_clip_post_vad_clip_db_ids") or []
+                    if _speaker_durs and _speaker_db_ids:
+                        # Build map: speaker clip's db_id → (master_start, master_end)
+                        _pos_by_db_id = {}
+                        _cursor = 0.0
+                        for _i, _d in enumerate(_speaker_durs):
+                            _start = _cursor
+                            _end = _cursor + _d
+                            _cursor = _end
+                            _db_id = _speaker_db_ids[_i] if _i < len(_speaker_db_ids) else None
+                            if _db_id is not None:
+                                _pos_by_db_id[_db_id] = (_start, _end)
+
+                        # For each broll clip, find its position:
+                        #   - single (HOOK/CTA): match by own clip_db_id
+                        #   - visual_pair: match by paired_clip_id (the audio_pair sibling
+                        #     was in speaker concat at that position)
+                        _pre_targets = []
+                        _all_mapped = True
+                        for _bc in broll_clip_info:
+                            _role = (_bc.get("clip_role") or "single").lower()
+                            if _role == "visual_pair":
+                                _lookup_id = _bc.get("paired_clip_id")
+                            else:
+                                _lookup_id = _bc.get("_clip_db_id")
+                            _pos = _pos_by_db_id.get(_lookup_id)
+                            if _pos is None:
+                                _all_mapped = False
+                                print(
+                                    f"[Export/v698A/broll] v701zd no speaker position "
+                                    f"for broll clip clip_index={_bc.get('clip_index')} "
+                                    f"role={_role} lookup_id={_lookup_id} — falling back "
+                                    f"to Whisper-master path",
+                                    flush=True,
+                                )
+                                break
+                            _start, _end = _pos
+                            _pre_targets.append({
+                                "start": _start,
+                                "end": _end,
+                                "target_duration": _end - _start,
+                                "confidence": 1.0,
+                            })
+                        if not _all_mapped:
+                            _pre_targets = None
+                        else:
+                            print(
+                                f"[Export/v698A/broll] v701zd pre-computed targets built "
+                                f"from speaker per-clip durations ({len(_pre_targets)} clips)",
+                                flush=True,
+                            )
+
                     print(
                         f"[Export/v698A/broll] master-audio alignment: "
                         f"{len(broll_clip_info)} visuals against speaker master → "
-                        f"{broll_filename}",
+                        f"{broll_filename}"
+                        + (" (pre-computed targets)" if _pre_targets else " (Whisper master)"),
                         flush=True,
                     )
 
@@ -6720,7 +6782,8 @@ async def export_final_video(
                         transition_duration=settings.transition_duration,
                         max_clip_speed=2.0,         # visual_pair clips need ≤2x
                         min_gap_for_black=1.0,      # gaps ≥1s → black; smaller → extend prev clip
-                        sequential_alignment=True,  # v701t — broll lines are in master order
+                        sequential_alignment=True,  # v701t — fallback path uses sequential matching
+                        pre_computed_targets=_pre_targets,  # v701zd
                     )
                     stats["v698a_broll_filename"] = broll_filename
                     stats["v698a_broll_clips"] = len(broll_clip_info)

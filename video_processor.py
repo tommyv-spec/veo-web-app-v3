@@ -3425,6 +3425,7 @@ def export_with_master_audio(
     max_clip_speed: float = 1.5,
     min_gap_for_black: float = 2.0,
     sequential_alignment: bool = False,
+    pre_computed_targets: list = None,  # v701zd — bypass Whisper master
 ) -> dict:
     """
     Full pipeline: align clips to master audio, speed-adjust, concat with black gaps, mux audio.
@@ -3445,34 +3446,64 @@ def export_with_master_audio(
     """
     print(f"[MasterAlign] === Starting master audio alignment (exact dialogue timing) ===")
     print(f"[MasterAlign] Clips: {len(clip_info)}, Master: {master_audio_path}")
-    
+
     if len(clip_info) != len(dialogue_lines):
         raise ValueError(
             f"Clip count ({len(clip_info)}) != dialogue line count ({len(dialogue_lines)}). "
             f"Each clip must have a corresponding dialogue line."
         )
-    
-    # Step 1: Transcribe master audio (v701r — bias decoder via initial_prompt
-    # built from the dialogue_lines so compound terms in Veo TTS survive).
-    _master_prompt = " ".join((l or "").strip() for l in dialogue_lines if (l or "").strip()).strip()
-    master_words = transcribe_master_audio(
-        master_audio_path, initial_prompt=_master_prompt or None
-    )
-    if not master_words:
-        raise RuntimeError("Master audio transcription produced no words")
-    
-    # Get actual master audio duration
-    master_info = ffprobe_json(master_audio_path)
-    master_duration = get_duration(master_info)
-    print(f"[MasterAlign] Master audio duration: {master_duration:.2f}s (last word ends at {master_words[-1]['end']:.2f}s)")
-    
-    # Step 2: Calculate target durations (each clip = its own dialogue only)
-    targets = calculate_clip_targets(
-        master_words,
-        dialogue_lines,
-        master_duration=master_duration,
-        sequential=sequential_alignment,
-    )
+
+    # v701zd — when caller supplies pre_computed_targets (from speaker's
+    # per-clip post-VAD durations) skip the Whisper master transcription
+    # + fuzzy line matcher entirely. The Whisper-master path repeatedly
+    # under-transcribed the 55s speaker concat (61 words for a 127-word
+    # script across vad_filter on/off, model size small/tiny/base) which
+    # bricked alignment of HOOK + opening voiceovers. Speaker pipeline
+    # already produced authoritative per-clip durations in its per-clip
+    # Whisper-VAD pass — those ARE the master timeline positions. No
+    # second transcription needed.
+    if pre_computed_targets is not None:
+        if len(pre_computed_targets) != len(clip_info):
+            raise ValueError(
+                f"pre_computed_targets length ({len(pre_computed_targets)}) "
+                f"must match clip_info length ({len(clip_info)})"
+            )
+        master_words = None
+        targets = list(pre_computed_targets)
+        master_duration = max((t.get("end", 0.0) for t in targets), default=0.0)
+        print(
+            f"[MasterAlign] v701zd pre-computed targets (skip Whisper master): "
+            f"master_duration={master_duration:.2f}s, {len(targets)} clips",
+            flush=True,
+        )
+        for _i, _t in enumerate(targets):
+            print(
+                f"[MasterAlign]   Clip {_i}: {_t['start']:.2f}s → {_t['end']:.2f}s "
+                f"(duration={_t.get('target_duration', _t['end'] - _t['start']):.2f}s, "
+                f"conf={_t.get('confidence', 1.0):.2f})",
+                flush=True,
+            )
+    else:
+        # Step 1: Transcribe master audio (legacy path)
+        _master_prompt = " ".join((l or "").strip() for l in dialogue_lines if (l or "").strip()).strip()
+        master_words = transcribe_master_audio(
+            master_audio_path, initial_prompt=_master_prompt or None
+        )
+        if not master_words:
+            raise RuntimeError("Master audio transcription produced no words")
+
+        # Get actual master audio duration
+        master_info = ffprobe_json(master_audio_path)
+        master_duration = get_duration(master_info)
+        print(f"[MasterAlign] Master audio duration: {master_duration:.2f}s (last word ends at {master_words[-1]['end']:.2f}s)")
+
+        # Step 2: Calculate target durations (each clip = its own dialogue only)
+        targets = calculate_clip_targets(
+            master_words,
+            dialogue_lines,
+            master_duration=master_duration,
+            sequential=sequential_alignment,
+        )
     
     # Fill small gaps by extending the previous clip (avoids black flashes between words)
     # Sort clips by start time, then for each small gap, extend the earlier clip's end
@@ -4082,6 +4113,42 @@ def export_final_video(
             )
         except Exception as _e:
             print(f"[VideoProcessor/v692b] post-concat probe failed: {_e}", flush=True)
+
+        # v701zd — record per-clip post-VAD durations for downstream broll.
+        # The broll pipeline uses these to compute each clip's exact master
+        # timeline position without re-transcribing the assembled concat
+        # with Whisper. files_to_concat[i] is the i-th clip's trimmed file
+        # in speaker_clip_info order; ffprobe gives its post-trim duration.
+        # Sum-as-you-go gives cumulative start/end per clip in master time.
+        try:
+            _per_clip_durs = []
+            for _slot, _f in enumerate(files_to_concat):
+                _d = 0.0
+                if _f and Path(_f).exists():
+                    try:
+                        _d = float(get_duration(ffprobe_json(_f)))
+                    except Exception:
+                        _d = 0.0
+                _per_clip_durs.append(_d)
+                _info = clip_info[_slot] if _slot < len(clip_info) else {}
+                print(
+                    f"[VideoProcessor/v701zd] post-vad clip {_slot} "
+                    f"(clip_db_id={_info.get('_clip_db_id')} "
+                    f"role={_info.get('clip_role')} "
+                    f"scene_index={_info.get('scene_index')}): {_d:.3f}s",
+                    flush=True,
+                )
+            stats["per_clip_post_vad_durations"] = _per_clip_durs
+            stats["per_clip_post_vad_clip_db_ids"] = [
+                (clip_info[_slot].get("_clip_db_id") if _slot < len(clip_info) else None)
+                for _slot in range(len(files_to_concat))
+            ]
+            stats["per_clip_post_vad_paired_clip_ids"] = [
+                (clip_info[_slot].get("paired_clip_id") if _slot < len(clip_info) else None)
+                for _slot in range(len(files_to_concat))
+            ]
+        except Exception as _e:
+            print(f"[VideoProcessor/v701zd] per-clip duration capture failed: {_e}", flush=True)
         
         # Step 3: Apply VAD (if enabled)
         # v668 — note: when has_timeline_clips=True, remove_silence was
