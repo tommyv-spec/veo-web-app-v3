@@ -6322,10 +6322,49 @@ async def export_final_video(
     with _TPE(max_workers=3) as pool:
         results = list(pool.map(_download_clip, list(enumerate(clips))))
 
-    # Sort by clip_index to preserve order, filter None
-    clip_info = sorted(
-        [r for r in results if r is not None],
-        key=lambda x: x["_order"]
+    # v701n — Sort with audio_pair interleaved next to its visual_pair.
+    # Bug: audio_pair Clip rows are written with
+    # clip_index = 100000 + vp.clip_index (main.py:2595), so a naive
+    # clip_index-ASC sort pushes ALL audio_pair entries to the END of the
+    # export. Speaker pipeline (which DROPS visual_pair) then concatenates:
+    # HOOK → CTA → 9 voiceovers (wrong) instead of HOOK → 9 voiceovers → CTA.
+    # Fix: when a row's clip_role == 'audio_pair', sort it at its paired
+    # visual_pair's clip_index (secondary key 1 → lands right after the
+    # visual_pair). Lineup-override case keeps _order untouched.
+    _non_null = [r for r in results if r is not None]
+    if job.clip_order_json:
+        # Custom lineup — user authored the order explicitly; preserve _order
+        clip_info = sorted(_non_null, key=lambda x: x["_order"])
+    else:
+        # Build paired_id → visual_pair clip_index lookup
+        _vp_idx_by_id = {
+            r.get("_clip_db_id"): r["clip_index"]
+            for r in _non_null
+            if (r.get("clip_role") or "").lower() == "visual_pair"
+        }
+
+        def _interleaved_key(r):
+            role = (r.get("clip_role") or "single").lower()
+            if role == "audio_pair":
+                paired_id = r.get("paired_clip_id")
+                vp_idx = _vp_idx_by_id.get(paired_id)
+                if vp_idx is not None:
+                    # Land right after the paired visual_pair
+                    return (vp_idx, 1)
+                # Orphan audio_pair — fall back to its own clip_index
+                return (r["clip_index"], 1)
+            return (r["clip_index"], 0)
+
+        clip_info = sorted(_non_null, key=_interleaved_key)
+
+    # v701n — log final concatenation order so Render confirms the fix
+    print(
+        f"[Export/v701n] concat order: "
+        + " → ".join(
+            f"#{r['clip_index']}({(r.get('clip_role') or 'single')[:3]})"
+            for r in clip_info
+        ),
+        flush=True,
     )
     for r in clip_info:
         del r["_order"]
