@@ -6635,37 +6635,38 @@ async def export_final_video(
                                 flush=True,
                             )
 
-                    # Build broll clip + dialogue lists. Paired list invariant:
-                    # broll_clip_info[i] aligns to broll_dialogue_lines[i].
+                    # v701zf — broll includes ONLY visual_pair clips.
+                    # HOOK + CTA (singles) are persona on-camera → those
+                    # windows on the master timeline render as black in
+                    # broll (audio plays, no replacement visual). audio_pair
+                    # + text_card stay skipped. visual_pair without a
+                    # resolvable paired_clip_id (no audio_pair sibling in
+                    # speaker) is also skipped — "don't include the clip
+                    # if the clip is not paired".
                     broll_clip_info: List[Dict[str, Any]] = []
                     broll_dialogue_lines: List[str] = []
                     for c in clip_info:
                         role = (c.get("clip_role") or "single").lower()
-                        scene_type = (c.get("scene_type") or "").lower()
-                        if role == "audio_pair":
+                        if role != "visual_pair":
+                            continue  # singles + audio_pair + everything else
+                        paired_id = c.get("paired_clip_id")
+                        if not paired_id:
+                            print(
+                                f"[Export/v698A/broll] visual_pair clip "
+                                f"{c.get('clip_index')} has no paired_clip_id; "
+                                f"skipping (master window stays black)",
+                                flush=True,
+                            )
                             continue
-                        if scene_type == "text_card":
+                        line = (c.get("voiceover_line") or "").strip()
+                        if not line:
+                            print(
+                                f"[Export/v698A/broll] visual_pair clip "
+                                f"{c.get('clip_index')} missing voiceover_line; "
+                                f"skipping",
+                                flush=True,
+                            )
                             continue
-                        if role == "visual_pair":
-                            line = (c.get("voiceover_line") or "").strip()
-                            if not line:
-                                print(
-                                    f"[Export/v698A/broll] visual_pair clip "
-                                    f"{c.get('clip_index')} missing voiceover_line; "
-                                    f"skipping (would orphan in master timeline)",
-                                    flush=True,
-                                )
-                                continue
-                        else:
-                            line = (c.get("dialogue_text") or "").strip()
-                            if not line:
-                                print(
-                                    f"[Export/v698A/broll] single clip "
-                                    f"{c.get('clip_index')} missing dialogue_text; "
-                                    f"skipping",
-                                    flush=True,
-                                )
-                                continue
                         _rehydrate_path(c)
                         broll_clip_info.append(dict(c))
                         broll_dialogue_lines.append(line)
