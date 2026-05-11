@@ -6365,3 +6365,187 @@ After apply_vad writes _vad_out:
 **Verification (next export).** Look for `[VideoProcessor/v706]` lines in worker logs. Absence = no nuclear-cut on that run; presence = guard fired for documented clip with logged pre/post/floor values. Cross-check against the previously-reproducing job: if the same script is re-exported with v706 active, the previously-0.375s and 0.666s clips should land at their pre-VAD durations (typically 5-7s) and the corresponding script lines should be audible in the final export.
 
 **Touched (v706 ship commit).** `code/video_processor.py` (per-clip VAD floor guard, ~70 LOC inserted around line 4019; import-verified). `wiki/log.md` (v706 release entry). `code/template_reference.md` (this deep-dive). No skeleton change — v706 is an export-side runtime guard, not an authoring convention.
+
+---
+
+### v708 — Zero word loss contract (Whisper-VAD retry chain + final-export audit)
+
+**Scope.** Export-side only (`code/video_processor.py`). Supersedes v706's floor-guard as the dominant safety contract for the per-clip Whisper-VAD path. v706 protected against sub-floor durations; v708 protects against ALL word-loss modes regardless of duration. No markdown contract change, no parser change, no authoring discipline change. Operator-visible via export stats + log markers.
+
+**Surfaced** 2026-05-11 22:18 saffron export. Logs showed clip 13 (db_id=9240, scene_index=6) post-VAD duration 4.666s — well above v706's floor — but its audio dropped most of the intended 19-word line. WhisperVAD trace:
+
+```
+[WhisperVAD] v701q initial_prompt: 19 script words
+[WhisperVAD] Transcribed 10 raw words (total_duration=7.7s)
+[WhisperVAD] Dialogue match: 3/10 words matched script
+[WhisperVAD] ✂ v611 end-cap: 5.830s → 5.770s (filler 'are' p=0.54 at 5.720s)
+[WhisperVAD] ✂ v611 end-cap: 7.010s → 6.910s (filler 'cannot' p=0.57 at 6.860s)
+```
+
+Script for clip 13: `"comment saffron, and i will send you my recipe for how to use it with warm water..."` — 19 words. Whisper-tiny only transcribed 10 raw words, only 3 of which aligned to the script. The 7 unmatched Whisper-output tokens (`are`, `or`, `cannot`, etc.) were then used by v611's end-cap to "trim filler" — but they were never script words, they were Whisper-tiny hallucinations on accented / fast TTS output. The user could audibly hear the real script words in the Veo render; the trimming pipeline lost them anyway.
+
+**Why v706 did not catch this.** v706's floor check is `post_dur < max(MIN_KEEP_S=1.5, pre_dur * 0.30)`. Clip 13's `post_dur=4.666s > floor=2.319s` → v706 passed the clip through unchanged. v706 measures DURATION, not WORD COMPLETENESS. A clip can keep its full 7s of audio yet have most of its dialogue cut by v611 mid-segment trim and v706 won't notice.
+
+**The constraint v708 enforces.** Every script word from each clip's intended `dialogue_text` must remain audible in the final exported mp4. Optimization shifts from "tight trim" → "word completeness". Trim is now an opt-in operation requiring proof of safety; default is keep-full-clip.
+
+**Five-layer architecture.**
+
+---
+
+**Layer 1 — Per-clip word presence tracking.**
+
+After each Whisper-VAD pass, build:
+- `script_set = { every normalized token from dialogue_texts[clip] }`
+- `heard_set = { every normalized token from raw Whisper output for the clip's audio }`
+- `missing = script_set - heard_set`
+- `trust = matched / max(script_count, 1)`
+
+`heard_set` is built from the RAW Whisper transcript (`all_words`), not from the DP-matched subset. If Whisper transcribed a word but the matcher couldn't align it to a script position, the audio still contains the word and we treat it as heard. The DP matcher and `trust` score govern segment-construction safety; `heard_set` governs presence safety.
+
+Per-clip diagnostic line: `[WhisperVAD/v708] pass=<label> raw=<N> matched=<M> script=<S> trust=<T> missing=<sorted_set|NONE>`.
+
+---
+
+**Layer 2 — Retry chain on `missing > 0`.**
+
+```
+Pass 1: caller-supplied (tiny) model + default kwargs
+        ↓ if missing > 0
+Pass 2: SAME model + V708_HARDENED_WHISPER_KWARGS
+          temperature=0.0
+          no_speech_threshold=0.4
+          compression_ratio_threshold=2.0
+          logprob_threshold=-0.8
+          condition_on_previous_text=False
+        ↓ if missing > 0
+Pass 3: V708_ESCALATE_MODEL_SIZE='small' model + hardened kwargs
+        ↓ if missing > 0
+Pass 4 (FAILSAFE): return [(0.0, total_duration)]
+                   — NO trim, FULL clip kept verbatim
+```
+
+Why these kwargs:
+- `temperature=0.0` removes Whisper's fallback-sampling ladder (v701s deliberately re-enabled it because greedy-only collapsed the donut-glaze run from 41.6s → 6.2s). In v708 the hardened kwargs only fire on a RETRY after the default ladder already failed to produce a complete transcript — so we accept the determinism trade-off as a deliberate second-attempt strategy.
+- `no_speech_threshold=0.4` (default 0.6) — more aggressive about treating silence as silence; reduces phantom-word generation on the tail of clips.
+- `compression_ratio_threshold=2.0` (default 2.4) — rejects high-repetition outputs (Whisper-tiny sometimes emits `the the the the` on rare audio).
+- `logprob_threshold=-0.8` (default -1.0) — rejects very-low-confidence words as no-speech.
+- `condition_on_previous_text=False` — already default in the existing pipeline; pinned for safety against neighbor-clip bleed.
+
+Pass 3 escalates to V708_ESCALATE_MODEL_SIZE ('small' for now; can be bumped to 'medium' if Render memory ceiling allows). Model is loaded ONCE for the pass and disposed via `malloc_trim(0)` immediately after — peak RSS bump ~250MB, transient.
+
+Best-pass selection: zero-missing wins outright; else highest trust.
+
+**Failsafe path.** When all passes yield non-empty `missing` OR `trust < V708_TRUST_MIN_FOR_TRIM` (0.85), the function returns a single segment `[(0.0, total_duration)]` — the full clip. Downstream `apply_vad` still runs ffmpeg trim+concat, but with one segment covering the whole clip the effect is a passthrough re-encode. v616a/v616b/v701p segment-modifiers run but only on this single full-clip segment, which is a no-op. v706 floor-guard becomes redundant (we already return the full clip duration) and accepts the result.
+
+Failsafe diagnostic: `[WhisperVAD/v708] FAILSAFE: missing=[...], trust=X.XX<0.85 → no-trim, keep full clip Y.YYY s`.
+
+---
+
+**Layer 3 — Trim discipline at v611 end-cap + start-cap.**
+
+Even when `missing == 0` and `trust ≥ 0.85`, the v611 end-cap can still trim destructively when an unmatched-but-confident Whisper word sits past the last matched word. Pre-v708, ANY unmatched word with `probability ≥ 0` (after the global `HALLUC_PROB_FLOOR=0.30` filter) was treated as a filler and used to cap the segment.
+
+v708 adds a TWO-CONDITION gate at v611's filler-decision sites (both end-cap and start-cap):
+
+```python
+reject = (probability < V708_FILLER_MIN_PROB)              # 0.70
+       OR (edit_distance_to_any_script_word < V708_FILLER_MIN_EDIT_DIST)   # 2
+```
+
+- **Probability gate.** A filler must be confidently transcribed to drive a destructive trim. Clip 13's phantom `'are' p=0.54` and `'cannot' p=0.57` both fail this gate — too uncertain to trust.
+- **Edit-distance gate.** A filler must NOT be a 1-edit variant of a script word. This catches Whisper mis-spellings: `'safron' dist=1 from 'saffron'` is rejected (the audio actually contains 'saffron', Whisper just misspelled it). Bounded Levenshtein implementation (`_v708_levenshtein`) caps comparison at `max_dist=4` for cheap evaluation on short tokens.
+
+When the filler is rejected, the trim path falls through to the safe `lm_end + STRICT_FALLBACK_END_PAD` fallback (last-word + 100ms pad), which preserves audio integrity. The end-cap can still tighten the segment to a reasonable boundary, but it cannot trim PAST a script word's audio based on phantom or near-script filler detection.
+
+Diagnostic: `[WhisperVAD/v708] ✂ v611 end-cap REJECTED filler 'are' p=0.54 edit_dist=2 (min_p=0.70 min_edit=2) → fall back to last-word+pad`.
+
+---
+
+**Layer 4 — Final-export word audit.**
+
+After per-clip VAD completes and `concat → output_path` move happens (v701w branch), `audit_final_export_words()` runs a fidelity Whisper pass over the assembled output mp4 with hardened kwargs + `initial_prompt = " ".join(master_script_lines)`. Diffs the heard set against the concatenated script set, emits one of:
+
+- `[v708-AUDIT] ✓ all <N> script words present in final mp4 (heard=<M>)` — happy path.
+- `[v708-AUDIT] ❌ FINAL MP4 MISSING <N> script word(s): [w1, w2, ...] | script=<S> heard=<H>` — binding contract violated, operator must re-render the offending clip(s).
+
+Audit result lands in export stats:
+```python
+stats["v708_audit_ok"]            = bool
+stats["v708_audit_missing_words"] = list[str]   # the diff
+stats["v708_audit_model"]         = str         # which model ran
+stats["v708_audit_script_words"]  = int
+stats["v708_audit_heard_words"]   = int
+stats["v708_audit_error"]         = Optional[str]
+```
+
+Audit does NOT fail the export — it is observational. The operator decides whether to ship or re-render. This is deliberate: v708 provides the EVIDENCE the user needs to enforce "zero word loss" without auto-killing exports on Whisper-medium false-misses (a model can mishear a real word in the final mp4 the same way Whisper-tiny did per-clip). The audit is the strongest signal we have; operator judgment is the final gate.
+
+Audit model defaults to `V708_AUDIT_MODEL_SIZE='small'`. Memory peak ~250MB during audit, single load + dispose. Total audit time on a ~95s mp4: 10-30s on Render free tier.
+
+**Why audit beats per-clip checks alone.** Per-clip checks catch transcription-side word loss but cannot detect:
+- Veo TTS itself skipping a word during synthesis (the per-clip pass would mark the word missing but failsafe-kept the clip; audit still flags it as missing in the final mp4 because the audio truly never had it).
+- Concat-boundary word loss (rare — ffmpeg trim+concat at frame-snapped boundaries is reliable — but theoretically possible on PTS-rounding edge cases).
+- An ill-tuned VAD pass that systematically drops a vocabulary subset.
+
+Audit is the binding contract gate. Layers 1-3 are best-effort mitigations; Layer 4 is the verifier.
+
+---
+
+**Layer 5 — Permanent diagnostics.**
+
+All v708 log lines remain on the shipped commit (NOT removed in a cleanup commit, per CLAUDE.md verification rule). Operator can grep `[WhisperVAD/v708]` and `[v708-AUDIT]` in Render logs to see verdict for every clip + every export. Stats fields persist in the export summary dict for programmatic checks.
+
+`vad_pass` field bumped from `per_clip_only_v701w` to `per_clip_only_v708` to mark the version transition.
+
+---
+
+**Constants (tunable).**
+
+```python
+V708_TRUST_MIN_FOR_TRIM     = 0.85
+V708_FILLER_MIN_PROB        = 0.70
+V708_FILLER_MIN_EDIT_DIST   = 2
+V708_AUDIT_MODEL_SIZE       = "small"
+V708_ESCALATE_MODEL_SIZE    = "small"
+V708_HARDENED_WHISPER_KWARGS = {
+    "temperature": 0.0,
+    "no_speech_threshold": 0.4,
+    "compression_ratio_threshold": 2.0,
+    "logprob_threshold": -0.8,
+    "condition_on_previous_text": False,
+}
+```
+
+Threshold rationale: 0.85 trust is high enough that the matcher genuinely heard the bulk of the script (15/19 words for clip 13's case would NOT pass), low enough that a clean talking-head clip with 1-2 fuzzy-matched compound words ("safranal", "crocin") still passes. The 0.70 filler-prob floor is the canonical Whisper "this is real speech" threshold; below it, the token is breath/noise/lead-in. The edit-distance 2 cutoff allows 1-edit Whisper typos to be recognized as script-word mishearing.
+
+---
+
+**Touched (v708 ship commit).** `code/video_processor.py` only.
+- Module-top: V708_* constants + `_v708_levenshtein` + `_v708_min_edit_dist_to_script` helpers (~80 LOC).
+- `detect_speech_segments_whisper`: replaced single transcribe+match block with 3-pass retry chain + failsafe (~170 LOC net insertion around the original block).
+- v611 end-cap + start-cap: filler-gate wrappers added (~30 LOC).
+- New top-level `audit_final_export_words()` function (~135 LOC).
+- v701w branch in `process_speaker_export`: audit call + stats fields wiring (~45 LOC).
+
+Import-verified locally (`python -c "import video_processor"`). No DB schema change. No prompt contract change. No platform behavior change for non-Whisper VAD modes.
+
+---
+
+**Verification (mandatory next export).** Per CLAUDE.md hard rule for user-facing fixes:
+
+1. Re-export the saffron job (or a job with similar clip-13-shape risk: long line, fast TTS, accent).
+2. Grep Render logs: `[WhisperVAD/v708]` lines present for every clip with dialogue.
+3. Grep Render logs: `[v708-AUDIT]` line at end with `✓` for clean exports OR `❌` with explicit missing word list.
+4. Inspect stats payload: `v708_audit_ok=True`, `v708_audit_missing_words=[]`, `v708_audit_model='small'`.
+5. ffprobe + listen to the final mp4 segment corresponding to the previously-broken clip (clip 13 in saffron case). Every script word audible.
+6. ONLY THEN claim word-loss bug resolved.
+
+---
+
+**What v708 does NOT change.**
+- v706 floor-guard remains in place as a secondary safety net for clips where v708 returns segments (not the failsafe-full-clip path). v706 fires AFTER apply_vad returns; v708 fires INSIDE detect_speech_segments_whisper. They compose cleanly.
+- v616a unbridge / v616b frame-snap / v701p widen — unchanged. Run on whichever segments v708 returns (including the single-full-clip segment on failsafe).
+- v617 single-pass trim+concat — unchanged.
+- v691d serial per-clip loop architecture — unchanged.
+- Authoring side (`videos/*.md`, `raw/decoded_*.md`) — unchanged. v708 is invisible to the markdown contract.
+- Decode pipeline — unchanged. v708 is export-side only.
