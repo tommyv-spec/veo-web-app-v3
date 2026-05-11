@@ -22,6 +22,82 @@ FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
 
 
+# ============================================================
+# v708 — Zero word loss contract (Whisper-VAD + final-export audit)
+# ============================================================
+# Constraint: every script word from each clip's intended line must remain
+# audible in the final exported mp4. Whisper-tiny mistranscribes accented /
+# fast TTS output and v611 end-cap then trims real audio thinking the
+# Whisper-hallucinated words are fillers. v708 enforces:
+#   1. Per-clip word-presence tracking (raw Whisper transcript vs. script set)
+#   2. Retry chain on missing words: tiny+default → tiny+hardened → medium
+#   3. Hard failsafe: still missing → return full clip (no trim)
+#   4. Filler confidence gate at v611 end-cap (probability + edit distance)
+#   5. Final-export audit: medium Whisper over output mp4 vs. master script
+# v708 supersedes v706's floor-guard which only protected against sub-floor
+# durations and did NOT catch full-length clips where Whisper transcribed
+# the wrong words (clip 13 of saffron export 2026-05-11_2218: 19w script,
+# 3/10 matched, audio dropped via v611 filler-trim on phantom 'are/cannot'
+# tokens p=0.54/0.57).
+V708_TRUST_MIN_FOR_TRIM = 0.85          # below → no-trim full-clip fallback
+V708_FILLER_MIN_PROB = 0.70             # v611 end-cap filler must exceed this
+V708_FILLER_MIN_EDIT_DIST = 2           # filler must differ from any script word by ≥N chars
+V708_AUDIT_MODEL_SIZE = "small"         # final export audit model — small balances accuracy/RAM on Render free tier
+V708_ESCALATE_MODEL_SIZE = "small"      # pass-3 escalation model — same; tiny is the bottleneck
+V708_HARDENED_WHISPER_KWARGS = {
+    "temperature": 0.0,
+    "no_speech_threshold": 0.4,
+    "compression_ratio_threshold": 2.0,
+    "logprob_threshold": -0.8,
+    "condition_on_previous_text": False,
+}
+
+
+def _v708_levenshtein(a: str, b: str, max_dist: int = 4) -> int:
+    """Bounded Levenshtein distance. Returns ≥max_dist if exceeded.
+    Cheap because token lengths ≤ ~16 chars. Used by v611 filler gate
+    to suppress trims on words that are 1-edit variants of script words
+    (Whisper-tiny mis-spellings of real script content)."""
+    if a == b:
+        return 0
+    if abs(len(a) - len(b)) >= max_dist:
+        return max_dist
+    if not a:
+        return min(len(b), max_dist)
+    if not b:
+        return min(len(a), max_dist)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(
+                prev[j] + 1,        # delete
+                cur[-1] + 1,        # insert
+                prev[j - 1] + (ca != cb),  # substitute
+            ))
+        prev = cur
+        if min(prev) >= max_dist:
+            return max_dist
+    return min(prev[-1], max_dist)
+
+
+def _v708_min_edit_dist_to_script(token: str, script_words_set) -> int:
+    """Min edit distance from `token` to any word in `script_words_set`."""
+    import re as _re
+    t = _re.sub(r'[^\w]', '', (token or '').lower())
+    if not t or not script_words_set:
+        return 99
+    best = 99
+    for sw in script_words_set:
+        d = _v708_levenshtein(t, sw, max_dist=min(best, V708_FILLER_MIN_EDIT_DIST + 1))
+        if d < best:
+            best = d
+            if best == 0:
+                return 0
+    return best
+
+
+
 def run(cmd: List[str]) -> Tuple[int, str, str]:
     """Run a command and return (returncode, stdout, stderr)."""
     try:
@@ -272,81 +348,197 @@ def detect_speech_segments_whisper(
                         flush=True,
                     )
 
-            print(f"[WhisperVAD] Model: small | Language: {language} → whisper={whisper_lang or 'auto'}", flush=True)
+            print(f"[WhisperVAD] Model: tiny | Language: {language} → whisper={whisper_lang or 'auto'}", flush=True)
 
-            segments, info_w = model.transcribe(
-                audio_path,
-                language=whisper_lang,
-                word_timestamps=True,
-                beam_size=1,                            # v701x — was 5; greedy decode is faster + less memory; the matcher does the actual word-aligning
-                vad_filter=True,                        # Pre-filter with Silero VAD
-                condition_on_previous_text=False,       # Prevent cascading hallucinations
-                initial_prompt=_initial_prompt,         # v701q — bias toward script
-                # v701s — REVERT temperature=0.0. Greedy-only decode caused
-                # speaker output to collapse from 41.6s → 6.2s on the
-                # donut-glaze run: faster-whisper's default
-                # temperature=[0.0,0.2,0.4,0.6,0.8,1.0] fallback ladder is
-                # what RECOVERS segments where greedy decode trips
-                # no_speech_prob threshold. Removing the ladder dropped
-                # words mid-script → matcher saw silence → final-pass VAD
-                # cut 35s. Determinism deferred — pre-v701q reproducibility
-                # was already adequate.
+            # === v708 — Zero word loss retry chain ===
+            # Pre-build per-clip word lists + flattened script set (used by
+            # every pass + downstream v611 trim discipline).
+            _per_clip_words = []
+            _v708_script_set = set()
+            for _line in (dialogue_texts or []):
+                if _line:
+                    _cleaned = re.sub(r'[^\w\s]', '', _line.lower())
+                    _cw = _cleaned.split()
+                    _per_clip_words.append(_cw)
+                    for _w in _cw:
+                        _v708_script_set.add(_w)
+                else:
+                    _per_clip_words.append([])
+            _total_expected = sum(len(_w) for _w in _per_clip_words)
+
+            def _v708_run_pass(_pass_model, _pass_kwargs_override, _pass_label):
+                """Returns (all_words, speech_words, missing_set, matched_count, trust)."""
+                _base_kwargs = dict(
+                    language=whisper_lang,
+                    word_timestamps=True,
+                    beam_size=1,
+                    vad_filter=True,
+                    condition_on_previous_text=False,
+                    initial_prompt=_initial_prompt,
+                )
+                _base_kwargs.update(_pass_kwargs_override or {})
+                _segs_iter, _info_w = _pass_model.transcribe(audio_path, **_base_kwargs)
+                _aw = []
+                for _seg in _segs_iter:
+                    if _seg.words:
+                        for _word in _seg.words:
+                            _aw.append({
+                                'text': _word.word.strip().lower(),
+                                'start': _word.start,
+                                'end': _word.end,
+                                'probability': _word.probability,
+                            })
+                _sw = _aw
+                _matched_count = 0
+                if _total_expected > 0:
+                    _matched = _match_whisper_to_dialogue(
+                        _aw, _per_clip_words,
+                        clip_boundaries=clip_boundaries,
+                        cut_prefix_audio=cut_prefix_audio,
+                        prefix_word=prefix_word,
+                    )
+                    if _matched:
+                        _sw = _matched
+                        _matched_count = len(_matched)
+                _heard_set = set()
+                for _w in _aw:
+                    _tt = re.sub(r'[^\w]', '', (_w.get('text') or '').lower())
+                    if _tt:
+                        _heard_set.add(_tt)
+                _missing = _v708_script_set - _heard_set
+                _trust = (_matched_count / max(len(_v708_script_set), 1)) if _v708_script_set else 1.0
+                print(
+                    f"[WhisperVAD/v708] pass={_pass_label} raw={len(_aw)} "
+                    f"matched={_matched_count} script={len(_v708_script_set)} "
+                    f"trust={_trust:.2f} missing={sorted(_missing) if _missing else 'NONE'}",
+                    flush=True,
+                )
+                return _aw, _sw, _missing, _matched_count, _trust
+
+            # Pass 1 — caller-supplied (or just-loaded) model, default kwargs.
+            _v708_attempts = [_v708_run_pass(model, {}, "1-default")]
+            # Escalate ONLY when script provided AND missing non-empty.
+            if _total_expected > 0 and _v708_attempts[-1][2]:
+                _v708_attempts.append(
+                    _v708_run_pass(model, V708_HARDENED_WHISPER_KWARGS, "2-hardened")
+                )
+                if _v708_attempts[-1][2]:
+                    _medium_model = None
+                    try:
+                        from faster_whisper import WhisperModel as _WM_M
+                        _medium_model = _WM_M(
+                            V708_ESCALATE_MODEL_SIZE, device="cpu", compute_type="int8"
+                        )
+                        print(
+                            f"[WhisperVAD/v708] pass=3 loaded escalation model "
+                            f"'{V708_ESCALATE_MODEL_SIZE}'",
+                            flush=True,
+                        )
+                        _v708_attempts.append(
+                            _v708_run_pass(
+                                _medium_model,
+                                V708_HARDENED_WHISPER_KWARGS,
+                                f"3-{V708_ESCALATE_MODEL_SIZE}",
+                            )
+                        )
+                    except Exception as _me:
+                        print(
+                            f"[WhisperVAD/v708] escalation model load failed: "
+                            f"{_me} — skipping pass 3",
+                            flush=True,
+                        )
+                    finally:
+                        if _medium_model is not None:
+                            try:
+                                del _medium_model
+                            except Exception:
+                                pass
+                            try:
+                                import gc as _gc
+                                _gc.collect()
+                                import ctypes as _ct
+                                _libc = _ct.CDLL("libc.so.6")
+                                _libc.malloc_trim(0)
+                            except Exception:
+                                pass
+
+            # Pick best attempt: zero-missing wins; else highest trust.
+            _best = None
+            for _att in _v708_attempts:
+                if _best is None:
+                    _best = _att
+                    continue
+                _b_missing, _b_trust = _best[2], _best[4]
+                _a_missing, _a_trust = _att[2], _att[4]
+                if not _a_missing and _b_missing:
+                    _best = _att
+                elif _a_missing and not _b_missing:
+                    pass
+                elif _a_trust > _b_trust:
+                    _best = _att
+
+            all_words, speech_words, _best_missing, _best_matched, _best_trust = _best
+            print(
+                f"[WhisperVAD/v708] BEST pass: matched={_best_matched} "
+                f"trust={_best_trust:.2f} "
+                f"missing={sorted(_best_missing) if _best_missing else 'NONE'}",
+                flush=True,
             )
-            
-            # Collect all words with timestamps + probability
-            all_words = []
-            for segment in segments:
-                if segment.words:
-                    for word in segment.words:
-                        all_words.append({
-                            'text': word.word.strip().lower(),
-                            'start': word.start,
-                            'end': word.end,
-                            'probability': word.probability,
-                        })
-            
-            print(f"[WhisperVAD] Transcribed {len(all_words)} raw words (total_duration={total_duration:.1f}s)", flush=True)
-            
+
+            print(
+                f"[WhisperVAD] Transcribed {len(all_words)} raw words "
+                f"(total_duration={total_duration:.1f}s)",
+                flush=True,
+            )
+
+            # v708 HARD FAILSAFE — if script provided AND (missing non-empty OR
+            # trust below floor), abort all trimming for this clip. Return the
+            # full clip [0, total_duration]. Caller's apply_vad will still run
+            # ffmpeg trim+concat over a single segment = the entire clip.
+            # Downstream v706 floor + v707/v619 etc. unaffected; v708 just
+            # widens the policy from "minimum duration" to "every word kept".
+            if _total_expected > 0 and (_best_missing or _best_trust < V708_TRUST_MIN_FOR_TRIM):
+                _reason = []
+                if _best_missing:
+                    _reason.append(f"missing={sorted(_best_missing)}")
+                if _best_trust < V708_TRUST_MIN_FOR_TRIM:
+                    _reason.append(
+                        f"trust={_best_trust:.2f}<{V708_TRUST_MIN_FOR_TRIM:.2f}"
+                    )
+                print(
+                    f"[WhisperVAD/v708] FAILSAFE: {', '.join(_reason)} → "
+                    f"no-trim, keep full clip {total_duration:.3f}s",
+                    flush=True,
+                )
+                if _model_owned_here:
+                    try:
+                        del model
+                        import gc as _gc2
+                        _gc2.collect()
+                    except Exception:
+                        pass
+                return [(0.0, total_duration)]
+
             if not all_words:
                 print("[WhisperVAD] No words detected — returning full video")
+                if _model_owned_here:
+                    try:
+                        del model
+                        import gc as _gc3
+                        _gc3.collect()
+                    except Exception:
+                        pass
                 return [(0.0, total_duration)]
-            
-            # === Dialogue-anchored matching ===
-            # No probability pre-filter — the per-clip dialogue matcher IS the filter.
-            # Pre-filtering killed legitimate words (e.g. first word of a clip with low p)
-            # which broke gap detection and lost all subsequent clips.
-            speech_words = all_words  # default: use all words
-            
-            if dialogue_texts:
-                # Build per-clip word lists (NOT flattened)
-                per_clip_words = []
-                total_expected = 0
-                for line in dialogue_texts:
-                    if line:
-                        cleaned = re.sub(r'[^\w\s]', '', line.lower())
-                        clip_words = cleaned.split()
-                        per_clip_words.append(clip_words)
-                        total_expected += len(clip_words)
-                    else:
-                        per_clip_words.append([])
-                
-                if total_expected > 0:
-                    print(f"[WhisperVAD] Dialogue script: {total_expected} words across {len(per_clip_words)} clips", flush=True)
-                    matched = _match_whisper_to_dialogue(
-                        all_words, per_clip_words,
-                        clip_boundaries=clip_boundaries,
-                        cut_prefix_audio=cut_prefix_audio,  # v542
-                        prefix_word=prefix_word,  # v542
-                    )
-                    
-                    if matched:
-                        print(f"[WhisperVAD] Dialogue match: {len(matched)}/{len(all_words)} words matched script", flush=True)
-                        speech_words = matched
-                    else:
-                        print(f"[WhisperVAD] ⚠ No dialogue match — using all transcribed words", flush=True)
-            
+
             if not speech_words:
                 print("[WhisperVAD] No speech words survived filtering — returning full video")
+                if _model_owned_here:
+                    try:
+                        del model
+                        import gc as _gc4
+                        _gc4.collect()
+                    except Exception:
+                        pass
                 return [(0.0, total_duration)]
             
             # Log word-level timing for verification
@@ -863,13 +1055,39 @@ def detect_speech_segments_whisper(
                     None
                 )
                 if nearest_post:
-                    min_end = lm_end + STRICT_MIN_END_TAIL
-                    capped = max(min_end, nearest_post['start'] - STRICT_END_GUARD)
-                    if capped < new_end:
-                        u_text = nearest_post.get('text', '?')
-                        u_p = nearest_post.get('probability', 0)
-                        print(f"[WhisperVAD] ✂ v611 end-cap: {new_end:.3f}s → {capped:.3f}s (filler '{u_text}' p={u_p:.2f} at {nearest_post['start']:.3f}s)", flush=True)
-                    new_end = capped
+                    u_text = nearest_post.get('text', '?')
+                    u_p = nearest_post.get('probability', 0)
+                    # v708 — trim discipline gate. Reject filler if either:
+                    #   (a) probability below V708_FILLER_MIN_PROB (untrusted)
+                    #   (b) edit distance to ANY script word < V708_FILLER_MIN_EDIT_DIST
+                    #       (likely a Whisper mis-spelling of a real script word)
+                    # When rejected, fall through to fallback (lm_end + pad)
+                    # which preserves audio safely.
+                    _u_edit = _v708_min_edit_dist_to_script(u_text, _v708_script_set)
+                    _u_reject = (u_p < V708_FILLER_MIN_PROB) or (_u_edit < V708_FILLER_MIN_EDIT_DIST)
+                    if _u_reject:
+                        print(
+                            f"[WhisperVAD/v708] ✂ v611 end-cap REJECTED filler "
+                            f"'{u_text}' p={u_p:.2f} edit_dist={_u_edit} "
+                            f"(min_p={V708_FILLER_MIN_PROB:.2f} "
+                            f"min_edit={V708_FILLER_MIN_EDIT_DIST}) → "
+                            f"fall back to last-word+pad",
+                            flush=True,
+                        )
+                        capped = min(new_end, lm_end + STRICT_FALLBACK_END_PAD)
+                        if capped < new_end:
+                            print(
+                                f"[WhisperVAD] ✂ v611 end-cap (v708 fallback): "
+                                f"{new_end:.3f}s → {capped:.3f}s",
+                                flush=True,
+                            )
+                        new_end = capped
+                    else:
+                        min_end = lm_end + STRICT_MIN_END_TAIL
+                        capped = max(min_end, nearest_post['start'] - STRICT_END_GUARD)
+                        if capped < new_end:
+                            print(f"[WhisperVAD] ✂ v611 end-cap: {new_end:.3f}s → {capped:.3f}s (filler '{u_text}' p={u_p:.2f} at {nearest_post['start']:.3f}s)", flush=True)
+                        new_end = capped
                 else:
                     capped = min(new_end, lm_end + STRICT_FALLBACK_END_PAD)
                     if capped < new_end:
@@ -885,13 +1103,24 @@ def detect_speech_segments_whisper(
                 ]
                 if pre_candidates:
                     nearest_pre = max(pre_candidates, key=lambda w: w.get('end', 0))
-                    max_start = lm_start
-                    pushed = min(max_start, nearest_pre['end'] + STRICT_START_GUARD)
-                    if pushed > new_start:
-                        u_text = nearest_pre.get('text', '?')
-                        u_p = nearest_pre.get('probability', 0)
-                        print(f"[WhisperVAD] ✂ v611 start-cap: {new_start:.3f}s → {pushed:.3f}s (filler '{u_text}' p={u_p:.2f} at {nearest_pre['end']:.3f}s)", flush=True)
-                    new_start = pushed
+                    u_text = nearest_pre.get('text', '?')
+                    u_p = nearest_pre.get('probability', 0)
+                    # v708 — same trim-discipline gate on start-cap
+                    _u_edit = _v708_min_edit_dist_to_script(u_text, _v708_script_set)
+                    _u_reject = (u_p < V708_FILLER_MIN_PROB) or (_u_edit < V708_FILLER_MIN_EDIT_DIST)
+                    if _u_reject:
+                        print(
+                            f"[WhisperVAD/v708] ✂ v611 start-cap REJECTED filler "
+                            f"'{u_text}' p={u_p:.2f} edit_dist={_u_edit} → "
+                            f"keep new_start={new_start:.3f}s unchanged",
+                            flush=True,
+                        )
+                    else:
+                        max_start = lm_start
+                        pushed = min(max_start, nearest_pre['end'] + STRICT_START_GUARD)
+                        if pushed > new_start:
+                            print(f"[WhisperVAD] ✂ v611 start-cap: {new_start:.3f}s → {pushed:.3f}s (filler '{u_text}' p={u_p:.2f} at {nearest_pre['end']:.3f}s)", flush=True)
+                        new_start = pushed
 
                 if new_end > new_start:
                     contained_groups.append((new_start, new_end))
@@ -2017,6 +2246,167 @@ def _match_whisper_to_dialogue(whisper_words: list, per_clip_words: list,
               + ("  |  " + "  |  ".join(bits) if bits else ""), flush=True)
 
     return matched
+
+
+def audit_final_export_words(
+    output_mp4: Path,
+    master_script_lines: List[str],
+    language: str = "English",
+) -> dict:
+    """v708 Layer 4 — final-export word audit.
+
+    Transcribes the assembled mp4 with a higher-fidelity Whisper model and
+    matches against the concatenated dialogue script. Returns a dict:
+        {
+            'missing_words': [str, ...],           # script words NOT heard
+            'audit_model': str,                    # which model ran
+            'script_word_count': int,
+            'heard_word_count': int,
+            'transcript_excerpt': str,             # first 200 chars of audio transcript
+            'audit_ok': bool,                      # True iff missing_words is empty
+            'error': Optional[str],                # set when audit could not run
+        }
+    Does NOT fail the export — caller decides what to do with the result.
+    Per CLAUDE.md verification rule, audit results live in shipped stats so
+    every export's word-completeness is visible without needing log diving.
+    """
+    import re as _re
+    import tempfile as _tf
+    result = {
+        'missing_words': [],
+        'audit_model': V708_AUDIT_MODEL_SIZE,
+        'script_word_count': 0,
+        'heard_word_count': 0,
+        'transcript_excerpt': '',
+        'audit_ok': True,
+        'error': None,
+    }
+    try:
+        script_set = set()
+        for line in master_script_lines or []:
+            if line:
+                cleaned = _re.sub(r'[^\w\s]', '', line.lower())
+                for w in cleaned.split():
+                    script_set.add(w)
+        result['script_word_count'] = len(script_set)
+        if not script_set:
+            print("[v708-AUDIT] no master script provided — skipping audit", flush=True)
+            return result
+
+        if not output_mp4.exists():
+            result['audit_ok'] = False
+            result['error'] = f"output mp4 missing: {output_mp4}"
+            print(f"[v708-AUDIT] {result['error']}", flush=True)
+            return result
+
+        _LANG_MAP = {
+            "english": "en", "spanish": "es", "french": "fr", "german": "de",
+            "italian": "it", "portuguese": "pt",
+        }
+        whisper_lang = _LANG_MAP.get((language or "english").lower(), None)
+
+        with _tf.NamedTemporaryFile(suffix='.wav', delete=False) as _tmp:
+            audio_path = _tmp.name
+        try:
+            cmd = [FFMPEG_BIN, '-y', '-i', str(output_mp4),
+                   '-ar', '16000', '-ac', '1', '-f', 'wav', audio_path]
+            code, _, err = run(cmd)
+            if code != 0:
+                result['audit_ok'] = False
+                result['error'] = f"audio extract failed: {err[:200]}"
+                print(f"[v708-AUDIT] {result['error']}", flush=True)
+                return result
+
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError:
+                result['audit_ok'] = False
+                result['error'] = "faster_whisper unavailable for audit"
+                print(f"[v708-AUDIT] {result['error']}", flush=True)
+                return result
+
+            print(
+                f"[v708-AUDIT] loading {V708_AUDIT_MODEL_SIZE} model for "
+                f"final-export word audit of {output_mp4.name}",
+                flush=True,
+            )
+            audit_model = WhisperModel(
+                V708_AUDIT_MODEL_SIZE, device="cpu", compute_type="int8"
+            )
+            try:
+                # Use the script as initial_prompt to bias decoder toward
+                # the words we expect — same trick as v701q per-clip.
+                _audit_prompt = " ".join(
+                    (l or "").strip() for l in master_script_lines if l
+                ).strip() or None
+                segs_iter, _ = audit_model.transcribe(
+                    audio_path,
+                    language=whisper_lang,
+                    word_timestamps=True,
+                    beam_size=1,
+                    vad_filter=True,
+                    condition_on_previous_text=False,
+                    initial_prompt=_audit_prompt,
+                    temperature=0.0,
+                    no_speech_threshold=0.4,
+                    compression_ratio_threshold=2.0,
+                    logprob_threshold=-0.8,
+                )
+                heard_set = set()
+                full_transcript_parts = []
+                for seg in segs_iter:
+                    if seg.words:
+                        for w in seg.words:
+                            t = _re.sub(r'[^\w]', '', (w.word or '').lower())
+                            if t:
+                                heard_set.add(t)
+                                full_transcript_parts.append(t)
+            finally:
+                try:
+                    del audit_model
+                except Exception:
+                    pass
+                try:
+                    import gc as _gc
+                    _gc.collect()
+                    import ctypes as _ct
+                    _libc = _ct.CDLL("libc.so.6")
+                    _libc.malloc_trim(0)
+                except Exception:
+                    pass
+
+            missing = sorted(script_set - heard_set)
+            result['missing_words'] = missing
+            result['heard_word_count'] = len(heard_set)
+            result['transcript_excerpt'] = " ".join(full_transcript_parts)[:200]
+            result['audit_ok'] = (len(missing) == 0)
+
+            if missing:
+                print(
+                    f"[v708-AUDIT] ❌ FINAL MP4 MISSING {len(missing)} script "
+                    f"word(s): {missing} | script={len(script_set)} heard={len(heard_set)}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[v708-AUDIT] ✓ all {len(script_set)} script words present "
+                    f"in final mp4 (heard={len(heard_set)})",
+                    flush=True,
+                )
+        finally:
+            try:
+                os.remove(audio_path)
+            except Exception:
+                pass
+
+    except Exception as e:
+        result['audit_ok'] = False
+        result['error'] = f"audit exception: {e}"
+        import traceback
+        print(f"[v708-AUDIT] {result['error']}", flush=True)
+        traceback.print_exc()
+
+    return result
 
 
 def apply_vad(
@@ -4226,7 +4616,54 @@ def export_final_video(
                 info = ffprobe_json(output_path)
                 stats["final_duration"] = get_duration(info)
                 stats["vad_applied"] = True
-                stats["vad_pass"] = "per_clip_only_v701w"
+                stats["vad_pass"] = "per_clip_only_v708"
+
+                # === v708 Layer 4 — final-export word audit ===
+                # Bind contract: every script word from each clip's intended
+                # dialogue must appear in the assembled mp4. Audit
+                # transcribes the final output with a fidelity model and
+                # diffs against the concatenated master script. Result
+                # surfaces in stats (operator-visible) and logs.
+                try:
+                    _master_lines = []
+                    for _ci in clip_info:
+                        _cm = (_ci.get("cut_mode") or "").lower()
+                        _st = (_ci.get("scene_type") or "").lower()
+                        if _cm == "timeline" or _st == "text_card":
+                            continue
+                        _dt = (_ci.get("dialogue_text") or "").strip()
+                        if _dt:
+                            _master_lines.append(_dt)
+                    if _master_lines:
+                        if progress_callback:
+                            progress_callback("v708 word-completeness audit...")
+                        _audit = audit_final_export_words(
+                            output_mp4=output_path,
+                            master_script_lines=_master_lines,
+                            language=language,
+                        )
+                        stats["v708_audit_ok"] = _audit.get("audit_ok", False)
+                        stats["v708_audit_missing_words"] = _audit.get("missing_words", [])
+                        stats["v708_audit_model"] = _audit.get("audit_model")
+                        stats["v708_audit_script_words"] = _audit.get("script_word_count", 0)
+                        stats["v708_audit_heard_words"] = _audit.get("heard_word_count", 0)
+                        stats["v708_audit_error"] = _audit.get("error")
+                    else:
+                        stats["v708_audit_ok"] = True
+                        stats["v708_audit_missing_words"] = []
+                        stats["v708_audit_model"] = None
+                        stats["v708_audit_script_words"] = 0
+                        stats["v708_audit_heard_words"] = 0
+                        stats["v708_audit_error"] = "no dialogue clips to audit"
+                except Exception as _audit_err:
+                    stats["v708_audit_ok"] = False
+                    stats["v708_audit_missing_words"] = []
+                    stats["v708_audit_error"] = f"audit exception: {_audit_err}"
+                    print(
+                        f"[v708-AUDIT] non-fatal exception: {_audit_err}",
+                        flush=True,
+                    )
+
                 # Skip the rest of the final-pass block
                 if progress_callback:
                     progress_callback("Export complete!")
