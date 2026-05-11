@@ -2908,8 +2908,14 @@ def transcribe_master_audio(audio_path: Path, initial_prompt: str = None) -> lis
             language="en",
             word_timestamps=True,
             initial_prompt=initial_prompt,
-            # v701s — drop temperature=0.0 here too (same reason as the
-            # per-clip path above; greedy-only collapses script coverage).
+            beam_size=5,                            # v701zb — small benefits from beam>1
+            vad_filter=True,                        # v701zb — Silero pre-filter; skip silent regions
+            condition_on_previous_text=False,       # v701zb — KILL HALLUCINATION; default True
+                                                    # cascaded "please subscribe to my channel" from
+                                                    # training data, transcribed 61 words for a 55s
+                                                    # audio that has 127 dialogue words
+            # v701s — keep faster-whisper's default temperature ladder
+            # [0.0,0.2,0.4,0.6,0.8,1.0] for fallback decoding.
         )
         
         words = []
@@ -3072,12 +3078,25 @@ def find_line_in_master(master_words: list, master_text: str, dialogue_text: str
             window_len = (best_second_idx + sh_len) - best_first_idx
             print(f"[MasterAlign]   Split match improved: {best_score:.2f} (first={best_first_score:.2f} second={best_second_score:.2f})")
     
+    # v701zb — clamp indices into valid range. When sequential matching
+    # is active and the cursor has advanced past the last master word,
+    # best_idx can equal len(master_words) (no iteration entered the
+    # loop). Returning master_words[len()] raises IndexError and kills
+    # the whole broll pipeline. Defensive clamp + None return when the
+    # search range was effectively empty.
+    if not master_words:
+        return None
+    if best_idx >= len(master_words):
+        print(f"[MasterAlign]   ✗ search exhausted for '{dialogue_text[:50]}...' (search_from_word={search_from_word}, master len={len(master_words)})")
+        return None
     end_idx = min(best_idx + window_len - 1, len(master_words) - 1)
-    
+    if end_idx < best_idx:
+        end_idx = best_idx
+
     quality = "✓ GOOD" if best_score > 0.6 else "⚠ WEAK" if best_score > 0.3 else "✗ POOR"
     print(f"[MasterAlign]   {quality} match ({best_score:.2f}): '{dialogue_text[:50]}...' → words {best_idx}-{end_idx} "
           f"('{' '.join(master_norm[best_idx:end_idx+1][:8])}...')")
-    
+
     return {
         "start": master_words[best_idx]["start"],
         "end": master_words[end_idx]["end"],
