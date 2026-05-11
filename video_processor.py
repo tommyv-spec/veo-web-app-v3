@@ -3543,11 +3543,12 @@ def export_with_master_audio(
     stats = {
         "master_audio_aligned": True,
         "clips_processed": len(clip_info),
-        "master_words": len(master_words),
+        "master_words": len(master_words) if master_words is not None else 0,  # v701zd — pre-computed path has None
         "master_duration": master_duration,
         "clip_details": [],
         "black_segments": 0,
         "total_black_duration": 0.0,
+        "pre_computed_targets": pre_computed_targets is not None,
     }
     
     with tempfile.TemporaryDirectory() as temp_dir:
