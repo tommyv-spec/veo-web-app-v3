@@ -270,7 +270,15 @@ def detect_speech_segments_whisper(
                 vad_filter=True,                        # Pre-filter with Silero VAD
                 condition_on_previous_text=False,       # Prevent cascading hallucinations
                 initial_prompt=_initial_prompt,         # v701q — bias toward script
-                temperature=0.0,                        # v701q — deterministic decode
+                # v701s — REVERT temperature=0.0. Greedy-only decode caused
+                # speaker output to collapse from 41.6s → 6.2s on the
+                # donut-glaze run: faster-whisper's default
+                # temperature=[0.0,0.2,0.4,0.6,0.8,1.0] fallback ladder is
+                # what RECOVERS segments where greedy decode trips
+                # no_speech_prob threshold. Removing the ladder dropped
+                # words mid-script → matcher saw silence → final-pass VAD
+                # cut 35s. Determinism deferred — pre-v701q reproducibility
+                # was already adequate.
             )
             
             # Collect all words with timestamps + probability
@@ -2869,7 +2877,8 @@ def transcribe_master_audio(audio_path: Path, initial_prompt: str = None) -> lis
             language="en",
             word_timestamps=True,
             initial_prompt=initial_prompt,
-            temperature=0.0,
+            # v701s — drop temperature=0.0 here too (same reason as the
+            # per-clip path above; greedy-only collapses script coverage).
         )
         
         words = []
