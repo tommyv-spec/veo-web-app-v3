@@ -2880,12 +2880,22 @@ def transcribe_master_audio(audio_path: Path, initial_prompt: str = None) -> lis
     
     try:
         from faster_whisper import WhisperModel
-        # v701z — switched master-audio Whisper from "base" → "tiny" to
-        # keep peak RSS under the 2GB ceiling. With v701q initial_prompt
-        # biasing the decoder toward the known script + find_line_in_master
-        # being substring-based fuzzy match, tiny's lower acoustic accuracy
-        # is fine for locating each line in the master timeline.
-        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        # v701za — bump master-audio Whisper back to "small". v701z's "tiny"
+        # mis-transcribed enough words (donut-glaze run: HOOK / vp2 / vp3
+        # / CTA) that find_line_in_master's Method 1 EXACT-substring match
+        # failed for those lines and Method 2 sliding-window matched the
+        # wrong master position with confidence 0.36-0.50 → clips placed
+        # at the wrong timestamp → overlap warnings → final broll played
+        # 6/11 clips out of order. Speaker's per-clip pass still uses
+        # tiny (good enough with v701q initial_prompt + 11-clip scope),
+        # but master-audio is ONE transcription over a longer continuous
+        # audio where accuracy matters more.
+        #
+        # Memory budget after v701y/z sequencing: speaker's tiny is
+        # disposed + malloc_trim before this load runs, so small (~250MB
+        # resident) is the only Whisper instance live during the master
+        # pass. Within 2GB ceiling.
+        model = WhisperModel("small", device="cpu", compute_type="int8")
         if initial_prompt:
             print(
                 f"[MasterAlign] v701r initial_prompt: "
