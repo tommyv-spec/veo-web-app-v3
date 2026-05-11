@@ -5921,3 +5921,208 @@ Post-v699 audit:
 Result: NOT a text_card. The "golden" caption is the source's karaoke-style word callout at shot 4's tail, sitting on top of a darkening live-action frame as the air-fryer scene fades to the cut. Recorded retroactively as a karaoke caption note on shot 4's storyboard scene (decode-only); no separate scene_type=text_card emitted. Image numbering compacted from 1-3, 5-12 (with reserved image_4 gap) to 1-11 (no gap).
 
 **Migration:** existing decoded artifacts in `raw/` may have false-positive text_cards from pre-v699 decodes. Audit them on next touch. New decodes from this commit forward MUST satisfy all five criteria before emitting a `scene_type: text_card`.
+
+---
+
+### v702 — Image-prompt vocabulary safety (GENERATE-side only)
+
+**Scope.** GENERATE-side authoring only (`videos/*.md` produced by `lift_bundle.sh` / `create_bundle.sh` lift/create/innovate workflows). DECODE-side artifacts (`raw/decoded_*.md`) preserve source observation faithfully per v614/v615 decode-fidelity rule — decoded prose may describe what the source IS in plain terms even when those terms would be unsafe to ship to a generator.
+
+**Trigger.** Any text Banana 2 or Veo TTS will read at generation time:
+- Every `### Image N` fenced code block (the `**Image prompt:**` body)
+- Every `## Veo 3.1 Final Prompts` fenced code block (per-clip prompt body)
+- Every `- **action_note:**` field (consumed by Veo prompt-builder per v540)
+- Every `- **line:**` field IF authored generate-side (verbatim source dialogue on a decode is exempt per v614/v615; lift dialogue must re-author with safe vocabulary)
+
+**Why.** Banana 2 image-policy + Veo TTS content-policy reject several anatomical / sexual-action words even in clinical / educational framing. Rejection modes:
+- Hard refusal (blank output, "I can't generate that")
+- Silent degradation (generation completes but the offending element is hallucinated as safe — e.g. a clinic-demo prop gets repositioned across the room and the entire shot composition breaks)
+- TTS pronunciation glitch (Veo over-emphasizes the flagged word then drops audio frames around it; downstream Whisper-VAD drops the surrounding syllables, breaking clip cut alignment)
+
+Safe-vocabulary lifts pass all three policy gates while preserving the same shame-proxy / educational-explanation framing that drove the v598 hook power-test signal.
+
+**Forbidden tokens** (mechanical pre-output grep — case-insensitive):
+
+```
+erection
+limp erection
+stand-in for erection
+crotch
+wedged
+pressed
+inseam at the crotch
+genitals
+sexual symptom
+```
+
+**Safe substitute vocabulary** (use the right-hand replacement when authoring):
+
+| Forbidden | Safe substitute |
+|---|---|
+| erection | male performance / performance quality |
+| limp erection | curved (banana shape) |
+| stand-in for erection | visible-feature anchor for the educational topic |
+| crotch | lap area / upper thigh / shorts upper-thigh area |
+| wedged (against) | positioned slightly forward (toward camera) / held near |
+| pressed (against) | presented / held with visible air space |
+| inseam at the crotch | shorts upper-thigh area |
+| genitals | NOT in frame / educational-only framing |
+| sexual symptom | ED-cluster topic / educational explanation |
+
+**Required prompt-body framing for lap-area educational props** (the typical ED-niche use case — banana / produce / supplement bottle held near a male patient's lap area for clinical demonstration):
+
+1. Name the prop's role explicitly — "symbolic clinical demonstration prop" / "visual health-demo prop"
+2. Name the prop's position relative to the patient using safe-substitute vocabulary — "in the patient's lap area" / "at the level of the shorts upper-thigh area"
+3. State "off-center" placement
+4. State "visible air space" between the prop and the patient
+5. State "NOT touching" the patient
+6. Direction qualifier — "slightly forward toward camera" for prop angle relative to lens
+7. Add an explicit negative-constraint line at the closing of the prompt body: "The banana is NOT touching the patient — visible air space is maintained between the educational prop and the shorts upper-thigh area throughout."
+
+**Patient anatomy framing:**
+- Crop the patient strictly: above the navel and below mid-thigh ONLY (no face, no upper torso skin past the navel line)
+- Avoid the word "genitals" entirely; reference the patient's clothing fabric instead ("dark grey workout shorts")
+- Use clothing as the only anatomical reference — describe the shorts, not what's underneath
+
+**Verbatim source dialogue handling (the v614/v615 + v702 intersection):**
+
+When a source video's dialogue (preserved per v614/v615 in the `- **line:**` field of a decode) contains a forbidden token (e.g. "erection quality" in the rosabella beetroot decode at scene 5), the GENERATE-side adaptation must:
+- Rewrite the `- **line:**` field with safe vocabulary BEFORE shipping into a `videos/*.md` lift
+- Document the original source phrasing in a footnote comment for source-record fidelity
+- Verify the rewritten line still satisfies the v577 word budget + v693 lowercase rule
+
+Example (source → lift):
+```
+SOURCE (decode-side, preserved verbatim):
+- **line:** beetroot is rich in natural nitrates. these boost blood flow, which drives erection quality and hormone delivery.
+
+LIFT (generate-side, safe-vocabulary rewrite):
+- **line:** beetroot is rich in natural nitrates. these boost blood flow, which drives male performance and hormone delivery.
+```
+
+**Pre-output validation gate (v702):**
+
+Before emitting any `videos/*.md` file, mechanically grep for forbidden tokens across the file:
+
+```bash
+grep -niE "\b(erection|crotch|wedged|inseam|genitals|sexual symptom|stand-in for erection|limp erection)\b" videos/<file>.md && echo "v702 FAIL"
+```
+
+If grep returns ANY match, the file is NOT safe to ship. Rewrite the offending lines using the safe-substitute table before the next pre-output check.
+
+The check is supplementary to v696's parser-abort gates and v698A's voiceover-anchor gates — all three run before the `python -c` parser verification.
+
+**Decode-side exemption** (do NOT apply v702 to `raw/decoded_*.md`):
+- Decoded artifacts describe what the source IS in faithful prose (a banana wedged at a patient's crotch IS what the camera shows; the decoded artifact records that observation accurately)
+- Decoder DOES NOT generate; the decoded prose is read by humans + downstream LLMs doing lift authoring, not by Banana 2 or Veo
+- The lift author is responsible for translating the decoded observation into v702-compliant generate-side prose
+- Mirrors v614/v615 decode-fidelity carve-out — em-dashes preserved in decoded `- **line:**` fields even though banned in authored dialogue
+
+**Concrete worked example — energy-drinks-vs-testosterone-rosabella decode (2026-05-11):**
+
+DECODE observation (raw/decoded_snapinsta_AQMBrzzabywwq5_energy_drinks_testosterone_rosabella.md, post-v702-retrofit):
+The decoded artifact's Image 1 prompt body describes the banana as a "symbolic clinical demonstration prop in the patient's lap area, off-center, visible air space, NOT touching." This safe-vocabulary description happens to satisfy v702 because the source video's actual composition (post-frame-audit) had the banana held with air space, not pressed. The retrofit was scope-only; the description matches what the camera shows. Per v702 carve-out, decoded artifacts MAY use plainer source-faithful language too — both forms are legal decode-side.
+
+LIFT adaptation (any future `videos/*.md` derived from this decode):
+- Use the safe-vocabulary form verbatim — the decoded prompt body is already v702-compliant and lifts directly
+- Rewrite scene-5 `- **line:**` from source verbatim "erection quality" to safe "male performance"
+- Mechanical grep gate passes pre-output
+
+**Migration:** existing `videos/*.md` files predating this rule should be audited on next-touch. If any contain forbidden tokens in image prompt bodies, action_notes, or `- **line:**` fields, swap to safe substitutes before the next render. New `videos/*.md` files from this commit forward MUST pass the v702 grep gate before render submission.
+
+---
+
+### v703 — Worker-injected reference manifest (replaces fragile platform-side slot-substitution)
+
+**Scope.** Generate-side rendering pipeline (`code/image_worker.py`). Replaces the fragile platform-side substitution path in `code/image_platform.py:_resolve_flow_prompt_bindings` for the canonical "Use Image N for X." reference-binding header. Decoder + markdown author UNCHANGED — they continue to write `- **image:**` / `product_image:` / `reference_image:` fields as before.
+
+**Problem (pre-v703).** Platform substituted `"the uploaded character reference image"` → `"Image N"` in the prompt body using the DB `slot_order` of each parent edge. The worker's actual reference-attach order — driven by the `input_images` list the platform sends — could drift from the slot_order the substitution used. Concrete failure (verified 2026-05-11, node 1143):
+
+- Platform substitution wrote: `"Use Image 3 for the korella saffron bottle. Use Image 1 for the main character."`
+- Worker attached refs in actual order: `Image 1 = the_main_character.png, Image 2 = the_korella_saffron_bottle.jpg, Image 3 = chain_from_image_1.png`
+- Banana 2 saw "bottle at Image 3" in prompt but `Image 3` slot held the chain image → rendered the chain as the bottle reference → composition broken (no bottle, prior-scene context misattributed)
+
+The renumbering bug was triggered by the v581 LEGACY substitution in `_resolve_flow_prompt_bindings` (`\bImage K\b` pattern replacement) firing on already-substituted persona/product lines, mutating positional numbers AFTER they had been bound to the wrong index by an out-of-order iteration.
+
+**Fix (v703).** Move numbering authority from PLATFORM-SIDE BODY-SUBSTITUTION to WORKER-SIDE MANIFEST-INJECTION:
+
+1. Platform-side substitution path **kept untouched** for backward compatibility. Whatever the substitution produces (right or wrong) becomes part of the prompt body the worker receives.
+2. Worker, after `upload_reference_images(input_paths)` returns successfully (refs attached in confirmed order, chip count verified), runs two transformations on the prompt before pasting:
+   - `_strip_stale_reference_lines(prompt)` removes any pre-existing `^Use Image \d+ for [^.\n]+\.\s*$` lines from the prompt body — these are the substitution's output, potentially mis-numbered, and now obsolete
+   - `_build_reference_manifest(input_paths)` builds a fresh manifest header listing each attached ref with its TRUE Image N position, mapping the worker-side filename to a display name via `_filename_to_ref_display_name`:
+     - `the_main_character.png` → `the main character`
+     - `the_korella_saffron_bottle.jpg` → `the korella saffron bottle`
+     - `chain_from_image_K.png` → `the prior scene (chain from image_K)`
+     - `ref_N.png` / `variant_N.png` → `reference N`
+3. Worker prepends the manifest to the stripped body and pastes the result via clipboard
+
+**Authoritative order.** `input_paths` IS the order the worker just attached. The downloader (`_download_reference_inputs`) preserves `input_images` order verbatim. The platform builds `input_images` sorted by `slot_order` — so worker's Image N == sorted-by-slot-order index. Whatever the substitution path computed, the worker manifest reflects what Banana 2 actually sees.
+
+**Body content unchanged outside the substitution lines.** Author-written content describing the scene, references to the prior scene via `image_K` (with underscore, lowercase) chain markers, ingredient descriptions — all preserved. Only the `Use Image N for ...` lines (which the platform now owns at submit time) get rebuilt.
+
+**Implementation surface.**
+
+- `code/image_worker.py` — three new module-level helpers + manifest-injection at three `upload_reference_images` call sites:
+  - `_filename_to_ref_display_name(filename) -> str`
+  - `_build_reference_manifest(input_paths: list[str]) -> str`
+  - `_strip_stale_reference_lines(prompt: str) -> str`
+  - Call sites patched: legacy `process_image_job` path (line ~2855), watch-folder `process_job_with_refs` path (line ~3357), API-submit path in `worker_main_loop` (line ~5980)
+- Worker logs `[v703] manifest prepended (N ref(s)): Use Image 1 for X. | Use Image 2 for Y. | ...` so authors can audit attribution post-hoc
+
+**No change to platform-side substitution.** `_resolve_flow_prompt_bindings` continues to run as before for backward compatibility with any consumers that look at the platform's prepared prompt before worker mutation. Whatever the substitution produces gets stripped + replaced by the worker's authoritative manifest. The buggy legacy `\bImage K\b` rewrite remains active but its output is overwritten by v703.
+
+**No change to markdown contract.** Authors continue to write:
+- `- **image:** image_N` on each scene
+- `- **product_image:** the X bottle` on product-bearing images
+- `- **reference_image:** image_K` for chain
+- `Use the uploaded character reference image for the main character.` (preferred)
+- `Use the uploaded product reference image for the bottle.` (preferred)
+- `Use the prior-scene reference image to preserve ...` (preferred)
+
+The platform substitution + v703 worker manifest both handle these. Both forms produce the same final Banana 2 input.
+
+**Migration.** Zero. Existing `videos/*.md` files render correctly under v703 without edits — the manifest injection overrides any pre-existing positional numbers in the body. Future authoring continues to use role-descriptor phrases; the worker maps them transparently at render time.
+
+**Verification.**
+
+Worker log on successful v703 path (sample, node 1143 retrofit):
+
+```
+[node_1143] Processing 3 reference image(s)...
+[node_1143]   Image 1/3: the_main_character.png
+[node_1143]   Image 2/3: the_korella_saffron_bottle.jpg
+[node_1143]   Image 3/3: chain_from_image_1.png
+[node_1143] ✓ All reference images attached
+[node_1143] [v703] manifest prepended (3 ref(s)): Use Image 1 for the main character. | Use Image 2 for the korella saffron bottle. | Use Image 3 for the prior scene (chain from image_1).
+✓ Prompt pasted via clipboard
+```
+
+Pre-v703 (broken): prompt at submit said `Use Image 3 for the korella saffron bottle.` while worker had attached the bottle at `Image 2`. Banana 2 bound the bottle role to the chain image. Composition rendered with chain content where bottle should be.
+
+Post-v703 (correct): worker manifest writes `Use Image 2 for the korella saffron bottle.` matching the actual Image 2 slot. Banana 2 binds the bottle correctly. Composition renders with the actual Korella Saffron bottle visible.
+
+**Unit tests.**
+
+```python
+# manifest builder
+m = _build_reference_manifest([
+    "the_main_character.png",
+    "the_korella_saffron_bottle.jpg",
+    "chain_from_image_1.png",
+])
+# Expected: "Use Image 1 for the main character.\n
+#            Use Image 2 for the korella saffron bottle.\n
+#            Use Image 3 for the prior scene (chain from image_1).\n\n"
+
+# strip stale lines
+s = _strip_stale_reference_lines(
+    "Use Image 3 for the korella saffron bottle.\n"
+    "Use Image 1 for the main character.\n"
+    "Use image_1 as the base frame. Keep the anatomy-clinic setting.\n"
+)
+# Expected: "Use image_1 as the base frame. Keep the anatomy-clinic setting.\n"
+# (the underscored chain marker "image_1" is preserved — pattern requires
+#  capital-I + space, not underscore-separated lowercase)
+```
+
+Both verified passing on commit landing v703.

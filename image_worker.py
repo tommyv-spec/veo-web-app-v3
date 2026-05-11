@@ -2237,6 +2237,104 @@ def upload_reference_images(page, image_paths, context="", already_uploaded=None
     return True
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# v703 — Worker-injected reference manifest (replaces fragile platform-side
+# slot-substitution in image_platform.py:_resolve_flow_prompt_bindings).
+#
+# Problem (pre-v703): platform substituted "the uploaded character/product
+# reference image" → "Image N" using DB slot_order, but slot_order vs the
+# worker's actual attach order can drift (e.g. chain edge inserted between
+# persona + product edges shifted product's flow_image_num). Banana 2 then
+# saw "Use Image 3 for the bottle" while the worker had attached the bottle
+# at Image 2, so the model bound the wrong reference to the bottle role.
+#
+# Fix (v703): worker has authoritative attach order at submit time. Build
+# the manifest header right BEFORE pasting the prompt, using the same
+# input_paths list that was just attached. Manifest is prepended to the
+# prompt body; stale "Use Image N for ..." lines from platform substitution
+# are stripped first to avoid conflicting numbers. Body's role-descriptor
+# phrases ("the prior-scene reference image", "the main character", etc.)
+# stay unchanged — manifest at top is authoritative for Banana 2.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _filename_to_ref_display_name(filename):
+    """Map a worker-side reference filename to a human-readable display name
+    suitable for the manifest header.
+
+    The worker downloads each reference with a slugified filename derived
+    from the platform's edge role (see _download_reference_inputs +
+    _slugify_role). Examples:
+      "the_main_character.png"          → "the main character"
+      "the_korella_saffron_bottle.jpg"  → "the korella saffron bottle"
+      "chain_from_image_1.png"          → "the prior scene (chain from image_1)"
+      "ref_2.png"                       → "reference 2"
+    """
+    import os as _os
+    import re as _re
+    stem = _os.path.splitext(_os.path.basename(filename or ""))[0]
+    if not stem:
+        return "(unknown reference)"
+    # chain_from_image_K → "the prior scene (chain from image_K)"
+    m = _re.match(r"^chain_from_image_(\d+)$", stem)
+    if m:
+        return f"the prior scene (chain from image_{m.group(1)})"
+    # ref_N or variant_N → "reference N"
+    m = _re.match(r"^(?:ref|variant)_(\d+)$", stem)
+    if m:
+        return f"reference {m.group(1)}"
+    # default: replace underscores with spaces
+    return stem.replace("_", " ")
+
+
+def _build_reference_manifest(input_paths):
+    """Build the v703 manifest header listing each attached reference and
+    its actual Image N position, based on the worker's true attach order.
+
+    Returns a string ending with a blank line, ready to prepend to the
+    prompt body. Empty if no input_paths.
+
+    Example output:
+      Use Image 1 for the main character.
+      Use Image 2 for the korella saffron bottle.
+      Use Image 3 for the prior scene (chain from image_1).
+
+      (blank line)
+    """
+    if not input_paths:
+        return ""
+    lines = []
+    for i, p in enumerate(input_paths):
+        name = _filename_to_ref_display_name(p)
+        lines.append(f"Use Image {i + 1} for {name}.")
+    return "\n".join(lines) + "\n\n"
+
+
+def _strip_stale_reference_lines(prompt):
+    """Remove any pre-existing 'Use Image N for X.' lines from the prompt
+    body. Platform-side substitution (image_platform.py
+    _resolve_flow_prompt_bindings) may have written numbered references
+    that no longer match the worker's actual attach order. The v703 manifest
+    we prepend is authoritative; stripping prevents conflicting numbers
+    from confusing Banana 2.
+
+    Only strips lines that look like the substitution output pattern:
+      ^Use Image \\d+ for [^.]+\\.\\s*$
+    Body content that mentions "Image N" in other contexts (e.g.
+    "Use image_1 as the base frame", "Image quality settings", inline
+    references) is preserved.
+    """
+    import re as _re
+    if not prompt:
+        return prompt
+    # Strip leading "Use Image N for ...." lines (with optional trailing
+    # whitespace / newlines after each)
+    pattern = _re.compile(
+        r"^Use Image \d+ for [^.\n]+\.\s*\n", flags=_re.MULTILINE
+    )
+    cleaned = pattern.sub("", prompt)
+    return cleaned.lstrip("\n")
+
+
 def upload_reference_images_legacy(page, image_paths, context=""):
     """Original multi-select upload (kept for reference). Not used."""
     prefix = f"[{context}] " if context else ""
@@ -2756,7 +2854,9 @@ def process_image_job(page, input_paths, prompt, output_path,
         if input_paths:
             upload_reference_images(page, input_paths)
             human_delay(1, 2)
-        
+            # v703 — worker-injected reference manifest (see helper docstrings)
+            prompt = _build_reference_manifest(input_paths) + _strip_stale_reference_lines(prompt)
+
         # --- Step 5: Enter prompt ---
         human_mouse_move(page)
         scroll_randomly(page)
@@ -3259,6 +3359,14 @@ def process_image_job_multi(page, input_paths, prompt, output_dir,
             if not upload_reference_images(page, input_paths, context=context,
                                            already_uploaded=already_uploaded):
                 return False, [], "Failed to upload reference images"
+            # v703 — worker-injected reference manifest (see helper docstrings)
+            _v703_manifest = _build_reference_manifest(input_paths)
+            prompt = _v703_manifest + _strip_stale_reference_lines(prompt)
+            print(
+                f"[{context}] [v703] manifest prepended ({len(input_paths)} ref(s)): "
+                f"{_v703_manifest.replace(chr(10), ' | ').strip(' |')}",
+                flush=True,
+            )
 
         # 4) Fill prompt
         if not fill_prompt_textarea(page, prompt):
@@ -5882,6 +5990,27 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 if not upload_reference_images(page, input_paths, context=ctx,
                                                already_uploaded=project_state["uploaded_in_project"]):
                     raise RuntimeError("Failed to upload reference images")
+
+            # v703 — Worker-injected reference manifest. After attaching
+            # refs in input_paths order, the worker has authoritative
+            # knowledge of which file is at which Image N. Build a manifest
+            # header from input_paths, strip any stale "Use Image N" lines
+            # the platform's substitution path may have written (with
+            # potentially mis-matched numbers), and prepend the worker's
+            # authoritative header to the prompt body. Banana 2 reads the
+            # manifest at top → trusts it → no more "bottle ended up at
+            # Image 3 but prompt says Image 2" misbinds.
+            if input_paths:
+                _v703_manifest = _build_reference_manifest(input_paths)
+                _v703_stripped = _strip_stale_reference_lines(prompt)
+                prompt = _v703_manifest + _v703_stripped
+                _v703_preview = _v703_manifest.replace("\n", " | ").strip(" |")
+                print(
+                    f"[{ctx}] [v703] manifest prepended ({len(input_paths)} ref(s)): "
+                    f"{_v703_preview}",
+                    flush=True,
+                )
+
             if not fill_prompt_textarea(page, prompt):
                 raise RuntimeError("Failed to fill prompt")
 
