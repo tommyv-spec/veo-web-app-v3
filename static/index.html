@@ -10413,8 +10413,29 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const controller = new AbortController();
                 const exportTimeout = exportSettings.master_audio_filename ? 600000 : 300000;
                 const timeoutId = setTimeout(() => controller.abort(), exportTimeout);
-                
+
+                // v701v — Snapshot pre-export R2 file list BEFORE firing POST so
+                // we can identify a NEW final_export_*.mp4 deterministically even
+                // when the POST's response is lost to Render's proxy timeout (any
+                // export running ≥30-60s will trip it). Pattern: fire POST in
+                // background, race against a /list-outputs poll loop. Whichever
+                // observes the new file first wins; the "Export Failed" /
+                // "Server took longer than the browser waited" banners no longer
+                // surface for a successful-but-slow run.
+                let _preExportFilenames = new Set();
+                try {
+                    const _preRes = await fetch(`${API}/jobs/${jobId}/list-outputs`);
+                    if (_preRes.ok) {
+                        const _preData = await _preRes.json();
+                        for (const fn of (_preData.files || [])) _preExportFilenames.add(fn);
+                    }
+                } catch (_preErr) {
+                    console.log('[Export/v701v] pre-snapshot skipped:', _preErr);
+                }
+                console.log(`[Export/v701v] pre-export snapshot: ${_preExportFilenames.size} files`);
+
                 let response;
+                let _fetchErrored = false;
                 try {
                     response = await fetch(`${API}/jobs/${jobId}/export-final`, {
                         method: 'POST',
@@ -10424,14 +10445,64 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     });
                 } catch (fetchError) {
                     clearTimeout(timeoutId);
-                    // Check if it was an abort (timeout)
-                    if (fetchError.name === 'AbortError') {
-                        throw new Error('Export timed out after 5 minutes. The video might still be processing on the server. Try refreshing and downloading manually.');
-                    }
-                    // Network error
-                    throw new Error(`Network error: ${fetchError.message}. The server may be restarting — please retry in a few seconds.`);
+                    _fetchErrored = true;
+                    console.log(
+                        `[Export/v701v] POST connection lost (${fetchError.name}: ${fetchError.message}); `
+                        + `backend likely still processing. Polling /list-outputs for the new export.`
+                    );
+                    // DON'T throw — fall through to the poll loop below so a
+                    // slow-but-successful run still resolves to ✅ instead of
+                    // a transient ❌. The poll has an 8-minute ceiling.
                 }
                 clearTimeout(timeoutId);
+
+                // v701v — If fetch failed, poll R2 for the new file rather than
+                // declaring failure. The status banner stays in "processing"
+                // mode while the poll runs.
+                if (_fetchErrored) {
+                    const _statusEl = document.getElementById('exportStatusText');
+                    if (_statusEl) _statusEl.textContent = '⏳ Server still processing — waiting for the export to land in R2...';
+                    const _pollStart = Date.now();
+                    const _pollMaxMs = exportSettings.master_audio_filename ? 600000 : 480000;  // 10min master-audio, 8min default
+                    let _foundFilename = null;
+                    while (Date.now() - _pollStart < _pollMaxMs) {
+                        await new Promise(r => setTimeout(r, 3000));
+                        try {
+                            const _r = await fetch(`${API}/jobs/${jobId}/list-outputs`);
+                            if (!_r.ok) continue;
+                            const _d = await _r.json();
+                            const _newest = (_d.files || [])
+                                .filter(f => f.startsWith('final_export_') && f.endsWith('.mp4') && !_preExportFilenames.has(f));
+                            if (_newest.length > 0) {
+                                _newest.sort();
+                                _foundFilename = _newest[_newest.length - 1];
+                                console.log(`[Export/v701v] poll matched new file: ${_foundFilename}`);
+                                break;
+                            }
+                            const _elapsed = ((Date.now() - _pollStart) / 1000).toFixed(0);
+                            if (_statusEl) _statusEl.textContent = `⏳ Still processing (${_elapsed}s) — final_export not yet uploaded to R2...`;
+                        } catch (_pollErr) {
+                            console.log('[Export/v701v] poll tick error (ignored):', _pollErr);
+                        }
+                    }
+                    if (!_foundFilename) {
+                        throw new Error('Export polling exceeded the time cap with no new file in R2. Check Render logs for the actual export task; manual recovery may be needed.');
+                    }
+                    // Fake a 'response' so downstream code can read result.filename
+                    // / result.download_url. Build the R2 URL from the same
+                    // /list-outputs route the UI uses elsewhere.
+                    const _downloadUrl = `${API}/jobs/${jobId}/outputs/${_foundFilename}`;
+                    response = new Response(
+                        JSON.stringify({
+                            filename: _foundFilename,
+                            download_url: _downloadUrl,
+                            // duration / clips / etc not known from poll;
+                            // the success banner will read those from
+                            // the inserted card's denormalized text instead.
+                        }),
+                        { status: 200, headers: { 'Content-Type': 'application/json' } },
+                    );
+                }
                 
                 clearInterval(timerInterval);
                 clearInterval(stageInterval);
