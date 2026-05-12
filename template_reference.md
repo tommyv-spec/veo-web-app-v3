@@ -6755,3 +6755,202 @@ ONLY THEN claim stuck-tile bug resolved.
 - `wiki/log.md` — v709 timeline entry added.
 
 **Migration: zero required.** v709 is a recovery contract layered on top of the existing submit/scan loop. Pre-v709 InFlightJob instances (none in flight on deploy) would lack `retry_count` and `_original_job` slots, but only freshly-submitted jobs after deploy carry the new state — there's no pre-existing in-flight state to migrate.
+
+---
+
+### v710 — Image-shared replacement cascade (mirror of v701e rejection cascade)
+
+**Scope.** Webapp endpoint runtime only (`code/main.py:replace_clip_image` + `code/static/index.html` toast handler). Repairs an asymmetric cascade bug in the v701 content-policy-violation recovery flow. No markdown contract change, no parser change, no DB schema change, no worker logic change. Operator-visible via the job log + the frontend toast on replacement upload.
+
+**Surfaced from.** 2026-05-12, job 01-amish-house (15-clip recipe video). Operator screenshot showed clips 1-5 PENDING REVIEW (rendered), clip 6 GENERATING (in flight, system-reissued the redo), clip 7 still stuck on the "Rejected by Flow Content Policy / upload replacement" card. Both clip 6 and clip 7 had originally been rejected by Flow content policy at submit time; both shared the same `start_frame` (the recipe-step image binding to both scenes). User uploaded a replacement image targeted at clip 6's card. The expected behavior was that BOTH clip 6 and clip 7 should re-queue with the new image — both were marked `CONTENT_POLICY_VIOLATION` by the same cause, both pointed at the same rejected key, and the user already supplied the replacement. Observed behavior: clip 6 re-queued and the worker picked it up; clip 7 stayed FAILED with the old rejected `start_frame` indefinitely. Job log:
+
+```
+1:41:08 PM  Clip 6: image policy violation — awaiting user replacement
+            (preemptively marked 1 sibling sharing same image)
+1:42:32 PM  Clip 7: image policy violation — awaiting user replacement
+            (preemptively marked 1 sibling sharing same image)
+2:21:28 PM  Clip 6: user uploaded replacement image → re-queued
+            ← NO matching entry for clip 7
+```
+
+---
+
+**The asymmetric cascade — diagnosis.**
+
+The v701 content-policy recovery flow has two cascade directions:
+
+**Rejection direction** (worker → backend, when Flow rejects an image):
+
+- Endpoint: `POST /api/local-worker/clips/{clip_id}/policy-violation` (`main.py:8721-8841`).
+- v701e preemptive cascade (`main.py:8763-8819`): finds all other clips in the job where `Clip.start_frame == rejected_key AND Clip.id != clip.id AND Clip.status in {PENDING, GENERATING, REDO_QUEUED, FLOW_REDO_QUEUED, FAILED}`. Marks each as `FAILED + CONTENT_POLICY_VIOLATION` and stamps `replacement_start_frame = rejected_key` for audit. Skips siblings with a different non-policy `error_code`. **This works correctly** — clip 7 was correctly marked at 1:42:32 PM.
+
+**Replacement direction** (frontend → backend, when user uploads replacement):
+
+- Endpoint: `POST /api/clips/{clip_id}/replace-image` (`main.py:3530-3786`).
+- Pre-v710 had ONLY the v701d anchor cascade (`main.py:3620-3684`): cascades when `clip_role == 'audio_pair'` via the `voiceover_anchor_image_node_id` hop. Walks from the user-uploaded audio_pair clip → its `paired_clip_id` (the visual_pair sibling) → that visual_pair's `voiceover_anchor_image_node_id` → all other visual_pairs in the job sharing the same anchor → their `paired_clip_id` audio twins. Patches those audio_pair clips with the new `start_frame`.
+- **There was NO cascade for siblings sharing the same `start_frame`.** The "Clip K is a recipe-step shot reused for scene K and scene K+1" relationship (the common case for recipe / chain images) was unhandled on the replacement side.
+
+The rejection-side comment at `main.py:8769-8770` explicitly promised the missing piece:
+
+> Once the user uploads a replacement on ANY ONE of them, the v701d cascade in `/replace-image` patches the siblings back to pending.
+
+But v701d patches **audio_pair anchor siblings**, NOT start_frame siblings. The promised symmetry never landed.
+
+Git timeline confirms the gap. v701d (2026-05-10 5:54p, audio_pair anchor cascade) shipped 7 minutes BEFORE v701e (2026-05-10 6:01p, preemptive `start_frame` rejection cascade). The v701e author wrote the rejection-side cascade against the `start_frame` relationship and referenced "v701d cascade" in the comment, assuming v701d already handled the `start_frame` relationship — it didn't. The contract was broken from day one but only surfaces when clips share `start_frame` AND user uploads a replacement (the recipe/chain scenarios — the user's exact case here).
+
+---
+
+**The fix.** Add a new cascade block in `replace_clip_image`, parallel to v701d, mirroring the v701e query but in reverse direction (now patching CONTENT_POLICY_VIOLATION siblings back to FLOW_REDO_QUEUED instead of marking them violated).
+
+**Lookup key acquisition.** The endpoint overwrites `clip.start_frame = new_key` at line 3603 before the cascade block runs. The pre-overwrite snapshot is already captured at line 3602: `previous_rejected = clip.replacement_start_frame`. v701e set `replacement_start_frame = rejected_key` on every directly-rejected and cascade-marked clip at rejection time (line 8753 for the direct clip, line 8803 for siblings via `replacement_start_frame = replacement_start_frame or rejected_key`). So `previous_rejected` IS the rejected key by construction.
+
+**Query.** Mirror of v701e but inverted:
+
+```python
+image_siblings_q = db.query(Clip).filter(
+    Clip.job_id == clip.job_id,
+    Clip.start_frame == rejected_lookup_key,
+    Clip.id != clip.id,
+    Clip.error_code == "CONTENT_POLICY_VIOLATION",
+)
+```
+
+The `error_code == "CONTENT_POLICY_VIOLATION"` filter is tighter than v701e's status-list filter — only siblings that v701e (or a direct worker policy-violation report) marked. Excludes:
+
+- COMPLETED siblings (no error_code) — already-rendered b-roll is the user's truth.
+- Siblings with a non-policy error_code (e.g. `CELEBRITY_FILTER` from a different flag class) — don't clobber unrelated failures.
+- Siblings the user manually replaced earlier (error_code cleared by an earlier v701d/v710 cascade run).
+
+**Per-sibling patch.** Mirror of the v701d per-sibling block at line 3658-3670:
+
+```python
+sib.start_frame = new_key
+sib.replacement_start_frame = (
+    sib.replacement_start_frame or rejected_lookup_key
+)
+sib.error_code = None
+sib.error_message = None
+sib.status = ClipStatus.FLOW_REDO_QUEUED.value  # v701h required for redo-pending poll
+sib.approval_status = "pending_review"
+sib.claimed_by_worker = None
+sib.claimed_at = None
+```
+
+**Dedup across cascades.** v701d and v710 can in principle both match the same sibling — an audio_pair clip's `start_frame` IS the anchor image, so if the rejected image happens to be an anchor, both cascades query it. To avoid double-write, the v701d block now tracks patched IDs in `patched_sibling_ids: set[int]`; v710 skips any ID already in that set.
+
+**Error handling.** Full traceback printed + `db.rollback()` on exception, matching v701d/v701e. The bare-except trap that cavecrew flagged on v701 cleanup is preserved as a try/except-with-traceback pattern, not a bare except.
+
+**Endpoint response gains a new field:**
+
+```python
+return {
+    "ok": True,
+    "clip_id": clip_id,
+    "new_start_frame": new_key,
+    "previous_rejected_frame": previous_rejected,
+    "cascaded_audio_pair_count": cascade_count,        # v701d
+    "cascaded_image_shared_count": image_shared_count, # v710
+}
+```
+
+**Job log message** extended via `cascade_parts` list assembly:
+
+- v701d only: `(cascaded to 2 audio twins)`
+- v710 only: `(cascaded to 1 image sibling)`
+- Both: `(cascaded to 2 audio twins + 1 image sibling)`
+- Neither: no parenthetical (single-clip retry)
+
+**Frontend toast** at `static/index.html:8235:replaceClipImage` reads both counts:
+
+```
+replacement uploaded — also retried 1 voice clip + 1 image sibling
+```
+
+Or if only one cascade fired:
+
+```
+replacement uploaded — also retried 1 image sibling
+```
+
+Or if neither:
+
+```
+replacement uploaded — clip re-queued
+```
+
+The optimistic in-cache `error_code = null` clearing at line 8273-8283 already handles image-shared siblings correctly via DOM key-match — it walks every `cachedClipsData` entry and clears `error_code` on any entry whose `start_frame` or `replacement_start_frame` matches the just-uploaded clip's rejected key. Pre-v710 the optimistic UI cleared the card but the DB never matched, so the next poll re-rendered the card from fresh state. Post-v710 the DB matches the optimistic update — card stays cleared.
+
+---
+
+**Edge cases verified during design.**
+
+| # | Case | v710 behavior |
+|---|---|---|
+| 1 | Clip 6 + 7 share `start_frame`, both `CONTENT_POLICY_VIOLATION` | Both re-queue. **The user's case.** |
+| 2 | Clip 6 + 7 are audio_pair siblings sharing v698A anchor | v701d handles. v710 skips via `patched_sibling_ids`. |
+| 3 | Clip 6 visual_pair, clip 7 visual_pair share `start_frame`, clip 6 has audio_pair twin | v710 patches clip 7. Audio twin has different `start_frame` (the anchor) → not in v710's query, not affected (v701e wouldn't have marked it either). |
+| 4 | Clip 6 already COMPLETED somehow when user uploads | `replace_clip_image` enforces `error_code == CONTENT_POLICY_VIOLATION` at line 3552 — returns 400 before reaching cascade. |
+| 5 | Sibling already had a non-policy error_code (e.g. CELEBRITY_FILTER) | Skipped — `error_code == "CONTENT_POLICY_VIOLATION"` filter excludes. |
+| 6 | Sibling was COMPLETED between rejection and replacement | Skipped — completed clips have no `CONTENT_POLICY_VIOLATION` error_code. |
+| 7 | User uploads sequentially on multiple cards (clip 6 then clip 7) | First upload re-queues both; second upload on clip 7 finds no other CONTENT_POLICY_VIOLATION siblings (they were cleared) → no-op cascade. No double-patch. |
+| 8 | Rejected key snapshot timing | `previous_rejected = clip.replacement_start_frame` at line 3602, BEFORE `clip.start_frame = new_key` at line 3603. Always non-empty for clips that hit `replace_clip_image` (gated by `error_code == CONTENT_POLICY_VIOLATION` at line 3552, and v701e/the worker policy endpoint always stamps `replacement_start_frame`). |
+
+---
+
+**Why v710 versus alternatives.**
+
+- **"Just retry both clips at rejection time, don't preemptively mark"**: defeats the credit-saving purpose of v701e. Pre-v701e, a single bad image burned Veo credits across every scene that referenced it as the worker kept retrying. v701e is the right discipline; v710 is its missing mirror.
+- **"Cascade by `voiceover_anchor_image_node_id` only and let user re-upload per-clip otherwise"**: defeats the purpose. The promise in the v701e comment was specifically "upload once, cascade to all". User workflow expectation is one upload = all siblings recover.
+- **"Cascade by both `start_frame` and `voiceover_anchor_image_node_id`"**: that's v710.
+- **"Server-side image-deduplication store"**: out of scope. Doesn't address the immediate failure and would require schema changes.
+- **"Bulk re-upload action on the frontend"**: out of scope and worse UX. The atomic single-upload should cover the case.
+
+---
+
+**Logs (job log entries).**
+
+```
+Clip 7: image policy violation — awaiting user replacement (preemptively marked 1 sibling sharing same image)
+Clip 6: image policy violation — awaiting user replacement (preemptively marked 1 sibling sharing same image)
+Clip 6: user uploaded replacement image → re-queued (cascaded to 1 image sibling)
+```
+
+Post-v710, the third entry now references the cascade count instead of being silent on it.
+
+`[v710] image-shared cascade FAILED for clip <id>: <ExceptionType>: <message>` fires only on cascade failure (with full traceback) — the primary patch is preserved.
+
+---
+
+**What v710 does NOT change.**
+
+- v701d audio_pair anchor cascade — unchanged behavior, just gained the `patched_sibling_ids` tracker so v710 can dedup.
+- v701e rejection cascade — unchanged.
+- v701h FLOW_REDO_QUEUED status requirement for the redo-pending poll — unchanged.
+- Worker logic (`code/static/flow_worker.py`) — unchanged. The redo-pending poll already filters on FLOW_REDO_QUEUED and picks up cascaded clips automatically.
+- `ClipStatus` enum, `Clip` model, DB schema — no migration required.
+- Markdown contract, parser, image cardinality, all authoring rules — unchanged.
+
+---
+
+**Touched.**
+
+- `code/main.py` — `replace_clip_image` endpoint: new v710 cascade block (lines ~3688-3744), `patched_sibling_ids` tracker in v701d block, response payload extended with `cascaded_image_shared_count`, job-log message refactored to combine both counts via `cascade_parts` list.
+- `code/static/index.html` — `replaceClipImage` toast handler combines both counts via `cascadeBits` list.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v710 index row prepended.
+- `CLAUDE.md` — v710 quickref bullet.
+- `wiki/log.md` — v710 timeline entry.
+
+**Migration: zero required.** Pre-v710 clips that are still stuck in the asymmetric-cascade state (FAILED + CONTENT_POLICY_VIOLATION with `start_frame == rejected_key` and a sibling that was already re-queued via v701d-only path) can be manually unstuck by uploading the same replacement file on the stuck card — v710's cascade will then patch them. Or operator can run a one-shot SQL update setting `status = FLOW_REDO_QUEUED, error_code = NULL, start_frame = (sibling's new_key)` for any pre-v710 stragglers.
+
+**Verification (mandatory before claiming the stuck-clip-7 bug resolved).**
+
+1. Push v710 to `code/` main → wait for Render auto-deploy (~2-3 min).
+2. Reproduce: job with two clips sharing `start_frame`, both submitted to Flow, both rejected (image flagged by content policy).
+3. Confirm job log shows `preemptively marked 1 sibling sharing same image` on the second rejection (v701e working — should be unchanged).
+4. Upload a replacement on one of the rejected clip cards.
+5. Job log should show `Clip N: user uploaded replacement image → re-queued (cascaded to 1 image sibling)`.
+6. Frontend toast: `replacement uploaded — also retried 1 image sibling`.
+7. Both rejected clip cards in the dashboard should clear within one poll tick. Both clips should transition to GENERATING and complete normally.
+
+ONLY THEN claim image-shared replacement-cascade bug resolved.
