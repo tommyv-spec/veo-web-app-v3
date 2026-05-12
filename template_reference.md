@@ -6549,3 +6549,209 @@ Import-verified locally (`python -c "import video_processor"`). No DB schema cha
 - v691d serial per-clip loop architecture — unchanged.
 - Authoring side (`videos/*.md`, `raw/decoded_*.md`) — unchanged. v708 is invisible to the markdown contract.
 - Decode pipeline — unchanged. v708 is export-side only.
+
+---
+
+### v709 — Stuck-tile reload+resubmit chain (image_worker runtime)
+
+**Scope.** Worker-runtime only (`code/image_worker.py`). Recovery contract for Banana 2 image generations that stall at 99% in the UI and never finalize. No markdown contract change, no parser change, no authoring rule change, no DB schema change. Sibling to v708 in spirit (export-side runtime safety contract) but targets Banana 2 image-tile attribution rather than Whisper-VAD word-loss.
+
+**Surfaced from.** 2026-05-12 saffron submit, node 1151. Three reference images attached (`the_main_character.png` 6.8MB + `the_corella_saffron_bottle.jpg` 75KB + `chain_from_image_5.png` 627KB), v703 manifest prepended, Generate clicked, four tile_id's captured at submit time via v624 listener (`fe_id_58ca2068-71db-414a…` family). Scanner ran legacy fallback every 30s for 250s+. Every probe returned the same DOM state:
+
+```
+[API:scan] ⓘ Node 1151 tile_id lookup: {'ready': 0, 'rendering': 0, 'failed': 0, 'not_found': 4}
+[API:scan] 🔎 Node 1151 pending 252s (legacy fallback) — scanner saw 6 container(s).
+   idx=0 rendering=True committed=0 failed=False urls=0 claimed=0 baseline=0 s1_match=True
+   prompt[:120]='warning Failed undo Reuse Prompt delete_forever Delete image 99%
+                 Use Image 1 for the main character. Use Image 2 for the…'
+```
+
+The `warning Failed` substring in the DOM text is generic Banana 2 icon-tooltip rendering, not an actual failure badge — the tile genuinely stayed at progress=99% with no completion event ever firing. Operator confirmed: refreshing the browser tab manually was the only recovery. Pre-v709 the scanner's stuck-handler at `STUCK_TIMEOUT = 300s` would eventually fail-mark the job and drop it (no retry, no reload), so any stall cost five minutes of wall time plus a full operator re-claim.
+
+**Root-cause hypotheses** (any combination plausible; v709 is recovery-agnostic to which one is hitting):
+
+1. **Banana 2 backend hang.** Render worker crashes mid-job; UI never receives a `done` SSE event; progress bar stays pinned at 99%. The `tile_id not_found: 4` line tells us Banana 2 even evicted the original tile IDs from the DOM — they exist in `fe_id_*` form at submit time, but later DOM queries can't find them. Consistent with server-side discard + UI desync.
+2. **SSE/WebSocket completion event dropped.** Server finished but the browser never received the push. Tile stays "rendering" forever from the page's perspective.
+3. **Multi-ref state desync.** Log shows `Chip didn't grow (2 → 2) — checking if chain_from_image_5.png landed in gallery anyway... ✓ Recovered via gallery`. Recovery path fired during ref attach. If Banana 2's internal binding state matches "chip count = 3" but server-side reference ordering is off-by-one, the render can hang silently.
+4. **Reference payload size soft-limit.** Combined refs ~7.5MB. Banana 2 may quietly degrade past a threshold without surfacing an error code.
+5. **Browser tab throttling.** Backgrounded tabs throttle JS event loops; SSE events queue indefinitely.
+
+v709 does NOT diagnose which cause is hitting on any given stall. It assumes the symptom (stuck >90s, no tile match) is sufficient signal to escalate to recovery. **Reload then resubmit** clears state across causes 1, 2, 3, and 5 simultaneously — `page.goto(current_project_url, wait_until="domcontentloaded")` rebuilds the DOM, re-establishes the SSE channel, and resets Banana 2's per-tab connection state. Cause 4 (payload size) requires a separate authoring-time mitigation (downscale large refs); v709 cannot fix it but the retry chain at least surfaces it as a final-fail with diagnostics intact.
+
+---
+
+**The contract v709 enforces.**
+
+> Every image submission that stalls past STUCK_RETRY_TIMEOUT seconds is automatically reload+resubmitted up to STUCK_MAX_RETRIES times before being marked failed. Final-fail path remains as the backstop for genuinely-impossible jobs (e.g. content-policy rejection, image-size limit).
+
+Pre-v709: stall → wait 300s → fail. Total wall time on a stuck node: 5 minutes dead.
+v709: stall → 90s → reload+resubmit (retry 1/2). If second stall: 90s → reload+resubmit (retry 2/2). If third stall: continue until STUCK_TIMEOUT=300s then final-fail. Worst case wall: ~7 min total but with two recovery chances. Best case: 90s + 30s second attempt = under 2 min from stall to success.
+
+---
+
+**Constants** (`code/image_worker.py` ~line 6195, inside `api_pull_mode_parallel`):
+
+```python
+STUCK_RETRY_TIMEOUT = 90    # seconds — flip status to "stuck_retry"
+STUCK_MAX_RETRIES   = 2     # max reload+resubmit attempts
+STUCK_TIMEOUT       = 300   # final give-up after retries exhausted
+```
+
+Numbers chosen from corpus observation:
+
+- **90s**: Banana 2 happy-path image generations land in 30–70s (corpus median ≈45s). 90s is a confident "this is stuck, not slow" threshold without over-eagerly cancelling legitimate-but-slow renders. Sub-60s is too aggressive (catches healthy long-tail). 120s+ wastes wall time when the stall is unrecoverable.
+- **2 retries**: empirical sweet spot. Single retry is too thin (one transient SSE drop and the job dies). Three+ retries inflate worst-case wall (90+90+90+300 = ~10min on a doomed job) without measurable success-rate gain — by retry 3 the job is almost always genuinely-broken (content-policy / payload-size / Banana 2 outage).
+- **300s STUCK_TIMEOUT**: unchanged from pre-v709. Acts as final-fail backstop, e.g. if a retry itself stalls past 90s and 90s of additional time before another retry attempt is allowed.
+
+---
+
+**State additions on `InFlightJob`** (line ~5142, slot-class):
+
+```python
+__slots__ = (
+    ..., "tile_ids",
+    "retry_count",       # v709 — incremented on each reload+resubmit
+    "_original_job",     # v709 — preserved job-dict for verbatim replay
+)
+```
+
+`_original_job` holds the raw dict returned from the webapp `/jobs/pending` endpoint (contains `node_id`, `prompt`, `input_image_urls`, `variants`, `aspect_ratio`, `resolution`, `model`, etc.). Stored at first submit so the retry path can call `_submit_one_job(_original_job)` verbatim — refs get re-downloaded, project re-opened, settings re-configured, prompt re-pasted, Generate re-clicked, new tile_ids captured. No partial-state replay; full rerun.
+
+`retry_count` starts at 0 on first submit. Each successful reload+resubmit propagates `retry_count + 1` from the popped predecessor onto the new InFlightJob, so escalation to final-fail is correct even when retries themselves stall.
+
+---
+
+**Detection (scanner-side, end of `_run_download_cycle`)**:
+
+```python
+# v709 — Stuck-submission detection with reload+resubmit retry chain
+now = time.time()
+for job in list(in_flight.values()):
+    if job.status != "submitted":
+        continue
+    age = now - job.submit_time
+    if age > STUCK_TIMEOUT:
+        # Final fail — either retries exhausted, or a retry itself stalled
+        # past the 300s backstop. Push to http_queue so the worker thread
+        # POSTs status=failed to the webapp and operator sees the error.
+        print(f"[API:scan] ✗ Node {job.node_id} STUCK ({STUCK_TIMEOUT}s, {job.retry_count}/{STUCK_MAX_RETRIES} retries exhausted) — failing", flush=True)
+        http_queue.put({"node_id": job.node_id, "failed": True,
+                        "error": f"Stuck after {job.retry_count} retries (>{STUCK_TIMEOUT}s)"})
+        job.status = "failed"
+    elif age > STUCK_RETRY_TIMEOUT and job.retry_count < STUCK_MAX_RETRIES:
+        # Flip status so the main loop picks it up next tick.
+        print(f"[API:scan] ⟳ Node {job.node_id} STUCK ({int(age)}s) — queuing reload+resubmit (attempt {job.retry_count + 1}/{STUCK_MAX_RETRIES})", flush=True)
+        job.status = "stuck_retry"
+```
+
+Order matters: the `age > STUCK_TIMEOUT` branch is checked first so a job that's been retried twice + stalled past 300s lands in final-fail rather than queuing a third retry that the elif branch would refuse (`retry_count < STUCK_MAX_RETRIES` is False at that point).
+
+---
+
+**Recovery (main-loop, top of while-loop body)**:
+
+```python
+# v709 — Handle stuck retries (reload+resubmit) before new work
+stuck_jobs = [j for j in in_flight.values() if j.status == "stuck_retry"]
+if stuck_jobs:
+    _stuck = stuck_jobs[0]
+    _prev_retry = _stuck.retry_count
+    _saved_dict = _stuck._original_job
+    _stuck_nid = _stuck.node_id
+    in_flight.pop(_stuck_nid, None)
+    print(f"[API:retry] ⟳ Node {_stuck_nid} reload+resubmit (attempt {_prev_retry + 1}/{STUCK_MAX_RETRIES})", flush=True)
+    try:
+        _ok = _submit_one_job(_saved_dict) if _saved_dict else False
+        if _ok and _stuck_nid in in_flight:
+            in_flight[_stuck_nid].retry_count = _prev_retry + 1
+            in_flight[_stuck_nid]._original_job = _saved_dict
+            print(f"[API:retry] ✓ Node {_stuck_nid} resubmitted (retry {_prev_retry + 1}/{STUCK_MAX_RETRIES})", flush=True)
+        else:
+            print(f"[API:retry] ✗ Node {_stuck_nid} resubmit failed", flush=True)
+            http_queue.put({"node_id": _stuck_nid, "failed": True,
+                            "error": f"Stuck retry {_prev_retry + 1} resubmit failed"})
+    except Exception as _retry_e:
+        print(f"[API:retry] ✗ Node {_stuck_nid} retry exception: {_retry_e}", flush=True)
+        http_queue.put({"node_id": _stuck_nid, "failed": True,
+                        "error": f"Stuck retry exception: {_retry_e}"})
+    time.sleep(API_POLL_BUSY_INTERVAL)
+    continue
+```
+
+Key design decisions:
+
+1. **Pop before resubmit.** The stuck job must leave `in_flight` before `_submit_one_job(...)` runs, because that function ends with `in_flight[node_id] = InFlightJob(...)` and would either collide on the same key (overwriting state) or trigger the cross-batch active-in-flight check (line ~5904) which can release the claim.
+2. **`_submit_one_job` re-used verbatim.** Rather than write a parallel `_retry_stuck_job` function (would duplicate ~300 lines of project setup + ref upload + manifest + paste + click + tile capture logic), v709 leans on the existing submit path. The `_ensure_project_ready` call early in `_submit_one_job` already includes a "same job → reload" branch (line ~4515): `page.goto(current_project_url, wait_until="domcontentloaded", timeout=30000)` + wait for Create-button hydration. That branch is exactly the reload that clears Banana 2 stuck SSE state. No extra reload code needed on the retry path.
+3. **`retry_count` carries forward via post-submit assignment.** `_submit_one_job` constructs a fresh InFlightJob with `retry_count=0`. After success, v709 overwrites that field with `_prev_retry + 1` from the popped predecessor and re-attaches the original-job dict. Without this carry-forward, every retry would reset the counter and the chain could loop indefinitely past STUCK_MAX_RETRIES.
+4. **`continue` instead of `did_work = True`.** Main loop pattern is "each iteration does EITHER a submit OR a scan, never both." A retry IS a submit. Bare `continue` skips the rest of the iteration (poll + scan) cleanly. The next iteration starts fresh from the top.
+5. **One retry per tick.** `stuck_jobs[0]` only — if multiple jobs go stuck simultaneously they're retried serially over multiple ticks. Prevents page.goto thrash and keeps the main loop predictable.
+
+---
+
+**Logs (permanent per CLAUDE.md verification rule).**
+
+Every retry path emits structured markers:
+
+```
+[API:scan] ⟳ Node 1151 STUCK (90s) — queuing reload+resubmit (attempt 1/2)
+[API:retry] ⟳ Node 1151 reload+resubmit (attempt 1/2)
+[API:retry] ✓ Node 1151 resubmitted (retry 1/2)
+[API:scan] ✓ Node 1151 matched → 4 variant(s) → enqueue (legacy fallback)
+```
+
+Final-fail path:
+
+```
+[API:scan] ⟳ Node 1151 STUCK (90s) — queuing reload+resubmit (attempt 1/2)
+[API:retry] ⟳ Node 1151 reload+resubmit (attempt 1/2)
+[API:retry] ✓ Node 1151 resubmitted (retry 1/2)
+[API:scan] ⟳ Node 1151 STUCK (90s) — queuing reload+resubmit (attempt 2/2)
+[API:retry] ⟳ Node 1151 reload+resubmit (attempt 2/2)
+[API:retry] ✓ Node 1151 resubmitted (retry 2/2)
+[API:scan] ✗ Node 1151 STUCK (300s, 2/2 retries exhausted) — failing
+```
+
+Exception path:
+
+```
+[API:retry] ✗ Node 1151 retry exception: <traceback summary>
+```
+
+These markers are the verification evidence for "is v709 actually firing in production." Operator should grep `[API:retry]` after every export-side stuck-tile suspicion.
+
+---
+
+**What v709 does NOT change.**
+
+- v624 network listener path — primary tile attribution mechanism unchanged. Retry submissions get fresh `tile_ids` captured at the new submit time.
+- v521 prompt-key fuzzy-match fallback — unchanged. Used when tile_id capture fails on the retry submission.
+- v703 worker-injected reference manifest — unchanged. Retry replays the manifest verbatim via `_submit_one_job`.
+- v625.1 cross-batch active-in-flight bypass — unchanged. Listener-attached default still bypasses the active-in-flight strand check, so retries don't get blocked by other in-flight jobs.
+- Webapp `/jobs/pending` API — unchanged. Retries don't re-claim from the webapp; they reuse the dict that was originally returned.
+- Authoring contract (markdown templates, parser, validators) — unchanged. v709 is invisible to operators authoring videos.
+- Decode pipeline — unchanged. v709 is image-worker-only.
+
+---
+
+**Verification (mandatory before claiming the saffron-style stall is fixed).**
+
+1. Push v709 to `code/` main → wait for Render auto-deploy (~2-3 min).
+2. Re-submit a node likely to stall (large multi-ref payload, chained scene, similar profile to the failing 2026-05-12 saffron submission).
+3. If stall occurs: grep Render logs for `[API:scan] ⟳ Node N STUCK` + `[API:retry] ⟳ Node N reload+resubmit` + `[API:retry] ✓ Node N resubmitted`.
+4. Confirm downstream `[API:scan] ✓ Node N matched → K variant(s)` lands within `STUCK_RETRY_TIMEOUT * (1 + retries) + 90s` wall budget (~300s max for first retry, ~5min for two retries).
+5. If retry path itself stalls past 300s total wall: expect `[API:scan] ✗ Node N STUCK (300s, K/2 retries exhausted) — failing` and audit whether the root cause is content-policy / payload-size (v709 cannot fix those — separate authoring-side mitigation needed).
+6. Operator-visible UI: webapp dashboard should show node transition from "in-flight" → "in-flight (retry 1)" → "complete" (or "failed" if all retries exhausted). The retry log markers should appear in the per-node detail view alongside existing `[API:submit]` + `[API:scan]` entries.
+
+ONLY THEN claim stuck-tile bug resolved.
+
+---
+
+**Touched files.**
+
+- `code/image_worker.py` — `InFlightJob.__slots__` + `__init__` signature/body (slot additions), `_submit_one_job` InFlightJob construction (`original_job=job` kwarg), STUCK_TIMEOUT constants block, stuck-submission detection (scanner end), main-loop stuck-retry handler (top of while). Total: 1 file, +64 lines, -6 lines.
+- `code/template_reference.md` — this section (v709 deep-dive).
+- `wiki/patterns/conventions.md` — v709 index row added.
+- `CLAUDE.md` — v709 quickref bullet added under "Known runtime quirks".
+- `wiki/log.md` — v709 timeline entry added.
+
+**Migration: zero required.** v709 is a recovery contract layered on top of the existing submit/scan loop. Pre-v709 InFlightJob instances (none in flight on deploy) would lack `retry_count` and `_original_job` slots, but only freshly-submitted jobs after deploy carry the new state — there's no pre-existing in-flight state to migrate.
