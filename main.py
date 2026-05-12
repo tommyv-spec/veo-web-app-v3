@@ -3624,6 +3624,7 @@ async def replace_clip_image(
         # audio_pairs using the same anchor. Otherwise the user would have
         # to upload the same replacement N times — once per voiceover scene.
         cascade_count = 0
+        patched_sibling_ids: set[int] = set()  # v710 — dedup across cascades
         try:
             clip_role = (clip.clip_role or '').lower()
             if clip_role == 'audio_pair' and clip.paired_clip_id:
@@ -3668,6 +3669,7 @@ async def replace_clip_image(
                             sib.claimed_by_worker = None
                             sib.claimed_at = None
                             cascade_count += 1
+                            patched_sibling_ids.add(sib.id)  # v710
                         db.commit()
         except Exception as _cascade_err:
             # v701-cleanup — full traceback so silent cascade failures
@@ -3683,10 +3685,77 @@ async def replace_clip_image(
             traceback.print_exc()
             db.rollback()
 
+        # v710 — image-shared replacement cascade.
+        # Mirror of v701e's preemptive rejection cascade. When Flow rejects
+        # clip K's start_frame on policy, v701e marks every OTHER clip in
+        # the job sharing the same `start_frame` as CONTENT_POLICY_VIOLATION
+        # so the worker stops burning credits on a doomed image. The
+        # rejection-side comment at line 8769-8770 promised v701d would
+        # patch those siblings back to pending on replacement — but v701d
+        # only handles the audio_pair anchor relationship (different sibling
+        # link). Result pre-v710: user uploads on clip 6, clip 7 (same
+        # start_frame, marked by v701e) stayed FAILED + CONTENT_POLICY_VIOLATION
+        # with the old rejected key forever. Frontend kept rendering the
+        # "Rejected by Flow Content Policy" card; redo-pending poll never
+        # picked it up (filter is FLOW_REDO_QUEUED only).
+        #
+        # Use `previous_rejected` (snapshotted at line 3602 BEFORE the
+        # start_frame overwrite at line 3603) as the lookup key. Skip any
+        # sibling already patched by v701d to avoid double-write.
+        image_shared_count = 0
+        try:
+            rejected_lookup_key = previous_rejected
+            if rejected_lookup_key:
+                image_siblings_q = db.query(Clip).filter(
+                    Clip.job_id == clip.job_id,
+                    Clip.start_frame == rejected_lookup_key,
+                    Clip.id != clip.id,
+                    Clip.error_code == "CONTENT_POLICY_VIOLATION",
+                )
+                for sib in image_siblings_q.all():
+                    if sib.id in patched_sibling_ids:
+                        # Already patched via v701d audio_pair anchor cascade.
+                        continue
+                    sib.start_frame = new_key
+                    # Preserve audit: don't clobber the original rejected key
+                    # if it's already stashed.
+                    sib.replacement_start_frame = (
+                        sib.replacement_start_frame or rejected_lookup_key
+                    )
+                    sib.error_code = None
+                    sib.error_message = None
+                    sib.status = ClipStatus.FLOW_REDO_QUEUED.value
+                    sib.approval_status = "pending_review"
+                    sib.claimed_by_worker = None
+                    sib.claimed_at = None
+                    patched_sibling_ids.add(sib.id)
+                    image_shared_count += 1
+                if image_shared_count:
+                    db.commit()
+        except Exception as _img_cascade_err:
+            import traceback
+            print(
+                f"[v710] image-shared cascade FAILED for clip {clip_id}: "
+                f"{type(_img_cascade_err).__name__}: {_img_cascade_err}",
+                flush=True,
+            )
+            traceback.print_exc()
+            db.rollback()
+
+        cascade_parts = []
+        if cascade_count:
+            cascade_parts.append(
+                f"{cascade_count} audio twin"
+                f"{'s' if cascade_count != 1 else ''}"
+            )
+        if image_shared_count:
+            cascade_parts.append(
+                f"{image_shared_count} image sibling"
+                f"{'s' if image_shared_count != 1 else ''}"
+            )
         cascade_msg = (
-            f" (cascaded to {cascade_count} sibling audio twin"
-            f"{'s' if cascade_count != 1 else ''})"
-            if cascade_count else ""
+            f" (cascaded to {' + '.join(cascade_parts)})"
+            if cascade_parts else ""
         )
         add_job_log(
             db, clip.job_id,
@@ -3708,6 +3777,7 @@ async def replace_clip_image(
             "new_start_frame": new_key,
             "previous_rejected_frame": previous_rejected,
             "cascaded_audio_pair_count": cascade_count,  # v701d
+            "cascaded_image_shared_count": image_shared_count,  # v710
         }
     except HTTPException:
         raise

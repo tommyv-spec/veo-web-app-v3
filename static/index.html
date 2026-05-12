@@ -8251,10 +8251,20 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const data = await r.json();
                 // v701h — backend cascade may have re-keyed N sibling
                 // audio_pairs sharing the same anchor image.
-                const cascaded = data && data.cascaded_audio_pair_count;
-                if (cascaded && cascaded > 0) {
+                // v710 — backend also cascades to M siblings sharing the
+                // same start_frame (mirror of v701e rejection cascade).
+                const cascadedAudio = (data && data.cascaded_audio_pair_count) || 0;
+                const cascadedImage = (data && data.cascaded_image_shared_count) || 0;
+                const cascadeBits = [];
+                if (cascadedAudio > 0) {
+                    cascadeBits.push(`${cascadedAudio} voice clip${cascadedAudio === 1 ? '' : 's'}`);
+                }
+                if (cascadedImage > 0) {
+                    cascadeBits.push(`${cascadedImage} image sibling${cascadedImage === 1 ? '' : 's'}`);
+                }
+                if (cascadeBits.length) {
                     showToast(
-                        `replacement uploaded — also retried ${cascaded} sibling voice clip${cascaded === 1 ? '' : 's'}`,
+                        `replacement uploaded — also retried ${cascadeBits.join(' + ')}`,
                         '#10b981',
                     );
                 } else {
