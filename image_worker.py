@@ -5140,10 +5140,17 @@ class InFlightJob:
         # capture failed (rare race where tiles weren't in DOM yet) and
         # the legacy prompt_key path will run as fallback.
         "tile_ids",
+        # v709: stuck-retry bookkeeping. retry_count = how many times this
+        # job has been reload+resubmitted after a 90s stall; _original_job
+        # = the dict pulled from /jobs/pending so _submit_one_job can be
+        # called again verbatim when a stuck job is retried.
+        "retry_count",
+        "_original_job",
     )
 
     def __init__(self, node_id, node_name, prompt, prompt_key, variants,
-                 output_dir, input_items, baseline_urls=None, tile_ids=None):
+                 output_dir, input_items, baseline_urls=None, tile_ids=None,
+                 retry_count=0, original_job=None):
         self.node_id = node_id
         self.node_name = node_name
         self.prompt = prompt
@@ -5159,6 +5166,8 @@ class InFlightJob:
         self.baseline_urls = baseline_urls or set()
         self._last_diag_at = 0.0  # v476
         self.tile_ids = list(tile_ids) if tile_ids else []  # v521
+        self.retry_count = retry_count  # v709
+        self._original_job = original_job  # v709
 
 
 def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
@@ -6173,6 +6182,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 input_items=input_items,
                 baseline_urls=baseline_urls,
                 tile_ids=tile_ids,
+                original_job=job,  # v709 — preserve dict for stuck-retry resubmit
             )
             print(f"[API:submit] ✓ Node {node_id} submitted (in_flight={len([j for j in in_flight.values() if j.status=='submitted'])}, baseline={len(baseline_urls)} urls)", flush=True)
             return True
@@ -6192,7 +6202,15 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             return False
 
     # --- Download-cycle constants ---
-    STUCK_TIMEOUT = 300  # seconds — fail a submission if no match within
+    # v709 — stuck-retry chain. After STUCK_RETRY_TIMEOUT seconds with no
+    # tile match, the scanner flips the job to status="stuck_retry" so the
+    # main loop picks it up next tick, reloads the project page (clears
+    # Banana 2 stuck SSE state), and resubmits via _submit_one_job using
+    # the preserved original-job dict. After STUCK_MAX_RETRIES exhaustion
+    # OR age past STUCK_TIMEOUT, the job is failed for real.
+    STUCK_RETRY_TIMEOUT = 90   # seconds — trigger reload+resubmit at this age
+    STUCK_TIMEOUT = 300         # seconds — final give-up after retries exhausted
+    STUCK_MAX_RETRIES = 2       # max reload+resubmit attempts before failing
     SCAN_INTERVAL = 4    # seconds between scan passes when busy
     IDLE_POLL = API_POLL_INTERVAL  # seconds when nothing in flight
 
@@ -6682,17 +6700,23 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             _mark_urls_claimed(download_urls)
             enqueued += 1
 
-        # Stuck-submission detection
+        # v709 — Stuck-submission detection with reload+resubmit retry chain
         now = time.time()
         for job in list(in_flight.values()):
-            if job.status == "submitted" and (now - job.submit_time) > STUCK_TIMEOUT:
-                print(f"[API:scan] ✗ Node {job.node_id} STUCK ({STUCK_TIMEOUT}s no match) — failing", flush=True)
+            if job.status != "submitted":
+                continue
+            age = now - job.submit_time
+            if age > STUCK_TIMEOUT:
+                print(f"[API:scan] ✗ Node {job.node_id} STUCK ({STUCK_TIMEOUT}s, {job.retry_count}/{STUCK_MAX_RETRIES} retries exhausted) — failing", flush=True)
                 http_queue.put({
                     "node_id": job.node_id,
                     "failed": True,
-                    "error": f"No matching tile appeared within {STUCK_TIMEOUT}s",
+                    "error": f"Stuck after {job.retry_count} retries (>{STUCK_TIMEOUT}s)",
                 })
                 job.status = "failed"
+            elif age > STUCK_RETRY_TIMEOUT and job.retry_count < STUCK_MAX_RETRIES:
+                print(f"[API:scan] ⟳ Node {job.node_id} STUCK ({int(age)}s) — queuing reload+resubmit (attempt {job.retry_count + 1}/{STUCK_MAX_RETRIES})", flush=True)
+                job.status = "stuck_retry"
 
         return enqueued
 
@@ -6738,6 +6762,40 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
         while not stop_flag.is_set():
             # 1. Harvest completions from the HTTP worker
             _drain_done_queue()
+
+            # v709 — Handle stuck retries (reload+resubmit) before new work.
+            # Scanner flips a stalled job to status="stuck_retry" after
+            # STUCK_RETRY_TIMEOUT. Here we pop it from in_flight, call
+            # _submit_one_job with the preserved original dict — that re-runs
+            # _ensure_project_ready which reloads the page (clearing any
+            # Banana 2 stuck SSE state), re-attaches refs, re-pastes the
+            # prompt, and clicks Generate. retry_count is carried forward
+            # onto the new InFlightJob so subsequent stalls still escalate
+            # to the final-fail path.
+            stuck_jobs = [j for j in in_flight.values() if j.status == "stuck_retry"]
+            if stuck_jobs:
+                _stuck = stuck_jobs[0]
+                _prev_retry = _stuck.retry_count
+                _saved_dict = _stuck._original_job
+                _stuck_nid = _stuck.node_id
+                in_flight.pop(_stuck_nid, None)
+                print(f"[API:retry] ⟳ Node {_stuck_nid} reload+resubmit (attempt {_prev_retry + 1}/{STUCK_MAX_RETRIES})", flush=True)
+                try:
+                    _ok = _submit_one_job(_saved_dict) if _saved_dict else False
+                    if _ok and _stuck_nid in in_flight:
+                        in_flight[_stuck_nid].retry_count = _prev_retry + 1
+                        in_flight[_stuck_nid]._original_job = _saved_dict
+                        print(f"[API:retry] ✓ Node {_stuck_nid} resubmitted (retry {_prev_retry + 1}/{STUCK_MAX_RETRIES})", flush=True)
+                    else:
+                        print(f"[API:retry] ✗ Node {_stuck_nid} resubmit failed (no original_job or claim released)", flush=True)
+                        http_queue.put({"node_id": _stuck_nid, "failed": True,
+                                        "error": f"Stuck retry {_prev_retry + 1} resubmit failed"})
+                except Exception as _retry_e:
+                    print(f"[API:retry] ✗ Node {_stuck_nid} retry exception: {_retry_e}", flush=True)
+                    http_queue.put({"node_id": _stuck_nid, "failed": True,
+                                    "error": f"Stuck retry exception: {_retry_e}"})
+                time.sleep(API_POLL_BUSY_INTERVAL)
+                continue
 
             # 2. Try to submit if we have capacity
             active = sum(1 for j in in_flight.values()
