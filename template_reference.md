@@ -7049,3 +7049,2668 @@ Post-v710, the third entry now references the cascade count instead of being sil
 7. Both rejected clip cards in the dashboard should clear within one poll tick. Both clips should transition to GENERATING and complete normally.
 
 ONLY THEN claim image-shared replacement-cascade bug resolved.
+
+---
+
+### v712 — Decode-side relational composition grammar (Stage 4d reproduction-fidelity fix)
+
+**Problem.** Decoded Image prompts written under v586 + v603 + v604 + v521.1 use coordinate-anchored composition grammar ("viewer-left half / upper-third line / chest-up two-shot / cropped at mid-chest / NO floor visible"). The grammar is internally precise. The VALUES the VLM (Gemini Stage 4d / LM Studio vision model / human walker) writes into that grammar are frequently wrong because the VLM picks corpus-default composition slots instead of measuring the source frame. The rigid grammar then locks in the wrong values, so when the decoded prompt is fed back into Banana 2 it produces an image that does not match the source frame.
+
+**Surfaced 2026-05-13** from `raw/decoded_dr_kim_skincare_NMN.md` Image 1. Source frame: extreme face-macro, Dr. Kim's face occupies upper-right corner only (~25% area), patient's face dominates lower-left + center (~60% area), doctor's head positioned BEHIND patient with face inches from her right temple, gloved finger pointing DOWN at her forehead from above. Stage 4d decode wrote: `"Tight chest-up two-shot framing. The patient is on the viewer-left, filling the left half of the frame. The main character stands close beside her on the viewer-right... Heads land near the upper-third line per rule of thirds. Cropped at mid-chest, NO floor visible, NO feet visible."` Every coordinate-anchored claim was wrong. When the operator asked the SAME VLM to describe the frame WITHOUT the Kaveno grammar harness, it produced: `"the man... pointing a purple-gloved finger at the forehead of the middle-aged blonde woman BELOW him, whose deep forehead wrinkles and dark eye circles are clearly visible as she looks forward. The camera close, focusing sharply on their expressions."` — accurate, reproducible, no grid math.
+
+**Root cause.** Coordinate grammar (viewer-left / upper-third / chest-up / cropped at) is FRAME-anchored. It requires the VLM to mentally overlay a grid on the source frame and measure subject cells. VLMs do not measure — they pattern-match against corpus defaults ("clinical scene → two-shot side-by-side / chest-up"). Forcing them into coordinate grammar without a measurement step produces precise-but-wrong descriptions. Relational grammar (above / below / behind / over the shoulder of / pointing down at) is SUBJECT-anchored. It encodes geometry through verbs and prepositions chained to the subjects themselves. The VLM cannot drift because the constraint is anchored to what it actually identifies (people + props), not to an abstract grid.
+
+**Grammar class split.**
+
+| Class | Anchor | Example | VLM eyeballing risk |
+|---|---|---|---|
+| Relational | Subject-to-subject ("A above B / A behind B / hand of A pointing at forehead of B from above") | "the man pointing a purple-gloved finger at the forehead of the blonde woman below him" | Low — cannot misidentify "below him" if subjects are correct |
+| Coordinate | Frame grid ("viewer-left half / upper-third line / cropped at mid-chest") | "patient viewer-left filling left half, main character viewer-right" | High — frame-cell assignment requires measurement VLMs don't do |
+
+v603 and v604 codified coordinate grammar as universal — applied to BOTH decode and generate. That was wrong for decode. **Decode has a source frame = ground truth; relational grammar suffices because the VLM only needs to DESCRIBE what it sees.** Generate has no source frame; coordinate grammar is required because the operator must SPECIFY composition for Banana 2 to render. Same problem, opposite directions, different grammars.
+
+**v712 rule (decode side only).**
+
+For `raw/decoded_*.md` Image prompt bodies, use the following grammar order:
+
+1. **Subject identity + visible features** (race / age / build / hair / wardrobe items VISIBLE in frame — never inferred).
+2. **Active verb + spatial preposition chain** encoding subject-to-subject geometry. Allowed prepositions: `above / below / behind / in front of / over the shoulder of / beside / between / under / next to`. Allowed verbs encoding pose: `pointing / leaning / standing / sitting / holding / lifting / reaching / gesturing / smiling / wincing / closing eyes / looking forward / looking down / looking at`.
+3. **Hand position relative to subjects** via verb chain: `pointing DOWN at her forehead from above / holding the bottle up to camera in his left hand / cupping her cheek with his right hand`. NOT via frame coordinates.
+4. **Subject orientation** explicit: `faces the camera / looks forward / looks down / turns toward him / closes her eyes`.
+5. **Shot size via DETAIL-DENSITY anchor**, not jargon. Name micro-features that are visible only at the actual framing: `"forehead wrinkles clearly visible, dark eye circles clearly visible"` = close-macro. `"full white lab coat visible, stethoscope visible, ID badge visible"` = medium-wide. Banana 2 infers framing from what is named as visible-and-sharp.
+6. **What is NOT in the frame** by OMISSION, not by negation. Do NOT write `"NO floor visible, NO feet visible"` on decode side — the negation tokens occasionally invoke rendering of the negated item (Banana 2 "no green elephant" hallucination class). Just don't mention floor/feet. What's unnamed = not rendered when prompt focus is tight.
+7. **Background blur statement** at the end: `"background: slightly out-of-focus clinic interior"` or `"background: blurred kitchen counter and pendant lights"`.
+8. **v603 closing tag retained** (`"iPhone HDR colors, deep focus."`) — style lock is orthogonal to composition grammar.
+
+**Coordinate grammar (v603 / v604 / v521.1) reserved for generate side** (`videos/*.md`), where:
+- Operator specifies aspect ratio (9:16 vertical lock).
+- Operator specifies rule-of-thirds anchoring.
+- Operator specifies crop boundary (`cropped at mid-chest`).
+- Operator specifies viewer-relative directions (mirror prevention).
+- Operator specifies negative-constraint block (`"No generic studio. No smooth forehead."`).
+
+v712 does NOT deprecate v603 / v604 / v521.1 / v586. Those rules remain authoritative for generate side. v712 carves out the decode side and switches it to relational grammar.
+
+**Worked example — Dr. Kim Image 1 frame, both grammars.**
+
+*Pre-v712 (coordinate, wrong):*
+
+> "Tight chest-up two-shot framing. The patient is on the viewer-left, filling the left half of the frame. The main character stands close beside her on the viewer-right, wearing a dark suit tie under a white lab coat, and purple nitrile exam gloves. The main character's viewer-left index finger POINTS firmly at the patient's deep forehead wrinkles. Heads land near the upper-third line per rule of thirds. Cropped at mid-chest, NO floor visible, NO feet visible. Shot on iPhone with wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight. iPhone HDR colors, deep focus."
+
+Banana 2 renders: side-by-side chest-up shot, both heads upper third, lab coat visible. Does NOT match source.
+
+*Post-v712 (relational, correct):*
+
+> "The main character with tan-framed glasses, dark hair, open speaking mouth, wearing a dark suit and purple tie, leaning forward over the right shoulder of a white woman in her 60s with a short blonde bob and dark green V-neck scrub top. He points a purple-gloved index finger DOWN at her forehead from above, the fingertip near her right temple. She faces the camera and looks forward, deep horizontal forehead wrinkles and dark circles under her eyes clearly visible. His face is close to her head, faces nearly touching. The camera focuses sharply on both their expressions. Background: slightly out-of-focus clinic interior. iPhone HDR colors, deep focus."
+
+Banana 2 renders: stacked face-macro, doctor face partial top-right, patient face dominating lower-left + center, finger pointing down. Matches source.
+
+Five geometric constraints encoded in the relational version:
+1. Doctor above woman (via "over the right shoulder of" + "from above").
+2. Woman lower-frame (via "below" implied through "leaning forward over").
+3. Hand crossing down (via "points DOWN at her forehead from above").
+4. Hand near her right temple (via "fingertip near her right temple").
+5. Both faces visible and sharp (via "camera focuses sharply on both their expressions").
+
+Shot size encoded by detail-listing (forehead wrinkles + dark eye circles visible).
+
+Crop encoded by omission — no clothing below chest mentioned, no feet, no floor, no background props beyond "slightly out-of-focus clinic interior".
+
+**Stage 4d prompt template patch (`code/v589_video_understanding.py`).**
+
+Pre-v712 SYSTEM_INSTRUCTION block told the VLM to "be precise about object POSITIONS in frame (lower-left, immediate foreground, behind subject at jaw height, etc.)" — that pushed coordinate grammar. v712 patches SYSTEM_INSTRUCTION to require relational grammar primary, coordinate grammar secondary only when relational is ambiguous (e.g. multiple subjects at same vertical level with no clear above/below relationship).
+
+New SYSTEM_INSTRUCTION fragment:
+
+```
+COMPOSITION GRAMMAR (v712, decode-side):
+- Describe subject-to-subject geometry through verb + preposition chains:
+  "A above B / A behind B / A over the shoulder of B / pointing DOWN at the
+  forehead of B from above / holding the bottle up to camera in his left hand".
+- Anchor positions to SUBJECTS, never to frame quadrants. Do NOT write
+  "viewer-left half" / "upper-third line" / "lower-right corner" on decode side.
+- Encode shot size by NAMING the micro-features that are visible at the actual
+  framing: "forehead wrinkles clearly visible, dark eye circles clearly visible"
+  signals close-macro. "Full white lab coat visible, stethoscope visible" signals
+  medium-wide. Banana 2 infers framing from named visible-and-sharp detail.
+- Describe what IS in the frame. Use OMISSION to signal what is cropped out.
+  Do NOT write "NO floor visible" / "NO feet visible" — the negation tokens
+  occasionally invoke rendering of the negated item.
+- Subject orientations explicit: "faces the camera / looks forward / looks down
+  / turns toward him / closes her eyes".
+- Background blur statement at the end: "background: slightly out-of-focus
+  clinic interior".
+```
+
+The `static_composition.framing` field in PER_SHOT_SCHEMA changes its required content from `"camera distance + frame partition + depth layers + crop"` (coordinate) to `"subject-to-subject geometry chain + shot-size detail-density anchor + background blur statement"` (relational).
+
+**Round-trip verification gate (operator-side, advisory).**
+
+Cheap sanity check before committing a decoded artifact:
+
+1. Pick Image 1's prompt body from `raw/decoded_<id>.md`.
+2. Feed it to Banana 2 with the persona reference attached.
+3. Compare result to source frame at the same beat (use the source MP4's first-frame still).
+4. Look for: (a) correct subject vertical stacking (above / below / behind), (b) correct hand position relative to subjects, (c) correct shot size (close-macro vs medium vs wide), (d) correct subject orientations (facing camera / looking down / etc.).
+5. Mismatch on any of (a)-(d) = decode failed. Rerun Stage 4d with stricter v712 grammar reminder.
+
+Gate is operator-discretion, not blocking. Costs +1 Banana credit per image checked + ~30-60s wall time. Typically run on Image 1 only as a sample; if Image 1 round-trips faithfully, downstream chained images inherit fidelity.
+
+**Pre-output grep gate (mandatory on decode-side artifacts).**
+
+Run before committing any `raw/decoded_*.md`:
+
+```bash
+# v712 gate 1 — coordinate grammar tokens BANNED on decode side
+grep -niE "\b(viewer-left|viewer-right|upper-third|lower-third|left half|right half|cropped at mid-chest|chest-up two-shot|NO floor visible|NO feet visible)\b" raw/decoded_<id>.md
+# Expect: zero hits.
+
+# v712 gate 2 — relational tokens REQUIRED on decode side
+grep -niE "\b(above|below|behind|in front of|over the shoulder of|beside|between|under|next to|from above|from below|pointing down|pointing up|looking forward|looking down|faces the camera)\b" raw/decoded_<id>.md
+# Expect: ≥1 hit per Image prompt body (count of `### Image N` blocks).
+
+# v712 gate 3 — negation tokens for crop BANNED on decode side
+grep -niE "\bNO (floor|feet|background|hands|legs|wall|window|ceiling|wardrobe|chairs?|chair|generic studio)\b" raw/decoded_<id>.md
+# Expect: zero hits.
+```
+
+ANY gate-1 hit OR gate-3 hit = rewrite the Image prompt body. Missing gate-2 hits = relational grammar absent, rewrite.
+
+**Carve-outs.**
+
+- **Generate side unchanged.** `videos/*.md` continues to use v603 / v604 / v521.1 / v586 coordinate grammar. The operator specifies framing because no source frame exists.
+- **Single-subject shots.** When only ONE subject is in frame (HOOK close-up, EXPLAIN talking-head, single-bottle product hero), relational grammar reduces to verb + orientation chain ("she leans forward toward camera / he holds the bottle up to camera in his right hand"). No second-subject preposition needed.
+- **Subjects at same vertical level with no clear above/below.** Use lateral relational prepositions: `beside / next to / between / on either side of`. Coordinate fallback (`viewer-left` / `viewer-right`) allowed if AND ONLY IF the lateral relational form is ambiguous (rare — typically a 2-subject scene with both heads at the same height and both at the same depth, with no third anchor to disambiguate).
+- **Background props.** Single background blur statement at end of prompt body. Do not enumerate background props with frame coordinates — the v712 prose already establishes foreground subjects as the focus, so background defaults to "blurred [setting type]".
+- **Decode of frame that genuinely IS a side-by-side chest-up two-shot.** If the source frame really is side-by-side at chest-up with both heads at the upper-third line, write that with relational grammar: "the man stands beside the woman, both cropped at the chest, both heads at the upper portion of the frame". The TEST is: is the description anchored to SUBJECTS (man / woman / both heads) or to FRAME GRID (viewer-left / upper-third line)? Subject-anchored phrasing of the same composition is v712-compliant.
+
+**Migration.**
+
+Zero required. Pre-v712 decoded artifacts in `raw/decoded_*.md` remain valid as-is — they were authored under v603 + v604 grammar and Banana 2 still renders something from them (just not faithful to source). From this commit forward, new Stage 4d outputs MUST satisfy the v712 grep gates above. The wiki lint pass can flag pre-v712 decoded artifacts that fail gate 1 OR gate 3, but lint is advisory not blocking.
+
+**Why v712 is decode-only, not universal.**
+
+Three reasons:
+
+1. **Generate side has no source frame to compare against.** The operator authoring `videos/*.md` specifies a composition the model must produce. Coordinate grammar locks the spec ("9:16 vertical, heads upper-third, cropped at chest, no floor"). Relational grammar alone cannot encode 9:16 aspect ratio or rule-of-thirds anchoring.
+2. **Generate side has v603 / v604 / v521.1 / v586 accumulated authoring discipline.** Operators have learned coordinate grammar across 100+ shipped videos. Switching generate side would invalidate that discipline.
+3. **Decode side fails specifically because the VLM eyeballs coordinates wrong.** Operators authoring generate-side artifacts DO measure (or specify) coordinates correctly because they choose the composition. The failure mode is unique to decode where the VLM measures from a source frame it can't grid-anchor reliably.
+
+v712 = decode-side relational; v603 + v604 + v521.1 + v586 = generate-side coordinate. Same accumulated wisdom, applied to the side where it actually works.
+
+**Touched.**
+
+- `code/v589_video_understanding.py` — SYSTEM_INSTRUCTION block patched with v712 composition grammar fragment; PER_SHOT_SCHEMA `static_composition.framing` field description updated from coordinate to relational language.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v712 index row prepended.
+- `wiki/meta/decode-grammar-checklist.md` — v712 workflow note added under Stage 4d composition discipline.
+- `CLAUDE.md` — v712 quickref bullet under Known runtime quirks.
+- `wiki/log.md` — v712 timeline entry.
+
+**Verification (mandatory before claiming v712 works).**
+
+1. Pick a recent `raw/decoded_*.md` that has a known-bad Image 1 (the Dr. Kim NMN decode is the surfacing case).
+2. Manually rewrite Image 1's prompt body using v712 relational grammar (or rerun Stage 4d with the patched SYSTEM_INSTRUCTION via `python code/v589_video_understanding.py <source.mp4>`).
+3. Feed the rewritten prompt body to Banana 2 with the persona reference attached.
+4. Compare the rendered image to the source frame at the same beat.
+5. Confirm: (a) subject vertical stacking matches, (b) hand position relative to subjects matches, (c) shot size matches, (d) subject orientations match.
+6. Run the v712 grep gates above on the artifact — expect zero gate-1 hits, zero gate-3 hits, ≥1 gate-2 hit per Image block.
+
+ONLY THEN claim v712 reproduces decode-side composition faithfully.
+
+---
+
+### v713 — Banana 2 attached-reference composition discipline (extends v712)
+
+**Problem.** v712 switched decode-side composition prose to relational grammar. Verified to produce correct images on text-only image models (GPT image gen, etc.) where no character reference is attached. **Banana 2 with persona reference attached has a different failure mode**: the reference image (full identity = full face) FIGHTS the prompt's composition instruction whenever the source frame shows the persona only PARTIALLY (cropped at frame edge, only part of face visible, behind another subject dominating the frame). Banana 2's default behavior is "render the referenced character fully visible at balanced composition" — when the prompt asks for partial visibility, Banana 2's planner conflicts and reverts to balanced two-shot. Reference wins by default.
+
+**Surfaced 2026-05-13** from the same Dr. Kim Image 1 source frame as v712: extreme face-macro with doctor face partial in upper-right corner only (~25% area), patient face dominating lower-left + center (~60% area). After applying v712 relational grammar correctly, GPT image gen reproduced the composition faithfully. Banana 2 with `Use the uploaded character reference image for the main character.` binding line attached rendered a balanced chest-up two-shot every time — the reference image's full-face identity pulled the composition away from the prompt's partial-visibility instruction.
+
+**Documented in [wiki/generation/nano-banana-prompting.md](../wiki/generation/nano-banana-prompting.md):**
+- Line 194: *"When using reference photos, keep text description minimal — long text + photos fight each other."*
+- Line 218: *"Banana 2 plans the image before rendering pixels"* — first content gets weighted heaviest.
+- Line 114 (Rule 2): *"Name the camera. Specific hardware unlocks the visual priors the model learned from training data."*
+
+**Documented in [wiki/generation/json-prompt-method.md](../wiki/generation/json-prompt-method.md):**
+- Line 104 + 171: *"Long text description + reference photos — two sources fight each other. Use one or the other; if photos, label minimally."*
+- Line 118: *"Fields that force the AI's hand: `visible`, `dramatic`, `exposed` push the model to alter composition to 'prove' the change."* The standard binding line `Use the uploaded character reference image for the main character.` is functionally `character_visible: true` — it pushes Banana 2 to render the character fully.
+
+**v713 rule — five techniques.**
+
+**[a] Binding-line partial-visibility override.**
+
+When persona / character appears PARTIALLY in the source frame, the binding line must include the partial-visibility instruction inline. Standard v609 concise binding plus override clause:
+
+```
+Use the uploaded character reference image for the main character. In this frame the main character appears PARTIALLY — only his face from eyebrows to chin is visible, the rest of his head cropped above the frame edge.
+```
+
+This converts the binding from "render the character (default = full face)" into "render this specific portion of the character". One instruction, no conflict between binding and body prose. The partial-visibility clause names what IS visible + what is cropped via subject body-part anchors (eyebrows, chin, head, frame edge) per v712 carve-out.
+
+When persona is FULLY visible in the frame, use standard v609 binding only — no override clause needed.
+
+**[b] Composition block front-loaded.**
+
+Composition comes FIRST in body prose, AFTER bindings + blank line, BEFORE Subject / Action / Location / Style / Tech blocks. Banana 2 plans the image from early content; framing and geometry must precede subject description so the planner doesn't default before seeing composition constraints.
+
+Use the `[Composition]` block label explicitly. Banana 2's reasoning treats labeled blocks as structured slots per the canonical prompt formula ([nano-banana-prompting.md:91](../wiki/generation/nano-banana-prompting.md#L91)).
+
+**[c] Camera grammar required in Composition block.**
+
+Per [nano-banana-prompting.md:114](../wiki/generation/nano-banana-prompting.md#L114) Rule 2 — Name the camera. Concrete hardware unlocks training-data priors. NOT just "iPhone wide-angle". Use:
+
+- `"85mm telephoto lens at minimum focus distance, shallow depth of field"` → macro portrait
+- `"wide-angle 24mm, deep focus"` → environmental
+- `"from low-angle / over-shoulder POV"` → camera position
+- `"Hasselblad X2D, 85mm at f/2.8"` → premium portrait
+
+Camera grammar lives in the `[Composition]` block. v603 closing style tag (`"iPhone HDR colors, deep focus."`) stays in the `[Style]` block at the end. The two are complementary: camera grammar specifies the FRAMING + DEPTH; style tag specifies the GRADING.
+
+**[d] Composition-anti-default negatives.**
+
+When the source frame breaks Banana 2 defaults (balanced two-shot, full-character visibility, center composition), add explicit negative constraints in the negatives block:
+
+- `"No balanced two-shot — [primary subject] dominates the frame"`
+- `"No full view of [partial-visibility subject]"`
+- `"No center-stage hero composition"`
+
+Banana 2 takes negatives seriously per [nano-banana-prompting.md:202](../wiki/generation/nano-banana-prompting.md#L202) ("Be explicit about preservation"). Negatives counter the model's default-priors pull. These compose with v604 negative-constraint block + v606 product negatives — append the v713 composition-anti-default constraints to the existing negatives, do not replace.
+
+**[e] Canonical block order (Banana 2 prompt formula).**
+
+```
+Binding line(s) — with v713(a) partial-visibility override if applicable
+[BLANK LINE]
+[Composition] — front-loaded, camera grammar, dominance + cropping
+[Subject] — patient / secondary characters described fully; persona refs minimal per v553.1 / v609
+[Action] — verbs + spatial geometry
+[Location] — background blur statement
+[Style] — camera + lighting + grading (v603 closing tag here)
+[Tech] — aspect + resolution
+Negatives — composition-anti-default (v713) + v604 / v606 product negatives + persona drift constraints
+```
+
+This is Banana 2's canonical Subject / Composition / Action / Location / Style / Tech formula ([nano-banana-prompting.md:91](../wiki/generation/nano-banana-prompting.md#L91)) with two adjustments: (1) Composition comes BEFORE Subject (v713[b] front-load), (2) Negatives appended at end (v604 + v606 + v713).
+
+**Worked example — Dr. Kim Image 1 frame.**
+
+Pre-v713 (v712-compliant relational grammar, Banana 2 fights reference):
+
+```
+Use the uploaded character reference image for the main character.
+
+The main character leans forward over the right shoulder of a white woman in her 60s with a short blonde bob and dark green V-neck scrub top. He points a purple-gloved index finger DOWN at her forehead from above, the fingertip near her right temple. She faces the camera and looks forward, deep horizontal forehead wrinkles and dark circles under her eyes clearly visible. His face is close to her head, faces nearly touching. The camera focuses sharply on both their expressions. Background: slightly out-of-focus clinic interior. iPhone HDR colors, deep focus.
+```
+
+GPT image gen renders: stacked face-macro, doctor partial top-right, patient dominant. Matches source. **Banana 2 with persona ref renders: balanced chest-up two-shot, both heads visible, both at equal frame share.** Reference fought the partial-visibility instruction; reference won.
+
+Post-v713:
+
+```
+Use the uploaded character reference image for the main character. In this frame the main character appears PARTIALLY — only his face from eyebrows to chin is visible, the rest of his head cropped above the frame edge.
+
+[Composition] EXTREME close-up portrait, 85mm telephoto lens at minimum focus distance, shallow depth of field, 9:16 vertical framing. The patient's face FILLS the frame — only her head and the tops of her shoulders are visible. The main character leans down from behind her right shoulder, his partial face appearing close beside and above her head, faces inches apart.
+
+[Subject — patient] A white woman in her 60s, heavy build, short blonde bob, dark green V-neck scrub top, facing the camera, looking forward with a distressed embarrassed expression. Deep horizontal forehead wrinkles, crepey skin texture, and dark circles under her eyes are sharply visible at macro distance.
+
+[Action] The main character points a purple-gloved index finger DOWN at her forehead from above, fingertip resting near her deep horizontal wrinkles.
+
+[Location] Bright modern medical clinic interior with white walls, background fully blurred.
+
+[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus on both visible faces.
+
+[Tech] 9:16, 2K output.
+
+Negatives: No generic studio. No smooth forehead on the patient. No bare hands on the main character. No full lab coat. No full view of the main character's head. No balanced two-shot composition — the patient dominates the frame.
+```
+
+Banana 2 with persona ref renders: stacked face-macro, doctor partial top, patient dominant. Matches source.
+
+**Why each of the five techniques is load-bearing on Banana 2:**
+
+| Technique | Banana 2 default it overrides | Mechanism |
+|---|---|---|
+| (a) Partial-visibility override on binding | Reference = render character fully | Reference instruction NOW says "render partial portion" → no conflict |
+| (b) Composition front-load | Planner picks composition from corpus defaults | First content in body weighs heaviest → composition wins planner step |
+| (c) Camera grammar | "iPhone wide-angle" too vague → wide-angle environmental defaults | Concrete focal length + aperture + focus distance triggers macro/portrait/wide priors |
+| (d) Anti-default negatives | Balanced two-shot, full visibility, center comp | Negatives counter priors per "be explicit about preservation" |
+| (e) Block-labeled canonical order | Free-form prose → planner extracts blocks unevenly | Labeled blocks = structured slots Banana 2 reasoning reads precisely |
+
+**Fallback escalation chain when one-shot still misses on Banana 2.**
+
+Try in this order:
+
+1. **Google AI Studio over Flow / direct API.** [nano-banana-prompting.md:230](../wiki/generation/nano-banana-prompting.md#L230) confirms AI Studio composition results consistently outperform direct API; AI Studio adds conversational refinement under the hood.
+2. **Gemini Thinking / Pro mode** (same Banana 2 model, deeper reasoning per [nano-banana-prompting.md:218](../wiki/generation/nano-banana-prompting.md#L218)). "Multi-character scenes, specific lighting interactions" listed as Thinking-mode use cases.
+3. **JSON method** ([json-prompt-method.md](../wiki/generation/json-prompt-method.md)). Banana 2 treats JSON as native data. Composition / Subject / Action / Camera in separate JSON fields = surgical control. Especially good when you want to edit one thing and keep the rest locked.
+4. **Multi-turn editing.** [nano-banana-prompting.md:208](../wiki/generation/nano-banana-prompting.md#L208) — Banana 2 retains conversational context. Sequence: (turn 1) generate patient face-macro alone WITHOUT persona ref; (turn 2) attach persona ref and add "the main character leaning down from behind her right shoulder, only his lower face visible from eyebrows to chin, rest of head cropped above frame edge"; (turn 3) add gloved finger pointing. Reference enters AFTER composition is locked.
+
+**Pre-output grep gates (mandatory before commit).**
+
+```bash
+# v713 gate (a) — when partial-visibility descriptors present in body, binding line must include override
+# heuristic: if body contains cropping-of-persona descriptors, binding must contain "appears PARTIALLY" or similar
+grep -niE "appears PARTIALLY|partial(ly)? visible|only .{1,40} from .{1,30} to .{1,30} is visible|the rest of .{1,30} cropped|cropped (above|below) the frame edge" raw/decoded_<id>.md
+
+# v713 gate (b) — Composition block precedes Subject block in body prose
+python -c "
+import re
+text = open('raw/decoded_<id>.md', encoding='utf-8').read()
+for block in re.split(r'^### Image \d+', text, flags=re.MULTILINE)[1:]:
+    comp = re.search(r'\[Composition\]', block)
+    subj = re.search(r'\[Subject', block)
+    if comp and subj and comp.start() >= subj.start():
+        print('FAIL: Composition block must come BEFORE Subject block')
+"
+
+# v713 gate (c) — camera grammar in Composition block
+grep -niE "\b(85mm|24mm|35mm|50mm|telephoto|wide-angle|minimum focus distance|shallow depth of field|deep focus|low-angle|over-shoulder|f/[0-9]+(\.[0-9]+)?|Hasselblad|Leica|Sony FX)\b" raw/decoded_<id>.md
+# Expect: ≥1 hit per Image block
+
+# v713 gate (d) — composition-anti-default negatives when partial visibility in play
+grep -niE "No balanced two-shot|No full view of|No center-stage" raw/decoded_<id>.md
+# Expect: ≥1 hit per Image block where partial-visibility override is present
+```
+
+**Carve-outs.**
+
+- **Persona FULLY visible.** When the source frame shows the persona fully visible (HOOK close-up, EXPLAIN talking-head, talking-head CTA), v713[a] override is not needed — use standard v609 binding only. v713[b]-[e] still apply.
+- **No persona on screen.** Scenes where `cast:` excludes the persona (per v711) have no binding line to add the override to. v713[a] is N/A. v713[b]-[e] still apply.
+- **Product reveal scenes.** v713 composes with v605 PROP-LED format + v606 compositing directives. Composition block describes prop placement + persona-relative geometry; v605's "60% prop / 40% persona" allocation lives in the Subject block.
+- **Generate side.** v713 is a decode-side rule (`raw/decoded_*.md`) primarily, but the same techniques apply when authoring generate-side artifacts (`videos/*.md`) for partial-character compositions. v603 + v604 coordinate grammar on generate side composes with v713 block-labeled order — author can use coordinate grammar inside the `[Composition]` block (`viewer-left half / upper-third line / cropped at mid-chest` allowed because generate side defines composition rather than measuring it).
+
+**Migration.**
+
+Zero required. Pre-v713 decoded artifacts in `raw/decoded_*.md` remain valid; Banana 2 still renders something from them (just not faithful when persona reference is attached and partial visibility is in play). From this commit forward, new decoded artifacts with partial-visibility scenes MUST satisfy the v713 grep gates above. The wiki lint pass can flag pre-v713 artifacts where partial-visibility descriptors exist in the body but the binding line lacks the override — advisory not blocking.
+
+**Touched.**
+
+- `code/decode_bundle.sh` — task-prompt heredoc gained `V712` + `V713` instruction sections; line 154 heredoc delimiter quoted (`<<'EOF'`) to fix backtick command-substitution bug.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v713 index row prepended above v712.
+- `wiki/meta/decode-grammar-checklist.md` — v713 workflow section added after v712.
+- `CLAUDE.md` — v713 quickref prepended above v712.
+- `wiki/log.md` — v713 timeline entry prepended.
+
+**Verification (mandatory before claiming v713 works).**
+
+1. Pick the same `raw/decoded_dr_kim_skincare_NMN.md` Image 1 used to surface v712.
+2. Rewrite Image 1 prompt body to v713 spec (partial-visibility override on binding, Composition block front-loaded with camera grammar, anti-default negatives).
+3. Feed the rewritten prompt body to Banana 2 with persona reference attached, via Google AI Studio (best-case path per [nano-banana-prompting.md:230](../wiki/generation/nano-banana-prompting.md#L230)).
+4. Compare result to source frame.
+5. Confirm: (a) partial face only on persona (eyebrows to chin visible), (b) patient face dominates the frame, (c) extreme close-up framing (not chest-up), (d) doctor positioned behind+above patient.
+6. If still fails one-shot, escalate to multi-turn editing (Fix 5 above).
+
+ONLY THEN claim v713 reproduces composition faithfully on Banana 2.
+
+---
+
+### v714 — Emotional payoff discipline (non-persona AFTER-state expression)
+
+**Problem.** v541 (outfit change for Day 1 → Day 14) + v580 (recipe / process state-evolution) + v589 (absolute-magnitude state arcs) + v622 (symptom-feature exaggeration in HOOK frames) collectively force decoders + lift authors to update the non-persona character's PHYSICAL state across a transformation arc (wrinkles smoothed, belly flat, varicose veins faded, jaw lifted). NONE of these rules mandate updating the EMOTIONAL state. Chain-inheritance (v512 / v669) carries identity forward, and decoders / lift LLMs implicitly assume expression inherits with identity. Result: the AFTER frame shows the resolved physical symptom on a still-distressed face — wrinkles gone but expression still embarrassed, belly flat but face still ashamed, varicose veins faded but eyes still wincing. Emotional payoff missing. The transformation arc collapses because the AFTER frame doesn't FEEL like resolution.
+
+**Surfaced 2026-05-13** via self-analysis from Gemini 3.1 Pro during a Dr. Kim NMN decode session. After the decoder correctly updated patient forehead wrinkles to smooth via v589 absolute-magnitude grammar, the patient's expression remained distressed in the AFTER frame. Gemini's post-hoc diagnosis: *"v667/v707 visual_delta focuses on physical state change; v589 mandates absolute physical magnitude. Because the rules scream at me to ensure wrinkles disappear and honey dissolves, I hyper-focused on the physical prop/symptom. v622 forces exaggerated negative symptom in HOOK but has no AFTER-state equivalent forcing emotional payoff. v669 chain-inheritance trap: I updated her forehead because v589 told me to, but I left her expression alone because I was relying on the chain to carry her 'identity' forward."*
+
+**Three existing rules created the blind spot:**
+
+1. **v541** mandates outfit change for time-passing signal. Silent on expression.
+2. **v589** mandates absolute-magnitude grammar for prop / symptom state. Silent on expression.
+3. **v622** mandates symptom-feature exaggeration in HOOK / AUGMENTED-SYMPTOMS lens. Inverse not specified for HEALER-SHOWING-CURE / RESULT lens.
+
+Plus **v669** (non-persona identity chain-inheritance) implicitly tells the chain to carry "everything" forward — including expression — when actually expression must be re-declared per scene.
+
+**v714 rule.**
+
+Every image where the non-persona character (patient / customer / bystander) appears AND the scene is part of a state-evolution / before-after / transformation arc AND the AFTER-state physical resolution is declared MUST also explicitly declare the AFTER-state expression in BOTH the `visual_delta` field AND the body prose.
+
+The `visual_delta` field on chained AFTER images must carry BOTH a physical-change clause AND an expression-change clause, joined by `AND`:
+
+```
+- **visual_delta:** forehead wrinkles smoothed flat AND distressed-embarrassed expression replaced with relieved-amazed open-mouthed smile, eyes brightened, posture lifted
+```
+
+Body prose must explicitly name the new expression per scene — never `(same as image 1)` / `(unchanged from before)` / no expression statement at all.
+
+**Expression mapping — mirror of v622 BEFORE intensity scale.**
+
+When v622 BEFORE expressions name distress / shame / pain, v714 AFTER expressions name the matched payoff:
+
+| Symptom domain | v622 BEFORE expression | v714 AFTER expression |
+|---|---|---|
+| Skin / wrinkles | distressed, embarrassed | relieved, amazed, joyful |
+| Weight / belly | ashamed, hiding | confident, proud, smiling |
+| Hair / scalp | self-conscious, dejected | bright-eyed, energetic |
+| Joints / pain | wincing, grimacing | comfortable, smiling, free |
+| Energy / fatigue | exhausted, slumped | energized, upright, alert |
+| Skin / acne | embarrassed, head-down | radiant, confident, head-up |
+| Sleep / dark circles | hollow-eyed, weary | rested, bright-eyed, fresh |
+| Digestion / bloat | uncomfortable, frowning | comfortable, smiling, relaxed |
+
+**Expression intensity matches transformation magnitude.** v589 absolute-magnitude grammar applies bidirectionally: COMPLETE physical resolution requires COMPLETE emotional resolution (broad open-mouthed smile, eyes wide with surprise/relief), PARTIAL physical change matches PARTIAL emotional shift (gentle smile, softened brow), MINIMAL physical change matches MINIMAL emotional update (neutral lifted eyebrows, calmer eyes).
+
+**Mandatory body-prose pattern for AFTER-state images.**
+
+```
+[Subject — patient] [physical AFTER-state per v622-inverse description].
+The patient's expression has transformed: [explicit AFTER expression — joy / relief / confidence / amazement / pride]. [Specific facial details — eyes widened, mouth open in smile, eyebrows lifted, posture upright].
+```
+
+NOT:
+```
+[Subject — patient] [physical AFTER-state per v622-inverse description].
+```
+
+The expression sentence is non-negotiable on AFTER frames.
+
+**Chain-inheritance clarification (amends v669).**
+
+Chained images inherit IDENTITY (race / age / build / hair / wardrobe core) via the v523 chain. Chained images DO NOT inherit EXPRESSION — expression must be explicitly re-declared in every image where the character appears. The chain carries who the person IS, not what they FEEL.
+
+Add to v669:
+> **EXPRESSION DOES NOT CHAIN.** While identity inherits via v523, expression must be explicitly named in body prose on every image. Default-omitting expression = AI inherits the prior expression = transformation arc collapses.
+
+**Worked example — Dr. Kim NMN decode (the surfacing case).**
+
+Source video Image 5 (AFTER-state, 14-day mark): patient sits in same chair, same clinic, same scrub top — wrinkles smoothed, dark eye circles faded. Source frame ALSO shows: broad open-mouthed smile, eyes wide with delighted surprise, eyebrows lifted, hand raised to touch her own forehead in disbelief.
+
+Pre-v714 decoded prompt:
+```
+### Image 5
+- **frame_anchor:** 22.0s
+- **reference_image:** image_1
+- **visual_delta:** forehead wrinkles smoothed completely flat, dark eye circles faded, crepey texture replaced with smooth radiant skin
+- **Image prompt:**
+Use the prior-scene reference image to preserve the setting, lighting, anchor props, and continuity from the previous scene.
+
+[Composition] EXTREME close-up portrait, 85mm telephoto lens, minimum focus distance. The patient's face fills the frame.
+
+[Subject — patient] A white woman in her 60s, heavy build, short blonde bob, dark green V-neck scrub top, facing the camera. Forehead wrinkles smoothed completely flat, dark eye circles faded, smooth radiant skin texture.
+
+[Action] (none — talking-head transformation reveal)
+...
+```
+
+Banana 2 renders: smooth skin, dark eye circles gone — patient still expressionless / mildly distressed. AFTER frame doesn't FEEL like resolution. Lift collapses.
+
+Post-v714:
+```
+### Image 5
+- **frame_anchor:** 22.0s
+- **reference_image:** image_1
+- **visual_delta:** forehead wrinkles smoothed completely flat AND dark eye circles faded AND distressed-embarrassed expression replaced with broad open-mouthed amazed smile, eyes wide with delighted surprise, eyebrows lifted, hand raised to touch her own forehead in disbelief
+- **Image prompt:**
+Use the prior-scene reference image to preserve the setting, lighting, anchor props, and continuity from the previous scene.
+
+[Composition] EXTREME close-up portrait, 85mm telephoto lens, minimum focus distance. The patient's face fills the frame.
+
+[Subject — patient] A white woman in her 60s, heavy build, short blonde bob, dark green V-neck scrub top, facing the camera. Forehead wrinkles smoothed completely flat, dark eye circles faded, smooth radiant skin texture. The patient's expression has transformed: a broad open-mouthed amazed smile spreads across her face, her eyes wide with delighted surprise, eyebrows lifted in disbelief. Her hand is raised to touch her own forehead, fingertips brushing the now-smooth skin.
+
+[Action] The patient looks at the camera in amazement.
+...
+```
+
+Banana 2 renders: smooth skin + delighted expression. AFTER frame DELIVERS the emotional payoff. Lift lands.
+
+**Pre-output grep gates (mandatory before commit).**
+
+```bash
+# v714 gate 1 — every chained image where visual_delta names a physical AFTER-state must also name an emotional AFTER-state
+python -c "
+import re
+text = open('raw/decoded_<id>.md', encoding='utf-8').read()
+# Find Image blocks with reference_image: image_K (chained AFTER candidate)
+for m in re.finditer(r'### Image (\d+).*?(?=### Image \d+|\Z)', text, flags=re.DOTALL):
+    block = m.group(0)
+    if 'reference_image: image_' not in block or 'reference_image: none' in block:
+        continue
+    delta = re.search(r'- \*\*visual_delta:\*\* (.+)', block)
+    if not delta:
+        continue
+    delta_text = delta.group(1).lower()
+    # Physical-change keywords
+    physical = any(k in delta_text for k in ['smooth', 'flat', 'fade', 'reduc', 'shrink', 'resolv', 'clear', 'lift', 'tight', 'firm'])
+    # Emotional-change keywords
+    emotional = any(k in delta_text for k in ['smile', 'joy', 'relief', 'confidence', 'amaze', 'happy', 'proud', 'satisfied', 'comfortable', 'grin', 'bright-eyed', 'energetic', 'radiant', 'expression'])
+    if physical and not emotional:
+        print(f'FAIL Image {m.group(1)}: visual_delta has physical change but no emotional update')
+"
+
+# v714 gate 2 — AFTER-state body prose must explicitly name the new expression
+grep -niE "expression has transformed|expression has changed|broad .{1,20} smile|wide with .{1,20} surprise|eyes (brightened|brightened|widened)|relieved smile|amazed smile|confident smile|proud smile|radiant smile" raw/decoded_<id>.md
+# Expect: ≥1 hit per AFTER-state Image block (chained from a HOOK / BEFORE)
+```
+
+**Carve-outs.**
+
+- **Non-transformation chained scenes.** Talking-head explanation continuing across cuts, recipe-prep steps showing only props changing, walk-throughs with no patient state change — no expression update required on the patient (because no transformation arc is in play). v714 applies only when v541 / v580 / v589 / v622 mandates a physical state change on the patient.
+- **Persona (uploaded character).** v714 does NOT apply to the persona — persona expressions are handled via v553.1 / v609 (upload carries identity, body prose names current persona expression per scene as needed; v713 (a) override may also apply when persona is partial-visible). The asymmetry mirrors v610 / v622: persona is generic / chainable / swappable; non-persona is the symptom-bearer whose specific emotional state IS the rhetorical payload.
+- **HOOK / AUGMENTED-SYMPTOMS lens scenes.** v622 governs (BEFORE distress). v714 N/A on HOOK images; v714 fires on RESULT / payoff / AFTER lens scenes only.
+- **GRABBING-ATTENTION lens.** No transformation arc in play — v714 N/A.
+
+**Decode-side vs generate-side.**
+
+- **Decode-side**: when source video shows AFTER frame with explicit emotional transformation, decoder MUST capture it in visual_delta + body prose. v714 is observation enforcement.
+- **Generate-side**: when authoring a lift with state evolution, author MUST explicitly declare the AFTER expression. v714 is authoring enforcement.
+
+Both sides share the same grep gates.
+
+**Pairing with v713 (Banana 2 attached-reference).**
+
+When the AFTER-state image is chained AND uses v713's `[Composition]` / `[Subject]` block order, the expression update lives in the `[Subject — patient]` block (where physical AFTER-state per v622-inverse already lives). The `[Action]` block can name the expression-driving micro-action ("looks at the camera in amazement", "smiles broadly toward the lens", "raises her hand to touch her own forehead in disbelief").
+
+**Touched.**
+
+- `code/decode_bundle.sh` — task-prompt heredoc gains V714 section.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v714 row prepended above v713.
+- `wiki/meta/decode-grammar-checklist.md` — v714 workflow section added after v713.
+- `CLAUDE.md` — v714 quickref prepended above v713.
+- `wiki/log.md` — v714 timeline entry prepended.
+
+**Migration.**
+
+Zero required. Pre-v714 decoded artifacts with AFTER-state images that fail to declare emotional payoff remain valid; Banana 2 still renders something (just emotionally flat). From this commit forward, new decoded artifacts with state-evolution scenes MUST satisfy v714 grep gates. The wiki lint pass can flag pre-v714 artifacts that have v589 physical AFTER-state but no emotional payoff in visual_delta — advisory not blocking. Existing artifacts can be retrofit on next-touch.
+
+**Verification (mandatory before claiming v714 works).**
+
+1. Pick a recent decode with AFTER-state images (e.g. `raw/decoded_dr_kim_skincare_NMN.md` Image 5 — the surfacing case).
+2. Audit each AFTER-state image's visual_delta + body prose against the two grep gates.
+3. Add expression update where missing.
+4. Feed the updated AFTER-state prompt to Banana 2 with persona + chain references attached.
+5. Confirm rendered image shows BOTH (a) resolved physical state AND (b) explicit emotional payoff (smile / relief / amazement matching the symptom domain).
+6. Spot-check the BEFORE → AFTER pair side-by-side: emotional contrast must be unmistakable. If AFTER face still reads distressed or neutral, v714 not applied; fix.
+
+ONLY THEN claim v714 delivers emotional payoff faithfully.
+
+---
+
+### v715 — Elevated prop composition discipline (v605b + v713f + v603b umbrella)
+
+**Problem.** v604 (per-video camera anchors) + v605 (PROP-LED format for product reveals) + v606 (compositing — surface contact / grip / occlusion) + v712 (subject-anchored prop positioning) collectively describe HOW a prop is held / lit / shadowed / occluded. They are silent on WHERE in the frame the prop lands. In practice the corpus default reads "on the counter / on the desk / on the table / on the side counter / on the prep surface" — every desk-anchored description sinks the prop into the bottom 20% of a 9:16 vertical frame. The hero prop (bladder model / banana / saffron bottle / honey jar / anatomical demo / before-after card) becomes a footer instead of the focal point. The viewer's eye lands on the patient's face by default and the prop registers only as background detail. Worse: when Banana 2 plans the image (v713(b) front-loaded composition), it places the prop where the prose anchors it — desk-anchored prose = lower-third prop, every time.
+
+**Surfaced 2026-05-13** via Gemini 3.1 Pro analysis after a Nuri bladder-model diagnostic-hook generation collapsed the prop to lower-third floor-level: prose anchored the bladder to "the desk in the immediate foreground"; Banana 2 rendered the bladder at desk height bottom-of-frame; patient's distressed face floated above empty space; persona's pointing hand crossed empty air to reach the bladder; the diagnostic-pointer hook lost its visual center. The corpus has a "desk gravity" bias — operators inherit "on the desk / counter / table" from decoded competitor videos that themselves chose desk-anchoring, and the bias propagates through lifts. Gemini's diagnosis: *"v604 / v605 / v712 heavily rely on desk-anchoring. In a 9:16 vertical, anything on a desk sinks to the bottom 20%. We need an Elevated Prop rule that bans desk-anchoring for hero props, forces Z-axis depth layering instead of Y-axis height stacking, and locks the camera to chest-level eye-level so the perspective doesn't drift downward."*
+
+**v715 packages three sub-amendments** to existing rules. The umbrella name is "Elevated prop composition discipline"; the three sub-amendments are named per Gemini's framing for cross-reference precision.
+
+---
+
+#### v605b — Subject-Anchored Prop Position (amends v605)
+
+When a prop or symptom is the PRIMARY focus of the frame (HOOK diagnostic-pointer, RESULT before-after card, EXPLAIN mechanism demo, product hero reveal, anatomical demonstration, symptom-pointer), the prop MUST anchor to a SUBJECT (character body or body part) — NEVER to environment furniture (desk / counter / table / shelf / windowsill / floor). Subject-anchoring puts the prop in the same depth plane as the character's torso, which Z-axis layering (v713f) then composes into the frame's center.
+
+**Five subject-anchor modes** — pick the one that matches the scene's rhetorical function:
+
+| Mode | What it looks like | Best for |
+|---|---|---|
+| **Held aloft** | character holds prop at chest / face / chin / overhead height, prop between holder's torso and camera | HOOK diagnostic-pointer, product reveal, before-after card, recipe payoff |
+| **Placed on body** | prop rests on the patient's belly / chest / forearm / thigh / knee / scalp / back / shoulder | anatomical-pointer demos (bladder on belly, brain on head, heart on chest), treatment-area indicators, transdermal patches, before-photo overlays |
+| **Pressed against body** | character presses prop / hand / instrument against the symptom site, palpation pose | palpation diagnostic, examination, pain-pointer, pressure tests |
+| **Worn / strapped / draped on body** | prop wraps around / over / on the body (compression garment, scarf, supplement-patch, glasses, watch, monitor) | wearable products, brace demos, monitor demos |
+| **Symptom-as-prop on body** | symptom IS the prop (varicose veins on calf, jowl on jaw, distended belly, thinning hairline, dark eye circles, back acne) | AUGMENTED-SYMPTOMS HOOK frames, before-state callouts |
+
+The unifying principle: **prop position is anchored to a CHARACTER BODY PART (held by / placed on / pressed against / worn over / inherent to), never to ENVIRONMENT FURNITURE.**
+
+**BANNED anchor phrases for hero props on decode + generate side:**
+
+- `"on the desk"` / `"sitting on the desk"` / `"placed on the desk"`
+- `"on the counter"` / `"on the side counter"` / `"on the prep counter"`
+- `"on the table"` / `"on the bedside table"`
+- `"on the shelf"` / `"on the windowsill"`
+- `"resting on the surface"` / `"sitting on the surface"`
+- `"in front of him on the desk"` / `"between them on the table"`
+
+**REQUIRED anchor phrases (per mode) for hero props:**
+
+*Held aloft:*
+- `"HELD ALOFT at [chest|face|chin|overhead] height in the immediate center-foreground"`
+- `"the patient holds [prop] up at her own chest height, [prop] dominating the center of the frame"`
+- `"the main character lifts [prop] at face height, [prop] directly between him and the camera"`
+- `"the main character cradles [prop] at chest, [prop] held forward toward the lens"`
+
+*Placed on body:*
+- `"the [prop] is placed directly on the patient's [belly|chest|forearm|thigh|knee|scalp|back|shoulder], anchored at [body-part] height in the immediate center-foreground"`
+- `"the patient rests the [prop] on his own [body part], [prop] dominating the center of the frame"`
+- `"the main character lays the [prop] flat against the patient's [body part]"`
+- `"the [prop] sits on the patient's [body part], [body part] forming the supporting surface"`
+
+*Pressed against body:*
+- `"the main character presses [prop / index finger / palm] firmly against the patient's [body part]"`
+- `"the [prop] is pressed into the soft underside of the patient's [body part]"`
+- `"the main character's fingertips palpate the patient's [body part]"`
+
+*Worn / strapped / draped on body:*
+- `"the patient wears the [prop] [around the wrist / strapped to the forearm / draped over the shoulder / clipped to the lapel]"`
+- `"the [prop] wraps around the patient's [body part]"`
+
+*Symptom-as-prop on body:*
+- `"the patient's [body part] fills the immediate center-foreground, [symptom-feature exaggerated description per v622]"`
+- `"the camera focuses tightly on the patient's [body part] at the center of the frame"`
+
+**Holder / anchor choice:**
+
+- **Patient anchors (preferred for HOOK / AUGMENTED-SYMPTOMS lens)**: patient holds / wears / hosts the prop on their own body. Puts the symptom in the patient's frame layer — patient's body parts enter the frame, prop sits on / between / against the patient's body, patient's face appears above the prop or symptom.
+- **Persona anchors (preferred for HEALER-SHOWING-CURE lens)**: persona holds / applies / points at the prop on the patient or on the persona's own body. Persona's hands enter frame, prop anchors at patient's body part OR persona's torso.
+- **Both anchor (preferred for RESULT / payoff lens)**: persona and patient share the prop (before/after card held between them, completed recipe held by both), both anchor points in chest-to-face level.
+
+**Mode selection by symptom domain:**
+
+| Symptom domain | Default anchor mode |
+|---|---|
+| Bladder / urinary / prostate | placed on belly OR held aloft at chest |
+| Skin / wrinkles / acne | symptom-as-prop on face OR before-after card held aloft |
+| Belly / digestion / bloat | symptom-as-prop on belly OR held aloft over belly |
+| Joints / pain / palpation | pressed against the joint OR placed on the joint |
+| Heart / circulation | placed on chest OR held aloft at chest |
+| Hair / scalp | symptom-as-prop on scalp OR held aloft beside head |
+| Vision / eyes | held aloft at face level OR symptom-as-prop on eyes |
+| Legs / varicose veins | symptom-as-prop on calf at frame center (NOT lower-third) |
+| Joints / arthritis | pressed against / placed on the joint |
+| Heart / circulation | placed on chest at chest height |
+| Energy / fatigue | held aloft (the supplement) at chest height |
+| Recipe ingredient | held aloft toward camera at chest height OR cradled in palms |
+
+Operators picking against this default need a scene-specific reason — log it as a comment in the body prose if defaulting elsewhere.
+
+**No carve-outs for body-part symptoms.** v622 anatomy framing previously seemed to govern body-part symptom shots separately; v715 now folds them into mode 5 (Symptom-as-prop on body). Same composition discipline applies: symptom at frame center, character body region behind / framing the symptom, character face above when visible. Camera anchors at the level of the symptom anchor.
+
+**Carve-outs.**
+
+- **Edible recipe-prep mid-action.** Pouring honey into a jar, chopping ginger — surface contact is rhetorically load-bearing (you can't pour into a jar held in mid-air). Carve-out: `[Action]` block describes prop ON the surface with hands actively manipulating it; `[Composition]` block uses v603b chest-level camera angle (NOT top-down from above), elevating the surface into the middle of the frame.
+- **Environmental establishing shots.** Full-room walkthroughs, CCTV-style shots, bedroom scenes — no prop is the primary focus; v715 N/A.
+- **Edible-product packshot scenes (hero-shot with no people).** Saffron bottle alone, label-forward, brand-anchor — v606 compositing governs (surface contact, lighting, occlusion); v605b's anchor language not applicable when no body is in frame.
+- **Furniture / appliances / vehicles** that ARE the product (chairs, blenders, cars) — not portable / not body-anchorable; product-page composition rules govern; v715 N/A.
+
+---
+
+#### v713f — Central Z-Axis Stacking (amends v713 block order)
+
+v713 codified canonical block order with `[Composition]` front-loaded. v713f amends the `[Composition]` block content to require Z-AXIS DEPTH LAYERING when a hero prop is subject-anchored per v605b — regardless of which anchor mode (held aloft / placed on body / pressed against / worn / symptom-as-prop) — not Y-axis height stacking.
+
+Y-axis stacking puts the patient at top, prop at bottom, persona at side — same vertical level conflict that drove desk-anchoring. Z-axis stacking puts the prop at the closest depth plane (immediate foreground), the primary character at mid-depth (face / body region directly behind or framing the prop), the secondary character at the far depth (leaning in from background or angled in from top). All three layers occupy a vertical region centered on the prop's anchor height — chest level for held-aloft, belly level for on-belly, calf level for leg-symptom — at different camera distances.
+
+**Required Composition-block structure for v715-compliant hero-prop frames:**
+
+```
+[Composition] [camera grammar per v713(c)] + [camera height per v603b at the prop's anchor level], 9:16 vertical framing. [Z-axis depth layering, three planes named in order]:
+  Foreground (immediate, center, closest to lens): [hero prop, anchored to subject per v605b mode, dominating the center of the frame].
+  Midground (directly behind / framing the prop): [primary character's body part hosting the prop OR face visible just above/beside the prop].
+  Background (top / side / behind midground): [secondary character — persona leaning in OR partial-visible from frame edge].
+```
+
+**Depth-anchored prepositions (allowed):**
+
+`in the immediate foreground / directly behind / just above the prop / framing the prop / hosting the prop / beneath the prop / slightly offset from / in the background / leaning in from the top / from behind`
+
+**Anchor-height matches prop's body anchor**, not always chest:
+
+| Anchor mode | Frame center sits at | Camera height (v603b) |
+|---|---|---|
+| Held aloft at chest | chest level | chest level |
+| Held aloft at face | face level | face level |
+| Placed on belly | belly level | belly level |
+| Placed on chest | chest level | chest level |
+| Placed on forearm / thigh | mid-torso | seated mid-torso |
+| Pressed against jaw / forehead | face level | face level |
+| Pressed against knee / calf | knee / calf level | mid-shin level |
+| Symptom-as-prop on calf | calf level | calf level (camera at shin) |
+| Symptom-as-prop on belly | belly level | belly level |
+| Symptom-as-prop on face | face level | face level |
+| Worn / draped on wrist / shoulder | wrist / shoulder level | matched |
+
+The rule: **camera and frame center BOTH sit at the level of the prop's anchor point on the subject's body.** Floor / desk / counter never enters the frame because the camera isn't pointing down at them.
+
+**v712 compatibility:** subject-anchored geometry (above / below / behind / over the shoulder of / between) still works — v713f layers it onto a Z-axis depth frame instead of a Y-axis vertical frame. The shift is which AXIS the subject relationships compose along.
+
+**Three worked Composition blocks — three anchor modes:**
+
+*Mode 1 — held aloft (bladder diagnostic hook):*
+
+```
+[Composition] 85mm telephoto lens at minimum focus distance, shallow depth of field, straight-on at chest-level, 9:16 vertical framing. The transparent anatomical bladder model is HELD ALOFT in the immediate center-foreground, dominating the middle of the image. Directly behind the elevated model, the patient's face is sharply visible just above the bladder. The main character leans in from the top-right background, his partial face appearing above and behind the patient's head.
+```
+
+*Mode 2 — placed on body (bladder on belly):*
+
+```
+[Composition] 50mm portrait lens, shallow depth of field, straight-on at belly-level (camera lens level with the patient's navel), 9:16 vertical framing. The transparent anatomical bladder model is placed directly on the patient's distended lower belly in the immediate center-foreground, anchored at belly height and dominating the middle of the image. Directly above the bladder model, the patient's torso rises into the frame, his distressed face sharply visible at the top of the image. The main character leans in from the top-right background, his partial face appearing above and behind the patient's head.
+```
+
+*Mode 3 — symptom-as-prop on body (varicose veins on calf):*
+
+```
+[Composition] 85mm telephoto lens at minimum focus distance, shallow depth of field, straight-on at calf-level (camera lens level with the patient's mid-shin), 9:16 vertical framing. The patient's calf fills the immediate center-foreground — ropey, bulging blue-purple varicose veins running down the calf, raised above the skin surface, dominating the middle of the image. The patient's lower leg extends through the frame from knee to ankle. The main character's purple-gloved index finger enters from the top-right background, pointing at the most pronounced vein.
+```
+
+In all three: prop / symptom OWNS the center. Frame anchor sits at the body-part level. Camera height matches. Floor / desk / counter never enters the frame.
+
+---
+
+#### v603b — Anchor-Level Camera Framing (amends v603 camera lock)
+
+v603 generic style line (`"Shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight"`) does not specify camera HEIGHT or ANGLE. Default operator phrasing tends toward "looking down at the desk" / "above the prop" / "shot from above" — pulls the camera perspective downward, which pulls the prop downward, which pulls the viewer's eye to the floor. v603b mandates camera AT THE LEVEL of the prop's subject-anchor point (chest, belly, knee, calf, etc.), shooting straight-on, whenever the scene has a hero prop subject-anchored per v605b.
+
+**Required camera anchor in v713 `[Composition]` block — generalized to the prop's anchor level:**
+
+- `"straight-on at [anchor]-level"` / `"camera at [anchor] height, level with the [anchor-part]"`
+- `"camera lens level with the [body anchor point]"` (e.g. `"camera lens level with the patient's navel"` for belly-placed prop, `"camera lens level with the patient's mid-shin"` for calf symptom)
+- `"eye-level with the [anchor]"` / `"camera positioned at the prop's plane"`
+
+**BANNED camera anchors when hero prop is subject-anchored:**
+
+- `"shot from above"` / `"high angle"` / `"angled down at the desk"`
+- `"looking down at the prop"` / `"top-down view"` / `"overhead shot"`
+- `"bird's-eye"` / `"camera tilted down"`
+- `"low angle looking up"` — wrong direction; pushes prop into upper-third with empty bottom
+- `"camera at floor level looking up at the patient"` — pulls perspective off the anchor point
+
+**Anchor height by anchor mode (matches v713f Z-axis table):**
+
+| Anchor mode | Camera height |
+|---|---|
+| Held aloft at chest | chest level |
+| Held aloft at face | face level |
+| Held aloft overhead | overhead level |
+| Placed on belly | belly level (lens level with navel) |
+| Placed on chest | chest level |
+| Placed on forearm / thigh (seated) | seated mid-torso level |
+| Pressed against jaw / forehead | face level |
+| Pressed against knee / calf (seated) | knee / calf level |
+| Symptom-as-prop on calf | mid-shin level |
+| Symptom-as-prop on belly | belly level |
+| Symptom-as-prop on face | face level |
+| Worn on wrist | wrist level |
+
+**Combined with v713(c) camera grammar:** v603b adds HEIGHT + ANGLE specificity to v713(c)'s focal-length + aperture + DOF. Compose:
+
+```
+[Composition] 85mm telephoto lens at minimum focus distance, shallow depth of field, straight-on at [anchor]-level, 9:16 vertical framing. ...
+```
+
+`85mm telephoto + minimum focus distance + shallow DOF + straight-on + anchor-level` = locks Banana 2 to the macro / portrait prior at the right height for that anchor. Drops the "desk gravity" pull from the camera-angle vector AND the prop-anchor vector simultaneously, regardless of where on the body the prop anchors.
+
+---
+
+### Full parser-compliant block structure — Image + Scene (v593 + v696 + v715)
+
+The platform parser is STRICT per v593 + v696. Two block kinds (Image N + Scene N) each have hard-required bullets. Missing any of them hard-fails import with one of these errors:
+
+```
+Parse error: Image N: no fenced 'Image prompt:' block found
+Parse error: Scene N: missing '- **image:** image_N' field
+Parse error: Scene N: voiceover_anchor_image image_M has empty cast list
+```
+
+The worked-example bodies below show the `[Composition]` / `[Subject]` / `[Action]` / `[Location]` / `[Style]` / `[Tech]` / `Negatives` prose blocks IN ISOLATION for readability. When emitting the actual `videos/*.md` or `raw/decoded_*.md` artifact, every Image-prompt body MUST be wrapped per the canonical structure:
+
+````markdown
+### Image N
+- **frame_anchor:** <Xs>
+- **reference_image:** <none | image_K>
+- **narrative_lens:** <HEALER-SHOWING-CURE | AUGMENTED-SYMPTOMS | GRABBING-ATTENTION>
+- **cast:** <comma-separated character handles>
+- **product_image:** <ingredient name, ONLY if product is bound on this image>
+- **prop_position:** <if product_image set, per v605>
+- **visual_delta:** <if reference_image set, per v604 + v714>
+- **action_arc:** <force-verb chain per v697>
+- **Image prompt:**
+```
+[v609 binding line(s), with v713(a) partial-visibility override if applicable]
+
+[Composition] [v713(c) camera grammar + v603b anchor-level camera + 9:16 framing + v713f Z-axis depth layering with three planes: foreground / midground / background, all subject-anchored per v605b].
+
+[Subject — patient or non-persona] [fully described per v610 / v622 — race + age + BUILD + hair + clothing + expression; symptom-feature exaggerated description per v622 / v714].
+
+[Action] [v697 force-verb chain + v712 subject-to-subject geometry; mention v605b anchor mode in motion].
+
+[Location] [setting + background blur statement per v713].
+
+[Style] [iPhone camera + handheld + lighting + grading + v603 closing tag "iPhone HDR colors, deep focus."].
+
+[Tech] [aspect ratio + resolution, e.g. 9:16, 2K output].
+
+Negatives: [v604 negative-constraint block + v606 product negatives + v713(d) composition-anti-default + v715 desk-anchor anti-default].
+```
+````
+
+Three rules that hard-fail import if violated:
+
+1. **`### Image N` header**: integer + nothing else on the line. NO suffix like `### Image 4 — TEXT CARD (no render)` (v593).
+2. **`- **Image prompt:**` followed by a FENCED code block** (triple-backtick): mandatory in every Image N block. Pre-fence prose breaks the parser. Closing fence required.
+3. **No h4 sub-scenes** (`#### Scene 1a`): v593 banned. Splitting a scene by clip uses a second `- **line:**` + `- **action_note:**` pair in ONE Scene block.
+
+Skeleton verbatim (operator can copy-paste):
+
+````markdown
+### Image 1
+- **frame_anchor:** 0.5s
+- **reference_image:** none
+- **narrative_lens:** AUGMENTED-SYMPTOMS
+- **cast:** the main character, the patient
+- **action_arc:** GESTURE-FORWARD → POINT-TO-LENS
+- **Image prompt:**
+```
+Use the uploaded character reference image for the main character. In this frame the main character appears PARTIALLY — only his face from eyebrows to chin is visible in the top-right, the rest of his head cropped above the frame edge.
+
+[Composition] 85mm telephoto lens at minimum focus distance, shallow depth of field, straight-on at chest-level, 9:16 vertical framing. The transparent anatomical bladder model is HELD ALOFT in the immediate center-foreground, dominating the middle of the image, showing yellow cloudy fluid inside. Directly behind the elevated model, the patient's face is sharply visible just above the bladder. The main character leans in from the top-right background, his partial face appearing close beside and above the patient's head.
+
+[Subject — patient] A white man in his late 50s, heavy build, salt-and-pepper hair, navy polo. He is holding the bladder model up at his own chest height with both hands. He faces the camera, looking directly over the top of the model with an exhausted, distressed expression.
+
+[Action] The main character reaches in from the top-right to point a purple-gloved index finger DOWN at the elevated bladder model, fingertip touching the cloudy yellow fluid line.
+
+[Location] Bright modern medical clinic interior with white walls, background fully blurred.
+
+[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus on the prop and both visible faces.
+
+[Tech] 9:16, 2K output.
+
+Negatives: No desk visible. No bladder on a surface. No top-down camera angle. No high-angle shot. No prop sinking to the lower-third. No empty space between patient face and prop. No balanced two-shot — the prop dominates the center of the frame.
+```
+````
+
+Note the **TRIPLE-BACKTICK FENCE** around the prompt body. Without it, the parser cannot identify where the prompt body begins / ends, and emits `Parse error: Image N: no fenced 'Image prompt:' block found`. The fence terminator must be on its own line at column 0 (no leading whitespace).
+
+The body-internal `[Composition]` / `[Subject]` / etc. labels are CONCEPTUAL block markers for Banana 2's reasoning (per v713(b) front-loaded structure), NOT markdown headers. They live INSIDE the fenced code block as prose. Do not promote them to `##` or `###` markdown headers — the platform parser would break on those.
+
+---
+
+### Scene-block structure — `## Storyboard` blocks
+
+Scene blocks live under `## Storyboard` and reference Image blocks via `- **image:** image_N`. Two scene-type variants — SHOT and TEXT_CARD — have different required-field sets. Mixing them hard-fails import.
+
+**SHOT scene** (default — persona / patient on screen, lip-sync or voiceover playing over b-roll):
+
+| Bullet | Required | Notes |
+|---|---|---|
+| `- **image:** image_N` | YES — hard-fail without (`Parse error: Scene N: missing '- **image:** image_N' field`) | references an `### Image N` block; integer must exist in `## Images` |
+| `- **scene_type:** shot` | YES on shot scenes | default if omitted, but explicit recommended |
+| `- **speaker:** <on-camera \| voiceover \| silent>` | YES per v538 explicit-only | |
+| `- **line:** [text]` | YES if `speaker: on-camera` or `voiceover` | lowercase per v693, 12-28 words per v704, no em-dash per v615; absent on `speaker: silent` |
+| `- **action_note:** [single-line prose]` | YES | per v540 + v604, inline beat markers `[Start beat 0-Xs]` / `[Mid-clip beat]` / `[End beat]` |
+| `- **target_duration_s:** <float>` | YES | clip length in seconds |
+| `- **clip_mode:** <fresh \| blend>` | YES per v704 (CONTINUE banned) | |
+| `- **transition:** <cut \| blend>` | YES per v704 | |
+| `- **action_arc:** <verb chain>` | YES per v697 | force-verb arrows like `LIFT → SLAM` |
+| `- **voiceover_anchor_image:** image_M` | YES when `speaker: voiceover` (per v698A) | anchor image's `cast:` must include persona |
+
+**TEXT_CARD scene** (caption-card insert — solid background + text overlay, NO live-action footage):
+
+| Bullet | Required | Notes |
+|---|---|---|
+| `- **scene_type:** text_card` | YES — discriminator field | |
+| `- **caption:** "text"` | YES | string in quotes |
+| `- **bg_color:** "#hex"` | YES | hex color string |
+| `- **duration:** <float>` | YES (different field than `target_duration_s`) | seconds |
+
+**MUST NOT** on TEXT_CARD scenes (per v682d):
+
+- `- **image:** image_N` — text_card scenes have NO image bullet
+- corresponding `### Image N` header in `## Images` section — text_card has no rendered image
+
+Image numbering may be NON-CONTIGUOUS when text_cards are interleaved (e.g. images 1, 2, 3, 5, 6, 7 with text_card at scene 4 having no image_4).
+
+---
+
+### Scene-block skeleton (operator can copy-paste)
+
+````markdown
+## Storyboard
+
+### Scene 1
+- **image:** image_1
+- **scene_type:** shot
+- **target_duration_s:** 5.0
+- **clip_mode:** fresh
+- **transition:** cut
+- **speaker:** on-camera
+- **action_arc:** GESTURE-FORWARD → POINT-TO-LENS
+- **line:** [lowercase 12-28 word on-camera line, no em-dash]
+- **action_note:** [Start beat 0-1.5s] persona leans forward, hand extended toward camera. [Mid-clip beat] persona's index finger reaches lens. [End beat] camera holds on extended hand.
+
+### Scene 2
+- **image:** image_2
+- **scene_type:** shot
+- **target_duration_s:** 6.0
+- **clip_mode:** fresh
+- **transition:** cut
+- **speaker:** voiceover
+- **voiceover_anchor_image:** image_5
+- **action_arc:** POUR → CASCADE
+- **line:** [voiceover line played over the silent b-roll image_2, lowercase 12-28 words]
+- **action_note:** [Start beat 0-2s] honey pours from jar. [Mid-clip beat] golden cascade hits water. [End beat] saffron threads dissolve.
+
+### Scene 3
+- **scene_type:** text_card
+- **caption:** "guide"
+- **bg_color:** "#000000"
+- **duration:** 1.2
+
+### Scene 4
+- **image:** image_3
+- **scene_type:** shot
+- **target_duration_s:** 7.0
+- **clip_mode:** fresh
+- **transition:** cut
+- **speaker:** on-camera
+- **action_arc:** GESTURE-FORWARD → POINT-TO-LENS
+- **line:** [closing CTA line, lowercase, 12-28 words]
+- **action_note:** [Start beat 0-2s] persona on camera mid-utterance. [Mid-clip beat] persona points at the lens. [End beat] camera holds.
+````
+
+Scene 3 (text_card) has NO `image:`, NO `speaker:`, NO `line:`, NO `action_note:` — it's a different scene-type. Scene 2 binds a `voiceover_anchor_image: image_5` because `speaker: voiceover` — image_5 must be a TORSO+HANDS-VISIBLE persona-on-camera image with `role: voiceover_anchor` declared in `## Images` per v698A.
+
+---
+
+### Full worked examples — three anchor modes, three rhetorical functions
+
+The body content below shows the IN-FENCE prose ONLY. Wrap each per the canonical structure above before emitting.
+
+**Pre-v715 baseline (desk-anchored, prop sinks — applies to all three cases):**
+
+```
+Use the uploaded character reference image for the main character.
+
+[Composition] Medium-close two-shot. The patient sits at his desk facing the camera. On the desk in the immediate foreground sits [prop]. The main character stands behind the patient.
+
+[Subject — patient] [description]. He looks down at [prop] on the desk with an exhausted expression.
+
+[Action] The main character reaches over the patient's shoulder to point at [prop] on the desk.
+```
+
+Banana 2 renders: prop at desk level (lower-third), patient looking down at it (his face fills upper half of frame, looking at empty foreground), persona's pointing hand crosses empty middle to reach the desk prop, prop is footer-detail not hero. Hook loses its diagnostic center.
+
+---
+
+**Post-v715 mode 1 — Bladder held aloft (Nuri prostate diagnostic hook):**
+
+```
+Use the uploaded character reference image for the main character. In this frame the main character appears PARTIALLY — only his face from eyebrows to chin is visible in the top-right, the rest of his head cropped above the frame edge.
+
+[Composition] 85mm telephoto lens at minimum focus distance, shallow depth of field, straight-on at chest-level, 9:16 vertical framing. The transparent anatomical bladder model is HELD ALOFT in the immediate center-foreground, dominating the middle of the image, showing yellow cloudy fluid inside. Directly behind the elevated model, the patient's face is sharply visible just above the bladder. The main character leans in from the top-right background, his partial face appearing close beside and above the patient's head.
+
+[Subject — patient] A white man in his late 50s, heavy build, salt-and-pepper hair, navy polo. He is holding the bladder model up at his own chest height with both hands. He faces the camera, looking directly over the top of the model with an exhausted, distressed expression.
+
+[Action] The main character reaches in from the top-right to point a purple-gloved index finger DOWN at the elevated bladder model, fingertip touching the cloudy yellow fluid line.
+
+[Location] Bright modern medical clinic interior with white walls, background fully blurred.
+
+[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus on the prop and both visible faces.
+
+[Tech] 9:16, 2K output.
+
+Negatives: No desk visible. No bladder on a surface. No top-down camera angle. No high-angle shot. No prop sinking to the lower-third. No empty space between patient face and prop. No balanced two-shot — the prop dominates the center of the frame.
+```
+
+Banana 2 renders: bladder at chest-height center-frame, patient face visible behind/above the bladder with distressed expression, persona's gloved finger pointing down from top-right at the prop. Three depth planes share the chest-to-face vertical region. Prop owns center. Hook lands.
+
+---
+
+**Post-v715 mode 2 — Bladder placed on belly (Nuri anatomical demo / bladder-on-belly diagnostic):**
+
+```
+Use the uploaded character reference image for the main character. In this frame the main character appears PARTIALLY — only his face from eyebrows to chin is visible in the top-right, the rest of his head cropped above the frame edge.
+
+[Composition] 50mm portrait lens, shallow depth of field, straight-on at belly-level (camera lens level with the patient's navel), 9:16 vertical framing. The transparent anatomical bladder model is placed directly on the patient's distended lower belly in the immediate center-foreground, anchored at belly height, dominating the middle of the image, showing yellow cloudy fluid inside. Directly above the bladder model, the patient's torso rises through the frame, his distressed face visible at the top of the image looking down at the model with embarrassment. The main character leans in from the top-right background, his partial face appearing above and behind the patient's head.
+
+[Subject — patient] A white man in his late 50s, heavy build, salt-and-pepper hair, navy polo lifted to expose his lower abdomen. He is seated, looking down at the bladder model resting on his own belly with an exhausted, embarrassed expression. His distended lower abdomen forms the supporting surface for the model.
+
+[Action] The main character reaches in from the top-right to point a purple-gloved index finger DOWN at the bladder model on the patient's belly, fingertip touching the cloudy yellow fluid line. The patient holds his polo up with his viewer-left hand.
+
+[Location] Bright modern medical clinic interior with white walls, background fully blurred.
+
+[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus on the model and both visible faces.
+
+[Tech] 9:16, 2K output.
+
+Negatives: No desk visible. No bladder on a surface. No top-down camera angle. No high-angle shot. No prop sinking to the lower-third. No floor visible. No balanced two-shot — the model on the belly dominates the center of the frame.
+```
+
+Banana 2 renders: bladder model resting on the patient's exposed belly at frame center, patient's distended belly forming the supporting surface, patient's face visible at top of frame looking down with embarrassment, persona's gloved finger pointing down from top-right. Anatomical-demo composition lands.
+
+---
+
+**Post-v715 mode 5 — Symptom-as-prop on body (varicose veins on calf):**
+
+```
+Use the uploaded character reference image for the main character. In this frame the main character appears PARTIALLY — only his hand and forearm are visible from the top-right, the rest of his body out of frame.
+
+[Composition] 85mm telephoto lens at minimum focus distance, shallow depth of field, straight-on at calf-level (camera lens level with the patient's mid-shin), 9:16 vertical framing. The patient's calf fills the immediate center-foreground — ropey, bulging blue-purple varicose veins running down the calf, raised above the skin surface, dominating the middle of the image. The patient's lower leg extends through the frame from knee to ankle. The main character's purple-gloved index finger enters from the top-right background, pointing at the most pronounced vein.
+
+[Subject — patient] A white woman in her late 60s, heavy build, seated with one leg extended forward. Her calf is bare. Ropey, bulging blue-purple varicose veins run down the calf, raised above the skin surface, crisscrossing visibly from knee to ankle.
+
+[Action] The main character's purple-gloved viewer-right index finger enters from the top-right and points at the most pronounced varicose vein at the calf-midpoint, fingertip almost touching the raised vein.
+
+[Location] Bright modern medical clinic interior with white walls, background fully blurred.
+
+[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus on the calf and visible hand.
+
+[Tech] 9:16, 2K output.
+
+Negatives: No floor visible. No top-down camera angle. No high-angle shot. No symptom at floor level. No camera tilted down. The symptom dominates the center of the frame.
+```
+
+Banana 2 renders: calf with prominent varicose veins at frame center, camera at shin level, persona's gloved finger pointing from top-right. Symptom-as-prop lands without the calf sinking to the floor.
+
+---
+
+**Common pattern across all three modes.** Anchor mode changes; principle does not:
+
+1. Prop / symptom anchors to a SUBJECT body region (hands / belly / calf), never to environment furniture.
+2. `[Composition]` block uses Z-axis depth (immediate foreground / midground / background) and explicit anchor-level camera position.
+3. Frame center sits at the prop's anchor body-part level.
+4. Camera height matches the anchor level.
+5. Negatives block bans desk / surface / top-down phrasing.
+
+---
+
+### Pre-output grep gates (mandatory before commit)
+
+```bash
+# v715 gate (a) — banned environment-anchor phrases for hero props
+grep -niE "\b(on the desk|sitting on the desk|placed on the desk|on the counter|on the side counter|on the prep counter|on the table|on the bedside table|on the shelf|on the windowsill|resting on the surface|sitting on the surface|in front of (him|her) on the desk|between them on the table)\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: zero hits on hero-prop image blocks
+# Carve-out: recipe-prep mid-action chopping/pouring where prep surface IS the action plane
+
+# v715 gate (b) — required subject-anchored prop phrases (one of FIVE modes)
+grep -niE "\b(HELD ALOFT|held .{1,30} at (chest|face|chin|overhead) height|holds .{1,30} up at|lifts .{1,30} at (chest|face|chin) height|cradles .{1,30} at chest|extends .{1,30} (up )?toward the (camera|lens)|placed (directly )?on (the patient's|her|his) (belly|chest|forearm|thigh|knee|scalp|back|shoulder)|rests (the )?.{1,30} on (her|his) own (belly|chest|forearm|thigh|knee|scalp|back|shoulder)|lays .{1,30} flat against (the patient's|her|his)|pressed (firmly )?(against|into) (the patient's|her|his|the soft underside of)|palpate (the patient's|her|his)|wears the .{1,30} (around|strapped to|draped over|clipped to)|wraps around (the patient's|her|his)|the patient's (calf|belly|chest|face|scalp|forearm|jaw|forehead|under-eye|knee|hairline) fills the immediate center-foreground|directly between .{1,30} and the (camera|lens))\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per hero-prop Image block
+
+# v715 gate (c) — required Z-axis depth language in Composition block
+grep -niE "\b(immediate (center-)?foreground|directly (behind|above) (the )?prop|just above the prop|framing the prop|hosting the prop|in the background|leaning in from|at (chest|face|belly|knee|calf|wrist|scalp)-level|at (chest|face|belly|knee|calf|wrist|scalp) height|camera (lens )?level with (the )?(patient's )?(navel|chest|face|mid-shin|belly|forehead|jaw|hairline))\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per hero-prop Image block
+
+# v715 gate (d) — banned downward camera angles when hero prop is subject-anchored
+grep -niE "\b(shot from above|high angle|angled down at (the )?(desk|counter|table|surface)|looking down at the prop|top-down view|overhead shot|bird's-eye|camera tilted down|camera at floor level)\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: zero hits on hero-prop image blocks
+
+# v715 gate (e) — required negative constraints when hero prop is subject-anchored
+grep -niE "\b(No (desk|counter|table|surface) visible|No (.{1,30} )?on (a|the) (surface|desk|counter|table)|No top-down|No high-angle|No prop (sinking|at floor level)|No empty space between|prop dominates the (center|middle)|symptom dominates the (center|middle))\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per hero-prop Image block negatives block
+```
+
+ANY gate-(a) hit OR gate-(d) hit on a hero-prop image = rewrite. Missing gate-(b), (c), or (e) hits when hero prop is in frame = rewrite.
+
+**Mode-detection heuristic** — to decide which subject-anchor mode applies to a given source frame (decode-side) or scene spec (generate-side):
+
+1. Is the prop in someone's hands? → Held aloft (mode 1).
+2. Is the prop on a character's body, not held? → Placed on body (mode 2).
+3. Is the persona pressing the prop / a hand / instrument against the patient? → Pressed against body (mode 3).
+4. Is the prop strapped / worn / draped on the character? → Worn (mode 4).
+5. Is the focus a visible body-surface feature on the patient (vein / wrinkle / acne / bloat)? → Symptom-as-prop (mode 5).
+
+If multiple modes apply (e.g. persona holds a magnifier while pressing a finger at the patient's jowl), pick the mode whose prop is the PRIMARY rhetorical focus per v621 narrative_lens — usually the symptom or the diagnostic indicator, not the secondary tool.
+
+---
+
+### Carve-outs
+
+- **Recipe-prep mid-action.** Pouring honey, chopping ginger, whisking saffron — the prep surface IS the action plane and the prop's position on the surface is rhetorically load-bearing (you can't pour honey into a jar at chest height suspended in mid-air). Carve-out: `[Action]` block describes prop ON the surface with hands actively manipulating it; `[Composition]` block can still anchor camera at chest-level (v603b) to compose the surface into the middle of the frame rather than the lower-third (low-angle from prop level, not top-down from above).
+- **Environmental establishing shots.** Full-room walkthroughs, CCTV-style shots, bedroom scenes — no prop is the primary focus, v715 N/A.
+- **Body-part symptom shots.** Varicose veins on calf, jaw shot, scalp shot, belly shot — the body part IS the prop; v622 anatomy-framing governs; v715 N/A.
+- **Edible-product packshot scenes.** Hero shot of saffron bottle alone with no people, label-forward, brand-anchor — held-aloft is N/A (no one is holding it). Carve-out: v606 compositing directives govern (surface contact, lighting, occlusion); composition block describes the bottle's frame-coverage directly (`"the bottle fills the upper-center of the frame"`) without v605b's holder language.
+- **Decode-side observation.** When source video genuinely shows desk-anchored prop, decoder captures it accurately — `"on the desk"` is valid decode-side observation. v715 fires only when the operator decoding is about to default to desk-anchoring out of corpus bias rather than source-fidelity. Decode-side cross-check: open the source frame, verify what the camera actually shows, then write what is observed. If source IS desk-anchored, decode says so. If source IS held-aloft, decode says THAT.
+
+---
+
+### Decode-side vs generate-side
+
+- **Decode-side**: when source video shows a held-aloft prop, decoder MUST capture it accurately (don't write `"on the desk"` by corpus bias when the source frame shows the patient holding the prop at chest). Observation enforcement.
+- **Generate-side**: when authoring a lift / new video with a hero prop in HOOK / EXPLAIN / RESULT scenes, author MUST mandate held-aloft composition per v605b + v713f + v603b. Authoring enforcement.
+
+Same grep gates apply both sides.
+
+---
+
+### Pairing with other rules
+
+- **v605 PROP-LED format** (60% prop / 40% persona allocation in body prose) — v715 adds WHERE the prop sits in frame; v605 still mandates how prose ALLOCATES attention to the prop.
+- **v606 compositing directives** (scale / lighting / cast shadow / perspective / grip / occlusion) — v715 doesn't replace these; v606 still required on product-bearing images. v715 layers WHERE on top of v606's HOW.
+- **v621 narrative_lens** — HEALER-SHOWING-CURE + AUGMENTED-SYMPTOMS scenes most often have a hero prop; v715 fires hardest on these lenses. GRABBING-ATTENTION lens: optional.
+- **v622 anatomy framing** — body-part symptoms carve-out from v715 (the body is the prop, body parts can't be "held aloft").
+- **v712 relational composition** — v715's Z-axis depth language is subject-anchored ("directly behind the model", "just above the prop") and v712-compliant.
+- **v713(b) Composition front-loaded + (c) camera grammar** — v603b extends v713(c) with camera HEIGHT + ANGLE; v713f amends v713(b)'s `[Composition]` block content with depth-layer structure.
+- **v714 emotional payoff** — AFTER-state hero prop (smooth before/after card, full saffron bottle held in joy) still held aloft per v715; patient expression updated per v714.
+
+---
+
+### Migration
+
+Zero required. Pre-v715 decoded / lift artifacts with desk-anchored hero props remain valid (Banana 2 renders something, just with prop in lower-third). From this commit forward, new artifacts with hero props MUST satisfy the v715 grep gates above. The wiki lint pass can flag pre-v715 artifacts that fail gate (a) or gate (d) — advisory not blocking. Highest-value retrofit candidates: HOOK images on HEALER-SHOWING-CURE + AUGMENTED-SYMPTOMS lens (the diagnostic-pointer compositions). Lower-priority retrofit: recipe-prep mid-action (carve-out partially applies).
+
+---
+
+### Touched
+
+- `code/decode_bundle.sh` — task-prompt heredoc gains V715 section.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v715 row prepended above v714; latest-live marker bumped v714 → v715.
+- `wiki/meta/decode-grammar-checklist.md` — v715 workflow section added after v714.
+- `CLAUDE.md` — v715 quickref prepended above v714.
+- `wiki/log.md` — v715 timeline entry prepended.
+
+---
+
+### Verification (mandatory before claiming v715 works)
+
+1. Pick a recent lift / decoded artifact with a hero-prop HOOK scene (Nuri bladder, Dr. Kim banana, saffron bottle reveal — any diagnostic-pointer / product-hero / before-after image).
+2. Audit the hero-prop image's body prose against the five grep gates above.
+3. Rewrite per v605b + v713f + v603b: persona/patient holds prop at chest height; `[Composition]` block uses Z-axis depth layering; camera locked to chest-level straight-on; banned desk-anchor + high-angle phrases removed; required elevated-prop + depth + negatives present.
+4. Feed the rewritten prompt to Banana 2 with persona + product references attached, via Google AI Studio (best-case path per [nano-banana-prompting.md:230](../wiki/generation/nano-banana-prompting.md#L230)).
+5. Compare rendered image to the desired composition. Confirm: (a) hero prop dominates the center of the frame at chest-to-face vertical level, (b) primary character's face visible directly behind / just above the prop, (c) secondary character enters from top edge of frame, (d) no desk / counter / table visible, (e) camera angle reads straight-on not top-down.
+6. If composition still drifts (e.g. prop renders at face height instead of chest, or prop renders too small relative to characters), escalate to v713 fallback chain (AI Studio over direct API → Thinking / Pro mode → JSON method → multi-turn editing with prop locked first via Banana 2 turn 1 = prop alone at center, turn 2 = add characters around it).
+
+ONLY THEN claim v715 elevates hero props faithfully on Banana 2.
+
+---
+
+### v716 — Banana 2 normalization-bias countermeasures (v622b + v715f umbrella)
+
+**Problem.** Two failure modes surfaced from Gemini 3.1 Pro generation cycles after v715 shipped:
+
+1. **Symptoms render too normal.** v622 mandates "specific exaggerated terms" for symptom features on non-persona characters, but the corpus uses ADJECTIVES (`"sagging"`, `"loose"`, `"puffy"`, `"distended"`, `"thinning"`). Banana 2 treats adjectives as soft suggestions and applies normalization bias — renders a mild realistic out-of-shape 50-year-old's arm instead of the scroll-stopper exaggeration the HOOK needs. The AUGMENTED-SYMPTOMS rhetorical lens collapses.
+2. **Persona crops too aggressively when full-visibility needed.** v715 Z-axis stacking + v713(a) partial-visibility override produces a beautiful symptom-centered macro shot — but pulls the persona into a partial-face corner. When the operator needs BOTH characters fully visible (typical EXPLAIN / RESULT scenes, chest-up two-shots), v715's framing trade-off forces an unwanted persona crop.
+
+**Surfaced 2026-05-13** via Gemini self-analysis: a v715 Mode 5 (symptom-as-prop on calf) generation for a varicose-veins HOOK rendered (a) "mildly out-of-shape calf with faint veins" instead of "ropey purple veins 5mm above skin"; and (b) persona reduced to a hand-and-forearm sliver in the top-right corner per v713(a) — operator wanted the persona's face visible for the diagnostic-pointer authority anchor. Two failure modes, same root: Banana 2's defaults trump v622 + v715 unless the prompt language is harder + the composition trade-off is explicit.
+
+**v716 packages two sub-amendments** under one rule number:
+
+- **v622b** — Geometric Symptom Exaggeration
+- **v715f** — Two-Shot Body-Part-Thrust Mode (v605b Mode 6 — full-visibility persona carve-out)
+
+---
+
+#### v622b — Geometric Symptom Exaggeration (extends v622)
+
+**Rule.** When v622 mandates symptom-feature exaggeration on a non-persona character (AUGMENTED-SYMPTOMS HOOK frames, HEALER-SHOWING-CURE diagnostic-pointer frames, before-state callouts), the body prose MUST use GEOMETRIC / MEASUREMENT-BASED descriptors — not adjective-only. Banana 2 treats measurements as hard constraints; adjectives are soft suggestions that lose to normalization bias.
+
+**Banned (adjective-only) → Required (geometric):**
+
+| Symptom domain | Pre-v622b (normalized) | Post-v622b (exaggerated) |
+|---|---|---|
+| Sagging arm | `"sagging loose skin"` | `"crepey loose flab hanging 3 inches below the tricep in a deep U-shape"` |
+| Distended belly | `"distended belly"` | `"belly pushing 4 inches past the waistband, draped heavily over the belt"` |
+| Varicose veins | `"ropey veins"` | `"veins raised 5mm above the skin, branching 6 inches down the calf"` |
+| Thinning hair | `"thinning crown"` | `"scalp visible through 50% of the crown coverage area"` |
+| Jowl drop | `"sagging jowl"` | `"jowl drooping 2 inches below the jawline, forming a visible pouch"` |
+| Forehead wrinkles | `"deep wrinkles"` | `"5+ horizontal grooves carved 3mm deep across the forehead"` |
+| Dark eye circles | `"dark circles"` | `"hollow shadows extending 1.5 inches below the lower lash line"` |
+| Crow's feet | `"crow's feet"` | `"radiating creases 0.8 inches long fanning from each outer eye corner"` |
+| Double chin | `"double chin"` | `"second chin pouch projecting 1.5 inches forward of the jawline"` |
+| Belly bloat | `"bloated"` | `"belly distended 3 inches outward, skin stretched taut over the swell"` |
+| Acne severity | `"acne"` | `"30+ inflamed red papules covering 60% of the cheek surface"` |
+| Stretch marks | `"stretch marks"` | `"silvery linear striae 4-6 inches long radiating across the lower abdomen"` |
+| Back acne | `"back acne"` | `"clustered inflamed pustules covering 40% of the upper back"` |
+
+**The pattern.** Geometric descriptors use one or more of:
+
+- **Linear measurement** in real units (inches / mm / cm)
+- **Coverage percentage** (`"50% of the crown area"`, `"60% of the cheek surface"`)
+- **Count** (`"5+ grooves"`, `"30+ papules"`)
+- **Directional projection** (`"projecting 1.5 inches forward"`, `"drooping 2 inches below"`)
+- **Geometric shape** (`"deep U-shape"`, `"radiating fan pattern"`, `"linear striae"`)
+- **Spatial extent** (`"branching 6 inches down"`, `"radiating from"`, `"covering [region]"`)
+
+Adjective + geometric combo is allowed and preferred. Adjective without geometric is BANNED on AUGMENTED-SYMPTOMS lens images.
+
+**Mandatory anti-normalization negatives** in the negatives block on every AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE image where v622b applies:
+
+```
+No firm [body part]. No normal skin elasticity. No minor [symptom]. No mild [symptom]. The [symptom] MUST be EXTREME and highly visible.
+```
+
+Adapt `[body part]` and `[symptom]` to the scene (e.g. `"No firm arm. No normal skin elasticity. No minor sagging. The sagging MUST be EXTREME and highly visible."`).
+
+**Carve-outs.**
+
+- **Persona NOT affected.** Per v553.1 / v609 / v610, persona descriptions are minimal and upload-carried — v622b is non-persona only.
+- **RESULT / AFTER-state frames.** v714 emotional payoff governs the AFTER expression; v622b governs the BEFORE intensity. AFTER frames may name the resolved physical state without v622b geometric descriptors.
+- **GRABBING-ATTENTION lens with no specific symptom indicated.** v622b N/A.
+- **Decode-side observation.** When source video shows MILD symptom intensity, decoder captures source-truthful description — v622b is observation-faithful on decode, not always-maximalist.
+
+**Pre-output grep gate (v622b):**
+
+```bash
+# Gate — every AUGMENTED-SYMPTOMS or HEALER-SHOWING-CURE Image block referring
+# to a non-persona character's body-part symptom must contain at least one
+# geometric descriptor
+grep -niE "\b([0-9]+(\.[0-9]+)?[- ]?(inch(es)?|mm|cm)|[0-9]+%|[0-9]+\+? (groove|papule|pustule|crease|wrinkle|stria|vein)s?|(projecting|extending|drooping|hanging|pushing|branching|radiating|covering|fanning) [0-9]+|deep [A-Z]-shape|U-shape|V-shape|linear striae|radiating (creases|fan))\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE Image block
+# with a non-persona body-part symptom
+
+# Negative-discipline gate
+grep -niE "\bNo (firm|normal|minor|mild) (arm|belly|jaw|forehead|under-eye|scalp|skin|symptom|sagging|wrinkle|vein|acne|bloat|jowl|chin)\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE Image block negatives
+```
+
+---
+
+#### v715f — Two-Shot Body-Part-Thrust Mode (extends v715, adds v605b Mode 6)
+
+**Rule.** Sixth subject-anchor mode for scenes where the persona must remain FULLY VISIBLE (not partial-cropped per v713(a)) AND the symptom still needs to dominate frame center. Adds Mode 6 to the five v605b modes.
+
+| **Mode 6 — Body-Part-Thrust** | Patient extends their own body part (arm / belly / leg / hand / face) DRAMATICALLY toward the lens; persona stays fully visible at the side; camera pulls back to chest-up two-shot at 35mm wide-angle |
+|---|---|
+
+**Use case.** EXPLAIN scenes where the persona's authority anchor (face / gesture) IS load-bearing AND the symptom must remain visually prominent.
+
+**Required Composition-block structure for Mode 6 (replaces v603b anchor-level + v713(a) partial-visibility for this mode):**
+
+```
+[Composition] 35mm wide-angle lens, deep focus, chest-up two-shot, 9:16 vertical framing. The main character stands fully visible on the viewer-right [OR viewer-left]. The patient stands on the [opposite side] and [thrusts / extends / presents / pushes / lifts] [his / her] [body part] across the center-foreground toward the camera. The [body part] dominates the immediate foreground; both characters are visible at chest-up framing.
+```
+
+**Trade-offs (explicit).**
+
+| What you gain | What you give up |
+|---|---|
+| Both characters fully visible at chest-up two-shot | Symptom no longer at extreme-macro framing |
+| Persona's face / authority gesture visible | v603b anchor-level camera dropped |
+| Diagnostic-pointer authority anchor preserved | v713(a) partial-visibility override dropped |
+| Z-axis depth still works (symptom in immediate foreground via thrust) | Symptom detail-density reduced — v622b geometric language compensates |
+
+**Drop (when using Mode 6):**
+
+- v713(a) partial-visibility override on the binding line
+- v603b anchor-level camera lock (camera at chest-up two-shot height instead)
+
+**Keep (when using Mode 6):**
+
+- v605b subject-anchored anchoring (via body-part-thrust gesture — patient anchors the prop with their own body)
+- v713f Z-axis depth (symptom in immediate foreground via patient's gesture)
+- v713(b) Composition front-loaded
+- v713(c) camera grammar (`35mm wide-angle lens, deep focus`)
+- v713(d) anti-default negatives
+- v605b banned environment-anchor phrases
+- v622 + v622b symptom intensity (CRITICAL — symptom must compensate for reduced macro detail by maxing intensity language)
+
+**Composition negatives unique to Mode 6:**
+
+```
+No symmetric balanced two-shot — the patient's [body part] thrust dominates the center-foreground. No persona crop — the main character is fully visible at chest-up. No top-down angle. No floor visible.
+```
+
+**Worked example — varicose veins via Mode 6 (full-visibility EXPLAIN):**
+
+````markdown
+### Image 1
+- **frame_anchor:** 0.5s
+- **reference_image:** none
+- **narrative_lens:** AUGMENTED-SYMPTOMS
+- **cast:** the main character, the patient
+- **action_arc:** EXTEND-FORWARD → POINT-TO-LENS
+- **Image prompt:**
+```
+Use the uploaded character reference image for the main character.
+
+[Composition] 35mm wide-angle lens, deep focus, chest-up two-shot, 9:16 vertical framing. The main character stands fully visible on the viewer-right, leaning slightly toward the patient. The patient stands on the viewer-left and thrusts her bare right calf across the center-foreground toward the camera, the calf raised toward the lens at chest height. The thrust calf dominates the immediate foreground; both characters are visible at chest-up framing.
+
+[Subject — patient] A white woman in her late 60s, heavy build, short blonde bob, dark green V-neck top, navy shorts revealing bare calves. Her right calf is extended forward toward the lens, raised to chest height. Ropey, bulging blue-purple varicose veins raised 5mm above the skin surface, branching 6 inches down the calf from the back of the knee to the ankle, visible across 70% of the calf surface in a deep crisscross web pattern.
+
+[Action] The patient thrusts her calf toward the camera. The main character on the viewer-right reaches a purple-gloved index finger toward the most prominent varicose vein, fingertip almost touching the raised vein.
+
+[Location] Bright modern medical clinic interior with white walls, background fully blurred.
+
+[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
+
+[Tech] 9:16, 2K output.
+
+Negatives: No firm calf. No normal skin elasticity. No minor varicose veins. The veins MUST be EXTREME and highly visible. No symmetric balanced two-shot — the patient's thrust calf dominates the center-foreground. No persona crop — the main character is fully visible at chest-up. No top-down angle. No floor visible.
+```
+````
+
+Banana 2 renders: patient on viewer-left thrusting bare calf with prominent purple veins toward the camera; persona on viewer-right fully visible at chest-up gesturing toward the symptom; both characters in frame; symptom dominates the center via thrust. Two-shot lands.
+
+**Selection guide — Mode 1-5 vs Mode 6:**
+
+| Operator need | Mode |
+|---|---|
+| Maximum symptom macro detail, partial-visible persona acceptable | Mode 1-5 + v713(a) partial-visibility override |
+| Both characters fully visible, accept some symptom macro detail loss | **Mode 6** |
+| Symptom EXTREME + both characters visible | Mode 6 + v622b geometric intensity |
+| Single-subject shot (no persona in frame) | Mode 1 / 5 with persona absent |
+
+**Pre-output grep gate (v715f):**
+
+```bash
+# Gate — when persona is fully visible AND a body-part symptom is the
+# rhetorical focus, body-part-thrust language must be present
+grep -niE "\b(thrusts? .{1,30} (across|toward|forward to) the (center|camera|lens|foreground)|extends? .{1,30} (across|toward|forward to) the (center|camera|lens|foreground)|presents? .{1,30} (across|toward|forward to) the (center|camera|lens|foreground)|pushes? .{1,30} (across|toward) the (center|camera|lens|foreground)|lifts? .{1,30} (across|toward) the (camera|lens))\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per Mode 6 Image block
+
+# Mode 6 negatives gate
+grep -niE "\bNo (symmetric balanced two-shot|persona crop|main character crop)\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per Mode 6 Image block negatives
+```
+
+---
+
+### Pairing v622b + v715f
+
+When operator applies Mode 6, v622b is CRITICAL to compensate for reduced macro detail:
+
+- Mode 1-5 + macro framing → symptom detail-density carries the visual intensity → v622 adjectives MAY be enough
+- Mode 6 + chest-up two-shot → symptom detail-density REDUCED → v622b geometric measurements REQUIRED to maintain visual intensity at lower magnification
+
+Coupling rule: **Mode 6 implies v622b. v622b is recommended for Mode 1-5 and required for Mode 6.**
+
+---
+
+### Carve-outs (umbrella v716)
+
+- **Persona-only frames** (HOOK persona reaction, EXPLAIN talking-head with no patient on screen) — v622b N/A; v715f N/A.
+- **AFTER / RESULT frames** — v714 governs emotional payoff; v622b intensity drops because resolution removes the geometric severity.
+- **Recipe-prep mid-action** — no non-persona body-part symptom; v716 N/A.
+- **Environmental establishing shots** — no symptom focus; v716 N/A.
+
+---
+
+### Decode-side vs generate-side
+
+- **Decode-side**: capture source-frame symptom intensity accurately. If source shows MILD intensity, decoder writes mild descriptors. If source shows EXTREME intensity, decoder uses geometric descriptors per v622b. Observation-faithful enforcement.
+- **Generate-side**: when authoring lifts / new videos with AUGMENTED-SYMPTOMS HOOK frames, mandate v622b geometric descriptors + v716 anti-normalization negatives. When operator wants both characters full-visible, mandate Mode 6 framing per v715f. Authoring enforcement.
+
+Same grep gates apply both sides.
+
+---
+
+### Migration
+
+Zero required. Pre-v716 artifacts using adjective-only symptom descriptors remain valid (Banana 2 still renders something, just normalized). From this commit forward, new AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE artifacts MUST satisfy v716 grep gates. Wiki lint can flag pre-v716 failures (adjective-only symptom + missing geometric) — advisory not blocking. Retrofit priority: HOOK images on AUGMENTED-SYMPTOMS lens first.
+
+---
+
+### Touched
+
+- `code/decode_bundle.sh` + `code/innovate_bundle.sh` — task-prompt heredocs gain V716 section.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v716 row prepended above v715; latest-live marker bumped v715 → v716.
+- `wiki/meta/decode-grammar-checklist.md` — v716 workflow section added after v715.
+- `CLAUDE.md` — v716 quickref prepended above v715.
+- `wiki/log.md` — v716 timeline entry prepended.
+
+---
+
+### Verification (mandatory before claiming v716 works)
+
+1. Pick a recent AUGMENTED-SYMPTOMS HOOK frame with weak symptom rendering (Banana 2 produced mild realistic intensity).
+2. Rewrite `[Subject — patient]` block per v622b geometric descriptors. Update negatives with anti-normalization language.
+3. If full-visibility persona needed, also switch to Mode 6 framing per v715f.
+4. Feed rewritten prompt to Banana 2 via Google AI Studio.
+5. Confirm rendered image shows EXTREME geometric symptom severity matching the prose measurements (visible 5mm raised veins, 4-inch waistband overhang, 30+ papules, etc.).
+6. Confirm Mode 6 (if applied) renders both characters fully visible at chest-up + symptom dominating center-foreground via patient's thrust.
+7. If symptom still normalizes despite v622b, escalate to v713 fallback chain (AI Studio Thinking / Pro mode → JSON method → multi-turn editing with patient-only generation first → add persona in turn 2).
+
+ONLY THEN claim v716 bypasses Banana 2 normalization bias faithfully.
+
+---
+
+### v717 — Anti-normalization intensification stack (v622b-extension + v605c + v604b umbrella)
+
+**Problem.** v716 shipped geometric symptom descriptors + Mode 6 framing. Banana 2 still hits normalization on some AUGMENTED-SYMPTOMS HOOK frames because:
+
+1. **Geometric measurements alone aren't visually distinctive enough** — `"hanging 3 inches below the tricep"` constrains shape extent but doesn't lock the visual character of the drooping. Banana 2 has weak priors for "human arm with detached drooping skin" and strong priors for inanimate-object shapes; the prompt fails to invoke the strong priors.
+2. **Patient-first Subject allocation puts the symptom second** — Banana 2 weights first-tokens heaviest; when the `[Subject]` block opens with the host character's demographics (race / age / build / hair / wardrobe), the symptom's grotesque shape gets planned AFTER the host's normal anatomy, and the symptom inherits whatever default the host's body part suggests.
+3. **Outcome-banning negatives don't ban the underlying anatomical default** — `"No firm arm"` bans the END state but Banana 2 still renders "normal human arm anatomy" as the structural default and treats the symptom as a surface decoration on top of normal anatomy. The default fights through.
+
+**Surfaced 2026-05-13** via Gemini 3.1 Pro analysis: even with v716 v622b geometric descriptors applied, a varicose-veins HOOK still rendered "mild realistic vein web" because (a) `"5mm raised veins"` didn't anchor the visual character (Banana 2 picked a mild interpretation of the measurement); (b) the `[Subject — patient]` block opened with `"A white woman in her late 60s, heavy build..."` putting demographics before symptom; (c) negatives banned `"No clear calf"` but didn't ban `"No normal calf skin / No smooth surface texture / No invisible vasculature"`. Three reinforcing default-pulls each contributed.
+
+**v717 packages three sub-amendments**:
+
+- **v622b-extension** — Geometric + Metaphor Forcing (extends existing v716/v622b)
+- **v605c** — Symptom-First Subject Allocation (new, amends v605)
+- **v604b** — Structural Negative Constraints (new, amends v604)
+
+---
+
+#### v622b-extension — Geometric + Metaphor Forcing (extends v716/v622b)
+
+**Rule.** Geometric descriptors alone are insufficient on Banana 2. Add INANIMATE-OBJECT METAPHOR FORCING alongside measurements. Banana 2 has strong visual priors for inanimate-object shapes (`balloon` / `melted wax` / `corduroy` / `porcelain` / `bowling ball`) that lock the visual character of the symptom in ways measurements alone don't.
+
+**Banned (geometric-only) → Required (geometric + metaphor):**
+
+| Symptom | v716/v622b (geometric only) | v717 (geometric + metaphor) |
+|---|---|---|
+| Sagging arm | `"crepey flab hanging 3 inches below the tricep in a deep U-shape"` | `"a massive 6-inch flap of loose detached skin hanging straight down from the tricep bone in a deep U-shape, drooping like a deflated balloon or melted wax"` |
+| Distended belly | `"belly pushing 4 inches past the waistband"` | `"belly pushing 4 inches past the waistband like an inflated bowling ball straining against the belt"` |
+| Varicose veins | `"veins raised 5mm above the skin, branching 6 inches down the calf"` | `"veins raised 5mm above the skin like blue-purple twisted yarn knotted across the calf, branching 6 inches down from knee to ankle"` |
+| Thinning hair | `"scalp visible through 50% of the crown coverage area"` | `"scalp visible through 50% of the crown coverage, the hair appearing like sparse grass on dry ground"` |
+| Jowl drop | `"jowl drooping 2 inches below the jawline, forming a visible pouch"` | `"jowl drooping 2 inches below the jawline like a melted candle pooling at the chin, forming a visible pouch"` |
+| Forehead wrinkles | `"5+ horizontal grooves carved 3mm deep across the forehead"` | `"5+ horizontal grooves carved 3mm deep across the forehead like ridged corduroy fabric"` |
+| Dark eye circles | `"hollow shadows extending 1.5 inches below the lower lash line"` | `"hollow shadows extending 1.5 inches below the lower lash line like bruised purple pouches"` |
+| Crow's feet | `"radiating creases 0.8 inches long fanning from each outer eye corner"` | `"radiating creases 0.8 inches long fanning from each outer eye corner like cracked porcelain"` |
+| Double chin | `"second chin pouch projecting 1.5 inches forward of the jawline"` | `"second chin pouch projecting 1.5 inches forward of the jawline like a deflated water balloon"` |
+| Acne severity | `"30+ inflamed red papules covering 60% of the cheek surface"` | `"30+ inflamed red papules clustering across the cheek like an angry rash of crushed berries"` |
+| Stretch marks | `"silvery linear striae 4-6 inches long radiating across the lower abdomen"` | `"silvery linear striae 4-6 inches long like cracked porcelain spreading across the lower abdomen"` |
+| Back acne | `"clustered inflamed pustules covering 40% of the upper back"` | `"clustered inflamed pustules covering 40% of the upper back like a relief map of small volcanic peaks"` |
+
+**Metaphor-anchor catalog** (Banana 2 strong visual priors):
+
+| Symptom geometry | Recommended metaphor anchors |
+|---|---|
+| Drooping / sagging | `"deflated balloon"` / `"melted wax"` / `"melted candle"` / `"draped curtain"` / `"sagging dough"` |
+| Distended / swollen | `"inflated bowling ball"` / `"swollen water balloon"` / `"taut drumhead"` |
+| Knotted / twisted | `"twisted yarn"` / `"knotted rope"` / `"branching tree roots"` |
+| Cracked / lined | `"cracked porcelain"` / `"ridged corduroy"` / `"dried mud"` |
+| Sparse / thin | `"sparse grass on dry ground"` / `"thinning carpet"` / `"patchy moss"` |
+| Clustered / inflamed | `"crushed berries"` / `"angry rash"` / `"relief map of small volcanic peaks"` |
+| Hollow / shadowed | `"bruised purple pouches"` / `"sunken caves"` / `"shadowed wells"` |
+| Detached / unattached | `"detached fabric flap"` / `"loose curtain"` / `"hanging tapestry"` |
+
+**Pattern phrase**: `"like a [object] [verb describing behavior]"` — verb optional. Examples: `"like a deflated balloon"`, `"like melted wax drooping"`, `"like cracked porcelain spreading across"`.
+
+**Required structure** (per AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE symptom description):
+
+- AT LEAST ONE geometric measurement (linear / percentage / count / projection / shape / spatial extent) — already mandated by v716/v622b
+- AT LEAST ONE inanimate-object metaphor anchor (`"like a [object]"` or `"[object]-like"`) — NEW v717 requirement
+
+Both required. Geometric-only fails Banana 2 normalization in observed cases.
+
+---
+
+#### v605c — Symptom-First Subject Allocation (amends v605)
+
+**Rule.** When narrative_lens is AUGMENTED-SYMPTOMS AND the symptom is the rhetorical priority of the frame (HOOK diagnostic-pointer / before-state callout / symptom-pointer EXPLAIN), the `[Subject]` block MUST lead with the SYMPTOM as a standalone visual entity BEFORE the host character's demographics. Banana 2 weights first-tokens heaviest; opening with the symptom's grotesque shape forces the model to plan the symptom geometry first, then attach it to a body.
+
+**Two-block Subject structure (replaces single `[Subject — patient]`):**
+
+```
+[Subject — Symptom] [geometric + metaphor description of the symptom per v622b-extension, as a standalone visual entity, naming the body part it occupies; ends with "fills the immediate center-foreground" or equivalent v713f Z-axis anchor].
+
+[Subject — Host] [host character demographics — race + age + BUILD + hair + clothing + expression per v610 / v622 / v714 — the body part bearing the symptom belongs to this host].
+```
+
+**Worked example — varicose-veins HOOK:**
+
+Pre-v605c (patient-first):
+```
+[Subject — patient] A white woman in her late 60s, heavy build, short blonde bob, dark green V-neck top. Her right calf shows varicose veins raised 5mm above the skin, branching 6 inches down.
+```
+
+Post-v605c (symptom-first + v622b-extension metaphor):
+```
+[Subject — Symptom] Ropey, bulging blue-purple varicose veins raised 5mm above the skin like twisted yarn knotted across a human calf, branching 6 inches down from knee to ankle in a deep crisscross web pattern, fill the immediate center-foreground.
+
+[Subject — Host] The calf belongs to a white woman in her late 60s, heavy build, short blonde bob, dark green V-neck top, navy shorts revealing bare calves. She faces the camera with a distressed expression.
+```
+
+Two-block structure leads with `"Ropey, bulging blue-purple varicose veins... like twisted yarn..."` — Banana 2 plans the vein geometry first. The host attaches AFTER. Different planner output than `"a white woman in her 60s... shows varicose veins"` which plans the woman first and adds veins as a surface decoration.
+
+**Triggers when:**
+
+- narrative_lens = AUGMENTED-SYMPTOMS (HOOK / before-state / symptom-pointer)
+- AND v605b Mode 5 (symptom-as-prop on body) OR Mode 6 (body-part-thrust)
+- Optional but recommended on Mode 2 (placed on body) where the placed prop is anatomical (bladder model on belly = quasi-symptom; the v605c lead emphasizes the anatomical condition over the patient's identity)
+
+**Does NOT trigger when:**
+
+- narrative_lens = HEALER-SHOWING-CURE (the cure / mechanism is the focus, not the symptom)
+- narrative_lens = GRABBING-ATTENTION (scroll-stopper without specific symptom)
+- AFTER / RESULT frames (v714 governs; emotional payoff leads, not symptom severity)
+- HOOK frames where the patient's identity / authority IS the rhetorical anchor (e.g. celebrity testimonial-style HOOK)
+
+---
+
+#### v604b — Structural Negative Constraints (amends v604)
+
+**Rule.** v604 / v716 anti-normalization negatives ban the OUTCOME (`"No firm arm"` / `"No clear calf"` / `"No normal skin elasticity"`). Banana 2 still renders the underlying ANATOMICAL DEFAULT (`"normal human arm anatomy with skin attached to the bicep"`) and treats the symptom as a surface decoration on top of the default. v604b adds STRUCTURAL ANATOMICAL BANS that forbid the underlying default, forcing the model to render the unattached / detached / drooping / distorted state.
+
+**Pre-v604b (outcome ban only):**
+
+```
+No firm arm. No normal skin elasticity. The sagging MUST be EXTREME.
+```
+
+**Post-v604b (outcome ban + structural anatomical ban):**
+
+```
+No firm arm. No normal skin elasticity. The sagging MUST be EXTREME. No normal human arm anatomy. No skin attached to the bottom of the bicep. No straight lower arm contour. No natural muscle definition under the tricep.
+```
+
+**Structural-ban catalog per symptom domain:**
+
+| Symptom | v604b structural-anatomical bans |
+|---|---|
+| Sagging arm | `"No normal human arm anatomy. No skin attached to the bottom of the bicep. No straight lower arm contour. No natural muscle definition under the tricep."` |
+| Distended belly | `"No normal abdominal wall. No taut skin over the belt line. No flat waistband. No defined obliques."` |
+| Varicose veins | `"No normal calf skin. No smooth surface texture. No invisible vasculature. No clear leg silhouette."` |
+| Thinning hair | `"No full coverage hairline. No dense crown. No normal hair density. No closed parting line."` |
+| Jowl drop | `"No clean jawline contour. No skin attached firmly to the mandible. No normal jaw definition. No defined chin-to-neck angle."` |
+| Forehead wrinkles | `"No smooth forehead surface. No taut skin over the brow. No normal frontal anatomy. No clean brow line."` |
+| Dark eye circles | `"No taut under-eye skin. No flat tear-trough region. No normal periorbital anatomy."` |
+| Crow's feet | `"No smooth outer-eye region. No taut canthal skin. No normal lateral orbital anatomy."` |
+| Double chin | `"No clean neck contour. No flat submental region. No normal mandibular silhouette."` |
+| Acne severity | `"No clear skin. No smooth cheek surface. No normal pore visibility. No even skin tone."` |
+| Stretch marks | `"No smooth abdominal skin. No uniform skin tone. No normal dermal continuity."` |
+| Back acne | `"No clear back. No smooth upper-back skin. No normal pore distribution."` |
+
+**Pattern.** Each structural ban negates an anatomical / surface default — names the body part + the healthy structural feature being banned. Banana 2 must render the absence of the named anatomy, which forces the symptom-distorted version.
+
+**Where v604b lives** in the canonical block structure: same negatives block at end of body prose, AFTER v716 anti-normalization negatives, BEFORE v713(d) composition-anti-default negatives.
+
+```
+Negatives: [v716 anti-normalization — outcome ban] + [v604b structural-anatomical ban] + [v713(d) composition-anti-default] + [v604 generic per-video negatives] + [v606 product negatives if applicable].
+```
+
+---
+
+### Combined worked example — varicose-veins HOOK with full v717 stack
+
+````markdown
+### Image 1
+- **frame_anchor:** 0.5s
+- **reference_image:** none
+- **narrative_lens:** AUGMENTED-SYMPTOMS
+- **cast:** the main character, the patient
+- **action_arc:** EXTEND-FORWARD → POINT-TO-LENS
+- **Image prompt:**
+```
+Use the uploaded character reference image for the main character.
+
+[Composition] 35mm wide-angle lens, deep focus, chest-up two-shot, 9:16 vertical framing. The main character stands fully visible on the viewer-right, leaning slightly toward the patient. The patient stands on the viewer-left and thrusts her bare right calf across the center-foreground toward the camera, the calf raised toward the lens at chest height. The thrust calf dominates the immediate foreground; both characters are visible at chest-up framing.
+
+[Subject — Symptom] Ropey, bulging blue-purple varicose veins raised 5mm above the skin like twisted yarn knotted across a human calf, branching 6 inches down from knee to ankle in a deep crisscross web pattern covering 70% of the calf surface, fill the immediate center-foreground.
+
+[Subject — Host] The calf belongs to a white woman in her late 60s, heavy build, short blonde bob, dark green V-neck top, navy shorts revealing bare calves. She faces the camera with a distressed, embarrassed expression. The calf is extended forward toward the lens, raised to chest height.
+
+[Action] The patient thrusts her calf toward the camera. The main character on the viewer-right reaches a purple-gloved index finger toward the most prominent varicose vein, fingertip almost touching the raised twisted vein.
+
+[Location] Bright modern medical clinic interior with white walls, background fully blurred.
+
+[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
+
+[Tech] 9:16, 2K output.
+
+Negatives: No firm calf. No normal skin elasticity. No minor varicose veins. The veins MUST be EXTREME and highly visible. No normal calf skin. No smooth surface texture. No invisible vasculature. No clear leg silhouette. No symmetric balanced two-shot — the patient's thrust calf dominates the center-foreground. No persona crop — the main character is fully visible at chest-up. No top-down angle. No floor visible.
+```
+````
+
+Three layers stacked:
+
+- **v622b-extension** in `[Subject — Symptom]`: `"raised 5mm above the skin like twisted yarn knotted across a human calf, branching 6 inches down... in a deep crisscross web pattern"` = geometric + metaphor + spatial extent
+- **v605c** symptom-first allocation: `[Subject — Symptom]` block precedes `[Subject — Host]` block; symptom planned first, host attached after
+- **v604b** structural bans in negatives: `"No normal calf skin. No smooth surface texture. No invisible vasculature. No clear leg silhouette."` bans the underlying anatomical defaults
+
+Banana 2 plans the veins' shape (twisted-yarn geometry, 5mm raised, 70% coverage, crisscross pattern, 6 inches down), attaches them to a host calf, then renders the negatives that forbid the host calf's normal smoothness. Three reinforcing default-pulls each negated.
+
+---
+
+### Pre-output grep gates (v717)
+
+```bash
+# Gate (v622b-extension) — every AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE Image
+# with a non-persona body-part symptom contains BOTH a geometric descriptor
+# AND an inanimate-object metaphor
+grep -niE "\blike (a )?(deflated balloon|melted wax|melted candle|draped curtain|sagging dough|inflated bowling ball|swollen water balloon|taut drumhead|twisted yarn|knotted rope|branching tree roots|cracked porcelain|ridged corduroy|dried mud|sparse grass on dry ground|thinning carpet|patchy moss|crushed berries|angry rash|relief map of small volcanic peaks|bruised purple pouches|sunken caves|shadowed wells|detached fabric flap|loose curtain|hanging tapestry|deflated water balloon)\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE Image block
+# (composed with v716/v622b geometric gate)
+
+# Gate (v605c) — [Subject — Symptom] block precedes [Subject — Host] (or
+# [Subject — patient]) block in body prose on AUGMENTED-SYMPTOMS lens images
+python -c "
+import re
+text = open('raw/decoded_<id>.md', encoding='utf-8').read()
+for m in re.finditer(r'### Image (\d+).*?(?=### Image \d+|\Z)', text, flags=re.DOTALL):
+    block = m.group(0)
+    if 'narrative_lens: AUGMENTED-SYMPTOMS' not in block:
+        continue
+    sym = re.search(r'\[Subject — Symptom\]', block)
+    host = re.search(r'\[Subject — (Host|patient)\]', block)
+    if sym and host and sym.start() >= host.start():
+        print(f'FAIL Image {m.group(1)}: [Subject — Symptom] must precede [Subject — Host]')
+    elif host and not sym:
+        print(f'WARN Image {m.group(1)}: AUGMENTED-SYMPTOMS lens but no [Subject — Symptom] block')
+"
+
+# Gate (v604b) — structural anatomical bans in negatives block
+grep -niE "\bNo normal (human )?(arm|abdominal|calf|hair|jawline|forehead|under-eye|outer-eye|chin|skin|frontal|periorbital|lateral orbital|mandibular|dermal)( anatomy| wall| surface| structure| silhouette| continuity| anatomy)?\b|No skin attached to|No straight (lower|upper) (arm|leg) contour|No natural (muscle|skin) definition|No (taut|smooth|flat|defined|clean|even|invisible|closed|clear|firm|full) (skin|forehead|abdominal|cheek|jawline|chin|hair|brow line|under-eye skin|outer-eye region|canthal skin|neck contour|submental region|parting line|skin tone|pore visibility|leg silhouette|back|upper-back skin|tear-trough region|chin-to-neck angle|frontal anatomy|obliques)" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE Image block negatives
+```
+
+---
+
+### Carve-outs (umbrella v717)
+
+- **Persona NOT affected.** v717 is non-persona only (same carve-out chain as v622 / v622b / v716).
+- **RESULT / AFTER frames.** v714 governs emotional payoff. v717 intensity drops because the resolution removes the geometric / metaphor / structural-ban severity. AFTER frames may name the resolved physical state without v717 stack.
+- **GRABBING-ATTENTION lens with no specific symptom.** v717 N/A.
+- **HEALER-SHOWING-CURE without a body-part symptom** (e.g. recipe-mechanism scenes where the prop is the cure not the symptom). v717 N/A.
+- **Decode-side observation.** Capture source-frame symptom intensity. If source MILD, decoder writes mild (no v717 stack). If source EXTREME, decoder uses full v717 stack.
+
+---
+
+### Decode-side vs generate-side
+
+- **Decode-side**: observation-faithful. Source MILD → mild descriptors; source EXTREME → v717 stack (geometric + metaphor + symptom-first + structural bans).
+- **Generate-side**: mandate v717 stack on AUGMENTED-SYMPTOMS HOOK frames where the symptom is the rhetorical priority.
+
+Same grep gates apply both sides.
+
+---
+
+### Pairing with v716
+
+v717 composes WITH v716, not instead of:
+
+- v716 v622b (geometric measurements) → v717 v622b-extension adds metaphor anchors on top
+- v716 v715f (Mode 6 body-part-thrust) → v717 v605c symptom-first allocation works inside Mode 6's `[Subject]` block (replaces `[Subject — patient]` with two-block `[Subject — Symptom]` + `[Subject — Host]`)
+- v716 anti-normalization negatives (outcome ban) → v717 v604b structural-anatomical bans append to the same negatives block
+
+Stacking rule: **v717 = v716 + metaphor forcing + symptom-first allocation + structural bans.** Both rules ship together on extreme-symptom HOOK frames.
+
+---
+
+### Migration
+
+Zero required. Pre-v717 artifacts using v716 v622b geometric-only descriptors remain valid (Banana 2 renders something, just less extreme). From this commit forward, new AUGMENTED-SYMPTOMS HOOK frames with extreme-symptom-priority MUST satisfy v717 grep gates. Wiki lint can flag pre-v717 failures (geometric without metaphor + patient-first allocation + outcome-only negatives) — advisory not blocking.
+
+---
+
+### Touched
+
+- `code/decode_bundle.sh` + `code/innovate_bundle.sh` — task-prompt heredocs gain V717 section.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v717 row prepended above v716; latest-live marker bumped v716 → v717.
+- `wiki/meta/decode-grammar-checklist.md` — v717 workflow section added after v716.
+- `CLAUDE.md` — v717 quickref prepended above v716.
+- `wiki/log.md` — v717 timeline entry prepended.
+
+---
+
+### Verification (mandatory before claiming v717 works)
+
+1. Pick an AUGMENTED-SYMPTOMS HOOK frame where v716 alone produced normalized rendering (mild symptom despite geometric descriptors).
+2. Apply v717 stack: extend v622b descriptors with metaphor anchors; switch `[Subject]` block to `[Subject — Symptom]` + `[Subject — Host]` two-block form per v605c; append v604b structural anatomical bans to negatives.
+3. Feed rewritten prompt to Banana 2 via Google AI Studio.
+4. Confirm rendered image shows EXTREME symptom severity matching geometric + metaphor anchors (e.g. veins literally read as "twisted yarn" / arm flap reads as "deflated balloon" / wrinkles read as "corduroy fabric").
+5. Spot-check: does the host body part show the BANNED anatomical default (smooth skin / firm contour / normal muscle definition)? If yes, v604b structural bans didn't fire — escalate to v713 fallback chain.
+6. If symptom STILL normalizes, escalate to multi-turn editing (turn 1: symptom-only on a body part, no host; turn 2: attach host).
+
+ONLY THEN claim v717 forces extreme-symptom rendering faithfully on Banana 2.
+
+---
+
+### v718 — VLM forensic-perception protocol (Stage 4d pre-grammar)
+
+**Problem.** v712 + v713 + v715 + v716 + v717 are all PROSE-GRAMMAR rules — they govern what the decoded markdown SAYS once the VLM has perceived the frame. None of them recover from VLM PERCEPTUAL FAILURES upstream — when the VLM looks at the source frame and gets the spatial / attributional / anatomical facts wrong before writing a single word. Three observed VLM perceptual failure classes:
+
+1. **Misattribution (proximity bias).** If a face is near a hand in 2D, the VLM assigns the hand to that face. When two characters are close together and a hand crosses the frame, the VLM attributes the hand to whichever face it appears NEXT TO rather than tracing the limb back to its origin torso. Result: decoded artifact says "the patient points at her own forehead" when in fact the practitioner's hand crossed in front of the patient's face.
+2. **Blocking blindness (flat-2D processing).** VLMs process frames as flat 2D posters and miss occlusion / depth layering. When a patient's arm extends forward and crosses in front of a practitioner, the VLM describes both as side-by-side companions instead of recognizing the arm is foreground occluding the practitioner's midground torso. Result: composition prose treats the frame as Y-axis stacked when it's actually Z-axis stacked.
+3. **Anatomical normalization (VFX hallucination).** When source videos use extreme VFX that violate real-world physics (flesh loops, floating objects, impossible stretching, detached body parts, multiplied features), the VLM defaults to mapping impossible shapes back to closest NORMAL anatomical concepts because normal anatomy is the familiar training prior. Result: a closed flesh-loop renders in decoded prose as "deep U-shape sagging" (a U-shape is OPEN; a LOOP is CLOSED — the VLM lost the topology).
+
+**Surfaced 2026-05-13** via Gemini 3.1 Pro self-analysis on a saffron-saggy-arm HOOK decode that miscalled: (a) the patient's extended arm attributed to the practitioner because the practitioner's face was closer; (b) the patient's arm crossing in front of the practitioner described as "patient and practitioner stand side by side" missing the foreground occlusion; (c) the flesh-loop where detached arm-skin reconnects to itself described as "U-shape sagging skin" instead of the actual closed loop. Three perceptual failures upstream of any grammar discipline.
+
+**v718 packages three pre-grammar perceptual steps** that the VLM MUST complete BEFORE writing static_composition prose:
+
+- **v718a** — Kinematic Tracing (limb attribution)
+- **v718b** — Z-Depth Isolation (blocking detection)
+- **v718c** — Literal Pixel VFX Recognition (anti-anatomical-normalization)
+
+Applied in order: see structure (Z-depth) → attribute correctly (kinematic) → describe literally (literal pixels) → THEN apply v712 / v713 / v715 / v716 / v717 grammar rules.
+
+---
+
+#### v718a — Kinematic Tracing (cures misattribution)
+
+**Rule.** Before attributing any body part, symptom, or held prop to a character, VISUALLY TRACE THE LIMB back to its origin shoulder / torso. Five-step protocol:
+
+1. Look at the limb (hand, arm, leg, foot, finger).
+2. Trace the pixels from the fingertip / extremity back to the shoulder or torso of origin.
+3. Note the CLOTHING COLOR at the shoulder where the limb originates.
+4. Assign the limb ONLY to the character wearing that clothing color.
+5. DO NOT assign ownership based on which face is closest to the limb in the 2D frame.
+
+**Failure pattern:** "the patient's gloved hand points at her forehead" — but the gloves are PURPLE and the patient is wearing a green scrub top. The purple gloves belong to the practitioner (purple matches his suit / lab coat / accessory color). The hand belongs to the practitioner who reached across the frame, not to the patient whose face happened to be near the hand.
+
+**Apply when:** any frame with 2+ characters in close proximity AND a limb / prop crosses the frame between them.
+
+---
+
+#### v718b — Z-Depth Isolation (cures blocking blindness)
+
+**Rule.** Before writing static_composition, EXPLICITLY MAP THE Z-AXIS. Five-step protocol:
+
+1. Identify what is in the ABSOLUTE FOREGROUND (closest to camera, in focus, blocking pixels behind it).
+2. Identify what is in the MIDGROUND (one layer behind foreground).
+3. Identify what is in the BACKGROUND (furthest from camera, often blurred / out of focus).
+4. Check for OVERLAPPING PIXELS: if Object A's pixels cover Object B's pixels, A is in front of B.
+5. Explicitly note when a character's body part crosses the frame horizontally and BLOCKS another character standing behind it.
+
+**Failure pattern:** "the patient and practitioner stand side by side, the patient's arm extended forward" — but the patient's arm CROSSES the frame in front of the practitioner, partially OCCLUDING the practitioner's torso. The arm is foreground, the practitioner is midground (behind the arm), the wall is background. Side-by-side flat-2D description loses the depth layering.
+
+**Apply when:** any frame with multiple subjects / props at different camera distances. Especially fires on v715 Mode 6 (body-part-thrust) frames where the thrust body part crosses the practitioner's plane.
+
+**Composes with v713f Z-axis stacking** (generate-side composition rule). v718b is the DECODE-SIDE perceptual check that feeds v713f — v713f says "describe Z-depth layering"; v718b ensures the VLM actually sees the Z-depth before describing it.
+
+---
+
+#### v718c — Literal Pixel VFX Recognition (cures anatomical normalization)
+
+**Rule.** Source videos frequently use extreme VFX that violate real-world physics. DESCRIBE LITERAL SHAPES AND CONNECTIONS YOU SEE IN THE PIXELS. Do NOT map impossible VFX back to "normal" anatomical descriptors just because normal makes more logical sense.
+
+**Five hallucination patterns + literal corrections:**
+
+| VFX in source | VLM hallucination (anatomical) | v718c literal |
+|---|---|---|
+| Flesh connecting back to itself to form closed loop | `"deep U-shape sagging skin"` (U is open) | `"a closed loop of flesh, the skin reconnecting to itself with a visible hole in the middle"` |
+| Object floating with no visible support | `"object resting on the table"` (invents attachment) | `"the object floats unsupported in mid-air, no visible attachment"` |
+| Impossible stretching (skin stretched 12 inches) | `"skin stretched a few inches"` (normalizes distance) | `"skin stretched 12 inches from its origin, far beyond normal elasticity"` |
+| Detached body part | `"the hand rests near the wrist"` (reattaches) | `"the hand is fully detached from the arm, a visible gap of 3 inches between wrist stump and the floating hand"` |
+| Multiplied features (3 eyes, 2 mouths) | `"the face shows eyes and a mouth"` (collapses count) | `"the face has three visible eyes — two in normal position plus a third on the forehead — and two mouths stacked vertically"` |
+| Inverted anatomy (arm bending wrong direction) | `"the arm is bent at the elbow"` (normalizes direction) | `"the arm bends BACKWARD at the elbow, the forearm pointing toward the shoulder instead of away from it"` |
+| Translucent / glass-like skin | `"pale skin tone"` (collapses transparency) | `"the skin is partially transparent, visible blood vessels and bone structure showing through"` |
+| Liquefied body part | `"the limb appears slightly distorted"` (normalizes solid state) | `"the limb appears liquefied, the flesh flowing downward like wax or honey"` |
+
+**The pattern:** if the source shows impossible physics, decode the IMPOSSIBLE PHYSICS LITERALLY. Banana 2 + Veo can render impossible shapes — but only if the prompt names them literally. Default anatomical normalization erases the source's VFX-distinctive HOOK signal.
+
+**Apply when:** the source frame's shape doesn't match any common anatomical default. Trigger word: when the VLM's first instinct is to describe the shape using a "normal anatomy" adjective + the shape doesn't actually match that adjective, the VLM is hallucinating. Force LITERAL pixel description instead.
+
+---
+
+### Pre-grammar order
+
+```
+For each shot:
+  1. v718a Kinematic Tracing — trace every visible limb to origin torso
+  2. v718b Z-Depth Isolation — map foreground / midground / background
+  3. v718c Literal Pixel VFX — name what pixels show, not what anatomy predicts
+  THEN:
+  4. v712 relational composition grammar
+  5. v713 Banana-2-attached-reference discipline (if generate-side)
+  6. v715 subject-anchored prop composition (5 modes + Mode 6 if applicable)
+  7. v716 normalization countermeasures
+  8. v717 anti-normalization intensification stack (if extreme symptom)
+```
+
+v718 is PRE-GRAMMAR. The three grammar-rule layers above (v712-v717) write the markdown ONCE v718 has correctly perceived the frame. Skipping v718 means the grammar describes a hallucinated frame instead of the actual frame.
+
+---
+
+### Worked example — saffron-saggy-arm HOOK (the surfacing case)
+
+**Source frame (described in raw pixels):**
+- Practitioner on viewer-right, wearing dark suit + purple gloves
+- Patient on viewer-left, wearing green scrub top, ARM EXTENDED FORWARD crossing in front of practitioner's torso
+- Patient's arm shows VFX: detached skin reconnects to itself in a CLOSED LOOP with visible hole in the middle
+- Practitioner's purple-gloved hand reaches across the frame and points at the patient's flesh loop
+
+**Pre-v718 VLM output (three hallucinations):**
+
+```
+[Subject — patient] A white man in his 50s wearing a green scrub top, his
+right arm extended forward showing a deep U-shape of sagging loose skin
+hanging from the tricep. His purple-gloved hand points at the sagging.
+```
+
+Three failures: (a) attributes purple-gloved hand to PATIENT despite green scrub top — should be practitioner; (b) describes patient + practitioner as side-by-side, missing arm-as-foreground occluding practitioner; (c) describes flesh-LOOP as U-shape (lost topology).
+
+**Post-v718 VLM output (forensic-corrected):**
+
+```
+v718a kinematic tracing: purple gloves trace back to dark-suit shoulder
+on viewer-right = PRACTITIONER's hand. Patient's hand (green scrub
+sleeve) traces back to green-scrub shoulder on viewer-left.
+
+v718b Z-depth: foreground = patient's right arm extending forward
+across the frame; midground = practitioner's torso, partially occluded
+by the arm; background = blurred clinic interior.
+
+v718c literal pixels: the arm's saggy skin forms a CLOSED LOOP where
+detached flesh reconnects to itself, with a visible HOLE in the middle
+of the loop (not a U-shape — U is open, this is closed).
+
+[Subject — Symptom] A massive 6-inch closed loop of detached flesh
+hanging from the tricep bone in a circular shape with a visible hole
+in the middle, the skin reconnecting to itself like a detached fabric
+flap looped back through, fills the immediate center-foreground.
+
+[Subject — Host] The arm belongs to a white man in his 50s wearing a
+green scrub top, standing on the viewer-left. His arm is extended
+forward across the frame, the arm crossing in front of the
+practitioner's torso who stands behind on the viewer-right.
+
+[Action] The practitioner (in dark suit, purple gloves) on the
+viewer-right reaches a purple-gloved index finger across the frame
+to point at the closed flesh loop on the patient's extended arm.
+```
+
+Banana 2 renders: patient's looped flesh on extended arm in foreground; practitioner's purple-gloved hand reaching across; practitioner's torso partially occluded by the arm. Three hallucinations corrected; the loop topology preserved; the limb attribution correct; the Z-depth layered.
+
+---
+
+### Pre-output diagnostics (recommended in stage4d_vlm.json schema)
+
+The JSON schema can carry a `forensic_perception` field per shot that the VLM populates BEFORE writing static_composition:
+
+```json
+"forensic_perception": {
+  "kinematic_traces": [
+    "purple gloves -> dark suit shoulder -> practitioner",
+    "green scrub sleeve -> green-scrub shoulder -> patient"
+  ],
+  "z_depth_layers": {
+    "foreground": "patient's right arm extended forward",
+    "midground": "practitioner's torso, partially occluded by arm",
+    "background": "blurred clinic interior"
+  },
+  "literal_vfx_observations": [
+    "closed loop of flesh with visible hole — NOT a U-shape"
+  ]
+},
+```
+
+Operator reviews the `forensic_perception` field before the markdown is written. Misattributions / blocking blindness / hallucinations caught here cost zero Banana 2 credits.
+
+---
+
+### Carve-outs
+
+- **Single-subject shots.** v718a kinematic tracing N/A (no two-character ambiguity); v718b Z-depth still applies (foreground prop vs background); v718c literal pixels still applies (VFX may distort the single subject).
+- **No-VFX talking-head shots.** v718c N/A (no impossible physics to normalize). v718a + v718b still apply to multi-subject frames.
+- **Recipe-prep mid-action.** v718b Z-depth applies (prop on surface = midground, hand reaching = foreground); v718a applies to which hand belongs to which character.
+- **Environmental establishing shots.** v718a + v718b N/A (no subjects); v718c still applies if VFX present.
+
+---
+
+### Pairing with downstream grammar rules
+
+| Downstream rule | Depends on v718 step |
+|---|---|
+| v712 relational composition | v718a (correct limb attribution) + v718b (Z-depth) |
+| v713 Banana-2-attached-reference | v718a (persona vs non-persona attribution) |
+| v713f Z-axis stacking | v718b (Z-depth perceived before described) |
+| v715 5 anchor modes | v718a (anchor character correctly identified) + v718b (mode 2 placed-on-body / mode 6 body-part-thrust occlusion) |
+| v716 v715f Mode 6 | v718b (body-part-thrust occludes practitioner) |
+| v717 v605c symptom-first | v718a (symptom attributed to correct host) + v718c (literal pixel preserves VFX topology) |
+| v717 v622b-extension | v718c (preserves literal VFX shapes that metaphor anchors describe) |
+
+v718 is the perceptual foundation; v712-v717 are the grammatical superstructure built on top. Both layers required for faithful decoding.
+
+---
+
+### Migration
+
+Zero required. Pre-v718 decoded artifacts may contain misattributions / blocking blindness / anatomical normalization (the source-faithful version is lost). From this commit forward, Stage 4d outputs MUST satisfy v718 forensic-perception protocol BEFORE writing static_composition. The wiki lint pass can flag pre-v718 artifacts with suspected misattribution (gloves color doesn't match wearer's clothing) or anatomical normalization (U-shape descriptors where source has closed loops) — advisory not blocking. Highest-value retrofit candidates: HOOK frames with 2+ characters in close proximity and VFX-heavy symptoms.
+
+---
+
+### Touched
+
+- `code/v589_video_understanding.py` — SYSTEM_INSTRUCTION patched with v718 forensic-perception protocol (3-step block prepended before COMPOSITION GRAMMAR / v712 section).
+- `code/decode_bundle.sh` + `code/innovate_bundle.sh` — task-prompt heredocs gain V718 section.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v718 row prepended above v717; latest-live marker bumped v717 → v718.
+- `wiki/meta/decode-grammar-checklist.md` — v718 workflow section added after v717.
+- `CLAUDE.md` — v718 quickref prepended above v717.
+- `wiki/log.md` — v718 timeline entry prepended.
+
+---
+
+### Verification (mandatory before claiming v718 works)
+
+1. Pick a 2-character HOOK frame with limb-crossing OR VFX-heavy symptom from a recent decode.
+2. Re-run Stage 4d via `python code/v589_video_understanding.py <source.mp4>` with the patched SYSTEM_INSTRUCTION.
+3. Check the VLM output for the three perceptual signals:
+   - (a) Are limbs attributed by clothing-color trace, or by face-proximity?
+   - (b) Is Z-depth explicitly mapped (foreground / midground / background)?
+   - (c) Are impossible shapes described literally, or normalized to closest-anatomy adjective?
+4. If pre-v718 output had misattributions, confirm post-v718 output corrects them.
+5. Feed the v718-corrected decode markdown to Banana 2 — render the HOOK image. Confirm:
+   - Limb attribution renders correctly (no purple gloves on the green-scrubbed patient).
+   - Occlusion renders correctly (arm in foreground in front of practitioner).
+   - VFX topology preserved (closed loops render as loops, not U-shapes).
+6. If perceptual failures persist, the VLM is ignoring v718 — escalate to manual decoder pass (Claude in-session walks the frames per dense-frame Read tool, applies v718 explicitly).
+
+ONLY THEN claim v718 cures Stage 4d perceptual failures.
+
+---
+
+### v719 — Solid-volume topology discipline (v719a + v719b + v719c umbrella)
+
+**Problem.** v716/v622b + v717/v622b-extension mandated geometric descriptors with shape anchors ("deep U-shape sagging", "U-shape sagging skin"). Surfaced after shipping: Banana 2 reads "U-shape" as topology-with-negative-space and renders a literal U-shaped HOLE / OPENING in the flesh that doesn't exist in the source. Same hallucination class as v718c's original direction (impossible VFX) but in REVERSE — the prompt's geometric vocabulary CREATES impossible VFX in renders where the source has solid unbroken volume.
+
+**Surfaced 2026-05-13** from saffron-saggy-arm lift attempt: source frame shows a CONTINUOUS solid drape of flesh hanging from the tricep; v716/v622b prose used "deep U-shape" geometric anchor; Banana 2 rendered an actual U-shaped hole in the arm flesh that wasn't in the source. The U-shape vocabulary leaked topology into Banana 2's plan.
+
+**v719 packages three sub-amendments** correcting the topology vocabulary stack:
+
+- **v719a** — Solid-Volume Vocabulary Swap (replaces topology-implying geometric anchors with solid-volume metaphors in v716/v717)
+- **v719b** — Topology Bans (extends v604b with explicit no-hole / no-loop / no-negative-space negatives)
+- **v719c** — Bidirectional VFX Recognition (extends v718c — don't hallucinate VFX where source is solid)
+
+---
+
+#### v719a — Solid-Volume Vocabulary Swap (extends v716/v622b + v717/v622b-extension)
+
+**Rule.** Drop topology-implying geometric anchors when the source shows SOLID, UNBROKEN, CONTINUOUS flesh / mass. Replace with solid-volume metaphors that force a continuous shape.
+
+**Banned topology-implying anchors when source is solid:**
+
+`"deep U-shape"` / `"V-shape"` / `"C-shape"` / `"Y-shape"` / `"doughnut shape"` / `"ring shape"` / `"loop"` / `"hole"` / `"opening"` / `"gap"` / `"split"` / `"fork"` / `"open arc"` / `"semicircle"`
+
+**Required solid-volume metaphors:**
+
+| Symptom | Pre-v719a (topology-implying) | Post-v719a (solid-volume) |
+|---|---|---|
+| Sagging arm | `"crepey loose flab hanging 3 inches below the tricep in a deep U-shape"` | `"a continuous solid sheet of draped flesh hanging 3 inches below the tricep, a dense unbroken curtain of loose skin draping straight down"` |
+| Distended belly | `"belly pushing 4 inches past the waistband in a U-shape pouch"` | `"belly pushing 4 inches past the waistband as a solid continuous overhang, a thick unbroken mass of distended tissue draped over the belt"` |
+| Jowl drop | `"jowl drooping 2 inches below the jawline forming a U-pouch"` | `"jowl drooping 2 inches below the jawline as a single continuous fold of pendulous flesh, an uninterrupted drape of skin"` |
+| Double chin | `"second chin pouch in a U-shape below the jaw"` | `"second chin pouch projecting 1.5 inches forward of the jawline as a continuous solid mass of subcutaneous fullness"` |
+
+**Solid-volume metaphor catalog:**
+
+- `"continuous solid sheet of draped flesh"`
+- `"dense unbroken curtain of loose skin"`
+- `"solid flap hanging straight down"`
+- `"thick mass of pendulous flesh"`
+- `"uninterrupted drape of skin"`
+- `"single continuous fold"`
+- `"solid continuous overhang"`
+- `"thick unbroken mass"`
+- `"continuous slab of soft tissue"`
+- `"uninterrupted drape descending"`
+
+**Selection guide.** Inspect source frame:
+
+- If source flesh forms a CLOSED LOOP or HAS A HOLE in the middle → keep v718c literal topology language (`"closed loop with visible hole"`)
+- If source flesh is SOLID + CONTINUOUS with no negative space → use v719a solid-volume metaphors
+
+The vocabulary follows source topology. Don't apply U-shape to solid sources; don't apply continuous-drape to genuinely-hole-containing sources.
+
+---
+
+#### v719b — Topology Bans (extends v604b)
+
+**Rule.** v604b banned anatomical defaults (`"No normal human arm anatomy"`). v719b adds explicit TOPOLOGY bans for solid-volume sources — bans the negative-space shapes Banana 2 might hallucinate when geometric language is ambiguous.
+
+**Append to v604b negatives when source is solid:**
+
+```
+No holes in the flesh. No negative space in the center of the [body part]. No loops. No ring shapes. No openings. No gaps. No splits. The hanging skin MUST be a solid, continuous, unbroken flap.
+```
+
+Adapt to symptom:
+
+| Symptom | v719b topology bans |
+|---|---|
+| Sagging arm | `"No holes in the arm flesh. No negative space below the tricep. No loops in the hanging skin. The drape MUST be a solid continuous flap."` |
+| Distended belly | `"No holes in the belly. No negative space in the overhang. No openings. The belly MUST be a solid continuous mass."` |
+| Jowl drop | `"No holes in the jowl. No negative space below the jaw. No loops. The jowl MUST be a single solid fold."` |
+| Thinning hair | (different domain — gaps are part of the source) carve-out, v719b N/A |
+
+**Negatives-block order** (canonical, updated):
+
+```
+Negatives: [v716 anti-normalization outcome ban] + [v604b structural-anatomical ban] + [v719b topology ban — NEW] + [v713(d) composition-anti-default] + [v604 generic] + [v606 product if applicable].
+```
+
+---
+
+#### v719c — Bidirectional VFX Recognition (extends v718c)
+
+**Rule.** v718c original direction: VLM hallucinates by NORMALIZING impossible VFX to closest normal anatomy (closed flesh-loop → "U-shape"). v719c covers the REVERSE direction: VLM/Banana 2 hallucinates by INVENTING impossible VFX where source is solid (solid drape → "U-shape with hole").
+
+Both directions covered by ONE rule: **describe the source LITERALLY**.
+
+**Decode-side (VLM perception):**
+
+| Source topology | Required prose |
+|---|---|
+| Impossible VFX (loop, hole, detached, multiplied) | Describe literally (`"closed loop with visible hole"` / `"fully detached, 3-inch gap"` / `"three eyes"`) — v718c original |
+| Solid unbroken volume | Describe literally (`"continuous solid sheet"` / `"unbroken drape"` / `"single continuous fold"`) — v719c new |
+
+**Generate-side (vocabulary discipline):**
+
+When AUTHORING (lift / create / innovate) a body-part symptom, MATCH the source's topology vocabulary to the source's actual topology. If decoded source shows solid volume, lift uses solid-volume metaphor. If decoded source shows impossible loop, lift uses literal loop language.
+
+**Verification heuristic.** Before shipping, ask: "If I feed this prompt to Banana 2 with no context, would the rendered topology match the source frame?" If prose says "U-shape" → Banana 2 renders U-shape opening; if source is solid, mismatch. If prose says "continuous solid drape" → Banana 2 renders solid drape; if source has actual loop, mismatch.
+
+---
+
+### Combined worked example — saffron-saggy-arm (solid source, post-v719)
+
+```
+[Subject — Symptom] A massive continuous solid sheet of draped flesh hanging 6 inches below the tricep bone, a dense unbroken curtain of loose skin drooping straight down like a deflated balloon or melted wax, with no holes, no openings, no negative space — a single continuous fold of pendulous flesh, fills the immediate center-foreground.
+
+[Subject — Host] The arm belongs to a white man in his 50s, heavy build, salt-and-pepper hair, navy polo, extended straight outward to the viewer-left. He stands on the viewer-left in the midground depth plane.
+
+[Action] The patient holds his arm extended laterally outward. The main character on the viewer-right stands fully visible and gestures toward the hanging drape.
+
+[Location] Bright modern medical clinic interior with white walls, background fully blurred.
+
+[Style] iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
+
+[Tech] 9:16, 2K output.
+
+Negatives: No firm arm. No normal skin elasticity. No minor sagging. The sagging MUST be EXTREME. No normal human arm anatomy. No skin attached to the bottom of the bicep. No straight lower arm contour. No natural muscle definition. No holes in the arm flesh. No negative space below the tricep. No loops in the hanging skin. The drape MUST be a solid continuous flap.
+```
+
+Three layers stacked:
+- v719a solid-volume metaphor ("continuous solid sheet of draped flesh", "dense unbroken curtain", "single continuous fold")
+- v719b topology bans ("No holes / No negative space / No loops. The drape MUST be a solid continuous flap.")
+- v719c bidirectional (source is solid → prose names solid topology; no U-shape leakage)
+
+Banana 2 renders solid drape, no hallucinated hole. Topology matches source.
+
+---
+
+### Pre-output grep gates (v719)
+
+```bash
+# Gate (v719a) — when source is solid, banned topology vocabulary must NOT appear
+grep -niE "\b(deep U-shape|V-shape|C-shape|Y-shape|doughnut shape|ring shape|loop in the (skin|flesh)|hole in the (skin|flesh)|opening in the (skin|flesh)|gap in the (skin|flesh)|split in the (skin|flesh))\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: zero hits when source is solid-volume (carve-out for genuine VFX
+# loop / hole sources per v718c original)
+
+# Gate (v719a positive) — solid-volume metaphor present
+grep -niE "\b(continuous solid sheet|dense unbroken curtain|solid flap hanging|thick mass of pendulous flesh|uninterrupted drape|single continuous fold|solid continuous overhang|thick unbroken mass|continuous slab of soft tissue|continuous .{1,30} drape)\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per solid-volume symptom Image block
+
+# Gate (v719b) — topology bans in negatives block
+grep -niE "\bNo (holes in the|negative space in|loops in|ring shapes|openings|gaps|splits in the) .{1,30}\b|MUST be a solid (continuous|unbroken)" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per solid-volume symptom Image block negatives
+```
+
+---
+
+### Carve-outs (v719)
+
+- **Genuine VFX-loop sources.** When source video really does show a closed flesh-loop with a hole (rare but real), v719a/b/c DO NOT apply — keep v718c original literal topology language. v719 is for SOLID-source mismatches, not genuine VFX-loop sources.
+- **Thinning hair / sparse hair.** Gaps / negative space ARE part of the thinning-hair symptom — v719b topology bans N/A. v719a still applies (use `"sparse coverage"` / `"patchy distribution"` etc, not `"U-shape gaps"`).
+- **AFTER / RESULT frames.** v714 governs; resolved physical state removes the topology question entirely.
+- **Persona NOT affected** — v717/v605c carve-out chain still applies; v719 is non-persona only.
+
+---
+
+### v719 ships with v716 + v717
+
+v719 is a vocabulary refinement / topology-band addition on top of v716/v717. Stacking rule:
+
+- v716/v622b → use geometric measurements (`"hanging 3 inches below the tricep"`)
+- v717/v622b-extension → add inanimate-object metaphor (`"like a deflated balloon"`)
+- v719/v719a → replace topology-implying anchors with solid-volume metaphors when source is solid (`"continuous solid sheet"` NOT `"deep U-shape"`)
+- v717/v604b + v719/v719b → ban anatomical defaults AND topology defaults (`"No holes. No loops. MUST be solid continuous flap."`)
+- v718c + v719c → bidirectional pixel literalism (don't normalize impossible to normal; don't hallucinate impossible from normal)
+
+All five sub-rules ship together on extreme-symptom HOOK frames where the source topology is SOLID.
+
+---
+
+### Touched
+
+- `code/v589_video_understanding.py` — SYSTEM_INSTRUCTION patched with v718c COROLLARY (v719c) — bidirectional discipline; solid-volume vocabulary catalog; topology-banned vocabulary catalog.
+- `code/decode_bundle.sh` + `code/innovate_bundle.sh` — task-prompt heredocs gain V719 section + Gate 21.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v719 row prepended; latest-live updated.
+- `wiki/meta/decode-grammar-checklist.md` — v719 workflow section.
+- `CLAUDE.md` — v719 quickref.
+- `wiki/log.md` — v719 timeline entry.
+
+---
+
+### Migration
+
+Zero required. Pre-v719 artifacts using topology-implying anchors may render with hallucinated holes on Banana 2 — retrofit on next-touch by swapping `"U-shape"` etc. to solid-volume metaphors AND appending v719b topology bans to negatives block. Wiki lint can flag artifacts with topology vocabulary + no topology bans — advisory not blocking.
+
+---
+
+### Verification (mandatory before claiming v719 works)
+
+1. Pick an artifact using `"deep U-shape"` on a solid-volume symptom from a recent decode / lift.
+2. Apply v719a solid-volume vocabulary swap; v719b topology bans; v719c bidirectional check.
+3. Feed rewritten prompt to Banana 2 via Google AI Studio.
+4. Confirm rendered image shows SOLID continuous drape (no hallucinated hole).
+5. Compare to source frame side-by-side. Topology MUST match source.
+6. If Banana 2 still renders a hole, v719b topology bans didn't fire — escalate to multi-turn editing (turn 1: render solid drape only; turn 2: add other elements).
+
+ONLY THEN claim v719 prevents hallucinated topology on Banana 2.
+
+---
+
+### v720 — Lateral X-axis composition (v720a + v720b + v720c umbrella)
+
+**Problem.** v713f Z-axis stacking + v715 anchor modes (1-6) all assume the hero prop / symptom occupies a DEPTH plane (foreground / midground / background). Source videos OFTEN have the symptom extended LATERALLY (to the side, parallel to the camera plane) instead of toward the camera. When v713f Z-axis grammar is applied to lateral-extension sources, Banana 2 forces depth layering — interprets "extended arm" as forward-toward-camera or crossing-the-chest (the two most common Banana 2 defaults for ambiguous arm extension), neither matching the source.
+
+**Surfaced 2026-05-13** from a lateral-arm-extension HOOK lift: source frame shows patient standing SIDE-BY-SIDE with practitioner, patient's arm extended STRAIGHT OUT to the viewer-left at chest height, parallel to the ground. v715 Mode 6 body-part-thrust framing got applied; Banana 2 rendered the arm thrust FORWARD toward the camera instead of laterally. Z-axis grammar collapsed the lateral source.
+
+**v720 packages three sub-amendments**:
+
+- **v720a** — Lateral Extension Carve-out (amends v713f)
+- **v720b** — Lateral Vector Grammar (amends v712)
+- **v720c** — Limb-Pose Structural Bans (extends v604b)
+
+---
+
+#### v720a — Lateral Extension Carve-out (amends v713f)
+
+**Rule.** v713f mandates Z-axis depth layering for hero-prop / symptom frames. When the hero prop / symptom extends LATERALLY (to the side, parallel to the camera plane), Z-axis layering does NOT apply — the extended limb and the host's torso share the SAME midground depth plane. Switch to X-axis (side-to-side) grammar.
+
+**Trigger.** Source frame shows hero prop / symptom extended:
+
+- straight out to the viewer-left
+- straight out to the viewer-right
+- straight upward overhead
+- straight downward toward the floor
+- at a 45-degree angle laterally (e.g. viewer-right-and-up)
+
+All these are LATERAL extensions sharing the same depth plane as the torso. Z-axis layering N/A.
+
+**Composition-block structure for lateral-extension scenes:**
+
+```
+[Composition] [camera grammar per v713(c)] + [camera height per v603b at the symptom's anchor level], 9:16 vertical framing. The patient and the main character stand side-by-side in the MIDGROUND depth plane. The patient's [body part] extends straight outward to the viewer-[left/right], filling the [left/right] side of the frame. The [body part] dominates the [left/right] side; both characters are visible at chest-up framing.
+```
+
+Note: no foreground / midground / background depth layering. Single midground plane shared by patient + practitioner + extended limb. X-axis spatial language fills the [Composition] block.
+
+**Pairs with v715 Mode 6 trade-off table updated:**
+
+| Operator need | Mode |
+|---|---|
+| Maximum symptom macro detail, partial-visible persona acceptable | Mode 1-5 + v713(a) partial-visibility override (Z-axis) |
+| Both characters fully visible, symptom thrust FORWARD toward camera | Mode 6 + Z-axis layering |
+| Both characters fully visible, symptom extended LATERALLY to the side | **Mode 6 + v720a lateral X-axis layering** |
+| Single-subject shot (no persona in frame) | Mode 1 / 5 with persona absent |
+
+---
+
+#### v720b — Lateral Vector Grammar (amends v712)
+
+**Rule.** For ANY extended limb described in body prose, declare an EXPLICIT LATERAL VECTOR relative to the viewer. Banana 2's default for ambiguous "extended arm" is forward-toward-camera OR crossing-the-chest; neither matches lateral-source-truth.
+
+**Required directional clauses (allowed):**
+
+- `"extended straight outward to the viewer-left"`
+- `"extended straight outward to the viewer-right"`
+- `"extended straight forward toward the camera"`
+- `"extended straight upward overhead"`
+- `"extended straight downward toward the floor"`
+- `"extended at a 45-degree angle upward to the viewer-right"`
+- `"extended laterally to the side, parallel to the ground"`
+
+**Banned (loses lateral vector — Banana 2 defaults render WRONG):**
+
+- `"extended arm"` (no direction)
+- `"outstretched arm"` (no direction)
+- `"arm reaching out"` (no direction — implies forward-toward-camera by default)
+- `"arm in the foreground"` (vector ambiguous)
+- `"arm raised"` (could mean up / out / forward)
+
+**Apply to:** every body-part extension on AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE / Mode 6 frames. Carve-out: body-parts in their natural rest position (no extension) need no vector clause.
+
+---
+
+#### v720c — Limb-Pose Structural Bans (extends v604b)
+
+**Rule.** For lateral-extension scenes, v604b structural negatives must include specific limb-pose anti-defaults to prevent Banana 2 from defaulting to forward-thrust or crossing-chest.
+
+**Append to v604b negatives for lateral-extension scenes:**
+
+```
+No arm crossing the chest. No arm thrust forward toward the lens. No arm reaching toward the camera. The arm MUST extend straight out to the side, parallel to the ground. No overlapping bodies. No persona hiding behind the patient.
+```
+
+**Adapt to other lateral-extensions:**
+
+| Lateral extension | v720c bans |
+|---|---|
+| Arm extended viewer-left | `"No arm crossing the chest. No arm thrust forward. The arm MUST extend straight out to the viewer-left."` |
+| Leg extended viewer-right | `"No leg crossing the body. No leg thrust forward. The leg MUST extend straight out to the viewer-right, parallel to the ground."` |
+| Hand raised overhead | `"No hand crossing the head. No hand reaching forward. The hand MUST extend straight upward overhead."` |
+| Both arms extended out | `"No arms crossed at the chest. No arms reaching forward. Both arms MUST extend straight outward to opposite sides, parallel to the ground."` |
+
+---
+
+### Combined worked example — lateral-arm-extension HOOK (post-v720)
+
+```
+[Composition] 50mm portrait lens, deep focus, straight-on at chest-level, 9:16 vertical framing. The patient and the main character stand side-by-side in the midground depth plane. The patient's right arm extends straight outward to the viewer-left, filling the left side of the frame, parallel to the ground.
+
+[Subject — Symptom] A massive continuous solid sheet of draped flesh hanging 6 inches below the tricep bone, a dense unbroken curtain of loose skin drooping straight down from a horizontally extended arm, fills the left side of the frame.
+
+[Subject — Host] The arm belongs to a white woman in her late 60s, heavy build, short blonde bob, dark green V-neck top. She stands on the viewer-left in the midground, her right arm extended straight outward to the viewer-left, parallel to the ground. The main character stands fully visible on the viewer-right in the same midground depth plane.
+
+[Action] The patient holds a mug to her mouth with her viewer-right hand, actively drinking. Her viewer-left arm is held straight out to the side, parallel to the ground. The main character on the viewer-right gestures toward the hanging drape.
+
+[Location] Bright modern medical clinic interior with white walls, background fully blurred.
+
+[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
+
+[Tech] 9:16, 2K output.
+
+Negatives: No firm arm. No normal skin elasticity. No minor sagging. The sagging MUST be EXTREME. No normal human arm anatomy. No skin attached to the bottom of the bicep. No straight lower arm contour. No natural muscle definition. No holes in the arm flesh. No negative space below the tricep. No loops in the hanging skin. The drape MUST be a solid continuous flap. No arm crossing the chest. No arm thrust forward toward the lens. No arm reaching toward the camera. The arm MUST extend straight out to the side, parallel to the ground. No overlapping bodies. No persona hiding behind the patient.
+```
+
+Multi-layer stack: v716 + v717 + v719 + v720 all firing. Each anti-default negative addresses a distinct Banana 2 default-pull. Source-truthful lateral extension renders correctly.
+
+---
+
+### Pre-output grep gates (v720)
+
+```bash
+# Gate (v720a) — lateral-extension scenes name midground depth plane
+# (no Z-axis foreground / midground / background layering)
+grep -niE "\b(side-by-side in the midground|share the midground depth plane|midground depth plane|fills the (left|right) side of the frame|parallel to the (ground|camera plane))\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per lateral-extension Image block
+
+# Gate (v720b) — every extended limb has a lateral vector clause
+grep -niE "\bextended (straight )?(outward|forward|upward|downward|at a [0-9]+-degree angle) (to the viewer-(left|right)|toward the (camera|lens|floor)|overhead|parallel to the ground)\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per extended-limb mention; ZERO "extended arm" / "outstretched arm" / "arm reaching out" without vector
+
+# Gate (v720c) — limb-pose bans in negatives block
+grep -niE "\bNo (arm|leg|hand) (crossing|thrust|reaching)|MUST extend straight (out|outward|upward|downward) (to the (viewer-)?(left|right|side)|overhead|parallel to the ground)|No overlapping bodies|No persona hiding behind\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: ≥1 hit per lateral-extension Image block negatives
+```
+
+---
+
+### Carve-outs (v720)
+
+- **Forward-toward-camera body parts** (v715 Mode 6 body-part-thrust default) — v720a N/A; Z-axis layering still governs.
+- **Hero prop in characters' hands** (v605b Mode 1 held aloft) — v720a N/A; Z-axis still applies (prop in foreground / characters midground).
+- **Patient lying down / seated with body part visible** — v720a applies if body part extends laterally; the bed / chair shares the same depth plane as the patient.
+- **Persona NOT affected** — v720c bans the patient's lateral extension; persona pose handled per v713(a) / Mode 6.
+
+---
+
+### Pairing with v713f / v715 / v716 / v717
+
+| Rule | Default behavior | v720 modification |
+|---|---|---|
+| v713f Z-axis stacking | Always force foreground/midground/background | v720a carve-out: NO Z-axis when symptom extends laterally |
+| v715 Mode 6 body-part-thrust | Thrust toward camera | v720a/b switch to lateral extension when source is lateral |
+| v716 v715f | Mode 6 implies v622b | Still applies; v720 modifies WHICH direction the thrust goes |
+| v717 v605c symptom-first | `[Subject — Symptom]` precedes `[Subject — Host]` | Still applies; symptom is the laterally-extended body part |
+| v719 solid-volume | Vocabulary swap + topology bans | Composes — lateral arm with solid drape uses BOTH v719 + v720 |
+
+---
+
+### Migration
+
+Zero required. Pre-v720 artifacts using `"extended arm"` without vector may render Banana-2-defaults (forward thrust / crossing chest) instead of source-truthful lateral extension — retrofit on next-touch by adding lateral vector clauses + v720c limb-pose bans + switching v713f Z-axis to v720a X-axis midground sharing. Wiki lint can flag artifacts with `"extended arm"` ambiguity — advisory not blocking.
+
+---
+
+### Touched
+
+- `code/v589_video_understanding.py` — SYSTEM_INSTRUCTION patched with v712 LATERAL-VECTOR REQUIREMENT (v720b) — mandatory lateral vector for every extended limb; banned ambiguous extension language.
+- `code/decode_bundle.sh` + `code/innovate_bundle.sh` — task-prompt heredocs gain V720 section + Gate 22.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v720 row prepended; latest-live v718 → v720 (bumped past v719 to current).
+- `wiki/meta/decode-grammar-checklist.md` — v720 workflow section.
+- `CLAUDE.md` — v720 quickref.
+- `wiki/log.md` — v720 timeline entry.
+
+---
+
+### Verification (mandatory before claiming v720 works)
+
+1. Pick an artifact with `"extended arm"` from a lateral-source decode / lift.
+2. Apply v720a lateral X-axis carve-out (drop Z-axis depth language; declare shared midground plane); v720b lateral vector grammar (every extended limb gets explicit direction); v720c limb-pose bans (No arm crossing chest / No thrust forward / arm MUST extend straight out).
+3. Feed rewritten prompt to Banana 2 via Google AI Studio.
+4. Confirm rendered image shows arm extended LATERALLY (not forward, not crossing chest) and BOTH characters fully visible side-by-side.
+5. Compare to source — vector direction MUST match.
+
+ONLY THEN claim v720 prevents Z-axis defaults on lateral-extension sources.
+
+---
+
+### v721 — v698A activation gate (anti-auto-voiceover on on-camera persona scenes)
+
+**Problem.** v698A spec: voiceover-anchor pair fires when persona's face is NOT visible at t=0 OR persona is NOT lip-syncing the line (recipe b-roll, VFX overlays, hands-only). LLMs (Gemini 3.1 Pro / GPT / Claude) apply the v698A pattern aggressively from corpus prior — "recipe scene = voiceover" — even when the scene's Image body explicitly says persona is on-camera lip-syncing. Result: scenes that should be `speaker: on-camera` get `speaker: voiceover` + `voiceover_anchor_image:` declared. Platform correctly renders TWO Veo clips per scene per v698A spec (silent b-roll + audio twin), but the b-roll is REDUNDANT — persona is already on-camera lip-syncing in the image. Operator gets paired clips on scenes that didn't need them, doubling Veo cost + creating audio-swap artifacts at export.
+
+**Surfaced 2026-05-13** from nuri-prostate-health-hose-blast-safe lift: scenes 2-7 were recipe-prep scenes with persona seated behind clinical counter "eyes locked to the lens, mouth open mid-word" — persona on-camera lip-syncing in every recipe scene. LLM marked all 6 scenes `speaker: voiceover` + `voiceover_anchor_image: image_2`. Platform created PAIRED voice-anchor + b-roll for every scene; operator saw "VOICE FAILED — RETRY PAIRED" labels on 6 scenes that should have been single-clip on-camera.
+
+**v721 rule.** When the Image bound by a Scene's `- **image:**` field shows persona ON-CAMERA + visible at t=0 + lip-syncing the line, `speaker:` MUST be `on-camera` (or the persona handle on-camera), NOT `voiceover`. v698A is N/A; no anchor field required.
+
+**Trigger keywords in the bound Image body that mandate `speaker: on-camera`:**
+
+- `"eyes locked to the lens"` / `"eyes locked to the camera"`
+- `"mouth open mid-word"` / `"mouth slightly parted in mid-speech"` / `"mid-utterance"`
+- `"facing the camera"` / `"squared to camera"`
+- `"face visible"` + `"chest-up framing"` / `"head-and-shoulders"`
+- `"lip-syncing"` / `"on-camera dialogue"`
+
+**Disallowed combination** (parser-detectable):
+
+```
+Scene N:
+  - **image:** image_K
+  - **speaker:** voiceover
+  - **voiceover_anchor_image:** image_M
+
+WHERE image_K body contains any of the trigger keywords above
+```
+
+This combination is a v721 violation. Fix: drop `voiceover_anchor_image:` field; change `speaker: voiceover` to `speaker: on-camera`.
+
+**v721-compliant decision tree** when authoring a recipe / b-roll / cutaway scene:
+
+```
+Q1: Is the persona's face visible in the bound Image (image_K)?
+  NO  → speaker: voiceover + voiceover_anchor_image: image_M (per v698A)
+  YES → Q2
+
+Q2: Is the persona shown lip-syncing the line (mouth open mid-word, mouth
+     slightly parted in mid-speech, mouth moving with the dialogue beat)?
+  YES → speaker: on-camera (or persona handle on-camera) — NO anchor
+  NO  → Q3 (persona visible but silent — hands doing the action)
+
+Q3: Is the persona's mouth visible but closed / not speaking?
+  YES → speaker: voiceover + voiceover_anchor_image: image_M (per v698A)
+        AND optional caption: image_K body says "mouth closed" or
+        "lips together" to prevent Veo from auto-animating speech on
+        the silent visual.
+```
+
+**Pre-output grep gate (v721):**
+
+```bash
+# Gate v721 — block speaker: voiceover when bound image shows on-camera lip-sync
+python -c "
+import re
+text = open('videos/<file>.md', encoding='utf-8').read()
+
+# Build a map of Image N -> Image body
+images = {}
+for m in re.finditer(r'### Image (\d+)(.*?)(?=### Image \d+|## )', text, flags=re.DOTALL):
+    images[m.group(1)] = m.group(2)
+
+# Iterate Scene blocks, check each speaker:voiceover scene
+for sc in re.finditer(r'### Scene (\d+)(.*?)(?=### Scene \d+|## |\Z)', text, flags=re.DOTALL):
+    scene_num = sc.group(1)
+    scene_body = sc.group(2)
+    if 'speaker: voiceover' not in scene_body:
+        continue
+    img_m = re.search(r'- \\*\\*image:\\*\\* image_(\d+)', scene_body)
+    if not img_m:
+        continue
+    img_id = img_m.group(1)
+    img_body = images.get(img_id, '')
+    trigger_keywords = [
+        'eyes locked to the lens', 'eyes locked to the camera',
+        'mouth open mid-word', 'mouth slightly parted in mid-speech',
+        'mid-utterance', 'facing the camera', 'squared to camera',
+        'lip-syncing', 'on-camera dialogue',
+    ]
+    hits = [k for k in trigger_keywords if k in img_body]
+    if hits:
+        print(f'FAIL Scene {scene_num}: speaker: voiceover but image_{img_id} shows on-camera lip-sync ({hits})')
+"
+```
+
+**Carve-outs.**
+
+- **Scene's image shows hands-only / no face**: v721 N/A; v698A correctly fires (`speaker: voiceover` + anchor).
+- **Scene's image shows persona's face but mouth closed / not speaking** (silent passive shot, looking at the camera but not speaking the line): v721 N/A; v698A fires. Image body should explicitly note `"mouth closed"` / `"lips together"` to prevent Veo from animating speech on the silent visual.
+- **HOOK / EXPLAIN / CTA scenes**: persona is almost always on-camera lip-syncing → `speaker: on-camera`. v721 catches the mis-application.
+- **Voiceover narrator without on-screen persona**: when the narrator is a different character than the one on-screen (e.g. omniscient narrator over patient-only b-roll), v698A still fires with the narrator's anchor image.
+
+**Fix for v698A misuse (operator-side, no rule change required):**
+
+When grep gate fails:
+
+1. Identify the scenes where `speaker: voiceover` was declared but the bound image shows on-camera lip-sync.
+2. For each scene: change `- **speaker:** voiceover` → `- **speaker:** [persona handle] on-camera` (or `- **speaker:** on-camera`).
+3. Remove the `- **voiceover_anchor_image:** image_M` field from those scenes.
+4. If the only purpose of `image_M` was to serve as a voiceover anchor (no other Scene references it), remove `### Image M` from `## Images` and renumber subsequent Images. If other Scenes still reference `image_M`, keep it but remove `- **role:** voiceover_anchor` field.
+
+**Cost impact.**
+
+v721 violations cost +1 Veo render per affected scene (the unused b-roll audio twin) at ~$0.30-0.50 per render. A 6-scene recipe video with all v721-violating voiceovers = +6 Veo renders = +$2-3 wasted. Plus audio-swap at export creates additional processing cost. Fix → single Veo render per scene → 50% cost reduction on affected scenes.
+
+**Pairing with v698A.**
+
+v721 is a GATE on v698A's activation. v698A spec is unchanged — when `speaker: voiceover` is correctly declared, v698A's two-clip render mechanism still fires. v721 prevents incorrect speaker declarations from triggering v698A unnecessarily.
+
+**Migration.**
+
+Zero required. Pre-v721 artifacts with v698A misuse still render correctly (just with redundant b-roll twins + doubled Veo cost). From this commit forward, new artifacts MUST satisfy v721 grep gate. Wiki lint can flag suspected v721 violations — advisory not blocking. Highest-value retrofit: recipe-led + RECIPE-LED scenes with persona on-camera.
+
+**Touched.**
+
+- `code/decode_bundle.sh` + `code/innovate_bundle.sh` — task-prompt heredocs gain V721 section + Gate 23.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v721 row prepended; latest-live v720 → v721.
+- `wiki/meta/decode-grammar-checklist.md` — v721 workflow section.
+- `CLAUDE.md` — v721 quickref.
+- `wiki/log.md` — v721 timeline entry.
+
+**Verification (mandatory before claiming v721 works).**
+
+1. Pick a multi-scene recipe / b-roll video with `speaker: voiceover` declared on multiple scenes.
+2. Run the v721 grep gate above.
+3. For each FAIL hit, audit the bound Image body — does it show persona on-camera lip-syncing?
+4. If yes, apply the fix protocol (change speaker + drop anchor + cleanup orphan image).
+5. Re-import the corrected markdown. Confirm: scenes no longer render as PAIRED. Single Veo clip per scene. Cost halved on affected scenes.
+
+ONLY THEN claim v721 prevents v698A auto-misuse.
+
+---
+
+### v722 — Persona wardrobe ban (strict extension of v553.1 + v609 + v610)
+
+**Problem.** v553.1 ("never describe the persona inline — uploaded ref handles it. Refer to them as 'the main character'") + v609 (concise binding line) + v610 (gender-neutral persona refs) collectively mandate persona descriptions stay minimal. LLMs (Gemini 3.1 Pro / GPT / Claude) under attention pressure (long task prompt, multi-rule stack, recipe-led patterns) still leak persona wardrobe descriptors into Image prompt bodies: `"She wears her crisp white doctor's coat"` / `"the main character in her blue scrub top"` / `"with a stethoscope around her neck"`. Effect: redundant text fights with the uploaded reference image (per Banana 2 docs: "long text + photos fight each other"), wastes input tokens, and creates wardrobe drift when the upload's actual wardrobe differs from the prose. Decode side has the same leak: Stage 4d VLM captures persona wardrobe and writes it into `static_composition.subject` instead of confining it to the Ingredients table metadata.
+
+**Surfaced 2026-05-13** from nuri-prostate-health-hose-blast-safe lift: every Image block had `"She wears her crisp white doctor's coat"` or similar wardrobe descriptors despite v553.1 being live since the initial rule pipeline. The Ingredients table already declared `"white doctor's coat, professional attire, stethoscope"` — that's where persona wardrobe metadata belongs. Repeating it in body prose violates the upload-as-identity contract.
+
+**v722 rule.** Persona's identity — INCLUDING clothing / wardrobe / accessories / medical attire / scrubs / coats / ties / stethoscope / badge / glasses / hair / race / age / build — is carried by the UPLOADED CHARACTER REFERENCE IMAGE. NEVER describe persona wardrobe in:
+
+- Image prompt body prose
+- `static_composition.subject` field (decode side)
+- Action note prose (`- **action_note:** ...`)
+- Scene line / dialogue (`- **line:** ...`)
+- Veo final-prompt body
+
+Persona wardrobe lives ONLY in the Ingredients table Description column as identity-metadata for the upload bind. Single source of truth, never duplicated.
+
+**Banned phrasings when referring to the PERSONA (the main character):**
+
+- `"wears her [clothing item]"` / `"wears his [clothing item]"`
+- `"wearing [clothing item]"` (when subject is persona)
+- `"the main character in her [color] [garment]"`
+- `"her crisp white doctor's coat"` / `"his white lab coat"`
+- `"her scrub top"` / `"her blue scrubs"` / `"her V-neck scrub"`
+- `"her uniform"` / `"her clinical attire"`
+- `"stethoscope around her neck"` / `"wears a stethoscope"`
+- `"her medical badge"` / `"clipped to her lapel"`
+- `"wears [color] [garment]"` (any persona-wardrobe pattern)
+
+**Required when persona action involves clothing or visible attire:**
+
+```
+The main character [verb] [action] [object].
+```
+
+Identity is in the upload; prose stays minimal. No `"wears"` / `"wearing"` / wardrobe-item mentions for persona.
+
+**Asymmetry (CRITICAL — do NOT confuse persona vs non-persona):**
+
+| Subject | Wardrobe in prose | Rule |
+|---|---|---|
+| PERSONA (the main character) | BANNED | v722 (upload carries identity) |
+| NON-PERSONA (patient / customer / bystander) | REQUIRED | v610 / v622 / v669 (prose is the only anchor) |
+
+This asymmetry is load-bearing. Banana 2 has NO upload for non-persona characters — prose IS their identity. Removing non-persona wardrobe → Banana 2 hallucinates. Removing persona wardrobe → Banana 2 uses the upload (correct).
+
+**Where persona wardrobe legitimately lives:**
+
+- Ingredients table Description column (the canonical source-of-truth for the upload bind):
+
+```markdown
+| Name | Type | Description | Source | Attached to |
+|---|---|---|---|---|
+| the main character | character | persona identity carried by upload — Nuri, modern clinic doctor, half-Korean, late 20s, white doctor's coat, professional attire, stethoscope | upload — personas/refs/nuri.png | image_1, image_2, image_3, ... |
+```
+
+This is the ONLY place persona wardrobe appears in the markdown. Image prompt bodies never repeat it.
+
+**Worked example — nuri-prostate-hose-blast-safe (the surfacing case):**
+
+**Pre-v722 (Image 1, persona wardrobe in body prose):**
+
+```
+Use the uploaded character reference image for the main character.
+
+The main character stands inside a men's public restroom with white tile walls... She wears her crisp white doctor's coat and holds a thick pressure hose with both hands, aimed toward a bright yellow kinked garden hose draped across the urinal area.
+```
+
+`"She wears her crisp white doctor's coat"` violates v722. v553.1 said don't describe persona; LLM violated.
+
+**Post-v722:**
+
+```
+Use the uploaded character reference image for the main character.
+
+The main character stands inside a men's public restroom with white tile walls... She holds a thick pressure hose with both hands, aimed toward a bright yellow kinked garden hose draped across the urinal area.
+```
+
+Wardrobe descriptor dropped. The upload renders her white doctor's coat per the Ingredients table identity-metadata.
+
+**Pre-output grep gate (v722):**
+
+```bash
+# Gate v722 — banned persona-wardrobe phrasings in body prose
+# Only matches WITHIN Image prompt bodies, action_notes, scene lines, and
+# Veo final-prompt bodies — NOT within the Ingredients table.
+
+grep -niE "\b(the main character (wears|wearing)|wears (her|his) (crisp |white |blue |dark |black |green |navy |light |pale )?[a-z ]{1,30}(coat|scrub|tie|shirt|top|uniform|badge|stethoscope|glasses|gloves|jacket|polo|attire)|her (crisp |white |blue |dark |black |green |navy )?(doctor's coat|lab coat|scrub top|V-neck scrub|crew-neck|uniform|clinical attire|medical badge)|his (crisp |white |blue |dark |black |green |navy )?(doctor's coat|lab coat|scrub top|V-neck scrub|crew-neck|uniform|clinical attire|medical badge)|stethoscope around (her|his) neck|wears a stethoscope|wears (her|his) (badge|glasses))\b" raw/decoded_<id>.md videos/<file>.md
+# Expect: zero hits in Image prompt bodies / action_notes / scene lines /
+# Veo final-prompt bodies (matches inside the Ingredients table are
+# expected and correct — those are identity-metadata, not body prose).
+```
+
+**Disambiguation: persona wardrobe vs non-persona wardrobe in same scene.**
+
+When a scene has both persona AND non-persona characters present, the rule applies asymmetrically:
+
+```
+[Subject — Host] (NON-PERSONA description per v610 / v622 — REQUIRED)
+  A white woman in her 60s, heavy build, short blonde bob, dark green V-neck top, navy shorts revealing bare calves. She faces the camera with a distressed expression.
+
+[Subject — Symptom] (per v717 v605c)
+  ...
+
+[Action] (persona action — wardrobe BANNED per v722)
+  The main character on the viewer-right reaches a purple-gloved index finger toward...
+```
+
+The `"purple-gloved"` in the Action block is BANNED if it refers to the persona's gloves. The persona's wardrobe (including gloves) is in the upload. To reference the persona's hand action without wardrobe leak, use:
+
+```
+The main character on the viewer-right reaches an index finger toward the symptom.
+```
+
+If the source video shows specific glove color and that color is critical to the visual (the gloves contrast with the symptom for diagnostic-pointer effect), it goes in the Ingredients table metadata for the persona upload, not in body prose:
+
+```markdown
+| the main character | character | persona identity carried by upload — Nuri, modern clinic doctor, half-Korean, late 20s, white doctor's coat, purple nitrile exam gloves | ... |
+```
+
+**Carve-outs.**
+
+- **Non-persona wardrobe** is REQUIRED in body prose per v610 / v622 / v669. v722 is persona-only.
+- **Ingredients table Description column** is the canonical source-of-truth for persona wardrobe — v722 N/A there.
+- **Wardrobe AS PROP (not identity)**: if the persona REMOVES / DROPS / HOLDS UP a wardrobe item as a rhetorical prop (e.g. persona pulls off their stethoscope and dangles it for emphasis), the wardrobe-as-prop description IS allowed in the action_note as a prop action — but the persona's BASE wardrobe still stays in the Ingredients table. Example: `"The main character pulls a stethoscope from around the neck and holds it up to the camera"` — `"stethoscope"` here is a prop action, not an identity descriptor.
+- **HOOK weird-action involving wardrobe**: per v539, weird-action HOOK may involve the persona doing something physical with their wardrobe. The action goes in the action_note. The base wardrobe stays in Ingredients metadata.
+
+**Pairing with v553.1 / v609 / v610.**
+
+| Rule | Scope | Status |
+|---|---|---|
+| v553.1 | Never describe persona inline | Still live, v722 is the STRICT enforcement |
+| v609 | Concise binding line (drop "match her ... exactly" trailer) | Still live |
+| v610 | Gender-neutral persona refs (no she/her for persona) | Still live |
+| v722 | Persona wardrobe ban in body prose | New strict gate |
+
+v722 doesn't replace v553.1 / v609 / v610 — it adds a parser-detectable grep gate that catches the most common v553.1 violation (wardrobe leak).
+
+**Cost impact.**
+
+Token waste per wardrobe leak: ~10-20 tokens per Image block × N images. Plus prose-vs-upload conflict can degrade Banana 2 render quality (per the Banana 2 docs "long text + photos fight each other"). Removing wardrobe descriptors reduces total prompt tokens AND improves render fidelity.
+
+**Migration.**
+
+Zero required. Pre-v722 artifacts with wardrobe descriptors render correctly (Banana 2 still binds to the upload), just with token waste + potential drift. Retrofit on next-touch: grep + remove persona wardrobe phrasings; ensure Ingredients table Description column has the canonical metadata.
+
+**Touched.**
+
+- `code/v589_video_understanding.py` — SYSTEM_INSTRUCTION patched with PERSONA WARDROBE BAN (v722) — banned phrasings list + asymmetry note + Ingredients-table-only storage rule.
+- `code/decode_bundle.sh` + `code/innovate_bundle.sh` — task-prompt heredocs gain V722 section + Gate 24.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v722 row prepended; latest-live v721 → v722.
+- `wiki/meta/decode-grammar-checklist.md` — v722 workflow section.
+- `CLAUDE.md` — v722 quickref.
+- `wiki/log.md` — v722 timeline entry.
+
+**Verification (mandatory before claiming v722 works).**
+
+1. Run the v722 grep gate above on the artifact (raw/decoded_*.md OR videos/*.md).
+2. Confirm ZERO hits on persona-wardrobe phrasings in body prose. Hits inside the Ingredients table are correct and expected.
+3. Confirm Ingredients table Description column DOES contain the persona's canonical wardrobe metadata (the upload-bind anchor).
+4. Feed the cleaned prompt to Banana 2 — confirm rendered images still show correct persona wardrobe (the upload binds it; prose is no longer required).
+5. Compare token count pre vs post — should drop ~10-20 tokens per Image block.
+
+ONLY THEN claim v722 prevents persona wardrobe leak.
+
+---
+
+### v725 — PATCH `ImageSceneAssignment` scene-config fields (no image re-render)
+
+**Problem.** `POST /api/import-scene-table` always creates a fresh `ImageJobBatch` + new `ImageNode` rows. No content-hash dedup. Operators who need to fix scene-level metadata (e.g. v721 violation — `speaker: voiceover` declared when persona is on-camera lip-syncing) have only one path before v725: re-import the corrected markdown → 10+ new Banana 2 image renders + N new Veo clips. Pre-v725 cost on the nuri-prostate retrofit: ~10 image renders + 6 clip renders = ~$1.10 + wall-clock time. The persona / product / scene images themselves are unchanged; only `ImageSceneAssignment.speaker_mode` + `ImageSceneAssignment.voiceover_anchor_image_node_id` columns need to change. `PATCH /api/nodes/{node_id}` exists but only updates per-node fields (`name` / `prompt` / `aspect_ratio` / `resolution` / `model` / `n_variants` / `parents`) — does NOT touch `ImageSceneAssignment` rows. `replace-image` (v710) targets clip start_frames, not scene config. `reconcile-by-content` matches batches → video jobs, not scene metadata. Result: no in-place editing path for scene-config drift.
+
+**Surfaced 2026-05-13** from nuri-prostate-health-hose-blast-safe lift. Operator promoted a batch where scenes 2-7 had `speaker_mode='voiceover'` + `voiceover_anchor_image_node_id` set per v698A (LLM auto-fired the pattern from corpus prior). Platform rendered PAIRED Veo clips on all 6 scenes (visual + audio twin per v698A). Operator wanted to fix per v721 (persona was on-camera lip-syncing → should be `speaker_mode='on-camera'`, no anchor). Asked "how do I fix this without re-rendering all 10 images?". Code audit confirmed: no in-place edit path existed. v725 ships that endpoint.
+
+**v725 endpoint:**
+
+```
+PATCH /api/batches/{batch_id}/scenes/{scene_index}
+```
+
+**Allowed PATCH fields (scene-config only):**
+
+| Field | Type | Notes |
+|---|---|---|
+| `speaker_mode` | `str` | canonicalized via `_normalize_speaker_mode`; expected canonical values `on-camera` / `voiceover` / `silent` / `auto` |
+| `voiceover_anchor_image_node_id` | `int` | must point at a ready `ImageNode` with `role='voiceover_anchor'` in the same batch |
+| `clip_mode` | `str` | `blend` / `fresh` / `continue` |
+| `scene_transition` | `str` | `cut` / `blend` / `null` (sentinel string to clear the column) |
+| `cut_mode` | `str` | `whisper` / `timeline` / `auto` |
+| `caption` | `str` | text_card caption |
+| `bg_color` | `str` | text_card hex color |
+| `duration_s` | `float` | text_card seconds |
+| `clear_fields` | `List[str]` | explicit clear-to-NULL list; allowed: `voiceover_anchor_image_node_id`, `cut_mode`, `transition`, `caption`, `bg_color`, `duration_s` |
+
+**Banned (would require re-render or schema-level changes):**
+
+- `image_node_id` — rebinding which image a scene uses is out of scope (use a fresh import + reconcile-by-content)
+- `scene_index` — re-numbering scenes is a batch-wide concern
+- `cast_json` — changing cast triggers v619 N4 / v711 re-evaluation of edges
+- `lines_json` / `action_notes_json` — would re-derive Veo prompts; use a re-import flow
+
+**Validation (v698A-consistent):**
+
+- `speaker_mode='voiceover'` REQUIRES `voiceover_anchor_image_node_id` to be set (either by the PATCH or already on the row) AND the anchor node must belong to the same batch with `role='voiceover_anchor'`.
+- `speaker_mode != 'voiceover'` AUTO-CLEARS `voiceover_anchor_image_node_id` to NULL unless the caller explicitly sets a new anchor in the same PATCH. Removes the v721 footgun class — flipping a scene back to on-camera no longer leaves an orphan anchor reference.
+- Unrecognized `speaker_mode` after canonicalization → 400.
+- Unrecognized `clip_mode` / `scene_transition` / `cut_mode` value → 400.
+
+**Explicit clear-to-NULL semantics.** Pydantic `Optional[X] = None` means "don't change" by convention (matches `UpdateNodeRequest` semantics — see line 1252). To explicitly NULL a column, pass `clear_fields=["foo"]` in the request body.
+
+**Worked example — nuri-prostate retrofit (the surfacing case):**
+
+```bash
+# v721 fix for scenes 2-7 (one HTTP call per scene)
+for SCENE in 2 3 4 5 6 7; do
+  curl -X PATCH "https://<host>/api/batches/<batch-uuid>/scenes/$SCENE" \
+    -H "Content-Type: application/json" \
+    -d '{"speaker_mode": "on-camera"}'
+done
+```
+
+Effect: 6 `ImageSceneAssignment` rows updated. `speaker_mode` flipped to `on-camera`; `voiceover_anchor_image_node_id` auto-cleared to NULL on each (per v698A consistency check). Images stay rendered. Promote-to-video next renders 6 single-clip Veo renders instead of 12 paired clips.
+
+**Cost saved.** Pre-v725 retrofit: ~$1.10 + ~5min wall. Post-v725: $0 image cost + 6 single Veo re-renders only. Eliminates the re-import-because-of-scene-metadata-drift waste class.
+
+**Auto-clear semantics worked example:**
+
+```
+PATCH /api/batches/<uuid>/scenes/3
+{"speaker_mode": "on-camera"}
+```
+
+Before: `speaker_mode='voiceover'`, `voiceover_anchor_image_node_id=42`.
+After: `speaker_mode='on-camera'`, `voiceover_anchor_image_node_id=NULL` (auto-cleared).
+Server log: `[v725] Auto-clearing voiceover_anchor_image_node_id on scene 3 of batch <uuid> because speaker_mode='on-camera' is not 'voiceover'`.
+
+**Schema unchanged.** v725 is an ENDPOINT addition only. No DB migrations. No new columns. No model changes. The `ImageSceneAssignment` table has had `speaker_mode` (v681e.10) + `voiceover_anchor_image_node_id` (v698A) since their respective shipments — v725 just exposes them to PATCH.
+
+**Pairing with v721.**
+
+v721 = the AUTHORING-side rule (LLMs shouldn't auto-fire `speaker: voiceover` when persona is on-camera lip-syncing).
+v725 = the PLATFORM-side retrofit mechanism (when v721 violations land in production, operator can fix in-place without re-rendering).
+
+Operators producing fresh artifacts should still apply v721 at authoring time (cheaper). v725 is the safety net for already-promoted batches with v721 violations.
+
+**Touched.**
+
+- `code/image_platform.py` — new `UpdateSceneAssignmentRequest` Pydantic model + `PATCH /batches/{batch_id}/scenes/{scene_index}` endpoint (~180 LOC inserted before `promote_batch_to_video` at line ~7702). AST-verified.
+- `code/template_reference.md` — this section.
+- `wiki/patterns/conventions.md` — v725 row prepended above v722; latest-live v722 → v725.
+- `CLAUDE.md` — v725 quickref prepended above v722.
+- `wiki/log.md` — v725 timeline entry prepended.
+
+**No bundle-script changes.** v725 is a runtime platform endpoint, not an authoring rule. Decode / lift / innovate / create bundles unchanged. `wiki/meta/decode-grammar-checklist.md` unchanged (decode-grammar concerns; v725 is operator-runtime).
+
+**Migration.** Zero required. Pre-v725 batches use the new endpoint immediately on deploy. No backfill needed.
+
+**Verification (mandatory before claiming v725 works).**
+
+1. Push v725 to `code/` main branch → auto-deploys to Render (~2-3 min per CLAUDE.md).
+2. Pick a real batch with at least one v721 violation (`speaker_mode='voiceover'` on a scene whose bound image shows persona on-camera lip-syncing).
+3. Curl the PATCH endpoint with `{"speaker_mode": "on-camera"}`.
+4. Confirm response 200 with `"ok": true` + updated `assignment` payload.
+5. Re-fetch the batch via existing GET endpoints. Confirm `speaker_mode='on-camera'` + `voiceover_anchor_image_node_id=NULL` on the patched scene.
+6. Re-promote batch to video. Confirm Veo clips for the patched scenes render as SINGLE clips (no PAIRED tag), no failed voice twins.
+7. Negative test: PATCH `{"speaker_mode": "voiceover"}` on a scene with `voiceover_anchor_image_node_id=NULL` → expect 400 with the v698A consistency error message.
+8. Negative test: PATCH `{"voiceover_anchor_image_node_id": <id-of-non-anchor-node>}` → expect 400 with role mismatch error.
+9. Confirm no image re-renders queued during any of the above (Banana 2 image jobs not bumped; only Veo clip renders fire on re-promotion).
+
+ONLY THEN claim v725 retrofits scene-config without re-render.

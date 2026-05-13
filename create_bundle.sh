@@ -1448,19 +1448,46 @@ BUNDLE_FILE="$TMPDIR_PATH/create_bundle_$(date +%s).md"
 build_bundle > "$BUNDLE_FILE"
 BYTES=$(wc -c < "$BUNDLE_FILE")
 
+# Resolve a host-native path for the bundle so operators on Windows / Git Bash
+# can drag-drop or paste the file directly into upload fields (Gemini, AI Studio,
+# Claude.ai) which expect Windows-form paths, not POSIX /tmp/... paths.
+WIN_BUNDLE_FILE=""
+if command -v cygpath >/dev/null 2>&1; then
+    WIN_BUNDLE_FILE="$(cygpath -w "$BUNDLE_FILE" 2>/dev/null || true)"
+fi
+
+print_paths() {
+    echo "[create_bundle] Bundle saved (POSIX):   $BUNDLE_FILE"
+    if [[ -n "$WIN_BUNDLE_FILE" ]]; then
+        echo "[create_bundle] Bundle saved (Windows): $WIN_BUNDLE_FILE"
+    fi
+}
+
+print_upload_guidance() {
+    echo "[create_bundle] Upload options for LLMs with paste-size caps (e.g. Gemini app):"
+    echo "[create_bundle]   - Drag the .md file from Explorer into the chat's attach field"
+    if [[ -n "$WIN_BUNDLE_FILE" ]]; then
+        echo "[create_bundle]   - Or paste the Windows path above into the upload field"
+    fi
+    echo "[create_bundle]   - Then add the one-line cell-spec prompt:"
+    echo "[create_bundle]       \"create a new videos/*.md for [persona] [niche] [audience] from a corpus-validated cell\""
+}
+
 if [[ -n "$CLIP_CMD" ]]; then
     if cat "$BUNDLE_FILE" | $CLIP_CMD 2>/dev/null; then
         echo "[create_bundle] OK: ${#BUNDLE_FILES[@]} files concatenated (~${BYTES} bytes), piped via '$CLIP_CMD'"
-        echo "[create_bundle] Bundle also saved to: $BUNDLE_FILE"
-        echo "[create_bundle] Paste into your LLM + add a one-line cell-spec prompt:"
-        echo "[create_bundle]   \"create a new videos/*.md for [persona] [niche] [audience] from a corpus-validated cell\""
+        print_paths
+        print_upload_guidance
     else
         echo "[create_bundle] WARNING: clipboard pipe failed (sandboxed env or clip locked)"
-        echo "[create_bundle] Bundle saved to: $BUNDLE_FILE"
-        echo "[create_bundle] Open it manually: cat \"$BUNDLE_FILE\" | clip   (or pbcopy / xclip)"
+        print_paths
+        echo "[create_bundle] Manual clip pipe: cat \"$BUNDLE_FILE\" | clip   (or pbcopy / xclip)"
         echo "[create_bundle] OK: ${#BUNDLE_FILES[@]} files concatenated (~${BYTES} bytes)"
+        print_upload_guidance
     fi
 else
-    echo "[create_bundle] No clipboard tool found. Bundle saved to: $BUNDLE_FILE"
+    echo "[create_bundle] No clipboard tool found."
+    print_paths
     echo "[create_bundle] OK: ${#BUNDLE_FILES[@]} files concatenated (~${BYTES} bytes)"
+    print_upload_guidance
 fi

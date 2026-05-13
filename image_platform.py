@@ -7699,6 +7699,232 @@ def _backfill_batch_video_links_impl(
     }
 
 
+# ============================================================================
+# v725 — PATCH ImageSceneAssignment scene-config fields (no image re-render).
+# ============================================================================
+#
+# Lets operators fix scene-level metadata (speaker_mode, voiceover_anchor,
+# clip_mode, transition, cut_mode, text_card fields) on an existing batch
+# WITHOUT triggering a re-import and the 10+ Banana 2 image re-renders that
+# come with it. Surfaced 2026-05-13 from nuri-prostate lift where scenes 2-7
+# were marked speaker: voiceover (LLM auto-fired v698A pairing) when persona
+# was on-camera lip-syncing in the bound images. Pre-v725 fix path: re-import
+# the corrected markdown (~$1-2 wasted on re-rendering already-rendered
+# images). Post-v725: PATCH the 6 scene rows in place; images stay, only
+# Veo clips re-render on next promote-to-video / video re-render.
+#
+# Allowed PATCH fields (scene-config only):
+#   speaker_mode                       — canonicalized via _normalize_speaker_mode
+#   voiceover_anchor_image_node_id     — must point at a ready ImageNode with
+#                                        role='voiceover_anchor' in the same
+#                                        batch when set
+#   clip_mode                          — blend | fresh | continue
+#   scene_transition                   — cut | blend | null (sentinel)
+#   cut_mode                           — whisper | timeline | auto
+#   caption                            — text_card caption string
+#   bg_color                           — text_card hex color
+#   duration_s                         — text_card duration in seconds
+#
+# Banned (would require re-render or schema-level changes):
+#   image_node_id                      — rebinding which image a scene uses
+#                                        is out of scope (use a fresh import
+#                                        + reconcile-by-content)
+#   scene_index                        — re-numbering scenes is a batch-wide
+#                                        concern
+#   cast_json                          — changing cast triggers v619 N4 /
+#                                        v711 re-evaluation of edges
+#   lines_json / action_notes_json     — would re-derive Veo prompts; use a
+#                                        re-import flow with reconcile
+#
+# Validation:
+#   * speaker_mode = 'voiceover' requires voiceover_anchor_image_node_id
+#     to be set (either by this PATCH or already on the row) AND for that
+#     anchor node to belong to the same batch with role='voiceover_anchor'.
+#   * speaker_mode != 'voiceover' auto-clears voiceover_anchor_image_node_id
+#     to NULL (unless the caller explicitly sets a new anchor in the same
+#     PATCH). Removes the v721 footgun class — flipping a scene back to
+#     on-camera no longer leaves an orphan anchor reference.
+#
+# Explicit clear-to-NULL semantics: pass `clear_fields: ["foo", "bar"]` to
+# set those columns to NULL. Pydantic Optional[X] = None means "don't
+# change" by convention, matching UpdateNodeRequest semantics.
+
+class UpdateSceneAssignmentRequest(BaseModel):
+    speaker_mode: Optional[str] = None
+    voiceover_anchor_image_node_id: Optional[int] = None
+    clip_mode: Optional[str] = None
+    scene_transition: Optional[str] = None
+    cut_mode: Optional[str] = None
+    caption: Optional[str] = None
+    bg_color: Optional[str] = None
+    duration_s: Optional[float] = None
+    clear_fields: Optional[List[str]] = None
+
+
+@router.patch("/batches/{batch_id}/scenes/{scene_index}")
+def update_scene_assignment(
+    batch_id: str,
+    scene_index: int,
+    req: UpdateSceneAssignmentRequest,
+    db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v725 — update scene-config fields on an existing ImageSceneAssignment
+    row without triggering a re-import + image re-render.
+
+    See header comment for the full design rationale.
+    """
+    # Verify batch + ownership
+    batch = db.query(ImageJobBatch).filter(
+        ImageJobBatch.id == batch_id,
+        ImageJobBatch.user_id == current_user.id,
+    ).first()
+    if not batch:
+        raise HTTPException(404, f"Batch {batch_id} not found")
+
+    assignment = db.query(ImageSceneAssignment).filter(
+        ImageSceneAssignment.batch_id == batch_id,
+        ImageSceneAssignment.scene_index == scene_index,
+    ).first()
+    if not assignment:
+        raise HTTPException(
+            404, f"Scene {scene_index} not found in batch {batch_id}"
+        )
+
+    # ─── speaker_mode (canonicalized) ───────────────────────────────────
+    if req.speaker_mode is not None:
+        normalized = _normalize_speaker_mode(req.speaker_mode)
+        if normalized is not None and normalized not in (
+            "on-camera", "voiceover", "silent", "auto",
+        ):
+            raise HTTPException(
+                400,
+                f"Unrecognized speaker_mode {req.speaker_mode!r} "
+                f"(canonicalized to {normalized!r}); expected one of "
+                f"'on-camera', 'voiceover', 'silent', 'auto'."
+            )
+        assignment.speaker_mode = normalized
+
+    # ─── voiceover_anchor_image_node_id ─────────────────────────────────
+    if req.voiceover_anchor_image_node_id is not None:
+        anchor = db.query(ImageNode).filter(
+            ImageNode.id == req.voiceover_anchor_image_node_id,
+            ImageNode.user_id == current_user.id,
+            ImageNode.batch_id == batch_id,
+        ).first()
+        if not anchor:
+            raise HTTPException(
+                400,
+                f"voiceover_anchor_image_node_id "
+                f"{req.voiceover_anchor_image_node_id} not found in batch "
+                f"{batch_id} for current user"
+            )
+        if (anchor.role or "").lower() != "voiceover_anchor":
+            raise HTTPException(
+                400,
+                f"Node {anchor.id} has role={anchor.role!r}, expected "
+                f"'voiceover_anchor' (per v698A image-role discriminator)"
+            )
+        assignment.voiceover_anchor_image_node_id = anchor.id
+
+    # ─── clip_mode ──────────────────────────────────────────────────────
+    if req.clip_mode is not None:
+        cm = req.clip_mode.lower().strip()
+        if cm not in ("blend", "fresh", "continue"):
+            raise HTTPException(
+                400,
+                f"Unrecognized clip_mode {req.clip_mode!r}; expected one of "
+                f"'blend', 'fresh', 'continue'."
+            )
+        assignment.clip_mode = cm
+
+    # ─── scene_transition (column name: transition) ─────────────────────
+    if req.scene_transition is not None:
+        st = req.scene_transition.lower().strip()
+        if st == "null":
+            assignment.transition = None
+        elif st in ("cut", "blend"):
+            assignment.transition = st
+        else:
+            raise HTTPException(
+                400,
+                f"Unrecognized scene_transition {req.scene_transition!r}; "
+                f"expected one of 'cut', 'blend', 'null'."
+            )
+
+    # ─── cut_mode ───────────────────────────────────────────────────────
+    if req.cut_mode is not None:
+        cm = req.cut_mode.lower().strip()
+        if cm not in ("whisper", "timeline", "auto"):
+            raise HTTPException(
+                400,
+                f"Unrecognized cut_mode {req.cut_mode!r}; expected one of "
+                f"'whisper', 'timeline', 'auto'."
+            )
+        assignment.cut_mode = cm
+
+    # ─── text_card fields ───────────────────────────────────────────────
+    if req.caption is not None:
+        assignment.caption = req.caption
+    if req.bg_color is not None:
+        assignment.bg_color = req.bg_color
+    if req.duration_s is not None:
+        assignment.duration_s = req.duration_s
+
+    # ─── Explicit clear-to-NULL ─────────────────────────────────────────
+    clear_fields = req.clear_fields or []
+    allowed_clear = {
+        "voiceover_anchor_image_node_id",
+        "cut_mode",
+        "transition",
+        "caption",
+        "bg_color",
+        "duration_s",
+    }
+    for field in clear_fields:
+        if field not in allowed_clear:
+            raise HTTPException(
+                400,
+                f"Cannot clear field {field!r}; allowed: "
+                f"{sorted(allowed_clear)}"
+            )
+        setattr(assignment, field, None)
+
+    # ─── Auto-clear voiceover_anchor when flipping away from voiceover ──
+    if assignment.speaker_mode and assignment.speaker_mode != "voiceover":
+        if (
+            req.voiceover_anchor_image_node_id is None
+            and "voiceover_anchor_image_node_id" not in clear_fields
+            and assignment.voiceover_anchor_image_node_id is not None
+        ):
+            log.info(
+                f"[v725] Auto-clearing voiceover_anchor_image_node_id on "
+                f"scene {scene_index} of batch {batch_id} because "
+                f"speaker_mode={assignment.speaker_mode!r} is not 'voiceover'"
+            )
+            assignment.voiceover_anchor_image_node_id = None
+
+    # ─── v698A consistency check ────────────────────────────────────────
+    if assignment.speaker_mode == "voiceover":
+        if assignment.voiceover_anchor_image_node_id is None:
+            raise HTTPException(
+                400,
+                f"Scene {scene_index} speaker_mode='voiceover' requires "
+                f"voiceover_anchor_image_node_id (v698A). Either send a "
+                f"new anchor in this PATCH or leave speaker_mode "
+                f"unchanged."
+            )
+
+    db.commit()
+    db.refresh(assignment)
+    return {
+        "ok": True,
+        "batch_id": batch_id,
+        "scene_index": scene_index,
+        "assignment": assignment.to_dict(),
+    }
+
+
 @router.post("/batches/{batch_id}/promote-to-video")
 def promote_batch_to_video(
     batch_id: str,

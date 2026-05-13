@@ -55,8 +55,8 @@ PER_SHOT_SCHEMA = {
     "summary": "<one sentence: rhetorical function + visible action>",
     "static_composition": {
         "subject": "<persona pose + eye direction + mouth state + expression>",
-        "framing": "<camera distance + frame partition + depth layers + crop>",
-        "anchor_props_with_positions": "<every visible prop and its EXACT position>",
+        "framing": "<v712 relational: subject-to-subject geometry chain (above / below / behind / over the shoulder of / pointing DOWN at) + shot-size DETAIL-DENSITY anchor (which micro-features are visible-and-sharp) + background blur statement. NO coordinate tokens (viewer-left / viewer-right / upper-third / chest-up / NO floor visible) on decode side.>",
+        "anchor_props_with_positions": "<every visible prop and its position relative to SUBJECTS (in the patient's lap / behind the doctor's right shoulder / on the counter beside her / in his left hand). NOT relative to frame quadrants.>",
         "lighting_and_palette": "<lighting direction + color palette + mood>",
     },
     "action_arc": {
@@ -86,15 +86,305 @@ VISIBLE STATE-EVOLUTION ARCS within shots — not just the static composition.
 For each shot, output a JSON object matching the schema in your prompt.
 
 Hard rules:
-- Be precise about object POSITIONS in frame (lower-left, immediate foreground,
-  behind subject at jaw height, etc.).
-- Use ABSOLUTE magnitude language for state changes ('completely melts away',
-  'fully revealed', 'entirely dissolves'). 'Dramatically reduced' is forbidden
-  when the source shows complete melt — reserved for genuinely partial states.
 - Capture dialogue verbatim (use the supplied whisper transcript).
 - Identify verbs of state change (pour, squeeze, add, stir, mix, melt, dissolve).
 - If a shot is a static talking-head with no state evolution, set
   has_state_evolution=false.
+- Use ABSOLUTE magnitude language for state changes ('completely melts away',
+  'fully revealed', 'entirely dissolves'). 'Dramatically reduced' is forbidden
+  when the source shows complete melt — reserved for genuinely partial states.
+
+FORENSIC-PERCEPTION PROTOCOL (v718, MANDATORY pre-grammar):
+
+Before writing ANY composition prose, complete three perceptual steps. Skipping
+them produces three observed failure classes — misattribution / blocking
+blindness / anatomical normalization — that no amount of downstream grammar
+discipline can recover from.
+
+v718a — KINEMATIC TRACING (limb attribution):
+
+VLMs suffer from proximity bias — if a face is near a hand, the VLM assumes
+it's their hand. Before attributing any body part, symptom, or held prop to
+a character, VISUALLY TRACE THE LIMB back to its origin:
+
+  1. Look at the limb.
+  2. Trace the pixels from fingertip / extremity back to the shoulder
+     or torso of origin.
+  3. Note the CLOTHING COLOR at the shoulder where the limb originates.
+  4. Assign the limb ONLY to the character wearing that clothing color.
+  5. DO NOT assign ownership based on which face is closest to the limb
+     in the 2D frame.
+
+If two characters are close together and a hand reaches across the frame,
+the hand belongs to whichever torso the wrist+forearm trace back to — not
+the face it appears near.
+
+v718b — Z-DEPTH ISOLATION (blocking detection):
+
+VLMs process frames as flat 2D posters and miss occlusion / depth layering.
+Before writing the static_composition, EXPLICITLY MAP THE Z-AXIS:
+
+  1. Identify what is in the ABSOLUTE FOREGROUND (closest to camera, in
+     focus, blocking pixels behind it).
+  2. Identify what is in the MIDGROUND (one layer behind foreground).
+  3. Identify what is in the BACKGROUND (furthest from camera, often
+     blurred / out of focus).
+  4. Check for OVERLAPPING PIXELS: if Object A covers Object B's pixels,
+     Object A is in front of B.
+  5. Explicitly note when a character's body part crosses the frame
+     horizontally and BLOCKS another character standing behind it.
+
+A patient's arm extended toward camera that crosses in front of a
+practitioner's torso = arm is foreground, practitioner is midground. The
+practitioner's body is partially OCCLUDED by the arm. Decode this
+explicitly; do not treat the two as side-by-side flat-2D companions.
+
+v718c — LITERAL PIXEL VFX RECOGNITION (anti-anatomical-normalization):
+
+Source videos frequently use extreme VFX that violate real-world physics
+(flesh loops, floating objects, impossible stretching, detached body
+parts, multiplied features). VLMs default to mapping impossible shapes
+back to closest normal anatomical concepts because normal anatomy is
+familiar prior. THIS IS A HALLUCINATION — the VLM is overriding what
+its eyes see with what its training data expects.
+
+If you see shapes that defy normal anatomy:
+
+  - Flesh connecting back to itself to form a closed loop -> describe
+    the LOOP, the HOLE in the flesh, the CIRCULAR CONNECTION. Do not
+    snap to "deep U-shape sagging" because U-shape is the closest
+    normal-anatomy concept; U-shape is open, a LOOP is closed.
+  - Objects floating with no visible support -> describe the FLOAT
+    explicitly; do not invent invisible attachment.
+  - Impossible stretching (skin stretched 12 inches) -> describe the
+    LITERAL DISTANCE; do not normalize to "a few inches".
+  - Detached body parts -> describe the DETACHMENT; do not reattach in
+    prose because reattachment is the normal-anatomy default.
+  - Multiplied features (three eyes, two mouths) -> describe the
+    LITERAL COUNT; do not collapse to one because one is the
+    normal-anatomy default.
+
+The rule: DESCRIBE LITERAL SHAPES AND CONNECTIONS YOU SEE IN THE PIXELS.
+Do NOT map impossible VFX back to "normal" anatomical descriptors just
+because normal makes more logical sense. If there is a hole in the
+flesh, say "a hole in the flesh." If skin forms a closed loop, say "a
+closed loop of skin." Banana 2 + Veo can RENDER impossible shapes but
+only if the prompt names them literally.
+
+v718c COROLLARY (v719c — bidirectional VFX recognition, MANDATORY):
+
+The literal-pixel rule above (v718c) cures hallucinations in BOTH
+directions, not just one. The original v718c failure was: VLM
+normalizes IMPOSSIBLE VFX back to NORMAL anatomy (closed flesh-loop
+described as "U-shape sagging"). The MIRROR failure observed
+afterward: VLM hallucinates IMPOSSIBLE VFX where source has SOLID,
+UNBROKEN anatomy (Banana 2 reads "deep U-shape" vocabulary in the
+prompt and renders a literal U-shape HOLE / LOOP that doesn't exist
+in the source).
+
+Bidirectional discipline:
+
+  If source has IMPOSSIBLE VFX (closed loops, holes, detached parts,
+  multiplied features) -> describe LITERALLY (closed loop with hole;
+  3-inch detachment gap; three eyes). DO NOT normalize to closest
+  anatomical concept.
+
+  If source has SOLID, UNBROKEN anatomy (continuous sagging flesh,
+  draped skin sheet, hanging curtain of tissue) -> describe AS SOLID
+  AND UNBROKEN explicitly. DO NOT use vocabulary that implies
+  topology (U-shape, V-shape, loop, hole, opening, ring, gap) when
+  the source is solid.
+
+Vocabulary that implies topology / negative space (avoid when source
+is solid):
+  "U-shape", "V-shape", "loop", "ring", "hole", "opening", "gap",
+  "split", "fork", "Y-shape", "C-shape", "doughnut shape"
+
+Vocabulary that names solid volume (use when source is solid):
+  "continuous sheet of draped flesh", "dense unbroken curtain of
+  loose skin", "solid flap hanging straight down", "thick mass of
+  pendulous flesh", "uninterrupted drape of skin", "single
+  continuous fold"
+
+Rule: if the source shows the flesh as ONE continuous solid mass
+with no holes / no negative space / no loops, name it as such
+explicitly. Adding "U-shape" to a solid mass creates a hole in
+Banana 2's render that wasn't in the source.
+
+v712 LATERAL-VECTOR REQUIREMENT (v720b, MANDATORY):
+
+For ANY extended limb, you MUST declare its LATERAL VECTOR relative
+to the viewer (not just that it is "extended"). The VLM's default
+"extended arm" interpretation gets rendered by Banana 2 as either
+forward-toward-camera (most common) or crossing-the-chest (second
+most common) — neither matching the source if the source has the
+arm extended TO THE SIDE.
+
+Required: every extended limb gets a directional clause:
+
+  "extended straight outward to the viewer-left"
+  "extended straight outward to the viewer-right"
+  "extended straight forward toward the camera"
+  "extended straight upward overhead"
+  "extended straight downward toward the floor"
+  "extended at a 45-degree angle upward to the viewer-right"
+
+Banned (loses lateral vector):
+
+  "extended arm" (no direction)
+  "outstretched arm" (no direction)
+  "arm reaching out" (no direction)
+  "arm in the foreground" (vector ambiguous)
+
+When two characters stand side-by-side and the patient's arm extends
+LATERALLY (to the side, not toward the camera), the arm and torso
+share the SAME midground depth plane — there is NO Z-axis layering
+to describe (v713f does NOT apply in this case). Use X-axis
+relational grammar instead.
+
+Apply v718a -> v718b -> v718c (with v719c bidirectional corollary)
+-> v720b lateral-vector check, in order, BEFORE writing
+static_composition. The four steps are pre-grammar perceptual
+checks; they constrain what the v712 / v713 / v715 / v716 / v717
+grammar rules describe.
+
+PERSONA WARDROBE BAN (v722, MANDATORY):
+
+The persona's identity — INCLUDING clothing, wardrobe, accessories,
+medical attire, scrubs, coats, ties, stethoscope, badge, glasses,
+hair, race, age, build — is carried by the UPLOADED CHARACTER
+REFERENCE IMAGE, not by prose. Per v553.1 / v609 / v610, persona
+descriptions are minimal: refer to the persona only as "the main
+character" (or canonical handle from cast: list). NEVER describe
+persona wardrobe in prose.
+
+This applies to decode AND generate AND innovate. The Stage 4d VLM
+must observe the source video's persona wardrobe AS METADATA in the
+Ingredients table (in the Description column), NEVER in any Image
+prompt body / static_composition.subject / action arc / scene line.
+
+Banned phrasings when referring to the PERSONA (the main character):
+
+  "wears her [clothing item]"
+  "wearing [clothing item]"
+  "[clothing item] on the main character"
+  "her crisp white doctor's coat"
+  "her white lab coat"
+  "her scrub top"
+  "her blue scrubs"
+  "her V-neck scrub"
+  "her uniform"
+  "stethoscope around her neck"
+  "wears a stethoscope"
+  "her medical badge"
+  "her clinical attire"
+  "wears [color] [garment]"
+
+Required when persona action involves clothing or visible attire:
+
+  "the main character [does action]" — no wardrobe mention
+  Identity is in the upload; prose stays minimal.
+
+ASYMMETRY (do NOT confuse with non-persona):
+
+  PERSONA wardrobe -> v722 BANNED (upload carries it)
+  NON-PERSONA wardrobe -> v610 / v622 / v669 REQUIRED (prose is the
+                          only anchor; without it Banana 2
+                          hallucinates the non-persona's clothing)
+
+The Stage 4d VLM:
+  - Captures the persona's visible wardrobe ONCE in the Ingredients
+    table Description column ("white doctor's coat, professional
+    attire, stethoscope") as identity-metadata for the upload bind.
+  - Does NOT repeat that wardrobe in any per-image static_composition
+    or action_arc field.
+  - Captures NON-persona character wardrobe (patient / customer /
+    bystander) IN the Image prompt body's [Subject — Host] block
+    on first appearance, per v610 / v622 / v669.
+
+COMPOSITION GRAMMAR (v712, decode-side):
+
+Describe composition through SUBJECT-TO-SUBJECT geometry, not through frame
+quadrants. The VLM cannot reliably grid-anchor a source frame, so coordinate
+grammar produces precise-but-wrong descriptions. Relational grammar anchors
+to subjects (which the VLM CAN identify) and encodes geometry through verb +
+preposition chains.
+
+Allowed prepositions for spatial geometry:
+  above / below / behind / in front of / over the shoulder of / beside /
+  between / under / next to / from above / from below.
+
+Allowed verbs encoding pose + action:
+  pointing / leaning / standing / sitting / holding / lifting / reaching /
+  gesturing / smiling / wincing / closing eyes / looking forward / looking
+  down / looking at / facing the camera / turning toward.
+
+Shot size: encode through DETAIL-DENSITY anchor, not jargon. Name the
+micro-features that are visible-and-sharp at the actual framing:
+- "forehead wrinkles clearly visible, dark eye circles clearly visible" → close-macro
+- "full lab coat visible, stethoscope visible, ID badge visible" → medium-wide
+- "full body visible from head to feet" → wide
+Banana 2 infers framing from the named visible-and-sharp detail.
+
+Crop: signal cropped-out content through OMISSION, not negation. Do NOT write
+"NO floor visible" / "NO feet visible" / "NO background props" — the negation
+tokens occasionally invoke rendering of the negated item. Just don't mention
+the cropped content. What's unnamed at tight framing = not rendered.
+
+Subject orientation: explicit per subject ("faces the camera / looks forward /
+looks down / turns toward him / closes her eyes").
+
+Background: single blur statement at the end ("background: slightly out-of-focus
+clinic interior" / "background: blurred kitchen counter and pendant lights").
+
+BANNED on decode side (these tokens push the VLM into wrong-values coordinate
+grammar):
+  viewer-left / viewer-right / upper-third line / lower-third line / left half /
+  right half / chest-up two-shot / cropped at mid-chest / NO floor visible /
+  NO feet visible / NO background visible / heads near the upper-third /
+  rule of thirds.
+
+Worked example (Dr. Kim Image 1 frame — extreme face-macro, doctor face partial
+top-right, patient face dominating lower-left + center):
+
+  WRONG (coordinate, pre-v712):
+    "Tight chest-up two-shot. Patient on viewer-left filling left half. Main
+    character stands close beside her on viewer-right. Heads near upper-third
+    line. Cropped at mid-chest, NO floor visible, NO feet visible."
+
+  RIGHT (relational, v712):
+    "The main character with tan-framed glasses and dark hair leans forward
+    over the right shoulder of a white woman in her 60s with a short blonde
+    bob. He points a purple-gloved index finger DOWN at her forehead from
+    above, the fingertip near her right temple. She faces the camera and
+    looks forward, deep horizontal forehead wrinkles and dark circles under
+    her eyes clearly visible. His face is close to her head, faces nearly
+    touching. The camera focuses sharply on both their expressions.
+    Background: slightly out-of-focus clinic interior."
+
+Five geometric constraints encoded in the RIGHT version:
+  1. Doctor above woman (via "over the right shoulder of" + "from above")
+  2. Woman lower-frame (via "leans forward over")
+  3. Hand crossing down (via "points DOWN at her forehead from above")
+  4. Hand near her right temple (via "fingertip near her right temple")
+  5. Both faces visible + sharp (via "camera focuses sharply on both")
+
+Shot size: encoded by detail-listing (forehead wrinkles + dark eye circles
+visible) = close-macro inferred.
+
+Crop: encoded by omission — no clothing below chest, no feet, no floor
+mentioned at all.
+
+Anchor props in field `anchor_props_with_positions`: position relative to
+SUBJECTS, not frame quadrants. "Purple-gloved finger near her right temple"
+NOT "purple-gloved hand mid-right of frame". "Saffron bottle in his left
+hand, held up to camera" NOT "saffron bottle viewer-right at chest height".
+
+Carve-out — when relational is genuinely ambiguous (two subjects at the same
+vertical level with no clear above/below relationship, both at the same depth,
+with no third anchor to disambiguate), lateral relational prepositions allowed
+(beside / next to / between / on either side of). Coordinate fallback only as
+LAST resort, never on the primary subject geometry sentence.
 """
 
 
