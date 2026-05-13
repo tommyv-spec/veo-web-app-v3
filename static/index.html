@@ -6875,18 +6875,31 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
         }
         
-        // v726 — date-window filter for the jobs sidebar. Defaults to 3
-        // days; "Show older" escalates 3 → 14 → 90 → 0 (all).
-        // v728 — limit scales with window so older rows actually surface
-        // when the user widens. Pre-v728 the hard limit=50 cap masked
-        // the widen on accounts with >50 jobs.
+        // v726 — date-window filter for the jobs sidebar. Defaults to 3 days.
+        // v728 — limit scales with window so older rows surface on widen.
+        // v729 — fine-grained day-by-day escalation. The 3 → 14 → 90 → 0
+        // jumps from v726 were too coarse: a single click could trigger
+        // a 1000-row server response that visibly stalled the UI while
+        // the user was on a different tab. Step table now adds rows
+        // gradually so the increment is fast even on cold-cache.
         window._jobsSinceDays = 3;
+        // Step table — each click moves to the next entry. Past 0 = stays at 0 (all).
+        const JOBS_WINDOW_STEPS = [3, 4, 5, 6, 7, 10, 14, 21, 30, 45, 60, 90, 180, 365, 0];
+        function _jobsNextStep(cur) {
+            const idx = JOBS_WINDOW_STEPS.indexOf(cur);
+            if (idx < 0) return 7;  // unknown current → jump to 7d
+            if (idx >= JOBS_WINDOW_STEPS.length - 1) return 0;
+            return JOBS_WINDOW_STEPS[idx + 1];
+        }
         function _jobsLimitForWindow(d) {
-            // 3d → 50, 14d → 300, 90d → 1000, all → 2000. Server caps at 2000.
+            // Conservative growth so day-by-day widen doesn't shock the server.
             if (d === 0) return 2000;
             if (d <= 3) return 50;
-            if (d <= 14) return 300;
-            if (d <= 90) return 1000;
+            if (d <= 7) return 80;
+            if (d <= 14) return 150;
+            if (d <= 30) return 300;
+            if (d <= 90) return 600;
+            if (d <= 365) return 1000;
             return 2000;
         }
         function _jobsQuery() {
@@ -6906,25 +6919,44 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 return;
             }
             const rows=jobs.map(j=>{const bl={'flow':'FLOW','api':'API','prompt_only':'PROMPT','import':'ASSEMBLE'};const bn=bl[j.backend]||j.backend||'API';const thumb=j.first_frame_url?`<img class="job-thumb" src="${j.first_frame_url}" alt="" onerror="this.outerHTML='<div class=\\'job-thumb-placeholder\\'>🎬</div>'">`:`<div class="job-thumb-placeholder">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`;const dlg=j.first_dialogue?`<div class="job-dialogue">${j.first_dialogue}</div>`:'';return`<div class="job-item ${selectedJobId===j.id?'selected':''}" onclick="selectJob('${j.id}')"><div class="job-body">${thumb}<div class="job-meta"><div class="job-badges"><span class="badge badge-${j.status}">${j.status}</span><span class="badge-backend badge-backend-${j.backend||'api'}">${bn}</span>${j.has_export?'<span class="badge badge-export">🎬</span>':''}${j.has_voice_clone?'<span class="badge badge-voice">🎤</span>':''}<span class="job-id">${j.id.slice(0,8)}</span></div>${dlg}</div></div><div class="progress-bar" style="margin-top:8px"><div class="progress-fill" style="width:${j.progress_percent}%"></div></div><div class="progress-text"><span>${j.progress_percent.toFixed(0)}%</span><span>${j.completed_clips}/${j.total_clips}</span></div></div>`}).join('');
-            // v726 + v728 — "Show older" footer. Button (not <a javascript:>)
-            // to bypass CSP. Renders even at since_days=0 so user has a way
-            // to manually re-tighten ("Reset to 3d" link in that mode).
+            // v726 + v728 + v729 — "Show older" footer.
+            // v729 — label shows next step explicitly (+1d / +N days) so the
+            // operator knows how much the click will widen. Two-button layout
+            // when sd > 0: "+1 day" small step (when next is exactly +1d) /
+            // "Show older (Nd → Md)" step / "Show all" jump.
             const sd = window._jobsSinceDays;
+            const nextStep = _jobsNextStep(sd);
             const countStr = `${jobs.length} job${jobs.length===1?'':'s'}`;
-            const showOlder = sd > 0
-                ? `<div style="padding:10px;text-align:center;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border-color);margin-top:8px"><div style="margin-bottom:6px">Showing ${countStr} from last ${sd} day${sd===1?'':'s'}</div><button class="btn btn-secondary btn-sm" onclick="jobsShowOlder()" style="padding:4px 12px;font-size:11px">Show older →</button></div>`
-                : `<div style="padding:10px;text-align:center;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border-color);margin-top:8px"><div style="margin-bottom:6px">Showing ${countStr} (all time)</div><button class="btn btn-secondary btn-sm" onclick="jobsResetWindow()" style="padding:4px 12px;font-size:11px">↺ Reset to 3 days</button></div>`;
+            let footerInner;
+            if (sd === 0) {
+                footerInner = `<div style="margin-bottom:6px">Showing ${countStr} (all time)</div><button class="btn btn-secondary btn-sm" onclick="jobsResetWindow()" style="padding:4px 12px;font-size:11px">↺ Reset to 3 days</button>`;
+            } else {
+                const delta = nextStep === 0 ? 'all' : `+${nextStep - sd}d → ${nextStep}d`;
+                const stepBtn = `<button class="btn btn-secondary btn-sm" onclick="jobsShowOlder()" style="padding:4px 12px;font-size:11px;margin-right:6px">Show older (${delta})</button>`;
+                const allBtn = nextStep === 0
+                    ? ''
+                    : `<button class="btn btn-secondary btn-sm" onclick="jobsShowAll()" style="padding:4px 12px;font-size:11px;opacity:0.7">Show all</button>`;
+                footerInner = `<div style="margin-bottom:6px">Showing ${countStr} from last ${sd} day${sd===1?'':'s'}</div><div style="display:flex;justify-content:center;gap:6px;flex-wrap:wrap">${stepBtn}${allBtn}</div>`;
+            }
+            const showOlder = `<div style="padding:10px;text-align:center;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border-color);margin-top:8px">${footerInner}</div>`;
             c.innerHTML = rows + showOlder;
             }catch(e){console.warn('[refreshJobsList] failed:', e);}
         }
 
-        // v726 — escalate jobs sidebar window: 3 → 14 → 90 → 0 (all).
-        // v728 — log + raise pre-existing 50-cap so older jobs surface.
+        // v726 — escalate jobs sidebar window.
+        // v729 — day-by-day via JOBS_WINDOW_STEPS table (3,4,5,6,7,10,14,...).
         window.jobsShowOlder = function() {
             const cur = window._jobsSinceDays;
-            const next = cur === 3 ? 14 : cur === 14 ? 90 : cur === 90 ? 0 : 0;
-            console.log('[v726] jobsShowOlder: ' + cur + 'd → ' + (next === 0 ? 'all' : next + 'd'));
+            const next = _jobsNextStep(cur);
+            console.log('[v729] jobsShowOlder: ' + cur + 'd → ' + (next === 0 ? 'all' : next + 'd') + ' (limit=' + _jobsLimitForWindow(next) + ')');
             window._jobsSinceDays = next;
+            refreshJobsList();
+        };
+        // v729 — jump straight to all-time. For when the operator knows
+        // they want everything and doesn't want N clicks.
+        window.jobsShowAll = function() {
+            console.log('[v729] jobsShowAll: → all (limit=' + _jobsLimitForWindow(0) + ')');
+            window._jobsSinceDays = 0;
             refreshJobsList();
         };
         window.jobsResetWindow = function() {
@@ -14787,17 +14819,35 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
 
             // Update summary count + v726 Show-older affordance.
-            // v728 — <button onclick> instead of <a href="javascript:"> to
-            // bypass CSP and match other in-app buttons.
+            // v728 — <button onclick> instead of <a href="javascript:"> to bypass CSP.
+            // v729 — day-by-day step + "show all" alternative.
             const summary = document.getElementById('imgNodesSummary');
             if (summary) {
                 const totalReady = imgState.nodes.filter(n => n.status === 'ready').length;
                 const sd = (imgState && typeof imgState.sinceDays === 'number') ? imgState.sinceDays : 3;
-                const olderBtn = sd > 0
-                    ? ` · <button onclick="imgShowOlder()" style="background:none;border:none;color:var(--accent);cursor:pointer;padding:0;font:inherit;text-decoration:underline">Show older (${sd}d) →</button>`
-                    : ` · <button onclick="imgResetWindow()" style="background:none;border:none;color:var(--accent);cursor:pointer;padding:0;font:inherit;text-decoration:underline">↺ Reset 3d</button>`;
-                summary.innerHTML = `${imgState.nodes.length} node${imgState.nodes.length === 1 ? '' : 's'} · ${totalReady} ready${olderBtn}`;
+                const linkStyle = 'background:none;border:none;color:var(--accent);cursor:pointer;padding:0;font:inherit;text-decoration:underline';
+                let trailingBtns;
+                if (sd === 0) {
+                    trailingBtns = ` · <button onclick="imgResetWindow()" style="${linkStyle}">↺ Reset 3d</button>`;
+                } else {
+                    const nextSd = _imgNextStep(sd);
+                    const delta = nextSd === 0 ? 'all' : `+${nextSd - sd}d`;
+                    trailingBtns = ` · <button onclick="imgShowOlder()" style="${linkStyle}">Show older (${delta})</button>`;
+                    if (nextSd !== 0) {
+                        trailingBtns += ` · <button onclick="imgShowAll()" style="${linkStyle};opacity:0.7">all</button>`;
+                    }
+                }
+                summary.innerHTML = `${imgState.nodes.length} node${imgState.nodes.length === 1 ? '' : 's'} · ${totalReady} ready (${sd === 0 ? 'all' : sd + 'd'})${trailingBtns}`;
             }
+        }
+
+        // v729 — images sidebar uses the same step table as jobs sidebar.
+        const IMG_WINDOW_STEPS = [3, 4, 5, 6, 7, 10, 14, 21, 30, 45, 60, 90, 180, 365, 0];
+        function _imgNextStep(cur) {
+            const idx = IMG_WINDOW_STEPS.indexOf(cur);
+            if (idx < 0) return 7;
+            if (idx >= IMG_WINDOW_STEPS.length - 1) return 0;
+            return IMG_WINDOW_STEPS[idx + 1];
         }
 
         // v726 + v728 — reset images window back to 3 days.
@@ -14807,13 +14857,20 @@ Example: A realistic vertical video of a professional presenter speaking directl
             imgState._prevActiveIds = null;
             imgRefreshNodes(false);
         };
+        // v729 — jump straight to all-time for images sidebar.
+        window.imgShowAll = function() {
+            console.log('[v729] imgShowAll: → all');
+            imgState.sinceDays = 0;
+            imgState._prevActiveIds = null;
+            imgRefreshNodes(false);
+        };
 
-        // v726 — escalate the images sidebar date window: 3 → 14 → 90 → 0 (all).
-        // Triggers a fresh full /nodes fetch with the wider window.
+        // v726 — escalate the images sidebar date window.
+        // v729 — day-by-day via IMG_WINDOW_STEPS table.
         window.imgShowOlder = function() {
             const cur = (imgState.sinceDays === undefined) ? 3 : imgState.sinceDays;
-            const next = cur === 3 ? 14 : cur === 14 ? 90 : cur === 90 ? 0 : 0;
-            console.log('[v726] imgShowOlder: ' + cur + 'd → ' + (next === 0 ? 'all' : next + 'd'));
+            const next = _imgNextStep(cur);
+            console.log('[v729] imgShowOlder: ' + cur + 'd → ' + (next === 0 ? 'all' : next + 'd'));
             imgState.sinceDays = next;
             // Drop the active-poll signature so the next tick can't short-circuit.
             imgState._prevActiveIds = null;
