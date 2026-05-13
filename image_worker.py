@@ -5520,7 +5520,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             # active state before persisting so legacy and dict views
             # never diverge.
             #
-            # v713 — Only mirror when current_project_url is non-None.
+            # v723 — Only mirror when current_project_url is non-None.
             # _ensure_project_ready's path-2 (switching jobs, no prior to
             # reuse) clears current_project_url to None and calls
             # _save_state BEFORE updating current_job_key, so a naive
@@ -5924,43 +5924,60 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
         # is the listener-attached one.
         active_in_flight = [j for j in in_flight.values()
                             if j.status in ("submitted", "downloading")]
-        cross_batch_active = listener_state['attached'] or cross_batch
-        if active_in_flight and not cross_batch_active:
-            current_batch = project_state.get("current_job_key")
-            if current_batch and current_batch != new_job_key:
-                print(f"[API:submit] ⏸ Node {node_id} is batch '{new_job_key}' but {len(active_in_flight)} in-flight on '{current_batch}' — releasing claim, will re-queue", flush=True)
-                # v550: release with retry + extended timeout. The original
-                # path used a 10s timeout and gave up on first failure,
-                # relying on the 10-min TTL to clear the claim. During
-                # transient network stalls (user's log: ReadTimeout
-                # cascading on /release call) that means up to 10
-                # minutes of work blocked. Retry up to 3 times with
-                # progressively longer timeouts; if all fail, fall
-                # back to TTL but log it clearly so the operator knows.
-                released = False
-                last_err = None
-                for attempt, t_out in enumerate((10, 20, 30), start=1):
-                    try:
-                        _api_request(api_url, api_key, "POST",
-                                     f"/jobs/{node_id}/release",
-                                     params={"worker_id": worker_id},
-                                     timeout=t_out)
-                        released = True
-                        if attempt == 1:
-                            print(f"[API:submit] ↩ Released node {node_id} back to queue", flush=True)
-                        else:
-                            print(f"[API:submit] ↩ Released node {node_id} back to queue (retry {attempt})", flush=True)
-                        break
-                    except Exception as e:
-                        last_err = e
-                        if attempt < 3:
-                            # brief backoff between retries — server
-                            # might just be momentarily slow.
-                            time.sleep(0.5 * attempt)
-                        continue
-                if not released:
-                    print(f"[API:submit] ⚠ Release failed after 3 attempts (10-min TTL will clear): {last_err}", flush=True)
-                return False
+        cross_batch_active = listener_state['attached'] or cross_batch  # retained for log-only context
+        # v724 — Cross-PROJECT submits ALWAYS block while in-flight jobs
+        # exist on the current project, regardless of cross_batch_active.
+        # v625 assumed the v624 network listener handles attribution across
+        # project switches — true only when Flow's batchGenerateImages
+        # response arrives BEFORE we navigate to the next project. For
+        # any render slower than the gap between submit and the next
+        # cross-project claim (~10-30s typical), the response is
+        # aborted by the navigation, Tier A captured_urls_by_node never
+        # populates, tile_id DOM lookup returns not_found (tiles are
+        # on the OTHER project's gallery), and at age=90s v709
+        # STUCK_RETRY resubmits a fresh copy. Original 4 Banana renders
+        # complete server-side and rot in the abandoned gallery —
+        # wasted credits + ~5min wall penalty per orphaned job.
+        # Surfaced 2026-05-13 from node 1208: pending 196s on HCC page
+        # while its tiles rendered on man arm project dee3a7db, then
+        # STUCK_RETRY fired and re-rendered the whole job. Reverts v625
+        # cross-batch-on-listener default for the cross-PROJECT case
+        # only; same-project parallel slots still proceed normally.
+        current_batch = project_state.get("current_job_key")
+        if active_in_flight and current_batch and current_batch != new_job_key:
+            print(f"[API:submit] ⏸ Node {node_id} is batch '{new_job_key}' but {len(active_in_flight)} in-flight on '{current_batch}' — releasing claim, will re-queue (v724 cross-project block)", flush=True)
+            # v550: release with retry + extended timeout. The original
+            # path used a 10s timeout and gave up on first failure,
+            # relying on the 10-min TTL to clear the claim. During
+            # transient network stalls (user's log: ReadTimeout
+            # cascading on /release call) that means up to 10
+            # minutes of work blocked. Retry up to 3 times with
+            # progressively longer timeouts; if all fail, fall
+            # back to TTL but log it clearly so the operator knows.
+            released = False
+            last_err = None
+            for attempt, t_out in enumerate((10, 20, 30), start=1):
+                try:
+                    _api_request(api_url, api_key, "POST",
+                                 f"/jobs/{node_id}/release",
+                                 params={"worker_id": worker_id},
+                                 timeout=t_out)
+                    released = True
+                    if attempt == 1:
+                        print(f"[API:submit] ↩ Released node {node_id} back to queue", flush=True)
+                    else:
+                        print(f"[API:submit] ↩ Released node {node_id} back to queue (retry {attempt})", flush=True)
+                    break
+                except Exception as e:
+                    last_err = e
+                    if attempt < 3:
+                        # brief backoff between retries — server
+                        # might just be momentarily slow.
+                        time.sleep(0.5 * attempt)
+                    continue
+            if not released:
+                print(f"[API:submit] ⚠ Release failed after 3 attempts (10-min TTL will clear): {last_err}", flush=True)
+            return False
 
         print(f"\n[API:submit] → Claimed job: node {node_id}" + (f" ({node_name})" if node_name else ""), flush=True)
         print(f"[API:submit]    Prompt: {prompt[:80]}{'...' if len(prompt) > 80 else ''}", flush=True)
