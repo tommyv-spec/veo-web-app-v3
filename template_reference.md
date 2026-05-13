@@ -9612,6 +9612,224 @@ ONLY THEN claim v722 prevents persona wardrobe leak.
 
 ---
 
+### v727 — Diff-merge polling endpoints (`/api/images/nodes/active` + `/api/jobs/{job_id}/clips/active`)
+
+**Problem.** The platform has three polling cycles, none of which previously scoped their fetches to rows that could still change.
+
+| Cycle | File | Cadence | Endpoint | Pre-v727 scope |
+|---|---|---|---|---|
+| Images sidebar | `static/index.html:imgStartPolling` | 2s when on images tab (v656 gate) | `GET /api/images/nodes` | Full user node tree |
+| Selected video job | `static/index.html:startPolling` (selectJob) | 5s while a job is selected | `GET /api/jobs/{id}/clips` | All clips of selected job |
+| Global jobs list | `static/index.html:globalJobsRefreshTimer` | 30s | `GET /api/jobs` (limit=50) | Last 50 jobs |
+
+v640 added ETag/304 to `/nodes` which saves bandwidth on idle ticks — but the SERVER still does the full SELECT + 4 eager joins + MD5 of 2.9 MB body every tick to decide whether the ETag matches. v656 gated the 2s loop to the images tab so non-images tabs stop hitting it entirely. v726 (paired with v727) trims the INITIAL fetch via date window. v727 trims the POLLING fetch — the steady-state work the user pays for the entire time the page is open.
+
+**Insight.** A poll only needs rows whose state can still change. For images: `status IN ('queued','generating','draft')` — terminal `ready` / `failed` / `superseded` nodes won't flip on their own. For clips: non-terminal status OR `(completed AND approval_status='pending_review')` — already-approved or rejected clips also won't flip without user input. The diff endpoint serves exactly that subset. The client merges the response into its local cache and only triggers a full re-render when something visibly changed.
+
+**Endpoint 1 — `GET /api/images/nodes/active`** (image_platform.py:1910).
+
+```python
+ACTIVE_STATUSES = ("queued", "generating", "draft")
+nodes = read_query_with_retry(db, lambda: db.query(ImageNode).filter(
+    ImageNode.user_id == current_user.id,
+    ImageNode.status.in_(ACTIVE_STATUSES),
+).options(
+    selectinload(ImageNode.variants),
+    selectinload(ImageNode.parent_edges).joinedload(ImageEdge.parent),
+    selectinload(ImageNode.child_edges).joinedload(ImageEdge.child),
+).order_by(ImageNode.created_at.desc()).all())
+```
+
+Eager-load chain matches `/nodes` so the response shape is interchangeable for client merge. Same ETag/304 pattern — idle ticks (no active nodes, or active set unchanged) return 49 B 304. Index `ix_image_nodes_user_status` on `(user_id, status)` supports the `status IN(...)` filter inside the user partition.
+
+**Endpoint 2 — `GET /api/jobs/{job_id}/clips/active`** (main.py:3427).
+
+```python
+ACTIVE_CLIP_STATUSES = (
+    ClipStatus.PENDING.value, ClipStatus.GENERATING.value,
+    ClipStatus.RETRYING.value, ClipStatus.REDO_QUEUED.value,
+    ClipStatus.FLOW_REDO_QUEUED.value, ClipStatus.WAITING_APPROVAL.value,
+)
+clips = db.query(Clip).filter(
+    Clip.job_id == job_id,
+    or_(
+        Clip.status.in_(ACTIVE_CLIP_STATUSES),
+        and_(
+            Clip.status == ClipStatus.COMPLETED.value,
+            or_(
+                Clip.approval_status == "pending_review",
+                Clip.approval_status.is_(None),
+            ),
+        ),
+    ),
+).order_by(Clip.clip_index).all()
+```
+
+Returns the same `ClipResponse` shape as `/clips` (lineup_set + audio_pair fields + replacement_start_frame) so client can merge by `id`. Index `ix_clips_job_status` on `(job_id, status)` supports the filter.
+
+**Frontend wiring — 2s image poll.**
+
+`imgRefreshNodesActive()` is the new diff-merge poll function in `static/index.html`:
+
+1. Fetch `/api/images/nodes/active`. If `304`, return (nothing changed).
+2. Build `newActiveIds = Set(activeNodes.map(n => n.id))`.
+3. For each active node, replace its row in `imgState.nodesById[n.id]`.
+4. Compute `transitioned = [...prevActiveIds].filter(id => !newActiveIds.has(id))` — nodes that WERE active last tick and are no longer in this response. These transitioned to terminal (`ready` / `failed`).
+5. If `transitioned.length > 0`, fall through to `imgRefreshNodes(true)` for one full reconciliation — this picks up the new terminal state AND triggers the existing v558 notification dispatch block (`imgNotifyReadyForChoice` / `imgNotifyFailed`).
+6. Otherwise, just re-sort `imgState.nodes` from `nodesById` and re-render the list.
+
+The 2s loop in `imgStartPolling` swaps `imgRefreshNodes(true)` → `imgRefreshNodesActive()` for the hot path. Manual refresh, initial load, and `Show older →` (v726) still use the full `imgRefreshNodes(false)`.
+
+**Frontend wiring — 5s clips poll.**
+
+The 5s `selectJob` poll's `loadClips(id)` call (when the job is running or has active clips) is gated by a probe:
+
+```javascript
+const ar = await fetch(`${API}/jobs/${id}/clips/active`);
+const activeRows = await ar.json();
+const sig = activeRows
+    .map(r => `${r.id}:${r.status}:${r.approval_status||''}:${r.error_code||''}`)
+    .sort().join('|');
+const prevSig = window._clipsActiveSig || null;
+window._clipsActiveSig = sig;
+if (sig !== prevSig) {
+    loadClips(id);  // active set or its state changed — refresh DOM
+}
+// else: skip — DOM still reflects truth
+```
+
+`selectJob(id)` clears `window._clipsActiveSig = null` so a new job's first poll tick always triggers a full `loadClips`.
+
+**Payload comparison.**
+
+| Scenario | Pre-v727 | Post-v727 |
+|---|---|---|
+| Images idle (200 nodes, 0 active) | `/nodes` 2s: full SELECT + 4 eager joins + MD5 of 2.9 MB → 49 B 304 | `/nodes/active` 2s: indexed SELECT on `status IN(...)` returns 0 rows + MD5 of ~200 B → 49 B 304. Server CPU ~50× cheaper. |
+| Images 1 generating | `/nodes` 2s: full tree, ETag misses each tick → 2.9 MB wire | `/nodes/active` 2s: 1 row payload → ~1 KB wire + transition-detect after row drops out |
+| 50-clip job, 2 active | `/clips` 5s: full 50-clip fetch + DOM diff every tick | `/clips/active` 5s: 2-row probe → signature compare → skip full fetch when signature unchanged |
+| Operator parked on completed job | `/clips` 5s: full 50-clip fetch on every tick (signature never compared) | `/clips/active` 5s: empty probe → signature `''` matches prev `''` → skip full fetch forever (until user navigates) |
+
+**Consistency-window mitigation.** When an active node transitions ready/failed between two polls, the diff path detects it (node ID present last tick, absent now) and triggers exactly ONE full `imgRefreshNodes(true)` to pick up the new terminal status. That full refresh runs the existing notification dispatch block, so v558 ready/failed browser notifications still fire correctly. For clips, the signature changes whenever any visible attribute mutates (status, approval, error_code), which triggers `loadClips(id)` — same DOM-diff path as before.
+
+**Pairing with v640.** ETag is preserved on `/nodes` AND added to `/nodes/active`. Double protection — active filter at server narrows the rowset, 304 short-circuits when even that narrowed set hasn't changed.
+
+**Pairing with v656.** v656 tab-gates the 2s loop. v727 makes the per-tick cost cheaper when it does fire. They stack: v656 stops irrelevant ticks entirely, v727 makes the remaining ticks ~50× cheaper server-side.
+
+**Pairing with v726.** v726 trims the INITIAL fetch via `since_days`. v727 trims the POLLING fetch. Both compose: initial load gets a 3-day-windowed full tree, subsequent polls hit the active-only diff endpoint. Show-older (v726) re-runs a full `imgRefreshNodes(false)` which still uses `?since_days={widerWindow}`.
+
+**Carve-outs.**
+
+- Full `/nodes` endpoint preserved — used by initial load, manual refresh, Show-older window expansion, tab-switch reactivation.
+- Single-node detail endpoint `/nodes/{node_id}` unchanged.
+- Promotion-index batches + jobs callsites unchanged — they hit full endpoints with `since_days=0` per v726.
+- Batch list endpoint `/api/images/batches` unchanged — there is no comparable polling cycle for it.
+
+**DB migrations.** Two indexes ship as idempotent `CREATE INDEX IF NOT EXISTS` migrations:
+
+```sql
+CREATE INDEX IF NOT EXISTS ix_image_nodes_user_status
+  ON image_nodes (user_id, status);
+CREATE INDEX IF NOT EXISTS ix_clips_job_status
+  ON clips (job_id, status);
+```
+
+Postgres path: `image_platform.py:434` (image_nodes) + `models.py:_run_migrations_postgresql` (clips). SQLite path: same SQL works on SQLite 3.3+. Re-runs are no-ops.
+
+**Migration zero required** for the endpoint additions themselves. Indexes are idempotent. Pre-v727 in-flight artifacts unaffected. Browser tabs with stale JS keep hitting old endpoints — they don't get the optimization but don't break either.
+
+**Verification mandatory before claiming fixed.**
+
+1. Open browser DevTools → Network tab → filter `images/nodes`.
+2. Confirm `/api/images/nodes/active` fires every 2s instead of `/api/images/nodes`.
+3. Confirm payload size <500 B when idle (no in-flight nodes).
+4. Idle the tab for 30 s → confirm subsequent ticks return 304 (server-side ETag).
+5. Submit a new image generation → confirm `/nodes/active` count goes from 0 → 1 → 0 across three ticks → confirm the transition tick fires ONE `/api/images/nodes` full refresh (visible in Network tab) → confirm ready notification appears.
+6. Select a video job with active clips → confirm `/api/jobs/{id}/clips/active` fires every 5s → confirm `/api/jobs/{id}/clips` only fires when active signature changes (e.g. clip transitions completed, approval flips).
+7. Check Render deploy logs for `[Migration] PostgreSQL: ensured index — CREATE INDEX IF NOT EXISTS ix_image_nodes_user_status ...` and `... ix_clips_job_status ...`.
+
+ONLY THEN claim v727 cuts polling cost.
+
+---
+
+### v726 — `since_days` query param on list endpoints + Show-older UI escalation
+
+**Problem.** Three list endpoints — `GET /api/jobs`, `GET /api/images/nodes`, `GET /api/images/batches` — loaded every row owned by the current user on every initial fetch. A user with months of history paid the full cost on every page load, even though they typically only care about the last few days. `/jobs` already capped at `limit=50` but had no date scope (a user with 200 old jobs got the 50 most-recent old ones, not the 50 most-recent of any age). `/nodes` returned the full user node tree (with eager-loaded variants + edges) every fetch — measured at 2.9 MB per call in production HAR captures. `/batches` was explicitly not paginated per its docstring ("expected to stay under a few hundred").
+
+**Rule.** Each of the three endpoints gains `since_days: int = Query(default=3, ge=0, le=3650)`. When `>0`, the SQLAlchemy query adds a created_at filter before the existing user-id + ORDER BY + LIMIT clauses:
+
+```python
+if since_days > 0:
+    cutoff = datetime.utcnow() - timedelta(days=since_days)
+    query = query.filter(Job.created_at >= cutoff)  # or ImageNode/ImageJobBatch
+```
+
+`since_days=0` disables the filter and returns the pre-v726 behavior (full user history). The default is `3` so a fresh page load only paints recent rows.
+
+**`/api/images/batches` response shape extension.** Adds `total_unfiltered` (count of rows the user has overall, regardless of window) and `since_days` (echo of the param actually applied) so the frontend can render an accurate "N more older →" count and the current window state. `total` (rows after filter) stays for back-compat.
+
+**Frontend wiring.**
+
+- `imgState.sinceDays = 3` and `window._jobsSinceDays = 3` as default globals.
+- `refreshJobs()` and `refreshJobsList()` append `?since_days=${window._jobsSinceDays}` to `${API}/jobs`.
+- `imgRefreshNodes()` appends `?since_days=${imgState.sinceDays}` to `/api/images/nodes`.
+- Sidebar summary lines render `Show older (Nd) →` affordance when `sinceDays > 0`.
+- `imgShowOlder()` / `jobsShowOlder()` escalate `3 → 14 → 90 → 0`, clear the v727 active-poll signature cache, and re-fetch with the wider window.
+- Empty-state UI also surfaces "Show older →" when filter window is empty.
+
+**Carve-outs (always force `since_days=0`).**
+
+- `imgMaybeRefreshPromotionIndex` (index.html:15252) — fetches `/api/images/batches` + `/api/jobs` together for the 🎥 badge mapping that links promoted batches to video jobs. Must see batches AND jobs older than 3 days so badges resolve correctly when the user is viewing recent work that references older history.
+- `imgFetchExistingBatchNames` (index.html:16882) — fetches `/api/images/batches` for import-modal name collision check. Must see every batch name ever owned to detect duplicates.
+
+Both call sites explicitly pass `?since_days=0` (and the jobs callsite passes `&limit=100`).
+
+**DB indexes (compound, user-partitioned).**
+
+Three indexes ship as idempotent `CREATE INDEX IF NOT EXISTS` migrations:
+
+```sql
+CREATE INDEX IF NOT EXISTS ix_jobs_user_created
+  ON jobs (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_image_nodes_user_created
+  ON image_nodes (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_image_job_batches_user_created
+  ON image_job_batches (user_id, created_at DESC);
+```
+
+Postgres path: `models.py:_run_migrations_postgresql` (jobs) + `image_platform.py:434` (image_nodes + image_job_batches). SQLite path: same SQL works (SQLite supports `IF NOT EXISTS` and `DESC` in compound indexes). Re-runs are no-ops. The compound `(user_id, created_at DESC)` shape lets `WHERE user_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT N` walk the index inside the user partition without a separate sort step.
+
+**Pairing with v640.** ETag on `/nodes` still works with `since_days` because ETag hashes the actual response body, which now contains fewer rows when the filter is active → faster MD5 + smaller body when 304 misses.
+
+**Pairing with v727.** v726 trims the INITIAL fetch. v727 trims the POLLING fetch. They compose — initial load gets a 3-day-windowed full tree; subsequent polls hit the active-only diff endpoint. `Show older` widens the v726 window AND clears the v727 signature so the next poll re-syncs.
+
+**Disambiguation from `limit/offset`.** `limit/offset` is row-count pagination (`?limit=50&offset=100` returns rows 100-150). `since_days` is date-window scope (`?since_days=3` returns rows from the last 3 days, up to the existing limit). Both compose — `?since_days=3&limit=50` returns up to 50 most recent rows created in the last 3 days. They are orthogonal concerns: limit caps the page size, since_days bounds the candidate set.
+
+**Migration zero required.** `since_days=0` returns pre-v726 behavior. In-flight artifacts unaffected. Browser tabs with stale JS keep hitting the endpoints without the param and get the default `3` automatically (FastAPI Query default).
+
+**Touched.**
+
+- `code/main.py` — `list_jobs` signature + `since_days` filter clause.
+- `code/image_platform.py` — `list_nodes` filters list with optional `created_at` predicate; `list_batches` query with optional filter + `total_unfiltered` field; `index_migrations` block in `run_image_platform_migrations()` running after column migrations.
+- `code/models.py` — postgres + sqlite index migrations for `jobs(user_id, created_at DESC)` and `clips(job_id, status)` (the latter for v727).
+- `code/static/index.html` — `imgState.sinceDays` + `window._jobsSinceDays` defaults; `refreshJobs/refreshJobsList/imgRefreshNodes` callsites updated; `imgShowOlder/jobsShowOlder` escalation functions; `Show older →` affordances in sidebar summaries; `imgMaybeRefreshPromotionIndex` + `imgFetchExistingBatchNames` carve-outs to `since_days=0`.
+
+AST-verified. Auto-deploys to Render in 2-3 min.
+
+**Verification mandatory before claiming fixed.**
+
+1. Open browser DevTools → Network tab.
+2. Refresh the page. Confirm `/api/jobs?since_days=3` is the request URL (not `/api/jobs` bare).
+3. Confirm response contains ≤50 jobs and all `created_at` timestamps are within the last 3 days.
+4. Click "Show older →" in the jobs sidebar. Confirm URL escalates to `?since_days=14`. Confirm fresh fetch returns more rows.
+5. Switch to the images tab. Confirm `/api/images/nodes?since_days=3` is the request URL.
+6. Open a batch with a `created_at` older than 3 days. Confirm it does NOT appear in the sidebar until "Show older →" is clicked enough times.
+7. Trigger an import → confirm `/api/images/batches?since_days=0` fires (collision check carve-out preserved).
+8. Check Render deploy logs for the three `[Migration] PostgreSQL: ensured index — CREATE INDEX IF NOT EXISTS ix_*_user_created ...` lines.
+
+ONLY THEN claim v726 reduces initial-load cost.
+
+---
+
 ### v725 — PATCH `ImageSceneAssignment` scene-config fields (no image re-render)
 
 **Problem.** `POST /api/import-scene-table` always creates a fresh `ImageJobBatch` + new `ImageNode` rows. No content-hash dedup. Operators who need to fix scene-level metadata (e.g. v721 violation — `speaker: voiceover` declared when persona is on-camera lip-syncing) have only one path before v725: re-import the corrected markdown → 10+ new Banana 2 image renders + N new Veo clips. Pre-v725 cost on the nuri-prostate retrofit: ~10 image renders + 6 clip renders = ~$1.10 + wall-clock time. The persona / product / scene images themselves are unchanged; only `ImageSceneAssignment.speaker_mode` + `ImageSceneAssignment.voiceover_anchor_image_node_id` columns need to change. `PATCH /api/nodes/{node_id}` exists but only updates per-node fields (`name` / `prompt` / `aspect_ratio` / `resolution` / `model` / `n_variants` / `parents`) — does NOT touch `ImageSceneAssignment` rows. `replace-image` (v710) targets clip start_frames, not scene config. `reconcile-by-content` matches batches → video jobs, not scene metadata. Result: no in-place editing path for scene-config drift.
