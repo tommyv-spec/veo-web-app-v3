@@ -428,6 +428,30 @@ def run_image_platform_migrations():
                 except Exception as e:
                     log.warning(f"[image_platform] Migration skipped {table}.{column} widen: {e}")
 
+    # v726: indexes for since_days date-window filter + status diff endpoint.
+    # Compound (user_id, created_at DESC) lets ORDER BY created_at DESC LIMIT N
+    # scan inside the user partition. Compound (user_id, status) supports the
+    # v727 /nodes/active endpoint which filters by status IN (...) per user.
+    # CREATE INDEX IF NOT EXISTS is idempotent on both Postgres and SQLite.
+    index_migrations = [
+        ("image_nodes", "ix_image_nodes_user_created",
+         "CREATE INDEX IF NOT EXISTS ix_image_nodes_user_created ON image_nodes (user_id, created_at DESC)"),
+        ("image_nodes", "ix_image_nodes_user_status",
+         "CREATE INDEX IF NOT EXISTS ix_image_nodes_user_status ON image_nodes (user_id, status)"),
+        ("image_job_batches", "ix_image_job_batches_user_created",
+         "CREATE INDEX IF NOT EXISTS ix_image_job_batches_user_created ON image_job_batches (user_id, created_at DESC)"),
+    ]
+    with engine.connect() as conn:
+        for table, index_name, sql in index_migrations:
+            if table not in existing_tables:
+                continue
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+                log.info(f"[image_platform] Migration: ensured {index_name} on {table}")
+            except Exception as e:
+                log.warning(f"[image_platform] Migration skipped {index_name}: {e}")
+
     # v447: backfill user_id on existing rows after the column exists
     _backfill_user_id_ownership()
 
@@ -1836,6 +1860,7 @@ def _delete_variant_files(node: ImageNode):
 @router.get("/nodes")
 def list_nodes(
     request: Request,
+    since_days: int = Query(default=3, ge=0, le=3650),
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -1873,8 +1898,16 @@ def list_nodes(
     # pre_ping didn't catch (mid-second connection death). One
     # retry on dead-connection errors is the documented production
     # SQLAlchemy pattern for read paths.
+    # v726 — since_days date-window filter (default 3 days).
+    # since_days=0 disables, returning the full user history (used by
+    # the "Show older" UI escalation: 3 → 14 → 90 → 0).
+    filters = [ImageNode.user_id == current_user.id]
+    if since_days > 0:
+        cutoff = datetime.utcnow() - timedelta(days=since_days)
+        filters.append(ImageNode.created_at >= cutoff)
+
     nodes = read_query_with_retry(db, lambda: db.query(ImageNode).filter(
-        ImageNode.user_id == current_user.id
+        *filters
     ).options(
         selectinload(ImageNode.variants),
         selectinload(ImageNode.parent_edges).joinedload(ImageEdge.parent),
@@ -1896,6 +1929,54 @@ def list_nodes(
     import json as _json
     from fastapi.responses import Response as _FAResponse
     payload = {"nodes": [n.to_dict(include_variants=True) for n in nodes]}
+    body = _json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+    etag = '"' + hashlib.md5(body).hexdigest() + '"'
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, max-age=0, must-revalidate",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return _FAResponse(status_code=304, headers=headers)
+    return _FAResponse(content=body, media_type="application/json", headers=headers)
+
+
+@router.get("/nodes/active")
+def list_active_nodes(
+    request: Request,
+    db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v727 — diff endpoint for the 2s sidebar poll.
+
+    Returns ONLY nodes whose status can still change
+    (``queued`` / ``generating`` / ``draft``). Typical payload is 0-10
+    rows even for users with hundreds of total nodes.
+
+    The frontend's 2s ``imgStartPolling`` loop calls this instead of the
+    full ``/nodes`` endpoint. The full endpoint is reserved for initial
+    page load, manual refresh, and tab-switch reactivation.
+
+    Active set includes the same eager-loaded relationships as ``/nodes``
+    so the response shape is interchangeable for status-merge into the
+    client cache. ETag/304 short-circuits idle polls when nothing changes.
+    """
+    ACTIVE_STATUSES = ("queued", "generating", "draft")
+    nodes = read_query_with_retry(db, lambda: db.query(ImageNode).filter(
+        ImageNode.user_id == current_user.id,
+        ImageNode.status.in_(ACTIVE_STATUSES),
+    ).options(
+        selectinload(ImageNode.variants),
+        selectinload(ImageNode.parent_edges).joinedload(ImageEdge.parent),
+        selectinload(ImageNode.child_edges).joinedload(ImageEdge.child),
+    ).order_by(ImageNode.created_at.desc()).all())
+
+    import hashlib
+    import json as _json
+    from fastapi.responses import Response as _FAResponse
+    payload = {
+        "nodes": [n.to_dict(include_variants=True) for n in nodes],
+        "active_count": len(nodes),
+    }
     body = _json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
     etag = '"' + hashlib.md5(body).hexdigest() + '"'
     headers = {
@@ -5895,24 +5976,35 @@ def backfill_batch_from_nodes(
 
 @router.get("/batches")
 def list_batches(
+    since_days: int = Query(default=3, ge=0, le=3650),
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """List every ImageJobBatch owned by the current user.
-    Lightweight — used by the Import modal frontend to detect name collisions
-    before the user submits (so the warning surfaces instantly, without a
-    round-trip for the 409).
+    """List ImageJobBatch rows owned by the current user.
 
-    v461: also includes promoted_video_job_id + name_prefix so the sidebar's
+    v726 — ``since_days`` defaults to 3, restricting the result set to
+    batches created in the last N days. ``since_days=0`` disables the
+    filter (used by the "Show older" UI escalation).
+
+    Used by the Import modal frontend to detect name collisions and by
+    the sidebar attention banner. Response includes ``total`` (rows in
+    the window) and ``total_unfiltered`` (rows the user has overall) so
+    the UI can render "N more older →".
+
+    v461: also includes promoted_video_job_id + name_prefix so the
     attention banner can tell which batches have been promoted to video
-    (and which video job they're tied to) without an N+1 lookup per batch.
-
-    Not paginated — batches per user are expected to stay under a few
-    hundred. If that becomes a concern, add ``?limit=`` + ``?search=``.
+    (and which video job they're tied to) without an N+1 lookup.
     """
-    batches = db.query(ImageJobBatch).filter(
+    query = db.query(ImageJobBatch).filter(
         ImageJobBatch.user_id == current_user.id
-    ).order_by(ImageJobBatch.created_at.desc()).all()
+    )
+    total_unfiltered = query.count()
+
+    if since_days > 0:
+        cutoff = datetime.utcnow() - timedelta(days=since_days)
+        query = query.filter(ImageJobBatch.created_at >= cutoff)
+
+    batches = query.order_by(ImageJobBatch.created_at.desc()).all()
     return {
         "batches": [
             {
@@ -5925,6 +6017,8 @@ def list_batches(
             for b in batches
         ],
         "total": len(batches),
+        "total_unfiltered": total_unfiltered,
+        "since_days": since_days,
     }
 
 

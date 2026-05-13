@@ -2824,17 +2824,27 @@ async def list_jobs(
     status: Optional[str] = None,
     limit: int = Query(default=50, le=100),
     offset: int = 0,
+    since_days: int = Query(default=3, ge=0, le=3650),
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """List all jobs for the current user only"""
+    """List jobs for the current user.
+
+    v726 — ``since_days`` defaults to 3, restricting the result set to jobs
+    created in the last N days. ``since_days=0`` disables the filter (used
+    by the "Show older" UI escalation: 3 → 14 → 90 → 0).
+    """
     query = db.query(Job).filter(
         Job.user_id == current_user.id
     )
-    
+
     if status:
         query = query.filter(Job.status == status)
-    
+
+    if since_days > 0:
+        cutoff = datetime.utcnow() - timedelta(days=since_days)
+        query = query.filter(Job.created_at >= cutoff)
+
     jobs = query.order_by(Job.created_at.desc()).offset(offset).limit(limit).all()
     
     # Batch-fetch first clip (clip_index=0) for each job to get dialogue + frame
@@ -3410,6 +3420,95 @@ async def get_job_clips(
             voiceover_anchor_image_node_id=c.voiceover_anchor_image_node_id,
             voiceover_line=c.voiceover_line,
             replacement_start_frame=c.replacement_start_frame,  # v701
+        )
+        for c in clips
+    ]
+
+
+@app.get("/api/jobs/{job_id}/clips/active", response_model=List[ClipResponse])
+async def get_job_clips_active(
+    job_id: str,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v727 — diff endpoint for the 5s clips poll.
+
+    Returns ONLY clips whose status or approval state can still change:
+      - status IN (pending, generating, retrying, redo_queued,
+        flow_redo_queued, waiting_approval)
+      - OR (status == completed AND approval_status == pending_review)
+
+    The frontend's 5s ``selectJob`` poll calls this instead of the full
+    ``/clips`` endpoint. Full endpoint reserved for initial selection,
+    manual refresh, and after-mutation reload. Reduces a 50-clip job's
+    per-poll payload from ~50 clips to typically 1-5.
+
+    Response shape is identical to ``/clips`` so the client can merge
+    rows into the local ``cachedClipsData`` map by ``id``.
+    """
+    from sqlalchemy import or_, and_
+
+    job = get_user_job(db, job_id, current_user)
+
+    ACTIVE_CLIP_STATUSES = (
+        ClipStatus.PENDING.value,
+        ClipStatus.GENERATING.value,
+        ClipStatus.RETRYING.value,
+        ClipStatus.REDO_QUEUED.value,
+        ClipStatus.FLOW_REDO_QUEUED.value,
+        ClipStatus.WAITING_APPROVAL.value,
+    )
+    clips = db.query(Clip).filter(
+        Clip.job_id == job_id,
+        or_(
+            Clip.status.in_(ACTIVE_CLIP_STATUSES),
+            and_(
+                Clip.status == ClipStatus.COMPLETED.value,
+                or_(
+                    Clip.approval_status == "pending_review",
+                    Clip.approval_status.is_(None),
+                ),
+            ),
+        ),
+    ).order_by(Clip.clip_index).all()
+
+    lineup_set = None
+    if job.clip_order_json:
+        try:
+            lineup_ids = json.loads(job.clip_order_json)
+            lineup_set = set(lineup_ids)
+        except (json.JSONDecodeError, KeyError):
+            lineup_set = None
+
+    return [
+        ClipResponse(
+            id=c.id,
+            clip_index=c.clip_index,
+            dialogue_id=c.dialogue_id,
+            dialogue_text=c.dialogue_text,
+            status=c.status,
+            retry_count=c.retry_count,
+            start_frame=c.start_frame,
+            end_frame=c.end_frame,
+            output_filename=c.output_filename,
+            error_code=c.error_code,
+            error_message=c.error_message,
+            approval_status=c.approval_status or "pending_review",
+            generation_attempt=c.generation_attempt or 1,
+            attempts_remaining=3 - (c.generation_attempt or 1),
+            redo_reason=c.redo_reason,
+            versions=deduplicate_versions(c.versions_json, job_id=c.job_id),
+            selected_variant=c.selected_variant if c.selected_variant else 1,
+            total_variants=get_actual_versions_count(c),
+            clip_mode=c.clip_mode or "blend",
+            scene_index=c.scene_index or 0,
+            prompt_text=c.prompt_text or None,
+            in_lineup=c.id in lineup_set if lineup_set else True,
+            clip_role=c.clip_role,
+            paired_clip_id=c.paired_clip_id,
+            voiceover_anchor_image_node_id=c.voiceover_anchor_image_node_id,
+            voiceover_line=c.voiceover_line,
+            replacement_start_frame=c.replacement_start_frame,
         )
         for c in clips
     ]

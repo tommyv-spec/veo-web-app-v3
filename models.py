@@ -756,7 +756,25 @@ def _run_migrations_postgresql(engine):
                 print(f"[Migration] PostgreSQL: ensured column {column} exists in {table}", flush=True)
             except Exception as e:
                 print(f"[Migration] PostgreSQL skipped {column}: {e}", flush=True)
-    
+
+    # v726: indexes for since_days date-window filter + v727 status diff endpoint.
+    # Compound (user_id, created_at DESC) lets the ORDER BY + LIMIT path
+    # walk inside the user partition. Compound (job_id, status) supports
+    # the v727 /clips/active endpoint filtering by status per job.
+    # CREATE INDEX IF NOT EXISTS is idempotent in Postgres 9.5+.
+    index_migrations = [
+        "CREATE INDEX IF NOT EXISTS ix_jobs_user_created ON jobs (user_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_clips_job_status ON clips (job_id, status)",
+    ]
+    with engine.connect() as conn:
+        for sql in index_migrations:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+                print(f"[Migration] PostgreSQL: ensured index — {sql}", flush=True)
+            except Exception as e:
+                print(f"[Migration] PostgreSQL skipped index: {e}", flush=True)
+
     return engine
 
 
@@ -822,6 +840,21 @@ def _run_migrations_sqlite(engine):
             print("[Migration] Ensured user_worker_tokens table exists", flush=True)
         except Exception as e:
             print(f"[Migration] user_worker_tokens table: {e}", flush=True)
+
+    # v726: SQLite indexes — same compound shapes as the Postgres path.
+    # CREATE INDEX IF NOT EXISTS is supported in SQLite 3.3+.
+    sqlite_indexes = [
+        "CREATE INDEX IF NOT EXISTS ix_jobs_user_created ON jobs (user_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_clips_job_status ON clips (job_id, status)",
+    ]
+    with engine.connect() as conn:
+        for sql in sqlite_indexes:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+                print(f"[Migration] SQLite: ensured index — {sql}", flush=True)
+            except Exception as e:
+                print(f"[Migration] SQLite skipped index: {e}", flush=True)
 
 
 @contextmanager

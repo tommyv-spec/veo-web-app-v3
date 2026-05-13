@@ -6875,12 +6875,40 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
         }
         
-        async function refreshJobs(){try{const r=await fetch(`${API}/jobs`);const jobs=await r.json();if(jobs.length>0){hasJobs=true;setActiveState();}await refreshJobsList();}catch(e){}}
+        // v726 — date-window filter for the jobs sidebar. Defaults to 3
+        // days; "Show older" escalates 3 → 14 → 90 → 0 (all).
+        window._jobsSinceDays = 3;
+        async function refreshJobs(){try{const r=await fetch(`${API}/jobs?since_days=${window._jobsSinceDays}`);const jobs=await r.json();if(jobs.length>0){hasJobs=true;setActiveState();}await refreshJobsList();}catch(e){}}
         async function refreshJobsList(){
-            try{const r=await fetch(`${API}/jobs`);const jobs=await r.json();const c=document.getElementById('jobsList');
-            if(!jobs.length){c.innerHTML='<div class="empty"><h3>No jobs yet</h3></div>';return;}
-            c.innerHTML=jobs.map(j=>{const bl={'flow':'FLOW','api':'API','prompt_only':'PROMPT','import':'ASSEMBLE'};const bn=bl[j.backend]||j.backend||'API';const thumb=j.first_frame_url?`<img class="job-thumb" src="${j.first_frame_url}" alt="" onerror="this.outerHTML='<div class=\\'job-thumb-placeholder\\'>🎬</div>'">`:`<div class="job-thumb-placeholder">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`;const dlg=j.first_dialogue?`<div class="job-dialogue">${j.first_dialogue}</div>`:'';return`<div class="job-item ${selectedJobId===j.id?'selected':''}" onclick="selectJob('${j.id}')"><div class="job-body">${thumb}<div class="job-meta"><div class="job-badges"><span class="badge badge-${j.status}">${j.status}</span><span class="badge-backend badge-backend-${j.backend||'api'}">${bn}</span>${j.has_export?'<span class="badge badge-export">🎬</span>':''}${j.has_voice_clone?'<span class="badge badge-voice">🎤</span>':''}<span class="job-id">${j.id.slice(0,8)}</span></div>${dlg}</div></div><div class="progress-bar" style="margin-top:8px"><div class="progress-fill" style="width:${j.progress_percent}%"></div></div><div class="progress-text"><span>${j.progress_percent.toFixed(0)}%</span><span>${j.completed_clips}/${j.total_clips}</span></div></div>`}).join('');}catch(e){}
+            try{const r=await fetch(`${API}/jobs?since_days=${window._jobsSinceDays}`);const jobs=await r.json();const c=document.getElementById('jobsList');
+            if(!jobs.length){
+                // v726 — if filter is active and result empty, offer to widen.
+                if (window._jobsSinceDays > 0) {
+                    c.innerHTML = `<div class="empty"><h3>No jobs in last ${window._jobsSinceDays} day${window._jobsSinceDays===1?'':'s'}</h3><button class="btn btn-secondary btn-sm" onclick="jobsShowOlder()" style="margin-top:10px">Show older →</button></div>`;
+                } else {
+                    c.innerHTML='<div class="empty"><h3>No jobs yet</h3></div>';
+                }
+                return;
+            }
+            const rows=jobs.map(j=>{const bl={'flow':'FLOW','api':'API','prompt_only':'PROMPT','import':'ASSEMBLE'};const bn=bl[j.backend]||j.backend||'API';const thumb=j.first_frame_url?`<img class="job-thumb" src="${j.first_frame_url}" alt="" onerror="this.outerHTML='<div class=\\'job-thumb-placeholder\\'>🎬</div>'">`:`<div class="job-thumb-placeholder">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`;const dlg=j.first_dialogue?`<div class="job-dialogue">${j.first_dialogue}</div>`:'';return`<div class="job-item ${selectedJobId===j.id?'selected':''}" onclick="selectJob('${j.id}')"><div class="job-body">${thumb}<div class="job-meta"><div class="job-badges"><span class="badge badge-${j.status}">${j.status}</span><span class="badge-backend badge-backend-${j.backend||'api'}">${bn}</span>${j.has_export?'<span class="badge badge-export">🎬</span>':''}${j.has_voice_clone?'<span class="badge badge-voice">🎤</span>':''}<span class="job-id">${j.id.slice(0,8)}</span></div>${dlg}</div></div><div class="progress-bar" style="margin-top:8px"><div class="progress-fill" style="width:${j.progress_percent}%"></div></div><div class="progress-text"><span>${j.progress_percent.toFixed(0)}%</span><span>${j.completed_clips}/${j.total_clips}</span></div></div>`}).join('');
+            // v726 — "Show older" footer when the window may be hiding rows.
+            // Always visible while filter is active (we can't know server-side
+            // count without an extra query; 50-result cap means full windows
+            // can also benefit from expansion).
+            const showOlder = window._jobsSinceDays > 0
+                ? `<div style="padding:10px;text-align:center;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border-color);margin-top:8px"><span>Showing last ${window._jobsSinceDays} day${window._jobsSinceDays===1?'':'s'}</span> · <a href="javascript:jobsShowOlder()" style="color:var(--accent);text-decoration:none">Show older →</a></div>`
+                : '';
+            c.innerHTML = rows + showOlder;
+            }catch(e){}
         }
+
+        // v726 — escalate jobs sidebar window: 3 → 14 → 90 → 0 (all).
+        window.jobsShowOlder = function() {
+            const cur = window._jobsSinceDays || 3;
+            const next = cur === 3 ? 14 : cur === 14 ? 90 : cur === 90 ? 0 : 0;
+            window._jobsSinceDays = next;
+            refreshJobsList();
+        };
         
         // Global jobs list refresh timer (updates all jobs periodically)
         let globalJobsRefreshTimer = null;
@@ -6905,6 +6933,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
         
         async function selectJob(id){
             if(selectedJobId===id)return;selectedJobId=id;lastLogId=0;clipStates={};clipVideoKeys={};clipUIKeys={};currentJobStatus=null;currentJobApprovedCount=0;currentJobBackend=null;
+            // v727 — clear active-clips probe signature so the new job's
+            // first poll tick always triggers a full loadClips reload.
+            window._clipsActiveSig = null;
             // v655 — clear image-platform selection so its 2-second poll
             // (imgStartPolling at line 11983) stops firing imgRefreshNodes
             // while the user is on a video job. Without this, navigating
@@ -6986,7 +7017,35 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         job.status === 'queued_for_flow' ||
                         _hasActiveClipsNow
                     )) {
-                        loadClips(id);
+                        // v727 — probe /clips/active before full /clips fetch.
+                        // The active endpoint returns ONLY non-terminal clips
+                        // (typically 1-5 per job vs full 50+). We hash the
+                        // active rows by (id|status|approval_status|error_code).
+                        // If the signature matches the previous tick AND the
+                        // active count is unchanged, nothing visible has
+                        // changed and we skip the full /clips fetch + DOM
+                        // diff entirely. Any signature change or count delta
+                        // falls through to the regular loadClips() path so
+                        // ordering / lineup / approval banner stay correct.
+                        try {
+                            const ar = await fetch(`${API}/jobs/${id}/clips/active`);
+                            if (!ar.ok) { loadClips(id); }
+                            else {
+                                const activeRows = await ar.json();
+                                const sig = activeRows
+                                    .map(r => `${r.id}:${r.status}:${r.approval_status||''}:${r.error_code||''}`)
+                                    .sort()
+                                    .join('|');
+                                const prevSig = window._clipsActiveSig || null;
+                                window._clipsActiveSig = sig;
+                                if (sig !== prevSig) {
+                                    loadClips(id);
+                                }
+                                // else: silent skip — DOM still reflects truth
+                            }
+                        } catch (e) {
+                            loadClips(id);
+                        }
                     }
                     // On ANY status transition out of an interim state, force a
                     // re-render so the body updates. v675 — without this, the
@@ -12902,6 +12961,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // tab button. Auto-managed by imgRefreshNodes.
             pendingChoiceNodes: new Set(),
             notifPermissionAsked: false,
+            // v726 — date-window filter for sidebar /nodes fetch. Defaults
+            // to 3 days; "Show older" escalates 3 → 14 → 90 → 0 (all).
+            sinceDays: 3,
+            totalUnfilteredHint: null,  // set by /nodes response when available
         };
 
         function switchMainTab(tab) {
@@ -12951,6 +13014,57 @@ Example: A realistic vertical video of a professional presenter speaking directl
             imgEnsureNotifPermission();
         }
 
+        // v727 — diff-merge poll path. Hits /nodes/active (returns only
+        // queued/generating/draft rows) instead of the full /nodes tree.
+        // Detects status transitions (active → terminal) by diffing the
+        // active ID set vs. the previous tick; when any node drops out
+        // of the active set, fires ONE full /nodes refresh to pick up
+        // the now-ready/failed node and trigger its notification.
+        // Idle ticks (no active nodes) send 0 bytes back when ETag matches.
+        async function imgRefreshNodesActive() {
+            try {
+                const res = await fetch('/api/images/nodes/active');
+                if (res.status === 304) {
+                    return; // nothing changed since last tick
+                }
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                const activeNodes = data.nodes || [];
+                const newActiveIds = new Set(activeNodes.map(n => n.id));
+                const prevActiveIds = imgState._prevActiveIds || new Set();
+
+                // Merge active rows into the cache (replace each by id).
+                for (const n of activeNodes) {
+                    imgState.nodesById[n.id] = n;
+                }
+
+                // Detect transitions: nodes that were active last tick and
+                // are no longer in the active response → they transitioned
+                // to a terminal state (ready/failed). Force one full refresh
+                // so we pick up the new state + fire notifications via the
+                // existing imgRefreshNodes notification block.
+                const transitioned = [...prevActiveIds].filter(id => !newActiveIds.has(id));
+                imgState._prevActiveIds = newActiveIds;
+
+                if (transitioned.length > 0) {
+                    return imgRefreshNodes(true);
+                }
+
+                // No transitions — just refresh the visible list to reflect
+                // status updates within the active set (progress %, etc).
+                imgState.nodes = Object.values(imgState.nodesById).sort((a, b) => {
+                    const ca = a.created_at || '';
+                    const cb = b.created_at || '';
+                    return cb.localeCompare(ca);
+                });
+                imgRenderNodeList();
+                imgUpdateTabCount();
+                imgUpdateTabBadge();
+            } catch (e) {
+                // Network blip — silent. Next tick retries.
+            }
+        }
+
         function imgStartPolling() {
             imgStopPolling();
             imgState.pollTimer = setInterval(() => {
@@ -12983,7 +13097,13 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     n.status === 'draft'   // draft = waiting on a parent choice
                 );
                 if (hasInFlight || imgState.detailNodeId || imgState.selectedJobKey) {
-                    imgRefreshNodes(true);
+                    // v727 — diff-merge path instead of full /nodes tree.
+                    // Returns only queued/generating/draft rows; on detected
+                    // transitions falls through to imgRefreshNodes(true) for
+                    // notification dispatch. Cuts payload from ~2.9 MB to
+                    // ~200 B on idle ticks even when the user has hundreds
+                    // of terminal nodes in cache.
+                    imgRefreshNodesActive();
                 }
                 imgRefreshWorkerStatus();
             }, 2000);
@@ -13077,7 +13197,11 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         async function imgRefreshNodes(silent = false) {
             try {
-                const res = await fetch('/api/images/nodes');
+                // v726 — pass since_days to scope initial fetch to recent
+                // nodes only (default 3 days). The "Show older" UI escalates
+                // the value in imgState.sinceDays (3 → 14 → 90 → 0=all).
+                const _sd = (imgState && typeof imgState.sinceDays === 'number') ? imgState.sinceDays : 3;
+                const res = await fetch('/api/images/nodes?since_days=' + _sd);
                 if (!res.ok) throw new Error('HTTP ' + res.status);
                 const data = await res.json();
 
@@ -14639,13 +14763,28 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 }
             }
 
-            // Update summary count
+            // Update summary count + v726 Show-older affordance.
             const summary = document.getElementById('imgNodesSummary');
             if (summary) {
                 const totalReady = imgState.nodes.filter(n => n.status === 'ready').length;
-                summary.textContent = `${imgState.nodes.length} node${imgState.nodes.length === 1 ? '' : 's'} · ${totalReady} ready`;
+                const sd = (imgState && typeof imgState.sinceDays === 'number') ? imgState.sinceDays : 3;
+                const olderLink = sd > 0
+                    ? ` · <a href="javascript:imgShowOlder()" style="color:var(--accent);text-decoration:none">Show older (${sd}d) →</a>`
+                    : '';
+                summary.innerHTML = `${imgState.nodes.length} node${imgState.nodes.length === 1 ? '' : 's'} · ${totalReady} ready${olderLink}`;
             }
         }
+
+        // v726 — escalate the images sidebar date window: 3 → 14 → 90 → 0 (all).
+        // Triggers a fresh full /nodes fetch with the wider window.
+        window.imgShowOlder = function() {
+            const cur = (imgState.sinceDays === undefined) ? 3 : imgState.sinceDays;
+            const next = cur === 3 ? 14 : cur === 14 ? 90 : cur === 90 ? 0 : 0;
+            imgState.sinceDays = next;
+            // Drop the active-poll signature so the next tick can't short-circuit.
+            imgState._prevActiveIds = null;
+            imgRefreshNodes(false);
+        };
 
         // Helper: find which group key a node belongs to.
         // Mirrors the keyFor() inside imgRenderNodeList.
@@ -15125,8 +15264,12 @@ Example: A realistic vertical video of a professional presenter speaking directl
             imgState._promotionLastFetch = now;
             try {
                 const [batchesRes, jobsRes] = await Promise.all([
-                    fetch('/api/images/batches').catch(() => null),
-                    fetch('/api/jobs?limit=100').catch(() => null),
+                    // v726 — promotion-index needs full history regardless of
+                    // the user's current "last 3 days" view, so the 🎥 badge
+                    // mapping covers older batches → newer jobs and vice-
+                    // versa. since_days=0 disables the date filter.
+                    fetch('/api/images/batches?since_days=0').catch(() => null),
+                    fetch('/api/jobs?limit=100&since_days=0').catch(() => null),
                 ]);
                 if (batchesRes && batchesRes.ok) {
                     const data = await batchesRes.json();
@@ -16755,7 +16898,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         async function imgFetchExistingBatchNames() {
             try {
-                const res = await fetch('/api/images/batches');
+                // v726 — name-collision check needs every batch ever owned,
+                // not just last 3 days. since_days=0 disables the filter.
+                const res = await fetch('/api/images/batches?since_days=0');
                 if (!res.ok) return [];
                 const data = await res.json();
                 return (data.batches || []).map(b => b.name);
