@@ -4700,6 +4700,24 @@ def _import_scene_table_impl(
             "Use the uploaded character reference image for the main character."
         )
 
+        # v711 — character-typed ingredient names (lowercased) for the
+        # cast-aware v619 N4 gate. When an image's `cast:` field is declared
+        # AND contains zero of these names, N4's auto-prepend of the persona
+        # binding line is suppressed — the operator deliberately authored
+        # a scene where the uploaded persona is NOT present (e.g. a CCTV
+        # bedroom flashback with prose-only husband + wife, or a torso shot
+        # of a non-persona narrator). Mirrors v681e.3 (force-bind cast
+        # respect) and v681e.7 (subject-fallback cast respect) — the three
+        # gates together let `cast: husband, wife` fully suppress persona
+        # attachment on a per-image basis. Without v711 the body line still
+        # rendered into the prompt as a misleading instruction even though
+        # the persona edge itself was correctly suppressed by v681e.3.
+        character_names_lc: set = {
+            ing["name"].strip().lower()
+            for ing in parsed_ingredients
+            if (ing.get("type") or "").strip().lower() == "character"
+        }
+
         all_image_indices = {img["image_index"] for img in images}
 
         for img in images:
@@ -4758,12 +4776,28 @@ def _import_scene_table_impl(
                         f"{current_product_image!r}"
                     )
 
-            # N4 — Auto-prepend v581 character binding line if missing
+            # N4 — Auto-prepend v581 character binding line if missing.
+            # v711 — cast-aware suppression. When the image's `cast:` field is
+            # declared AND contains zero character-typed ingredient names,
+            # the persona is intentionally absent from this scene; do NOT
+            # prepend the misleading binding line. Mirrors v681e.3 force-bind
+            # respect — the operator's explicit cast wins.
             char_re = _re.compile(
                 r"Use the uploaded character reference image for [^.]+\.",
                 _re.IGNORECASE,
             )
-            if not char_re.search(body):
+            img_cast = img.get("cast")
+            cast_excludes_persona = (
+                img_cast is not None
+                and not any(c in character_names_lc for c in img_cast)
+            )
+            if cast_excludes_persona:
+                log.info(
+                    f"[image_platform] v711 N4: Image {image_index}: "
+                    f"cast={img_cast} excludes all character-typed "
+                    f"ingredients — skipping persona auto-prepend"
+                )
+            elif not char_re.search(body):
                 img["prompt"] = v581_character_line + "\n" + body
                 body = img["prompt"]
                 log.info(

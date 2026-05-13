@@ -4820,6 +4820,40 @@ The action must:
 3. **Be physically possible in the persona's setting** — kitchen → smash, dump, slice; gym → throw, slam; consultation room → rip, snap, swipe-off-desk; airport → throw photo
 4. **Be appropriate to the script's tone** — the persona is angry/frustrated/disapproving in the HOOK, not playful. The weird action expresses that.
 
+#### Principle behind v539 — HIDDEN-COMES-OUT (≥9 corpus instances)
+
+The verbs above are the surface form. The principle that makes them work is the same in nearly every strong HOOK: **something hidden, gross, or surprising comes out of an ingredient, body part, or product when the persona does something to it.** The viewer cannot un-see the reveal — the rest of the script then names what it means.
+
+The verb is interchangeable. The reveal is the load-bearing beat.
+
+**Action variants of the same principle (corpus citations):**
+
+| Action | What comes out | What it proves | Source decode |
+|---|---|---|---|
+| SUBMERGE grapes in clear water tank | Tiny white worms emerge from the fruit | Pesticide-resistant contamination | JUPI grapes |
+| POUR hot water on a red apple | Thick opaque white wax sweats off | Petroleum-wax coating | JUPI apple |
+| KNEAD ketchup between palms | Bright orange-red dye stains the skin | "Industrial dye, not tomato" | JUPI ketchup |
+| PEEL dried mud mask off back | Clear skin appears next to untreated acne | The recipe works | amish-house1 |
+| SLAM ripe banana flat | Soft mushy core revealed | Anatomical metaphor for symptom | banana-male-ed / costco-banana |
+| SPLIT banana lengthwise | Rotten core revealed | Hidden internal damage | ED decodes |
+| GRIND onion to pulp | Wet pulp drips between fingers | Active compound is real, visible | hair-regrowth decodes |
+| MARK lump with surgical pen | Bump outline drawn ON the skin | The problem has a precise location | back-lump / back-bump-female |
+| FLOSS the tonsils with water jet | Tonsil stones come flying out | The remedy is mechanical and works in real time | tonsil-healer |
+
+**Five sub-types of reveal — pick the one that fits the niche:**
+
+| Sub-type | What is revealed | Best for |
+|---|---|---|
+| Contamination reveal | Hidden bad thing inside food / body | Food-toxicity, pesticide, gut-health, anti-aging |
+| Damage reveal | Hidden internal damage in body or food-as-metaphor | ED, joint, back-lump, varicose |
+| Effectiveness reveal | Hidden improvement uncovered by removing a cover | Skin clearing, weight transformation, recipe results |
+| Mechanism reveal | Hidden active compound or force becomes visible | Hair regrowth, blood-flow, circulation |
+| Diagnostic reveal | Hidden boundary / shape made visible | Back-bump (surgical mark), varicose (pen outline) |
+
+**Authoring gate — name the reveal before picking the verb.** Can you finish this sentence: *"when the persona [action]s the [object], [hidden thing] comes out"*? If yes, the HOOK is on principle. If no, the HOOK is decoration.
+
+Reverse-order picking (pick a flashy verb, then try to find a reveal) produces verbs that look exciting but reveal nothing. The verb follows from the reveal target.
+
 For scripts with multi-beat HOOKs (3+ before-state scenes), at least ONE of the scenes must contain the weird action. The others can be character beats that build to it. But the SMASH/THROW scene typically lands at scene 2 of a 3-scene HOOK — scene 1 sets up the problem character, scene 2 does the weird action that punctuates the frustration, scene 3 (often the after-state) shows the resolution.
 
 For scripts with secondary-character before-states (patient on a scale, daughter on stairs, customer at car door), the weird action can be performed by either:
@@ -5798,6 +5832,67 @@ The voiceover_anchor_image is a DEDICATED image entry in `## Images` whose `role
 - Does NOT render this image as a visible scene clip (it has no scene reference)
 - DOES render Veo audio twins from it for any scene whose `voiceover_anchor_image:` points at it
 - DOES bind persona slot 0 + product slot 1 (if applicable) same as any other image
+
+**`role:` field allowlist — STRICT (hard-fails import on unknown values).** The image-block `role:` field accepts EXACTLY ONE value: `voiceover_anchor`. Any other value (decorative tags like `husband_hook_cctv` / `product_hero` / `cta_card` / `before_after_pair`, or typos like `voiceover-anchor` with a hyphen) raises `Parse error: Image N: unrecognized role='...' (supported: voiceover_anchor)` and aborts import — the strictness is intentional per the comment in `image_platform.py` near "v698A — image role discriminator" so the v698A vocabulary can be iterated without silently dropping unknown role tokens. Standard non-anchor images MUST OMIT the `role:` field entirely (do not write `role: standard` / `role: normal` / `role: hook` — they all hard-fail). The field is OPTIONAL; absence = standard image (default for all pre-v698A entries).
+
+**Pre-output gate:**
+```bash
+grep -nE "^- \*\*role:\*\* (?!voiceover_anchor *$)" videos/<file>.md   # expect zero hits
+```
+
+**v711 — cast-aware persona auto-prepend (image_platform.py v619 N4 gate).**
+
+Pre-v711 the platform unconditionally auto-prepended `Use the uploaded character reference image for the main character.` to every image's prompt body when an Ingredients table was present, and force-bound the persona's slot-0 upload edge unless `cast:` was declared (v681e.3). The two gates were asymmetric: `cast:` correctly suppressed the EDGE attachment (no upload sent to Banana 2) but did NOT suppress the BODY LINE prepend — the prompt still contained a misleading instruction referencing a ref that wasn't actually attached. Surfaced 2026-05-13 from the CCTV bedroom flashback scene of `videos/husband-cctv-bedroom-nuri-saffron-redemption.md`: image_1 had `cast: the husband, the wife` (correctly excluding the uploaded persona Nuri), v681e.3 + v681e.7 correctly suppressed the persona edge, but v619 N4 still prepended the body line → operator-reported "why is the main character in this image's prompt?".
+
+**v711 fix**: extends v619 N4 with a cast-aware suppression gate. After computing `character_names_lc` (lowercased character-typed ingredient names) above the v619 normalize loop, N4 now skips the auto-prepend when `img.get("cast")` is set AND `cast` contains zero character-typed names. Logs `[image_platform] v711 N4: Image N: cast=[...] excludes all character-typed ingredients — skipping persona auto-prepend`. Three sibling gates now consistently respect explicit cast: v619 N4 body-line suppress (v711), v607 force-bind suppress (v681e.3), v681e.7 subject-fallback suppress.
+
+**Authoring rule**: for any image where the uploaded persona is NOT present (CCTV flashbacks, non-persona narrator close-ups, b-roll without the persona on-camera, after-state shots), declare `- **cast:** <non-persona-character-names>` listing only the in-scene non-persona characters (prose-only descriptions). The cast names need NOT be present in the Ingredients table — unmatched cast names log a benign skip-bind line and produce zero edges. Empty cast (`cast:`) is parsed as None (= cast absent = legacy v509 prompt-scan fallback path), so to opt out completely use at least one name.
+
+**Concrete example — three opt-out images in the CCTV redemption file:**
+```markdown
+### Image 1
+- **reference_image:** none
+- **cast:** the husband, the wife    # ← CCTV bedroom — Nuri NOT present
+- **Image prompt:** ...
+
+### Image 2
+- **reference_image:** none
+- **cast:** the husband               # ← husband on couch narrator — Nuri NOT present
+- **Image prompt:** ...
+
+### Image 9
+- **reference_image:** none
+- **cast:** the husband, the wife    # ← after-state bedroom — Nuri NOT present
+- **Image prompt:** ...
+```
+
+Result: v619 N4 logs `v711 N4: Image 1: cast=['the husband', 'the wife'] excludes all character-typed ingredients — skipping persona auto-prepend` for each of the three images. Nuri's upload edge is NOT created (v681e.3). Nuri's body-line instruction is NOT prepended (v711). Banana 2 generates these images from prose alone, no character ref attached.
+
+**Pre-output gate (v711):**
+```bash
+# every image where the uploaded persona is NOT in the scene SHOULD have
+# `cast:` declared. Heuristic check: image prompt body does NOT mention
+# "the main character" but Ingredients table contains a character row →
+# author probably needs an explicit cast: bullet to suppress v619 N4.
+python -c "import re,sys; t=open(sys.argv[1],encoding='utf-8').read(); \
+  imgs=re.findall(r'^### Image (\d+)\s*$(.*?)(?=^### Image \d+|^---)', t, re.M|re.S); \
+  [print(f'WARN image {n}: no cast: bullet AND body does not mention persona — likely needs cast: bullet') \
+   for n,b in imgs \
+   if 'the main character' not in b.lower() and not re.search(r'^- \*\*cast:\*\*', b, re.M)]" videos/<file>.md
+```
+
+**Gate 10 implication — anchor MUST feature the uploaded persona.** The voiceover_anchor_image's `cast:` list must contain a persona character — defined concretely as a character whose Ingredients-table `Type` column is `character` AND whose name is one of the canonical persona handles ("the main character" for single-persona videos; the cast handles for multi-persona videos). NON-persona secondary characters (husband / wife / patient / bystander / extra) cannot anchor a voiceover scene because the audio-twin Veo render binds the persona upload (Flow slot 0) as the lip-syncer — the audio voice IS the uploaded persona, not the secondary character. Concrete failure mode: authoring a husband-narrator scene with `speaker: voiceover` pointing at an anchor image of just-the-husband (no persona in cast) raises `Parse error: Scene N: voiceover_anchor_image image_M has empty cast list — must include a persona character (the main character) so Banana 2 binds the persona upload`. To author a non-persona-narrator scene (husband / patient / customer first-person), either (a) re-cast the persona as the speaker, (b) use on-camera lip-sync of the non-persona character via `speaker: on-camera` in a primary scene (no voiceover plumbing), OR (c) deliver the narration via CapCut quote-card overlay on a silent scene. Option (b) is the typical fix.
+
+**Pre-output gate (Gate 10):**
+```bash
+# every speaker: voiceover scene's voiceover_anchor_image must point at an image
+# whose cast: list contains a canonical persona handle. Run this against the
+# resolved file before push.
+python -c "import re,sys; t=open(sys.argv[1],encoding='utf-8').read(); \
+  sc=re.findall(r'^- \*\*speaker:\*\* voiceover\s*\n- \*\*voiceover_anchor_image:\*\* (image_\d+)', t, re.M); \
+  imgs={m.group(1):m.group(2) for m in re.finditer(r'^### Image (\d+)\s*$(.*?)(?=^### Image \d+|^---)', t, re.M|re.S)}; \
+  [print(f'GATE-10 FAIL: anchor {a} has no cast: bullet') for a in sc if not re.search(r'^- \*\*cast:\*\*.+the main character', imgs.get(a.split('_')[1], ''), re.M|re.I)]" videos/<file>.md
+```
 
 **Anchor image framing requirements (mandatory):**
 - TORSO framing — waist-up to head, body squared to lens
