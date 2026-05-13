@@ -5519,10 +5519,25 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             # v541 — keep projects[current_job_key] in sync with the
             # active state before persisting so legacy and dict views
             # never diverge.
+            #
+            # v713 — Only mirror when current_project_url is non-None.
+            # _ensure_project_ready's path-2 (switching jobs, no prior to
+            # reuse) clears current_project_url to None and calls
+            # _save_state BEFORE updating current_job_key, so a naive
+            # mirror would overwrite projects[displaced_key]={url:None},
+            # clobbering the URL that line 5752's displacement-persist
+            # block correctly stored seconds earlier. Round-trip evidence
+            # (2026-05-13): node 1191 created HCC project 7b31aa58; round-5
+            # switch back to HCC found prior_url=None and created
+            # ca9b3d8f — orphaning 7b31aa58 and the in-flight renders
+            # already running there. Same hazard at line 5827. Defensive
+            # rule: never persist a None URL onto an existing entry. If
+            # we genuinely have no current project, just skip the mirror.
             ck = project_state["current_job_key"]
-            if ck:
+            cu = project_state["current_project_url"]
+            if ck and cu:
                 project_state["projects"][ck] = {
-                    "url": project_state["current_project_url"],
+                    "url": cu,
                     "uploaded": sorted(project_state["uploaded_in_project"]),
                     "last_used_at": time.time(),
                 }
