@@ -48,7 +48,7 @@ V708_HARDENED_WHISPER_KWARGS = {
     "temperature": 0.0,
     "no_speech_threshold": 0.4,
     "compression_ratio_threshold": 2.0,
-    "logprob_threshold": -0.8,
+    "log_prob_threshold": -0.8,
     "condition_on_previous_text": False,
 }
 
@@ -2350,7 +2350,7 @@ def audit_final_export_words(
                     temperature=0.0,
                     no_speech_threshold=0.4,
                     compression_ratio_threshold=2.0,
-                    logprob_threshold=-0.8,
+                    log_prob_threshold=-0.8,
                 )
                 heard_set = set()
                 full_transcript_parts = []
