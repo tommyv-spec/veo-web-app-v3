@@ -2822,7 +2822,7 @@ async def _setup_job_background(
 async def list_jobs(
     request: Request,
     status: Optional[str] = None,
-    limit: int = Query(default=50, le=100),
+    limit: int = Query(default=50, le=2000),
     offset: int = 0,
     since_days: int = Query(default=3, ge=0, le=3650),
     db: DBSession = Depends(get_db_session),
@@ -2833,6 +2833,11 @@ async def list_jobs(
     v726 — ``since_days`` defaults to 3, restricting the result set to jobs
     created in the last N days. ``since_days=0`` disables the filter (used
     by the "Show older" UI escalation: 3 → 14 → 90 → 0).
+
+    v728 — ``limit`` ceiling raised 100 → 2000 so the Show-older UI can
+    surface older rows that the prior cap was hiding. The frontend scales
+    limit alongside the window (3d → 50, 14d → 300, 90d → 1000, all → 2000)
+    so payload size stays bounded.
     """
     query = db.query(Job).filter(
         Job.user_id == current_user.id

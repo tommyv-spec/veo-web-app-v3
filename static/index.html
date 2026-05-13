@@ -6877,10 +6877,25 @@ Example: A realistic vertical video of a professional presenter speaking directl
         
         // v726 — date-window filter for the jobs sidebar. Defaults to 3
         // days; "Show older" escalates 3 → 14 → 90 → 0 (all).
+        // v728 — limit scales with window so older rows actually surface
+        // when the user widens. Pre-v728 the hard limit=50 cap masked
+        // the widen on accounts with >50 jobs.
         window._jobsSinceDays = 3;
-        async function refreshJobs(){try{const r=await fetch(`${API}/jobs?since_days=${window._jobsSinceDays}`);const jobs=await r.json();if(jobs.length>0){hasJobs=true;setActiveState();}await refreshJobsList();}catch(e){}}
+        function _jobsLimitForWindow(d) {
+            // 3d → 50, 14d → 300, 90d → 1000, all → 2000. Server caps at 2000.
+            if (d === 0) return 2000;
+            if (d <= 3) return 50;
+            if (d <= 14) return 300;
+            if (d <= 90) return 1000;
+            return 2000;
+        }
+        function _jobsQuery() {
+            const sd = window._jobsSinceDays || 0;
+            return `since_days=${sd}&limit=${_jobsLimitForWindow(sd)}`;
+        }
+        async function refreshJobs(){try{const r=await fetch(`${API}/jobs?${_jobsQuery()}`);const jobs=await r.json();if(jobs.length>0){hasJobs=true;setActiveState();}await refreshJobsList();}catch(e){}}
         async function refreshJobsList(){
-            try{const r=await fetch(`${API}/jobs?since_days=${window._jobsSinceDays}`);const jobs=await r.json();const c=document.getElementById('jobsList');
+            try{const r=await fetch(`${API}/jobs?${_jobsQuery()}`);const jobs=await r.json();const c=document.getElementById('jobsList');
             if(!jobs.length){
                 // v726 — if filter is active and result empty, offer to widen.
                 if (window._jobsSinceDays > 0) {
@@ -6891,22 +6906,30 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 return;
             }
             const rows=jobs.map(j=>{const bl={'flow':'FLOW','api':'API','prompt_only':'PROMPT','import':'ASSEMBLE'};const bn=bl[j.backend]||j.backend||'API';const thumb=j.first_frame_url?`<img class="job-thumb" src="${j.first_frame_url}" alt="" onerror="this.outerHTML='<div class=\\'job-thumb-placeholder\\'>🎬</div>'">`:`<div class="job-thumb-placeholder">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`;const dlg=j.first_dialogue?`<div class="job-dialogue">${j.first_dialogue}</div>`:'';return`<div class="job-item ${selectedJobId===j.id?'selected':''}" onclick="selectJob('${j.id}')"><div class="job-body">${thumb}<div class="job-meta"><div class="job-badges"><span class="badge badge-${j.status}">${j.status}</span><span class="badge-backend badge-backend-${j.backend||'api'}">${bn}</span>${j.has_export?'<span class="badge badge-export">🎬</span>':''}${j.has_voice_clone?'<span class="badge badge-voice">🎤</span>':''}<span class="job-id">${j.id.slice(0,8)}</span></div>${dlg}</div></div><div class="progress-bar" style="margin-top:8px"><div class="progress-fill" style="width:${j.progress_percent}%"></div></div><div class="progress-text"><span>${j.progress_percent.toFixed(0)}%</span><span>${j.completed_clips}/${j.total_clips}</span></div></div>`}).join('');
-            // v726 — "Show older" footer when the window may be hiding rows.
-            // Always visible while filter is active (we can't know server-side
-            // count without an extra query; 50-result cap means full windows
-            // can also benefit from expansion).
-            const showOlder = window._jobsSinceDays > 0
-                ? `<div style="padding:10px;text-align:center;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border-color);margin-top:8px"><span>Showing last ${window._jobsSinceDays} day${window._jobsSinceDays===1?'':'s'}</span> · <a href="javascript:jobsShowOlder()" style="color:var(--accent);text-decoration:none">Show older →</a></div>`
-                : '';
+            // v726 + v728 — "Show older" footer. Button (not <a javascript:>)
+            // to bypass CSP. Renders even at since_days=0 so user has a way
+            // to manually re-tighten ("Reset to 3d" link in that mode).
+            const sd = window._jobsSinceDays;
+            const countStr = `${jobs.length} job${jobs.length===1?'':'s'}`;
+            const showOlder = sd > 0
+                ? `<div style="padding:10px;text-align:center;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border-color);margin-top:8px"><div style="margin-bottom:6px">Showing ${countStr} from last ${sd} day${sd===1?'':'s'}</div><button class="btn btn-secondary btn-sm" onclick="jobsShowOlder()" style="padding:4px 12px;font-size:11px">Show older →</button></div>`
+                : `<div style="padding:10px;text-align:center;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border-color);margin-top:8px"><div style="margin-bottom:6px">Showing ${countStr} (all time)</div><button class="btn btn-secondary btn-sm" onclick="jobsResetWindow()" style="padding:4px 12px;font-size:11px">↺ Reset to 3 days</button></div>`;
             c.innerHTML = rows + showOlder;
-            }catch(e){}
+            }catch(e){console.warn('[refreshJobsList] failed:', e);}
         }
 
         // v726 — escalate jobs sidebar window: 3 → 14 → 90 → 0 (all).
+        // v728 — log + raise pre-existing 50-cap so older jobs surface.
         window.jobsShowOlder = function() {
-            const cur = window._jobsSinceDays || 3;
+            const cur = window._jobsSinceDays;
             const next = cur === 3 ? 14 : cur === 14 ? 90 : cur === 90 ? 0 : 0;
+            console.log('[v726] jobsShowOlder: ' + cur + 'd → ' + (next === 0 ? 'all' : next + 'd'));
             window._jobsSinceDays = next;
+            refreshJobsList();
+        };
+        window.jobsResetWindow = function() {
+            console.log('[v726] jobsResetWindow: → 3d');
+            window._jobsSinceDays = 3;
             refreshJobsList();
         };
         
@@ -14764,22 +14787,33 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
 
             // Update summary count + v726 Show-older affordance.
+            // v728 — <button onclick> instead of <a href="javascript:"> to
+            // bypass CSP and match other in-app buttons.
             const summary = document.getElementById('imgNodesSummary');
             if (summary) {
                 const totalReady = imgState.nodes.filter(n => n.status === 'ready').length;
                 const sd = (imgState && typeof imgState.sinceDays === 'number') ? imgState.sinceDays : 3;
-                const olderLink = sd > 0
-                    ? ` · <a href="javascript:imgShowOlder()" style="color:var(--accent);text-decoration:none">Show older (${sd}d) →</a>`
-                    : '';
-                summary.innerHTML = `${imgState.nodes.length} node${imgState.nodes.length === 1 ? '' : 's'} · ${totalReady} ready${olderLink}`;
+                const olderBtn = sd > 0
+                    ? ` · <button onclick="imgShowOlder()" style="background:none;border:none;color:var(--accent);cursor:pointer;padding:0;font:inherit;text-decoration:underline">Show older (${sd}d) →</button>`
+                    : ` · <button onclick="imgResetWindow()" style="background:none;border:none;color:var(--accent);cursor:pointer;padding:0;font:inherit;text-decoration:underline">↺ Reset 3d</button>`;
+                summary.innerHTML = `${imgState.nodes.length} node${imgState.nodes.length === 1 ? '' : 's'} · ${totalReady} ready${olderBtn}`;
             }
         }
+
+        // v726 + v728 — reset images window back to 3 days.
+        window.imgResetWindow = function() {
+            console.log('[v726] imgResetWindow: → 3d');
+            imgState.sinceDays = 3;
+            imgState._prevActiveIds = null;
+            imgRefreshNodes(false);
+        };
 
         // v726 — escalate the images sidebar date window: 3 → 14 → 90 → 0 (all).
         // Triggers a fresh full /nodes fetch with the wider window.
         window.imgShowOlder = function() {
             const cur = (imgState.sinceDays === undefined) ? 3 : imgState.sinceDays;
             const next = cur === 3 ? 14 : cur === 14 ? 90 : cur === 90 ? 0 : 0;
+            console.log('[v726] imgShowOlder: ' + cur + 'd → ' + (next === 0 ? 'all' : next + 'd'));
             imgState.sinceDays = next;
             // Drop the active-poll signature so the next tick can't short-circuit.
             imgState._prevActiveIds = null;
