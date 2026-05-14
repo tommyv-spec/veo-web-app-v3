@@ -289,6 +289,17 @@ _PRIMARY_MEDIA_LOCK = threading.Lock()
 _SUBMIT_RESPONSE_BUFFERS = {}               # buffer_key -> list[dict(data, captured_at, url)]
 _SUBMIT_RESPONSE_BUFFERS_LOCK = threading.Lock()
 
+# v729 — late-bind ledger for responses that arrive AFTER _bind_pending_submits
+# times out. Flow's batchAsyncGenerateVideoStartImage now responds in 11-15s
+# but the bind wait was 10s — diagnostics confirmed strict-match responses
+# captured into the buffer 1-5s post-WARN. Late-bind stamps a pending slot
+# per (buf_key) on WARN; listener checks ledger on every strict-match and
+# binds uuids retroactively into _PRIMARY_MEDIA_BINDINGS until expected_min
+# variants are bound (then auto-clears).
+_V729_LATE_BIND_PENDING = {}                # buf_key -> dict(job_id, clip_index, clip_id, click_at, expected_min, bound_count, account_label, expires_at)
+_V729_LATE_BIND_LOCK = threading.Lock()
+_V729_LATE_BIND_MAX_AGE_S = 60.0            # response arriving >60s after click is suspect
+
 
 def _submit_buffer_key(account_label):
     """Buffer key per account so parallel workers don't see each other's
@@ -364,6 +375,63 @@ def _install_submit_response_listener(page, account_label=""):
                     f"workflows={len((data or {}).get('workflows') or [])}",
                     flush=True,
                 )
+            except Exception:
+                pass
+            # v729 late-bind — if _bind_pending_submits already timed out on
+            # this buf_key, stamp the resulting uuids onto the pending slot's
+            # (job_id, clip_index, clip_id) so downstream attribution still
+            # finds them. Without this, Flow's 11-15s API latency leaves the
+            # buffer un-drained and every clip falls back to legacy
+            # tile-position attribution → v681d dedup → DROP.
+            try:
+                with _V729_LATE_BIND_LOCK:
+                    pending = _V729_LATE_BIND_PENDING.get(buf_key)
+                if pending is not None:
+                    _now = entry['captured_at']
+                    if _now <= pending['expires_at']:
+                        _bound_now = []
+                        with _PRIMARY_MEDIA_LOCK:
+                            for w in (data.get('workflows') or []):
+                                meta = (w.get('metadata') or {}) if isinstance(w, dict) else {}
+                                mid = (meta.get('primaryMediaId') or '').lower()
+                                if not mid:
+                                    continue
+                                # Don't overwrite a fresher binding from a newer click.
+                                _existing = _PRIMARY_MEDIA_BINDINGS.get(mid)
+                                if _existing and _existing.get('submit_time', 0) >= pending['click_at']:
+                                    continue
+                                _PRIMARY_MEDIA_BINDINGS[mid] = {
+                                    'job_id': pending['job_id'],
+                                    'clip_index': pending['clip_index'],
+                                    'clip_id': pending['clip_id'],
+                                    'batch_id': meta.get('batchId'),
+                                    'workflow_id': (w.get('name') if isinstance(w, dict) else None),
+                                    'submit_time': _now,
+                                    'account': pending.get('account_label', ''),
+                                }
+                                _bound_now.append(mid)
+                        if _bound_now:
+                            with _V729_LATE_BIND_LOCK:
+                                p = _V729_LATE_BIND_PENDING.get(buf_key)
+                                if p is not None:
+                                    p['bound_count'] = p.get('bound_count', 0) + len(_bound_now)
+                                    _bc = p['bound_count']
+                                    _need = p['expected_min']
+                                    if _bc >= _need:
+                                        _V729_LATE_BIND_PENDING.pop(buf_key, None)
+                                else:
+                                    _bc, _need = len(_bound_now), pending['expected_min']
+                            print(
+                                f"[v729] LATE-BIND clip {pending['clip_index']} → "
+                                f"{len(_bound_now)} mediaId(s) ({', '.join(b[:8] for b in _bound_now)}) "
+                                f"arrived {(_now - pending['click_at']):.1f}s post-click; "
+                                f"bound {_bc}/{_need} expected",
+                                flush=True,
+                            )
+                    else:
+                        # Pending expired; purge to avoid stale binds.
+                        with _V729_LATE_BIND_LOCK:
+                            _V729_LATE_BIND_PENDING.pop(buf_key, None)
             except Exception:
                 pass
         except Exception:
@@ -533,13 +601,33 @@ def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
         #   discarded_stale==0 + workflows_seen==0 + NO [v729-diag] strict-match
         #     in log → listener never matched (endpoint rename or not attached)
         #   discarded_stale==0 + workflows_seen==0 + strict-match PRESENT
-        #     → buffer-key mismatch (listener wrote acct:X, bind drained acct:Y)
+        #     → late-arriving response (Flow >drain_timeout latency); late-bind
+        #     will retroactively claim the uuids
         print(
             f"[v729-diag] bind-WARN state: buf_key=acct:{account_label} "
             f"min_captured_at={min_captured_at} discarded_stale={discarded_stale} "
             f"workflows_seen={seen_workflows} expected_min={expected_min}",
             flush=True,
         )
+        # v729 — stamp late-bind pending slot so the listener binds uuids
+        # retroactively when Flow finally returns the response. Per-buf_key
+        # slot; next click overwrites (sequential submits inside one account).
+        try:
+            _buf_key = f"acct:{account_label}" if account_label else f"tid:{threading.get_ident()}"
+            with _V729_LATE_BIND_LOCK:
+                _click_at = float(min_captured_at) if min_captured_at else time.time()
+                _V729_LATE_BIND_PENDING[_buf_key] = {
+                    'job_id': job_id,
+                    'clip_index': clip_index,
+                    'clip_id': clip_id,
+                    'click_at': _click_at,
+                    'expected_min': expected_min,
+                    'bound_count': 0,
+                    'account_label': account_label,
+                    'expires_at': _click_at + _V729_LATE_BIND_MAX_AGE_S,
+                }
+        except Exception as _e:
+            print(f"[v729] late-bind stamp failed: {_e}", flush=True)
     return bound
 
 
@@ -13278,7 +13366,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
             _bind_pending_submits_for_page(
                 page, job_id, clip_index,
                 clip_id=clip.get('id'),
-                drain_timeout=10.0,
+                drain_timeout=20.0,   # v729 — Flow API now 11-15s; bumped from 10s. Late-bind covers >20s outliers.
                 expected_min=_v700_expected,
             )
         except Exception as _v700_err:
@@ -14985,7 +15073,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             _bind_pending_submits_for_page(
                 page, job_id, clip_index,
                 clip_id=clip.get('id'),
-                drain_timeout=10.0,
+                drain_timeout=20.0,   # v729 — Flow API now 11-15s; bumped from 10s. Late-bind covers >20s outliers.
                 expected_min=_v700_expected,
             )
         except Exception as _v700_err:
@@ -15534,7 +15622,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     _bind_pending_submits_for_page(
                         page, job_id, clip_index,
                         clip_id=_v700_clip_id,
-                        drain_timeout=10.0,
+                        drain_timeout=20.0,   # v729 — Flow API now 11-15s; bumped from 10s. Late-bind covers >20s outliers.
                         expected_min=_v700_expected,
                     )
                 except Exception as _v700_err:
