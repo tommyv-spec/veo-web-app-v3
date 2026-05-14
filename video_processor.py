@@ -42,6 +42,19 @@ FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
 V708_TRUST_MIN_FOR_TRIM = 0.85          # below → no-trim full-clip fallback
 V708_FILLER_MIN_PROB = 0.70             # v611 end-cap filler must exceed this
 V708_FILLER_MIN_EDIT_DIST = 2           # filler must differ from any script word by ≥N chars
+# v731 — Soft failsafe trust floor. When v708 detects missing script words OR
+# trust < V708_TRUST_MIN_FOR_TRIM, original behavior was full-clip retain (no
+# trim) — which kept Veo TTS filler (breath/uh/repeat-syllables) intact and
+# made the rendered line objectionable to the listener. Operator preference
+# stated 2026-05-14: filler retention is worse than losing a rare-vocab word
+# (chemistry/brand names Whisper-tiny/small cannot transcribe even with
+# initial_prompt bias). v729 splits failsafe into two tiers:
+#   * trust < V731_TRIM_TRUST_FLOOR  → HARD failsafe (current full-clip path)
+#   * trust ≥ V731_TRIM_TRUST_FLOOR  → SOFT failsafe: trim using ALL Whisper
+#     words (matched + unmatched-rare-vocab) as anchors. Rare-vocab audio
+#     survives at its mis-transcribed timestamp; obvious filler outside any
+#     Whisper word still gets dropped at concat time.
+V731_TRIM_TRUST_FLOOR = 0.50
 V708_AUDIT_MODEL_SIZE = "small"         # final export audit model — small balances accuracy/RAM on Render free tier
 V708_ESCALATE_MODEL_SIZE = "small"      # pass-3 escalation model — same; tiny is the bottleneck
 V708_HARDENED_WHISPER_KWARGS = {
@@ -497,6 +510,18 @@ def detect_speech_segments_whisper(
             # ffmpeg trim+concat over a single segment = the entire clip.
             # Downstream v706 floor + v707/v619 etc. unaffected; v708 just
             # widens the policy from "minimum duration" to "every word kept".
+            # v731 — Two-tier failsafe. HARD path only fires when trust is
+            # genuinely garbage (< V731_TRIM_TRUST_FLOOR). For the "high-trust
+            # + a few rare-vocab missing" case (clip 4 of dish-soap export
+            # 2026-05-13_23:43: `laureth`/`probable` missing, trust > 0.85,
+            # FAILSAFE retained full Veo clip with audible filler), promote
+            # to SOFT failsafe: continue to the trim path using all_words
+            # (raw Whisper output, includes mis-transcribed rare vocab) as
+            # speech anchors instead of speech_words (matched-only). Rare
+            # word's audio sits at the mis-transcribed token's timestamp,
+            # so trim segments around it; obvious filler outside any
+            # Whisper word still gets dropped.
+            _v731_soft_failsafe = False
             if _total_expected > 0 and (_best_missing or _best_trust < V708_TRUST_MIN_FOR_TRIM):
                 _reason = []
                 if _best_missing:
@@ -505,19 +530,36 @@ def detect_speech_segments_whisper(
                     _reason.append(
                         f"trust={_best_trust:.2f}<{V708_TRUST_MIN_FOR_TRIM:.2f}"
                     )
-                print(
-                    f"[WhisperVAD/v708] FAILSAFE: {', '.join(_reason)} → "
-                    f"no-trim, keep full clip {total_duration:.3f}s",
-                    flush=True,
-                )
-                if _model_owned_here:
-                    try:
-                        del model
-                        import gc as _gc2
-                        _gc2.collect()
-                    except Exception:
-                        pass
-                return [(0.0, total_duration)]
+                # v731: classify hard vs soft failsafe by trust floor.
+                if _best_trust < V731_TRIM_TRUST_FLOOR:
+                    print(
+                        f"[WhisperVAD/v708] FAILSAFE-HARD: {', '.join(_reason)} "
+                        f"(trust={_best_trust:.2f}<{V731_TRIM_TRUST_FLOOR:.2f}) → "
+                        f"no-trim, keep full clip {total_duration:.3f}s",
+                        flush=True,
+                    )
+                    if _model_owned_here:
+                        try:
+                            del model
+                            import gc as _gc2
+                            _gc2.collect()
+                        except Exception:
+                            pass
+                    return [(0.0, total_duration)]
+                else:
+                    _v731_soft_failsafe = True
+                    print(
+                        f"[WhisperVAD/v731] FAILSAFE-SOFT: {', '.join(_reason)} "
+                        f"(trust={_best_trust:.2f}≥{V731_TRIM_TRUST_FLOOR:.2f}) → "
+                        f"trim with all-words anchors ({len(all_words)} words) "
+                        f"to preserve rare-vocab audio + drop filler",
+                        flush=True,
+                    )
+                    # Promote raw all_words to speech anchors. Mis-transcribed
+                    # rare vocabulary (e.g. 'laureth' heard as 'loreth') still
+                    # carries a timestamp here, so its audio survives the
+                    # trim. Filler outside any Whisper word remains droppable.
+                    speech_words = all_words
 
             if not all_words:
                 print("[WhisperVAD] No words detected — returning full video")
