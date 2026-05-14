@@ -4665,21 +4665,32 @@ def _import_scene_table_impl(
             ing_type = (ing.get("type") or "").strip().lower()
             ing_source = (ing.get("source") or "").strip()
             # v681 — only character + product rows REQUIRE an upload-backed
-            # Reference path. `patient` rows are OPTIONAL-upload: when
-            # Reference is empty (e.g. `—`), the patient enters anchor-scene
-            # mode — the first scene that includes them becomes the anchor
-            # and subsequent scenes chain via v512. When Reference IS set,
-            # patient validates the same as character/product.
+            # Reference path. `patient` rows are FULLY OPTIONAL-upload (v735):
+            # whether Reference is empty (`—`), a synthetic placeholder
+            # (`patients/refs/<name>.png`), or a real path with no matching
+            # upload, the patient ALWAYS falls back to anchor-scene mode —
+            # first scene mentioning the patient becomes the anchor, later
+            # scenes chain via v512. Banana 2 generates the patient from
+            # the first-scene identity prose and propagates forward.
             # `extra` rows are prose-only (no upload, never anchor).
             # `setting` rows skip (existing behavior; settings may anchor).
             if ing_type not in ("character", "product"):
-                # Only validate patient when its Reference is non-empty —
-                # operators may legitimately ship a patient row with `—`
-                # to signal "use a generated image from earlier in the job".
-                if ing_type == "patient" and ing_source:
-                    pass  # fall through to validation below
-                else:
-                    continue
+                # v735 — patient never raises validation. Log info when a
+                # Reference path is declared but no upload resolved, so
+                # operators can see they're in anchor-scene mode.
+                if (
+                    ing_type == "patient"
+                    and ing_source
+                    and ing_name not in ingredient_nodes
+                ):
+                    log.info(
+                        f"[image_platform] v735: patient '{ing_name}' "
+                        f"declares Reference '{ing_source}' but no matching "
+                        f"upload — falling back to anchor-scene mode "
+                        f"(Banana 2 will generate the patient from the "
+                        f"first-scene identity prose and chain forward)"
+                    )
+                continue
             if not ing_source:
                 # No Reference path declared — author may intend an
                 # anchor-scene ingredient (rare for type=character/product
