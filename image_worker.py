@@ -4654,7 +4654,7 @@ def api_pull_mode(page, api_url, api_key, worker_id=None):
 #     earlier tiles. At any moment up to `parallel_slots` generations are
 #     in flight on Flow's side.
 
-def _derive_prompt_key(full_prompt, max_chars=300):
+def _derive_prompt_key(full_prompt, max_chars=800):
     """Extract the scene-specific portion of a prompt for tile attribution.
 
     The global prompt prefix (POSITIVE / NEGATIVE quality rules) is appended
@@ -4665,6 +4665,18 @@ def _derive_prompt_key(full_prompt, max_chars=300):
     This function strips the prefix. The prefix starts at a line that begins
     with '* POSITIVE' or 'POSITIVE' — everything before is scene-specific.
     If no prefix marker is found, we just cap the raw prompt at max_chars.
+
+    v733 — max_chars bumped 300 → 800. Lift artifacts with v703 manifest +
+    v581 binding line + v589.1 chain line + opening Composition phrase
+    consumed nearly all of the previous 300-char window, leaving only the
+    chain-image-K token as the per-scene disambiguator. Two scenes that
+    chained off the same image_K (multi-clip via v698A or sibling scenes
+    both chaining off the same anchor) collapsed to identical prompt_keys
+    → Strategy 1 longest-match resolved by dict iteration order →
+    non-deterministic legacy-fallback attribution. 800 catches per-scene
+    Action / Subject body prose that's genuinely unique per scene.
+    Callers use substring match which is monotonic in key length —
+    strictly safer than the old cap.
 
     Returns a string suitable for substring matching against tile DOM text.
     """
@@ -5089,18 +5101,42 @@ def match_container_to_submission(container, pending_jobs, claimed_uuids=None):
         # path for the wrong-set bug: gallery still shows node 1000's
         # tiles, scan misses tile_id resolution, falls into Strategy 3,
         # claims them for the lone pending job (1002). Reject.
-        if claimed_uuids:
-            _UUID_RE_LOCAL = re.compile(
-                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-                re.IGNORECASE,
-            )
-            container_uuids = set()
-            for url in (container.get("tile_image_urls") or []):
+        #
+        # v732 — extend the guard to cover URLs that existed in this
+        # job's baseline at submit time. _claimed_tile_uuids only covers
+        # claims made BY CURRENT worker session; stale tiles from prior
+        # worker runs or manual gallery use leave _claimed_tile_uuids
+        # empty for those UUIDs → v671 guard passes → lone pending job
+        # inherits stale tiles. baseline_urls IS captured at every
+        # submit (snapshot of gallery URLs at submit time, including
+        # pre-existing tiles), so extracting its UUIDs catches any URL
+        # that predates this job regardless of which session generated
+        # it.
+        _UUID_RE_LOCAL = re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            re.IGNORECASE,
+        )
+        container_uuids = set()
+        for url in (container.get("tile_image_urls") or []):
+            m = _UUID_RE_LOCAL.search(url or "")
+            if m:
+                container_uuids.add(m.group(0).lower())
+        if container_uuids:
+            if claimed_uuids and (container_uuids & claimed_uuids):
+                # v671 path — already claimed by current session
+                return None
+            # v732 — additional guard: container UUIDs overlapping the
+            # lone pending job's baseline mean the tiles predate this
+            # job's submit, so they can't be its result.
+            _job_v732 = pending_jobs[0]
+            baseline_uuids = set()
+            for url in (_job_v732.baseline_urls or set()):
                 m = _UUID_RE_LOCAL.search(url or "")
                 if m:
-                    container_uuids.add(m.group(0).lower())
-            if container_uuids and (container_uuids & claimed_uuids):
-                # Stale gallery container — don't claim it.
+                    baseline_uuids.add(m.group(0).lower())
+            if baseline_uuids and (container_uuids & baseline_uuids):
+                overlap_n = len(container_uuids & baseline_uuids)
+                print(f"[match] [v732] ⏭ Strategy 3 rejected: container has {overlap_n}/{len(container_uuids)} UUID(s) in pending job {_job_v732.node_id} baseline — stale gallery state", flush=True)
                 return None
         return pending_jobs[0]
 
@@ -5337,6 +5373,12 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     # — pre-existing project tiles, not the new generation."
     captured_batches = []  # list of {ts, prompt_in_resp, fife_urls, media_ids, consumed, node_id}
     listener_state = {'attached': False, 'current_submitting_node_id': None}
+    # v734 — request_to_node bounded by REQUEST_TO_NODE_CAP. Python id()
+    # is reusable after GC; long sessions risked id()-collision
+    # misattribution if Playwright recycled request objects. Python dicts
+    # are insertion-ordered (since 3.7); when size exceeds the cap, drop
+    # the 100 oldest entries inside _on_image_request.
+    REQUEST_TO_NODE_CAP = 1000
     request_to_node = {}  # id(playwright_request) → node_id (set when request fires, popped on response)
     captured_urls_by_node = {}  # node_id → list[str] (aggregated fife URLs, in order)
     # v628: FIFO fallback queue for POSTs that fire AFTER submit returns.
@@ -5377,6 +5419,13 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 return
         except Exception:
             return
+        # v734 — bounded prune. Python dicts are insertion-ordered; drop
+        # the 100 oldest entries when over cap to keep id()-collision
+        # risk negligible over long sessions.
+        if len(request_to_node) > REQUEST_TO_NODE_CAP:
+            for k in list(request_to_node.keys())[:100]:
+                request_to_node.pop(k, None)
+            print(f"[API:v734] pruned request_to_node to {len(request_to_node)} entries", flush=True)
         nid = listener_state.get('current_submitting_node_id')
         if nid is not None:
             request_to_node[id(request)] = nid
@@ -5387,11 +5436,24 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     break
             return
         # Path 2: flag is None, find oldest unfilled pending submission
+        # v734 — filter FIFO by project URL. The page-level listener
+        # stays attached across navigations; a late POST from project A
+        # could in theory FIFO-tag to a job pending on project B.
+        # Match request.frame.url to pending entry's project_url when
+        # both known; fall back to legacy oldest-unfilled otherwise.
+        try:
+            _req_url = request.frame.url if request.frame else None
+        except Exception:
+            _req_url = None
         for p in pending_submissions:
-            if p['tagged_count'] < p['expected_count']:
-                request_to_node[id(request)] = p['node_id']
-                p['tagged_count'] += 1
-                break
+            if p['tagged_count'] >= p['expected_count']:
+                continue
+            _p_proj = p.get('project_url')
+            if _req_url and _p_proj and _p_proj != _req_url:
+                continue
+            request_to_node[id(request)] = p['node_id']
+            p['tagged_count'] += 1
+            break
 
     def _on_image_response(response):
         try:
@@ -6112,11 +6174,16 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             # tagged via the FIFO fallback. Either way no fall-through
             # to the brittle prompt-match path.
             listener_state['current_submitting_node_id'] = node_id
+            try:
+                _v734_proj_url = page.url
+            except Exception:
+                _v734_proj_url = None
             pending_submissions.append({
                 'node_id': node_id,
                 'expected_count': variants,
                 'ts': time.time(),
                 'tagged_count': 0,
+                'project_url': _v734_proj_url,  # v734 — per-project FIFO filter
             })
             # Cap pending list — drop entries older than 60s. They
             # represent submissions whose POSTs already fired or were
@@ -6361,6 +6428,22 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             age = time.time() - job.submit_time
             if len(tagged_urls) < need_count and age < PARTIAL_TIMEOUT:
                 continue  # wait for more responses
+            # v731 — baseline-overlap guard. Pre-v731 Tier A trusted the
+            # request-tag mapping unconditionally. If a request was
+            # mis-tagged (pre-v730a pending_submissions leak, cross-project
+            # FIFO drift, or id()-collision after Playwright GC) Tier A
+            # would enqueue WRONG fife URLs byte-identical for the wrong
+            # job. baseline_urls is the snapshot of gallery URLs at submit
+            # time; if any tagged_url is in that set, the URL predates
+            # this job's submit and CANNOT belong to it. Drop the bucket
+            # and fall through to Tier B / legacy (both have container-
+            # level baseline filters at lines ~6646 + ~6714 already).
+            tagged_set = set(tagged_urls)
+            overlap = tagged_set & (job.baseline_urls or set())
+            if overlap:
+                print(f"[API:scan] [v731] ⚠ Node {job.node_id}: Tier A bucket has {len(overlap)}/{len(tagged_urls)} URL(s) overlapping baseline — likely mis-tagged. Dropping bucket, falling through to Tier B/legacy.", flush=True)
+                captured_urls_by_node.pop(job.node_id, None)
+                continue
             # Pop the bucket so we don't double-attribute
             captured_urls_by_node.pop(job.node_id, None)
             _enqueue_for_job(job, tagged_urls, source_label="v627 request-tag listener")
