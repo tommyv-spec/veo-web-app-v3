@@ -437,6 +437,46 @@ Step 6 — PRE-OUTPUT VALIDATION GATES (mandatory — fix and re-emit if any fai
     speaker:** on-camera"; drop "- **voiceover_anchor_image:**
     image_M" line; remove orphan anchor image from ## Images if
     not referenced elsewhere.
+  Gate 25 — v590 + v604 Static-World Trap (parallax / moving
+    montages -> reference_image: none MANDATORY)
+    THE STATIC-WORLD TRAP: When deciding to chain, watch out for
+    movement. If a character is walking, panning, or moving
+    through a space (stadium / house / store / garden / theme
+    park / Costco aisle / clinic hallway), DO NOT chain the
+    images together. Chaining forces Banana 2 to lock the exact
+    same background pixels, making it look like the character
+    is walking on a treadmill in front of a green screen. Use
+    `reference_image: none` for moving sequences so the background
+    updates naturally and parallel-generation produces fresh
+    background angles that simulate travel through the
+    environment.
+    Triggers (ANY one -> reference_image MUST be none):
+      - Character walking from frame A to frame B (any locomotion)
+      - Camera panning / dollying / tracking
+      - Background elements shift between beats (walls / shelves /
+        trees / rides / aisles / products / signage)
+      - Listicle / montage where each beat has its own backdrop
+        (Costco aisle 1 -> aisle 2 -> parking lot)
+      - "Travel" sequences (entering store / leaving store /
+        crossing parking lot / entering clinic)
+      - B-roll re-staging persona in different parts of the same
+        venue
+    Re-statement of v604 continuity-chain rule: criteria 3 ("same
+    room") and 4 ("same camera angle") must BOTH be true at the
+    PIXEL level, not the semantic level. A theme-park walk that
+    passes the carousel -> the food cart -> the bench is THREE
+    rooms in pixel terms even though it's ONE location
+    semantically.
+    Carve-outs (chains still allowed): genuine state-evolution
+    on a stationary subject (v580 recipe / v541 before-after) /
+    two-shot follow-up preserving a one-off character's identity /
+    single-shot action arc anchoring. Movement through space is
+    NEVER one of these.
+    Pre-output check: for every Image with `reference_image:
+    image_K`, confirm both Image N and Image K share the SAME
+    background pixels (same walls / same shelves / same camera
+    angle on the room). If they don't, switch to
+    `reference_image: none`.
 
 CANONICAL BLOCK STRUCTURE (parser-compliant, v593 + v696):
 

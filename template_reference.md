@@ -380,7 +380,9 @@ Slight natural background variation between independent scenes is **desirable**:
 
 ### Everything else: independent
 
-HOOK / CONTEXT / EXPLAIN / AUTHORITY / single-frame PRODUCT (bottle hero) / CTA / FOLLOW — set `reference_image: none`. The persona+product uploads + the v586 description carry the rest. Each independent scene's image prompt must be **self-sufficient**: full six-block walk, setting + anchor props described inline since no chain carries them.
+HOOK / CONTEXT / EXPLAIN / AUTHORITY / single-frame PRODUCT (bottle hero) / CTA / FOLLOW / **MOVING MONTAGES** — set `reference_image: none`. The persona+product uploads + the v586 description carry the rest. Each independent scene's image prompt must be **self-sufficient**: full six-block walk, setting + anchor props described inline since no chain carries them.
+
+**Moving / Walking Montages — independence is MANDATORY.** For walking sequences, listicle bashes where the backdrop changes between beats (Costco aisle 1 → aisle 2 → parking lot), panning shots, store-tour b-roll, theme-park transit shots, and any beat where the character or camera physically moves through space, `reference_image: none` is non-negotiable. Generating these in parallel without a chain gives you the natural background variation required to prove the character is actually moving through a 3D space. Chaining a moving montage produces the Static-World Trap — identical background pixels behind shifting character poses, reading as treadmill / green-screen and breaking the illusion of travel. See v604 Parallax / Environmental Movement Carve-out for the decode-side criterion and trigger checklist.
 
 ### Throughput math (typical 8-scene script)
 
@@ -3407,6 +3409,17 @@ When deciding whether to chain Image N to Image N-1, check these visual-continui
 If ALL match → CHAIN it. Even if the dialogue moves to a new point (explanation → product reveal, recipe step → CTA, problem statement → solution).
 
 **The trap to avoid**: trusting dialogue-beat grouping over visual continuity. Decoders frequently treat "talking-head explanation" and "talking-head product reveal" as separate images because the script topic changes — but visually they're the same setup, so the chain saves cost (one Banana 2 generation instead of two, no drift) and improves consistency.
+
+**Parallax / Environmental Movement Carve-out (v604 + v590).** "Same room" or "same location" does NOT mean "same composition" if the character or camera is moving through the space. If the source video shows the character walking, the camera panning, or the physical backdrop changing (different walls, different trees, different shelves, different aisles, different rides, different store sections), DO NOT CHAIN. Chaining locks the background pixels and freezes the world — the result reads as a treadmill / green-screen tell because Banana 2 reproduces the same background pixel-for-pixel while only the character's pose changes. Treat each beat of movement as a distinct composition (`reference_image: none`) so the generator produces fresh background angles that simulate travel through the environment. Criterion 3 ("Same room?") and criterion 4 ("Same camera angle?") must BOTH be true at the pixel level, not at the semantic level. A theme-park walk that passes the carousel → the food cart → the bench is THREE rooms in pixel terms even though it's ONE location semantically.
+
+**Trigger checklist for the carve-out** (any ONE = no chain):
+
+- Character walking from frame A to frame B (any locomotion)
+- Camera panning / dollying / tracking (any motion beyond a handheld micro-jitter)
+- Background elements shift between beats (walls, shelves, trees, rides, products on shelves, signage)
+- Listicle / montage where each beat has its own backdrop (Costco aisle 1 → aisle 2 → aisle 3 → parking lot)
+- "Travel" sequences (entering store, leaving store, crossing a parking lot, entering a clinic, etc.)
+- B-roll shots that re-stage the persona in different parts of the same building / venue
 
 ### Universal prompt-discipline rules (apply to BOTH decode and generate)
 

@@ -238,6 +238,20 @@ violated rules in past LLM outputs:
     if Image N is a different room/desk/location, it's `none` even
     if the persona is the same.
 
+    THE STATIC-WORLD TRAP (v604 + v590 carve-out): When deciding
+    to chain, watch out for movement. If a character is walking,
+    panning, or moving through a space (a stadium, a house, a
+    store, a garden, a theme park, a Costco aisle), DO NOT chain
+    the images together. Chaining forces Banana 2 to lock the
+    exact same background pixels, making it look like the character
+    is walking on a treadmill in front of a green screen. Use
+    `reference_image: none` for moving sequences, listicle bashes
+    where the backdrop changes between beats, panning shots, and
+    store-tour b-roll. Independence is MANDATORY for moving
+    montages — the natural background variation across parallel
+    independent generations is what proves the character is
+    actually moving through a 3D space.
+
 [6] PERSONA FROM PERSONA-MAP (not invented) — pick from corpus-
     validated personas in wiki/persona-map.md (or the persona pages
     referenced by strategy-mechanisms.md). The 4 corpus-validated
