@@ -317,6 +317,30 @@ def _install_submit_response_listener(page, account_label=""):
         try:
             url = resp.url
             if 'batchAsyncGenerateVideoStartImage' not in url:
+                # v729 diagnostic — capture responses that LOOK like the Flow
+                # generate API but miss the strict filter. Catches endpoint
+                # renames. Logs once per page to limit noise.
+                try:
+                    _u_lc = url.lower()
+                    if (('generatevideo' in _u_lc or 'asyncgenerate' in _u_lc
+                            or 'batchasync' in _u_lc)
+                            and not getattr(page, '_v729_endpoint_diag_logged', False)):
+                        try:
+                            page._v729_endpoint_diag_logged = True
+                        except Exception:
+                            pass
+                        try:
+                            _st = resp.status
+                        except Exception:
+                            _st = '?'
+                        print(
+                            f"[v729-diag] saw candidate generate URL not matching "
+                            f"strict filter — url={url} status={_st} "
+                            f"buf_key={buf_key}",
+                            flush=True,
+                        )
+                except Exception:
+                    pass
                 return
             try:
                 if resp.status != 200:
@@ -333,6 +357,15 @@ def _install_submit_response_listener(page, account_label=""):
                 buf.append(entry)
                 if len(buf) > 32:
                     del buf[:-32]
+            # v729 diagnostic — confirm strict-match capture fired.
+            try:
+                print(
+                    f"[v729-diag] strict-match response captured buf_key={buf_key} "
+                    f"workflows={len((data or {}).get('workflows') or [])}",
+                    flush=True,
+                )
+            except Exception:
+                pass
         except Exception:
             # Never let a listener error propagate into Playwright.
             pass
@@ -493,6 +526,18 @@ def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
             f"[v700] WARNING clip {clip_index} (id={clip_id}) — no submit response "
             f"captured within {drain_timeout:.0f}s; downloads will fall back to "
             f"declared clip_index (legacy tile-position attribution)",
+            flush=True,
+        )
+        # v729 diagnostic — emit state for triage:
+        #   discarded_stale>0 + workflows_seen==0 → v700j timestamp filter ate it
+        #   discarded_stale==0 + workflows_seen==0 + NO [v729-diag] strict-match
+        #     in log → listener never matched (endpoint rename or not attached)
+        #   discarded_stale==0 + workflows_seen==0 + strict-match PRESENT
+        #     → buffer-key mismatch (listener wrote acct:X, bind drained acct:Y)
+        print(
+            f"[v729-diag] bind-WARN state: buf_key=acct:{account_label} "
+            f"min_captured_at={min_captured_at} discarded_stale={discarded_stale} "
+            f"workflows_seen={seen_workflows} expected_min={expected_min}",
             flush=True,
         )
     return bound
@@ -13884,7 +13929,23 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     )
 
     if _has_own_project and cached_job.get('project_url'):
-        project_url = cached_job['project_url']
+        # v729 — prefer per-account project URL over top-level. Top-level is
+        # last-writer-wins (mark_job_started overwrites at line ~3446), so on a
+        # parallel-mode self-resume Account1 would otherwise read Account2's URL
+        # and submit into the wrong project gallery (root cause of 2026-05-14
+        # cross-attribution loss + duplicate v681d/dedup rejects).
+        _acct_projects = cached_job.get('account_projects', {}) or {}
+        _acct_url = _acct_projects.get(account_name) if account_name else None
+        if _acct_url:
+            project_url = _acct_url
+            if _acct_url != cached_job.get('project_url'):
+                print(
+                    f"[v729] Resume picked per-account URL for {account_name} "
+                    f"(top-level pointed elsewhere — would have crossed accounts)",
+                    flush=True,
+                )
+        else:
+            project_url = cached_job['project_url']
         cached_clips_done = cached_job.get('clips_submitted', [])
         completed_from_db = [
             c['clip_index'] for c in clips
