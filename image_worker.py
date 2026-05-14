@@ -5350,6 +5350,19 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     # mis-attributes when two scenes share an identical prompt template).
     pending_submissions = []
 
+    def _gc_pending_submission(node_id):
+        """v730 — drop pending_submissions entry when a job exits in_flight.
+        Pre-v730 entries lingered up to 60s after completion; FIFO fallback
+        in _on_image_request could siphon late POSTs from a NEW job to an
+        OLD completed job whose tagged_count never reached expected_count.
+        The new job's bucket starved → Tier A 90s timeout → legacy fallback
+        kicked in → wrong-image risk via Strategy 3 catchall on stale tiles.
+        Call this anywhere job.status flips to a terminal value."""
+        n = len(pending_submissions)
+        pending_submissions[:] = [p for p in pending_submissions if p['node_id'] != node_id]
+        if len(pending_submissions) < n:
+            print(f"[API:v730] ⟲ GC pending_submissions entry for node {node_id} (was tagged {n - len(pending_submissions)} time(s); {len(pending_submissions)} entries remain)", flush=True)
+
     def _on_image_request(request):
         """Tag every outgoing batchGenerateImages POST with the node_id of
         the job currently being submitted. Two paths:
@@ -6184,12 +6197,27 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 # the FIFO fallback path in _on_image_request — so even if
                 # we time out here, attribution remains correct.
                 if listener_state['attached']:
-                    tag_deadline = time.time() + 5.0
+                    # v730b — bump 5.0 → 12.0. Flow emits N POSTs over 2-5s
+                    # for an N-variant request; the previous 5s window let
+                    # the submit thread return before all POSTs were tagged
+                    # via the flag-path. Cross-project navigation in the
+                    # next main-loop iteration then aborted any POSTs still
+                    # queueing in React → captured_urls_by_node stayed
+                    # partial → Tier A 90s timeout → legacy fallback. 12s
+                    # catches the long tail; early-exit at tagged_count >=
+                    # variants so healthy runs still finish in ~2s.
+                    _v730b_wait_start = time.time()
+                    tag_deadline = _v730b_wait_start + 12.0
                     while time.time() < tag_deadline:
                         tagged_count = sum(1 for v in request_to_node.values() if v == node_id)
                         if tagged_count >= variants:
                             break
                         time.sleep(0.1)
+                    _v730b_waited_s = time.time() - _v730b_wait_start
+                    _v730b_final_tagged = sum(1 for v in request_to_node.values() if v == node_id)
+                    if _v730b_final_tagged >= variants and _v730b_waited_s > 5.0:
+                        # Fires only when the new 5-12s window actually did work
+                        print(f"[API:submit] [v730b] Node {node_id}: full flag-path tagging took {_v730b_waited_s:.1f}s (pre-v730b 5s window would have lost POST(s) to FIFO/abort)", flush=True)
                 # Final tagged-count diagnostic
                 tagged_count = sum(1 for v in request_to_node.values() if v == node_id)
                 if listener_state['attached']:
@@ -6317,6 +6345,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 'user_agent': user_agent_v521,
             })
             job.status = "completed"
+            _gc_pending_submission(job.node_id)  # v730
             ids_resolved_jobs.add(job.node_id)
             need_count = max(1, getattr(job, 'variants', 1) or 1)
             partial = " (partial — timeout reached)" if len(ready_urls) < need_count else ""
@@ -6413,6 +6442,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 })
                 job.status = "failed"
                 job.error_message = err_msg
+                _gc_pending_submission(job.node_id)  # v730
                 ids_resolved_jobs.add(job.node_id)
                 continue
             if ready:
@@ -6440,6 +6470,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 # Mark job as completed so the legacy loop below skips
                 # it. The HTTP worker will POST the success status.
                 job.status = "completed"
+                _gc_pending_submission(job.node_id)  # v730
                 ids_resolved_jobs.add(job.node_id)
                 # Partial-completion log: distinguish full success from
                 # mixed (some variants failed in Flow but others made it).
@@ -6666,6 +6697,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     "error": "Flow returned Failed for this generation",
                 })
                 match.status = "failed"
+                _gc_pending_submission(match.node_id)  # v730
                 enqueued += 1
                 continue
 
@@ -6726,6 +6758,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 "user_agent": user_agent,
             })
             match.status = "downloading"
+            _gc_pending_submission(match.node_id)  # v730
             # v458: record these URLs as claimed so future scans can't
             # re-attribute them via Strategy 3 catchall when this
             # submission is no longer in `pending`.
@@ -6746,6 +6779,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     "error": f"Stuck after {job.retry_count} retries (>{STUCK_TIMEOUT}s)",
                 })
                 job.status = "failed"
+                _gc_pending_submission(job.node_id)  # v730
             elif age > STUCK_RETRY_TIMEOUT and job.retry_count < STUCK_MAX_RETRIES:
                 print(f"[API:scan] ⟳ Node {job.node_id} STUCK ({int(age)}s) — queuing reload+resubmit (attempt {job.retry_count + 1}/{STUCK_MAX_RETRIES})", flush=True)
                 job.status = "stuck_retry"
@@ -6762,6 +6796,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 break
             nid = msg.get("node_id")
             job = in_flight.pop(nid, None)
+            _gc_pending_submission(nid)  # v730 — defense in depth: also GC at done-queue drain
             if job is not None:
                 try:
                     job_work = os.path.dirname(job.output_dir)
@@ -6811,6 +6846,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 _saved_dict = _stuck._original_job
                 _stuck_nid = _stuck.node_id
                 in_flight.pop(_stuck_nid, None)
+                _gc_pending_submission(_stuck_nid)  # v730 — clear stale entry before resubmit
                 print(f"[API:retry] ⟳ Node {_stuck_nid} reload+resubmit (attempt {_prev_retry + 1}/{STUCK_MAX_RETRIES})", flush=True)
                 try:
                     _ok = _submit_one_job(_saved_dict) if _saved_dict else False
