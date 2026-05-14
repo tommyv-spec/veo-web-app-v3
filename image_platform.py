@@ -2952,7 +2952,7 @@ def _parse_bullet_field(block: str, key: str) -> Optional[str]:
     # styles — "rhythm tier" vs "scene_transition"). Escape the key
     # for regex but let spaces match either space or underscore.
     key_pattern = _re.escape(key).replace(r"\ ", r"[\s_]")
-    pat = rf"^\s*-\s*\*\*{key_pattern}\s*:\*\*\s*(.+?)\s*$"
+    pat = rf"^\s*[-*]\s*\*\*{key_pattern}\s*:\*\*\s*(.+?)\s*$"
     m = _re.search(pat, block, flags=_re.MULTILINE | _re.IGNORECASE)
     if not m:
         return None
@@ -3072,7 +3072,7 @@ def _parse_scene_blocks_legacy(md_text: str) -> List[Dict[str, Any]]:
 
         # reference_image field (existing behavior)
         ref_match = _re.search(
-            r"^\s*-\s*\*\*reference_image:\*\*\s*(\S+)",
+            r"^\s*[-*]\s*\*\*reference_image:\*\*\s*(\S+)",
             block, flags=_re.MULTILINE,
         )
         ref_value = ref_match.group(1).strip() if ref_match else "none"
@@ -3179,7 +3179,7 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
         image_index = int(header.group(1))
 
         ref_match = _re.search(
-            r"^\s*-\s*\*\*reference_image:\*\*\s*(\S+)",
+            r"^\s*[-*]\s*\*\*reference_image:\*\*\s*(\S+)",
             block, flags=_re.MULTILINE,
         )
         ref_value = ref_match.group(1).strip() if ref_match else "none"
@@ -3193,7 +3193,7 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
         # this image binds. Value is the product ingredient name verbatim
         # from the Ingredients table.
         product_match = _re.search(
-            r"^\s*-\s*\*\*product_image:\*\*\s*(.+?)$",
+            r"^\s*[-*]\s*\*\*product_image:\*\*\s*(.+?)$",
             block, flags=_re.MULTILINE,
         )
         product_image: Optional[str] = None
@@ -3213,7 +3213,7 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
         # the diff vs the prior chained image; narrative_lens is an
         # optional lens label. All three are NULL on pre-v667 imports.
         frame_anchor_match = _re.search(
-            r"^\s*-\s*\*\*frame_anchor:\*\*\s*([0-9.]+)\s*s?\s*$",
+            r"^\s*[-*]\s*\*\*frame_anchor:\*\*\s*([0-9.]+)\s*s?\s*$",
             block, flags=_re.MULTILINE,
         )
         frame_anchor_s: Optional[float] = None
@@ -3224,7 +3224,7 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
                 frame_anchor_s = None
 
         visual_delta_match = _re.search(
-            r"^\s*-\s*\*\*visual_delta:\*\*\s*(.+?)\s*$",
+            r"^\s*[-*]\s*\*\*visual_delta:\*\*\s*(.+?)\s*$",
             block, flags=_re.MULTILINE,
         )
         visual_delta: Optional[str] = None
@@ -3232,7 +3232,7 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
             visual_delta = visual_delta_match.group(1).strip()
 
         narrative_lens_match = _re.search(
-            r"^\s*-\s*\*\*narrative_lens:\*\*\s*(.+?)\s*$",
+            r"^\s*[-*]\s*\*\*narrative_lens:\*\*\s*(.+?)\s*$",
             block, flags=_re.MULTILINE,
         )
         narrative_lens: Optional[str] = None
@@ -3251,7 +3251,7 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
         # When non-empty, the binding loop in import_scene_table binds
         # ONLY these names (skipping the v509 prompt-scan fallback).
         cast_match = _re.search(
-            r"^\s*-\s*\*\*cast:\*\*\s*(.+?)\s*$",
+            r"^\s*[-*]\s*\*\*cast:\*\*\s*(.+?)\s*$",
             block, flags=_re.MULTILINE,
         )
         cast_list: Optional[List[str]] = None
@@ -3273,7 +3273,7 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
         # as start frame for audio-pair Veo renders). NULL/absent = standard
         # image (default for all pre-v698A entries).
         role_match = _re.search(
-            r"^\s*-\s*\*\*role:\*\*\s*(.+?)\s*$",
+            r"^\s*[-*]\s*\*\*role:\*\*\s*(.+?)\s*$",
             block, flags=_re.MULTILINE,
         )
         role: Optional[str] = None
@@ -3384,14 +3384,14 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
 
         # Required: image reference (skipped for text_card scenes per v681)
         image_ref_m = _re.search(
-            r"^\s*-\s*\*\*image:\*\*\s*(\S+)",
+            r"^\s*[-*]\s*\*\*image:\*\*\s*(\S+)",
             block, flags=_re.MULTILINE,
         )
         if not image_ref_m:
             if is_text_card:
                 image_index = None  # type: ignore[assignment]
             else:
-                raise ValueError(f"Scene {scene_index}: missing '- **image:** image_N' field")
+                raise ValueError(f"Scene {scene_index}: missing '- **image:** image_N' (or '* **image:** image_N') field")
         else:
             image_ref_raw = image_ref_m.group(1).strip()
             img_m = _re.match(r"image_(\d+)", image_ref_raw)
@@ -3511,7 +3511,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # downstream in _parse_scene_blocks_new's caller via known images).
         voiceover_anchor_image: Optional[int] = None
         anchor_match = _re.search(
-            r"^\s*-\s*\*\*voiceover_anchor_image:\*\*\s*image_(\d+)\s*$",
+            r"^\s*[-*]\s*\*\*voiceover_anchor_image:\*\*\s*image_(\d+)\s*$",
             block, flags=_re.MULTILINE,
         )
         if anchor_match:
@@ -3547,7 +3547,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         #
         # We iterate through each matching bullet in source order.
         bullet_pattern = _re.compile(
-            r"^\s*-\s*\*\*(line|action_note|pad)\s*:\*\*\s*(.+?)\s*$",
+            r"^\s*[-*]\s*\*\*(line|action_note|pad)\s*:\*\*\s*(.+?)\s*$",
             flags=_re.MULTILINE | _re.IGNORECASE,
         )
         lines_list: List[str] = []
