@@ -3890,6 +3890,307 @@ async def replace_clip_image(
         raise HTTPException(status_code=500, detail=f"Replace failed: {e}")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# v735 — PATCH /api/clips/{clip_id}
+#
+# In-place edit of Clip row's scene-config + dialogue fields on an existing job
+# without going back through re-import + Banana 2 re-render. Mirrors v725's
+# PATCH /api/batches/{batch_id}/scenes/{scene_index} but on the post-promotion
+# Clip table (jobs side) instead of pre-promotion ImageSceneAssignment.
+#
+# Use cases:
+#   - v682b retrofit — drop dialogue_text (set to empty or NULL) on silent
+#     b-roll scenes that incorrectly carried bracket markers. Veo TTS no
+#     longer tries to literally speak "[upbeat music plays]".
+#   - Dialogue rewrite — fix typos / safe-vocab swap without re-import.
+#   - Mode flip — patch clip_mode (blend/fresh/continue) or cut_mode after
+#     observing render drift on the first attempt.
+#   - voiceover_anchor retrofit — fix v698A pair binding on a clip whose
+#     anchor image was mis-bound at import.
+#   - target_duration_s tweak — match observed Whisper-VAD trim length.
+#   - prompt_text override — surgical Veo-prompt rewrite without touching
+#     the source markdown / re-import.
+#
+# Allowed fields (each Optional[X]=None means "don't change"):
+#   dialogue_text, dialogue_pad, prompt_text, clip_mode, cut_mode,
+#   target_duration_s, veo_render_duration_s, caption, scene_type,
+#   bg_color, clip_role, voiceover_anchor_image_node_id, voiceover_line
+#   clear_fields: List[str] for explicit clear-to-NULL.
+#
+# Banned (would require dedicated flows / break invariants):
+#   id, job_id, clip_index, status, start_frame, end_frame, output_filename,
+#   output_url, error_code, error_message, approval_status, retry_count,
+#   claimed_*, versions_json, generation_attempt, flow_clip_id, paired_clip_id
+#
+# Status guard: rejects PATCH when status == GENERATING (race with worker
+# claim / submit). Operator pauses the job first, patches, then resumes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import re as _re_v735
+
+
+class UpdateClipRequest(BaseModel):
+    dialogue_text: Optional[str] = None
+    dialogue_pad: Optional[str] = None
+    prompt_text: Optional[str] = None
+    clip_mode: Optional[str] = None
+    cut_mode: Optional[str] = None
+    target_duration_s: Optional[float] = None
+    veo_render_duration_s: Optional[int] = None
+    caption: Optional[str] = None
+    scene_type: Optional[str] = None
+    bg_color: Optional[str] = None
+    clip_role: Optional[str] = None
+    voiceover_anchor_image_node_id: Optional[int] = None
+    voiceover_line: Optional[str] = None
+    clear_fields: Optional[List[str]] = None
+
+
+_V735_ALLOWED_CLEAR_FIELDS = {
+    "dialogue_text", "dialogue_pad", "prompt_text", "cut_mode",
+    "target_duration_s", "veo_render_duration_s", "caption",
+    "scene_type", "bg_color", "voiceover_anchor_image_node_id",
+    "voiceover_line",
+}
+
+_V735_HEX_COLOR_RE = _re_v735.compile(r"^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+
+
+@app.patch("/api/clips/{clip_id}")
+async def update_clip(
+    clip_id: int,
+    req: UpdateClipRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v735 — in-place PATCH of Clip scene-config + dialogue fields.
+
+    See v735 header comment above for design rationale + use cases.
+    """
+    clip = get_user_clip(db, clip_id, current_user)
+
+    # ─── Status guard ────────────────────────────────────────────────────
+    if clip.status == ClipStatus.GENERATING.value:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Clip {clip_id} is currently GENERATING. Pause the job "
+                f"first (POST /api/jobs/{clip.job_id}/pause), patch, then "
+                f"resume. Patching mid-render races with the worker claim."
+            ),
+        )
+
+    # ─── clip_mode ───────────────────────────────────────────────────────
+    if req.clip_mode is not None:
+        cm = req.clip_mode.lower().strip()
+        if cm not in ("blend", "fresh", "continue"):
+            raise HTTPException(
+                400,
+                f"Unrecognized clip_mode {req.clip_mode!r}; expected one of "
+                f"'blend', 'fresh', 'continue'.",
+            )
+        clip.clip_mode = cm
+
+    # ─── cut_mode ────────────────────────────────────────────────────────
+    if req.cut_mode is not None:
+        cmm = req.cut_mode.lower().strip()
+        if cmm not in ("whisper", "timeline", "auto"):
+            raise HTTPException(
+                400,
+                f"Unrecognized cut_mode {req.cut_mode!r}; expected one of "
+                f"'whisper', 'timeline', 'auto'.",
+            )
+        clip.cut_mode = cmm
+
+    # ─── scene_type ──────────────────────────────────────────────────────
+    if req.scene_type is not None:
+        st = req.scene_type.lower().strip()
+        if st not in ("shot", "text_card"):
+            raise HTTPException(
+                400,
+                f"Unrecognized scene_type {req.scene_type!r}; expected one "
+                f"of 'shot', 'text_card'.",
+            )
+        clip.scene_type = st
+
+    # ─── clip_role (v698A pair discriminator) ────────────────────────────
+    if req.clip_role is not None:
+        cr = req.clip_role.lower().strip()
+        if cr not in ("single", "visual_pair", "audio_pair"):
+            raise HTTPException(
+                400,
+                f"Unrecognized clip_role {req.clip_role!r}; expected one of "
+                f"'single', 'visual_pair', 'audio_pair'.",
+            )
+        clip.clip_role = cr
+
+    # ─── target_duration_s ───────────────────────────────────────────────
+    if req.target_duration_s is not None:
+        if not (0.1 <= req.target_duration_s <= 60.0):
+            raise HTTPException(
+                400,
+                f"target_duration_s {req.target_duration_s} out of range "
+                f"[0.1, 60.0]",
+            )
+        clip.target_duration_s = float(req.target_duration_s)
+
+    # ─── veo_render_duration_s ───────────────────────────────────────────
+    if req.veo_render_duration_s is not None:
+        if int(req.veo_render_duration_s) not in (4, 6, 8):
+            raise HTTPException(
+                400,
+                f"veo_render_duration_s {req.veo_render_duration_s} not in "
+                f"Veo render buckets [4, 6, 8]",
+            )
+        clip.veo_render_duration_s = int(req.veo_render_duration_s)
+
+    # ─── bg_color (hex) ──────────────────────────────────────────────────
+    if req.bg_color is not None:
+        bg = req.bg_color.strip()
+        if bg and not _V735_HEX_COLOR_RE.match(bg):
+            raise HTTPException(
+                400,
+                f"bg_color {req.bg_color!r} not a valid hex color "
+                f"(expected #RGB, #RRGGBB, or #RRGGBBAA).",
+            )
+        clip.bg_color = bg if bg.startswith("#") or not bg else f"#{bg}"
+
+    # ─── voiceover_anchor_image_node_id (v698A) ──────────────────────────
+    if req.voiceover_anchor_image_node_id is not None:
+        from models import ImageNode as _ImageNodeForAnchor  # local import
+        anchor = db.query(_ImageNodeForAnchor).filter(
+            _ImageNodeForAnchor.id == req.voiceover_anchor_image_node_id,
+            _ImageNodeForAnchor.user_id == current_user.id,
+        ).first()
+        if not anchor:
+            raise HTTPException(
+                400,
+                f"voiceover_anchor_image_node_id "
+                f"{req.voiceover_anchor_image_node_id} not found for current "
+                f"user.",
+            )
+        if (anchor.role or "").lower() != "voiceover_anchor":
+            raise HTTPException(
+                400,
+                f"Node {anchor.id} has role={anchor.role!r}, expected "
+                f"'voiceover_anchor' (per v698A image-role discriminator).",
+            )
+        clip.voiceover_anchor_image_node_id = anchor.id
+
+    # ─── Text fields (no enum / range validation) ────────────────────────
+    if req.dialogue_text is not None:
+        clip.dialogue_text = req.dialogue_text
+    if req.dialogue_pad is not None:
+        clip.dialogue_pad = req.dialogue_pad
+    if req.prompt_text is not None:
+        clip.prompt_text = req.prompt_text
+    if req.caption is not None:
+        clip.caption = req.caption
+    if req.voiceover_line is not None:
+        clip.voiceover_line = req.voiceover_line
+
+    # ─── Auto-clear anchor + voiceover_line when leaving visual_pair ─────
+    # Mirror v725 auto-clear: flipping clip_role away from visual_pair
+    # leaves orphan anchor refs. Clear unless caller explicitly set them
+    # in the same PATCH.
+    if req.clip_role is not None and clip.clip_role != "visual_pair":
+        if req.voiceover_anchor_image_node_id is None:
+            if clip.voiceover_anchor_image_node_id is not None:
+                print(
+                    f"[v735] Auto-clearing voiceover_anchor_image_node_id on "
+                    f"clip {clip_id} (clip_role={clip.clip_role!r} is not "
+                    f"'visual_pair')",
+                    flush=True,
+                )
+                clip.voiceover_anchor_image_node_id = None
+        if req.voiceover_line is None and clip.voiceover_line is not None:
+            print(
+                f"[v735] Auto-clearing voiceover_line on clip {clip_id} "
+                f"(clip_role={clip.clip_role!r} is not 'visual_pair')",
+                flush=True,
+            )
+            clip.voiceover_line = None
+
+    # ─── Validation: visual_pair requires anchor ─────────────────────────
+    if clip.clip_role == "visual_pair" and clip.voiceover_anchor_image_node_id is None:
+        raise HTTPException(
+            400,
+            "clip_role='visual_pair' requires voiceover_anchor_image_node_id "
+            "to be set (per v698A). Set it in the same PATCH or change "
+            "clip_role to 'single'.",
+        )
+
+    # ─── Validation: text_card requires caption + bg_color ───────────────
+    if clip.scene_type == "text_card":
+        if not (clip.caption or "").strip():
+            raise HTTPException(
+                400,
+                "scene_type='text_card' requires non-empty caption.",
+            )
+        if not (clip.bg_color or "").strip():
+            raise HTTPException(
+                400,
+                "scene_type='text_card' requires bg_color hex.",
+            )
+
+    # ─── clear_fields — explicit clear-to-NULL ───────────────────────────
+    cleared = []
+    if req.clear_fields:
+        for f in req.clear_fields:
+            if f not in _V735_ALLOWED_CLEAR_FIELDS:
+                raise HTTPException(
+                    400,
+                    f"clear_fields field {f!r} not in allow-list "
+                    f"{sorted(_V735_ALLOWED_CLEAR_FIELDS)}",
+                )
+            setattr(clip, f, None)
+            cleared.append(f)
+
+    try:
+        db.commit()
+        db.refresh(clip)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"PATCH commit failed: {e}")
+
+    # Audit log entry (best-effort)
+    try:
+        _changed = []
+        for fname in (
+            "dialogue_text", "dialogue_pad", "prompt_text", "clip_mode",
+            "cut_mode", "target_duration_s", "veo_render_duration_s",
+            "caption", "scene_type", "bg_color", "clip_role",
+            "voiceover_anchor_image_node_id", "voiceover_line",
+        ):
+            if getattr(req, fname) is not None:
+                _changed.append(fname)
+        add_job_log(
+            db, clip.job_id,
+            f"[v735] Clip {clip.clip_index + 1} patched — "
+            f"changed: {', '.join(_changed) or 'none'}"
+            + (f" — cleared: {', '.join(cleared)}" if cleared else ""),
+            source="user",
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "clip_id": clip.id,
+        "clip_index": clip.clip_index,
+        "changed_fields": [
+            f for f in (
+                "dialogue_text", "dialogue_pad", "prompt_text", "clip_mode",
+                "cut_mode", "target_duration_s", "veo_render_duration_s",
+                "caption", "scene_type", "bg_color", "clip_role",
+                "voiceover_anchor_image_node_id", "voiceover_line",
+            ) if getattr(req, f) is not None
+        ],
+        "cleared_fields": cleared,
+        "clip": clip.to_dict(),
+    }
+
+
 @app.delete("/api/clips/{clip_id}")
 async def delete_clip(
     clip_id: int, 
