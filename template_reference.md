@@ -9932,3 +9932,222 @@ Operators producing fresh artifacts should still apply v721 at authoring time (c
 9. Confirm no image re-renders queued during any of the above (Banana 2 image jobs not bumped; only Veo clip renders fire on re-promotion).
 
 ONLY THEN claim v725 retrofits scene-config without re-render.
+
+### v730 — pending_submissions GC + tag_deadline 5s→12s (worker attribution leak fix)
+
+**Symptom.** Wrong-image cross-attribution between scenes during cross-project switching, partial flag-path tagging, and FIFO siphoning of late POSTs. Operator observes Banana 2 variants for Scene X surfacing on Scene Y's node card; or the wrong subject (persona-only scene rendered where non-persona was expected, or vice versa). Logs show repeated `[API:submit] ⓘ Node N: K/M POSTs tagged via flag-path; FIFO fallback handles the rest` followed by `[API:scan] 🔎 Node N pending 30s+ (legacy fallback)` — Tier A (v627 request-tag listener) is starving and the job falls onto the brittle legacy DOM-scan path.
+
+**Root cause.** Two coupled bugs in `code/image_worker.py`:
+
+1. **`pending_submissions` never GC'd on job completion.** Cleanup runs only by 60s age cutoff at the `pending_submissions.append` site. When a job exits `in_flight` via `_drain_done_queue` (HTTP worker reports success) or via the v709 stuck-retry pop, its `pending_submissions` entry lingers up to 60s with whatever `tagged_count` it had at completion (often `< expected_count` because of bug #2 below). FIFO fallback in `_on_image_request` iterates pending_submissions oldest-first; a late POST from a NEW submit gets siphoned to an OLD completed job's quota. The new job's `captured_urls_by_node` bucket starves. Tier A waits 90s for partial fill. By that time the legacy fallback has already run and matched via Strategy 1 prompt_key substring OR Strategy 3 catchall — the catchall is the wrong-image vector when stale gallery state is present.
+
+2. **`tag_deadline = 5.0s` too short.** Flow's frontend emits N separate `batchGenerateImages` POSTs over a 2-5s window for an N-variant request. `_submit_one_job` waits up to 5s for `tagged_count >= variants` before clearing `current_submitting_node_id`. On long-tail emissions (or when Flow's React app is throttled by browser tab inactivity, or when network is slow), some POSTs fire AFTER the deadline. They get FIFO-tagged via path 2. If pending_submissions still contains an older job with unfilled quota (bug 1), those POSTs get tagged to the WRONG node. Even without bug 1, the new job's tagged_count starts incomplete and Tier A waits 90s before accepting partial.
+
+**Fix.** Two atomic patches in `code/image_worker.py`:
+
+**Part A (`_gc_pending_submission` helper).** New helper defined in the same closure that owns `pending_submissions`:
+
+```python
+def _gc_pending_submission(node_id):
+    n = len(pending_submissions)
+    pending_submissions[:] = [p for p in pending_submissions if p['node_id'] != node_id]
+    if len(pending_submissions) < n:
+        print(f"[API:v730] ⟲ GC pending_submissions entry for node {node_id} (was tagged {n - len(pending_submissions)} time(s); {len(pending_submissions)} entries remain)", flush=True)
+```
+
+Called at every terminal-status site:
+
+- `_enqueue_for_job` (Tier A / Tier B completed)
+- v521 tile_id path (failed branch + completed branch)
+- legacy fallback (failed branch + downloading branch)
+- STUCK_TIMEOUT failed (~300s final-fail)
+- v709 stuck-retry pop (clear stale entry before resubmit re-appends a fresh one)
+- `_drain_done_queue` (defense in depth — catches any path that bypassed the explicit hooks)
+
+Seven hook sites total.
+
+**Part B (`tag_deadline` 5.0 → 12.0).** In `_submit_one_job`, after `click_generate_image`:
+
+```python
+if listener_state['attached']:
+    _v730b_wait_start = time.time()
+    tag_deadline = _v730b_wait_start + 12.0
+    while time.time() < tag_deadline:
+        tagged_count = sum(1 for v in request_to_node.values() if v == node_id)
+        if tagged_count >= variants:
+            break
+        time.sleep(0.1)
+    _v730b_waited_s = time.time() - _v730b_wait_start
+    _v730b_final_tagged = sum(1 for v in request_to_node.values() if v == node_id)
+    if _v730b_final_tagged >= variants and _v730b_waited_s > 5.0:
+        print(f"[API:submit] [v730b] Node {node_id}: full flag-path tagging took {_v730b_waited_s:.1f}s (pre-v730b 5s window would have lost POST(s) to FIFO/abort)", flush=True)
+```
+
+Healthy runs early-exit at `tagged_count >= variants` in ~2s. Long-tail runs hold up to 12s; the diagnostic fires only when the new 5-12s window did real work.
+
+**Diagnostic logs (permanent per CLAUDE.md verification rule).**
+
+- `[API:v730] ⟲ GC pending_submissions entry for node N (was tagged K time(s); M entries remain)` — fires once per job exit. Operator can count occurrences and confirm every completed job is GC'd.
+- `[API:submit] [v730b] Node N: full flag-path tagging took X.Xs (pre-v730b 5s window would have lost POST(s) to FIFO/abort)` — fires only when the new window caught a long-tail emission that would have leaked under pre-v730b.
+
+**Verification mandatory before claiming fixed.**
+
+1. Wait for Render redeploy (~2-3 min after submodule push).
+2. Run a real image batch with cross-project switching (≥2 batches interleaved, ≥10 submissions per batch).
+3. Grep Render logs:
+   - `grep '\[API:v730\] ⟲'` — expect ≥1 line per completed job.
+   - `grep '\[API:submit\] \[v730b\]'` — fires on long-tail runs.
+   - `grep 'tagged via flag-path; FIFO fallback handles the rest'` — count drops vs pre-v730 baseline.
+   - `grep 'enqueue (legacy fallback)'` — count drops vs pre-v730 baseline.
+4. Spot-check 3-4 specific node-id → uploaded-variant pairs. Confirm the saved variants visually match the prompt that fired for that node_id.
+
+ONLY THEN claim v730 fixes the wrong-image cross-attribution.
+
+**Touched.** `code/image_worker.py` only. No DB / parser / markdown / decode / generate-rule change.
+
+**Migration.** Zero required. Pre-v730 in-flight artifacts unaffected; only freshly-claimed jobs after deploy benefit. Legacy `pending_submissions` entries from before the deploy decay naturally via the 60s age cutoff.
+
+---
+
+### v731 — Tier A baseline-overlap guard
+
+**Symptom.** Tier A (v627 request-tag listener) enqueued mis-tagged fife URLs byte-identical for the wrong job when the request-tag map was corrupted (pre-v730 pending_submissions leak, cross-project FIFO drift per v734, or `id()`-collision after Playwright GC).
+
+**Root cause.** Tier A trusted `captured_urls_by_node[node_id]` unconditionally. No cross-check against the job's `baseline_urls` snapshot.
+
+**Fix.** Before `_enqueue_for_job` in Tier A, intersect the tagged URLs with `job.baseline_urls`. On any overlap, drop the bucket, log `[API:scan] [v731] ⚠`, fall through to Tier B / legacy. Both downstream paths already have container-level baseline filters (`if container_urls and match.baseline_urls: new_urls = container_urls - match.baseline_urls` at lines ~6646 + ~6714), so cascading through is safe.
+
+```python
+tagged_set = set(tagged_urls)
+overlap = tagged_set & (job.baseline_urls or set())
+if overlap:
+    print(f"[API:scan] [v731] ⚠ Node {job.node_id}: Tier A bucket has {len(overlap)}/{len(tagged_urls)} URL(s) overlapping baseline — likely mis-tagged. Dropping bucket, falling through to Tier B/legacy.", flush=True)
+    captured_urls_by_node.pop(job.node_id, None)
+    continue
+```
+
+**Diagnostic.** `[API:scan] [v731] ⚠ Node N: Tier A bucket has K/M URL(s) overlapping baseline` — should fire zero times under normal operation. Any fire = a remaining mis-tag path that v730a/v734 didn't catch. Capture context and escalate.
+
+**Verification.** Run a batch post-deploy; grep logs; expect zero `[v731] ⚠` lines.
+
+**Touched.** `code/image_worker.py` only.
+
+---
+
+### v732 — Strategy 3 baseline-UUID guard extension
+
+**Symptom.** Lone-pending Strategy 3 catchall in `match_container_to_submission` inherited stale gallery tiles from prior worker runs / manual gallery use on REUSED projects. Tile UUIDs were never claimed by current session, so the v671 UUID-overlap guard passed, the single-pending lookup returned the lone job, the wrong tiles got attributed.
+
+**Root cause.** v671 rejected Strategy 3 only when `container_uuids ∩ _claimed_tile_uuids ≠ ∅`. `_claimed_tile_uuids` only covers claims made BY CURRENT worker session. Stale tiles from prior sessions never landed in this set. `baseline_urls` filter at line 6646 caught most cases at the container-stale layer, but virtuoso unmount/remount could put a stale tile OUTSIDE baseline (unmounted at submit-time snapshot, remounted at scan-time).
+
+**Fix.** When `len(pending_jobs) == 1`, ALSO extract UUIDs from the lone job's `baseline_urls` and reject containers whose UUIDs overlap. `baseline_urls` IS captured at every submit (snapshot of gallery URLs at submit time, including pre-existing tiles), so it covers any URL that predates this job — regardless of which session generated it.
+
+```python
+_UUID_RE_LOCAL = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+container_uuids = set()
+for url in (container.get("tile_image_urls") or []):
+    m = _UUID_RE_LOCAL.search(url or "")
+    if m:
+        container_uuids.add(m.group(0).lower())
+if container_uuids:
+    if claimed_uuids and (container_uuids & claimed_uuids):
+        return None  # v671 path
+    _job_v732 = pending_jobs[0]
+    baseline_uuids = set()
+    for url in (_job_v732.baseline_urls or set()):
+        m = _UUID_RE_LOCAL.search(url or "")
+        if m:
+            baseline_uuids.add(m.group(0).lower())
+    if baseline_uuids and (container_uuids & baseline_uuids):
+        overlap_n = len(container_uuids & baseline_uuids)
+        print(f"[match] [v732] ⏭ Strategy 3 rejected: container has {overlap_n}/{len(container_uuids)} UUID(s) in pending job {_job_v732.node_id} baseline — stale gallery state", flush=True)
+        return None
+```
+
+**Diagnostic.** `[match] [v732] ⏭ Strategy 3 rejected: container has K/M UUID(s) in pending job N baseline — stale gallery state` — fires only when v732 catches a real stale-state match (would otherwise have shipped wrong image).
+
+**Verification.** Run a batch on a REUSED project (one with prior renders visible in the gallery). Confirm `[v732] ⏭` either fires zero times (v731 + v734 + v730 caught everything earlier) OR fires on a real stale match.
+
+**Touched.** `code/image_worker.py` only.
+
+---
+
+### v733 — `_derive_prompt_key` max_chars 300 → 800
+
+**Symptom.** Sibling scenes chaining off the same `image_K` (multi-clip via v698A or recipe-pivot pairs) had identical `prompt_keys` because v703 manifest (~50-150 chars) + v581 binding line (~80) + v589.1 chain line (~150) + opening Composition phrase consumed the entire 300-char window, leaving only the chain-image-K token as the per-scene disambiguator — and that token was identical when both siblings chained off the same anchor.
+
+**Root cause.** `_derive_prompt_key(full_prompt, max_chars=300)` capped output at 300 chars after stripping the `POSITIVE` prefix. For lift artifacts the first 300 chars are nearly all standardized header. Strategy 1 longest-match then resolved by Python dict iteration order over `in_flight` — non-deterministic legacy-fallback attribution.
+
+**Fix.** Bump default to 800. Includes per-scene Action / Subject body prose that's genuinely unique per scene. Substring match is monotonic in key length (longer key is strictly more specific), so callers are strictly safer with the bigger cap.
+
+```python
+def _derive_prompt_key(full_prompt, max_chars=800):
+    ...
+```
+
+**Diagnostic.** Structural fix; no new log line. Observe absence of wrong-image symptoms on multi-clip-via-v698A artifacts that previously produced them.
+
+**Touched.** `code/image_worker.py` only.
+
+---
+
+### v734 — per-project FIFO + `request_to_node` bounded prune
+
+**Symptom (theoretical, hard to reproduce).** (a) Page-level response listener stays attached across navigations; a late POST from project A could in theory FIFO-tag to a job pending on project B if entries hadn't aged out of `pending_submissions` yet. (b) `request_to_node` grew unbounded across long sessions; Python `id()` is reusable after GC, raising a small risk of `id()`-collision misattribution if Playwright recycled request objects.
+
+**Fix.**
+
+**Per-project FIFO.** Record `page.url` at `pending_submissions.append` time. Filter FIFO matches by `request.frame.url` when both sides known. Fall back to legacy oldest-unfilled when either is unknown.
+
+```python
+listener_state['current_submitting_node_id'] = node_id
+try:
+    _v734_proj_url = page.url
+except Exception:
+    _v734_proj_url = None
+pending_submissions.append({
+    'node_id': node_id,
+    'expected_count': variants,
+    'ts': time.time(),
+    'tagged_count': 0,
+    'project_url': _v734_proj_url,  # v734
+})
+```
+
+```python
+# In _on_image_request Path 2 (FIFO):
+try:
+    _req_url = request.frame.url if request.frame else None
+except Exception:
+    _req_url = None
+for p in pending_submissions:
+    if p['tagged_count'] >= p['expected_count']:
+        continue
+    _p_proj = p.get('project_url')
+    if _req_url and _p_proj and _p_proj != _req_url:
+        continue
+    request_to_node[id(request)] = p['node_id']
+    p['tagged_count'] += 1
+    break
+```
+
+**Bounded prune.** Cap `request_to_node` at 1000 entries; drop oldest 100 when over cap. Insertion-ordered dicts since Python 3.7.
+
+```python
+REQUEST_TO_NODE_CAP = 1000
+# ... inside _on_image_request, before any tagging:
+if len(request_to_node) > REQUEST_TO_NODE_CAP:
+    for k in list(request_to_node.keys())[:100]:
+        request_to_node.pop(k, None)
+    print(f"[API:v734] pruned request_to_node to {len(request_to_node)} entries", flush=True)
+```
+
+**Diagnostic.** `[API:v734] pruned request_to_node to N entries` — fires after >1000 batchGenerateImages POSTs in a session.
+
+**Verification.** Run a long-running batch (≥200 submissions, ≥4 cross-project switches). Confirm zero cross-project attribution drift in saved variants.
+
+**Touched.** `code/image_worker.py` only.
+
+**Pairing with v730 / v731 / v732 / v733.** v734 is defense-in-depth on top of v730 (which closes the highest-impact FIFO leak), v731 (Tier A baseline-overlap guard), v732 (Strategy 3 baseline-UUID guard), and v733 (prompt_key disambiguation). Each layer is independently revertable; together they close every attribution leak path identified in the worker.
+
+
