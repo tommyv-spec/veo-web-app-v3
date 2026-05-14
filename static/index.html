@@ -16564,14 +16564,35 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 // Refresh node state so the new variant appears in the grid
                 // and is highlighted as chosen. Falls back gracefully if the
                 // refresh helpers aren't available in this app version.
+                //
+                // v735 — fix "Node undefined / Status: undefined" detail
+                // pane after manual upload. Pre-v735 this called
+                //   imgRenderNodeDetail(imgState.selectedNodeId || nodeId)
+                // passing an INTEGER node id to a function that expects a
+                // node OBJECT. `imgState.selectedNodeId` was a phantom
+                // field (only `detailNodeId` exists in state) so the
+                // expression always evaluated to the raw nodeId. Inside
+                // imgRenderNodeDetail, `node.name || ('Node ' + node.id)`
+                // resolves to `'Node undefined'` on an integer, and the
+                // status / variants grid render empty.
+                //
+                // Fix: prefer imgSelectNode(nodeId) — it does the right
+                // lookup via imgState.nodesById[nodeId], guards missing
+                // nodes, sets detailNodeId, expands the containing group,
+                // and calls imgRenderNodeDetail with the actual node
+                // object. Falls back to a corrected imgRenderNodeDetail
+                // call (with proper lookup) for older app versions.
                 try {
                     if (typeof imgLoadNodes === 'function') {
                         await imgLoadNodes();
                     }
-                    if (typeof imgRenderNodeDetail === 'function') {
-                        imgRenderNodeDetail(imgState.selectedNodeId || nodeId);
-                    } else if (typeof imgSelectNode === 'function') {
+                    if (typeof imgSelectNode === 'function') {
                         imgSelectNode(nodeId);
+                    } else if (typeof imgRenderNodeDetail === 'function') {
+                        const _v735_node = (imgState && imgState.nodesById)
+                            ? imgState.nodesById[nodeId]
+                            : null;
+                        if (_v735_node) imgRenderNodeDetail(_v735_node);
                     }
                 } catch (_re) {
                     // Last resort: full reload
