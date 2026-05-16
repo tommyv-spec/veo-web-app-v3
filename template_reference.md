@@ -11922,3 +11922,35 @@ Operator-surfaced 2026-05-16 across multiple rounds: "i can't scroll the audio c
 
 **Verification (mandatory before claiming v745 correctly applied)**: push to main → wait Render deploy → open job with multi-variant paired clips → COLLAPSED view: click audio side's `▶` arrow → confirm audio variant indicator increments AND audio video tile swaps (not visual side) → click visual side's `▶` → confirm visual variant changes independently → EXPANDED view: confirm multiple paired cards visible per row (2-3 on a 1920px viewport) → confirm b-roll panel sits at sensible width (~400-500px) → resize browser 1280px → 1920px → 2560px, confirm cards reflow correctly (2 / 3 / 4 per row) and voice inset stays compact at 160px regardless. Will not claim v745 correctly applied until evidence per CLAUDE.md hard rule.
 
+---
+
+## v746 — Expanded-mode tighter grid + hover-to-preview videos (amends v745)
+
+**Problem.** v745 reflowed the expanded grid from one-card-per-row to `repeat(auto-fill, minmax(540px, 1fr))` with paired voice inset at 160px. On 1920px viewport that was 3 cards per row — still too much vertical scroll on jobs with 12+ paired clips. Operator-surfaced 2026-05-16: "better but still too big and i still want the paired clips all visible like the other ones, so i can play them hovering and not clicking to scroll through." Two parts: (a) cards still too big — fit more per row; (b) currently every card requires a click on the video controls to verify the take, which is slow when sweeping a 12+ clip job for review.
+
+**Rule.**
+
+1. **Tighter grid** — `.clips-grid.expanded-mode` minmax drops from `540px` to `380px`; gap 24 → 16. On 1920px viewport that's ~5 cards per row instead of 3. On 1280px ~3 per row. B-roll panel sits at ~280-380px wide — still readable for review purposes; voice inset shrinks proportionally.
+
+2. **Tighter voice inset** — voice column 160px → 110px; voice container max-width 110px; voice video max-height 240 → 160. Badge font drops 9px → 8px, text shortens to `"🎙️ AUDIO ONLY"` (drops `" — lip-sync reference"` since the smaller card can't fit the full label). Container padding tightens (12/10/10 → 8/6/6). Margin-top from 14 → 12.
+
+3. **Hover-to-preview** — global `mouseenter` / `mouseleave` event listeners (capture phase since mouseenter doesn't bubble) on every `<video>` element inside `.clips-grid.expanded-mode`. Hover sets `video.muted = true` (avoids audio chaos when sweeping the grid) then calls `video.play()`. Leave pauses + resets `currentTime = 0`. Operator can hover-scan the grid to see every take animate in place without clicking play / fullscreen. Click on the video controls still gives full audio playback (user-initiated unmute via the controls persists). Catch around `play()` and `pause()` calls swallows autoplay-policy errors so the listener is no-throw safe.
+
+**Carve-outs**:
+- Collapsed-mode videos don't auto-play on hover (grid-mode CSS gate via `.closest('.clips-grid.expanded-mode')` in the listener). Small thumbnails staying static is intentional — review-at-a-glance shouldn't animate.
+- Muted preview only. If the operator wants to verify voice / TTS, they unmute via the video controls and the unmute persists through subsequent hover events (the listener sets `muted=true` only on mouseenter, doesn't override controls).
+- Failed / generating / pending cards don't have `<video>` elements (they show status placeholder divs) → listener no-ops for those.
+- Single-clip cards in expanded mode use the same hover behavior naturally.
+
+**Pairing with prior rules**:
+- v742 + v744 + v745 — v746 tunes sizes further (the layout direction set by v745 is preserved); voice inset still has indigo styling + dim filter + hover-restore from v742.
+- v743 `approvePairedSide` — unchanged; the inner DOM structure doesn't change.
+- v700c paired card HTML — unchanged.
+- Variant-nav scope from v745 — unchanged; per-side variant arrows still scope correctly.
+
+**Migration: zero required.** CSS + one DOMContentLoaded listener block. No DB / backend / data shape change.
+
+**Touched** (v746): `code/static/index.html` (CSS `.clips-grid.expanded-mode` minmax + gap tightening; inner paired-grid voice column 160 → 110 + max-height 240 → 160 + badge styling; new `mouseenter`/`mouseleave` capture-phase listeners inside DOMContentLoaded handler); this file (v746 deep-dive); `wiki/patterns/conventions.md` (v746 row + bumped Latest live v745 → v746); `CLAUDE.md` (quickref); `wiki/log.md` (timeline).
+
+**Verification (mandatory before claiming v746 correctly applied)**: push to main → wait Render deploy → open job with 8+ paired clips → toggle expanded view → confirm ~5 cards per row on 1920px viewport, ~3 on 1280px → confirm voice inset is ~110px wide compact PiP with smaller `"🎙️ AUDIO ONLY"` badge → hover over b-roll video on any card → confirm video starts playing muted automatically → move mouse away → confirm video pauses + resets to frame 1 → click video controls to unmute and play → confirm audio playback works as expected → sweep mouse across grid quickly → confirm every card animates in sequence with no audio overlap. Will not claim v746 correctly applied until evidence per CLAUDE.md hard rule.
+

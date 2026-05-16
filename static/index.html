@@ -1293,7 +1293,13 @@
            clips in one screen. Card-level paired span-2 override flips
            to span-1 in expanded mode (each paired card takes 1 of the
            wider slots, not 2 narrow ones). */
-        .clips-grid.expanded-mode { grid-template-columns: repeat(auto-fill, minmax(540px, 1fr)); gap: 24px; }
+        /* v746 — tighter expanded grid. v745 used minmax(540px,1fr); on
+           1920px viewport that's only 3 cards per row → still too much
+           vertical scroll on jobs with 12+ paired clips. Drop to 380px
+           min so 1920px fits ~5 per row, 1280px fits ~3 per row. B-roll
+           still readable at ~280-380px wide; voice inset shrinks
+           proportionally (120px column, max-height 180px). */
+        .clips-grid.expanded-mode { grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; }
         .clip-card.clip-paired { grid-column: span 2; }
         .clips-grid.expanded-mode .clip-card.clip-paired { grid-column: span 1; }
         /* Dual-view: collapsed shown by default, expanded hidden */
@@ -1335,25 +1341,39 @@
            while b-roll absorbs all remaining width (1fr). Max-height cap on
            the voice video prevents 9:16 aspect-ratio from towering in tall
            viewports. */
-        /* v745 — inner paired-grid in expanded mode: voice fixed 160px PiP
-           (down from 220 since cards themselves are now ~540-700px wide
-           instead of full-viewport). B-roll gets 1fr remaining. Voice video
-           max-height 240px keeps 9:16 aspect ratio from towering. */
-        .clips-grid.expanded-mode .clip-paired-grid { grid-template-columns: 1fr 160px; gap: 16px; align-items: start; }
+        /* v746 — inner paired-grid voice tightened further for the smaller
+           v746 expanded cards (~380-500px wide vs v745's 540-700px). Voice
+           now fixed 110px PiP, video max-height 160px. Badge gets smaller
+           padding + font so it still fits above the inset on narrow cards. */
+        .clips-grid.expanded-mode .clip-paired-grid { grid-template-columns: 1fr 110px; gap: 10px; align-items: start; }
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] {
             background: rgba(99, 102, 241, 0.06);
             border: 1px solid rgba(99, 102, 241, 0.18);
             border-radius: var(--radius-sm);
-            padding: 10px 8px 8px;
+            padding: 8px 6px 6px;
             position: relative;
-            margin-top: 14px;
-            max-width: 160px;
+            margin-top: 12px;
+            max-width: 110px;
+        }
+        .clips-grid.expanded-mode .clip-paired-side[data-side="voice"]::before {
+            font-size: 8px;
+            padding: 2px 5px;
+            top: -9px;
+            content: "🎙️ AUDIO ONLY";
         }
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] .clip-video,
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] video {
             max-width: 100%;
-            max-height: 240px;
+            max-height: 160px;
             object-fit: contain;
+        }
+        /* v746 — hover-to-preview on expanded-mode video tiles. Without this
+           the operator must click play on each card individually to verify
+           the take, which is slow on 12+ clip jobs. Hover starts the video
+           muted (avoids audio chaos when sweeping the grid), leave pauses
+           and resets. Click still works normally for full audio playback. */
+        .clips-grid.expanded-mode .clip-video video {
+            transition: outline 0.12s ease;
         }
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"]::before {
             content: "🎙️ AUDIO ONLY — lip-sync reference";
@@ -4108,6 +4128,37 @@ Example: A realistic vertical video of a professional presenter speaking directl
         // Initialize simple editor on page load
         document.addEventListener('DOMContentLoaded', function(){
             renderSimpleEditor();
+
+            // v746 — hover-to-preview on expanded-mode video tiles. Without
+            // this the operator must click play on each card individually
+            // to verify the take, which is slow on 12+ clip jobs. Hover
+            // starts the video muted (avoids audio chaos when sweeping the
+            // grid); leave pauses + rewinds. Click on the video itself
+            // still gives full audio playback (mouseenter sets muted but
+            // user-initiated unmute via controls persists).
+            // mouseenter/mouseleave don't bubble — must use capture phase
+            // for event delegation. Single-clip + paired-clip videos all
+            // get the same behavior; the grid-mode CSS gate ensures
+            // collapsed-mode (small thumbnails) doesn't auto-play.
+            document.addEventListener('mouseenter', function(e) {
+                const t = e.target;
+                if (!t || t.tagName !== 'VIDEO') return;
+                if (!t.closest || !t.closest('.clips-grid.expanded-mode')) return;
+                try {
+                    t.muted = true;
+                    const p = t.play();
+                    if (p && p.catch) p.catch(() => {});  // ignore autoplay-policy errors
+                } catch (_) {}
+            }, true);
+            document.addEventListener('mouseleave', function(e) {
+                const t = e.target;
+                if (!t || t.tagName !== 'VIDEO') return;
+                if (!t.closest || !t.closest('.clips-grid.expanded-mode')) return;
+                try {
+                    t.pause();
+                    t.currentTime = 0;
+                } catch (_) {}
+            }, true);
 
             // v558: start the image-platform poll on every page load so
             // approval-ready / failed notifications fire even when the
