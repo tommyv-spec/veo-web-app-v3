@@ -11825,3 +11825,40 @@ Inline `style` attribute on `.clip-paired-grid` element (previously locked `1.4f
 
 **Verification (mandatory before claiming v742 correctly applied)**: push to main → wait Render deploy (2-3 min) → open a job with paired clips and toggle expanded view → confirm b-roll panel dominates (~75% width) + voice panel inset on right (~25%) with floating `🎙️ AUDIO ONLY — lip-sync reference` indigo badge → confirm voice video is subtly dimmed → hover voice tile, confirm dim removes for clear lip-sync verification → confirm pair-level shortcuts (`✓ approve both`, `↻ redo both`, `🗑`) remain at card bottom → confirm collapsed mode (toggle expanded off) unchanged. Will not claim v742 correctly applied until evidence per CLAUDE.md hard rule.
 
+---
+
+## v743 — Per-side approve handler for paired clips (`approvePairedSide`)
+
+**Problem.** Pre-v743 the per-side `✓` button inside `renderPairedSide` (`code/static/index.html`) called `approve(clip.id)` — the single-clip approver designed for non-paired cards. For paired clips this broke five ways:
+
+1. `approve()` resolves card via `btn.closest('.clip-card')`. For paired clips the outer card has `data-clip-id = visual_pair.id` only (the audio_pair clip has no card of its own — it's an inset inside the visual_pair card). When the operator clicked the audio side's `✓`, `approve()` got the visual_pair card.
+2. Added `clip-approved` class to the WHOLE card → outer card flipped GREEN on single-side approve. Premature; pair shouldn't go green until BOTH sides approved.
+3. Set `.badge.textContent = 'approved'` → clobbered the pair status label (e.g. `"voice rendering"` / `"review both"` / `"video failed — retry"`).
+4. `clipStates` lookup used the outer card's `data-clip-index` (visual's). Audio_pair clips carry a 100000+ offset on `clip_index` per v698A Phase 3a — the audio approval mutated the WRONG cache row, leading polling to revert the optimistic UI.
+5. The `.clip-actions-collapsed` / `.clip-actions-expanded` elements `approve()` queries don't exist on paired cards (paired uses inner `clip-paired-side` actions). The optimistic action replace silently skipped → operator saw NO visible feedback when clicking per-side approve.
+
+Operator-surfaced 2026-05-16: "the buttons behave [unclear] while selecting clips in the paired clips... when we click approve nothing happen and only if we click approve both the couple is marked green."
+
+**Rule.** Dedicated `approvePairedSide(sideClipId, sideClipIndex)` handler. Resolves only the clicked `.clip-paired-side` inner div (via `btn.closest`). Replaces ONLY that side's `.clip-actions` div with the approved confirmation: `<div class="clip-actions" style="...color:var(--success);">✓ approved</div>`. Updates `clipStates[sideClipIndex]` for the SIDE's actual clip_index (not the outer card's). Recomputes pair-level state from `cachedClipsData` by walking the `paired_clip_id` link — when BOTH sides now approved, flips outer card to `clip-approved` + sets pair badge to `"PAIR READY"`; otherwise leaves card un-greened + updates pair badge to `"review voice"` / `"review video"` / `"review both"` per the still-pending side. Pair-level "approve both" button removed in either case (no longer applicable — at least one side is already approved). Fires `POST /api/clips/{sideClipId}/approve` in background; on failure, calls `loadClips(selectedJobId)` to revert optimistic UI to server truth.
+
+Same call signature shape as `approve()` (clip id + clip_index) so the per-side button wiring is a single-line swap at `renderPairedSide`'s canReview branch. Pair-level `approvePair(visualId, audioId)` (the "approve both" handler) unchanged.
+
+**Carve-outs**:
+- Non-paired clips continue to use `approve()` — `renderClip`'s standalone branch (line 8004 area) unchanged.
+- Pair-level "approve both" button (`approvePair`) unchanged — still fires both POSTs in parallel + relies on `loadClips` for state sync.
+- Fallback path: if `btn.closest('.clip-paired-side')` or `.clip-card.clip-paired` returns null (defensive — shouldn't happen given button is rendered inside renderPairedSide which always nests under both), the handler falls back to calling `approve(sideClipId)` with a console warning. Preserves correctness when DOM structure drifts in future renders.
+- The `currentJobApprovedCount++` + `obAdvance()` global ticker calls are preserved (review banner stays in sync regardless of approve path).
+
+**Pairing with prior rules**:
+- v700c paired card structure — v743 only changes the button handler; HTML / CSS unchanged.
+- v742 expanded view reflow — v743's optimistic UI replaces the `.clip-actions` div inside the voice inset, which lives correctly in both collapsed AND expanded mode (the CSS reflow doesn't change the action div's DOM placement).
+- v176 dual-view actions sync — N/A for paired clips; paired cards don't have `.clip-actions-collapsed` / `.clip-actions-expanded` (those belong to single-clip dual-view). v743 sidesteps the dual-view divs entirely.
+- v471 markClipLocallyUpdated — v743 preserves the call for the side's clip id (poll skips re-render until POST lands).
+- v698A audio_pair offset — v743 uses `sideClipIndex` directly (audio's true 100000+ index), so `clipStates` mutation lands on the right cache row.
+
+**Migration: zero required.** Pre-v743 sessions with completed paired clips that the operator never approved are unaffected (next click on either per-side ✓ uses the new handler). No DB / backend / data shape change. Pure frontend.
+
+**Touched** (v743): `code/static/index.html` (one-line swap at `renderPairedSide` canReview branch button onclick; new `approvePairedSide` async function inserted after `approvePair`); this file (v743 deep-dive); `wiki/patterns/conventions.md` (v743 row + bumped Latest live v742 → v743); `CLAUDE.md` (quickref); `wiki/log.md` (timeline).
+
+**Verification (mandatory before claiming v743 correctly applied)**: push to main → wait Render deploy (2-3 min) → open a job with paired clips in "review both" state → click the b-roll side's `✓` → confirm ONLY that side's action row replaces with `"✓ approved"` → confirm outer card does NOT flip green → confirm pair badge updates to `"review voice"` → click the voice side's `✓` → confirm card flips to `clip-approved` (green border) + badge updates to `"PAIR READY"` + "approve both" pair-shortcut button disappears → check Network panel: confirm TWO separate `POST /api/clips/{id}/approve` calls fired (one per side, sequential). Will not claim v743 correctly applied until evidence per CLAUDE.md hard rule.
+

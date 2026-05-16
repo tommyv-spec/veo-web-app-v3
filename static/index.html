@@ -8256,8 +8256,16 @@ Example: A realistic vertical video of a professional presenter speaking directl
             } else if (pending || waitingApproval) {
                 acts = `<div style="text-align:center;color:var(--text-muted);font-size:10px;">in queue</div>`;
             } else if (canReview) {
+                // v743 — per-side approve calls approvePairedSide (not the
+                // single-clip approve() which assumes outer card has the
+                // clicked clip's data-clip-id). approve() mis-targets the
+                // pair card (data-clip-id = visual_pair.id only), marks
+                // whole card green on single-side approve, and clobbers
+                // pair status badge. approvePairedSide marks ONLY the
+                // clicked side + recomputes pair state to gate card-level
+                // green on BOTH sides approved.
                 acts = `<div class="clip-actions" style="display:flex;gap:4px;justify-content:center;">
-                    <button class="btn btn-approve btn-sm" style="padding:4px 8px;font-size:11px;" onclick="approve(${clip.id})" title="approve ${sideLabel}">✓</button>
+                    <button class="btn btn-approve btn-sm" style="padding:4px 8px;font-size:11px;" onclick="approvePairedSide(${clip.id},${clip.clip_index})" title="approve ${sideLabel}">✓</button>
                     <button class="btn btn-redo btn-sm" style="padding:4px 8px;font-size:11px;" onclick="redoModal(${clip.id},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''} title="redo ${sideLabel}">↻${clip.attempts_remaining}</button>
                 </div>`;
             } else {
@@ -8360,6 +8368,120 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 if (selectedJobId) loadClips(selectedJobId);
             } catch(e) {
                 showToast('approve pair failed: ' + e.message, '#ef4444');
+            }
+        }
+        // v743 — per-side approve for paired clips. Pre-v743 the per-side ✓
+        // button called approve(clip.id), which:
+        //   1. resolved card via btn.closest('.clip-card') — got the OUTER
+        //      paired card whose data-clip-id is visual_pair.id only
+        //   2. added 'clip-approved' class to the WHOLE card → outer card
+        //      flipped green on single-side approve (premature, misleading)
+        //   3. set .badge textContent = 'approved' → clobbered pair status
+        //      label (e.g. "voice rendering" / "review both")
+        //   4. clipStates lookup used the outer card's clip_index (visual's)
+        //      so the audio_pair approval mutated the wrong cache row
+        //   5. .clip-actions-collapsed / .clip-actions-expanded don't exist
+        //      on paired cards (paired uses inner clip-paired-side actions)
+        //      so optimistic action replace silently skipped → no visible
+        //      feedback to the operator
+        // The new helper marks ONLY the clicked side's inner action div as
+        // "✓ approved", updates the correct clipStates row, and recomputes
+        // pair-level state via the existing cachedClipsData: when BOTH sides
+        // are now approved, flips the outer card to clip-approved + updates
+        // pair badge to "PAIR READY"; otherwise updates pair badge to the
+        // still-pending side label ("review voice" / "review video").
+        async function approvePairedSide(sideClipId, sideClipIndex) {
+            const btn = event.target;
+            const sideDiv = btn.closest('.clip-paired-side');
+            const card = btn.closest('.clip-card.clip-paired');
+            if (!sideDiv || !card) {
+                console.warn('[v743] approvePairedSide could not resolve sideDiv or card; falling back to approve()');
+                return approve(sideClipId);
+            }
+
+            markClipLocallyUpdated(sideClipId);
+
+            // Optimistic — replace ONLY this side's action row with the
+            // approved confirmation. Inner .clip-actions div is the last
+            // child rendered by renderPairedSide's `acts` (return: video +
+            // variantNav + acts). Find it by traversing the side div.
+            const innerActions = sideDiv.querySelector('.clip-actions');
+            if (innerActions) {
+                innerActions.outerHTML = `<div class="clip-actions" style="text-align:center;color:var(--success);font-size:11px;font-weight:600;">✓ approved</div>`;
+            }
+
+            // Update clipStates for the SIDE's actual clip_index (audio_pair
+            // carries a 100000+ offset per v698A Phase 3a — outer card's
+            // data-clip-index would be the visual's, NOT the audio's).
+            const sideClipData = cachedClipsData?.find(c => c.clip_index === sideClipIndex);
+            if (sideClipData) {
+                sideClipData.approval_status = 'approved';
+                clipStates[sideClipIndex] = getClipStateKey(sideClipData);
+                clipUIKeys[sideClipIndex] = getClipUIKey(sideClipData);
+            }
+
+            // Recompute pair state. The outer card carries visual_pair as
+            // its primary clipData; audio_pair lives via paired_clip_id on
+            // visual_pair AND clip_index in audio_pair.clip_index. Find the
+            // other half via cachedClipsData by paired_clip_id link.
+            const outerClipId = parseInt(card.dataset.clipId, 10);
+            const visualClip = cachedClipsData?.find(c => c.id === outerClipId);
+            const audioClip = visualClip
+                ? cachedClipsData?.find(c => c.id === visualClip.paired_clip_id)
+                : null;
+            const visualApproved = visualClip && visualClip.status === 'completed' && visualClip.approval_status === 'approved';
+            const audioApproved = audioClip && audioClip.status === 'completed' && audioClip.approval_status === 'approved';
+            const visualFailed = visualClip && visualClip.status === 'failed';
+            const audioFailed = audioClip && audioClip.status === 'failed';
+            const visualReady = visualClip && visualClip.status === 'completed' && !visualApproved && visualClip.approval_status !== 'rejected' && visualClip.approval_status !== 'max_attempts';
+            const audioReady = audioClip && audioClip.status === 'completed' && !audioApproved && audioClip.approval_status !== 'rejected' && audioClip.approval_status !== 'max_attempts';
+
+            const badge = card.querySelector('.badge:not([style*="paired"])');  // first status badge, not the "paired" pill
+            if (visualApproved && audioApproved) {
+                card.classList.remove('clip-rejected', 'clip-generating');
+                card.classList.add('clip-approved');
+                if (badge) {
+                    badge.className = 'badge badge-approved';
+                    badge.textContent = 'PAIR READY';
+                }
+                // Hide the per-side approve buttons + pair-level "approve both" by removing
+                // .clip-paired-shortcuts approve button. redo both + delete stay.
+                const approveBothBtn = card.querySelector('.clip-paired-shortcuts .btn-approve');
+                if (approveBothBtn) approveBothBtn.remove();
+                showToast('paired clip approved (both sides)', '#10b981');
+            } else {
+                // One side still pending. Update pair badge to reflect which side awaits.
+                if (badge) {
+                    badge.className = 'badge badge-pending_review';
+                    if (visualApproved && audioReady) {
+                        badge.textContent = 'review voice';
+                    } else if (audioApproved && visualReady) {
+                        badge.textContent = 'review video';
+                    } else if (visualReady && audioReady) {
+                        badge.textContent = 'review both';
+                    }
+                }
+                // Hide pair-level "approve both" since one side is now approved alone
+                // (clicking it would re-approve the side again; the remaining single side
+                // can still be approved via its own per-side button).
+                const approveBothBtn = card.querySelector('.clip-paired-shortcuts .btn-approve');
+                if (approveBothBtn) approveBothBtn.remove();
+                showToast(`✓ side approved (other side still needs review)`, '#10b981');
+            }
+            currentJobApprovedCount++;
+            if (typeof obAdvance === 'function') obAdvance();
+
+            // Fire the actual API call. If it fails, the poll will revert the
+            // optimistic UI on next tick (markClipLocallyUpdated has a TTL).
+            try {
+                const r = await fetch(`${API}/clips/${sideClipId}/approve`, {method:'POST'});
+                if (!r.ok) throw new Error('Approve failed');
+                if (selectedJobId) updateReviewBannerOnly(selectedJobId);
+            } catch(e) {
+                console.error('[v743] approvePairedSide POST failed:', e);
+                showToast('approve failed: ' + e.message, '#ef4444');
+                // Trigger full refresh to revert optimistic UI to server truth.
+                if (selectedJobId) loadClips(selectedJobId);
             }
         }
         async function redoPair(visualId, audioId, attemptsRemaining) {
