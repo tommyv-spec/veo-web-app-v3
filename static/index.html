@@ -1303,6 +1303,62 @@
         .variants-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 8px; }
         @media (max-width: 900px) { .variants-grid { grid-template-columns: repeat(3, 1fr); } }
         @media (max-width: 600px) { .variants-grid { grid-template-columns: repeat(2, 1fr); } }
+        /* v742 — paired-clip grid (v698A visual_pair + audio_pair). Default
+           = collapsed thumb scale, two roughly balanced columns. Expanded
+           mode = b-roll dominates (3fr), voice shrinks to inset (1fr) with
+           prominent "AUDIO ONLY — lip-sync reference" badge + subtle dim
+           on the voice video. Communicates that voice video is throwaway
+           at export (only audio swaps onto b-roll per v698A spec) without
+           hiding it entirely (operator still needs to verify lip-sync
+           before approving). Hover on voice tile removes dim. */
+        .clip-paired-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 8px; align-items: start; }
+        .clips-grid.expanded-mode .clip-paired-grid { grid-template-columns: 3fr 1fr; gap: 20px; align-items: start; }
+        .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] {
+            background: rgba(99, 102, 241, 0.06);
+            border: 1px solid rgba(99, 102, 241, 0.18);
+            border-radius: var(--radius-sm);
+            padding: 12px 10px 10px;
+            position: relative;
+            margin-top: 14px;
+        }
+        .clips-grid.expanded-mode .clip-paired-side[data-side="voice"]::before {
+            content: "🎙️ AUDIO ONLY — lip-sync reference";
+            position: absolute;
+            top: -10px;
+            left: 10px;
+            background: rgba(99, 102, 241, 0.95);
+            color: #fff;
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 3px 8px;
+            border-radius: 4px;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+            white-space: nowrap;
+            pointer-events: none;
+        }
+        .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] video {
+            filter: brightness(0.78) saturate(0.85);
+            transition: filter 0.18s ease;
+        }
+        .clips-grid.expanded-mode .clip-paired-side[data-side="voice"]:hover video,
+        .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] video:focus {
+            filter: brightness(1) saturate(1);
+        }
+        /* In expanded mode, hide the redundant "🎙️ voice (audio over b-roll)"
+           inline header on the voice side — the absolute-positioned badge
+           above carries the same meaning more prominently. Keep it for
+           collapsed mode so the small thumbnail still has its tiny label. */
+        .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] > div:first-child {
+            display: none;
+        }
+        /* B-roll side in expanded mode — emphasize "this is the final video"
+           with a subtle accent border + scaled-up label. */
+        .clips-grid.expanded-mode .clip-paired-side[data-side="video"] > div:first-child {
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
         .variant-group-header { padding: 8px 12px 4px; font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-top: 1px solid var(--border); margin-top: 4px; }
         .variant-group-header:first-child { border-top: none; margin-top: 0; }
         .variant-group-count { font-weight: 400; font-size: 11px; opacity: 0.6; text-transform: none; letter-spacing: 0; }
@@ -8268,7 +8324,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         <span class="badge" style="background:rgba(99,102,241,0.18);color:#818cf8;font-size:10px;font-weight:600;padding:2px 6px;border-radius:8px;margin-left:4px;" title="this clip has a b-roll video paired with a voiceover audio twin">🎙️ paired</span>
                         ${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}
                     </div>
-                    <div class="clip-paired-grid" style="display:grid;grid-template-columns:1.4fr 1fr;gap:8px;align-items:start;">
+                    <div class="clip-paired-grid">
                         <div class="clip-paired-side" data-side="video" style="display:flex;flex-direction:column;gap:4px;">
                             <div style="font-size:10px;color:#a78bfa;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">🎬 b-roll <span style="color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0;">(plays in final video)</span></div>
                             ${visualHtml}

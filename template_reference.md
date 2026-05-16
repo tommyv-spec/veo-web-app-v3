@@ -11779,3 +11779,49 @@ Only siblings whose failure is rooted in the SAME anchor image content (CELEBRIT
 
 **Verification (mandatory before claiming v741 correctly applied)**: push to main → wait Render deploy (2-3 min) → identify a job with mix of COMPLETED + FAILED audio_pair siblings sharing the same anchor (the screenshot's job after the v740 deploy where some voice clips had rendered fine before user uploaded the fix) → upload a replacement anchor face on one of the FAILED voice cards → confirm only FAILED siblings transition to FLOW_REDO_QUEUED in DevTools Network response → confirm COMPLETED siblings retain `output_filename` + `status: completed` (their prior good render unchanged) → grep Render logs for `[v741] anchor cascade preserved N audio_pair sibling(s)` line. Will not claim v741 correctly applied until evidence per CLAUDE.md hard rule.
 
+---
+
+## v742 — Paired clip expanded view: b-roll primary + voice as audio-only inset
+
+**Problem.** v700c shipped paired-clip rendering (`renderClipPaired` at `code/static/index.html:8220`) with a single layout: `.clip-paired-grid { grid-template-columns: 1.4fr 1fr }` — b-roll left at 58% width, voice right at 42% width. The two-column ratio was inlined as a `style="display:grid;grid-template-columns:1.4fr 1fr;gap:8px;..."` attribute on the inner div. The collapsed-grid layout (small thumbnails per card) is correct for review-at-a-glance. **Expanded mode**, however, scales the same fixed-ratio layout to full viewport width — both panels grow to roughly equal massive size, both fully playable, with no visual hierarchy communicating that the voice video is THROWAWAY at export.
+
+Per v698A spec: the audio_pair clip's visual track is DISCARDED at final export — only its audio swaps onto the visual_pair's b-roll. The expanded UI treated the two as peers, leading operator confusion: clicking play on the voice side shows the persona lip-syncing in isolation, but in the final cut viewer only sees the b-roll while hearing the voice audio. Operator-surfaced 2026-05-16 after v741 shipped: "when we have the pairs we need to fix the UI, and the way they are visualized in the expanded view."
+
+The CSS at `index.html:1285-1294` had only single-clip expanded-mode handlers (`.clip-video-collapsed` ↔ `.clip-video-expanded` toggle); no paired-clip-aware reflow.
+
+**Rule.** Reflow paired-clip grid in expanded mode to `3fr 1fr` (b-roll 75%, voice 25%) with explicit audio-only visual treatment on the voice side. Three coordinated CSS additions (all gated on `.clips-grid.expanded-mode`):
+
+1. **Grid reflow**: `.clip-paired-grid` default `1.4fr 1fr gap:8px` (collapsed thumbnails — unchanged). In expanded mode override to `3fr 1fr gap:20px`. B-roll dominates as primary preview = "this is the final video."
+
+2. **Voice-side audio-only badge** (via `::before` pseudo-element on `.clip-paired-side[data-side="voice"]`): `"🎙️ AUDIO ONLY — lip-sync reference"` floating label, indigo background `rgba(99,102,241,0.95)`, white text, top-edge position. Pseudo-element doesn't take pointer events so click-through to video controls works.
+
+3. **Voice video dim + hover-restore**: `video` element inside voice side gets `filter: brightness(0.78) saturate(0.85)` to communicate "not the final output." On `:hover` or `video:focus`, filter resets to `brightness(1) saturate(1)` so operator can verify lip-sync clearly when they want to. 0.18s ease transition.
+
+4. **Voice-side container styling**: faint indigo background `rgba(99,102,241,0.06)`, 1px indigo border `rgba(99,102,241,0.18)`, rounded corners, 12px padding. Reads as a labeled audio-monitoring panel beside the main preview.
+
+5. **Hidden redundant header**: the inline `🎙️ voice (audio over b-roll)` small-text header on the voice side is hidden in expanded mode (`.clip-paired-side[data-side="voice"] > div:first-child { display: none }`) because the absolute-positioned badge above carries the same meaning more prominently. Collapsed mode keeps the inline header for the tiny thumbnail label.
+
+6. **B-roll side label upscaled**: in expanded mode the `🎬 b-roll (plays in final video)` header bumps to 12px (from 10px) with tighter margin-bottom for visual prominence proportional to the larger panel.
+
+Inline `style` attribute on `.clip-paired-grid` element (previously locked `1.4fr 1fr`) removed so CSS class fully controls layout. Move to class-based styling makes the expanded-mode override actually fire — pre-v742 the inline style would have won regardless of CSS.
+
+**Carve-outs**:
+- Collapsed mode unchanged. Operator's review-at-a-glance grid still uses the small 1.4fr/1fr thumbnails with both labels visible inline.
+- Voice video still PLAYS — operator can click and verify lip-sync. The dim is a hint, not a hard hide. Hover removes dim entirely. Audio output of the voice tile is the audio that WILL play in final export, so listening is correct.
+- Per-side approve / redo / variant-nav buttons unchanged — still present per panel.
+- Pair-level shortcuts (`✓ approve both`, `↻ redo both`, `🗑`) at card bottom unchanged.
+- Failed-state cards: v740's `📁 upload` button (added inside `renderPairedSide` failed branch) still renders identically inside the voice inset — operator can upload a replacement anchor face from the smaller panel.
+- Non-paired clips (standalone `clip_role` NULL or `audio_pair` filtered out of visible list) unaffected — they don't hit `.clip-paired-grid` selectors.
+
+**Pairing with prior rules**:
+- v698A paired-clip render mechanism — v742 reflects the actual export semantics (audio_pair video throwaway) in the UI without changing the render mechanism.
+- v700c paired card structure — v742 amends only the CSS layout + adds badge; HTML structure of `renderClipPaired` + `renderPairedSide` unchanged except for one inline-style removal.
+- v740 image-attributable upload button — renders inside the voice inset's actions in failed state, works identically.
+- v739 revert-to-prior — same button placement inside paired-side failed branch, works identically.
+
+**Migration: zero required.** Pre-v742 expanded-mode views automatically reflow to the new layout on next page load. No DB / backend / data shape changes. No new fields on `ClipResponse`. Pure CSS + one inline-style removal in `renderClipPaired`.
+
+**Touched** (v742): `code/static/index.html` (CSS additions after `.variants-grid` block at ~line 1303; inline-style removal on `.clip-paired-grid` div at ~line 8271); this file (v742 deep-dive); `wiki/patterns/conventions.md` (v742 row + bumped Latest live v741 → v742); `CLAUDE.md` (quickref); `wiki/log.md` (timeline).
+
+**Verification (mandatory before claiming v742 correctly applied)**: push to main → wait Render deploy (2-3 min) → open a job with paired clips and toggle expanded view → confirm b-roll panel dominates (~75% width) + voice panel inset on right (~25%) with floating `🎙️ AUDIO ONLY — lip-sync reference` indigo badge → confirm voice video is subtly dimmed → hover voice tile, confirm dim removes for clear lip-sync verification → confirm pair-level shortcuts (`✓ approve both`, `↻ redo both`, `🗑`) remain at card bottom → confirm collapsed mode (toggle expanded off) unchanged. Will not claim v742 correctly applied until evidence per CLAUDE.md hard rule.
+
