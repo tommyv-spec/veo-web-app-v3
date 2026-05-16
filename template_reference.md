@@ -11661,3 +11661,75 @@ def _restore_clip_to_prior_version(clip) -> Optional[Dict[str, Any]]:
 
 **Verification (mandatory before claiming v739 correctly applied)**: push to main → wait Render deploy (2-3 min) → identify a clip currently stuck FAILED + CONTENT_POLICY_VIOLATION with `versions_json` containing ≥1 entry with filename (e.g. the `nuri-puffy-face-lymphatic-drain` clip 1 that surfaced this rule) → click `↶ revert to prior render` on the rejected-clip card → confirm toast `✓ Reverted to <filename>` → confirm card transitions to COMPLETED + shows prior good render → grep Render logs for `[v739] revert clip N → attempt M` line. Will not claim v739 correctly applied until evidence per CLAUDE.md hard rule.
 
+---
+
+## v740 — Image-attributable failure codes (broaden upload-replacement gate to Veo celebrity / safety / blacklist filters)
+
+**Problem.** Pre-v740 the upload-replacement card + `replace-image` backend endpoint gated on a single literal error code: `CONTENT_POLICY_VIOLATION`. That code is set ONLY by the Banana 2 image-policy reject path (`code/main.py:9370` and `code/main.py:11170`, all hit via `image_platform.py`). The Veo render path sets DIFFERENT codes when it rejects an input frame:
+
+- `CELEBRITY_FILTER` — literal string set at `code/image_worker.py:3083` when Veo's prominent-person / celebrity filter triggers (anchor face resembles a real person).
+- `CELEBRITY_RAI_FILTER` — `code/config.py` ErrorCode enum value, set by Veo response handler at `code/image_worker.py:3106` via `error_obj.code.value`.
+- `SAFETY_FILTER` — Veo safety filter, same enum dispatch path.
+- `ALL_IMAGES_BLACKLISTED` — set at `code/image_worker.py:2929` when every attached image was rejected.
+
+Consequence: for v698A paired clips (visual_pair + audio_pair), the audio_pair clip's `start_frame` IS the voiceover anchor image (a persona on-camera face). When Veo's celebrity filter rejects this anchor at render time, the audio_pair clip ends up FAILED with `error_code = CELEBRITY_FILTER`. The frontend's `renderClip` dispatch at `static/index.html:7910` only routed `CONTENT_POLICY_VIOLATION` to `renderClipPolicyViolation` (the upload-replacement card). All other failure codes fell through to the generic `renderPairedSide` failed branch which showed only `↻ retry voice` + `↶ revert` (the v739 addition). The user had NO path to upload a different anchor face — the only fix for a celebrity-filter rejection — short of re-importing the entire scene table.
+
+Backend's `replace_clip_image` (`code/main.py:3708`) had the same gate; even if the user wired up the upload manually via curl, the endpoint would refuse with `"This clip is not awaiting an image replacement."` v710 image-shared cascade lookup at `code/main.py:3906` had the same limitation: cascade siblings sharing the same rejected `start_frame` wouldn't get patched unless their error_code was `CONTENT_POLICY_VIOLATION`.
+
+Operator-surfaced 2026-05-16 on a job with 8+ voice clips all stuck `VOICE FAILED — RETRY` after Veo celebrity-filter rejected the shared persona anchor face. The screenshot showed retry / revert / redo buttons but no upload affordance.
+
+**Rule.** Define a constant `IMAGE_ATTRIBUTABLE_ERROR_CODES` at module top (`code/main.py`) listing every error code whose root cause is "input image content rejected by the render service":
+
+```python
+IMAGE_ATTRIBUTABLE_ERROR_CODES = frozenset({
+    "CONTENT_POLICY_VIOLATION",  # Banana 2 image-policy reject
+    "CELEBRITY_FILTER",          # Veo worker.py:3083 literal
+    "CELEBRITY_RAI_FILTER",      # Veo ErrorCode enum value
+    "SAFETY_FILTER",             # Veo safety filter
+    "ALL_IMAGES_BLACKLISTED",    # worker — every attached image rejected
+})
+```
+
+Use this constant to gate the two backend paths:
+
+1. **`replace_clip_image` accept gate** (`code/main.py:3740`) — `if clip.error_code not in IMAGE_ATTRIBUTABLE_ERROR_CODES: raise 400`. The endpoint now accepts uploads on any clip whose failure is image-attributable, not just Banana 2 policy rejects.
+
+2. **v710 image-shared cascade lookup** (`code/main.py:3912`) — `Clip.error_code.in_(list(IMAGE_ATTRIBUTABLE_ERROR_CODES))`. When the user uploads on one clip, the cascade now finds siblings in any image-attributable failure state (handles the case where Banana 2 + Veo rejected different sibling clips for the same underlying anchor).
+
+NOT broadened: the SETTER paths at `code/main.py:9370 / 9412 / 11170 / 11200`. Those are Banana 2 image-reject specific — still set `CONTENT_POLICY_VIOLATION` literally. v740 only widens the CONSUMER gates (what counts as "rescuable by upload"), not the producer assignments.
+
+**Frontend mirror.** Define `IMAGE_ATTRIBUTABLE_CODES` Set at top of `code/static/index.html` script block (alongside `const API='/api'`). Use it to gate:
+
+1. **`renderClip` dispatch** (`static/index.html:7929`) — `if (IMAGE_ATTRIBUTABLE_CODES.has(c.error_code || ''))` routes the clip to `renderClipPolicyViolation` (the upload-replacement card). Pre-v740 only `CONTENT_POLICY_VIOLATION` took this branch.
+
+2. **`renderPairedSide` failed branch** (`static/index.html:8195`) — when a paired-card's audio side OR visual side is in `failed` state AND `error_code` is image-attributable, render a `📁 upload` button alongside `↻ retry` + `↶ revert` (the v739 addition). Hidden when failure is non-image-attributable (RATE_LIMIT / TIMEOUT / NETWORK / VIDEO_GENERATION_FAILED etc.) — those have no upload-replacement fix.
+
+3. **`renderClipPolicyViolation` per-code copy** (`static/index.html` around line 8371) — pre-v740 the card always said "🚫 rejected by flow content policy" + "Flow rejected this image's content." Honest per-code copy now:
+   - `CELEBRITY_FILTER` / `CELEBRITY_RAI_FILTER` → "🚫 rejected by celebrity / prominent-person filter" + "Veo rejected this image (face resembles a real person). Upload a different anchor face to retry — every voice clip sharing this anchor will re-submit automatically."
+   - `SAFETY_FILTER` → "🚫 rejected by safety filter" + Veo safety wording
+   - `ALL_IMAGES_BLACKLISTED` → "🚫 every input image blacklisted" + blacklist wording
+   - `CONTENT_POLICY_VIOLATION` → existing Banana 2 wording preserved
+
+**Diagnostic log (permanent per CLAUDE.md verification rule)**: `[v740] image-attributable failure clip N (code=X) — upload-replacement path eligible` (fires every time `replace_clip_image` accepts an upload). Fired BEFORE the upload itself so log line stamps the entry path even if upload then errors.
+
+**Anchor-face cascade semantics (unchanged from v701d).** When the user uploads a replacement on an audio_pair clip whose `start_frame` is the v698A voiceover anchor image, the existing v701d cascade fires unchanged: `replace_clip_image` walks `audio_pair → paired_clip_id → visual_pair → voiceover_anchor_image_node_id`, finds all visual_pair siblings with the same `voiceover_anchor_image_node_id`, jumps to their paired `audio_pair` siblings, and patches each one's `start_frame` to the user's new key + clears their error_code + flips to FLOW_REDO_QUEUED. v740 doesn't touch this cascade — only ensures it FIRES on celebrity-filter rejections too (previously it required `clip_role == 'audio_pair'` which IS code-agnostic, but the entrance gate at line 3740 refused before the cascade could run).
+
+**Carve-outs**:
+- Non-image-attributable failure codes (RATE_LIMIT_429, API_TIMEOUT, API_NETWORK_ERROR, VIDEO_GENERATION_FAILED, OPENAI_PROMPT_FAILED, STORAGE_FULL, DATABASE_ERROR, WORKER_CRASHED, PREVIOUS_CLIP_*, REDO_STUCK, REDO_ZOMBIE, USER_CANCELLED) — upload button hidden, retry / revert / remove only. v740 explicitly does NOT expose upload-replacement for these because the input image isn't the root cause.
+- `IMAGE_INVALID_FORMAT`, `IMAGE_TOO_LARGE`, `IMAGE_CORRUPTED`, `IMAGE_NOT_FOUND` (config.py enum) — could arguably be image-attributable, but the fix differs (the user needs to re-export / re-encode, not upload a different image). Not added to the set. Operator can manually escalate via curl + DB patch if needed.
+- Paired card sibling already at COMPLETED — no failure to rescue, button doesn't render (gated on `failed`).
+- Visual_pair with no audio_twin attached (orphan) — falls through to standalone failed branch which doesn't currently surface upload button. Edge case; user can hit the dispatch path via `renderClip` directly since v740 broadened the dispatch.
+
+**Pairing with prior rules**:
+- v701/v710 — same upload-replacement endpoint + cascades; v740 just broadens the accept set.
+- v701d audio_pair anchor cascade — fires identically once the entrance gate accepts.
+- v698A paired-clip render mechanism — v740 makes the anchor-image rejection recoverable without re-import.
+- v739 universal stuck-clip rescue — orthogonal: v739 reverts to prior good render (no new Banana credit); v740 surfaces fresh upload (one Banana credit on new anchor, then v701d cascade reuses across siblings).
+- v709 stuck-tile reload+resubmit — orthogonal: worker-side retry, not user-side rescue.
+
+**Migration: zero required.** Pre-v740 stuck audio_pair clips can be rescued retroactively by clicking the new `📁 upload` button on the paired-card voice side after deploy. No DB schema change, no error_code rewrite, no worker logic change. Backend endpoint + frontend gates only.
+
+**Touched** (v740): `code/main.py` (constant `IMAGE_ATTRIBUTABLE_ERROR_CODES` after `# ============ Clips ============` header; gate at `replace_clip_image` accept; v710 cascade lookup; diagnostic log on accept), `code/static/index.html` (constant `IMAGE_ATTRIBUTABLE_CODES` after `const API='/api'`; `renderClip` dispatch gate; `renderPairedSide` failed branch gains `📁 upload` button; `renderClipPolicyViolation` per-code copy lookup); `wiki/patterns/conventions.md` (v740 row + bumped Latest live v739 → v740); `CLAUDE.md` (quickref); `wiki/log.md` (timeline). AST-verified.
+
+**Verification (mandatory before claiming v740 correctly applied)**: push to main → wait Render deploy (2-3 min) → identify a stuck audio_pair clip with `error_code = CELEBRITY_FILTER` / `CELEBRITY_RAI_FILTER` / `SAFETY_FILTER` (e.g. the screenshot's job with 8+ `VOICE FAILED — RETRY` cards) → confirm the paired card's voice side now shows `📁 upload` button alongside `↻ retry voice` → click `📁 upload`, pick a different anchor face → confirm toast `replacement uploaded — also retried N voice clips` → confirm all affected voice clips transition from FAILED to FLOW_REDO_QUEUED in DevTools Network response → grep Render logs for `[v740] image-attributable failure clip N (code='CELEBRITY_FILTER')` line. Will not claim v740 correctly applied until evidence per CLAUDE.md hard rule.
+

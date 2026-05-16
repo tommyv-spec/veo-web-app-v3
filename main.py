@@ -3289,6 +3289,33 @@ async def resume_job(
 
 # ============ Clips ============
 
+# v740 — image-attributable failure codes. A clip whose render failed with
+# one of these codes can be rescued by the user uploading a different
+# start_frame image (anchor / b-roll / persona reference) — the failure is
+# attributable to the input image's content, not to transient infra issues.
+#
+# Sources:
+#   - CONTENT_POLICY_VIOLATION    Banana 2 image-policy reject (image_platform path)
+#   - CELEBRITY_FILTER            Veo celebrity-filter literal (worker.py:3083)
+#   - CELEBRITY_RAI_FILTER        Veo enum value (config.py ErrorCode)
+#   - SAFETY_FILTER               Veo safety-filter enum value
+#   - ALL_IMAGES_BLACKLISTED      worker — every attached image rejected
+#
+# Pre-v740 only CONTENT_POLICY_VIOLATION qualified, so Veo-side voice-clip
+# rejections (audio_pair whose start_frame is the v698A voiceover anchor
+# image) had no upload-replacement path. v740 broadens both
+# `replace_clip_image` (main.py) accept gate and the v710 image-shared
+# cascade lookup gate to this set. Frontend mirrors the same set in
+# `IMAGE_ATTRIBUTABLE_CODES` (static/index.html).
+IMAGE_ATTRIBUTABLE_ERROR_CODES = frozenset({
+    "CONTENT_POLICY_VIOLATION",
+    "CELEBRITY_FILTER",
+    "CELEBRITY_RAI_FILTER",
+    "SAFETY_FILTER",
+    "ALL_IMAGES_BLACKLISTED",
+})
+
+
 def _rewrite_r2_url_to_proxy(version: dict, job_id: str) -> dict:
     """v693 — rewrite legacy presigned R2 URLs in versions[].url to the
     backend proxy form. Pre-v693 the upload paths stored
@@ -3705,11 +3732,21 @@ async def replace_clip_image(
 
     clip = get_user_clip(db, clip_id, current_user)
 
-    if clip.error_code != "CONTENT_POLICY_VIOLATION":
+    # v740 — broadened from literal CONTENT_POLICY_VIOLATION to the set of
+    # image-attributable failure codes (Banana 2 + Veo celebrity / safety /
+    # all-images-blacklisted). Closes the audio_pair voice-clip stuck case
+    # where Veo's anchor-image-side rejection set a non-CONTENT_POLICY code
+    # and the user had no path to upload a different anchor face.
+    if clip.error_code not in IMAGE_ATTRIBUTABLE_ERROR_CODES:
         raise HTTPException(
             status_code=400,
             detail="This clip is not awaiting an image replacement.",
         )
+    print(
+        f"[v740] image-attributable failure clip {clip.id} (code={clip.error_code!r}) "
+        f"— upload-replacement path eligible",
+        flush=True,
+    )
 
     if not is_storage_configured():
         raise HTTPException(status_code=503, detail="Storage not configured")
@@ -3862,11 +3899,17 @@ async def replace_clip_image(
         try:
             rejected_lookup_key = previous_rejected
             if rejected_lookup_key:
+                # v740 — broadened from literal CONTENT_POLICY_VIOLATION to
+                # the IMAGE_ATTRIBUTABLE_ERROR_CODES set so v710 cascade
+                # covers Veo celebrity / safety / blacklist failures on
+                # siblings sharing the same start_frame too (e.g. when a
+                # persona anchor image triggers both Banana 2 + Veo
+                # rejections on different sibling clips).
                 image_siblings_q = db.query(Clip).filter(
                     Clip.job_id == clip.job_id,
                     Clip.start_frame == rejected_lookup_key,
                     Clip.id != clip.id,
-                    Clip.error_code == "CONTENT_POLICY_VIOLATION",
+                    Clip.error_code.in_(list(IMAGE_ATTRIBUTABLE_ERROR_CODES)),
                 )
                 for sib in image_siblings_q.all():
                     if sib.id in patched_sibling_ids:

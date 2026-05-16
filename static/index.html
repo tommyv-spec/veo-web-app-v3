@@ -2940,6 +2940,20 @@ Example: A realistic vertical video of a professional presenter speaking directl
         
         let lastFrameIndex = null; // Index of image to use as last frame (end of video)
         const API='/api';
+        // v740 — image-attributable failure codes. Mirrors server-side
+        // IMAGE_ATTRIBUTABLE_ERROR_CODES in main.py. A clip whose render
+        // failed with one of these can be rescued by user uploading a new
+        // start_frame image. Pre-v740 only CONTENT_POLICY_VIOLATION
+        // qualified, so Veo voice-clip rejections (CELEBRITY_FILTER etc.)
+        // had no upload-replacement card and got stuck. Used by renderClip
+        // dispatch + renderPairedSide failed branch.
+        const IMAGE_ATTRIBUTABLE_CODES = new Set([
+            'CONTENT_POLICY_VIOLATION',  // Banana 2 image-policy reject
+            'CELEBRITY_FILTER',          // Veo worker.py:3083 literal
+            'CELEBRITY_RAI_FILTER',      // Veo ErrorCode enum value
+            'SAFETY_FILTER',             // Veo safety filter
+            'ALL_IMAGES_BLACKLISTED',    // worker — every attached image rejected
+        ]);
         
         function setActiveState(){ const c=document.getElementById('appContainer'); if(!c.classList.contains('state-active')){ c.classList.remove('state-initial'); c.classList.add('state-active'); } document.getElementById('jobsCard').style.display='block'; }
         function collapseResults(){ 
@@ -7904,10 +7918,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
         
         function renderClip(c,jid){
-            // v701 — image-policy-violation card. Surfaces the rejected
-            // frame back to the user with an "upload replacement" button
-            // so a flagged image doesn't dead-end the clip.
-            if ((c.error_code || '') === 'CONTENT_POLICY_VIOLATION') {
+            // v701 + v740 — image-attributable-failure card. Surfaces the
+            // rejected frame back to the user with an "upload replacement"
+            // button. v740 broadens from literal CONTENT_POLICY_VIOLATION
+            // to the IMAGE_ATTRIBUTABLE_CODES set so Veo voice-clip
+            // rejections (celebrity / safety / blacklist) also surface the
+            // upload-replacement path. Standalone clips (non-paired) take
+            // this branch directly; paired clips (visual_pair + audio_pair)
+            // surface the upload button per-side in renderPairedSide.
+            if (IMAGE_ATTRIBUTABLE_CODES.has(c.error_code || '')) {
                 return renderClipPolicyViolation(c, jid);
             }
             // v700c — paired card for v698A visual_pair clips. When the
@@ -8009,6 +8028,12 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const _revertBtn = _hasPrior && clipId
                     ? `<button class="btn btn-sm" onclick="revertToPriorVersion(${clipId},${c.clip_index})" style="background:rgba(99,102,241,0.18);color:#a5b4fc;border:1px solid rgba(99,102,241,0.4);padding:4px 10px;font-size:11px;" title="restore the clip that rendered fine before this redo">↶ Revert to prior</button>`
                     : '';
+                // v740 — image-attributable failure (Banana 2 / Veo celebrity
+                // / safety / blacklist) → render upload-replacement card via
+                // the early-return path; this branch is unreached for those.
+                // For non-image-attributable failures (RATE_LIMIT / TIMEOUT
+                // / NETWORK / VIDEO_GENERATION_FAILED etc.) the upload button
+                // is hidden — retry is the only fix.
                 acts=`<div style="text-align:center"><div style="color:var(--error);font-size:10px;margin-bottom:6px">${c.error_message||'Failed'}</div><div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap">${c.attempts_remaining>0&&clipId?`<button class="btn btn-redo btn-sm" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})">↻ Retry (${c.attempts_remaining} left)</button>`:''}${_revertBtn}<button class="btn btn-sm" onclick="confirmDelete(${clipId},${c.clip_index})" style="background:var(--surface-2);color:var(--text-muted);padding:4px 10px;font-size:11px;">✕ Remove</button></div></div>`;
             }
             else if(canReview&&clipId)acts=`<div class="clip-actions"><button class="btn btn-approve" onclick="approve(${clipId})">✓</button><button class="btn btn-reject" onclick="confirmDelete(${clipId},${c.clip_index})">🗑</button><button class="btn btn-redo" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})" ${c.attempts_remaining<=0?'disabled':''}>↻${c.attempts_remaining}</button></div>`;
@@ -8160,7 +8185,18 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const _revertBtn = _hasPrior
                     ? `<button class="btn btn-secondary btn-sm" style="padding:4px 10px;font-size:11px;background:rgba(99,102,241,0.18);color:#a5b4fc;border-color:rgba(99,102,241,0.4);" onclick="revertToPriorVersion(${clip.id},${clip.clip_index})" title="restore prior good render">↶ revert</button>`
                     : '';
-                acts = `<div style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap;"><button class="btn btn-redo btn-sm" style="padding:4px 10px;font-size:11px" onclick="redoModal(${clip.id},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''}>↻ retry ${sideLabel}</button>${_revertBtn}</div>`;
+                // v740 — show "📁 upload" when failure is image-attributable
+                // (Veo celebrity / safety / blacklist filter OR Banana 2 image
+                // policy reject). For audio_pair clips the start_frame IS the
+                // v698A voiceover anchor image; uploading a different anchor
+                // face fixes the celebrity-filter rejection. v701d cascade
+                // then propagates the new anchor to all sibling audio_pair
+                // clips sharing it (one upload retries all stuck voice scenes).
+                const _isImageAttributable = IMAGE_ATTRIBUTABLE_CODES.has(clip.error_code || '');
+                const _uploadBtn = _isImageAttributable
+                    ? `<input type="file" id="pairedReplaceImageInput_${clip.id}" accept="image/png,image/jpeg,image/webp" style="display:none;" onchange="replaceClipImage(${clip.id}, '${jid}', this.files[0])"><button class="btn btn-primary btn-sm" style="padding:4px 10px;font-size:11px;" onclick="document.getElementById('pairedReplaceImageInput_${clip.id}').click()" title="upload a different image (anchor face) to retry this voice clip + every sibling sharing the same anchor">📁 upload</button>`
+                    : '';
+                acts = `<div style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap;"><button class="btn btn-redo btn-sm" style="padding:4px 10px;font-size:11px" onclick="redoModal(${clip.id},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''}>↻ retry ${sideLabel}</button>${_uploadBtn}${_revertBtn}</div>`;
             } else if (pending || waitingApproval) {
                 acts = `<div style="text-align:center;color:var(--text-muted);font-size:10px;">in queue</div>`;
             } else if (canReview) {
@@ -8332,6 +8368,25 @@ Example: A realistic vertical video of a professional presenter speaking directl
             const cascadeNotice = (groupCount === 1 && isPaired)
                 ? `<div style="font-size:11px;color:#fbbf24;margin-top:6px;">⚠ this clip is part of a paired voice clip — uploading a replacement only affects the b-roll side</div>`
                 : '';
+            // v740 — honest per-code copy. Banana 2 = image policy; Veo
+            // celebrity / safety / blacklist each get a tailored message.
+            // Upload-replacement flow is identical across all of them.
+            const _vCode = c.error_code || '';
+            let rejectBannerLabel = '🚫 rejected by content policy';
+            let rejectBodyCopy = 'Render rejected this image. Upload a replacement to retry — the worker will re-submit automatically.';
+            if (_vCode === 'CELEBRITY_FILTER' || _vCode === 'CELEBRITY_RAI_FILTER') {
+                rejectBannerLabel = '🚫 rejected by celebrity / prominent-person filter';
+                rejectBodyCopy = 'Veo rejected this image (face resembles a real person). Upload a different anchor face to retry — every voice clip sharing this anchor will re-submit automatically.';
+            } else if (_vCode === 'SAFETY_FILTER') {
+                rejectBannerLabel = '🚫 rejected by safety filter';
+                rejectBodyCopy = 'Veo safety filter rejected this image. Upload a replacement to retry — the worker will re-submit automatically.';
+            } else if (_vCode === 'ALL_IMAGES_BLACKLISTED') {
+                rejectBannerLabel = '🚫 every input image blacklisted';
+                rejectBodyCopy = 'All attached input images were rejected. Upload at least one fresh image to retry.';
+            } else if (_vCode === 'CONTENT_POLICY_VIOLATION') {
+                rejectBannerLabel = '🚫 rejected by flow content policy';
+                rejectBodyCopy = 'Flow rejected this image\'s content. Upload a replacement to retry — the worker will re-submit automatically.';
+            }
             return `<div class="clip-card clip-rejected" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"
                         style="${isPaired ? 'grid-column: span 2;' : ''}border: 2px solid rgba(239,68,68,0.6);">
                 <div class="clip-content">
@@ -8341,13 +8396,12 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         ${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}
                     </div>
                     <div style="margin-top:8px;padding:8px;background:rgba(0,0,0,0.25);border-radius:8px;">
-                        <div style="font-size:10px;color:#ef4444;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">🚫 rejected by flow content policy</div>
+                        <div style="font-size:10px;color:#ef4444;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">${rejectBannerLabel}</div>
                         ${rejectedPreview}
                     </div>
                     ${dialogueText ? `<div class="clip-text" style="margin-top:8px;font-style:italic;color:#94a3b8;font-size:12px;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:6px;">"${dialogueText}"</div>` : ''}
                     <div style="margin-top:10px;font-size:11px;color:var(--text-muted);line-height:1.4;">
-                        Flow rejected this image's content. Upload a replacement
-                        to retry — the worker will re-submit automatically.
+                        ${rejectBodyCopy}
                     </div>
                     ${groupBadge}
                     ${cascadeNotice}
