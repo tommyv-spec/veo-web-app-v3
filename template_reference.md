@@ -11886,3 +11886,39 @@ Root cause: proportional `fr` columns scale with viewport. At any viewport > ~80
 
 **Verification (mandatory before claiming v744 correctly applied)**: push to main → wait Render deploy → open job with paired clips, toggle expanded view → confirm voice inset is locked at ~220px wide regardless of browser window width → confirm voice video height capped (no taller than ~340px) → confirm b-roll fills all remaining width → resize browser window from 1200px → 1920px → 2560px wide and confirm voice inset stays compact at every size. Will not claim v744 correctly applied until evidence per CLAUDE.md hard rule.
 
+---
+
+## v745 — Paired clip variant-nav scope fix + multi-column expanded grid (amends v742 + v744)
+
+**Problem A — variant nav arrows swap wrong tile.** Paired clip cards contain TWO `.variant-nav` blocks (one per `.clip-paired-side` — visual_pair on left, audio_pair on right). `switchVariant(clipId, variantNum)` at `code/static/index.html:8902` resolved its target via `card.querySelector('.variant-nav')` (returns FIRST nav match — always the visual_pair's) and then `card.querySelector('video')` (returns FIRST `<video>` — always the visual_pair's b-roll). When the operator clicked the audio_pair side's `◀` or `▶` arrow, the API call correctly fired `select-variant/N` for `audio.id`, but the optimistic video swap, button onclick rewrite, indicator text, and download/voice-button updates ALL targeted the visual side. Net effect: visual-side video tile flickered, audio variant invisibly changed server-side, operator perceived "audio arrows don't work."
+
+**Problem B — expanded mode forces one-card-per-row stretching b-roll.** v742 + v744 amended the paired card's INNER grid (3fr 1fr → 1fr 220px → 1fr 220px voice PiP), but the OUTER `.clips-grid.expanded-mode` rule at `index.html:1285` was `grid-template-columns: 1fr; gap: 20px` — exactly ONE card per row, full viewport width. On a 1920px viewport each paired card stretched to ~1900px wide, b-roll filled most of it, operator could only review one paired clip at a time and had to scroll vertically through every card. Voice inset's fixed 220px was correctly compact, but b-roll being ~1700px wide felt wrong because the WHOLE PREMISE of expanded mode (review multiple clips quickly) was broken.
+
+**Problem C — paired card's inline `grid-column: span 2` locks it to 2 collapsed slots even in expanded mode.** `renderClipPaired` set `style="grid-column: span 2"` on the outer div so the paired card occupies 2 thumbnail slots in collapsed mode (where small thumbnails fit ~6 per row, the paired card takes 2). In expanded mode this inline style continued to force `span 2` over the single column (no visible effect under `1fr`), but now that v745 reflows expanded mode to multi-column auto-fill, `span 2` would make each paired card occupy two of the wider expanded slots — wrong (each paired card should be ONE expanded slot since the inner grid already lays out b-roll + voice inset side-by-side).
+
+Operator-surfaced 2026-05-16 across multiple rounds: "i can't scroll the audio clips using the arrows," "the clip of the b-roll has to be the right size in the screen," "in the expanded mode we should see all the clips next to each other and well spaced in the screen, easy to review and navigate."
+
+**Rule.**
+
+1. **Variant nav scope** — `switchVariant` resolves DOM scope to `.clip-paired-side` first (via `event.target.closest('.clip-paired-side')`) and falls back to `.clip-card` for non-paired clips. All optimistic + server-confirmed DOM updates (video swap, button onclick rewrite, indicator text, download/voice button data attrs) stay within scope so paired sides don't bleed into each other. Card-level operations (approval status class, badge update, etc.) STAY card-scoped — those are pair-level concerns and shouldn't be per-side. Legacy fallback (when called programmatically without `event`) walks every card iterating ALL `.variant-nav` blocks (pre-v745 only checked first nav) so the function still works if someone invokes it from JS.
+
+2. **Multi-column expanded grid** — `.clips-grid.expanded-mode` becomes `grid-template-columns: repeat(auto-fill, minmax(540px, 1fr)); gap: 24px`. Cards reflow naturally based on viewport: 1280px viewport ≈ 2 cards per row, 1920px ≈ 3 per row, 2560px ≈ 4 per row. B-roll stays at a sensible size (~360-500px wide depending on viewport) instead of stretching to viewport.
+
+3. **Paired card grid-column override** — `.clip-card.clip-paired { grid-column: span 2 }` (collapsed default, occupies 2 thumbnail slots). `.clips-grid.expanded-mode .clip-card.clip-paired { grid-column: span 1 }` (expanded override, each paired card takes 1 of the wider 540px+ slots). Inline `style="grid-column: span 2"` removed from `renderClipPaired` so CSS class fully controls layout (pre-v745 inline would have won regardless of CSS in expanded mode).
+
+4. **Inner paired-grid voice tuning** — voice column was `220px` in v744 (good for one-per-row 1920px wide layouts). With v745's multi-column cards at ~540-700px each, voice scales down to `160px` fixed, voice video `max-height: 240px` (was 340), voice container `max-width: 160px`. Maintains the compact PiP visual relative to the smaller cards.
+
+**Carve-outs**:
+- Non-paired clips continue to use card-scope in `switchVariant` (event.target.closest('.clip-paired-side') returns null → falls back to `.clip-card`). Behavior unchanged.
+- Collapsed grid layout unchanged (`repeat(auto-fill, minmax(180px, 1fr))`).
+- Paired collapsed card still spans 2 thumbnail slots (`grid-column: span 2`).
+- v742 + v743 + v744 visual styling on voice inset (indigo badge, faint background, dim video, hover-restore, fixed-width PiP) all preserved.
+
+**Pairing**: v742 expanded view amended; v744 fixed-width voice amended (size tuned for smaller cards); v743 `approvePairedSide` unchanged (works on inner DOM regardless of grid column count); v700c paired card HTML structure unchanged (only inline-style removal from outer div).
+
+**Migration: zero required.** CSS + scope-resolution change only. No DB / backend / data shape change.
+
+**Touched** (v745): `code/static/index.html` (CSS reflow for `.clips-grid.expanded-mode` + `.clip-card.clip-paired` grid-column rules + inner paired-grid voice tuning; inline `style="grid-column: span 2"` removed from `renderClipPaired`; `switchVariant` scope resolution + scope-aware DOM queries); this file (v745 deep-dive); `wiki/patterns/conventions.md` (v745 row + bumped Latest live v744 → v745); `CLAUDE.md` (quickref); `wiki/log.md` (timeline).
+
+**Verification (mandatory before claiming v745 correctly applied)**: push to main → wait Render deploy → open job with multi-variant paired clips → COLLAPSED view: click audio side's `▶` arrow → confirm audio variant indicator increments AND audio video tile swaps (not visual side) → click visual side's `▶` → confirm visual variant changes independently → EXPANDED view: confirm multiple paired cards visible per row (2-3 on a 1920px viewport) → confirm b-roll panel sits at sensible width (~400-500px) → resize browser 1280px → 1920px → 2560px, confirm cards reflow correctly (2 / 3 / 4 per row) and voice inset stays compact at 160px regardless. Will not claim v745 correctly applied until evidence per CLAUDE.md hard rule.
+

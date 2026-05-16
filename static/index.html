@@ -1282,7 +1282,20 @@
         .stat-lbl { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
         
         .clips-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; margin-top: 12px; }
-        .clips-grid.expanded-mode { grid-template-columns: 1fr; gap: 20px; }
+        /* v745 — expanded mode = bigger cards, MULTI-column auto-fill.
+           Pre-v745 the expanded grid was `1fr` (one card per row, full
+           viewport width). At 1920px viewport that stretched each card to
+           ~1900px wide and b-roll filled most of it — operator could only
+           review one clip at a time and had to scroll vertically through
+           every paired card. Multi-column auto-fill with minmax(540px,1fr)
+           keeps cards reviewable at a sensible width AND fits 2-3 per row
+           on standard viewports so the operator can compare adjacent
+           clips in one screen. Card-level paired span-2 override flips
+           to span-1 in expanded mode (each paired card takes 1 of the
+           wider slots, not 2 narrow ones). */
+        .clips-grid.expanded-mode { grid-template-columns: repeat(auto-fill, minmax(540px, 1fr)); gap: 24px; }
+        .clip-card.clip-paired { grid-column: span 2; }
+        .clips-grid.expanded-mode .clip-card.clip-paired { grid-column: span 1; }
         /* Dual-view: collapsed shown by default, expanded hidden */
         .clip-video-expanded { display: none; width: 100%; }
         .clips-grid.expanded-mode .clip-video-collapsed { display: none; }
@@ -1322,20 +1335,24 @@
            while b-roll absorbs all remaining width (1fr). Max-height cap on
            the voice video prevents 9:16 aspect-ratio from towering in tall
            viewports. */
-        .clips-grid.expanded-mode .clip-paired-grid { grid-template-columns: 1fr 220px; gap: 24px; align-items: start; }
+        /* v745 — inner paired-grid in expanded mode: voice fixed 160px PiP
+           (down from 220 since cards themselves are now ~540-700px wide
+           instead of full-viewport). B-roll gets 1fr remaining. Voice video
+           max-height 240px keeps 9:16 aspect ratio from towering. */
+        .clips-grid.expanded-mode .clip-paired-grid { grid-template-columns: 1fr 160px; gap: 16px; align-items: start; }
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] {
             background: rgba(99, 102, 241, 0.06);
             border: 1px solid rgba(99, 102, 241, 0.18);
             border-radius: var(--radius-sm);
-            padding: 12px 10px 10px;
+            padding: 10px 8px 8px;
             position: relative;
             margin-top: 14px;
-            max-width: 220px;
+            max-width: 160px;
         }
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] .clip-video,
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] video {
             max-width: 100%;
-            max-height: 340px;
+            max-height: 240px;
             object-fit: contain;
         }
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"]::before {
@@ -8340,8 +8357,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             const removeBtn = `<button class="btn btn-secondary btn-sm" style="padding:6px 10px;font-size:12px;color:var(--text-muted);" onclick="confirmDelete(${clipId},${c.clip_index})" title="remove this paired clip from the lineup">🗑</button>`;
 
             return `<div class="clip-card clip-paired ${bothApproved?'clip-approved':''} ${visualGenerating||audioGenerating?'clip-generating':''} ${visualFailed||audioFailed?'clip-rejected':''}"
-                        data-clip-id="${clipId}" data-clip-index="${c.clip_index}"
-                        style="grid-column: span 2;">
+                        data-clip-id="${clipId}" data-clip-index="${c.clip_index}">
                 <div class="clip-content">
                     <div class="clip-header">
                         <span class="clip-idx">#${c.clip_index+1}</span>
@@ -8896,21 +8912,46 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
         async function switchVariant(clipId, variantNum) {
             if (variantNum < 1) return;
-            
+
             if (!window._variantBlobCache) window._variantBlobCache = {};
             const cacheKey = `variant_${clipId}_${variantNum}`;
-            const cards = document.querySelectorAll('.clip-card');
-            
-            // Find clip card and video element
-            // We need clipIndex — find it from the card's data or iterate
-            let card = null, clipIdx = -1;
-            cards.forEach((c, i) => {
-                const nav = c.querySelector('.variant-nav');
-                if (nav && nav.innerHTML.includes(`switchVariant(${clipId},`)) { card = c; clipIdx = i; }
-            });
-            if (!card) card = cards[clipIdx] || null;
-            
-            const video = card ? card.querySelector('.clip-video-collapsed video') || card.querySelector('video') : null;
+
+            // v745 — scope resolution. Paired clip cards contain TWO
+            // `.variant-nav` blocks (one per `.clip-paired-side`). The
+            // pre-v745 search did `card.querySelector('.variant-nav')` which
+            // matched the FIRST nav (always the visual_pair's), then
+            // `card.querySelector('video')` returned the visual_pair's video
+            // tile. Clicking the audio side's arrow swapped the wrong tile.
+            // Resolve scope to the `.clip-paired-side` containing the
+            // clicked button when called from an onclick handler; fall back
+            // to the whole `.clip-card` for standalone non-paired clips.
+            let scope = null;
+            if (typeof event !== 'undefined' && event && event.target) {
+                scope = event.target.closest('.clip-paired-side')
+                     || event.target.closest('.clip-card');
+            }
+            let card = scope && scope.closest ? scope.closest('.clip-card') : null;
+
+            // Legacy fallback: when called programmatically (no event in
+            // scope) walk every card looking for matching variant nav.
+            if (!card) {
+                const cards = document.querySelectorAll('.clip-card');
+                cards.forEach((c) => {
+                    const navs = c.querySelectorAll('.variant-nav');
+                    navs.forEach(n => {
+                        if (n.innerHTML.includes(`switchVariant(${clipId},`)) {
+                            card = c;
+                            scope = n.closest('.clip-paired-side') || c;
+                        }
+                    });
+                });
+            }
+
+            // Video element + button updates: stay within scope so paired
+            // sides don't bleed into each other.
+            const video = scope
+                ? (scope.querySelector('.clip-video-collapsed video') || scope.querySelector('video'))
+                : null;
             
             // === INSTANT: swap video from blob cache before any API call ===
             if (video && window._variantBlobCache[cacheKey]) {
@@ -8921,15 +8962,18 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
             
             // === INSTANT: update nav buttons optimistically ===
-            if (card) {
-                const btns = card.querySelectorAll('.variant-btn');
+            // v745 — scope to .clip-paired-side (or .clip-card for non-paired)
+            // so we don't update both sides' nav buttons when the user
+            // arrows on one side of a paired clip.
+            if (scope) {
+                const btns = scope.querySelectorAll('.variant-btn');
                 if (btns.length >= 2) {
                     btns[0].disabled = variantNum <= 1;
                     btns[0].setAttribute('onclick', `switchVariant(${clipId},${variantNum-1})`);
                     btns[1].setAttribute('onclick', `switchVariant(${clipId},${variantNum+1})`);
                     // Don't disable next yet — we don't know totalVariants until API returns
                 }
-                const indicator = card.querySelector('.variant-indicator');
+                const indicator = scope.querySelector('.variant-indicator');
                 if (indicator) {
                     // Update the number part immediately, keep the label format
                     const text = indicator.textContent;
@@ -8973,24 +9017,29 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     const currentVersion = variantNum > 0 && variantNum <= versions.length ? versions[variantNum - 1] : null;
                     const versionLabel = currentVersion && currentVersion.version_key ? currentVersion.version_key : (currentVersion ? `${currentVersion.attempt||1}.${currentVersion.variant||1}` : `${clipData.generation_attempt||1}.1`);
                     
-                    const indicator = card.querySelector('.variant-indicator');
+                    // v745 — scope nav indicator + buttons to the
+                    // .clip-paired-side (or card for non-paired) so paired
+                    // sides don't bleed into each other on server-confirmed
+                    // update.
+                    const navScope = scope || card;
+                    const indicator = navScope.querySelector('.variant-indicator');
                     if (indicator) indicator.textContent = `${versionLabel} (${variantNum}/${totalVariants})`;
-                    
+
                     // Now we know totalVariants — update next button
-                    const btns = card.querySelectorAll('.variant-btn');
+                    const btns = navScope.querySelectorAll('.variant-btn');
                     if (btns.length >= 2) {
                         btns[0].disabled = variantNum <= 1;
                         btns[0].setAttribute('onclick', `switchVariant(${clipId},${variantNum-1})`);
                         btns[1].disabled = variantNum >= totalVariants;
                         btns[1].setAttribute('onclick', `switchVariant(${clipId},${variantNum+1})`);
                     }
-                    
-                    // Update download button
-                    const dlBtn = card.querySelector('.video-download-btn');
+
+                    // Update download button (per-side scope for paired)
+                    const dlBtn = navScope.querySelector('.video-download-btn');
                     if (dlBtn && newFilename) dlBtn.setAttribute('onclick', `event.stopPropagation();downloadClip('${API}/jobs/${selectedJobId}/outputs/${newFilename}','clip_${clipData.clip_index+1}.mp4')`);
-                    
-                    // Update voice button
-                    const voiceBtn = card.querySelector('.video-voice-btn');
+
+                    // Update voice button (per-side scope for paired)
+                    const voiceBtn = navScope.querySelector('.video-voice-btn');
                     if (voiceBtn && newFilename) voiceBtn.setAttribute('data-clip', newFilename);
                     
                     // Update state to prevent polling from reverting
