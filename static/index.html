@@ -8000,7 +8000,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 else if(c.error_code === 'PREVIOUS_CLIP_FAILED') skipMsg = 'Previous clip failed';
                 acts=`<div style="text-align:center"><div style="color:#f59e0b;font-size:10px;margin-bottom:6px">${skipMsg}</div></div>`;
             }
-            else if(failed)acts=`<div style="text-align:center"><div style="color:var(--error);font-size:10px;margin-bottom:6px">${c.error_message||'Failed'}</div><div style="display:flex;gap:6px;justify-content:center">${c.attempts_remaining>0&&clipId?`<button class="btn btn-redo btn-sm" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})">↻ Retry (${c.attempts_remaining} left)</button>`:''}<button class="btn btn-sm" onclick="confirmDelete(${clipId},${c.clip_index})" style="background:var(--surface-2);color:var(--text-muted);padding:4px 10px;font-size:11px;">✕ Remove</button></div></div>`;
+            else if(failed){
+                // v739 — show revert button when versions_json has prior
+                // rendered entry. Rescues clips stuck FAILED after a redo
+                // where the prior render was good (content-policy reject,
+                // REDO_STUCK, etc.).
+                const _hasPrior = (c.versions || []).some(v => v && v.filename);
+                const _revertBtn = _hasPrior && clipId
+                    ? `<button class="btn btn-sm" onclick="revertToPriorVersion(${clipId},${c.clip_index})" style="background:rgba(99,102,241,0.18);color:#a5b4fc;border:1px solid rgba(99,102,241,0.4);padding:4px 10px;font-size:11px;" title="restore the clip that rendered fine before this redo">↶ Revert to prior</button>`
+                    : '';
+                acts=`<div style="text-align:center"><div style="color:var(--error);font-size:10px;margin-bottom:6px">${c.error_message||'Failed'}</div><div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap">${c.attempts_remaining>0&&clipId?`<button class="btn btn-redo btn-sm" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})">↻ Retry (${c.attempts_remaining} left)</button>`:''}${_revertBtn}<button class="btn btn-sm" onclick="confirmDelete(${clipId},${c.clip_index})" style="background:var(--surface-2);color:var(--text-muted);padding:4px 10px;font-size:11px;">✕ Remove</button></div></div>`;
+            }
             else if(canReview&&clipId)acts=`<div class="clip-actions"><button class="btn btn-approve" onclick="approve(${clipId})">✓</button><button class="btn btn-reject" onclick="confirmDelete(${clipId},${c.clip_index})">🗑</button><button class="btn btn-redo" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})" ${c.attempts_remaining<=0?'disabled':''}>↻${c.attempts_remaining}</button></div>`;
             // Frame info display
             let frameInfo='';
@@ -8142,7 +8152,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
             } else if (generating) {
                 acts = `<div style="text-align:center;color:var(--text-muted);font-size:10px;">rendering...</div>`;
             } else if (failed) {
-                acts = `<div style="display:flex;justify-content:center;"><button class="btn btn-redo btn-sm" style="padding:4px 10px;font-size:11px" onclick="redoModal(${clip.id},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''}>↻ retry ${sideLabel}</button></div>`;
+                // v739 — show "↶ revert to prior" when versions_json has a
+                // rendered entry, alongside the retry button. Rescues clips
+                // stuck FAILED after a redo (content-policy reject, etc.)
+                // where the prior render was good.
+                const _hasPrior = (clip.versions || []).some(v => v && v.filename);
+                const _revertBtn = _hasPrior
+                    ? `<button class="btn btn-secondary btn-sm" style="padding:4px 10px;font-size:11px;background:rgba(99,102,241,0.18);color:#a5b4fc;border-color:rgba(99,102,241,0.4);" onclick="revertToPriorVersion(${clip.id},${clip.clip_index})" title="restore prior good render">↶ revert</button>`
+                    : '';
+                acts = `<div style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap;"><button class="btn btn-redo btn-sm" style="padding:4px 10px;font-size:11px" onclick="redoModal(${clip.id},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''}>↻ retry ${sideLabel}</button>${_revertBtn}</div>`;
             } else if (pending || waitingApproval) {
                 acts = `<div style="text-align:center;color:var(--text-muted);font-size:10px;">in queue</div>`;
             } else if (canReview) {
@@ -8333,9 +8351,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     </div>
                     ${groupBadge}
                     ${cascadeNotice}
-                    <div style="display:flex;gap:8px;justify-content:center;margin-top:10px;">
+                    <div style="display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap;">
                         <input type="file" id="replaceImageInput_${clipId}" accept="image/png,image/jpeg,image/webp" style="display:none;" onchange="replaceClipImage(${clipId}, '${jid}', this.files[0])">
                         <button class="btn btn-primary btn-sm" style="padding:6px 14px;font-size:12px;" onclick="document.getElementById('replaceImageInput_${clipId}').click()" title="upload a new image">📁 upload replacement</button>
+                        ${((c.versions||[]).some(v => v && v.filename)) ? `<button class="btn btn-secondary btn-sm" style="padding:6px 12px;font-size:12px;background:rgba(99,102,241,0.18);color:#a5b4fc;border-color:rgba(99,102,241,0.4);" onclick="revertToPriorVersion(${clipId},${c.clip_index})" title="restore the clip that rendered fine before this redo">↶ revert to prior render</button>` : ''}
                         <button class="btn btn-secondary btn-sm" style="padding:6px 10px;font-size:12px;color:var(--text-muted);" onclick="confirmDelete(${clipId},${c.clip_index})" title="remove this clip from the lineup">🗑</button>
                     </div>
                 </div>
@@ -8599,6 +8618,31 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 clearClipLocalUpdate(cid);
                 if(card){card.style.opacity='1';card.style.pointerEvents='auto';}
                 alert('Failed to cancel redo: '+e.message);
+            });
+        }
+        // v739 — universal stuck-clip rescue. Restore a clip to its last
+        // good prior render from versions_json. No status gate: works on
+        // FAILED clips (content-policy-rejected or otherwise) where the
+        // redo trashed an originally-good render. Paired-clip cascade is
+        // server-side: if the other half of a paired card also has a
+        // prior version, server reverts that too in the same call.
+        function revertToPriorVersion(cid, clipIdx){
+            if(!confirm(`Revert Clip #${clipIdx+1} to its last good rendered version?`))return;
+            const card=document.querySelector(`.clip-card[data-clip-id="${cid}"]`);
+            if(card){card.style.opacity='0.5';card.style.pointerEvents='none';}
+            markClipLocallyUpdated(cid);
+            fetch(`${API}/clips/${cid}/revert-to-prior-version`,{method:'POST'}).then(r=>{
+                if(!r.ok) return r.json().then(e=>{throw new Error(e.detail||'Failed')});
+                return r.json();
+            }).then((res)=>{
+                clearClipLocalUpdate(cid);
+                const cascadeBits = res.cascaded_paired ? ' (paired clip also reverted)' : '';
+                showToast(`✓ Reverted to ${res.filename || 'previous version'}${cascadeBits}`);
+                clipStates={};clipVideoKeys={};clipUIKeys={};loadClips(selectedJobId);
+            }).catch(e=>{
+                clearClipLocalUpdate(cid);
+                if(card){card.style.opacity='1';card.style.pointerEvents='auto';}
+                alert('Failed to revert: '+e.message);
             });
         }
         async function switchVariant(clipId, variantNum) {

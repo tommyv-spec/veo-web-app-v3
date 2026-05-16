@@ -3363,8 +3363,60 @@ def get_actual_versions_count(clip) -> int:
     current_key = f"{current_attempt}.1"  # Main output is always variant 1
     if clip.status == ClipStatus.COMPLETED.value and clip.output_filename and current_key not in seen:
         seen[current_key] = {"attempt": current_attempt, "variant": 1, "filename": clip.output_filename}
-    
+
     return len(seen)
+
+
+def _restore_clip_to_prior_version(clip) -> Optional[Dict[str, Any]]:
+    """v739 — restore a clip to its last good prior render from versions_json.
+
+    Walks versions_json in reverse and picks the most recent entry that has
+    a `filename`. Mutates clip in-place (status, output_*, attempt counters,
+    error_* cleared, claim cleared). Caller commits.
+
+    Returns {"filename", "attempt", "version_index"} on success, None if no
+    prior version exists.
+
+    Shared by:
+      - POST /api/clips/{id}/cancel-redo (status-gated: redo_queued / flow_redo_queued / generating)
+      - POST /api/clips/{id}/revert-to-prior-version (no status gate — works on FAILED stuck clips)
+
+    The split exists because cancel-redo is the "abort a queued redo" semantic;
+    revert-to-prior-version is the "rescue any stuck clip that has prior good
+    output in versions_json" semantic. Same restore logic, different gate.
+    """
+    versions = json.loads(clip.versions_json) if clip.versions_json else []
+    last_version = None
+    last_index = None
+    for idx in range(len(versions) - 1, -1, -1):
+        v = versions[idx]
+        if v.get("filename"):
+            last_version = v
+            last_index = idx
+            break
+    if not last_version:
+        return None
+
+    clip.status = ClipStatus.COMPLETED.value
+    clip.approval_status = "pending_review"
+    clip.output_filename = last_version["filename"]
+    clip.output_url = last_version.get("url")
+    restored_attempt = last_version.get(
+        "attempt",
+        max(1, (clip.generation_attempt or 1) - 1),
+    )
+    clip.generation_attempt = restored_attempt
+    clip.selected_variant = last_index + 1  # 1-indexed pointer into versions[]
+    clip.error_code = None
+    clip.error_message = None
+    clip.claimed_by_worker = None
+    clip.claimed_at = None
+    return {
+        "filename": last_version["filename"],
+        "attempt": restored_attempt,
+        "version_index": last_index,
+    }
+
 
 @app.get("/api/jobs/{job_id}/clips", response_model=List[ClipResponse])
 async def get_job_clips(
@@ -4554,19 +4606,14 @@ async def cancel_redo_clip(
     Retry nor Revert worked.
     """
     clip = get_user_clip(db, clip_id, current_user)
-    
+
     if clip.status not in ('redo_queued', 'flow_redo_queued', 'generating'):
         raise HTTPException(status_code=400, detail=f"Clip is not in redo state (status: {clip.status})")
-    
-    # Find last version with a filename
-    versions = json.loads(clip.versions_json) if clip.versions_json else []
-    last_version = None
-    for v in reversed(versions):
-        if v.get('filename'):
-            last_version = v
-            break
-    
-    if not last_version:
+
+    # v739 — delegate restore logic to shared helper.
+    restored = _restore_clip_to_prior_version(clip)
+
+    if not restored:
         # v468: no prior successful version exists (the original
         # generation must have failed). Instead of leaving the clip
         # wedged in redo-queued forever, mark it failed. The user can
@@ -4586,24 +4633,116 @@ async def cancel_redo_clip(
             "filename": None,
             "status": "failed",
         }
-    
-    # Restore clip to completed state with previous version
-    clip.status = ClipStatus.COMPLETED.value
-    clip.approval_status = "pending_review"
-    clip.output_filename = last_version['filename']
-    clip.output_url = last_version.get('url')
-    clip.generation_attempt = last_version.get('attempt', clip.generation_attempt - 1)
-    clip.selected_variant = len(versions)  # Select the last version
-    clip.error_code = None
-    clip.error_message = None
-    clip.claimed_by_worker = None
-    clip.claimed_at = None
-    
+
     db.commit()
-    
-    add_job_log(db, clip.job_id, f"Clip {clip.clip_index + 1} redo cancelled — reverted to {last_version['filename']}", "INFO", "redo_cancel")
-    
-    return {"success": True, "message": f"Reverted to previous version", "filename": last_version['filename']}
+
+    add_job_log(db, clip.job_id, f"Clip {clip.clip_index + 1} redo cancelled — reverted to {restored['filename']}", "INFO", "redo_cancel")
+
+    return {"success": True, "message": f"Reverted to previous version", "filename": restored['filename']}
+
+
+@app.post("/api/clips/{clip_id}/revert-to-prior-version")
+async def revert_clip_to_prior_version(
+    clip_id: int,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v739 — universal stuck-clip rescue. Restore a clip to its last good
+    prior render from versions_json, regardless of current status.
+
+    Unlike cancel-redo (which gates on redo_queued / flow_redo_queued /
+    generating), this endpoint has NO status gate. It works when:
+      - clip is FAILED with error_code = CONTENT_POLICY_VIOLATION
+        (Flow rejected the redo's start_frame; the prior render is fine)
+      - clip is FAILED with error_code = REDO_STUCK
+      - clip is FAILED for any other reason but versions_json has a prior good entry
+      - clip is COMPLETED with multiple variants and user wants to roll back
+
+    Only requirement: at least one entry in versions_json carries a `filename`.
+
+    Paired-clip cascade (atomic UI unit):
+      visual_pair + audio_pair render as a single card in the frontend; if
+      one was rejected and the user wants the prior render back, the paired
+      sibling should revert too (when it has a prior version). Best-effort:
+      if the paired sibling has no versions_json entry with filename, leave
+      it alone and report cascaded_paired=False — the user gets the calling
+      clip back and can deal with the orphan paired side separately.
+
+    Mirror of v701d / v710 cascade discipline: log full traceback on cascade
+    failure, never swallow silently.
+    """
+    clip = get_user_clip(db, clip_id, current_user)
+
+    restored = _restore_clip_to_prior_version(clip)
+    if not restored:
+        raise HTTPException(
+            status_code=400,
+            detail="No prior version with a rendered output exists for this clip. Use redo or upload replacement instead.",
+        )
+
+    # Paired-clip cascade. Audio_pair + visual_pair siblings are an atomic
+    # render unit; if one was redone (then got stuck) the other typically
+    # was too. Revert paired sibling when it also has a prior good version.
+    cascaded_paired = False
+    paired_filename: Optional[str] = None
+    try:
+        if clip.paired_clip_id:
+            paired = db.query(Clip).filter(Clip.id == clip.paired_clip_id).first()
+            if paired is not None:
+                paired_restored = _restore_clip_to_prior_version(paired)
+                if paired_restored:
+                    cascaded_paired = True
+                    paired_filename = paired_restored["filename"]
+                    print(
+                        f"[v739] paired cascade ✓ clip {clip_id} paired_id={paired.id} "
+                        f"restored to attempt {paired_restored['attempt']} "
+                        f"(filename={paired_filename})",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[v739] paired cascade ⊘ clip {clip_id} paired_id={paired.id} "
+                        f"has no prior version with filename — leaving paired alone",
+                        flush=True,
+                    )
+    except Exception as _paired_err:
+        import traceback
+        print(
+            f"[v739] paired cascade FAILED for clip {clip_id}: "
+            f"{type(_paired_err).__name__}: {_paired_err}",
+            flush=True,
+        )
+        traceback.print_exc()
+        # Don't rollback the primary restore — paired is best-effort.
+        # The primary clip should still come back even if paired errored.
+
+    db.commit()
+
+    print(
+        f"[v739] revert clip {clip_id} → attempt {restored['attempt']} "
+        f"(filename={restored['filename']}, paired_cascaded={cascaded_paired})",
+        flush=True,
+    )
+
+    cascade_msg = ""
+    if cascaded_paired:
+        cascade_msg = " (paired clip also reverted)"
+    add_job_log(
+        db, clip.job_id,
+        f"Clip {clip.clip_index + 1} reverted to prior render: {restored['filename']}{cascade_msg}",
+        "INFO",
+        "revert",
+    )
+
+    return {
+        "success": True,
+        "message": f"Reverted to prior version: {restored['filename']}",
+        "filename": restored["filename"],
+        "attempt": restored["attempt"],
+        "version_index": restored["version_index"],
+        "cascaded_paired": cascaded_paired,
+        "paired_filename": paired_filename,
+    }
 
 
 @app.post("/api/clips/{clip_id}/select-variant/{variant_num}")
