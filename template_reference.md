@@ -11733,3 +11733,49 @@ NOT broadened: the SETTER paths at `code/main.py:9370 / 9412 / 11170 / 11200`. T
 
 **Verification (mandatory before claiming v740 correctly applied)**: push to main → wait Render deploy (2-3 min) → identify a stuck audio_pair clip with `error_code = CELEBRITY_FILTER` / `CELEBRITY_RAI_FILTER` / `SAFETY_FILTER` (e.g. the screenshot's job with 8+ `VOICE FAILED — RETRY` cards) → confirm the paired card's voice side now shows `📁 upload` button alongside `↻ retry voice` → click `📁 upload`, pick a different anchor face → confirm toast `replacement uploaded — also retried N voice clips` → confirm all affected voice clips transition from FAILED to FLOW_REDO_QUEUED in DevTools Network response → grep Render logs for `[v740] image-attributable failure clip N (code='CELEBRITY_FILTER')` line. Will not claim v740 correctly applied until evidence per CLAUDE.md hard rule.
 
+---
+
+## v741 — v701d anchor cascade preserves COMPLETED siblings (failure-state filter)
+
+**Problem.** Pre-v741 the v701d audio_pair anchor cascade at `code/main.py:3849-3851` queried sibling audio_pair clips WITHOUT a status / error_code filter. When the user uploaded a replacement anchor face to fix some failed voice clips, the cascade patched EVERY audio_pair sibling sharing the anchor — including ones that had ALREADY rendered fine (status COMPLETED, error_code NULL). Those completed siblings got their `start_frame` overwritten to the new key, status flipped to FLOW_REDO_QUEUED, and the worker re-rendered them from scratch. The user lost the prior good renders + burned fresh Veo credits.
+
+Operator-surfaced 2026-05-16 immediately after v740 shipped: "some of these were done and some other weren't, so i uploaded the image for the missing one and when i did they all went back to generating."
+
+Pre-v741 code path:
+```python
+if sibling_audio_ids:
+    siblings = db.query(Clip).filter(
+        Clip.id.in_(sibling_audio_ids)   # ← no status / error_code filter
+    ).all()
+    for sib in siblings:
+        sib.start_frame = new_key
+        # ... clobber regardless of prior state ...
+        sib.status = ClipStatus.FLOW_REDO_QUEUED.value
+```
+
+The v710 image-shared cascade at `code/main.py:3902-3907` has ALWAYS filtered on `error_code.in_(...)` so it was safe. Only v701d audio_pair anchor cascade had the gap.
+
+**Rule.** Add `Clip.error_code.in_(list(IMAGE_ATTRIBUTABLE_ERROR_CODES))` filter to the v701d sibling query so the cascade ONLY patches audio_pair siblings currently in an image-attributable failure state. Preserves:
+- COMPLETED siblings (error_code NULL) — keep their prior good render
+- GENERATING siblings (error_code NULL) — worker is mid-render, don't disturb
+- WAITING_APPROVAL / PENDING — same logic, error_code NULL
+- FAILED siblings with non-image-attributable codes (RATE_LIMIT_429 / API_TIMEOUT / API_NETWORK_ERROR / VIDEO_GENERATION_FAILED / etc.) — uploading a new image won't fix those, separate retry path
+
+Only siblings whose failure is rooted in the SAME anchor image content (CELEBRITY_FILTER / CELEBRITY_RAI_FILTER / SAFETY_FILTER / ALL_IMAGES_BLACKLISTED / CONTENT_POLICY_VIOLATION) get the new anchor. This matches the actual semantics of "one upload retries all stuck voice clips sharing the anchor" — the others aren't stuck and shouldn't be touched.
+
+**Diagnostic log (permanent per CLAUDE.md verification rule)**: `[v741] anchor cascade preserved N audio_pair sibling(s) not in image-attributable failure state (likely COMPLETED — kept prior render)` (fires once per replace-image call when at least one sibling is skipped; suppressed when every sibling matched). Fires AFTER the filtered query lands so log line reports actual skip count.
+
+**Carve-outs**: when EVERY audio_pair sibling sharing the anchor is in image-attributable failure state (all rejected together — same anchor face rejected on every scene), the cascade behaves identically to pre-v741 (patches all of them). The skip-count log doesn't fire. No regression for the original v701d use case.
+
+**Pairing with prior rules**:
+- v701d audio_pair anchor cascade — v741 narrows the WHERE clause; cascade mechanism unchanged.
+- v710 image-shared cascade — already had failure-state filter since shipment; v741 brings v701d into parity.
+- v740 image-attributable failure codes — v741 reuses the same `IMAGE_ATTRIBUTABLE_ERROR_CODES` frozenset; both gates share the same definition.
+- v698A paired-clip render mechanism — v741 makes anchor-replacement safe across partially-completed jobs (mix of done + failed siblings).
+
+**Migration: zero required.** Pre-v741 jobs where the cascade already clobbered completed siblings can be rescued via v739 `↶ revert to prior render` button on each affected card (assuming versions_json has the prior render). v741 prevents the same bug from happening on future uploads.
+
+**Touched** (v741): `code/main.py` (single sibling query filter + skip-count diagnostic log at the v701d cascade body); this file (v741 deep-dive); `wiki/patterns/conventions.md` (v741 row + bumped Latest live v740 → v741); `CLAUDE.md` (quickref); `wiki/log.md` (timeline). AST-verified.
+
+**Verification (mandatory before claiming v741 correctly applied)**: push to main → wait Render deploy (2-3 min) → identify a job with mix of COMPLETED + FAILED audio_pair siblings sharing the same anchor (the screenshot's job after the v740 deploy where some voice clips had rendered fine before user uploaded the fix) → upload a replacement anchor face on one of the FAILED voice cards → confirm only FAILED siblings transition to FLOW_REDO_QUEUED in DevTools Network response → confirm COMPLETED siblings retain `output_filename` + `status: completed` (their prior good render unchanged) → grep Render logs for `[v741] anchor cascade preserved N audio_pair sibling(s)` line. Will not claim v741 correctly applied until evidence per CLAUDE.md hard rule.
+

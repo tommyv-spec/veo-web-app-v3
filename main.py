@@ -3846,9 +3846,32 @@ async def replace_clip_image(
                         if v.paired_clip_id and v.paired_clip_id != clip.id
                     ]
                     if sibling_audio_ids:
+                        # v741 — filter cascade to ONLY siblings in image-
+                        # attributable failure state. Pre-v741 the cascade
+                        # patched every audio_pair sibling sharing the anchor
+                        # regardless of status: COMPLETED voice clips that had
+                        # already rendered fine got clobbered back to
+                        # FLOW_REDO_QUEUED and re-rendered from scratch (lost
+                        # the prior good render + burned fresh Veo credits).
+                        # Mirror of v710 image-shared cascade gate which has
+                        # always filtered on error_code — same discipline
+                        # ports to v701d audio_pair anchor cascade now.
+                        # Preserves COMPLETED (error_code NULL) + GENERATING
+                        # (error_code NULL) + non-image-attributable failures
+                        # (RATE_LIMIT / TIMEOUT / NETWORK — uploading new
+                        # image doesn't fix those, separate retry path).
                         siblings = db.query(Clip).filter(
-                            Clip.id.in_(sibling_audio_ids)
+                            Clip.id.in_(sibling_audio_ids),
+                            Clip.error_code.in_(list(IMAGE_ATTRIBUTABLE_ERROR_CODES)),
                         ).all()
+                        skipped_count = len(sibling_audio_ids) - len(siblings)
+                        if skipped_count > 0:
+                            print(
+                                f"[v741] anchor cascade preserved {skipped_count} "
+                                f"audio_pair sibling(s) not in image-attributable "
+                                f"failure state (likely COMPLETED — kept prior render)",
+                                flush=True,
+                            )
                         for sib in siblings:
                             sib.start_frame = new_key
                             sib.replacement_start_frame = (
