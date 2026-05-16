@@ -1312,7 +1312,17 @@
            hiding it entirely (operator still needs to verify lip-sync
            before approving). Hover on voice tile removes dim. */
         .clip-paired-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 8px; align-items: start; }
-        .clips-grid.expanded-mode .clip-paired-grid { grid-template-columns: 3fr 1fr; gap: 20px; align-items: start; }
+        /* v744 — voice column is a FIXED 220px wide PiP-style inset (not a
+           proportional fraction). Pre-v744 the 3fr 1fr ratio scaled voice
+           proportionally with viewport width — at 1920px viewport the voice
+           column became ~480px which then stretched the 9:16 voice video to
+           ~850px tall (matched b-roll height). Result: voice still felt
+           huge and competed with b-roll for visual weight. Fixed-pixel
+           column locks voice to a compact thumbnail regardless of viewport,
+           while b-roll absorbs all remaining width (1fr). Max-height cap on
+           the voice video prevents 9:16 aspect-ratio from towering in tall
+           viewports. */
+        .clips-grid.expanded-mode .clip-paired-grid { grid-template-columns: 1fr 220px; gap: 24px; align-items: start; }
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] {
             background: rgba(99, 102, 241, 0.06);
             border: 1px solid rgba(99, 102, 241, 0.18);
@@ -1320,6 +1330,13 @@
             padding: 12px 10px 10px;
             position: relative;
             margin-top: 14px;
+            max-width: 220px;
+        }
+        .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] .clip-video,
+        .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] video {
+            max-width: 100%;
+            max-height: 340px;
+            object-fit: contain;
         }
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"]::before {
             content: "🎙️ AUDIO ONLY — lip-sync reference";

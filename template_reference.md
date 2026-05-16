@@ -11862,3 +11862,27 @@ Same call signature shape as `approve()` (clip id + clip_index) so the per-side 
 
 **Verification (mandatory before claiming v743 correctly applied)**: push to main → wait Render deploy (2-3 min) → open a job with paired clips in "review both" state → click the b-roll side's `✓` → confirm ONLY that side's action row replaces with `"✓ approved"` → confirm outer card does NOT flip green → confirm pair badge updates to `"review voice"` → click the voice side's `✓` → confirm card flips to `clip-approved` (green border) + badge updates to `"PAIR READY"` + "approve both" pair-shortcut button disappears → check Network panel: confirm TWO separate `POST /api/clips/{id}/approve` calls fired (one per side, sequential). Will not claim v743 correctly applied until evidence per CLAUDE.md hard rule.
 
+---
+
+## v744 — Voice inset fixed-width PiP (amends v742 expanded view)
+
+**Problem.** v742 shipped paired expanded view with `grid-template-columns: 3fr 1fr` (b-roll 75%, voice 25%). On a 1920px viewport: voice column became ~480px wide, voice video 9:16 aspect ratio stretched to ~850px tall (matched b-roll height via `align-items: start` + intrinsic video sizing). Voice still felt huge and competed with b-roll for visual weight. Operator-surfaced 2026-05-16 immediately after v742 shipped: "bro the paired clip is still too big, that was the error also earlier."
+
+Root cause: proportional `fr` columns scale with viewport. At any viewport > ~800px the 25% voice column is bigger than necessary. The 9:16 voice video then preserves its aspect ratio while filling that column → tall, conspicuous.
+
+**Rule.** Switch voice column from proportional `1fr` to fixed `220px`. Grid becomes `grid-template-columns: 1fr 220px` — b-roll absorbs all remaining width, voice stays compact regardless of viewport. Pair gap bumped 20px → 24px to widen the visual separation. Voice container gets `max-width: 220px` so badge / padding don't push it wider. Voice video gets `max-width: 100%; max-height: 340px; object-fit: contain` so the 9:16 aspect ratio doesn't drive vertical height past 340px even in tall viewports.
+
+**Carve-outs**:
+- Collapsed mode unchanged (still `1.4fr 1fr` thumbnails).
+- v742's voice-side styling (indigo badge, faint background, dim filter, hover-restore) all preserved.
+- Voice video still plays — `max-height: 340px` is a ceiling, not a floor.
+- B-roll uncapped — fills all remaining width.
+
+**Pairing**: v742 (expanded view reflow) amended; v743 per-side approve (`approvePairedSide`) unchanged (works on same DOM structure); v700c paired card structure unchanged.
+
+**Migration: zero required.** CSS-only change.
+
+**Touched** (v744): `code/static/index.html` (CSS rules in the `.clip-paired-grid` expanded-mode block); this file (v744 deep-dive); `wiki/patterns/conventions.md` (v744 row + bumped Latest live v743 → v744); `CLAUDE.md` (quickref); `wiki/log.md` (timeline).
+
+**Verification (mandatory before claiming v744 correctly applied)**: push to main → wait Render deploy → open job with paired clips, toggle expanded view → confirm voice inset is locked at ~220px wide regardless of browser window width → confirm voice video height capped (no taller than ~340px) → confirm b-roll fills all remaining width → resize browser window from 1200px → 1920px → 2560px wide and confirm voice inset stays compact at every size. Will not claim v744 correctly applied until evidence per CLAUDE.md hard rule.
+
