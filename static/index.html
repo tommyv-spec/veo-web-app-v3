@@ -17000,9 +17000,29 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 // and calls imgRenderNodeDetail with the actual node
                 // object. Falls back to a corrected imgRenderNodeDetail
                 // call (with proper lookup) for older app versions.
+                //
+                // v748 — fix "have to refresh page to see uploaded image"
+                // bug. Pre-v748 this branch checked `typeof imgLoadNodes
+                // === 'function'` — but imgLoadNodes was a phantom name
+                // (no such function in this codebase; the real refresh
+                // is imgRefreshNodes at ~line 13671). typeof on an
+                // undefined identifier is 'undefined' so the branch was
+                // ALWAYS skipped. imgSelectNode then read the stale
+                // imgState.nodesById[nodeId] cache, re-rendering the
+                // detail pane with the OLD variants array — the new
+                // manual upload landed in the DB but was invisible
+                // until the user F5'd. Pre-v735 the bug was masked by
+                // the integer-vs-object bug rendering "Node undefined"
+                // garbage; v735 fixed that and unmasked this. Fix:
+                // call the real refresh function before re-selecting.
                 try {
-                    if (typeof imgLoadNodes === 'function') {
-                        await imgLoadNodes();
+                    if (typeof imgRefreshNodes === 'function') {
+                        // silent=true skips the spinner; we already
+                        // showed an upload-success toast above. Awaits
+                        // the full /api/images/nodes fetch so
+                        // imgState.nodesById[nodeId] reflects the new
+                        // manual variant before imgSelectNode reads it.
+                        await imgRefreshNodes(true);
                     }
                     if (typeof imgSelectNode === 'function') {
                         imgSelectNode(nodeId);
