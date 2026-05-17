@@ -7929,7 +7929,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
         function patchClipUI(card, clip, jobId){
             if(!card) return;
             // v464: same two-part gate as renderClip — status=completed AND approval_status=approved
-            const approved=clip.status==='completed'&&clip.approval_status==='approved',rejected=clip.approval_status==='rejected',maxed=clip.approval_status==='max_attempts';
+            // v747 — rejected gated on status==='completed' so failed-state
+            // (with stale approval_status='rejected' from redo) falls
+            // through to failed branch + v740 upload button.
+            const approved=clip.status==='completed'&&clip.approval_status==='approved',rejected=clip.status==='completed'&&clip.approval_status==='rejected',maxed=clip.approval_status==='max_attempts';
             const canReview=clip.status==='completed'&&!approved&&!maxed&&!rejected;
             const clipId=clip.id||0;
             const totalVariants = clip.total_variants || (clip.versions||[]).length || 1;
@@ -8087,7 +8090,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // label and the banner count stay consistent even if a status-update path
             // forgets to reset approval_status (e.g. when a worker re-picks an
             // already-approved clip for regeneration).
-            const approved=c.status==='completed'&&c.approval_status==='approved',rejected=c.approval_status==='rejected',maxed=c.approval_status==='max_attempts',generating=c.status==='generating',pending=c.status==='pending',failed=c.status==='failed',skipped=c.status==='skipped',redoQueued=c.status==='redo_queued'||c.status==='flow_redo_queued',waitingApproval=c.status==='waiting_approval',preparing=c.status==='preparing',isRegenerating=generating||redoQueued,canReview=c.status==='completed'&&!approved&&!maxed&&!rejected;
+            // v747 — `rejected` gated on status==='completed' (was bare
+            // approval_status==='rejected'). REDO endpoint at main.py:5003
+            // pre-sets approval_status='rejected' on user click. If worker
+            // then policy-rejects, status flips to 'failed' but
+            // approval_status stays 'rejected' → rejected branch fires
+            // before failed branch → v740 upload button never reached.
+            // Gating to completed-state lets the failed branch handle
+            // image-attributable policy rejections correctly.
+            const approved=c.status==='completed'&&c.approval_status==='approved',rejected=c.status==='completed'&&c.approval_status==='rejected',maxed=c.approval_status==='max_attempts',generating=c.status==='generating',pending=c.status==='pending',failed=c.status==='failed',skipped=c.status==='skipped',redoQueued=c.status==='redo_queued'||c.status==='flow_redo_queued',waitingApproval=c.status==='waiting_approval',preparing=c.status==='preparing',isRegenerating=generating||redoQueued,canReview=c.status==='completed'&&!approved&&!maxed&&!rejected;
             // Continue-mode waiting: only if previous clip is in the SAME scene
             const _prevClip = cachedClipsData?.find(p => p.clip_index === c.clip_index - 1);
             const isContinueWaiting = c.clip_mode === 'continue' && c.clip_index > 0 && _prevClip && (_prevClip.scene_index||0) === (c.scene_index||0);
@@ -8276,7 +8287,21 @@ Example: A realistic vertical video of a professional presenter speaking directl
         // available on the wrapper for full pair removal.
         function renderPairedSide(clip, jid, icon, sideLabel) {
             const approved = clip.status === 'completed' && clip.approval_status === 'approved';
-            const rejected = clip.approval_status === 'rejected';
+            // v747 — `rejected` MUST be gated on `status === 'completed'`.
+            // Pre-v747 it was a bare `clip.approval_status === 'rejected'`
+            // check, but the REDO endpoint at code/main.py:5003 pre-sets
+            // approval_status='rejected' when the user clicks redo. If the
+            // worker then policy-rejects (Veo celebrity / safety filter), the
+            // worker flips status=failed + sets error_code=CELEBRITY_FILTER
+            // but approval_status stays 'rejected' from the redo step. The
+            // elif chain below fires rejected branch BEFORE failed branch
+            // → rejected shows '✗ rejected' with NO buttons, the v740
+            // upload-replacement button (gated on `else if (failed)`) is
+            // never reached. v747 anchors rejected to completed-state so
+            // failed-status always falls through to the failed branch
+            // regardless of stale approval_status carrying 'rejected' from
+            // prior workflow steps.
+            const rejected = clip.status === 'completed' && clip.approval_status === 'rejected';
             const generating = clip.status === 'generating' || clip.status === 'redo_queued' || clip.status === 'flow_redo_queued';
             const failed = clip.status === 'failed';
             const pending = clip.status === 'pending' || clip.status === 'preparing';
