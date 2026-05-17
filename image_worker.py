@@ -4397,7 +4397,20 @@ def api_pull_mode(page, api_url, api_key, worker_id=None):
                 m = re.match(r"^(.*?)Scene\s+\d+", nm or "", re.IGNORECASE)
                 if m:
                     prefix = m.group(1).strip(" -—:\t")
-                    return f"scene-batch::{prefix or '(untitled)'}"
+                    # v749 — never collapse empty-prefix scene names to a
+                    # shared "(untitled)" bucket. Two unrelated batches
+                    # whose names happen to start with bare "Scene N"
+                    # would share a Flow project and risk cross-batch
+                    # contamination. Fall back to standalone:: keyed by
+                    # the full name so each unprefixed node lands in its
+                    # own bucket. Wasteful (one Flow project per scene)
+                    # but safe. The platform-side v749 fix in
+                    # image_platform.py prevents this path from firing
+                    # for fresh imports — kept defensive for legacy
+                    # nodes already in the DB without a batch label.
+                    if not prefix:
+                        return f"standalone::{nm}"
+                    return f"scene-batch::{prefix}"
                 return f"standalone::{nm or 'unnamed'}"
 
             new_job_key = _derive_job_key(node_name)
@@ -5782,7 +5795,19 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
         m = _re_local.match(r"^(.*?)Scene\s+\d+", name or "", _re_local.IGNORECASE)
         if m:
             p = m.group(1).strip(" -—:\t")
-            return f"scene-batch::{p or '(untitled)'}"
+            # v749 — never collapse empty-prefix scene names to a shared
+            # "(untitled)" bucket. Two unrelated batches whose names
+            # happen to start with bare "Scene N" would share a Flow
+            # project and risk cross-batch contamination. Fall back to
+            # standalone:: keyed by the full name so each unprefixed
+            # node lands in its own bucket. Wasteful (one Flow project
+            # per scene) but safe. Platform-side v749 fix in
+            # image_platform.py prevents this path from firing for
+            # fresh imports — kept defensive for legacy nodes already
+            # in the DB without a batch label.
+            if not p:
+                return f"standalone::{name}"
+            return f"scene-batch::{p}"
         return f"standalone::{name or 'unnamed'}"
 
     def _ensure_project_ready(new_job_key, context=""):

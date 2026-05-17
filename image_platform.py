@@ -5043,9 +5043,21 @@ def _import_scene_table_impl(
                 denorm_veo_prompt_override = _first_veo.get("text_prompt") or None
                 denorm_veo_negative_prompt_override = _first_veo.get("negative_prompt") or None
 
+        # v749 — never produce a bare "Scene N" node name. When the
+        # operator omits name_prefix, fall back to batch_name (which
+        # itself has a 4-step fallback chain ending in "Untitled
+        # batch"). Without this, every prefix-less batch produces
+        # nodes called "Scene 1", "Scene 2", ... and the worker's
+        # _derive_job_key regex strips them to an empty string,
+        # collapsing to the shared key "scene-batch::(untitled)".
+        # Two unrelated empty-prefix batches then SHARE a single
+        # Flow project, with all the cross-attribution risk that
+        # implies. Appending " — " separator preserves the
+        # "<prefix>Scene N" shape the existing regex expects.
+        _v749_name_prefix = prefix if prefix else f"{batch_name} — "
         node = ImageNode(
             user_id=current_user.id,
-            name=f"{prefix}Scene {image_index}",
+            name=f"{_v749_name_prefix}Scene {image_index}",
             kind="generated",
             prompt=final_prompt,
             aspect_ratio=req.aspect_ratio,
