@@ -628,6 +628,92 @@ WORKED EXAMPLE — tongue HOOK (post-v718d.3 schema, per-axis):
   Magnitude: COMPLETE
 
 ================================================================================
+V580.4 — INHERITANCE GRANULARITY DECISION TREE (NEW 2026-05-18 late)
+================================================================================
+
+THE PROBLEM: pre-v580.4 strict v580 chain mandated every Image K references
+Image K-1. Designed for STATE-EVOLUTION but OVER-APPLIED to recipe / multi-
+scene videos where props differ scene-to-scene but setting + persona stay
+constant. Banana 2 pattern-matches prior-frame props into subsequent
+scenes that don't want them -> author fights with explicit "no [prior
+prop]" negatives + Banana 2 still leaks. Better default: anchor every
+subsequent Image at Image 1 (which establishes persona + setting + camera
++ lighting) UNLESS the scene needs visible state inherited from prior.
+
+THREE INHERITANCE MODES per Image K (K>1):
+  Mode A STRICT CHAIN (v580): reference_image: image_<K-1>
+    Use when Image K shows VISIBLE STATE inherited from prior image
+    (state-evolution / aging / accumulating decay / continuous prop drift)
+
+  Mode B IMAGE-1 ANCHOR (v580.4 NEW): reference_image: image_1
+    Use when Image K shares CANVAS (persona + setting + camera + lighting)
+    with Image 1 but uses DIFFERENT PROPS per scene
+    (recipe / multi-step demo / listicle / multi-tip carousel)
+
+  Mode C NO CHAIN: reference_image: none
+    Use when Image K is standalone composition with no shared canvas
+    (text_card / location change / establishing b-roll)
+
+CARVE-OUT — WITHIN-CLIP MORPHOLOGY PAIR (v718h-C/B): AFTER half of pair
+ALWAYS chains from START half (Mode A pair carve-out, OVERRIDES Mode B/C
+default).
+
+DECISION TREE per Image K (K>1):
+  Q1: Image K shows VISIBLE STATE from prior? YES -> Mode A. NO -> Q2.
+  Q2: Image K is AFTER half of within-clip pair? YES -> Mode A pair carve-out.
+      NO -> Q3.
+  Q3: Image K shares CANVAS with Image 1, different props? YES -> Mode B.
+      NO -> Q4.
+  Q4: Standalone (text_card / location shift / establishing b-roll)? YES ->
+      Mode C. NO -> default Mode B (safest fallback).
+
+GENERIC APPLICABILITY:
+  Recipe / multi-step demo (same kitchen)          | Mode B for steps 2+
+  Day1 -> Day14 transformation                     | Mode A throughout
+  Within-clip BEFORE -> AFTER pair                 | Mode A pair carve-out
+  Multi-tip carousel (same setting, diff aid)      | Mode B for tips 2+
+  Talking-head + b-roll cuts                       | Mode B for b-roll
+  Multi-location move (clinic -> kitchen)          | Mode C at transition
+  CapCut quote-card sandwich                       | Mode C for text_card
+  Multi-character testimonial (different rooms)    | Mode C at each shift
+  Establishing-shot environmental b-roll           | Mode C
+  Color-drift continuous-progression chain         | Mode A throughout
+  POV product listicle (different products, same  | Mode B for products 2+
+   hand + setting)
+
+BANANA 2 MECHANICS:
+  Mode A: prior frame seeds planner -> continuity + prop drift carried forward
+  Mode B: scene-canvas seeds planner + new prompt body overrides prop set ->
+          setting + persona + camera + lighting carry cleanly, props swap fresh
+  Mode C: only persona upload + prompt body feed Banana 2 -> max flexibility,
+          min continuity
+
+PRE-OUTPUT GATES (advisory):
+  v580.4 — scan Images with reference_image: image_<K-1> where K>1; if
+    scene N+1's prompt explicitly removes prior-scene props AND persona +
+    setting + camera match Image 1 -> flag "v580.4 candidate: consider
+    Mode B IMAGE-1 ANCHOR".
+  Within-clip pair preservation — confirm Image K+1 AFTER half of v718h-C/B
+    pair still chains from START half. Switching to Mode B for paired
+    AFTER image = HARD FAIL.
+
+WORKED EXAMPLES:
+  Recipe video (BPH artifact): Image 1 = none / Image 2 = image_1 (pair
+    carve-out) / Images 3-6 = image_1 (Mode B anchor — recipe scenes,
+    different props each, same clinic + persona).
+  POV product listicle (Costco walkthrough source): Image 4 (first product
+    bottle) = none OR Mode B from Image 8 anchor / Images 5-7 (subsequent
+    products) = image_4 IF Mode A continuous-POV preferred, OR image_1
+    IF Mode B canvas-shared preferred. Operator picks per audience: Mode A
+    preserves identical hand framing across all products, Mode B allows
+    framing drift but cleaner per-product re-renders.
+  Day1 -> Day14 transformation: Image 2..N = Mode A strict chain (visible
+    aging accumulates).
+
+MIGRATION ZERO REQUIRED. Pre-v580.4 strict-chain artifacts remain valid.
+Flag advisory on next-touch. New artifacts SHOULD pick Mode per tree.
+
+================================================================================
 V718J — PAIRED-IMAGE IDENTIFICATION (NEW 2026-05-18 late)
 ================================================================================
 

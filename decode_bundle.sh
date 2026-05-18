@@ -871,6 +871,180 @@ advisory on next-touch. New artifacts MUST satisfy per-axis schema.
 ================================================================================
 
 ================================================================================
+V580.4 — INHERITANCE GRANULARITY DECISION TREE (NEW 2026-05-18 late)
+================================================================================
+
+THE PROBLEM: pre-v580.4, the strict v580 chain rule mandated every Image K
+references Image K-1. Designed for STATE-EVOLUTION (Day 1 -> Day 14
+visible aging) but OVER-APPLIED to recipe-style multi-scene videos where
+props differ every scene but setting + persona stay constant. Banana 2
+pattern-matches prior-frame props (cauldron / glass / hero prop) into
+subsequent scenes that don't want them -> author must fight Banana 2 with
+explicit "no [prior prop]" negatives + Banana 2 still leaks. Better
+default for shared-canvas multi-prop videos: anchor every subsequent
+Image at Image 1 (which establishes persona + setting + camera + lighting).
+
+THREE INHERITANCE MODES (decoder + lift author picks per Image K, K>1):
+
+  Mode A — STRICT CHAIN (v580):
+    reference_image: image_<K-1>
+    Use when Image K shows VISIBLE STATE inherited from prior image:
+      - State-evolution (Day 1 -> Day 14 visible aging accumulates)
+      - Continuous prop modification (color drift across frames)
+      - Decay reveal / progressive transformation across multiple scenes
+      - Cross-image chain where each frame builds visible delta on prior
+
+  Mode B — IMAGE-1 ANCHOR (v580.4 NEW):
+    reference_image: image_1
+    Use when Image K shares CANVAS (persona + setting + camera framing
+    + lighting) with Image 1 but uses DIFFERENT PROPS per scene:
+      - Recipe video (different ingredients each step, same kitchen)
+      - Multi-step demo (different props per scene, same studio)
+      - Multi-tip carousel (different teaching aid per tip, same clinic)
+      - Talking-head + b-roll cuts (b-roll changes, persona setting same)
+
+  Mode C — NO CHAIN:
+    reference_image: none
+    Use when Image K is standalone composition with no shared canvas:
+      - CapCut quote-card / text-on-solid-color (text_card scenes)
+      - Completely different setting / location change
+      - First image of new sub-sequence after location shift
+      - Establishing-shot environmental b-roll with no persona
+
+CARVE-OUT — WITHIN-CLIP MORPHOLOGY PAIR (v718h-C / v718h-B Option C/B):
+  When Image K+1 is the AFTER half of a within-clip BEFORE+AFTER pair,
+  reference_image ALWAYS chains from the START half (Image K) regardless
+  of v580.4 default. The pair is a single morphological unit; END
+  inherits visible BEFORE-state for Veo cfg.last_frame native interpolation.
+  Carve-out OVERRIDES Mode B / Mode C defaults for that single image.
+
+  Example: BPH artifact Scene 1 (v718h-C Option C):
+    Image 1 (BEFORE): reference_image: none (Mode C, first image)
+    Image 2 (AFTER):  reference_image: image_1 (within-clip pair carve-out,
+                                                Mode A applied because pair
+                                                inherits visible state)
+
+DECISION TREE PER IMAGE K (K > 1):
+
+  Q1: Image K shows VISIBLE STATE inherited from prior image (aging /
+      decay / accumulating delta / state-evolution)?
+        YES -> Mode A (STRICT CHAIN: reference_image: image_<K-1>)
+        NO  -> Q2
+
+  Q2: Image K is AFTER half of within-clip morphology pair (v718h-C/B)?
+        YES -> Mode A WITHIN-CLIP CARVE-OUT (reference_image: <start image>)
+        NO  -> Q3
+
+  Q3: Image K shares CANVAS (persona + setting + camera + lighting)
+      with Image 1 but uses DIFFERENT props per scene?
+        YES -> Mode B (IMAGE-1 ANCHOR: reference_image: image_1) per v580.4
+        NO  -> Q4
+
+  Q4: Image K is standalone composition with no shared canvas
+      (text_card / location change / establishing b-roll)?
+        YES -> Mode C (NO CHAIN: reference_image: none)
+        NO  -> default to Mode B (IMAGE-1 ANCHOR) — safest fallback
+
+BANANA 2 MECHANICS (why this works):
+
+  Mode A STRICT CHAIN: prior frame's pixels seed Banana 2 planner ->
+    continuity preserved + prop drift carried forward. Use when forward-
+    carry is the GOAL.
+
+  Mode B IMAGE-1 ANCHOR: scene-canvas pixels seed planner + new prompt
+    body overrides prop set. Banana 2 doesn't fight to remove prior-scene
+    props (because Image 1 doesn't have them either). Setting + persona +
+    camera + lighting carry cleanly. Use when canvas-shared multi-prop
+    videos need clean prop changes scene-to-scene.
+
+  Mode C NO CHAIN: only persona upload + product upload + prompt body
+    feed Banana 2. Maximum flexibility, minimum continuity. Use when
+    intentional break is the goal.
+
+COST / FIDELITY TRADEOFF:
+
+  Mode A: highest continuity, Banana 2 fights prop changes (bad for recipe)
+  Mode B: balanced — canvas preserved, props clean per scene (best for recipe)
+  Mode C: lowest continuity, max prompt-control burden (best for text_card)
+
+GENERIC APPLICABILITY TABLE (works for ANY video archetype):
+
+  ARCHETYPE                                       | RECOMMENDED MODE
+  ------------------------------------------------+--------------------
+  Recipe / multi-step demo (same kitchen)         | Mode B for steps 2+
+  Day1 -> Day14 transformation reveal             | Mode A throughout
+  Within-clip BEFORE -> AFTER morphology pair     | Mode A pair carve-out
+  Multi-tip carousel (same clinic, diff aid)      | Mode B for tips 2+
+  Talking-head + b-roll cuts                      | Mode B for b-roll
+  Persona-on-location move (clinic -> kitchen)    | Mode C at transition
+  CapCut quote-card sandwich                      | Mode C for text_card
+  Multi-character testimonial (different rooms)   | Mode C at each shift
+  Establishing-shot environmental b-roll          | Mode C
+  Color-drift / continuous-progression chain      | Mode A throughout
+
+DECODE-SIDE OBSERVATION DISCIPLINE:
+
+  When decoding a source video, observe what the source ACTUALLY uses:
+    - If source shows continuous visible drift across frames -> Mode A
+    - If source shows different props per scene with same setting -> Mode B
+    - If source genuinely cuts to new setting -> Mode C
+
+  Do NOT default to Mode A out of habit just because v580 was the legacy
+  rule. Decode-side faithfulness now means picking the MODE that matches
+  what the source frame structure shows.
+
+GENERATE-SIDE AUTHORING DISCIPLINE:
+
+  When authoring videos/*.md (lift / innovate / create), apply the
+  decision tree per Image K. Cost saving = Mode B for recipe-style
+  videos halves the Banana 2 "remove prior prop" prompt overhead +
+  reduces drift. State-evolution videos keep Mode A.
+
+PRE-OUTPUT GATES (advisory):
+
+  Gate v580.4 — scan Images with reference_image: image_<K-1> where K>1:
+    if scene N+1's prompt body explicitly removes prior-scene props
+    ("the [prior prop] is GONE from the frame") AND persona + setting
+    + camera framing match Image 1 -> flag "v580.4 candidate: consider
+    Mode B IMAGE-1 ANCHOR — current Mode A chain may force Banana 2 to
+    fight prior-frame prop carry-over".
+
+  Gate within-clip pair preservation — confirm Image K+1 AFTER half of
+    a v718h-C/B pair still chains from its START half (Mode A pair
+    carve-out). MUST NOT switch to Mode B for paired AFTER image.
+
+WORKED EXAMPLE — BPH artifact refactor (post-v580.4):
+
+  Pre-v580.4 (legacy strict chain):
+    Image 1: reference_image: none (Mode C, first image)
+    Image 2: reference_image: image_1 (Mode A within-clip pair carve-out)
+    Image 3: reference_image: image_2 (Mode A legacy chain — INCORRECT,
+              forces Banana 2 to fight prostate-model prop carry-over)
+    Image 4: reference_image: image_3 (Mode A legacy chain)
+    Image 5: reference_image: image_4 (Mode A legacy chain)
+    Image 6: reference_image: image_5 (Mode A legacy chain)
+
+  Post-v580.4 (correct):
+    Image 1: reference_image: none (Mode C, first image)
+    Image 2: reference_image: image_1 (Mode A within-clip pair carve-out)
+    Image 3: reference_image: image_1 (Mode B IMAGE-1 ANCHOR — recipe
+              scene with different props, same clinic + persona + camera)
+    Image 4: reference_image: image_1 (Mode B IMAGE-1 ANCHOR)
+    Image 5: reference_image: image_1 (Mode B IMAGE-1 ANCHOR)
+    Image 6: reference_image: image_1 (Mode B IMAGE-1 ANCHOR — CTA book
+              scene, same canvas as Image 1)
+
+  Saves ~5 minutes of Banana 2 re-render iterations on prop-fight failures
+  + cleaner prop swaps scene-to-scene.
+
+MIGRATION ZERO REQUIRED:
+  Pre-v580.4 artifacts with strict-chain reference_image remain valid
+  (Banana 2 still renders, just with prop-fight overhead). Flag advisory
+  on next-touch lint. New artifacts SHOULD pick Mode per decision tree.
+
+================================================================================
+
+================================================================================
 V718J — PAIRED-IMAGE IDENTIFICATION (NEW 2026-05-18 late)
 ================================================================================
 

@@ -402,6 +402,42 @@ LLM skips axes when only one output token-slot exists. Per-axis output
 FORCES LLM to re-evaluate each axis BEFORE generating line content.
 
 ================================================================================
+V580.4 — INHERITANCE GRANULARITY DECISION TREE (NEW 2026-05-18 late)
+================================================================================
+
+Pre-v580.4 strict v580 chain mandated Image K references Image K-1. Over-
+applied to recipe / multi-scene videos with different props per scene ->
+Banana 2 fights to remove prior-frame props.
+
+THREE INHERITANCE MODES per Image K (K>1):
+  Mode A STRICT CHAIN (v580): reference_image: image_<K-1>
+    Image K shows VISIBLE STATE inherited from prior (state-evolution).
+  Mode B IMAGE-1 ANCHOR (v580.4): reference_image: image_1
+    Image K shares CANVAS (persona + setting + camera + lighting) with
+    Image 1, different props per scene.
+  Mode C NO CHAIN: reference_image: none
+    Standalone composition, no shared canvas.
+
+CARVE-OUT: AFTER half of within-clip morphology pair (v718h-C/B) ALWAYS
+chains from START half (overrides Mode B/C default).
+
+DECISION TREE per Image K (K>1):
+  Q1: Visible state inherited from prior? YES -> Mode A. NO -> Q2.
+  Q2: AFTER half of within-clip pair? YES -> pair carve-out (Mode A from
+      pair START). NO -> Q3.
+  Q3: Shares canvas with Image 1, different props? YES -> Mode B. NO -> Q4.
+  Q4: Standalone (text_card / location shift / b-roll)? YES -> Mode C.
+      NO -> default Mode B.
+
+GENERIC: recipe steps -> Mode B / Day1->Day14 -> Mode A / within-clip pair
+-> Mode A pair carve-out / multi-tip carousel -> Mode B / location shift
+-> Mode C at transition / text_card -> Mode C / POV listicle -> Mode B or
+Mode A per operator preference.
+
+Pre-output: scan for v580.4 candidates (strict chain where Image K shares
+canvas with Image 1 + scene removes prior props) -> flag advisory.
+
+================================================================================
 V718J — PAIRED-IMAGE IDENTIFICATION (NEW 2026-05-18 late)
 ================================================================================
 
