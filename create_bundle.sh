@@ -322,6 +322,31 @@ Vocabulary present + Delta Axis lacks Structural Integrity/Volume/Shape
 -> REJECT (v718h.1 FAIL).
 
 ================================================================================
+V718J — PAIRED-IMAGE IDENTIFICATION (NEW 2026-05-18 late)
+================================================================================
+
+When a Scene declares v718h-C Option C native end-frame interpolation
+(`- **image:** image_K` + `- **end_frame_image:** image_K+1`), the TWO
+Image blocks that form the morphology pair MUST carry explicit pair-role
+metadata. Scene bullets remain authoritative for Veo render binding;
+pair_role + paired_with on Image blocks are for UI grouping + audit.
+
+REQUIRED BULLETS:
+  START Image block (image_K, BEFORE state):
+    - **pair_role:** start
+  END Image block (image_K+1, AFTER state):
+    - **pair_role:** end
+    - **paired_with:** image_K
+
+CARVE-OUTS: non-paired Image blocks OMIT both bullets. v718h-B Multi-Clip
+Blend pairs use SAME discipline. v580 multi-scene chain is NOT a pair —
+reference_image + visual_delta only, no pair_role.
+
+PARSER: pair_role ∈ {start, end} or absent. paired_with ONLY valid when
+pair_role = end. paired_with image must exist + be lower-indexed.
+Scene + Image pair_role mismatch advisory-warns (pre-v718j artifacts importable).
+
+================================================================================
 
 Author a NEW Korella videos/*.md from 0 for the cell specified in the
 operator's task prompt. Pick the cell from a corpus-validated row in

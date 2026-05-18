@@ -218,6 +218,18 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN end_frame_image_node_id INTEGER"),
         ("image_scene_assignments", "end_frame_image_node_id",
          "ALTER TABLE image_scene_assignments ADD COLUMN end_frame_image_node_id INTEGER"),
+        # v718j (NEW 2026-05-18 late): paired-image identification for
+        # v718h-C Option C scenes. pair_role ∈ {'start', 'end'} marks
+        # whether an Image is the BEFORE-state or AFTER-state half of a
+        # within-clip morphology pair. paired_with_image_node_id is the
+        # END image's back-reference to its START partner (the FORWARD
+        # binding lives on the Scene block's end_frame_image: bullet —
+        # this is the redundant back-ref for UI rendering + audit).
+        # NULL on every non-paired image (default — pre-v718j behavior).
+        ("image_nodes", "pair_role",
+         "ALTER TABLE image_nodes ADD COLUMN pair_role VARCHAR(20)"),
+        ("image_nodes", "paired_with_image_node_id",
+         "ALTER TABLE image_nodes ADD COLUMN paired_with_image_node_id INTEGER"),
         # v701: when Flow rejects start_frame for content-policy reasons,
         # the worker stamps error_code=CONTENT_POLICY_VIOLATION and the
         # rejected frame's R2 key gets stashed here so the frontend can
@@ -349,6 +361,11 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS end_frame_image_node_id INTEGER"),
         ("image_scene_assignments", "end_frame_image_node_id",
          "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS end_frame_image_node_id INTEGER"),
+        # v718j (NEW 2026-05-18 late): paired-image identification — see SQLite above.
+        ("image_nodes", "pair_role",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS pair_role VARCHAR(20)"),
+        ("image_nodes", "paired_with_image_node_id",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS paired_with_image_node_id INTEGER"),
         # v701: see SQLite migration above for the rationale.
         ("clips", "replacement_start_frame",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS replacement_start_frame VARCHAR(512)"),
@@ -876,6 +893,29 @@ class ImageNode(Base):
     # voiceover-over-b-roll" for the rule.
     role = Column(String(40), nullable=True)
 
+    # v718j (NEW 2026-05-18 late): paired-image identification for v718h-C
+    # Option C scenes. 'start' = BEFORE-state half of a within-clip morphology
+    # pair (rendered by Banana 2 as the cfg.image start frame). 'end' =
+    # AFTER-state half (rendered by Banana 2 as the cfg.last_frame end frame).
+    # NULL = standard non-paired image (default for all pre-v718j images and
+    # for non-Option-C scenes). The Scene block's `image:` + `end_frame_image:`
+    # bullets are AUTHORITATIVE pair-binding for Veo render time; pair_role +
+    # paired_with_image_node_id are denormalized onto ImageNode for
+    # UI rendering (paired tile group with BEFORE → AFTER badge + arrow)
+    # and import-time validation (e.g. warn when a Scene's end_frame_image
+    # points at an Image whose pair_role is not 'end').
+    pair_role = Column(String(20), nullable=True)
+    # v718j (NEW 2026-05-18 late): back-reference from END-state Image to its
+    # START-state partner. The Scene block carries the FORWARD binding
+    # (`end_frame_image: image_K+1` on Scene K's block); this column carries
+    # the matching BACK binding (`paired_with: image_K` on Image K+1's block).
+    # Redundant by design — Scene's forward binding wins at render time —
+    # but the back-ref lets the UI render an END-image card without
+    # walking every Scene to find which one references it. Always NULL on
+    # START-state images (those don't need back-refs; their END partner
+    # carries paired_with pointing at them).
+    paired_with_image_node_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=True)
+
     # v572: per-clip Veo prompt overrides — when non-NULL, build_prompt
     # is bypassed and the prebuilt prompt is shipped to Veo verbatim.
     # These two columns are the DENORMALIZED first-clip overrides for
@@ -964,6 +1004,15 @@ class ImageNode(Base):
             "narrative_lens": self.narrative_lens,
             # v681 — per-image cast (decoded list of Ingredients Name strings).
             "cast": (json.loads(self.cast_json) if self.cast_json else None),
+            # v698A — image role discriminator (was previously missing from
+            # to_dict output; UI couldn't distinguish voiceover_anchor images
+            # from standard images).
+            "role": self.role,
+            # v718j (NEW 2026-05-18 late) — paired-image identification for
+            # v718h-C Option C scenes. UI renders START/END pairs as visual
+            # tile groups when both fields are populated on adjacent images.
+            "pair_role": self.pair_role,
+            "paired_with_image_node_id": self.paired_with_image_node_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -3329,6 +3378,46 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
         if role:
             print(f"[v698A/parse] image_{image_index} role={role}", flush=True)
 
+        # v718j (NEW 2026-05-18 late) — paired-image identification.
+        # Image blocks in v718h-C Option C scene pairs gain two optional
+        # bullets: `- **pair_role:** start | end` marks BEFORE / AFTER half
+        # of the morphology pair; `- **paired_with:** image_K` on the END
+        # image back-references its START partner. Optional + advisory —
+        # Scene's `image:` + `end_frame_image:` bullets remain authoritative
+        # for Veo render binding. These metadata fields exist for UI grouping
+        # + import-time consistency checks.
+        pair_role_match = _re.search(
+            r"^\s*[-*]\s*\*\*pair_role:\*\*\s*(start|end)\s*$",
+            block, flags=_re.MULTILINE | _re.IGNORECASE,
+        )
+        pair_role_value: Optional[str] = None
+        if pair_role_match:
+            pair_role_value = pair_role_match.group(1).strip().lower()
+
+        paired_with_match = _re.search(
+            r"^\s*[-*]\s*\*\*paired_with:\*\*\s*image_(\d+)\s*$",
+            block, flags=_re.MULTILINE,
+        )
+        paired_with_md_idx: Optional[int] = None
+        if paired_with_match:
+            paired_with_md_idx = int(paired_with_match.group(1))
+
+        # Consistency: paired_with only valid on END images. START images
+        # must NOT carry paired_with (their END partner is the back-ref
+        # holder per v718j contract). Hard-fail to catch authoring drift.
+        if paired_with_md_idx is not None and pair_role_value != "end":
+            raise ValueError(
+                f"Image {image_index}: paired_with bullet present but "
+                f"pair_role is {pair_role_value!r} (must be 'end' — "
+                f"START images do not carry paired_with; see v718j)"
+            )
+        if pair_role_value:
+            print(
+                f"[v718j/parse] image_{image_index} pair_role={pair_role_value} "
+                f"paired_with={paired_with_md_idx}",
+                flush=True,
+            )
+
         # v698A Gate 13 — voiceover_anchor images MUST have torso-framing +
         # hands-visible keywords in the prompt body. Veo lip-syncs better
         # when the persona has natural gestural articulation; static-still
@@ -3358,6 +3447,8 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
             "narrative_lens": narrative_lens,  # v667
             "cast": cast_list,                 # v681 — None | list[str]
             "role": role,                      # v698A — None | 'voiceover_anchor'
+            "pair_role": pair_role_value,      # v718j — None | 'start' | 'end'
+            "paired_with": paired_with_md_idx, # v718j — None | int (markdown image index)
         })
 
     if not images:
@@ -3375,6 +3466,33 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
                 raise ValueError(
                     f"Image {i['image_index']} references image_{i['reference_image']} "
                     "— forward/self references not allowed"
+                )
+        # v718j — paired_with validation: must reference known image, must
+        # NOT be self, must be lower-indexed (END's partner is always START
+        # which is authored earlier in the markdown), and the referenced
+        # image MUST carry pair_role='start' (consistency check — warn only,
+        # since cross-image pair_role is operator-set and may drift during
+        # iteration).
+        if i.get("paired_with") is not None:
+            pw = i["paired_with"]
+            if pw not in known:
+                raise ValueError(
+                    f"Image {i['image_index']}: paired_with references "
+                    f"image_{pw} which doesn't exist"
+                )
+            if pw >= i["image_index"]:
+                raise ValueError(
+                    f"Image {i['image_index']}: paired_with references "
+                    f"image_{pw} — forward/self pair references not allowed "
+                    f"(v718j: END image must reference its lower-indexed START partner)"
+                )
+            partner = next((x for x in images if x["image_index"] == pw), None)
+            if partner is not None and partner.get("pair_role") != "start":
+                print(
+                    f"[v718j/parse] WARN image_{i['image_index']}: paired_with="
+                    f"image_{pw} but partner pair_role is "
+                    f"{partner.get('pair_role')!r} (expected 'start')",
+                    flush=True,
                 )
     return images
 
@@ -5163,6 +5281,21 @@ def _import_scene_table_impl(
             # 'voiceover_anchor' marks an audio-source-only image used by
             # paired voiceover scenes.
             role=img.get("role"),
+            # v718j (NEW 2026-05-18 late) — paired-image identification.
+            # pair_role is straightforward pass-through ('start'|'end'|None).
+            # paired_with_image_node_id resolves the markdown int index to
+            # the previously-created START node's DB id. Since markdown
+            # processes images in ascending order and paired_with always
+            # points to a lower-indexed image (validated in parser), the
+            # START node is guaranteed to already exist in
+            # created_nodes_by_image_index when END is constructed.
+            pair_role=img.get("pair_role"),
+            paired_with_image_node_id=(
+                created_nodes_by_image_index[img["paired_with"]].id
+                if img.get("paired_with") is not None
+                and img["paired_with"] in created_nodes_by_image_index
+                else None
+            ),
         )
         db.add(node)
         db.flush()
@@ -5895,6 +6028,33 @@ def _import_scene_table_impl(
                     f"image_{end_frame_md_idx} but no PHASE 1 node was created for it"
                 )
             end_frame_node_id_resolved = end_frame_node.id
+            # v718j (NEW 2026-05-18 late) — when Scene declares
+            # end_frame_image: image_K+1, verify the referenced Image carries
+            # pair_role='end'. Advisory warn (not hard-fail) so existing
+            # batches without pair_role authored remain importable; new
+            # authoring should declare pair_role on both halves so the UI
+            # can group them. Same warn pattern for the START Image:
+            # Scene.image points at the START half of the pair; verify it
+            # carries pair_role='start'.
+            if end_frame_node.pair_role != "end":
+                print(
+                    f"[v718j/import] WARN Scene {s['scene_index']}: "
+                    f"end_frame_image references image_{end_frame_md_idx} "
+                    f"but image's pair_role is {end_frame_node.pair_role!r} "
+                    f"(expected 'end' — author `- **pair_role:** end` bullet "
+                    f"on the END Image block for UI pair-grouping)",
+                    flush=True,
+                )
+            if node is not None and node.pair_role != "start":
+                print(
+                    f"[v718j/import] WARN Scene {s['scene_index']}: "
+                    f"image (start frame) references image_{img_idx} "
+                    f"but image's pair_role is {node.pair_role!r} "
+                    f"(expected 'start' when paired with end_frame_image — "
+                    f"author `- **pair_role:** start` bullet on the START "
+                    f"Image block for UI pair-grouping)",
+                    flush=True,
+                )
 
         assignment = ImageSceneAssignment(
             batch_id=batch_id,

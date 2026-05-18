@@ -501,6 +501,73 @@ PYTHON GATE (extends v738.1 Section 6 enforcement):
   v738.1 hardening + v580.3 — Structural Escalation Mandate".
 
 ================================================================================
+V718J — PAIRED-IMAGE IDENTIFICATION (NEW 2026-05-18 late)
+================================================================================
+
+When a Scene declares v718h-C Option C native end-frame interpolation
+(`- **image:** image_K` + `- **end_frame_image:** image_K+1`), the TWO
+Image blocks that form the morphology pair MUST carry explicit pair-role
+metadata so the platform UI can render them as a paired tile group and
+the parser can validate consistency.
+
+REQUIRED BULLETS (BOTH halves of every v718h-C / v718h-B / v580.2 pair):
+
+  START Image block (image_K, BEFORE state, t=0):
+    - **pair_role:** start
+
+  END Image block (image_K+1, AFTER state, t=end):
+    - **pair_role:** end
+    - **paired_with:** image_K
+
+  (END image's paired_with bullet is REDUNDANT BY DESIGN — Scene's
+   end_frame_image bullet is authoritative for Veo render binding —
+   but the back-ref lets the UI render the END image card without
+   walking every Scene to find which one references it.)
+
+WORKED EXAMPLE — tongue HOOK Clip 1.1 (v718h-C Option C):
+
+  ### Image 1
+  - **frame_anchor_s:** 0.6
+  - **pair_role:** start
+  ... (BEFORE state: coated tongue, grime visible)
+
+  ### Image 2
+  - **reference_image:** image_1
+  - **visual_delta:** grime washed away, pink surface revealed
+  - **frame_anchor_s:** 5.9
+  - **pair_role:** end
+  - **paired_with:** image_1
+  ... (AFTER state: clean tongue)
+
+  ### Scene 1
+  - **image:** image_1
+  - **end_frame_image:** image_2
+  - **target_duration_s:** 8
+  ...
+
+CARVE-OUTS:
+  - Non-paired Image blocks (talking-head HOOK, static CTA card, single-frame
+    EXPLAIN, voiceover-anchor images) MUST omit pair_role + paired_with.
+  - Multi-Clip Blend v718h-B paired Images use the SAME pair_role discipline
+    (Image K = start, Image K+1 = end + paired_with: image_K). The two
+    Scenes that render the pair (scene_N + scene_N+1) reference one Image
+    each via `image:` bullet — no `end_frame_image:` bullet needed for
+    Option B (Veo does not interpolate; CapCut blends).
+  - v580 multi-scene chain (chained recipe sequence, Day1 -> Day14 reveal)
+    is NOT a pair — use reference_image + visual_delta per v580 without
+    pair_role. pair_role applies ONLY to within-clip Option C / Option B
+    BEFORE+AFTER morphology pairs.
+
+PARSER VALIDATION (v718j):
+  - pair_role ∈ {start, end} or absent (other values rejected)
+  - paired_with: image_K bullet ONLY valid when pair_role = end (hard-fail
+    otherwise — START images don't carry paired_with)
+  - paired_with referenced image must exist + be lower-indexed than self
+  - Scene whose `image:` is paired with `end_frame_image:` advisory-warns
+    when START image's pair_role != 'start' or END image's pair_role != 'end'
+    (warn not fail — pre-v718j artifacts remain importable)
+
+================================================================================
 
 Decode the source video into a v521.1 -> v604 compliant raw/decoded_*.md.
 

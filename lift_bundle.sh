@@ -447,6 +447,44 @@ REJECT (v718h.1 FAIL). Full gate at code/template_reference.md
 §"v718h.1 + v718d.1 + v738.1 hardening + v580.3".
 
 ================================================================================
+V718J — PAIRED-IMAGE IDENTIFICATION (NEW 2026-05-18 late)
+================================================================================
+
+When a Scene declares v718h-C Option C native end-frame interpolation
+(`- **image:** image_K` + `- **end_frame_image:** image_K+1`), the TWO
+Image blocks that form the morphology pair MUST carry explicit pair-role
+metadata. The Scene block's bullets remain AUTHORITATIVE for Veo render
+binding; pair_role + paired_with on the Image blocks are for UI grouping
+(paired tile cards with BEFORE -> AFTER badge) + import-time consistency.
+
+REQUIRED BULLETS:
+
+  START Image block (image_K, BEFORE state):
+    - **pair_role:** start
+
+  END Image block (image_K+1, AFTER state):
+    - **pair_role:** end
+    - **paired_with:** image_K
+
+CARVE-OUTS:
+  - Non-paired images (HOOK talking-head, CTA card, EXPLAIN single-frame,
+    voiceover_anchor images) OMIT both bullets.
+  - v718h-B Multi-Clip Blend paired Images use SAME discipline (Image K =
+    start, Image K+1 = end + paired_with). The TWO Scenes that render the
+    pair reference one Image each via `image:` (no end_frame_image: bullet
+    on Option B — Veo doesn't interpolate, CapCut blends).
+  - v580 multi-scene chain (recipe progression, Day1->Day14 reveal) is
+    NOT a pair — use reference_image + visual_delta only, no pair_role.
+    pair_role applies ONLY to within-clip BEFORE+AFTER morphology pairs.
+
+PARSER VALIDATION:
+  - pair_role ∈ {start, end} or absent
+  - paired_with ONLY valid when pair_role = end (hard-fail otherwise)
+  - paired_with image must exist + be lower-indexed
+  - Scene + Image pair_role mismatch advisory-warns (warn not fail —
+    pre-v718j artifacts importable)
+
+================================================================================
 
 Lift the decoded source above into a Korella videos/*.md. Apply v594 image
 cardinality (consolidate to distinct compositions, M <= N). Apply v590 chain
