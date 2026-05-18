@@ -165,6 +165,71 @@ def _extract_fenced_content(block: str, label_re: re.Pattern) -> Optional[str]:
     return fence_m.group(1).strip()
 
 
+# v750.1 (NEW 2026-05-18 late): v750 codified `### Clip N.M` headers + bolded
+# field labels but operators commonly emit UNFENCED prose after `**Text prompt:**`
+# (no triple-backtick fences around the prompt body). The artifact at
+# `raw/decoded_follow_me_health_remedies_tongue_ginger_turmeric.md` is the
+# surfacing case — 5 Clip blocks with `**Text prompt:**` + `**Negative prompt:**`
+# bolded labels but multi-paragraph prose body NOT wrapped in fences.
+# Pre-v750.1 `_extract_fenced_content` rejected these blocks → empty
+# prompts_by_key → veo_prompt_override null on every line → build_prompt
+# auto-construction fires + ignores the operator's v750 verbatim prompts.
+# v750.1 adds unfenced fallback: after the label, capture content until
+# the NEXT bolded label (`**X prompt:**` / `**Start frame:**` / etc.) or the
+# next `### Clip` header or end of block — strip outer whitespace.
+_NEXT_BOLD_LABEL_RE = re.compile(
+    r"^\s*\*\*[A-Za-z][A-Za-z _-]*:\s*\*\*",
+    re.MULTILINE,
+)
+_NEXT_CLIP_HEADER_RE = re.compile(
+    r"^###\s+Clip\s+\d+(?:\.\d+)?\b",
+    re.MULTILINE,
+)
+
+
+def _extract_unfenced_content(block: str, label_re: re.Pattern) -> Optional[str]:
+    """Find a `**Label:**` marker and capture the UNFENCED prose body that
+    follows until the next bolded label / next clip header / end of block.
+    Returns None if the label is absent or the captured body is empty.
+
+    v750.1: complements `_extract_fenced_content` for operators who emit
+    v750 Clip blocks with bolded field labels but multi-paragraph prose
+    bodies NOT wrapped in triple-backtick fences.
+    """
+    label_m = label_re.search(block)
+    if not label_m:
+        return None
+    after_label = block[label_m.end():]
+    # Find boundary: next bolded label OR next ### Clip header.
+    boundaries = []
+    nb = _NEXT_BOLD_LABEL_RE.search(after_label)
+    if nb is not None:
+        boundaries.append(nb.start())
+    nc = _NEXT_CLIP_HEADER_RE.search(after_label)
+    if nc is not None:
+        boundaries.append(nc.start())
+    if boundaries:
+        end = min(boundaries)
+        body = after_label[:end]
+    else:
+        body = after_label
+    body = body.strip()
+    if not body:
+        return None
+    return body
+
+
+def _extract_prompt_content(block: str, label_re: re.Pattern) -> Optional[str]:
+    """v750.1: try fenced extraction first; fall back to unfenced prose.
+    Returns None if the label is absent OR both fenced + unfenced
+    extraction yield empty content.
+    """
+    fenced = _extract_fenced_content(block, label_re)
+    if fenced is not None:
+        return fenced
+    return _extract_unfenced_content(block, label_re)
+
+
 # --- Public API ------------------------------------------------------------
 
 
@@ -192,11 +257,23 @@ def parse_veo_prompts_block(md_text: str) -> Dict[Tuple[int, int], Dict[str, Opt
         # "Negative prompt: ..." trailer line inside the same fence.
         # Decode artifacts (Donna, etc.) use the bare-fence shape;
         # the labeled shape is the original lift-side convention.
-        text_prompt = _extract_fenced_content(block, _TEXT_PROMPT_LABEL_RE)
+        #
+        # v750.1 (NEW 2026-05-18 late): the labeled extraction now uses
+        # `_extract_prompt_content` which tries fenced FIRST then falls back
+        # to UNFENCED prose. v750 codified `### Clip N.M` headers + bolded
+        # `**Text prompt:**` / `**Negative prompt:**` labels but operators
+        # commonly emit multi-paragraph prose AFTER the label WITHOUT
+        # triple-backtick fences (see surfacing case at
+        # raw/decoded_follow_me_health_remedies_tongue_ginger_turmeric.md).
+        # Pre-v750.1 these blocks silently lost their text_prompt /
+        # negative_prompt → veo_prompt_override null on every line →
+        # build_prompt auto-construction fires + ignores operator's v750
+        # verbatim prompts.
+        text_prompt = _extract_prompt_content(block, _TEXT_PROMPT_LABEL_RE)
         negative_prompt: Optional[str]
         if text_prompt is not None:
-            # Labeled format — read negative from its own fence.
-            negative_prompt = _extract_fenced_content(block, _NEGATIVE_PROMPT_LABEL_RE)
+            # Labeled format — read negative from its own fenced OR unfenced body.
+            negative_prompt = _extract_prompt_content(block, _NEGATIVE_PROMPT_LABEL_RE)
         else:
             # Bare-fence format — first fence in block is the whole prompt.
             fence_m = _FENCE_RE.search(block)
