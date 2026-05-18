@@ -322,6 +322,41 @@ Vocabulary present + Delta Axis lacks Structural Integrity/Volume/Shape
 -> REJECT (v718h.1 FAIL).
 
 ================================================================================
+V718D.2 + V736I + V738.1 HIDDEN-LAYER AMENDMENT — ANTI-EXTRAPOLATION
+MANDATE (NEW 2026-05-18 late)
+================================================================================
+
+LLMs default to REAL-WORLD physics extrapolation: pour oil on dirty
+prop -> predict "wet glistening grime". Kaveno corpus viral payoff is
+TOTAL morphological REVEAL: catalyst contact = INSTANT reveal of hidden
+layer (clean pink mucosa under grime / flat organs under fat / etc.).
+
+V718D.2 — when creating new HOOK from 0, LLM MUST NOT extrapolate
+t=end from t=0 + applied force-verb via real-world physics. Hero prop
+with catalyst is assumed FUNDAMENTALLY ALTERED / REVEALED.
+
+V736I — liquids and tools are NEVER passive. Default Delta Axis
+Magnitude = COMPLETE for HOOK with active force-verb. PARTIAL/MINIMAL
+requires explicit named residual t=0 feature visible at t=end.
+
+V738.1 HIDDEN-LAYER REVEAL TEST — before locking t=end, ask "did I
+describe t=0 wet/contacted? Name the HIDDEN LAYER catalyst REVEALS."
+Trigger phrasings rejected: "wet/oiled/soaked [prop]" / "[prop]
+glistens without reveal verb" / "[t=0 features] still visible but
+[softened]".
+
+CORPUS-VALIDATED REVEAL CATALOG (default to these when creating):
+  grime -> clean pink mucosa / fat -> flat organs / wrinkles -> glassy
+  surface / bulging veins -> clear smooth / inflamed tissue -> normal
+  pink / cloudy -> bright clear / drooping -> firm lifted / sparse ->
+  dense / enlarged lobes -> normal small / dark crust -> bright smooth /
+  decayed -> white healthy / blocked -> clear flowing.
+
+PRE-OUTPUT GATES: scan Section 6 t=end for Hidden-Layer trigger
+phrasings; flag matches. Scan HOOK Delta Axis for PARTIAL/MINIMAL
+without explicit residual feature; flag.
+
+================================================================================
 V718J — PAIRED-IMAGE IDENTIFICATION (NEW 2026-05-18 late)
 ================================================================================
 

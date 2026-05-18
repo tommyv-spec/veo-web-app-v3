@@ -501,6 +501,202 @@ PYTHON GATE (extends v738.1 Section 6 enforcement):
   v738.1 hardening + v580.3 — Structural Escalation Mandate".
 
 ================================================================================
+V718D.2 + V736I + V738.1 HIDDEN-LAYER AMENDMENT — ANTI-EXTRAPOLATION
+MANDATE (NEW 2026-05-18 late)
+================================================================================
+
+PROBLEM: VLMs (Gemini / Claude / GPT-4o) look at a start frame + an
+action verb and MATHEMATICALLY GUESS the end frame using real-world
+physics — e.g., "pour oil onto dirty tongue" -> extrapolated end state
+"wet glistening grime". This is REAL-WORLD physics extrapolation. The
+Kaveno corpus operates on CARTOON-PHYSICS VIRAL PAYOFF — liquids
+INSTANTLY wash / dissolve / melt / color-shift, tools INSTANTLY crack /
+scrape / deflate, never passive contact. Pre-amendment v718d (Intrinsic
+State Isolation) demanded literal observation of t=end frame but did NOT
+explicitly ban predictive-text extrapolation. Result: VLM declares
+`t=end: oiled glistening grime` + `Delta Axis: Surface/Texture (PARTIAL)`
+in Pre-Flight Section 6 -> v718e Action-Consequence Coupling locks the
+hallucinated end-state into the action prose -> Banana 2 + Veo render
+"wet dirty tongue" instead of "clean pink reveal".
+
+RULE V718D.2 — ANTI-EXTRAPOLATION MANDATE (amends v718d Intrinsic State
+Isolation):
+
+  Before declaring t=end in Pre-Flight Section 6, VLM MUST explicitly
+  state in its working notes / reasoning trace:
+
+    "I am OBSERVING the final 2-3 seconds of the clip (specific frames
+     at t={clip_duration - 2.5}s, t={clip_duration - 1.5}s, t={clip_duration - 0.5}s).
+     I am NOT guessing or extrapolating from t=0 + action verb."
+
+  HARD BAN: inferring t=end state from t=0 state + applied force-verb
+  without literal end-frame observation. When a liquid, tool, or impact
+  is applied to a hero prop in a HOOK / state-evolution scene, the VLM
+  MUST assume the prop is FUNDAMENTALLY ALTERED or REVEALED until proven
+  otherwise by direct end-frame observation. Real-world-physics
+  extrapolation (oil + grime = wet grime / tea + fat = warm fat / hammer
+  + banana = dented banana) is the DEFAULT FAILURE MODE for VLMs and
+  must be actively suppressed.
+
+  When the VLM has NO access to dense end-frame samples (no
+  shots.json / no Stage 4d frame dump / source video unavailable), it
+  MUST explicitly flag: `<!-- v718d.2: t=end inferred without literal
+  observation; HIGH HALLUCINATION RISK -->` and bias HARD toward
+  COMPLETE morphological reveal (per v736i below).
+
+RULE V736I — AGENT-OF-CHANGE DEFAULT BIAS (extends v736 + v752):
+
+  In the Kaveno corpus, liquids and tools applied to hero props are
+  NEVER PASSIVE. Default assumption:
+    LIQUID poured -> melts / washes / dissolves / color-shifts /
+                     bleaches / strips the prop
+    TOOL applied -> cracks / scrapes / deflates / splits / shatters /
+                    levels the prop
+    IMPACT struck -> shatters / bursts / pulverizes / flattens the prop
+    HEAT applied -> chars / liquefies / vaporizes / blackens the prop
+    BLADE cut -> splits / sections / opens / cleaves the prop
+
+  When declaring Delta Axis + Magnitude in Pre-Flight Section 6 for a
+  HOOK / state-evolution scene with an active force-verb on the hero
+  prop, decoder MUST DEFAULT to COMPLETE magnitude reveal (not
+  PARTIAL / MINIMAL) unless source frame at t=end DIRECTLY contradicts
+  it. PARTIAL / MINIMAL requires explicit visual evidence at t=end (the
+  prop visibly shows residual BEFORE-state features). Defaulting to
+  PARTIAL because "real-world physics suggests partial transformation"
+  is a v736i FAIL.
+
+  Catalog of corpus-validated COMPLETE morphological reveals:
+    grime -> clean pink (oral cleanse)
+    coating -> bright underlying color (skin / scalp / hair)
+    fat -> revealed organs / flat plane (belly cleanse)
+    wrinkles -> glassy smooth surface (skin renewal)
+    bulging veins -> clear smooth surface (varicose cleanse)
+    inflamed reddish tissue -> normal pink (organ cleanse)
+    cloudy / yellowed -> bright clear (eye / fluid clarity)
+    drooping / pendulous -> firm tight (facial / arm tightening)
+    sparse / patchy -> dense full coverage (hair regrowth)
+
+  Decoder bias rule: if observed t=end matches catalog reveal AND a
+  catalyst is present at t=0 -> declare COMPLETE. If observed t=end
+  shows partial residual BEFORE-state features -> declare PARTIAL with
+  explicit feature list (e.g., "PARTIAL — 60% revealed, viewer-right
+  edge still shows residual grime patch ~2cm wide").
+
+V738.1 AMENDMENT — HIDDEN-LAYER REVEAL TEST (Pre-Flight Section 6 gate):
+
+  Before LOCKING t=end declaration in Section 6 per-prop block, decoder
+  MUST run the Hidden-Layer Reveal Test:
+
+    "Did I just describe the t=0 state but wet / broken / moved /
+     contacted? If YES -> RE-EVALUATE. Viral hooks feature TOTAL
+     morphological reveals — dirty becomes clean pink, fat becomes
+     visible organs, wrinkles become glassy plane, bulging veins become
+     smooth surface. Name the HIDDEN LAYER that the catalyst REVEALS."
+
+  Trigger phrasings in t=end declaration that AUTOMATICALLY trigger
+  re-evaluation:
+    - "wet [prop]" / "oiled [prop]" / "soaked [prop]" / "drenched [prop]"
+    - "[prop] now covered in [liquid]"
+    - "[prop] with [liquid] sitting on top"
+    - "[prop] glistens / shimmers / sheens" (without explicit reveal verb)
+    - "[t=0 features] now slightly [adjective]"
+    - "[t=0 features] still visible but [softened / muted / lighter]"
+
+  When ANY trigger phrasing matches, decoder MUST re-author t=end to
+  name the HIDDEN LAYER that the catalyst reveals (or explicitly justify
+  why a partial-reveal hook is correct with screenshot reference).
+
+ANTI-EXTRAPOLATION DECISION TREE (mandatory before Pre-Flight Section 6
+t=end declaration):
+
+  STEP 1: Did I literally observe the final 2-3 seconds of the clip via
+          dense frames (Stage 4d VLM walk / shots.json frame dump /
+          PySceneDetect end-frame extraction)?
+            YES -> proceed to Step 2
+            NO  -> insert `<!-- v718d.2: HIGH HALLUCINATION RISK -->`
+                   comment + bias HARD toward COMPLETE reveal per v736i
+                   default + ALWAYS Hidden-Layer Reveal Test before
+                   locking
+
+  STEP 2: Does t=end declaration match a v736i COMPLETE reveal pattern?
+            YES -> proceed to Step 3
+            NO  -> run Hidden-Layer Reveal Test (v738.1 amendment); if
+                   trigger phrasing detected, RE-AUTHOR; else explicit
+                   justify with screenshot reference
+
+  STEP 3: Does Delta Axis declaration in Section 6 carry COMPLETE
+          magnitude tag for HOOK scene with active force-verb?
+            YES -> lock Section 6 + emit declaration
+            NO  -> if PARTIAL/MINIMAL, name SPECIFIC residual t=0 feature
+                   present at t=end (e.g., "PARTIAL — viewer-right edge
+                   residual grime ~2cm"); ABSENT specific residual
+                   feature = v736i FAIL, re-declare COMPLETE
+
+PRE-OUTPUT PYTHON GATES (v718d.2 + v736i + v738.1 amendment):
+
+  Gate v718d.2 — scan each Section 6 per-prop block for required VLM
+    observation declaration ("I am observing the final" OR equivalent
+    OR `<!-- v718d.2: HIGH HALLUCINATION RISK -->` marker). MISSING =
+    REJECT with "v718d.2 FAIL: Pre-Flight Section 6 Hero Prop {N} lacks
+    explicit VLM end-frame observation declaration".
+
+  Gate v736i — scan each Section 6 Delta Axis declaration for HOOK
+    scenes with active force-verb on hero prop. If Magnitude =
+    PARTIAL / MINIMAL, require adjacent explicit residual-feature naming.
+    MISSING = REJECT with "v736i FAIL: HOOK scene declares PARTIAL/MINIMAL
+    morphological reveal without naming specific residual t=0 feature
+    visible at t=end (corpus default is COMPLETE — justify or re-declare)".
+
+  Gate v738.1 Hidden-Layer amendment — scan each Section 6 t=end
+    declaration for trigger phrasings ("wet [prop]" / "oiled [prop]" /
+    "[prop] still visible but" / etc.). MATCH = REJECT with "v738.1 FAIL:
+    t=end declaration matches Hidden-Layer trigger phrasing — re-author
+    to name the hidden layer the catalyst reveals".
+
+WORKED EXAMPLE — tongue HOOK (the surfacing case):
+
+  PRE-AMENDMENT (hallucinated):
+    t=end: "oiled glistening tongue, grime now wet and reflective,
+            tongue model coated in golden tea sheen"
+    Delta Axis: Surface/Texture (PARTIAL — grime softened by oil)
+
+  POST-AMENDMENT (correct, after Hidden-Layer Reveal Test):
+    t=end: "clean tongue surface bright vibrant pink mucosa + smooth
+            uncovered papillae + 3D blisters flattened + oil sheen
+            visible. Grime COMPLETELY washed away. Hidden layer revealed:
+            healthy pink mucosa that was buried under the grime crust at t=0."
+    Delta Axis: Surface/Texture + Structural Integrity + Color/Illumination
+                (COMPLETE — full reveal of underlying healthy pink mucosa;
+                catalyst = golden ginger-turmeric tea POUR acts as digital
+                VFX wipe per v752 catalyst pacing)
+
+  Failure mode patched: VLM no longer extrapolates "oil + grime = wet
+  grime"; mandated to observe final frames + run Hidden-Layer Reveal
+  Test + default to v736i COMPLETE reveal pattern.
+
+GENERALIZATION TABLE (apply to ANY new decode):
+
+  CATALYST + PROP                   | HIDDEN LAYER (correct t=end)
+  ---------------------------------+----------------------------------
+  oil/tea + dirty tongue            | clean pink mucosa
+  tea/herbal + fat belly            | flat organs / abs / muscle
+  serum + wrinkled forehead         | glassy smooth skin
+  cream + varicose calf             | clear smooth skin / visible vein
+  pour + clouded eye                | bright clear iris
+  wand + drooping jowl              | firm lifted jawline
+  paste + grey-yellow nail          | bright pink healthy nail bed
+  spray + sparse hairline           | dense full coverage scalp
+  rinse + inflamed prostate model   | clean pink normal lobes
+  pour + enlarged tonsil model      | smooth pink normal tonsils
+  pour + congested artery model     | clear flowing red artery
+  pour + decayed tooth model        | white smooth enamel surface
+
+  Decoder defaults to corresponding HIDDEN LAYER unless source t=end
+  frames explicitly contradict (partial reveal with named residual feature).
+
+================================================================================
+
+================================================================================
 V718J — PAIRED-IMAGE IDENTIFICATION (NEW 2026-05-18 late)
 ================================================================================
 

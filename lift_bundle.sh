@@ -447,6 +447,78 @@ REJECT (v718h.1 FAIL). Full gate at code/template_reference.md
 §"v718h.1 + v718d.1 + v738.1 hardening + v580.3".
 
 ================================================================================
+V718D.2 + V736I + V738.1 HIDDEN-LAYER AMENDMENT — ANTI-EXTRAPOLATION
+MANDATE (NEW 2026-05-18 late)
+================================================================================
+
+PROBLEM: LLMs / VLMs default to REAL-WORLD physics extrapolation when
+authoring HOOK / state-evolution scenes. Pour oil on dirty tongue ->
+predictive engine outputs "wet glistening grime" — the actual viral
+corpus payoff is "clean pink mucosa revealed". Pour tea on belly fat ->
+predictive engine outputs "warm wet belly" — corpus payoff is "fat
+melts revealing flat organs". This pre-amendment failure mode locked
+hallucinated t=end into Pre-Flight Section 6 -> v718e Action-Consequence
+Coupling propagated it -> Banana 2 + Veo rendered passive contact
+instead of total morphological reveal.
+
+V718D.2 ANTI-EXTRAPOLATION MANDATE: when authoring HOOK / state-evolution
+scenes (lift / innovate / create), LLM MUST NOT extrapolate t=end from
+t=0 + applied force-verb using real-world physics. Hero prop with a
+catalyst applied MUST be assumed FUNDAMENTALLY ALTERED or REVEALED until
+the source decode artifact explicitly contradicts.
+
+V736I AGENT-OF-CHANGE DEFAULT BIAS: in Kaveno corpus, liquids and tools
+are NEVER PASSIVE. Default assumption: LIQUID -> melts/washes/dissolves/
+color-shifts/bleaches/strips; TOOL -> cracks/scrapes/deflates/splits/
+shatters/levels; IMPACT -> shatters/bursts/pulverizes/flattens; HEAT ->
+chars/liquefies/vaporizes/blackens; BLADE -> splits/sections/opens/
+cleaves. When declaring Delta Axis + Magnitude in Section 6 for a HOOK
+scene with active force-verb, DEFAULT to COMPLETE magnitude REVEAL unless
+source decode explicitly contradicts. PARTIAL/MINIMAL requires explicit
+visual evidence at t=end (named residual t=0 feature).
+
+V738.1 HIDDEN-LAYER REVEAL TEST: before locking t=end in Section 6, ask
+"did I just describe t=0 wet/broken/contacted? If YES -> RE-EVALUATE.
+Viral hooks feature TOTAL morphological reveals. Name the HIDDEN LAYER
+the catalyst REVEALS." Trigger phrasings (auto-retrigger re-eval): "wet
+[prop]" / "oiled [prop]" / "[t=0 features] now slightly [adjective]" /
+"[t=0 features] still visible but [softened/muted]" / "[prop] glistens/
+shimmers without explicit reveal verb".
+
+CORPUS-VALIDATED COMPLETE REVEAL CATALOG (default to these when
+authoring HOOK with catalyst):
+  grime           -> clean pink mucosa (oral / tongue / throat)
+  coating         -> bright underlying color (skin / scalp / hair)
+  fat             -> revealed organs / flat plane / muscle (belly)
+  wrinkles        -> glassy smooth surface (forehead / face)
+  bulging veins   -> clear smooth surface (varicose / calf)
+  inflamed tissue -> normal pink (organ models — prostate / tonsil / liver)
+  cloudy / yellow -> bright clear (eye / nail / fluid)
+  drooping        -> firm tight lifted (jowl / arm / brow)
+  sparse / patchy -> dense full coverage (hair / scalp / lashes)
+  enlarged lobes  -> normal smooth small (BPH prostate / tonsils)
+  dark crust      -> bright smooth surface (skin / nail / tongue)
+  decayed / grey  -> white smooth healthy (teeth / nails / bone)
+  blocked / clog  -> clear flowing (artery / vein / urethra)
+
+PRE-OUTPUT GATES (advisory not blocking on lift side; hard-fail on decode):
+  v718d.2 — scan Section 6 per-prop t=end declarations; flag matches
+    against Hidden-Layer trigger phrasings.
+  v736i — scan HOOK scene Delta Axis declarations; if Magnitude =
+    PARTIAL/MINIMAL, require adjacent explicit residual-feature naming.
+  v738.1 Hidden-Layer amendment — same trigger-phrasing scan;
+    re-evaluation prompt fired on match.
+
+WORKED EXAMPLE — tongue HOOK (the surfacing case):
+  PRE-AMENDMENT (hallucinated): t=end "oiled glistening tongue, grime
+    wet and reflective"; Delta Axis Surface/Texture PARTIAL.
+  POST-AMENDMENT (correct): t=end "clean tongue bright vibrant pink
+    mucosa + smooth uncovered papillae + 3D blisters flattened + oil
+    sheen visible. Grime COMPLETELY washed away. Hidden layer revealed:
+    healthy pink mucosa buried under grime crust at t=0"; Delta Axis
+    Surface/Texture + Structural Integrity + Color/Illumination COMPLETE.
+
+================================================================================
 V718J — PAIRED-IMAGE IDENTIFICATION (NEW 2026-05-18 late)
 ================================================================================
 
