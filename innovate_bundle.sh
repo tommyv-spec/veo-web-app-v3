@@ -409,6 +409,51 @@ phrasings; flag matches. Scan HOOK Delta Axis for PARTIAL/MINIMAL
 without explicit residual feature; flag.
 
 ================================================================================
+V718D.3 — EXHAUSTIVE 4-AXIS MANDATE + CATALYST MASKING + SECTION 6
+PER-AXIS SCHEMA (NEW 2026-05-18 late)
+================================================================================
+
+LLMs suffer FIRST-DELTA-STOP BIAS: see one texture change, attention
+moves on, miss secondary multi-axis changes. When innovating new HOOK
+Pre-Flight Section 6 t=end, single-sentence consolidated declarations
+let autoregressive LLM skip axes silently.
+
+V718D.3 EXHAUSTIVE 4-AXIS CHECK: BEFORE writing t=0/t=end, check ALL
+FOUR AXES INDIVIDUALLY:
+  1. Surface/Texture     -> wet/coated/wiped/scrubbed/cleansed?
+  2. Structural Integrity-> break/shatter/flatten/smooth-out?
+  3. Volume/Shape        -> swell/shrink/deflate/collapse?
+  4. Color/Illumination  -> hue shift? flush/brighten?
+DO NOT STOP at first change. Catalysts almost ALWAYS multi-axis.
+
+V718C.1 CATALYST MASKING: do NOT describe agent on surface. Describe
+PROP UNDERNEATH (color flush / 3D flatten / volume shrink / surface
+restore). Trigger phrasings auto-reject: "[catalyst] now coating
+[prop]" / "[prop] with [catalyst] sheen" / "[prop] now wet/oily".
+
+V738.1 SECTION 6 PER-AXIS SCHEMA — MANDATORY OUTPUT FORMAT:
+
+  Hero Prop: <name>
+  t=0 Surface/Texture:     <desc>
+  t=0 Structural Integrity:<desc>
+  t=0 Volume/Shape:        <desc>
+  t=0 Color/Illumination:  <desc>
+
+  t=end Surface/Texture:     <desc>
+  t=end Structural Integrity:<desc>
+  t=end Volume/Shape:        <desc>
+  t=end Color/Illumination:  <desc>
+
+  Delta Axis: <list>
+  Highest-Escalation Axis: <per v718h.1>
+  Carry Mode: <per v580.3 default Option C>
+  Magnitude: <COMPLETE default per v736i | PARTIAL with named residual>
+
+ONE-LINE consolidated t=0/t=end declarations BANNED — autoregressive
+LLM skips axes when only one output token-slot exists. Per-axis output
+FORCES LLM to re-evaluate each axis BEFORE generating line content.
+
+================================================================================
 V718J — PAIRED-IMAGE IDENTIFICATION (NEW 2026-05-18 late)
 ================================================================================
 

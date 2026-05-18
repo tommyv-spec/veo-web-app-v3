@@ -519,6 +519,115 @@ WORKED EXAMPLE — tongue HOOK (the surfacing case):
     Surface/Texture + Structural Integrity + Color/Illumination COMPLETE.
 
 ================================================================================
+V718D.3 — EXHAUSTIVE 4-AXIS MANDATE + CATALYST MASKING + SECTION 6
+PER-AXIS SCHEMA (NEW 2026-05-18 late)
+================================================================================
+
+THE BLIND SPOT: LLMs suffer FIRST-DELTA-STOP BIAS. See one texture
+change (dry -> wet) -> attention moves on -> miss secondary multi-axis
+changes (color shift / volume deflation / structural flattening). When
+authoring HOOK / state-evolution Pre-Flight Section 6 t=end, single-
+sentence consolidated declarations let autoregressive LLM skip axes
+silently.
+
+V718D.3 EXHAUSTIVE 4-AXIS CHECK MANDATE: BEFORE writing t=0/t=end
+for any hero prop, check ALL FOUR AXES INDIVIDUALLY:
+  1. Surface/Texture     -> wet/coated/wiped/scrubbed/cleansed?
+  2. Structural Integrity-> break/shatter/deflate/flatten/smooth-out?
+  3. Volume/Shape        -> swell/shrink/deflate/distend/collapse?
+  4. Color/Illumination  -> hue shift? flush pink/glow red/brighten?
+DO NOT STOP at first obvious change. Catalysts ALMOST ALWAYS trigger
+MULTI-AXIS changes. Look PAST the catalyst.
+
+V718C.1 / V738.1 CATALYST MASKING ILLUSION: when liquid/cream/tool/
+impact is applied, do NOT describe the agent on the surface. Look at
+the PROP UNDERNEATH:
+  - Did COLOR FLUSH/BRIGHTEN/CLEAR?
+  - Did 3D BUMPS FLATTEN?
+  - Did VOLUME SHRINK or RECEDE?
+  - Did SURFACE TEXTURE smooth/restore?
+If you describe a "pour"/"scrub"/"spray" but t=end does NOT name a
+COLOR OR SHAPE change on the UNDERLYING object, you have FAILED the
+perceptual check.
+
+CATALYST MASKING TRIGGER PHRASINGS (auto-reject):
+  "[catalyst] now coating [prop]" / "[catalyst] sitting on [prop]" /
+  "[catalyst] pooled" / "[prop] with [catalyst] sheen" / "[catalyst]
+  glistens on [prop]" / "[prop] now wet/oily/damp" / "[catalyst]
+  dispersed across [prop]"
+
+Required PROP-FOCUSED phrasings:
+  "[prop's] underlying surface now [revealed feature]" / "[prop's] color
+  shifted from [t=0] to [t=end]" / "[prop's] 3D [feature] flattened to
+  smooth" / "[prop's] volume reduced from [t=0] to [t=end]" / "[prop]
+  revealed as [hidden layer] beneath the [catalyst]"
+
+V738.1 SECTION 6 SCHEMA — MANDATORY PER-AXIS OUTPUT FORMAT:
+
+Pre-Flight Section 6 per-hero-prop block schema EXTENDED. ONE-LINE
+consolidated t=0/t=end declarations are NOW BANNED. Decoder/lift MUST
+emit ALL FOUR AXES INDIVIDUALLY as separate output lines:
+
+  Hero Prop: <name>
+  Image(s): image_<K>, image_<K+1>
+  Scene(s): scene_<N>
+  v736c Texture Check: <texture class from catalog>
+
+  t=0 Surface/Texture:     <coated/dry/grimy/crusted/etc.>
+  t=0 Structural Integrity:<3D bumps/blisters/raised/protruding/etc.>
+  t=0 Volume/Shape:        <bloated/distended/swollen/normal/etc.>
+  t=0 Color/Illumination:  <dark grey/brown/pathology-tone/red-inflamed/etc.>
+
+  t=end Surface/Texture:     <clean/washed/scrubbed/smooth/etc.>
+  t=end Structural Integrity:<flattened/leveled/restored-to-smooth/etc.>
+  t=end Volume/Shape:        <same as t=0 OR shrunk/deflated/normal/etc.>
+  t=end Color/Illumination:  <bright pink/vibrant healthy/restored/etc.>
+
+  Delta Axis: <comma-separated list of axes that CHANGED>
+  Highest-Escalation Axis: <per v718h.1>
+  Carry Mode: <within-clip-end-frame (Option C default per v580.3) |
+               multi-clip-blend (Option B) | within-clip (Option A escape)>
+  Magnitude: <COMPLETE (default per v736i for HOOK with catalyst) |
+              PARTIAL — named residual feature | MINIMAL — Y% change>
+
+WHY MANDATORY PER-AXIS WORKS (autoregressive mechanics):
+LLMs generate tokens autoregressively. If prompt allows ONE generic
+sentence for t=end, attention moves to next task -> missed axes
+silently dropped. When prompt REQUIRES output of `t=end Color/
+Illumination:` line, LLM is FORCED to re-evaluate frames specifically
+looking for hue+saturation changes BEFORE generating line content.
+
+PRE-OUTPUT GATES (advisory not blocking on lift side):
+  v718d.3 — scan Section 6 per-prop for ALL 4 per-axis lines on BOTH
+    t=0 AND t=end. MISSING any axis = flag "v718d.3 FAIL: missing
+    {axis} declaration at t={0|end}".
+  Catalyst Masking — scan t=end per-axis lines for catalyst-description
+    trigger phrasings. MATCH = flag "v718c.1 FAIL: t=end {axis}
+    describes catalyst not prop".
+  Section 6 schema — flag legacy single-line t=0/t=end format.
+
+WORKED EXAMPLE — tongue HOOK (post-v718d.3 schema, per-axis):
+  t=0 Surface/Texture:      coated dorsal surface with thick dark grey-
+                            brown grime crust, papillae buried
+  t=0 Structural Integrity: 3D blisters protruding through coating
+  t=0 Volume/Shape:         bloated swollen profile, 4-5x normal scale
+  t=0 Color/Illumination:   pathology-tone desaturated dirty grey-brown
+                            over faint underlying pink
+
+  t=end Surface/Texture:     clean smooth surface, papillae uncovered +
+                             glistening, residual oil sheen
+  t=end Structural Integrity:3D blisters FLATTENED to smooth
+  t=end Volume/Shape:        same bloated profile (preserved)
+  t=end Color/Illumination:  bright vibrant healthy PINK mucosa fully
+                             revealed, saturated rosy hue restored
+
+  Delta Axis: Surface/Texture + Structural Integrity + Color/Illumination
+              (Volume/Shape preserved)
+  Highest-Escalation Axis: Structural Integrity -> Option C MANDATORY
+  Carry Mode: within-clip-end-frame (Option C)
+  Magnitude: COMPLETE
+
+================================================================================
 V718J — PAIRED-IMAGE IDENTIFICATION (NEW 2026-05-18 late)
 ================================================================================
 
