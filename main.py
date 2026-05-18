@@ -2422,12 +2422,42 @@ async def _setup_job_background(
                 elif num_images > 0:
                     start_fname = uploaded_frames_list[start_image_idx % num_images]
 
-                # End frame logic (same as before — scenes, blend, interpolation)
+                # v718i.3 (NEW 2026-05-18 late) — EXPLICIT END-FRAME OVERRIDE.
+                # When line_data carries end_frame_image_local_index (set by
+                # v718i frontend → DialogueLineInput → here), the operator has
+                # declared an explicit Veo native end-frame interpolation
+                # binding via `- **end_frame_image:** image_K+1` in the Scene
+                # block. Resolve to the uploaded frames list and skip the
+                # legacy scene-transition / blend / last-clip fallback below.
+                # Without this override the Flow path's Clip.end_frame stays
+                # NULL → flow_worker uploads only start_frame → Veo gets
+                # cfg.image but NO cfg.last_frame → no native morphological
+                # interpolation. Worker.py already reads
+                # explicit_end_frame_local_index for the Vertex path but the
+                # Flow path (kavenobuilder.com production) goes through
+                # main.py background prompt-build → Clip.end_frame → R2 key
+                # → flow_worker.py upload. v718i.3 closes the Flow-path gap.
                 end_fname = None
+                _explicit_end_idx_v718i = line_data.get("end_frame_image_local_index")
+                if (
+                    _explicit_end_idx_v718i is not None
+                    and isinstance(_explicit_end_idx_v718i, int)
+                    and 0 <= _explicit_end_idx_v718i < num_images
+                ):
+                    end_fname = uploaded_frames_list[_explicit_end_idx_v718i]
+                    print(
+                        f"[v718i.3] Clip {idx}: explicit end-frame override "
+                        f"(Option C native interpolation) → image_local_index="
+                        f"{_explicit_end_idx_v718i} → end_fname={end_fname}",
+                        flush=True,
+                    )
+
                 is_last_clip = (idx == total_clips - 1)
                 scenes = dialogue_data.get("scenes", [])
 
-                if scenes:
+                # Skip the legacy fallback when v718i.3 already resolved
+                # end_fname (operator's explicit binding wins over inferred).
+                if end_fname is None and scenes:
                     current_scene = None
                     current_scene_idx = 0
                     for si, scene in enumerate(scenes):
@@ -2464,9 +2494,9 @@ async def _setup_job_background(
                         else:
                             if clip_mode == "blend":
                                 end_fname = start_fname
-                elif num_images == 1 and use_interpolation and clip_mode == "blend":
+                elif end_fname is None and num_images == 1 and use_interpolation and clip_mode == "blend":
                     end_fname = start_fname
-                elif num_images > 1 and clip_mode == "blend" and use_interpolation:
+                elif end_fname is None and num_images > 1 and clip_mode == "blend" and use_interpolation:
                     # Multi-image, blend mode, no scenes → self-interpolation
                     end_fname = start_fname
 
