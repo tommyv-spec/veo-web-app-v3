@@ -519,6 +519,31 @@ REQUIRED BULLETS (BOTH halves of every v718h-C / v718h-B / v580.2 pair):
     - **pair_role:** end
     - **paired_with:** image_K
 
+OPERATOR-READABLE HEADER NAMING (v718j.1 — NEW 2026-05-18 late):
+
+  Per v718j.1 the `### Image N` parser regex now ACCEPTS optional suffix
+  annotation (introduced by em-dash / hyphen / colon / paren) so the
+  artifact reads at-a-glance and pair membership is visible from the
+  Image headers alone — no need to read every bullet.
+
+  REQUIRED suffix grammar for paired Images:
+    ### Image K — Clip C.L START (paired with image_K+1)
+    ### Image K+1 — Clip C.L END (paired with image_K)
+
+  REQUIRED suffix grammar for non-paired Images:
+    ### Image N — Scene S [role description]
+    e.g.
+    ### Image 3 — Scene 2 start frame (recipe-ginger pre-pour, v580 chain step 1/4)
+    ### Image 6 — Scene 5 CTA frame (static talking-head, Delta Axis NONE)
+
+  Suffix is PURELY COSMETIC — parser extracts only the integer N. v718j
+  pair_role + paired_with bullets remain authoritative for platform UI
+  pair-grouping. Header annotation is for OPERATOR readability ONLY.
+
+  Pre-v718j.1 strict regex `^###\s+Image\s+\d+\s*$` (v696 Gate 3) is
+  SUPERSEDED for Image headers. Scene headers (`^###\s+Scene\s+\d+\s*$`)
+  remain strict (Scene cardinality is platform-authoritative).
+
   (END image's paired_with bullet is REDUNDANT BY DESIGN — Scene's
    end_frame_image bullet is authoritative for Veo render binding —
    but the back-ref lets the UI render the END image card without

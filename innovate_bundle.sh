@@ -389,6 +389,14 @@ REQUIRED BULLETS:
     - **pair_role:** end
     - **paired_with:** image_K
 
+OPERATOR-READABLE HEADER NAMING (v718j.1):
+  `### Image N` regex accepts optional suffix (em-dash / hyphen / colon /
+  paren). Use for at-a-glance pair/scene membership:
+    ### Image K — Clip C.L START (paired with image_K+1)
+    ### Image K+1 — Clip C.L END (paired with image_K)
+    ### Image N — Scene S [role]   # non-paired
+  Cosmetic — parser extracts only N. Scene headers strict per v696.
+
 CARVE-OUTS: non-paired Image blocks OMIT both bullets. v718h-B Multi-Clip
 Blend pairs use SAME discipline (Image K = start, Image K+1 = end +
 paired_with). v580 multi-scene chain is NOT a pair — reference_image +

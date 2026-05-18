@@ -466,6 +466,16 @@ REQUIRED BULLETS:
     - **pair_role:** end
     - **paired_with:** image_K
 
+OPERATOR-READABLE HEADER NAMING (v718j.1):
+  Per v718j.1, `### Image N` parser regex ACCEPTS optional suffix
+  annotation (em-dash / hyphen / colon / paren). Use it for at-a-glance
+  pair / scene membership:
+    ### Image K — Clip C.L START (paired with image_K+1)
+    ### Image K+1 — Clip C.L END (paired with image_K)
+    ### Image N — Scene S [role]   # non-paired
+  Suffix purely cosmetic — parser extracts only N. Scene headers remain
+  strict per v696. Pre-v718j.1 strict Image-header regex SUPERSEDED.
+
 CARVE-OUTS:
   - Non-paired images (HOOK talking-head, CTA card, EXPLAIN single-frame,
     voiceover_anchor images) OMIT both bullets.

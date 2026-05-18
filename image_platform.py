@@ -3254,9 +3254,27 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
     # Find every "### Image N" header and its block. Capture up to the
     # next "### Image N" or "### Scene N" header, or a "## " section,
     # or end-of-file.
-    blocks = _re.split(r"(?=^###\s+Image\s+\d+\s*$)", md_text, flags=_re.MULTILINE)
+    # v718j.1 (NEW 2026-05-18 late): regex relaxed to accept optional
+    # operator-readable suffix after the integer (e.g. `### Image 1 — Clip 1.1 START`
+    # or `### Image 2 — Clip 1.1 END (paired with image_1)`). Suffix may be
+    # introduced by em-dash (—), hyphen (-), colon (:), or parens. Suffix is
+    # purely cosmetic (parser extracts only the integer N); it lets operators
+    # scan the artifact and see pair / clip membership at the header level
+    # without reading every bullet. Pre-v718j.1 strict regex `^###\s+Image\s+\d+\s*$`
+    # rejected all suffixes via v696 parser-abort gate — that rule is now
+    # superseded for Image headers. Scene headers (`^###\s+Scene\s+\d+\s*$`)
+    # remain strict per v696 (Scene cardinality is platform-authoritative).
+    blocks = _re.split(
+        r"(?=^###\s+Image\s+\d+(?:\s*[\-—:(].*)?\s*$)",
+        md_text,
+        flags=_re.MULTILINE,
+    )
     for block in blocks:
-        header = _re.match(r"^###\s+Image\s+(\d+)\s*$", block, flags=_re.MULTILINE)
+        header = _re.match(
+            r"^###\s+Image\s+(\d+)(?:\s*[\-—:(].*)?\s*$",
+            block,
+            flags=_re.MULTILINE,
+        )
         if not header:
             continue
         # Cut the block at the next "### Scene" / "## " header if present
@@ -4000,9 +4018,10 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
     # v509: parse the optional ## Ingredients block first (works in both formats).
     ingredients = _parse_ingredients_block(md_text)
 
-    # Detect format: presence of `### Image N` headers = new format
+    # Detect format: presence of `### Image N` headers = new format.
+    # v718j.1 — accept optional suffix annotation (see _parse_image_blocks_new).
     has_image_headers = bool(_re.search(
-        r"^###\s+Image\s+\d+\s*$", md_text, flags=_re.MULTILINE
+        r"^###\s+Image\s+\d+(?:\s*[\-—:(].*)?\s*$", md_text, flags=_re.MULTILINE
     ))
 
     if has_image_headers:
