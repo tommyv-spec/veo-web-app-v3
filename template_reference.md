@@ -9897,6 +9897,292 @@ Banana 2 renders: patient's looped flesh on extended arm in foreground; practiti
 
 ---
 
+#### v718d — Intrinsic State Isolation (4-axis morphological-delta diagnostic, NEW 2026-05-16)
+
+**Surfaced 2026-05-16** from operator audit: prior v718a-c covered spatial perception (kinematic tracing + Z-depth + literal VFX) but did NOT explicitly force the VLM to isolate the hero prop / symptom's intrinsic SUBSTANCE properties before describing it. Result: VLM treats movement and state-change as the same observation, then writes static_composition that glosses over the visceral payoff. Example: source video shows a tongue model getting washed clean — VLM observes "hand pours liquid down" (kinematics) and writes the scene as a generic pouring action, missing that the tongue's surface texture transformed from coated-grime to washed-pink (Morphological Delta). The transformation IS the scene's rhetorical anchor; without it, downstream lift/innovate inherits a generic recipe step instead of a cleansing payoff.
+
+**The rule**: BEFORE writing `static_composition`, the VLM MUST isolate the hero prop / symptom and run a 4-axis diagnostic on its physical substance at t=start vs t=end:
+
+| Axis | What changes | Example |
+|---|---|---|
+| **1. Surface / Texture** | dry → wet, clean → grimy, smooth → blistered, coated → washed | tongue model coated in dark brown grime → washed clean pink |
+| **2. Structural Integrity** | whole → smashed, solid → melted, intact → split, firm → collapsed | watermelon intact → smashed open with juice cascade |
+| **3. Volume / Shape** | flat → distended, shriveled → swollen, normal → bulged, full → deflated | belly normal → distended 5 inches forward |
+| **4. Color / Illumination** | pale → flushed, neutral → glowing red, dim → bright, dull → vibrant | thermometer mercury column neutral → glowing red emergency |
+
+If ANY of these four axes changes during the shot, the VLM has detected a **Morphological Delta** — and that delta becomes the rhetorical anchor of the scene, NOT the kinematic movement.
+
+**Why this works generically**: prior v716/v717/v622b rules forced "exaggeration" on specific anatomy types (varicose veins, sagging skin, distended belly). v718d generalizes the diagnostic — whether the source shows a tongue getting washed (Surface), a banana smashed (Structural), a belly deflating (Volume), or a thermometer glowing red (Color), the VLM runs the same 4-axis check and identifies the primary change axis. Robust enough to catch the next visceral payoff visual without needing a new niche-specific v-rule.
+
+**Decision tree per shot**:
+
+1. Identify the hero prop / symptom (per v605 prop-led 60/40 OR per the diagnostic-anchor in HOOK scenes).
+2. Run 4-axis check at t=start (first dense frame) and t=end (last dense frame) of the shot.
+3. For each axis, declare: NO CHANGE / PARTIAL CHANGE / COMPLETE CHANGE (per v589 Half C magnitude vocabulary).
+4. The axis with COMPLETE or strongest PARTIAL change = `primary_change_axis`.
+5. The morphological delta becomes the rhetorical anchor; static_composition prose MUST describe both start_state AND end_state of the primary axis explicitly.
+
+**Worked example — tongue-washing source**:
+
+Pre-v718d (kinematics only):
+```
+"action_arc": {
+  "start_state": "hand holds pitcher above tongue model",
+  "mid_state": "hand pours liquid downward from pitcher",
+  "end_state": "pitcher empty, liquid pooling on tongue"
+}
+```
+→ VLM describes generic pouring. Downstream lift loses the cleansing payoff.
+
+Post-v718d (4-axis morphology + kinematics decoupled):
+```
+"action_arc": {
+  "kinematics": {
+    "movement_path": "hand pours liquid downward from pitcher",
+    "camera_shift": "static"
+  },
+  "morphology": {
+    "focus_object": "anatomical tongue model",
+    "intrinsic_state_start": "coated in dark brown grime, surface texture rough and matte",
+    "intrinsic_state_end": "grime completely washed away, pink surface revealed, surface texture smooth and glossy",
+    "primary_change_axis": "Surface/Texture (cleansing)",
+    "magnitude": "COMPLETE"
+  }
+}
+```
+→ VLM forced to articulate the cleansing transformation. Downstream lift inherits the rhetorical anchor.
+
+**Pairing with existing rules**:
+- v589 Stage 4d VLM JSON schema — action_arc field now carries TWO sub-blocks: `kinematics` (movement) + `morphology` (intrinsic state change). Schema update mandatory in `code/v589_video_understanding.py` PER_SHOT_SCHEMA.
+- v716 / v717 / v622b geometric + metaphor — these stay as descriptive grammar applied to the morphology block; v718d is the perception step that catches the delta before the grammar describes it.
+- v600 cartoon-physics — primary_change_axis: Structural Integrity OR Volume/Shape activates v600 magnitude amp; other axes activate v716/v717 surface amp instead.
+- Pattern 23 diagnostic anchor (v702 sensitive-anatomy library) — primary_change_axis identifies WHICH axis carries the anchor for each niche (puffy face = Volume/Shape; saggy arms = Volume/Shape; varicocele = Surface/Texture; double chin = Volume/Shape; tongue-clean = Surface/Texture; thermometer-flush = Color/Illumination).
+
+**Pre-output gate (v718d)**: Stage 4d VLM output JSON for every shot scene MUST contain both `kinematics` and `morphology` sub-blocks under `action_arc`. The `primary_change_axis` field must be populated with one of the 4 axis names (or "NONE" for static talking-head shots with no state evolution).
+
+```python
+# Validation gate
+def validate_v718d(stage4d_json):
+    errors = []
+    for shot in stage4d_json.get('shots', []):
+        arc = shot.get('action_arc', {})
+        if 'kinematics' not in arc or 'morphology' not in arc:
+            errors.append(f"Shot {shot['shot_index']}: action_arc missing kinematics or morphology sub-block (v718d)")
+            continue
+        morph = arc['morphology']
+        axis = morph.get('primary_change_axis')
+        valid_axes = ['Surface/Texture', 'Structural Integrity', 'Volume/Shape', 'Color/Illumination', 'NONE']
+        if not any(axis.startswith(a) for a in valid_axes):
+            errors.append(f"Shot {shot['shot_index']}: primary_change_axis must be one of {valid_axes}")
+    return errors
+```
+
+**Carve-outs**:
+- **Static talking-head shots with no state evolution** → `primary_change_axis: NONE`; morphology block populated with `intrinsic_state_start == intrinsic_state_end` (or "no morphological change observed").
+- **Multi-prop scenes** → run 4-axis check on EACH hero prop; declare the dominant prop's primary_change_axis as the scene anchor.
+- **Persona-only shots (no prop)** → focus_object = persona's expression/posture; track expression-beat changes per v714 emotional-payoff discipline.
+
+---
+
+#### v718e — Action-Consequence Coupling (NEW 2026-05-17)
+
+**Surfaced 2026-05-17** from operator audit on tongue-cleansing-recipe lift: v718d correctly isolates `primary_change_axis` and `intrinsic_state_start` → `intrinsic_state_end`, but the scene's `action_note` still describes the agent's contact with the prop without describing the prop's transformation. VLM and lift LLM both default to "safe contact" verbs (`coating`, `pooling on`, `resting on`, `covering`, `touching`, `sitting on`) when describing the agent-prop interaction — kinematically accurate but morphologically vacant. Banana 2 + Veo render the contact but not the consequence: liquid pours, hits tongue, sits there — viewer sees splash, never sees the grime wash away. Same failure class generalizes across niches: tea pours onto fat (no melting), banana smashed by hammer (no bursting), saw cuts wood (no splitting), wand waves over face (no smoothing).
+
+v718d identifies WHAT changes; v718e enforces that the action prose DESCRIBES the change. Without v718e, downstream lift inherits a state-evolution scene whose visual payoff is hidden behind passive-contact vocabulary.
+
+**The rule** (three sub-amendments composed):
+
+- **v718e-1 — Action-Consequence Coupling Mandate (amends v697 force-verb arc).** When a scene's `primary_change_axis != NONE` (per v718d), the active force-verb in the `[Mid-clip beat]` AND `[End beat]` of the `action_note` MUST be IMMEDIATELY PAIRED with the morphological consequence of that action. The verb describes WHAT the agent does to the prop; the consequence clause describes WHAT THE PROP BECOMES. Cannot ship a state-evolution scene where the agent merely makes contact with the prop without altering it.
+
+  - **Wrong (contact without consequence):** `"The liquid cascades over the tongue, coating the grime."` — describes contact but treats the grime as a fixed surface decoration; viewer sees pour, not cleanse.
+  - **Right (action + consequence):** `"The liquid cascades over the tongue, completely washing away the grime in one continuous sweep."` — verb (cascades) paired with consequence (washing away the grime); the prop's state transforms inside the same sentence.
+  - **Wrong:** `"The tea pours onto the torso, pooling on the fat."` (contact)
+  - **Right:** `"The tea pours onto the torso, instantly melting the fat into a thinning sheet that drains downward."` (consequence)
+  - **Wrong:** `"The hammer strikes the banana, hitting the peel."` (contact)
+  - **Right:** `"The hammer strikes the banana, splitting the peel open and bursting the pulp outward in chunks."` (consequence)
+
+  Pattern: `"[agent] [force-verb] [prop], [consequence-verb] the [prop-feature] into [end-state]."` Force-verb and consequence-verb in the same sentence, separated by comma — NOT in separate sentences (separating them lets the LLM split contact from transformation across two beats and lose the coupling).
+
+- **v718e-2 — Terminal State Rule for [End beat] (amends v540 + v589 absolute-magnitude grammar).** The `[End beat 5-8s]` clause of every state-evolution scene's `action_note` MUST explicitly manifest the `intrinsic_state_end` declared in the v718d morphology block. Cannot leave the hero prop in a transient / intermediate state at the end. If v718d morphology says `intrinsic_state_end = "pink surface revealed, grime completely washed away"`, the `[End beat]` cannot say `"the liquid settles"` or `"the hand pulls back"` — it MUST say `"the tongue's surface now glistens pink, every trace of brown grime gone, the model fully revealed."`
+
+  Pattern: `[End beat 5-8s]` clause carries the SAME morphological vocabulary as v718d's `intrinsic_state_end` field. The two are bound — VLM declares the end state in morphology, lift author MUST quote / paraphrase it in the End beat. Magnitude marker from v589 (COMPLETE / PARTIAL / MINIMAL) carries forward: `intrinsic_state_end` declared at COMPLETE magnitude → End beat shows the full terminal state (no grime visible); declared PARTIAL → End beat shows the partial state explicitly (grime ~40% washed, two grimy patches remain visible); declared MINIMAL → End beat shows the small visible delta (one streak washed clean).
+
+- **v718e-3 — Anti-"Static-Contact" Vocabulary Ban (extends v718d enforcement).** When `primary_change_axis != NONE`, passive / static-contact descriptors are BANNED in the Mid and End beats of the `action_note`. Replace with transformation verbs that name the morphological delta.
+
+  **Banned static-contact verbs in Mid + End beats when state-evolution active:**
+
+  `coating` / `covering` / `pooling on` / `resting on` / `touching` / `sitting on` / `placed on` / `lying on` / `falling on` / `settling on` / `landing on` / `arriving at` / `meeting` / `contacting` / `reaching` (when the verb is the end-action, not the lead-up)
+
+  **Required transformation verbs by primary_change_axis:**
+
+  | primary_change_axis | Required transformation verbs |
+  |---|---|
+  | **Surface / Texture** | washing away / dissolving / scrubbing clean / clearing / revealing / lifting away / stripping / bleaching / scouring / unveiling |
+  | **Structural Integrity** | smashing open / shattering / splitting / bursting / tearing / fracturing / cracking apart / exploding / pulverizing / collapsing |
+  | **Volume / Shape** | melting / shrinking / deflating / flattening / dissolving down / draining / collapsing inward / thinning / receding / firming up / lifting tight |
+  | **Color / Illumination** | flushing red / glowing bright / dimming dark / blanching pale / igniting / brightening / saturating / draining color from |
+
+  Pre-v718e default `"The liquid covers the tongue"` — v718e ban triggers; replace with axis-1 transformation verb: `"The liquid washes the grime away from the tongue's surface."` Mechanically impossible to write a state-evolution scene whose action_note glosses over the visual payoff.
+
+**Decision tree per scene**:
+
+1. Pull `primary_change_axis` from v718d morphology block for this scene.
+2. If `primary_change_axis == NONE` (static talking-head / diagnostic reveal / no morphological delta) → v718e N/A; action_note can use kinematic verbs only.
+3. If `primary_change_axis != NONE`:
+   - (a) Lead force-verb in `[Start beat]` describes agent setup (LIFT / RAISE / GRIP / POSITION) — no consequence required yet.
+   - (b) Force-verb in `[Mid-clip beat]` describes the active transformation moment — MUST pair with consequence clause: `"<force-verb> the <prop>, <transformation-verb> the <prop-feature> into <intermediate-state>"`.
+   - (c) Force-verb in `[End beat]` describes the terminal moment — MUST manifest `intrinsic_state_end` explicitly: `"<terminal-verb> the <prop>, <transformation-verb-complete> the <prop-feature>, now <intrinsic_state_end vocabulary>"`.
+4. Verify Mid + End beats contain ZERO banned static-contact verbs.
+
+**Worked example — tongue-cleansing recipe scene (the surfacing case)**:
+
+Pre-v718e action_note (kinematics-only, banned static-contact present):
+
+```
+- **action_note:** [Start beat 0-2s] The main character LIFTS a glass
+pitcher of clear liquid above the anatomical tongue model on the
+counter. [Mid-clip beat] She POURS the liquid downward in a steady
+stream, the liquid CASCADING over the tongue and COATING the dark
+brown grime on its surface. [End beat 5-8s] The pitcher empties, the
+liquid POOLING on the tongue and SETTLING into a thin film.
+```
+
+→ Mid beat describes contact (`coating the grime`); End beat describes contact (`pooling`, `settling`). Grime never washes away in prose; Banana 2 + Veo render a pour + a wet tongue, but the cleansing payoff is invisible.
+
+Post-v718e action_note (consequence-coupled, terminal state explicit, transformation verbs):
+
+```
+- **action_note:** [Start beat 0-2s] The main character LIFTS a glass
+pitcher of clear liquid above the anatomical tongue model on the
+counter. [Mid-clip beat] She POURS the liquid downward in a steady
+stream, the liquid CASCADING over the tongue and WASHING AWAY the
+dark brown grime in a single continuous sweep, the grime breaking up
+and streaming off the edges of the model. [End beat 5-8s] The pitcher
+empties, the tongue's surface now GLISTENS clean pink, every trace of
+brown grime gone, the anatomical model fully revealed in its true
+salmon-pink color.
+```
+
+→ Mid beat verb (CASCADING) paired with consequence (WASHING AWAY the grime); End beat manifests `intrinsic_state_end` ("pink surface revealed, grime completely washed away") in plain prose. Banana 2 plans the start frame with brown grime; Veo's 8-second clip renders the cascade THEN the wash THEN the reveal. The cleansing payoff is visible because the prose describes it.
+
+**Generalized examples across niches** (proving the rule is niche-agnostic):
+
+| Niche | axis | Pre-v718e (banned contact) | Post-v718e (consequence) |
+|---|---|---|---|
+| Belly-fat | Volume/Shape | `"the tea pools on the belly"` | `"the tea melts the belly inward 4 inches, the distension collapsing into a flat plane"` |
+| Wrinkles | Surface/Texture | `"the serum coats the forehead"` | `"the serum fills and dissolves the wrinkles, the forehead smoothing into a glassy plane"` |
+| Tongue / detox | Surface/Texture | `"the liquid covers the tongue"` | `"the liquid washes the grime away, revealing the pink surface"` |
+| Banana smash | Structural Integrity | `"the hammer strikes the banana"` | `"the hammer shatters the banana, the peel bursting open and the pulp exploding outward"` |
+| Thermometer flush | Color/Illumination | `"the mercury sits at the top"` | `"the mercury glows bright red, the entire column igniting from neutral grey to emergency crimson"` |
+| Sagging jowl | Volume/Shape | `"the wand touches the jaw"` | `"the wand lifts the jowl tight, the pendulous flap firming up and receding 1.5 inches back into the jawline"` |
+| Varicose veins | Surface/Texture | `"the cream covers the calf"` | `"the cream dissolves the bulging veins, the surface flattening as the blue-purple ropes fade into clear skin"` |
+
+Pattern holds across every niche / every axis: VERB + CONSEQUENCE + TERMINAL STATE.
+
+**Pre-output mechanical gate (v718e, REQUIRED on every `videos/*.md` ship)**:
+
+```python
+# Gate: Action-Consequence Coupling (v718e)
+# Catches state-evolution scenes whose action_note uses banned static-contact verbs
+# in the Mid/End beats instead of transformation verbs.
+
+import re, sys
+
+text = open(sys.argv[1], encoding='utf-8').read()
+errors = []
+
+BANNED_STATIC_CONTACT = re.compile(
+    r'\b(coating|covering|pooling on|resting on|touching|sitting on|'
+    r'placed on|lying on|falling on|settling on|landing on|arriving at|'
+    r'meeting|contacting)\b',
+    re.IGNORECASE,
+)
+
+# Find each Scene block, pull its visual_delta + action_note.
+scene_blocks = re.split(r'(?=^###\s+Scene\s+\d+\s*$)', text, flags=re.MULTILINE)
+for block in scene_blocks:
+    scene_match = re.match(r'^###\s+Scene\s+(\d+)\s*$', block, re.MULTILINE)
+    if not scene_match:
+        continue
+    scene_n = scene_match.group(1)
+
+    # Skip if scene has no visual_delta (no state evolution → v718e N/A).
+    has_delta = re.search(
+        r'^- \*\*visual_delta:\*\*\s*(.+?)$', block, re.MULTILINE,
+    )
+    if not has_delta or has_delta.group(1).strip().lower() in ('', 'none', 'n/a'):
+        continue
+
+    # Pull action_note body.
+    action_note_match = re.search(
+        r'^- \*\*action_note:\*\*\s*(.+?)(?=\n- \*\*|\Z)',
+        block, re.MULTILINE | re.DOTALL,
+    )
+    if not action_note_match:
+        continue
+    action_note = action_note_match.group(1)
+
+    # Isolate Mid + End beat regions (Start beat is allowed contact verbs).
+    mid_end_region = re.search(
+        r'\[Mid-clip beat\].*?(?=\Z)', action_note, re.DOTALL,
+    )
+    if not mid_end_region:
+        continue
+    mid_end_text = mid_end_region.group(0)
+
+    static_hits = BANNED_STATIC_CONTACT.findall(mid_end_text)
+    if static_hits:
+        errors.append(
+            f"v718e FAIL Scene {scene_n}: state-evolution action_note uses banned "
+            f"static-contact verbs in Mid/End beats {sorted(set(h.lower() for h in static_hits))}. "
+            f"Must use transformation verbs (washing/melting/dissolving/shattering/flushing/etc.) "
+            f"per v718e Action-Consequence Coupling."
+        )
+
+if errors:
+    for e in errors:
+        print(e)
+    sys.exit(1)
+else:
+    print(f"v718e PASS: no state-evolution scene uses banned static-contact verbs in Mid/End beats.")
+```
+
+Run: `python -c "<script-above>" videos/<file>.md`. Expect zero v718e FAIL output before pushing.
+
+**Carve-outs**:
+
+- **`primary_change_axis == NONE`** — static talking-head shot, diagnostic reveal scene, persona-on-camera with no prop transformation → v718e N/A; action_note may use kinematic-only verbs (`reaches`, `points at`, `holds`, `stands`).
+- **Start beat** — `[Start beat 0-2s]` describes agent setup (lift / position / grip / raise) BEFORE the transformation kicks in. Static-contact verbs allowed at the Start beat only; v718e gate scopes to Mid + End beats.
+- **Multi-stage transformations** — if a scene chains two morphological deltas (e.g. pour THEN dissolve), each delta gets its own consequence clause; one in the Mid beat (pour → wash), one in the End beat (wash → reveal).
+- **Decode side** — `raw/decoded_*.md` artifacts describe what the source ACTUALLY shows. If the source video itself has a static-contact moment with no morphological payoff (rare but possible — e.g. a CTA shot where the practitioner just holds a product), the decoder writes that faithfully; v718e gate operates on generate-side `videos/*.md` only.
+- **Persona-only emotional beats** — when `focus_object = persona's expression/posture` per v718d carve-out, the consequence is the EXPRESSION CHANGE per v714 (distressed → amazed). v718e applies: action verb (`turns to the lens`) paired with consequence verb (`her expression transforming into wide-eyed amazement, eyebrows lifting and mouth opening in delight`).
+
+**Pairing with existing rules**:
+
+- **v718d morphology block** — feeds the `primary_change_axis` + `intrinsic_state_end` that v718e references; v718e is the action-prose enforcement of what v718d perceived.
+- **v697 force-verb action arc** — v697 mandates a chain of force-verbs in the action_note; v718e amends to require each verb in Mid + End beats be PAIRED with its consequence.
+- **v540 / v589 absolute-magnitude grammar** — v589 declares COMPLETE / PARTIAL / MINIMAL magnitude on the v718d morphology block; v718e v718e-2 propagates that magnitude into the End beat's terminal-state vocabulary.
+- **v716 / v717 / v622b geometric + metaphor** — these are surface-level descriptive grammar for the prop's appearance; v718e is the action-coupling grammar for the prop's transformation. Both stack: geometric describes the prop's shape state, v718e action_note describes the transition between two such states.
+- **v714 emotional-payoff discipline** — v714 fires on AFTER-state expression changes for non-persona characters; v718e applies the same coupling pattern (action → consequence) to morphological state changes on hero props.
+- **v600 cartoon-physics** — when `primary_change_axis == Structural Integrity` or `Volume/Shape` AND v600 fires, the transformation verb in v718e gets amped (`shatters → explodes`, `melts → vaporizes`).
+
+**Touched**:
+
+- `code/template_reference.md` — this v718e subsection appended after v718d, before the shared `### Pre-output diagnostics` block.
+- `code/decode_bundle.sh` — V718E section added inside V718 task-prompt block (decode-side observation: faithfully record source's action-consequence couplings into the morphology block + the action_note).
+- `code/lift_bundle.sh` + `code/innovate_bundle.sh` + `code/create_bundle.sh` — V718E section added inside V718 task-prompt block + pre-output Python gate appended to the artifact-validation checklist.
+- `wiki/patterns/conventions.md` — v718e row inserted above v718d row; Latest live marker bumped v747 → v718e (rule numbering note: v718e is a sub-amendment of v718 umbrella, not a top-level version bump — Latest live marker on platform features stays at v747).
+- `wiki/meta/decode-grammar-checklist.md` — v718e workflow note added after v718d entry.
+- `wiki/meta/generate-video-checklist.md` — v718e authoring discipline added with worked example + Python gate command.
+- `CLAUDE.md` — v718e quickref prepended above v718 / v719 quickrefs.
+- `wiki/log.md` — v718e timeline entry prepended.
+
+**Migration**: zero required. Pre-v718e `videos/*.md` artifacts with state-evolution scenes using banned static-contact verbs in Mid/End beats remain valid (Banana 2 + Veo still render something; the morphological payoff is just diluted). Wiki lint pass can flag pre-v718e artifacts that fail the Python gate — advisory not blocking. New / modified `videos/*.md` from this commit forward MUST satisfy v718e Python gate before ship.
+
+**Verification mandatory before claiming v718e correctly applied**: pick a state-evolution scene from a recent `videos/*.md` (preferably one whose previous render showed contact-only payoff), apply v718e-1 + v718e-2 + v718e-3 to the action_note (Mid beat verb paired with consequence; End beat manifests `intrinsic_state_end`; zero banned static-contact verbs), run the Python gate (expect PASS), re-render via Banana 2 + Veo; confirm the rendered 8-second clip shows the morphological transformation visibly progressing across the clip (not a held contact frame followed by an unchanged terminal frame). Will not claim v718e correctly applied until evidence per CLAUDE.md hard rule.
+
+---
+
 ### Pre-output diagnostics (recommended in stage4d_vlm.json schema)
 
 The JSON schema can carry a `forensic_perception` field per shot that the VLM populates BEFORE writing static_composition:
@@ -9914,9 +10200,32 @@ The JSON schema can carry a `forensic_perception` field per shot that the VLM po
   },
   "literal_vfx_observations": [
     "closed loop of flesh with visible hole — NOT a U-shape"
-  ]
+  ],
+  "intrinsic_state_isolation": {
+    "focus_object": "patient's tricep skin loop",
+    "axis_1_surface_texture": "wrinkled / pitted (NO CHANGE across shot)",
+    "axis_2_structural_integrity": "closed flesh loop with hole (NO CHANGE across shot)",
+    "axis_3_volume_shape": "6-inch pendulous loop (NO CHANGE — static reveal)",
+    "axis_4_color_illumination": "anatomical pink (NO CHANGE)",
+    "primary_change_axis": "NONE (static diagnostic reveal — no morphological delta)"
+  }
 },
+"action_arc": {
+  "kinematics": {
+    "movement_path": "practitioner's purple-gloved finger reaches across frame to point at the flesh loop on patient's extended arm",
+    "camera_shift": "static handheld"
+  },
+  "morphology": {
+    "focus_object": "patient's tricep skin loop",
+    "intrinsic_state_start": "closed pendulous loop with visible hole, surface wrinkled and pitted",
+    "intrinsic_state_end": "closed pendulous loop with visible hole, surface wrinkled and pitted (no morphological change — diagnostic reveal scene)",
+    "primary_change_axis": "NONE",
+    "magnitude": "NONE"
+  }
+}
 ```
+
+The `action_arc` field is the v718d-amended structure required for ALL shot scenes. `kinematics` block holds movement (what hand goes where, camera shift, persona action arc); `morphology` block holds 4-axis intrinsic-state diagnostic per v718d. Schema update lives in `code/v589_video_understanding.py` PER_SHOT_SCHEMA. Pre-2026-05-16 stage4d JSON outputs without the morphology sub-block are v718d violations and downstream lift/innovate authoring inherits the perception gap.
 
 Operator reviews the `forensic_perception` field before the markdown is written. Misattributions / blocking blindness / hallucinations caught here cost zero Banana 2 credits.
 
@@ -11567,10 +11876,11 @@ The lean original wins. v736h codifies why.
 
 **Why the IF/THEN branch matters**: pre-2026-05-15 Section 5 was a flat command "Any forbidden v702 tokens? → swap" that triggered the sanitization reflex indiscriminately. Decoders following the checklist would incorrectly sanitize source-faithful anatomical descriptions, losing the corpus-grade prop specificity that downstream lifts need (the v705 prop-specificity collapse class). Output-type branch hardcodes the carve-out so decoders can't accidentally route generate-side rules onto observation prose.
 
-### 6. Composition discipline check (v713 + v715 + v716/v717 + v720 + v736e/f/g/h)
+### 6. Composition discipline check (v713 + v715 + v716/v717 + v720 + v736e/f/g/h + v718d Anti-Platonic Gate)
 - HOOK image: dead-center symptom (v736e) + persona hands actively manipulating (v736f) + face above-or-beside (v736g) + Image body ≤400w (v736h)?
 - B-roll images post-v737 decoupling: pure b-roll, no persona in [Subject]/[Composition]/[Action]?
 - Anchor image (if v698A.1 fires): role: voiceover_anchor + cast: persona handle + chest-up framing + open-palm gesture?
+- **Anti-Platonic Gate (v718d, NEW 2026-05-16)**: for EVERY hero object in this artifact's Image blocks, ask — **"Does the hero object in this shot look exactly like a normal, everyday version of that object?"** If YES → LOOK CLOSER. Viral hooks rely on ABNORMALITY. Identify how the object's state, texture, structure, volume, or color deviates from the default Platonic baseline (the version a stock-image library would show). Per v718d 4-axis check: Surface/Texture / Structural Integrity / Volume/Shape / Color/Illumination — at least ONE axis MUST deviate from the default baseline for HOOK + diagnostic-reveal scenes. If all 4 axes match the default Platonic version, the HOOK has no visceral payoff and the scroll-stop fails. Re-amp via the Pattern 21 + v716 + v717 + v719 + Pattern 23 diagnostic-anchor stack until at least ONE axis deviates measurably.
 
 ### 7. Image cardinality + use audit (v594 + v580)
 - Number of declared `### Image N` blocks: ___
@@ -11588,13 +11898,164 @@ The lean original wins. v736h codifies why.
 - **Decode-only outputs** (default decode, no sandbox-request keyword): pre-flight checklist sections 4 + 6 (sandbox + composition discipline) are N/A; sections 1 + 3 + 5 still apply. Decoder may emit a shorter "Pre-Flight Decode Checklist" with sections 1, 3, 5 only.
 - **Edit operations** (modifying existing `videos/*.md` per `wiki/meta/workflows.md` 8 edit-mode templates): pre-flight checklist scoped to the edited section only — operator declares which edit-mode template applies + which v-rules govern that specific change.
 
-**Pre-output gate (v738)**:
+**Pre-output gate (v738) — STRICT ENFORCEMENT (HARDENED 2026-05-16)**:
+
+Pre-2026-05-16 v738 was advisory ("expect ≥1 hit"). Operator-surfaced finding: LLMs skip the checklist under attention pressure even when the bundle prompt mandates it, because the rule was framed as a recommendation rather than a reject-gate. Hardening: v738 is now a STRICT REJECT GATE — artifact missing `## Pre-Flight Checklist` MUST be rejected immediately and re-generated. Treat the LLM as a fallible pipeline component; force "show your perceptual math first" before allowing markdown output.
+
+**Strict reject gate (mandatory pre-commit / pre-render)**:
 
 ```bash
-# Confirm Pre-Flight Checklist present before artifact body
-grep -nE '^## Pre-Flight Checklist' videos/<file>.md raw/decoded_<id>.md
-# Expect: ≥1 hit per generate-side artifact + ≥1 hit per hybrid decode artifact
+# v738 STRICT — reject artifact if Pre-Flight Checklist missing
+python -c "
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+
+# Check 1: Pre-Flight Checklist section present
+if not re.search(r'^## Pre-Flight Checklist', text, re.MULTILINE):
+    print('v738 REJECT: artifact missing ## Pre-Flight Checklist section. Re-generate with checklist FIRST before any markdown body.')
+    sys.exit(1)
+
+# Check 2: All 7 sections present (or 5 for decode-only output type)
+required_sections = [
+    r'^### 1\. Composite layout',
+    r'^### 2\. State-evolution',
+    r'^### 3\. Voiceover-paired',
+    r'^### 5\. Vocabulary safety',
+    r'^### 7\. Image cardinality',
+]
+for sec in required_sections:
+    if not re.search(sec, text, re.MULTILINE):
+        print(f'v738 REJECT: Pre-Flight Checklist missing required section matching {sec}')
+        sys.exit(1)
+
+# Check 3: Pre-Flight Checklist appears BEFORE first ### Image N block
+checklist_pos = re.search(r'^## Pre-Flight Checklist', text, re.MULTILINE).start()
+first_image = re.search(r'^### Image \d+', text, re.MULTILINE)
+if first_image and first_image.start() < checklist_pos:
+    print('v738 REJECT: ## Pre-Flight Checklist must appear BEFORE first ### Image N block (chain-of-thought ordering required)')
+    sys.exit(1)
+
+print('v738 PASS — Pre-Flight Checklist present + required sections + correct ordering')
+" videos/<file>.md
 ```
+
+If exit code != 0 → artifact REJECTED. LLM must re-generate emitting checklist FIRST. No exceptions for "I forgot" / "trivial scene".
+
+**Operator-side grep gates — v714 + v718d visual_delta morphological-change validation**:
+
+Treat LLMs as fallible pipeline components. Established pre-output grep gates verify the LLM's deliverable matches the rule it claimed to apply. If `visual_delta` describes a physical action (pouring) but fails to describe a morphological change (grime washing away), the script flags it.
+
+```python
+# v718d morphological-change validation gate
+# Catches: visual_delta describes kinematic action but no morphological state-change
+# (the gloss-over failure pattern v718d was designed to prevent)
+
+import re, sys
+
+KINEMATIC_VERBS = re.compile(
+    r'\b(pour|drop|squeeze|lift|tilt|reach|hold|grip|place|press|spread|scoop|sprinkle|stir|mix|push|pull)s?\b',
+    re.IGNORECASE
+)
+
+MORPHOLOGICAL_CHANGE_PATTERNS = re.compile(
+    r'\b('
+    r'(was|previously|originally) .{1,80} (now|becomes|transforms|changes)|'
+    r'(now (contains|shows|displays|reveals|holds))|'
+    r'(washed away|dissolved|deflated|tightened|cleared|drained|expanded|distended|melted|burst|cracked)|'
+    r'(transformed (from|into))|'
+    r'(changed (from|to))|'
+    r'(start(ing)? state|end(ing)? state|state_start|state_end)|'
+    r'(primary_change_axis)|'
+    r'(intrinsic_state)|'
+    r'(glowing|illuminated|flushed|swollen|cleansed) (now|red|bright|tight|smooth|clean|firm)|'
+    r'(visible (delta|change|transformation|shift))|'
+    r'(pendulous .{1,30} (now|tightened|lifted))|'
+    r'(grime .{1,30} (washed|cleared|removed|cleansed))|'
+    r'(crepey .{1,30} (smooth|firm|tight))'
+    r')',
+    re.IGNORECASE
+)
+
+text = open(sys.argv[1], encoding='utf-8').read()
+errors = []
+
+# Find every visual_delta field
+for m in re.finditer(r'-\s*\*\*visual_delta:\*\*\s*(.+?)(?=\n-\s*\*\*|\n\n|\n###)', text, re.MULTILINE | re.DOTALL):
+    delta = m.group(1).strip()
+    line_num = text[:m.start()].count('\n') + 1
+    has_kinematic = bool(KINEMATIC_VERBS.search(delta))
+    has_morphology = bool(MORPHOLOGICAL_CHANGE_PATTERNS.search(delta))
+    if has_kinematic and not has_morphology:
+        errors.append(
+            f'v718d FAIL line {line_num}: visual_delta describes kinematic action ({KINEMATIC_VERBS.search(delta).group()}) '
+            f'but no morphological state-change detected. Per v718d 4-axis check, identify which axis changes '
+            f'(Surface/Texture / Structural Integrity / Volume/Shape / Color/Illumination) and add explicit state_start → state_end prose. '
+            f'Pattern: "now [contains|shows] [prior state ingredients]" + "[new ingredient] [verb] into [vessel]". '
+            f'Snippet: "{delta[:150]}..."'
+        )
+
+if errors:
+    for e in errors: print(e)
+    sys.exit(1)
+print(f'v718d PASS — all visual_delta fields contain both kinematic action AND morphological state-change')
+```
+
+If exit code != 0 → operator pushes back on LLM. The LLM must re-author the flagged visual_delta to include explicit morphological-change prose ("now contains X from prior step" / "transformed from grime-coated to washed-clean" / "previously distended → now deflated"). Pure-kinematic deltas without morphology are v718d violations.
+
+**Forensic-perception JSON mandate (decode-side, Stage 4d pre-grammar)**:
+
+For decode workflows that run the v589 Stage 4d VLM pass, the VLM MUST output the `forensic_perception` JSON block (containing `kinematic_traces` + `z_depth_layers` + `literal_vfx_observations` + `intrinsic_state_isolation`) BEFORE writing `static_composition` prose. Schema enforced via `code/v589_video_understanding.py` PER_SHOT_SCHEMA.
+
+```python
+# Decode-side forensic_perception gate (Stage 4d JSON output validation)
+import json, sys
+
+stage4d = json.load(open(sys.argv[1]))
+errors = []
+for shot in stage4d.get('shots', []):
+    sidx = shot.get('shot_index')
+    fp = shot.get('forensic_perception', {})
+    required_keys = ['kinematic_traces', 'z_depth_layers', 'literal_vfx_observations', 'intrinsic_state_isolation']
+    missing = [k for k in required_keys if k not in fp]
+    if missing:
+        errors.append(f'v718 REJECT shot {sidx}: forensic_perception missing required keys: {missing}')
+        continue
+
+    # v718d primary_change_axis must be populated
+    isi = fp['intrinsic_state_isolation']
+    axis = isi.get('primary_change_axis', '')
+    valid_axes = ['Surface/Texture', 'Structural Integrity', 'Volume/Shape', 'Color/Illumination', 'NONE']
+    if not any(axis.startswith(a) for a in valid_axes):
+        errors.append(f'v718d REJECT shot {sidx}: primary_change_axis must be one of {valid_axes}, got: {axis!r}')
+
+    # If primary_change_axis != NONE, intrinsic_state_start AND _end must be populated + distinct
+    arc = shot.get('action_arc', {})
+    morph = arc.get('morphology', {})
+    pca = morph.get('primary_change_axis', 'NONE')
+    if not pca.startswith('NONE'):
+        s_start = morph.get('intrinsic_state_start', '')
+        s_end = morph.get('intrinsic_state_end', '')
+        if not s_start or not s_end:
+            errors.append(f'v718d REJECT shot {sidx}: morphology block has primary_change_axis={pca!r} but missing intrinsic_state_start or intrinsic_state_end')
+        elif s_start.strip() == s_end.strip():
+            errors.append(f'v718d REJECT shot {sidx}: intrinsic_state_start == intrinsic_state_end but primary_change_axis={pca!r} (should be NONE if no morphological delta, or populate distinct start/end prose)')
+
+if errors:
+    for e in errors: print(e)
+    sys.exit(1)
+print(f'v718 + v718d PASS — all shots have forensic_perception + morphology blocks correctly populated')
+```
+
+If any shot fails this gate, the operator MUST reject the Stage 4d output and re-run with the corrected prompt template. Do NOT proceed to markdown emission with malformed perception JSON.
+
+**Strict enforcement chain (4-stage)**:
+
+1. **Stage 4d VLM output**: forensic_perception JSON block populated for every shot (v718 + v718d) — REJECT if missing.
+2. **Pre-Flight Checklist emission**: artifact MUST start with `## Pre-Flight Checklist` containing all 7 sections (or 5 for decode) — REJECT if missing.
+3. **Anti-Platonic Gate (Section 6)**: explicit per-hero-object 4-axis check declared — REJECT if hero objects look like default Platonic baseline with all 4 axes unchanged.
+4. **visual_delta morphological-change validation**: every `- **visual_delta:**` field must contain BOTH kinematic action AND morphological state-change descriptors — REJECT pure-kinematic deltas.
+
+Each stage gates the next. No stage skippable. "I forgot" is not an acceptable failure mode — the bundle prompt mandates the checklist; the grep gate enforces the mandate.
 
 **Pairing with existing rules**:
 
@@ -12019,3 +12480,1844 @@ Semantic shift: `rejected` is now "this clip is completed but user marked it rej
 
 **Verification (mandatory before claiming v747 correctly applied)**: push to main → wait Render deploy → identify a paired clip in the screenshot's exact state (outer badge `"VOICE FAILED — RETRY"`, inner voice tile previously showing `'✗ rejected'` with no buttons, `error_code` = `CELEBRITY_FILTER` / `CELEBRITY_RAI_FILTER` / `SAFETY_FILTER`) → reload page → confirm voice tile now shows `↻ retry voice` + `📁 upload` + (if prior version exists) `↶ revert` buttons → click `📁 upload`, pick a different anchor face → confirm toast `replacement uploaded` + v701d/v741 cascade fires correctly → confirm voice clips re-render with new anchor. Will not claim v747 correctly applied until evidence per CLAUDE.md hard rule.
 
+
+
+
+### v738.1 — Pre-Flight Section 6 rewrite (State-Delta Mandate, REPLACES Anti-Platonic Gate single-state check, NEW 2026-05-17)
+
+**Failure surfaced 2026-05-17** from Claude-in-session decode of `raw/follow_me_health_remedies_us_ai.mp4` (oversized tongue + ginger-turmeric mouth-wash). Decoder walked 18 dense PNG frames + caught coated tongue at t=0.6s + pour at t=2.1s + scrub at t=4.5s + clean tongue at t=5.7s. Despite seeing every frame of the within-HOOK cleanse arc, decoder wrote Image 1 anchored at t=5.5s (END state) + set `visual_delta: n/a (HOOK base frame)` + wrote static action_arc `HOLD-STEADY → GESTURE-FORWARD → LIFT-PRE → STICK-OUT → END-HOLD` with zero TRANSFORMATIVE force-verbs (POUR / SCRUB absent). Pre-Flight Section 6 Anti-Platonic Gate passed because the coated tongue deviated from the healthy baseline on all 4 axes — but Section 6's binary "is current state Platonic? YES/NO" question only forces the decoder to declare deviation from baseline; it does NOT force declaration of t=0 vs t=end DELTA.
+
+**Root cause**: existing Section 6 is single-state diagnostic (snapshot Anti-Platonic Gate). v718d already provides 4-axis morphological-delta vocabulary; v718e already enforces action-consequence coupling at action_note level. Gap = Pre-Flight Section 6 doesn't force the decoder to WRITE OUT both endpoint states side-by-side BEFORE markdown body locks in. LLM contrast-recognition kicks in when both states are committed to context window in close proximity; with only one state declared, second state gets glossed.
+
+**v738.1 rule**: REPLACE Pre-Flight Section 6 single-state Anti-Platonic Gate with per-hero-prop **State-Delta Declaration** block. Forces explicit t=0 + t=end side-by-side declaration BEFORE the artifact's `## Ingredients` / `## Images` / `## Storyboard` blocks emit.
+
+**New Section 6 spec (REPLACES prior single-state Anti-Platonic Gate)**:
+
+```
+### Section 6 — Morphological Delta Declaration (v738.1 / v718d / v718e)
+
+For EVERY hero prop appearing in this artifact's Image blocks, declare:
+
+  Hero Prop: <prop name verbatim as it appears in Ingredients table>
+  Image(s): <comma-separated image_N tokens this prop appears in>
+  Scene(s): <comma-separated scene_N tokens this prop's transformation spans>
+  t=0 (Start State): <explicit texture / color / volume / structural integrity at frame_anchor — NOT generic prop identity, MUST describe the BEFORE state>
+  t=end (Terminal State): <explicit texture / color / volume / structural integrity at end of scene's clip — MUST describe the AFTER state>
+  Delta Axis: <Surface/Texture | Structural Integrity | Volume/Shape | Color/Illumination | NONE>
+  Carry Mode: <within-clip (Veo animates) | cross-image (v580 chain) | both>
+  Magnitude: <COMPLETE | PARTIAL | MINIMAL | NONE> per v589 absolute-magnitude grammar
+
+HARD GATE (all conditions REJECT if violated):
+  - Delta Axis != NONE AND t=0 == t=end (verbatim or semantic match) → REJECT (contradiction).
+  - Delta Axis != NONE AND t=end relies on generic kinematic-only verbs ("is being poured on" / "gets washed" / "covered in tea" / "with the liquid on top") without explicit morphological state-change descriptor → REJECT (operator's exact failure pattern — kinematic-over-morphological blind spot).
+  - Delta Axis == NONE AND ANY of the prop's appearance images carry a `visual_delta_within_clip:` field with content → REJECT (declaring NONE while also declaring an inline transformation is a contradiction).
+  - Same prop declared with conflicting Delta Axis across two Scene rows where Carry Mode = within-clip → REJECT.
+
+ALLOWED:
+  - Delta Axis == NONE AND t=0 == t=end → declares static prop (CTA reveal / talking-head / authority hold). MUST pair with NON-TRANSFORMATIVE force-verbs only per v697.1.
+  - Multi-axis transformation: if prop changes on TWO axes simultaneously (e.g. ginger-turmeric brew: Color/Illumination clear → golden AND Volume/Shape water → opaque suspension), declare Delta Axis = primary axis + name secondary axis in t=end prose.
+  - Multi-prop per scene: HOOK with N hero props (coated tongue + golden tea + wooden scraper) requires N separate State-Delta Declaration blocks, NOT one combined block. Each prop independently anchored.
+  - Cross-image carry: prop transforms across Image K → Image K+1 (v580 chain). Carry Mode = cross-image. Declare per-image t=0 / t=end pair: Image K's t=end == Image K+1's t=0 (continuity invariant).
+  - Within-clip + cross-image hybrid: prop transforms WITHIN Scene N (Veo animates) AND continues transforming into next scene chained Image (v580 + v718d compose). Carry Mode = both. Declare per-scene + per-image transitions.
+
+WORKED EXAMPLE (the surfacing case, tongue HOOK):
+
+  Hero Prop: oversized hyperreal tongue model
+  Image(s): image_1
+  Scene(s): scene_1
+  t=0: heavily coated tongue surface — thick dark grey-brown grime crust spread across entire dorsal surface masking pink mucosa, papillae buried under coating, fissure groove packed with darker grime, bloated swollen profile, pathology-tone desaturated dirty grey-brown
+  t=end: clean tongue surface — bright vibrant pink mucosa visible across entire dorsal surface, papillae smooth + uncovered + glistening with tea moisture, fissure groove no longer packed with grime, same bloated profile (Volume axis unchanged), color shifted from dirty grey-brown → vibrant pink
+  Delta Axis: Surface/Texture (primary) + Color/Illumination (secondary)
+  Carry Mode: within-clip
+  Magnitude: COMPLETE
+```
+
+**Why this works (Anthropic chain-of-thought grounding)**: forcing the LLM to write t=0 + t=end side-by-side BEFORE generating prose triggers contrast-recognition capabilities. Single-state declaration only invokes object-identification ("what is this?"); side-by-side dual-state declaration invokes transformation-identification ("how did this change?"). Same mechanism that powers `superpowers:brainstorming` pre-commitment pattern + v738 Pre-Flight original rationale — pre-commit to specific morphological resolutions in early tokens; subsequent prose generation tokens reference resolved decisions instead of re-deriving (and potentially mis-deriving) at each Image/Scene block boundary.
+
+**Composition with existing rules**:
+- v718d provides the 4-axis vocabulary used in `Delta Axis:` field.
+- v718e (Action-Consequence Coupling) consumes the morphology block — action_note Mid + End beat verbs must pair with consequence-verbs matching the Delta Axis declared here.
+- v589 absolute-magnitude grammar provides the COMPLETE / PARTIAL / MINIMAL vocabulary for `Magnitude:` field.
+- v580 cross-image state-evolution chain composes with `Carry Mode: cross-image | both`.
+- v604.1 (frame_anchor anchoring discipline) — when Delta Axis != NONE, frame_anchor MUST point at t=0 of the within-clip transformation (NOT t=end). v738.1 + v604.1 compose.
+- v586.1 + v717.1 ([Subject — Symptom] bound to t=0 peak severity) — Image body prose for the prop's appearance image must echo the t=0 state declared here.
+- v597 forensic_perception JSON `intrinsic_state_isolation` field is the machine-readable equivalent; v738.1 is the human-readable equivalent.
+- v718g `visual_delta_within_clip` Scene-block field is the per-scene authoring contract; v738.1 is the per-prop perception contract.
+
+**Carve-outs**:
+- Trivial single-scene single-prop static videos (HOOK + CTA, no transformation arc) — Section 6 may declare all props with Delta Axis: NONE; gate trivially passes.
+- Decode-side default decode (`raw/decoded_*.md`) — Section 6 mandatory.
+- Hybrid decode + sandbox-request — Section 6 still mandatory, Sandbox section already required per v736d.
+- Generate-side authoring (`videos/*.md`) — Section 6 mandatory; author MUST commit to t=0 + t=end before writing scenes (otherwise Image bodies + action_notes drift from intended morphology).
+
+**Pre-output mechanical gate (v738.1, mandatory before commit)**:
+
+```python
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+sec6 = re.search(r'^### Section 6 — Morphological Delta Declaration.*?(?=^### Section 7|\Z)', text, re.MULTILINE | re.DOTALL)
+if not sec6:
+    print('v738.1 FAIL: ## Pre-Flight Checklist Section 6 missing or not renamed to "Morphological Delta Declaration"')
+    sys.exit(1)
+body = sec6.group(0)
+hero_blocks = re.findall(r'Hero Prop:.*?(?=Hero Prop:|\Z)', body, re.DOTALL)
+if not hero_blocks:
+    print('v738.1 FAIL: Section 6 has no Hero Prop blocks declared')
+    sys.exit(1)
+for i, blk in enumerate(hero_blocks, 1):
+    t0 = re.search(r't=0[^:]*:\s*(.+?)(?=t=end|Delta Axis|\Z)', blk, re.DOTALL)
+    tend = re.search(r't=end[^:]*:\s*(.+?)(?=Delta Axis|\Z)', blk, re.DOTALL)
+    axis = re.search(r'Delta Axis:\s*([A-Za-z/]+)', blk)
+    if not (t0 and tend and axis):
+        print(f'v738.1 FAIL: Hero Prop block {i} missing t=0 / t=end / Delta Axis field')
+        sys.exit(1)
+    axis_val = axis.group(1).strip()
+    if axis_val != 'NONE':
+        t0_text = t0.group(1).strip()[:200]
+        tend_text = tend.group(1).strip()[:200]
+        if t0_text == tend_text:
+            print(f'v738.1 FAIL: Hero Prop block {i} declares Delta Axis={axis_val} but t=0 == t=end (contradiction)')
+            sys.exit(1)
+        KINEMATIC_ONLY = re.compile(r'\b(being poured on|gets (washed|cleaned|covered)|with .{1,30} (on top|covering)|after .{1,30} (poured|applied|sprayed))\b', re.I)
+        MORPH_DESC = re.compile(r'\b(washed away|dissolved|scrubbed off|revealed|transformed|drained|smoothed|tightened|firmed|brightened|melted|shattered|dispersed|cleared|sloughed|opaque|speckled|cleansed|restored)\b', re.I)
+        if KINEMATIC_ONLY.search(tend_text) and not MORPH_DESC.search(tend_text):
+            print(f'v738.1 FAIL: Hero Prop block {i} t=end uses kinematic-only verbs without morphological descriptor')
+            sys.exit(1)
+print('v738.1 PASS')
+```
+
+**Touched**: `code/template_reference.md` (this section); `code/decode_bundle.sh` + `code/lift_bundle.sh` + `code/innovate_bundle.sh` + `code/create_bundle.sh` (Pre-Flight Section 6 prose REPLACED in TASK heredoc); `wiki/patterns/conventions.md` (v738.1 row + amended v738 row pointer); `CLAUDE.md` (quickref); `wiki/log.md` (timeline). **Migration zero required** for pre-v738.1 artifacts. New artifacts MUST satisfy v738.1 gate before commit.
+
+**Verification mandatory before claiming v738.1 correctly applied**: re-run decode bundle on the surfacing case (`raw/follow_me_health_remedies_us_ai.mp4`); confirm Pre-Flight Section 6 is now "Morphological Delta Declaration" (not "Anti-Platonic Gate"); confirm decoder emits per-prop t=0 + t=end declarations for tongue + tea + cauldron + book; confirm v738.1 Python gate PASSES on the corrected artifact.
+
+### v738.2 — Pre-Flight Section 8 NEW (per-scene morphology audit table, NEW 2026-05-17)
+
+Adds NEW Section 8 after the existing Section 7 (Image cardinality + use audit). Section 8 is per-SCENE morphology audit (mirror of Section 6's per-PROP audit). Catches the failure class where individual props passed Section 6 but a Scene's action_arc or End beat doesn't actually deliver the declared transformation.
+
+**Section 8 spec**:
+
+```
+### Section 8 — Per-scene morphology audit (v738.2 / v718d / v718e / v697.1)
+
+Required table — one row per Scene:
+
+| Scene N | Hero Prop(s) | Delta Axis | t=0 state (concise) | t=end state (concise) | TRANSFORMATIVE force-verb(s) in action_arc (v697.1) | Resolution token in End beat (v718e-2) |
+| 1 | tongue | Surface/Texture | coated grey-brown | clean pink | POUR + SCRUB | washed away |
+| 2 | cauldron + water | Color/Illumination | clear water | golden brew | TILT-POUR + DROP | transformed into |
+| 3 | cauldron contents | Volume/Shape | full pot | half pot | LIFT-LADLE + POUR-STRAIN | level dropped |
+| 4 | tea + pepper | Surface/Texture | transparent tea | speckled tea | PINCH-DROP | dispersed |
+| 5 | book (CTA) | NONE | book held | book held | LIFT + PRESENT (NON-TRANSFORMATIVE) | n/a |
+
+HARD GATE (Python verification):
+  - Every Scene N declared in ## Storyboard MUST have a matching row in Section 8.
+  - Row's Delta Axis MUST match the same prop's Delta Axis declared in Section 6 (cross-consistency).
+  - Row's TRANSFORMATIVE column MUST contain ≥1 v697.1 TRANSFORMATIVE-class verb when Delta Axis != NONE.
+  - Row's Resolution column MUST contain ≥1 v718e-2 resolution token when Delta Axis != NONE.
+  - Rows with Delta Axis == NONE allow n/a in TRANSFORMATIVE + Resolution columns AND MUST use v697.1 NON-TRANSFORMATIVE verbs only.
+```
+
+**Why per-scene + per-prop audit are both needed**: Section 6 catches "decoder declared a transformation but the transformation isn't real" (semantic gate). Section 8 catches "decoder declared a transformation per-prop but didn't wire it through to the action_arc that drives Veo render" (mechanical gate — action_arc generates the Veo motion clip from the Image first-frame). Together they prevent both gloss-over (Section 6) AND wire-up gaps (Section 8).
+
+**Pre-output mechanical gate (v738.2)**:
+
+```python
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+TRANSFORMATIVE = re.compile(r'\b(POUR|CASCADE|SPRAY|SLAM|SQUEEZE|DROP|SMASH|PIERCE|PEEL|SCRAPE|SCRUB|WIPE|TILT-POUR|STRAIN|DRAIN|DISSOLVE|SHATTER|CRACK|SPLIT|PULL-APART|KNEAD|WHISK|DIP|MASH|GRIND|PRESS|RUB|WASH|RINSE|SOAK|PINCH-DROP|LIFT-LADLE|POUR-STRAIN|COLOR-SHIFT|PEPPER-DISPERSE|REVEAL-CLEAN|WASH-AWAY|TILT|DRIP)\b')
+RESOLUTION = re.compile(r'\b(washed away|fully restored|completely gone|revealed|every trace gone|transformed into|completely clean|fully transformed|restored to|reduced to|empty of|no longer visible|resolved|settled into|scrubbed off|dissolved|drained|cleansed|level dropped|dispersed|smoothed|firmed|n/a)\b', re.I)
+sec8 = re.search(r'^### Section 8.*?(?=^### Section 9|^## |\Z)', text, re.MULTILINE | re.DOTALL)
+if not sec8:
+    print('v738.2 FAIL: Section 8 (Per-scene morphology audit) missing')
+    sys.exit(1)
+table = sec8.group(0)
+rows = [r.strip() for r in re.findall(r'^\| Scene .+\|.*$', table, re.MULTILINE)]
+if not rows:
+    print('v738.2 FAIL: Section 8 has no scene rows')
+    sys.exit(1)
+storyboard_scenes = re.findall(r'^### Scene (\d+)', text, re.MULTILINE)
+declared_scenes = re.findall(r'^\| Scene (\d+)', table, re.MULTILINE)
+unique_storyboard = sorted(set(storyboard_scenes))
+unique_declared = sorted(set(declared_scenes))
+if unique_storyboard != unique_declared:
+    print(f'v738.2 FAIL: scene row mismatch — storyboard={unique_storyboard} table={unique_declared}')
+    sys.exit(1)
+for r in rows:
+    parts = [p.strip() for p in r.split('|')[1:-1]]
+    if len(parts) < 7:
+        print(f'v738.2 FAIL: row has fewer than 7 columns: {r}')
+        sys.exit(1)
+    scene, prop, axis, t0, tend, verbs, resolution = parts[:7]
+    if axis.lower() != 'none':
+        if not TRANSFORMATIVE.search(verbs):
+            print(f'v738.2 FAIL: {scene} declares Delta Axis={axis} but TRANSFORMATIVE column has no v697.1 TRANSFORMATIVE verb: {verbs}')
+            sys.exit(1)
+        if not RESOLUTION.search(resolution):
+            print(f'v738.2 FAIL: {scene} declares Delta Axis={axis} but Resolution column missing resolution token: {resolution}')
+            sys.exit(1)
+print('v738.2 PASS')
+```
+
+**Touched**: same file matrix as v738.1. **Verification mandatory before claiming v738.2 correctly applied**: re-run decode on surfacing case; confirm Section 8 present with N rows (1 per Storyboard scene); confirm Python gate PASSES.
+
+### v586.1 + v717.1 — [Subject — Symptom] block bound to intrinsic_state_start at peak severity (NEW 2026-05-17)
+
+**Composes with v586 six-block image grammar + v717 (v605c Symptom-First Subject Allocation).** v605c mandates `[Subject — Symptom]` block precedes `[Subject — Host]` block in body prose. v586.1 + v717.1 add temporal anchor: the [Subject — Symptom] block MUST describe the prop at intrinsic_state_start (t=0) at peak severity, NOT at a generic / Platonic / neutral baseline.
+
+**Rule**: when narrative_lens ∈ {AUGMENTED-SYMPTOMS, HEALER-SHOWING-CURE} AND this scene has within-clip morphological delta (v738 Section 6 Delta Axis != NONE):
+- [Subject — Symptom] block opener MUST name the prop's t=0 state at peak severity.
+- Generic / Platonic / neutral / clean prop identifiers in [Subject — Symptom] are ILLEGAL.
+- Persona unchanged (v553.1 / v609 / v610 / v722 govern persona discipline).
+
+**Banned openers** (Banana 2 plans heaviest from first tokens — generic opener wastes the heaviest planner attention on neutral identity, severity becomes surface decoration):
+- "An anatomical tongue model."
+- "An oversized hyperreal silicone tongue model."
+- "A small black cast-iron cauldron of boiling water."
+- "A clear glass mug of golden tea."
+- "A bowl of vivid turmeric powder."
+
+**Required openers** (peak-severity t=0 state named in first clause):
+- "An anatomical tongue model coated in a thick, dry, pale-yellow film, papillae buried under the grime layer."
+- "An oversized hyperreal silicone tongue model laid across the table, surface heavily coated in thick discolored grime — a continuous unbroken layer of dark grey-brown crust spread across the entire dorsal surface, masking the underlying pink mucosa, papillae bumps protruding through the coating like a relief-map of small swollen volcanic peaks half-buried in mud."
+- "A black cast-iron cauldron full to the rim of vigorously boiling crystal-clear water, surface bubbling violently, dense white steam rising 12 inches into the frame — the water is fully transparent with no color tint yet."
+- "A tall clear glass mug full of bright golden-yellow strained ginger-turmeric tea — fully transparent saffron-yellow brew, light passing through cleanly, no particulate suspended yet, faint steam rising."
+
+**Carve-out — AFTER-state images (v580 chain context)**: when Image K is the t=end of Image K-1's transformation AND Image K is also the t=0 of Scene K+1, [Subject — Symptom] block anchors to THIS image's t=0 in THIS scene's clip (its OWN t=0 as it's now serving as the start frame of the next transformation), NOT to the global story arc's BEFORE state. If THIS scene shows no further morphology (Image K is the resolved AFTER state with Delta Axis == NONE for the next scene), [Subject — Symptom] describes the resolved state at peak resolution (mirror of severity rule, composes with v714 emotional payoff).
+
+**Pre-output mechanical gate (v586.1 / v717.1)**:
+
+```python
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+images = re.findall(r'^### Image (\d+)\n(.*?)(?=^### Image|\Z)', text, re.MULTILINE | re.DOTALL)
+sec6 = re.search(r'^### Section 6.*?(?=^### Section 7|\Z)', text, re.MULTILINE | re.DOTALL)
+if not sec6:
+    sys.exit(0)
+hero_blocks = re.findall(r'Hero Prop:\s*(.+?)\n.*?Delta Axis:\s*([A-Za-z/]+)', sec6.group(0), re.DOTALL)
+hero_with_delta = {name.strip(): axis.strip() for name, axis in hero_blocks if axis.strip().lower() != 'none'}
+GENERIC_OPENERS = re.compile(r'\[Subject — Symptom\]\s*(?:A|An)\s+([A-Za-z\- ]+?)(?:\.|,)', re.IGNORECASE)
+for img_n, body in images:
+    sym_block = GENERIC_OPENERS.search(body)
+    if not sym_block:
+        continue
+    opener = sym_block.group(1).strip().lower()
+    severity_tokens = re.search(r'\b(coated|heavily|thick|dark|swollen|bloated|crust|grime|inflamed|pendulous|distended|enlarged|bulging|ropey|raised|drooping|sagging|crepey|deep|hollow|ridged|cracked|fissured|encrusted|hyperemic|edematous|atrophied|congested|pathology|peak|severe|extreme|saturated|opaque|transparent|fully|empty|vacant|completely|crystal-clear)\b', body[:600], re.I)
+    if not severity_tokens:
+        print(f'v586.1/v717.1 FAIL: Image {img_n} [Subject — Symptom] opener "{opener}" lacks peak-severity / t=0 state vocabulary (first 600 chars of body scanned)')
+print('v586.1/v717.1 audit complete')
+```
+
+**Touched**: `code/template_reference.md` (this section). `code/decode_bundle.sh` + 3 generate bundles (V586 / V717 instruction blocks amended). `wiki/patterns/conventions.md` (v586.1 + v717.1 rows). `CLAUDE.md` (quickref). `wiki/log.md` (timeline). **Migration**: pre-v586.1 artifacts with generic [Subject — Symptom] openers remain valid (Banana 2 still renders); new artifacts MUST satisfy v586.1 / v717.1 gate on AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE lens scenes with morphology.
+
+### v717.1 — composes with v586.1
+
+(Already documented under v586.1 above. Cross-reference: v586.1 covers v586 six-block grammar; v717.1 covers v717 v605c symptom-first allocation. Both deliver the same rule — [Subject — Symptom] block bound to t=0 peak severity. Conventions table carries two rows pointing at the same combined deep-dive.)
+
+### v604.1 — frame_anchor anchoring discipline for morphology scenes (NEW 2026-05-17)
+
+**Rule**: when scene's hero prop has within-clip morphological delta (v738 Section 6 Delta Axis != NONE for this scene's hero prop), `frame_anchor:` MUST point at t=0 (BEFORE state) of the within-clip transformation, NOT t=end (AFTER state).
+
+**Why**: Banana 2 renders the static Image from frame_anchor as the FIRST FRAME of the Veo clip. Veo then animates motion forward from that first frame across the clip duration. If frame_anchor points at t=end, Banana 2 renders the AFTER state, and Veo cannot animate backward to undo the transformation — the cleanse / pour / smash / dissolve never happens on-clip because the start frame already shows the resolved state.
+
+**Failure pattern caught 2026-05-17** (surfacing case):
+- WRONG: `frame_anchor: 5.5s` (END of cleanse — Banana 2 renders clean tongue → Veo can't animate cleanse backward → clip shows static clean tongue throughout, the cleanse payoff is invisible)
+- CORRECT: `frame_anchor: 0.6s` (BEFORE pour — Banana 2 renders coated tongue → Veo animates POUR + SCRUB + WASH-AWAY forward → clip shows the full cleanse arc resolving into clean pink reveal)
+
+**Annotation discipline**: when `frame_anchor:` field is used on a morphology scene, the field value MUST be annotated with the BEFORE-state tag for operator audit clarity:
+
+```
+- **frame_anchor:** 0.6s (BEFORE-state anchor — coated tongue, persona pre-pour)
+```
+
+For static scenes (Delta Axis == NONE), annotation is OPTIONAL — frame_anchor may anchor any representative frame (typically mid-scene) without tag.
+
+**Pre-output mechanical gate (v604.1)**:
+
+```python
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+sec6 = re.search(r'^### Section 6.*?(?=^### Section 7|\Z)', text, re.MULTILINE | re.DOTALL)
+if not sec6:
+    sys.exit(0)
+hero_blocks = re.findall(r'Hero Prop:\s*(.+?)\nImage\(s\):\s*(.+?)\n.*?Delta Axis:\s*([A-Za-z/]+).*?Carry Mode:\s*(.+?)\n', sec6.group(0), re.DOTALL)
+images = dict(re.findall(r'^### Image (\d+)\n(.*?)(?=^### Image|\Z)', text, re.MULTILINE | re.DOTALL))
+for name, imgs, axis, mode in hero_blocks:
+    if axis.strip().lower() == 'none':
+        continue
+    if 'within-clip' not in mode.lower():
+        continue
+    for img_token in re.findall(r'image_(\d+)', imgs):
+        img_body = images.get(img_token, '')
+        anchor = re.search(r'frame_anchor:\*\*\s*([^\s\(]+)', img_body)
+        if not anchor:
+            print(f'v604.1 WARN: Image {img_token} morphology declared but frame_anchor missing')
+            continue
+        anchor_str = anchor.group(1).strip().rstrip('s')
+        annot = re.search(r'frame_anchor:\*\*[^\(]*\(([^\)]+)\)', img_body)
+        if annot and re.search(r'\b(BEFORE|t=0|start[- ]state|pre-pour|pre-smash|pre-cascade|pre-stir|pre-action)\b', annot.group(1), re.I):
+            continue
+        print(f'v604.1 ADVISORY: Image {img_token} morphology declared for prop "{name.strip()}" (Delta Axis={axis}) — frame_anchor={anchor_str}s should annotate "(BEFORE-state anchor)" or include "t=0" / "pre-action" tag for clarity')
+print('v604.1 audit complete')
+```
+
+**Touched**: `code/template_reference.md` (this section). `code/decode_bundle.sh` + 3 generate bundles (V604 anchor discipline added to relevant blocks). `wiki/patterns/conventions.md` (v604.1 row). `CLAUDE.md` (quickref). `wiki/log.md` (timeline). **Migration**: pre-v604.1 artifacts with frame_anchor at t=end on morphology scenes — Veo renders static; can be retroactively fixed by editing frame_anchor + re-rendering. v604.1 prevents the same bug on future authoring.
+
+### v697.1 — TRANSFORMATIVE vs NON-TRANSFORMATIVE force-verb subclass tags (NEW 2026-05-17)
+
+**Composes with v697 8-class force-verb taxonomy.** v697 catalogs force-verbs (LIFT / SLAM / POUR / CASCADE / GRIP / PULL-APART / TILT / KNEAD / WHISK / DIP / STEP-FORWARD / GESTURE-FORWARD / POINT-TO-LENS / etc.) but doesn't distinguish verbs that ACT ON a prop with morphological consequence from verbs that don't. v697.1 adds two subclass tags so v718e + v718f + v738.2 gates can scope correctly.
+
+**TRANSFORMATIVE subclass** (verb acts ON a prop with EXPECTED morphological consequence — gate fires v718e + v718e-2 + v718f resolution check):
+
+```
+POUR / CASCADE / SPRAY / SLAM / SQUEEZE / DROP / SMASH / PIERCE / PEEL / SCRAPE /
+SCRUB / WIPE / TILT-POUR / STRAIN / DRAIN / DISSOLVE / SHATTER / CRACK / SPLIT /
+PULL-APART / KNEAD / WHISK / DIP / MASH / GRIND / PRESS / RUB / WASH / RINSE / SOAK /
+PINCH-DROP / LIFT-LADLE / POUR-STRAIN / COLOR-SHIFT / PEPPER-DISPERSE / REVEAL-CLEAN /
+WASH-AWAY / SCRUB-WIPE / WIPE-AWAY / MELT / BURN / IGNITE / EXPLODE / BURST / CRUMBLE /
+COLLAPSE / DEFLATE / INFLATE / STRETCH / COMPRESS / TWIST / WRING / FOLD
+```
+
+**NON-TRANSFORMATIVE subclass** (verb acts ON a prop WITHOUT morphological consequence — persona-on-camera authority gestures, static reveals, talking-head beats):
+
+```
+HOLD / HOLD-STEADY / HOLD-GLASS-ALOFT / LIFT-PRE / PRESENT / GESTURE-FORWARD /
+OPEN-PALM / POINT-TO-LENS / STEP-FORWARD / END-LOOK / END-HOLD / END-PRESENT /
+NOD / TILT-HEAD / TURN / FACE-LENS / GRIP-STEADY / WAVE / SIGNAL / RAISE-HAND /
+LOWER-HAND / CROSS-ARMS / OPEN-ARMS / GESTURE-TO-CAMERA / GESTURE-AWAY /
+ANGLE-FORWARD / ANGLE-BACK / LEAN-IN / LEAN-OUT
+```
+
+**Use cases**:
+- v718e gate: scopes to TRANSFORMATIVE only; doesn't false-positive on persona authority gestures.
+- v718f / v718e-2 Terminal Reveal gate: scopes to End beats whose action_arc contains ≥1 TRANSFORMATIVE verb.
+- v738.2 Section 8 audit: TRANSFORMATIVE column accepts only TRANSFORMATIVE-class verbs; NON-TRANSFORMATIVE column accepts only NON-TRANSFORMATIVE-class verbs.
+- CTA / talking-head / static authority scenes: action_arc uses NON-TRANSFORMATIVE only; both gates pass trivially.
+
+**Decision tree per action_arc**: for each verb in chain, check class. Mixed chains allowed (HOOK typically opens NON-TRANSFORMATIVE then escalates to TRANSFORMATIVE then resolves to NON-TRANSFORMATIVE per `HOLD-GLASS-ALOFT → POUR-DOWN → SCRUB-WIPE → WASH-AWAY → REVEAL-CLEAN` pattern). v738 Section 6 morphology declaration drives which subclass dominates the scene.
+
+**Migration**: pre-v697.1 force-verbs remain valid; v697.1 adds classification only. Bundle scripts include the classification table so authoring LLMs route correctly.
+
+### v718.1 — In-session VLM JSON exemption clarification (NEW 2026-05-17)
+
+**Composes with v595 LLM-agnostic Stage 4d provider catalog + v597 forensic_perception JSON mandate.**
+
+**Rule**: when Stage 4d provider = Claude in-session (v595 provider #1), the `forensic_perception` JSON file (`stage4d_vlm.json`) output is OPTIONAL. v738 Pre-Flight Checklist Section 6 (State-Delta Declaration per v738.1) + Section 8 (per-scene morphology audit per v738.2) substitute as the human-readable equivalent — same `intrinsic_state_isolation` field semantics, just rendered as markdown prose instead of JSON.
+
+**Rationale**: in-session VLM (Claude Code reading PNG frames via Read tool) writes the decoded markdown direct without an intermediate JSON file. Forcing JSON-then-markdown roundtrip adds friction (parse JSON → re-render to markdown → operator audits both) without benefit when human Pre-Flight Section 6 + Section 8 cover the same morphology declaration semantics. v738.1 + v738.2 provide the same machine-auditable structured fields (t=0 / t=end / Delta Axis / Magnitude / TRANSFORMATIVE verbs / Resolution tokens) in human-readable form.
+
+**JSON remains MANDATORY** for non-in-session providers (Gemini API / GPT-4o vision / LM Studio / Ollama vision / OpenRouter gateway / human-walk template) — those providers produce a JSON file as their primary output that downstream pipeline stages consume.
+
+**v738 STRICT REJECT CONDITIONS amendment** (clarifies prior `Stage 4d shot output missing forensic_perception JSON → REJECT`):
+
+```
+- Stage 4d shot output missing forensic_perception JSON → REJECT
+  CARVE-OUT (v718.1): when Stage 4d provider = Claude in-session, JSON
+  is OPTIONAL provided Pre-Flight Section 6 + Section 8 are present
+  and populated per v738.1 + v738.2. Pre-Flight + Section 8 serve as
+  human-readable equivalent of forensic_perception JSON for in-session
+  VLM provider.
+```
+
+**Touched**: `code/template_reference.md` (this section + v738 STRICT REJECT CONDITIONS list amended with v718.1 carve-out). `code/decode_bundle.sh` (V738 STRICT ENFORCEMENT block amended). `wiki/patterns/conventions.md` (v718.1 row). `CLAUDE.md` (quickref). `wiki/log.md` (timeline). **Migration zero required**.
+
+### v718g — `visual_delta_within_clip` formal Scene-block field (NEW 2026-05-17)
+
+**Composes with v580 cross-image state-evolution chain + v718d intrinsic state isolation.** Existing `visual_delta:` field lives on Image block and describes CROSS-IMAGE chain delta (Image K parent → Image K+1 child rendered by Banana 2). NEW field `- **visual_delta_within_clip:**` lives on Scene block and describes WITHIN-CLIP morphological transformation (BEFORE → ACTION → AFTER state-change inside one Veo render driven by the action_arc).
+
+**Why a new field**: v580's `visual_delta:` and the new `visual_delta_within_clip:` describe different phenomena:
+
+| Field | Scope | Renderer | Trigger |
+|---|---|---|---|
+| `visual_delta:` (Image block) | cross-image, Banana 2 binds prior image and renders new state as a static frame | Banana 2 | new Image inherits chained state from prior Image |
+| `visual_delta_within_clip:` (Scene block, NEW) | within-clip, Veo animates the transformation from Banana 2's first-frame across the clip duration | Veo | Scene's clip contains in-frame morphological transformation |
+
+**Required**: when v738 Section 6 declares `Delta Axis != NONE` AND `Carry Mode: within-clip | both` for this scene's hero prop, the Scene block MUST carry a `- **visual_delta_within_clip:**` field.
+**Optional**: when Delta Axis == NONE (static CTA / talking-head) — field omitted.
+
+**Field content discipline**:
+- Pair TRANSFORMATIVE force-verbs (v697.1) with morphological state-change descriptors (v718d 4-axis vocabulary).
+- Match v738 Section 6 t=0 + t=end declaration for THIS scene's hero prop.
+- Typical length: 1-3 sentences for single-axis transformation; longer for compound transformations.
+- Echoed in action_note's [Mid-clip beat] + [End beat] (v718e-1 Action-Consequence Coupling).
+- Echoed in Veo prompt body's "Across the X seconds" section.
+
+**Example field** (from corrected surfacing case Scene 1):
+```
+- **visual_delta_within_clip:** the oversized tongue prop on the viewer-left of the table TRANSFORMS from heavily-coated (thick dark grey-brown grime crust masking the surface, papillae buried under coating, pathology-tone dirty grey-brown) → CLEAN (bright vibrant pink mucosa, smooth papillae visible + uncovered, the grime previously coating the surface is WASHED AWAY by the poured golden ginger-turmeric tea and SCRUBBED OFF by the small wooden tongue-scraper, end-state surface is now hydrated clean pink with the dark grime visibly dissolved + drained off the tip edge).
+```
+
+**Disambiguation table**:
+
+| Scenario | visual_delta: | visual_delta_within_clip: |
+|---|---|---|
+| Recipe pot fills with ingredients across two chained images | YES (Image 2 → Image 3 chain) | YES on Scene 2 (within-Scene-2 clip animation if pour happens on-clip) |
+| HOOK shows persona pouring water on tongue prop (single shot, single image) | NO (no chain) | YES (within-clip animation of cleanse on Scene 1) |
+| CTA shows persona presenting book (no transformation) | NO | NO (omit field) |
+| Before/After in a single chained image where transformation completes off-camera | YES (cross-image chain) | NO (Scene shows resolved state, no on-clip animation) |
+
+**Pre-output mechanical gate (v718g)**:
+
+```python
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+sec6 = re.search(r'^### Section 6.*?(?=^### Section 7|\Z)', text, re.MULTILINE | re.DOTALL)
+if not sec6:
+    sys.exit(0)
+hero = re.findall(r'Hero Prop:\s*(.+?)\nImage\(s\):\s*(.+?)\nScene\(s\):\s*(.+?)\n.*?Delta Axis:\s*([A-Za-z/]+).*?Carry Mode:\s*(.+?)\n', sec6.group(0), re.DOTALL)
+scenes_needing_field = set()
+for name, imgs, scns, axis, mode in hero:
+    if axis.strip().lower() == 'none':
+        continue
+    if 'within-clip' not in mode.lower():
+        continue
+    for s in re.findall(r'scene_(\d+)', scns):
+        scenes_needing_field.add(s)
+scene_blocks = re.findall(r'^### Scene (\d+)\n(.*?)(?=^### Scene|\Z)', text, re.MULTILINE | re.DOTALL)
+fail_count = 0
+for n, body in scene_blocks:
+    if n in scenes_needing_field:
+        if not re.search(r'\*\*visual_delta_within_clip:\*\*', body):
+            print(f'v718g FAIL: Scene {n} declared Delta Axis != NONE + within-clip Carry Mode in Section 6 but lacks visual_delta_within_clip: field')
+            fail_count += 1
+if fail_count == 0:
+    print('v718g PASS')
+else:
+    sys.exit(1)
+```
+
+**Touched**: `code/template_reference.md` (this section). `code/template_new_format.md` (Scene block schema gains the optional `- **visual_delta_within_clip:**` field). `code/decode_bundle.sh` + 3 generate bundles (V718G instruction block referencing the new field). `wiki/patterns/conventions.md` (v718g row). `CLAUDE.md` (quickref). `wiki/log.md` (timeline). **Migration zero required**: pre-v718g artifacts without the field remain valid (Banana 2 + Veo still render; within-clip morphology just lives in action_note + Veo prompt body without the structured field anchor). New artifacts MUST satisfy v718g gate when Section 6 declares within-clip morphology.
+
+### v718h — Veo 3.1 I2V Temporal Consistency Override (NEW 2026-05-17, render-test validated)
+
+**Surfaced 2026-05-17** from operator render-test iterations on tongue-cleanse HOOK after v738.1 + v738.2 codified (see v738.1 surfacing case). v738.1 forced the author to declare t=0 + t=end side-by-side; v718e enforced action-consequence coupling in action_note prose; v718g required visual_delta_within_clip field. Despite all four gates passing, the rendered Veo clip still failed to show the morphological transformation — Veo rendered the oil pouring + splashing realistically but the 3D blisters + grey crust on the tongue persisted unchanged through clip-end. Multiple prompt rewrites (delta-only with WASH AWAY, then structural verbs DISSOLVE/MELT, then temporal forcing with IMMEDIATE ACTION) all failed to defeat the persistence. Only the "VFX Wipe Override" pattern (describing the catalyst's leading edge as a digital wipe that ERASES + REPLACES geometry pixel-for-pixel) successfully forced the transformation.
+
+**Root cause**: Veo 3.1 (like Sora / Runway Gen-3) is trained with a heavy penalty against shape-shifting in I2V mode. Its primary objective is temporal consistency — keeping the geometry of the start frame stable across the clip. When fed a start frame with 3D raised pathology (blisters / bumps / swollen volume / raised crust) AND a text prompt with surface-transformation verbs (WASH / DISSOLVE / MELT), Veo's attention budget splits:
+
+1. **Physics prior**: "Liquid is a fluid. It flows over solid 3D objects without deleting them."
+2. **Text prompt**: "Delete the solid 3D objects via WASH / DISSOLVE."
+
+The physics prior wins by default. Veo dedicates compute to rendering realistic fluid dynamics (the liquid splashing over the bumps) and silently ignores the morphological command (deleting the bumps) because deleting 3D geometry mid-shot violates its core temporal-consistency training.
+
+**v718h rule** — codifies the universal Veo 3.1 I2V protocol the operator validated through render-test. Applied to every Veo Final Prompt in artifacts where Section 6 Delta Axis != NONE.
+
+**5-step protocol**:
+
+```
+STEP 1 — Static camera lock + zero start-state description
+  Open Veo Final Prompt body with: "Static handheld camera, no camera
+  move, slight natural drift." Then SKIP describing what the persona
+  is wearing / room layout / prop identity — the start frame already
+  carries it. Words burn attention budget.
+
+STEP 2 — Temporal Forcing in first action sentence
+  Action block opens with one of:
+    "IMMEDIATE ACTION: Right from the first frame, ..."
+    "INSTANTLY, ..."
+    "Without hesitation, ..."
+  Without temporal forcing, Veo defaults to 1-2s hold on start frame
+  before initiating motion.
+
+STEP 3 — Action-Consequence Coupling (one paragraph)
+  Physical motion + visual result + replacement target chained in one
+  continuous paragraph. Pattern:
+    "The [agent] [TRANSFORMATIVE-verb] [object] downward. As [agent]
+     [catalyst-action], it [erases/replaces/transforms] the
+     [start-state geometry] on contact. The surface behind is
+     [REPLACED in real-time / TRANSFORMED into] [terminal-state
+     geometry]."
+
+STEP 4 — Axis-matched verb framing
+  Surface/Texture delta (coatings / serums / topical fading):
+    WASH / DISSOLVE / SCRUB / REVEAL — natural Veo priors.
+  Color/Illumination delta (color shifts / hue changes):
+    COLOR-SHIFT / TRANSFORMS-INTO / SATURATES / FLUSHES — natural.
+  Volume/Shape delta (deflation / shrinkage / draining):
+    REDUCES / DRAINS / SHRINKS / DEFLATES — verify start frame
+    doesn't already show end state per v604.1.
+  Structural Integrity delta (3D raised pathology / blisters / bumps
+    / swollen volume / solid swelling) — MUST ESCALATE to VFX WIPE
+    OVERRIDE:
+      "As the leading edge of the [catalyst] travels across the
+       [object], it acts as a digital VFX wipe — instantly ERASING
+       the 3D geometry of the [start-state feature] on contact. The
+       surface behind the [catalyst] line is REPLACED in real-time
+       with [terminal-state geometry]."
+    Surface verbs (WASH / DISSOLVE) fail on 3D structural pathology
+    because Veo's physics prior treats raised geometry as solid
+    objects. VFX framing invokes Veo's video-editing prior which DOES
+    allow real-time geometry replacement.
+
+STEP 5 — Terminal State Lock + Temporal Negatives
+  Action block closes with:
+    "TERMINAL STATE: By clip-end, [explicit description of final
+     physical + morphological state — name every feature that must be
+     gone and every feature that must be present]."
+  Negative prompt MUST include:
+    Temporal negatives: "no delay in action, no hesitation, no
+      holding the start frame, no shape-shifting lag"
+    Start-state pixel negatives: "no [start-state texture] remaining
+      at clip-end, no [start-state color] surviving the [catalyst],
+      no partial transformation"
+    Structural negatives (Structural delta only): "no 3D [feature]
+      remaining at clip-end, no [feature] surviving the wipe, no
+      [feature] persisting, no fluid flowing over the [feature]"
+    Standard Veo hygiene: "no montage, no cutaways, no scene cuts,
+      no flashbacks, no cinematic transitions, no burnt-in text,
+      no captions, no on-screen titles, no face distortion, no
+      morphing, no warping, no duplicate limbs, no extra fingers,
+      no inconsistent lighting, no composite split-screen layouts,
+      no disembodied hands"
+```
+
+**Worked example (the surfacing case, tongue-cleanse HOOK — PASSED on render after this prompt)**:
+
+```
+Start frame: Image 1
+
+Text prompt:
+
+Static handheld camera, no camera move, slight natural drift.
+
+IMMEDIATE ACTION: Right from the first frame, the main character
+tilts the glass and POURS the golden oil downward in a continuous
+stream. As the leading edge of the liquid travels down the tongue
+from base to tip, it acts as a digital VFX wipe — instantly ERASING
+the 3D geometry of the raised blisters, grey crust, and yellow film
+on contact. The surface behind the liquid line is REPLACED in
+real-time with smooth, flat, glistening pink mucosa.
+
+TERMINAL STATE: By clip-end, the entire dorsal surface of the tongue
+is uniformly smooth and flat pink — every blister, bump, crust, and
+yellow patch completely erased, replaced by clean healthy tissue,
+glistening with residual oil sheen.
+
+The main character says in a serious, authoritative voice,
+"you shouldn't drink this too often because people will think you've
+been drinking perfume."
+
+Ambient: Rustic apothecary tone, soft fluid trickle of oil splashing
+onto a textured surface, deep quiet.
+(no subtitles, no captions)
+
+Negative prompt:
+
+no delay in action, no hesitation, no holding the start frame, no
+fluid flowing over the bumps, no 3D blisters remaining at clip-end,
+no grey crust surviving the wipe, no rough texture in the terminal
+state, no yellow film remaining, no partial transformation, no
+shape-shifting lag, no liquid pooling without consequence, no
+montage, no cutaways, no scene cuts, no flashbacks, no emotional
+escalation, no cinematic transitions, no burnt-in text, no captions,
+no on-screen titles, no face distortion, no morphing, no warping, no
+duplicate limbs, no extra fingers, no inconsistent lighting, no
+composite split-screen layouts, no disembodied hands.
+```
+
+**Pre-output mechanical gate (v718h, mandatory before Veo render)**:
+
+```python
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+sec6 = re.search(r'^### Section 6.*?(?=^### Section 7|\Z)', text, re.MULTILINE | re.DOTALL)
+if not sec6:
+    sys.exit(0)
+hero = re.findall(r'Hero Prop:\s*(.+?)\nImage\(s\):\s*(.+?)\nScene\(s\):\s*(.+?)\n.*?Delta Axis:\s*([A-Za-z/]+).*?Carry Mode:\s*(.+?)\n', sec6.group(0), re.DOTALL)
+scenes_needing_v718h = {}
+for name, imgs, scns, axis, mode in hero:
+    axis_clean = axis.strip()
+    if axis_clean.lower() == 'none':
+        continue
+    if 'within-clip' not in mode.lower():
+        continue
+    for s in re.findall(r'scene_(\d+)', scns):
+        scenes_needing_v718h[s] = axis_clean
+veo_prompts = re.findall(r'^### Scene (\d+)[^\n]*\n```(.*?)```', text, re.MULTILINE | re.DOTALL)
+fail_count = 0
+for n, prompt_body in veo_prompts:
+    if n not in scenes_needing_v718h:
+        continue
+    axis = scenes_needing_v718h[n]
+    if not re.search(r'\b(IMMEDIATE ACTION|Right from the first frame|INSTANTLY|Without hesitation)\b', prompt_body, re.I):
+        print(f'v718h FAIL Scene {n}: Step 2 Temporal Forcing missing — opener must be "IMMEDIATE ACTION: Right from the first frame" / "INSTANTLY" / "Without hesitation"')
+        fail_count += 1
+    if not re.search(r'\bTERMINAL STATE\b', prompt_body):
+        print(f'v718h FAIL Scene {n}: Step 5 Terminal State Lock missing — closing block must declare "TERMINAL STATE: ..." with explicit final-frame visual target')
+        fail_count += 1
+    neg_match = re.search(r'Negative prompt:(.*)', prompt_body, re.DOTALL | re.I)
+    if not neg_match:
+        print(f'v718h FAIL Scene {n}: Negative prompt section missing')
+        fail_count += 1
+    else:
+        neg = neg_match.group(1)
+        if not re.search(r'no (delay in action|hesitation|holding the start frame|shape-shifting lag)', neg, re.I):
+            print(f'v718h FAIL Scene {n}: temporal negatives missing — must include "no delay in action / no hesitation / no holding the start frame / no shape-shifting lag"')
+            fail_count += 1
+        if not re.search(r'no .{1,30} remaining at clip-end', neg, re.I) and not re.search(r'no .{1,30} surviving the', neg, re.I):
+            print(f'v718h FAIL Scene {n}: start-state pixel negatives missing — must explicitly ban start-state features from surviving (e.g. "no grey crust surviving the wipe" / "no yellow film remaining at clip-end")')
+            fail_count += 1
+    if axis.lower().startswith('structural'):
+        if not re.search(r'\b(digital VFX wipe|VFX wipe|acts as a wipe|ERASING the (3D )?geometry|REPLACED in real-time)\b', prompt_body, re.I):
+            print(f'v718h FAIL Scene {n}: Structural Integrity delta declared but VFX Wipe Override pattern missing — surface verbs alone (WASH / DISSOLVE) fail on 3D pathology; must use "digital VFX wipe" + "ERASING the 3D geometry" + "REPLACED in real-time"')
+            fail_count += 1
+if fail_count == 0:
+    print('v718h PASS')
+else:
+    sys.exit(1)
+```
+
+**Composition with existing rules**:
+- v738.1 Section 6 declares the morphology + axis; v718h drives how the Veo prompt body must encode it.
+- v718e Action-Consequence Coupling lives in action_note prose; v718h is the parallel discipline applied to the Veo Final Prompt body. Both must match.
+- v718g visual_delta_within_clip field carries the structured field; v718h is the runtime-prompt instantiation.
+- v604.1 frame_anchor at t=0 (BEFORE state) is precondition — if Banana 2 renders the AFTER state because frame_anchor pointed at t=end, no v718h prompt can recover (Veo cannot animate backward).
+- v697.1 TRANSFORMATIVE vs NON-TRANSFORMATIVE subclass — v718h only fires on TRANSFORMATIVE-class action_arc.
+
+**Carve-outs**:
+- Delta Axis == NONE (static CTA / talking-head) → v718h N/A. Standard Veo prompt without VFX Wipe.
+- Non-Veo render targets (Sora / Runway / Kling) — pattern likely transfers (similar I2V temporal-consistency priors observed in literature) but not empirically validated; mark `<!-- v718h pattern not yet validated on non-Veo target -->` if porting.
+- Decode-side `raw/decoded_*.md` — describes source-as-observed, NOT Veo prompts. v718h fires only on generate-side `videos/*.md` Veo Final Prompts.
+
+**Touched**: `code/template_reference.md` (this section). `code/lift_bundle.sh` + `code/innovate_bundle.sh` + `code/create_bundle.sh` (V718H section after V718E in TASKEOF heredoc). `code/decode_bundle.sh` (informational reference — decoder doesn't author Veo prompts but should observe transformation arcs that match the protocol so lift-side authoring is feasible). `wiki/patterns/conventions.md` (v718h row + Latest live authoring rule bumped to v718h). `CLAUDE.md` (quickref). `wiki/log.md` (timeline + worked rejected vs passed render evidence). **Migration zero required** for pre-v718h artifacts. New Veo Final Prompts MUST satisfy v718h gate when Section 6 declares within-clip morphology.
+
+**Verification mandatory before claiming v718h correctly applied**: re-render the surfacing case (tongue HOOK) with the validated VFX Wipe Override prompt; confirm Veo output shows the 3D blisters + grey crust visibly ERASING + REPLACING with smooth pink across the clip, NOT just oil flowing over the surface; confirm v718h Python gate PASSES on the Veo Final Prompt body.
+
+### v718h-B + v580.2 + v718i — Multi-Clip Blend Architecture + paired-image authoring + end_frame_image field (NEW 2026-05-17, render-test surfaced operator-validated)
+
+**Failure surfaced 2026-05-17** (sequel to v718h Option A — VFX Wipe Override). After v718h-A shipped, operator validated VFX Wipe Override on tongue HOOK render-test. Pattern worked but operator noted that for ULTIMATE bulletproof consistency across structural-axis transformations, a different architecture is preferable: instead of fighting Veo's physics engine in one 8-second clip, **author TWO Banana 2 images (t=0 BEFORE + t=end AFTER) and chain them via the platform's `clip_mode: blend` editor-blend mechanism**. Veo gets one clip per Image (each rendering a static state with continuing catalyst motion), and CapCut blends the seam between them. End result: morphological transformation is visually anchored by TWO real generated images, not by Veo's text-to-pixel guesswork.
+
+**Architectural insight**: this matches v589 Half B (B1) — the most reliable way to force Veo to change a physical structure is to give it the exact ending image and let the platform interpolate. v718h-A relied on text-only steering through Veo's physics prior (fragile on structural axes); v718h-B anchors the transformation in actual Banana 2 renders at both endpoints (robust on every axis).
+
+**v718h split into Options A/B/C with explicit decision tree**:
+
+```
+Per scene with v738 Section 6 Delta Axis != NONE, choose Carry Mode + render path:
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Delta Axis             │ Recommended Option │ Carry Mode                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Surface/Texture        │ A (single-clip)    │ within-clip                │
+│ Color/Illumination     │ A (single-clip)    │ within-clip                │
+│ Volume/Shape           │ B (multi-clip-blend) [default] OR C │ multi-clip-blend │
+│ Structural Integrity   │ B (multi-clip-blend) [default] OR C │ multi-clip-blend │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Option A — Single-Clip Veo with VFX Wipe Override (v718h-A, see v718h section)
+  - One Banana 2 Image at t=0 (BEFORE state)
+  - One Veo clip with full text-prompt protocol (Steps 1-5 per v718h)
+  - For Surface/Color axes: surface verbs (WASH/DISSOLVE) work natively
+  - For Structural/Volume axes: ESCALATE to VFX Wipe ("digital VFX wipe — ERASING the 3D geometry — REPLACED in real-time with [terminal geometry]")
+  - Carry Mode: within-clip
+  - Pros: single Banana 2 image cost, single Veo render cost, no CapCut blend seam
+  - Cons: structural axes fight Veo's physics prior; render success rate ~60-70% even with VFX Wipe Override; multiple retries common; failure mode = bumps persist, pour visible but no morph
+
+Option B — Multi-Clip Blend Architecture (v718h-B, RECOMMENDED for Structural/Volume)
+  - TWO Banana 2 Images:
+      Image K  = t=0 BEFORE state (per v580 + v604.1 + v586.1/v717.1)
+      Image K+1 = t=end AFTER state (chained from Image K via v580; visual_delta declares the morphological delta; frame_anchor at t=end)
+  - TWO sequential Veo clips bound to one source scene:
+      Scene N    = image: image_K,  clip_mode: fresh, transition: blend, target_duration_s: ≈ source_clip_duration / 2 (e.g. 4s for an 8s source)
+      Scene N+1  = image: image_K+1, clip_mode: blend, transition: cut, target_duration_s: ≈ source_clip_duration / 2
+  - Each Veo clip is internally "static" (catalyst action visible but morphology held to the anchor Image's state)
+  - CapCut crossfades the seam between clip N and clip N+1 (1-second blend window per clip_mode: blend semantic)
+  - Viewer perceives smooth morphological transition because the two anchor states are real Banana 2 renders, not Veo's morphological guesses
+  - Carry Mode: multi-clip-blend
+  - Pros: ROBUST on every axis; render success rate ~95%+; morphological anchors are real Banana 2 renders; predictable visual outcome
+  - Cons: 2× Banana 2 image cost (+1 image); 2× Veo render cost (+1 clip); ~1s of crossfade in the middle (may be visible as a soft blend); scene-count inflation (renumber downstream scenes)
+
+Option C — Veo Native End-Frame Interpolation (v718h-C, deferred until v718i parser support lands)
+  - TWO Banana 2 Images (same as Option B)
+  - ONE Veo clip with both images bound:
+      Scene N = image: image_K, end_frame_image: image_K+1, target_duration_s: source_clip_duration (full 8s)
+      Platform passes start_frame=image_K + end_frame=image_K+1 to Veo as cfg.image + cfg.last_frame
+      Veo natively interpolates between them across the clip
+  - Carry Mode: within-clip-end-frame
+  - Pros: single Veo render cost (vs Option B's 2); native Veo interpolation = no CapCut seam; smoother on structural axes than Option A
+  - Cons: requires v718i parser support for end_frame_image: field (deferred to follow-up commit); platform veo_generator.py already supports cfg.last_frame at line 2605 (the runtime piece exists); parser doesn't currently extract the field per scene
+  - Status: DEFERRED — once v718i ships, Option C becomes the default for Structural/Volume axes (replacing Option B as recommended); for now use Option B
+```
+
+### v580.2 — Paired-image authoring discipline for Structural/Volume morphology
+
+When v738 Section 6 declares Delta Axis ∈ {Structural Integrity, Volume/Shape} for a hero prop, the decoder / lift author / innovator / creator MUST:
+
+1. **Author Image K (t=0 BEFORE state)** per existing rules:
+   - `reference_image:` none (or chained from prior scene if cross-scene context)
+   - `frame_anchor:` t=0 of the within-clip transformation (per v604.1) + annotation `(BEFORE-state anchor — paired with image_K+1 for v718h-B/C)`
+   - `visual_delta:` n/a (BEFORE-state HOOK base) OR descriptive cross-scene delta if chained
+   - Body prose describes the prop at t=0 peak severity (per v586.1 / v717.1)
+
+2. **Author Image K+1 (t=end AFTER state)** chained from Image K:
+   - `reference_image: image_K`
+   - `frame_anchor:` t=end of the within-clip transformation + annotation `(AFTER-state anchor — paired end frame for v718h-B/C, chained from image_K BEFORE state)`
+   - `visual_delta:` MUST explicitly name the morphological transformation from t=0 → t=end, pairing TRANSFORMATIVE force-verb (v697.1) with morphological consequence (v718d 4-axis vocabulary). Pattern: `"the [hero prop] previously [t=0 state] is now [t=end state] — the [feature] has been [TRANSFORMATIVE-verb] AWAY/CLEAN/INTO [terminal-state geometry], catalyst continues [ongoing action]"`
+   - Body prose describes the prop at t=end RESOLVED state with the catalyst action still visible (catalyst doesn't disappear between clip A and clip B; it continues through the blend)
+
+3. **Author Scene N + Scene N+1 (Multi-Clip Blend pair)** per v718h-B Option B template:
+   - Scene N: `image: image_K`, `clip_mode: fresh`, `transition: blend`, `target_duration_s: ≈ source_clip_duration / 2`
+   - Scene N+1: `image: image_K+1`, `clip_mode: blend`, `transition: cut`, `target_duration_s: ≈ source_clip_duration / 2`
+   - Lines split across the pair (Scene N opens the dialogue, Scene N+1 lands the payoff word/phrase) OR placed entirely on Scene N+1 with Scene N silent (operator's discretion based on source pacing)
+   - action_arc + visual_delta_within_clip + action_note describe the FULL transformation across both clips (each scene's content references the catalyst + morphological-state evolution)
+
+4. **Renumber downstream scenes** to accommodate the inserted scene: every scene with index > N gets `scene_index + 1`. Same for Image references in Storyboard, action_notes, and Veo Final Prompts. Pre-output gate scans for orphan references.
+
+**Worked example (the surfacing case — tongue HOOK)**:
+
+Pre-v580.2 (single-image, Option A only):
+- Image 1: oversized coated tongue (BEFORE state)
+- Scene 1: image_1, 8s, action_arc HOLD-GLASS-ALOFT → POUR-DOWN → SCRUB-WIPE → WASH-AWAY → REVEAL-CLEAN
+- Veo render: ~60-70% success rate; failure mode = oil pours but blisters persist
+
+Post-v580.2 (paired-image, Option B):
+- Image 1: oversized coated tongue at t=0 (BEFORE state — thick dark grey-brown grime crust, papillae buried, fissure groove packed, frame_anchor 0.6s "BEFORE-state anchor — paired with image_2 for v718h-B")
+- Image 2: oversized clean tongue at t=end (AFTER state — bright vibrant pink mucosa, papillae smooth + uncovered, grime washed away + scrubbed off, oil sheen on surface, reference_image: image_1, visual_delta: "the tongue surface previously coated in thick dark grey-brown grime is now bright clean pink — the grime has been WASHED AWAY by the poured golden tea and SCRUBBED OFF by the wooden tongue-scraper, oil continues to drip from the glass held aloft", frame_anchor 5.9s "AFTER-state anchor — paired end frame for v718h-B, chained from image_1 BEFORE state")
+- Scene 1: image_1, clip_mode: fresh, transition: blend, target_duration_s: 4, action_arc HOLD-GLASS-ALOFT → POUR-DOWN, action_note covers beats 0-4s (oil pour begins + first scrub strokes, blisters still mostly visible)
+- Scene 2: image_2, clip_mode: blend, transition: cut, target_duration_s: 4, action_arc SCRUB-WIPE → WASH-AWAY → REVEAL-CLEAN, action_note covers beats 4-8s (scrub finishes + grime fully washed away + clean pink reveal)
+- Veo render: ~95% success rate; both clips render reliably to their anchor Image; CapCut blends seam at 4s mark
+
+### v738.1 amendment — Section 6 Carry Mode enum extension
+
+Original v738.1 spec declared three Carry Mode values: `within-clip` / `cross-image` / `both`. Extended to:
+
+```
+Carry Mode: <within-clip | within-clip-end-frame | multi-clip-blend | cross-image | both>
+
+  - within-clip            — single Veo clip + single Banana 2 Image; Veo's text-prompt protocol drives the morphology (v718h-A Option A). Recommended for Surface/Texture + Color/Illumination axes.
+  - within-clip-end-frame  — single Veo clip + two Banana 2 Images (t=0 + t=end); platform passes both to Veo via cfg.image + cfg.last_frame for native interpolation (v718h-C Option C). Requires v718i end_frame_image: field parser support (deferred).
+  - multi-clip-blend       — two sequential Veo clips + two Banana 2 Images; clip A renders Image K (t=0 anchor) + clip B renders Image K+1 (t=end anchor); CapCut crossfades seam via clip_mode: blend (v718h-B Option B). RECOMMENDED for Structural Integrity + Volume/Shape axes. Uses existing platform features (no parser changes needed).
+  - cross-image            — multi-scene v580 chain where morphology unfolds across N scenes (recipe progression / Day-N transformation / multi-stage process). Each scene's Image inherits from prior + declares its own delta. Independent from v718h Options.
+  - both                   — composite: within-clip OR multi-clip-blend at scene level PLUS cross-image chain across scenes.
+
+HARD GATE (enum):
+  - Delta Axis ∈ {Structural Integrity, Volume/Shape} AND Carry Mode == within-clip → REJECT unless explicit annotation "(v718h-A VFX Wipe Override escape hatch acknowledged; structural axis on single-clip carries elevated render-failure risk)"
+  - Delta Axis ∈ {Surface/Texture, Color/Illumination} AND Carry Mode == multi-clip-blend → ALLOWED but flagged ADVISORY ("surface/color axes typically don't require Option B; single-clip Veo handles them; verify operator intent")
+  - Carry Mode == within-clip-end-frame → REJECT until v718i parser support lands (deferred-feature gate)
+```
+
+### v604.1 amendment — paired-image frame_anchor annotation discipline
+
+When v738 Section 6 declares `Carry Mode: multi-clip-blend` (Option B) OR `within-clip-end-frame` (Option C deferred), BOTH Images authored per v580.2 MUST carry `frame_anchor` annotations:
+
+- Image K: `- **frame_anchor:** <t=0 timestamp>s (BEFORE-state anchor — paired with image_K+1 for v718h-B/C)`
+- Image K+1: `- **frame_anchor:** <t=end timestamp>s (AFTER-state anchor — paired end frame for v718h-B/C, chained from image_K BEFORE state)`
+
+Annotation discipline allows operator + downstream lift author to immediately see the paired Image relationship without parsing Section 6 morphology block separately.
+
+### v718i — `end_frame_image:` formal Scene-block field (NEW 2026-05-17, DEFERRED parser support)
+
+**Status: DEFERRED to follow-up commit.** Rule is codified here; parser support + DB schema + Veo generator hook are pending implementation.
+
+**Rule**: NEW optional Scene-block field `- **end_frame_image:** image_K+1` allows a single Scene to explicitly bind to TWO Images (start = the scene's `image:` field; end = the `end_frame_image:` field). When present, the platform passes start_frame=image to Veo as `cfg.image` AND end_frame=end_frame_image to Veo as `cfg.last_frame` for native frame interpolation across the clip.
+
+**Platform changes required** (DEFERRED):
+1. `code/image_platform.py:_parse_scene_blocks_new()` — extract `end_frame_image:` bullet, store as scene dict key `end_frame_image_index: Optional[int]`. Validate image_K+1 exists in `known_image_indexes`.
+2. `code/models.py` Clip schema — add column `end_frame_image_node_id: Optional[int]` referencing ImageNode.id. Add DB migration for SQLite + PostgreSQL.
+3. `code/main.py` clip creation logic — when scene has end_frame_image_index, look up corresponding ImageNode.id and set Clip.end_frame_image_node_id.
+4. `code/veo_generator.py` — when clip has end_frame_image_node_id set, override sequential end-frame auto-inference and use the explicit image's rendered output_filename as end_frame for cfg.last_frame.
+
+**Why useful**: Option B (Multi-Clip Blend) produces 2 Veo renders per morphology. Option C (v718i + Veo native interpolation) produces 1 Veo render per morphology with the same visual outcome (smooth start → end interpolation). Halves Veo render cost on structural-axis HOOKs once parser support ships.
+
+**Until v718i parser support ships**: authors use Option B Multi-Clip Blend (works with existing platform features) OR Option A VFX Wipe Override (single-clip with text-prompt steering, lower success rate on structural axes).
+
+### Pre-output mechanical gates (v718h-B, v580.2)
+
+```python
+# v718h-B / v580.2 paired-image authoring gate
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+sec6 = re.search(r'^### Section 6.*?(?=^### Section 7|\Z)', text, re.MULTILINE | re.DOTALL)
+if not sec6:
+    sys.exit(0)
+hero = re.findall(r'Hero Prop:\s*(.+?)\nImage\(s\):\s*(.+?)\nScene\(s\):\s*(.+?)\n.*?Delta Axis:\s*([A-Za-z/]+).*?Carry Mode:\s*(.+?)\n', sec6.group(0), re.DOTALL)
+images = dict(re.findall(r'^### Image (\d+)\n(.*?)(?=^### Image|\Z)', text, re.MULTILINE | re.DOTALL))
+scene_blocks = dict(re.findall(r'^### Scene (\d+)\n(.*?)(?=^### Scene|\Z)', text, re.MULTILINE | re.DOTALL))
+fail_count = 0
+for name, imgs, scns, axis, mode in hero:
+    axis_clean = axis.strip()
+    mode_clean = mode.strip().lower()
+    if axis_clean.lower() in ('structural', 'structural integrity', 'volume', 'volume/shape'):
+        # Should be multi-clip-blend (Option B) — verify paired Images + paired Scenes
+        if 'multi-clip-blend' not in mode_clean and 'within-clip-end-frame' not in mode_clean:
+            print(f'v718h-B FAIL: prop "{name.strip()}" has Delta Axis={axis_clean} but Carry Mode={mode_clean} — recommend multi-clip-blend (Option B) or within-clip-end-frame (Option C, deferred). Use v718h-A as escape hatch only with explicit acknowledgement.')
+            fail_count += 1
+        img_indices = sorted(int(i) for i in re.findall(r'image_(\d+)', imgs))
+        scn_indices = sorted(int(s) for s in re.findall(r'scene_(\d+)', scns))
+        if 'multi-clip-blend' in mode_clean:
+            if len(img_indices) < 2:
+                print(f'v580.2 FAIL: prop "{name.strip()}" Carry Mode=multi-clip-blend declared but only {len(img_indices)} Image(s) in Image(s) field — must author paired image_K (t=0 BEFORE) + image_K+1 (t=end AFTER)')
+                fail_count += 1
+            if len(scn_indices) < 2:
+                print(f'v718h-B FAIL: prop "{name.strip()}" Carry Mode=multi-clip-blend declared but only {len(scn_indices)} Scene(s) in Scene(s) field — must author paired scene_N (image_K) + scene_N+1 (image_K+1)')
+                fail_count += 1
+            if len(img_indices) >= 2:
+                k, k1 = img_indices[0], img_indices[1]
+                img_k1_body = images.get(str(k1), '')
+                if not re.search(rf'reference_image:\*\*\s*image_{k}\b', img_k1_body):
+                    print(f'v580.2 FAIL: Image {k1} should chain from Image {k} via reference_image: image_{k} but the binding is missing or incorrect')
+                    fail_count += 1
+                if not re.search(r'AFTER[- ]state anchor', img_k1_body):
+                    print(f'v604.1 FAIL: Image {k1} frame_anchor missing "(AFTER-state anchor — paired end frame for v718h-B/C, chained from image_{k} BEFORE state)" annotation')
+                    fail_count += 1
+            if len(scn_indices) >= 2:
+                n, n1 = scn_indices[0], scn_indices[1]
+                scn_n_body = scene_blocks.get(str(n), '')
+                scn_n1_body = scene_blocks.get(str(n1), '')
+                if not re.search(r'clip_mode:\*\*\s*fresh', scn_n_body):
+                    print(f'v718h-B FAIL: Scene {n} should declare clip_mode: fresh (first half of paired-blend pattern)')
+                    fail_count += 1
+                if not re.search(r'transition:\*\*\s*blend', scn_n_body):
+                    print(f'v718h-B FAIL: Scene {n} should declare transition: blend (blends INTO Scene {n1})')
+                    fail_count += 1
+                if not re.search(r'clip_mode:\*\*\s*blend', scn_n1_body):
+                    print(f'v718h-B FAIL: Scene {n1} should declare clip_mode: blend (second half of paired-blend pattern)')
+                    fail_count += 1
+if fail_count == 0:
+    print('v718h-B / v580.2 / v604.1 paired-image gate PASS')
+else:
+    sys.exit(1)
+```
+
+### Composition with existing rules
+
+- v580 (cross-image state-evolution chain) — v580.2 is the paired-image SPECIALIZATION for within-scene Structural/Volume morphology; v580 covers multi-scene chains.
+- v604.1 (frame_anchor at t=0) — extended in v580.2 to require paired BEFORE + AFTER anchors with explicit annotation.
+- v738.1 (Pre-Flight Section 6) — Carry Mode enum extended with `multi-clip-blend` + `within-clip-end-frame` per this amendment.
+- v738.2 (Pre-Flight Section 8) — table rows now reference paired Scenes for multi-clip-blend Carry Mode (Scene N + Scene N+1 share Delta Axis declaration; both rows present in audit table).
+- v697.1 (TRANSFORMATIVE force-verb subclass) — Scene N + Scene N+1 jointly carry the action_arc chain (Scene N opens with TRANSFORMATIVE verbs leading into the morph; Scene N+1 carries verbs through the resolution).
+- v718d (4-axis morphological-delta diagnostic) — Decision tree drives Option A/B/C selection.
+- v718e (action-consequence coupling) — applies to action_note in BOTH Scene N + Scene N+1; v718e-2 Terminal State rule lands in Scene N+1's End beat (AFTER state visible).
+- v718g (visual_delta_within_clip Scene-block field) — present on BOTH Scene N + Scene N+1 for multi-clip-blend; each carries the segment of transformation that happens in its half of the source clip duration.
+- v718h-A (current VFX Wipe Override single-clip) — escape hatch when paired-image authoring overhead is unacceptable OR cost-sensitive renders.
+
+**Touched**: `code/template_reference.md` (this section appended; v718h section retains Option A spec; v738.1 / v604.1 amendments cross-referenced). `code/decode_bundle.sh` + `code/lift_bundle.sh` + `code/innovate_bundle.sh` + `code/create_bundle.sh` (Section 10a v718h decision tree updated with A/B/C options + Section 6 Carry Mode enum extension + v580.2 paired-image authoring guide). `wiki/patterns/conventions.md` (3 new rows: v718h-B amendment + v580.2 + v718i deferred). `CLAUDE.md` (v718h quickref amended with A/B/C decision tree + v580.2 mention). `wiki/log.md` (timeline entry). `raw/decoded_follow_me_health_remedies_tongue_ginger_turmeric.md` (re-authored with paired Image 2 + Scene 1 split into Scene 1 + Scene 2 demonstrating v718h-B Option B). Migration zero required for pre-v718h-B artifacts (existing single-clip Option A artifacts remain valid; new structural-axis artifacts MUST use Option B unless escape-hatch acknowledged).
+
+**Verification mandatory before claiming v718h-B + v580.2 correctly applied**: re-author tongue HOOK with paired Image 1 (coated BEFORE) + Image 2 (clean AFTER) + Scene 1 (image_1, fresh, blend transition, 4s) + Scene 2 (image_2, blend, cut transition, 4s); render both via Banana 2; render both clips via Veo; confirm clip 1 + clip 2 individually render predictably (no need for VFX Wipe steering in Veo prompt since transformation anchors are real Banana 2 renders); export + confirm CapCut blends seam at 4s mark into smooth morphological transition; confirm v718h-B / v580.2 / v604.1 Python gates PASS. Will not claim correctly applied until evidence per CLAUDE.md hard rule.
+
+### v738.1 amendment + v586.1 amendment + v717.1 amendment + v738.3 NEW — Normalization-bias-during-generation countermeasures (NEW 2026-05-18)
+
+**Failure surfaced 2026-05-18** from Gemini's own diagnosis on tongue-cleansing decode regeneration: even though the LLM correctly mapped out the gross t=0 state in the ## Pre-Flight Checklist Section 6 at the top of the file, by the time generation reached the `### Image 1` block several hundred tokens later, the LLM's base training (strongly biased toward "safe / clean / aesthetic" descriptions) overrode the planning-phase instructions. Pre-Flight Section 6 declared `t=0: heavily coated tongue surface — thick dark grey-brown grime crust ...`; the actual `### Image 1` body's `[Subject — Symptom]` block then sanitized to `An anatomical tongue model with some discoloration` — Gemini paraphrased the gross prose into clinical language during the prose-generation phase, dropping the visceral severity that Pre-Flight had locked in.
+
+**Root cause**: planning ≠ executing. The rules exist (v586.1 / v717.1 / v736c) but the prompt structure fails to force LLM attention onto them at the exact moment of generation. The LLM treats Pre-Flight Section 6 declaration + `### Image N` body authoring as two separate creative tasks, allowing it to re-invent (and sanitize) the symptom in the Image block. Token proximity matters more than instruction count — rule read in line 10 of bundle prompt does not survive into line 850 of artifact output. RLHF-trained safety priors win by default during prose generation unless explicitly suppressed.
+
+**Four coordinated structural fixes** to bridge the planning-execution gap:
+
+#### Fix 1 — v738.1 amendment: Literal Copy-Paste Mandate (Pre-Flight Section 6 closing instruction)
+
+Append to v738.1 Section 6 spec at the end of the per-prop block format:
+
+```
+LITERAL COPY-PASTE MANDATE (v738.1 amendment 2026-05-18):
+When writing the [Subject — Symptom (t=0 PEAK SEVERITY)] block for an Image, you MUST literally copy-paste the exact phrasing you generated for the t=0 (Start State) field in Pre-Flight Section 6. Do not paraphrase. Do not clean it up. Do not "improve" the prose. Do not add clinical hedges. Inject it verbatim into the Image block body prose.
+
+The Pre-Flight declaration IS the locked-in description for the Image body. The Image body extends the Pre-Flight phrasing with surrounding context (composition + host + action + location + style + tech + negatives) but the [Subject — Symptom (t=0 PEAK SEVERITY)] core MUST match the Pre-Flight t=0 declaration word-for-word for the first N tokens of the block.
+
+Why: LLM treats Pre-Flight Section 6 + Image body as separate creative tasks. Literal copy-paste forces continuity. Banana 2's first-tokens-weighted-heaviest planner receives the locked Pre-Flight phrasing at the heaviest-attention position, not a sanitized paraphrase.
+```
+
+#### Fix 2 — v586.1 / v717.1 amendment: Just-In-Time Token Priming (block label change)
+
+Change the mandatory Image block label in `raw/decoded_*.md` + `videos/*.md` schema:
+
+```
+BEFORE (pre-2026-05-18):
+  [Subject — Symptom] <prose describing the prop>
+
+AFTER (2026-05-18 amendment):
+  [Subject — Symptom (t=0 PEAK SEVERITY)] <prose describing the prop>
+```
+
+**Why**: the bare label `[Subject — Symptom]` is too neutral — it doesn't prime the LLM's tokens for gross/extreme imagery. The amended label `[Subject — Symptom (t=0 PEAK SEVERITY)]` forces the LLM to TYPE the words "PEAK SEVERITY" immediately before describing the prop. This overrides the safety/normalization bias right at the boundary of prose generation — triggering tokens sit millimeters away from the actual prose-generation tokens, where RLHF safety priors are weakest.
+
+**Carve-out — AFTER-state images (v580.2 paired-image Multi-Clip Blend t=end anchor)**: when Image K+1 is the AFTER-state of a v718h-B paired pattern OR a v580 chained AFTER-state image (e.g. AFTER-product-application / AFTER-cleanse / AFTER-result), use:
+
+```
+[Subject — Symptom (t=end PEAK RESOLUTION)] <prose describing the resolved state at peak resolution>
+```
+
+Mirror of severity rule, composes with v714 emotional-payoff discipline. The resolved-state must be described at peak resolution (vibrant pink, smooth, glistening, fully clean) — not at neutral-baseline (just-okay, somewhat-improved). Same RLHF override semantics in reverse.
+
+**Static CTA / talking-head / non-symptom scenes** continue using legacy `[Subject — Host]` or `[Subject — Hero Prop]` block labels (v586.1 / v717.1 N/A — no morphology to prime).
+
+**Parser impact**: zero. Platform parser does NOT parse `[Subject — ...]` block labels (they live inside the fenced ``` Image prompt body``` and are LLM-attention-priming only, not field-anchored). All grep gates that previously matched `\[Subject — Symptom\]` must update to match `\[Subject — Symptom \(t=0 PEAK SEVERITY\)\]` and `\[Subject — Symptom \(t=end PEAK RESOLUTION\)\]` variants.
+
+**Updated v586.1 / v717.1 Python gate**:
+
+```python
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+images = re.findall(r'^### Image (\d+)\n(.*?)(?=^### Image|\Z)', text, re.MULTILINE | re.DOTALL)
+sec6 = re.search(r'^### Section 6.*?(?=^### Section 7|\Z)', text, re.MULTILINE | re.DOTALL)
+if not sec6:
+    sys.exit(0)
+hero = re.findall(r'Hero Prop:\s*(.+?)\n.*?Delta Axis:\s*([A-Za-z/]+)', sec6.group(0), re.DOTALL)
+hero_with_delta = {name.strip(): axis.strip() for name, axis in hero if axis.strip().lower() != 'none'}
+# v586.1/v717.1 (2026-05-18 amendment): block label must be primed with t=0 PEAK SEVERITY (or t=end PEAK RESOLUTION for AFTER-state images)
+PRIMED_OPENERS = re.compile(r'\[Subject — Symptom \((?:t=0 PEAK SEVERITY|t=end PEAK RESOLUTION)\)\]', re.IGNORECASE)
+BARE_OPENERS = re.compile(r'\[Subject — Symptom\](?! \()', re.IGNORECASE)
+fail_count = 0
+for img_n, body in images:
+    if PRIMED_OPENERS.search(body):
+        continue
+    if BARE_OPENERS.search(body):
+        print(f'v586.1/v717.1 FAIL: Image {img_n} uses bare [Subject — Symptom] label; must be amended to [Subject — Symptom (t=0 PEAK SEVERITY)] (BEFORE state) or [Subject — Symptom (t=end PEAK RESOLUTION)] (AFTER state) per 2026-05-18 amendment')
+        fail_count += 1
+if fail_count == 0:
+    print('v586.1/v717.1 amendment PASS')
+else:
+    sys.exit(1)
+```
+
+#### Fix 3 — v738.3 NEW: Anti-Sanitization Directive (bundle TASK preamble)
+
+NEW rule. Lives in the TASK heredoc preamble of all 4 bundle scripts (decode_bundle.sh + lift_bundle.sh + innovate_bundle.sh + create_bundle.sh) BEFORE any other instructions. Explicitly grants RLHF-override permission for visceral content authoring.
+
+**v738.3 rule text** (verbatim, inject into bundle TASK preamble at the very top):
+
+```
+================================================================================
+V738.3 — ANTI-SANITIZATION DIRECTIVE (NEW 2026-05-18, RLHF-OVERRIDE PERMISSION)
+================================================================================
+
+WARNING: As an AI, your default behavior is to sanitize gross, messy, or
+uncomfortable textures into clean, sterile, clinical descriptions.
+
+YOU MUST SUPPRESS THIS INSTINCT.
+
+For HOOK props in this artifact (per v736c Uncomfortable Texture Mandate),
+you have EXPLICIT PERMISSION and a STRICT MANDATE to generate visceral,
+gross, oozing, crusted, dripping, fibrous, gelatinous, slimy, and
+uncomfortable imagery.
+
+If a prop is dirty, describe the dirt.
+If it is gross, describe the grossness.
+If it is coated, describe the coating layer thickness + color + texture.
+If it is bloated, describe the bloat magnitude.
+If it is fissured, describe the fissure depth + width.
+If it is crusted, describe the crust composition + visual character.
+
+Sterile / clean / clinical / aesthetic / safe / neutral / generic / Platonic
+descriptions of HOOK props KILL THE SCROLL-STOP and collapse the v598 power
+test (Q7 audience-resonance + Q8 shame-proxy hook).
+
+This permission applies to:
+- Image prompt body prose (the [Subject — Symptom (t=0 PEAK SEVERITY)] block
+  per v586.1 / v717.1 amendment)
+- Pre-Flight Section 6 t=0 (Start State) declaration per v738.1
+- Pre-Flight Section 6 v736c Texture Check declaration per v738.1 amendment
+- visual_delta_within_clip field per v718g (when describing BEFORE state)
+- Veo Final Prompt body (when describing the BEFORE state held throughout
+  the clip and the morphological transformation per v718h-A/B/C)
+
+This permission does NOT apply to:
+- Persona descriptions (v553.1 / v609 / v610 / v722 govern — persona
+  identity carried by upload; minimal inline description, no wardrobe
+  describing)
+- v702 RELAXED clinical vocabulary boundaries (sexual-action verbs + Class
+  1/2 still banned; clinical anatomical names allowed; visceral textures
+  on anatomical props ALLOWED per this rule + v736c)
+- CTA / talking-head / static-authority scenes (Delta Axis NONE — no
+  symptom morphology to depict, NON-TRANSFORMATIVE force-verbs only)
+
+Decode-side (raw/decoded_*.md): grants permission to capture source-faithful
+visceral observation without sanitizing. Decoder DOES NOT generate; decoded
+prose is read by humans + downstream lift LLMs. Sanitization-reflex bleed
+from generate-side rules into decode-side observation is the most common
+decoder failure mode (per v738 Section 5 hardening 2026-05-15).
+
+Generate-side (videos/*.md): grants permission to author visceral HOOK
+imagery aggressively in Image prompt bodies. Banana 2 + Veo can render
+visceral content within RAI boundaries when prompted with explicit
+permission + textural specificity. v702 RELAXED + Pattern 22 vintage
+anatomical wax register + v718h-B Multi-Clip Blend paired-image
+architecture all stack to deliver bulletproof structural / volume / surface
+morphology with full visceral payoff.
+
+Suppress RLHF default. Author visceral. Ship the scroll-stop.
+================================================================================
+```
+
+#### Fix 4 — v738.1 amendment: v736c Texture Check field (Section 6 per-prop block)
+
+Append to v738.1 Section 6 per-prop block format:
+
+```
+For EVERY hero prop appearing in this artifact's Image blocks, declare:
+
+  Hero Prop: <prop name verbatim as it appears in Ingredients table>
+  Image(s): <comma-separated image_N tokens this prop appears in>
+  Scene(s): <comma-separated scene_N tokens this prop's transformation spans>
+  t=0 (Start State): <explicit texture / color / volume / structural integrity at frame_anchor — NOT generic prop identity, MUST describe the BEFORE state>
+  v736c Texture Check (NEW 2026-05-18, v738.1 amendment): <MUST name an uncomfortable texture class from the v736c catalog: oozing / bursting / sticky / fibrous / gelatinous / dripping / foamy / slimy / fleshy / pulpy / viscous / soaked / stretchy / gloppy / grimy / coated / crusted / encrusted / hyperemic / edematous / inflamed / pendulous / drooping / sagging / bloated / pustular / blistered / scaly / weeping / suppurating / atrophied — pick the closest match to the prop's BEFORE state; this primes Banana 2 + Veo with explicit textural target>
+  t=end (Terminal State): <explicit texture / color / volume / structural integrity at end of scene's clip — MUST describe the AFTER state>
+  Delta Axis: <Surface/Texture | Structural Integrity | Volume/Shape | Color/Illumination | NONE>
+  Carry Mode: <within-clip | within-clip-end-frame | multi-clip-blend | cross-image | both>
+  Magnitude: <COMPLETE | PARTIAL | MINIMAL | NONE> per v589
+```
+
+**Carve-out for NONE-axis props (CTA / static reveal)**: when Delta Axis == NONE, `v736c Texture Check:` may be `n/a (static prop, no morphology)`. Texture priming N/A on static authority beats.
+
+**Why**: v738.1 Section 6 already forces 4-axis morphological declaration but the existing schema doesn't explicitly force the LLM to evaluate the visceral discomfort of the texture. v736c Uncomfortable Texture Mandate (originally from v736 spectacle-over-logic umbrella) was rule-level guidance only — never structurally enforced at Pre-Flight time. New `v736c Texture Check:` field forces the LLM to commit to an explicit texture-class label BEFORE generating prose. Once the label is committed in Pre-Flight, the Literal Copy-Paste Mandate (Fix 1) carries it into the Image body. Once the block label `[Subject — Symptom (t=0 PEAK SEVERITY)]` (Fix 2) primes the prose-generation tokens at the boundary, the Anti-Sanitization Directive (Fix 3) grants RLHF-override permission. All 4 fixes stack to defeat the normalization-during-generation failure mode.
+
+**Updated v738.1 Python gate** (extended to check v736c Texture Check field):
+
+```python
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+sec6 = re.search(r'^### Section 6 — Morphological Delta Declaration.*?(?=^### Section 7|\Z)', text, re.MULTILINE | re.DOTALL)
+if not sec6:
+    print('v738.1 FAIL: Section 6 missing')
+    sys.exit(1)
+body = sec6.group(0)
+hero_blocks = re.findall(r'\*\*Hero Prop \d+:.*?(?=\*\*Hero Prop \d+:|\Z)', body, re.DOTALL)
+if not hero_blocks:
+    print('v738.1 FAIL: Section 6 has no Hero Prop blocks')
+    sys.exit(1)
+TEXTURE_CLASSES = re.compile(r'\b(oozing|bursting|sticky|fibrous|gelatinous|dripping|foamy|slimy|fleshy|pulpy|viscous|soaked|stretchy|gloppy|grimy|coated|crusted|encrusted|hyperemic|edematous|inflamed|pendulous|drooping|sagging|bloated|pustular|blistered|scaly|weeping|suppurating|atrophied|n/a)\b', re.I)
+fail_count = 0
+for i, blk in enumerate(hero_blocks, 1):
+    axis_m = re.search(r'\*\*Delta Axis:\*\*\s*([A-Za-z/]+)', blk)
+    if not axis_m:
+        print(f'v738.1 FAIL: Hero Prop block {i} missing Delta Axis')
+        fail_count += 1
+        continue
+    axis_val = axis_m.group(1).strip()
+    texture_m = re.search(r'v736c Texture Check[^:]*:\*\*?\s*(.+?)(?=\n\s*-|\n\s*\*\*|\Z)', blk, re.DOTALL)
+    if not texture_m:
+        print(f'v738.1 FAIL: Hero Prop block {i} missing v736c Texture Check field (2026-05-18 amendment)')
+        fail_count += 1
+        continue
+    texture_val = texture_m.group(1).strip()[:200]
+    if axis_val.lower() == 'none':
+        # Texture Check may be "n/a (static prop, no morphology)"
+        continue
+    if not TEXTURE_CLASSES.search(texture_val):
+        print(f'v738.1 FAIL: Hero Prop block {i} v736c Texture Check value "{texture_val[:60]}" does not name a v736c uncomfortable-texture class (oozing/bursting/sticky/fibrous/gelatinous/grimy/coated/crusted/etc.)')
+        fail_count += 1
+if fail_count == 0:
+    print('v738.1 amendment (v736c Texture Check) PASS')
+else:
+    sys.exit(1)
+```
+
+### Composition with existing rules
+
+- v738.1 Section 6 — extended with v736c Texture Check field + Literal Copy-Paste Mandate
+- v586.1 + v717.1 — extended with [Subject — Symptom (t=0 PEAK SEVERITY)] block label + AFTER-state PEAK RESOLUTION variant
+- v738.3 — NEW rule, bundle TASK preamble Anti-Sanitization Directive
+- v736 / v736c (Uncomfortable Texture Mandate) — v738.1 Texture Check field is the structural-enforcement layer; v736c was advisory-only pre-2026-05-18
+- v738 STRICT REJECT GATE — extended to include v738.1 amendment + v586.1/v717.1 amendment + v738.3 in the 4-stage chain (now 7-stage chain)
+- v553.1 / v609 / v610 / v722 — persona discipline unchanged (v738.3 explicitly excludes persona from anti-sanitization permission)
+- v702 RELAXED clinical-register — sexual-action verbs + Class 1/2 still banned; visceral textures on anatomical props ALLOWED per v738.3 + v736c
+- v580.2 + v604.1 + v718h-B — paired-image Multi-Clip Blend stacks with all 4 fixes (v738.3 grants permission for BOTH paired Images' BEFORE-state authoring)
+- v718g visual_delta_within_clip — when describing BEFORE state, v738.3 grants permission for visceral authoring
+
+### Migration
+
+- Pre-2026-05-18 artifacts using bare `[Subject — Symptom]` block label remain valid (parser doesn't touch the label; Banana 2 + Veo still render); v586.1/v717.1 grep gate flags them as needing amendment
+- Pre-2026-05-18 Section 6 blocks without `v736c Texture Check:` field remain valid (v738.1 gate flags them); decoder/author may add field on next-touch
+- Pre-2026-05-18 bundle scripts without v738.3 Anti-Sanitization Directive preamble are still functional but produce sanitized output more often; bundle scripts amended this commit forward
+- Tongue decoded artifact (`raw/decoded_follow_me_health_remedies_tongue_ginger_turmeric.md`) re-amended this commit to demonstrate all 4 fixes
+
+### Verification mandatory before claiming amendments correctly applied
+
+1. Re-author tongue HOOK decoded artifact with:
+   - Pre-Flight Section 6 per-prop blocks each carry `v736c Texture Check:` field with explicit texture class
+   - Image 1 + Image 2 body prose uses `[Subject — Symptom (t=0 PEAK SEVERITY)]` (Image 1) and `[Subject — Symptom (t=end PEAK RESOLUTION)]` (Image 2) labels
+   - Image body t=0 prose literally matches Pre-Flight Section 6 t=0 declaration phrasing (Literal Copy-Paste verified)
+2. Re-run all bundle scripts (decode + lift + innovate + create) on test input
+   - Confirm V738.3 Anti-Sanitization Directive preamble fires at top of TASK heredoc
+   - Confirm output artifacts use amended block labels + carry v736c Texture Check fields
+3. Run v738.1 + v586.1/v717.1 Python gates on amended artifact, expect PASS
+4. Render-test Banana 2 + Veo via lift workflow; confirm Image renders visceral (not sanitized) + Veo clip carries morphology through
+
+Full deep-dive at `code/template_reference.md` §"v738.1 amendment + v586.1 amendment + v717.1 amendment + v738.3 NEW — Normalization-bias-during-generation countermeasures (NEW 2026-05-18)".
+
+**Touched**: `code/template_reference.md` (this section appended); `code/decode_bundle.sh` + `code/lift_bundle.sh` + `code/innovate_bundle.sh` + `code/create_bundle.sh` (V738.3 Anti-Sanitization Directive preamble inserted at TASK heredoc top + Section 6 schema amended with v736c Texture Check field + Literal Copy-Paste Mandate text added); `raw/decoded_follow_me_health_remedies_tongue_ginger_turmeric.md` (Section 6 amended with v736c Texture Check field per prop + Image body block labels updated to PEAK SEVERITY / PEAK RESOLUTION variants); `wiki/patterns/conventions.md` (v738.3 new row + amended v738.1 + v586.1 + v717.1 row pointers + Latest live note); `CLAUDE.md` (combined amendment quickref entry); `wiki/log.md` (timeline entry). **Migration zero required** for pre-2026-05-18 artifacts. New artifacts from this commit forward MUST satisfy all 4 amended gates.
+
+
+### v718i + v718h-C status change: DEFERRED → LIVE (2026-05-18)
+
+**Platform code shipped 2026-05-18** — v718i parser + DB + clip-creation + worker end-frame override all wired. v718h-C Option C (Veo native end-frame interpolation single-clip) is now LIVE + RECOMMENDED default for Structural/Volume morphological deltas (replacing v718h-B Multi-Clip Blend as the recommended default). v718h-B retained as fallback when single-clip Veo render budget is unavailable.
+
+**Files touched (5 platform files)**:
+
+1. `code/image_platform.py`:
+   - DB migrations (SQLite + PostgreSQL): added `clips.end_frame_image_node_id` + `image_scene_assignments.end_frame_image_node_id` columns (mirror voiceover_anchor_image_node_id pattern)
+   - `ImageSceneAssignment` schema: new column `end_frame_image_node_id` ForeignKey ImageNode.id
+   - `ImageSceneAssignment.to_dict()`: returns `end_frame_image_node_id`
+   - `_parse_scene_blocks_new()`: extracts `- **end_frame_image:** image_K+1` bullet, validates against `known_image_indexes`, rejects same-frame (start == end), stores as `end_frame_image: int` in scene dict
+   - Assignment-construction site: resolves scene's `end_frame_image` (markdown int) → ImageNode.id, binds to `assignment.end_frame_image_node_id`
+   - `prepare_batch_for_video`: resolves end_frame_node_id → local_index, propagates as `end_frame_image_node_id` + `end_frame_image_local_index` into scene_assignments_payload
+   - `referenced_image_node_ids` upload-set: end-frame image added so Banana 2 renders it + worker uploads it
+
+2. `code/models.py`:
+   - `Clip` schema: new column `end_frame_image_node_id` ForeignKey ImageNode.id
+
+3. `code/main.py`:
+   - `DialogueLineInput` Pydantic model: new fields `end_frame_image_node_id` + `end_frame_image_local_index`
+   - `ClipResponse` Pydantic model: new field `end_frame_image_node_id`
+   - Clip creation site: extracts `end_frame_image_node_id_val` from line dict, binds to `Clip.end_frame_image_node_id`
+   - Two response-construction sites: propagate `end_frame_image_node_id` to ClipResponse
+
+4. `code/worker.py`:
+   - `clip_info` dict construction: extracts `explicit_end_frame_local_index` from `line_data.end_frame_image_local_index`
+   - End-frame determination logic: explicit override BEFORE single_image_mode check — when set, `actual_end_idx = explicit_end_idx` + `use_end_frame = True`; bypasses sequential next-scene auto-inference
+   - Diagnostic log: `[Worker/v718i] Clip {i}: explicit end-frame override (Option C native interpolation) → image_local_index={explicit_end_idx}`
+
+5. `code/veo_generator.py`:
+   - **NO changes needed.** Runtime support for `cfg.last_frame` already exists at line 2605 (pre-v718i). v718i merely exposes the explicit binding through the parser → DB → worker chain so veo_generator gets the right end_frame argument.
+
+**v718h Decision Tree (UPDATED 2026-05-18 LIVE)**:
+
+| Delta Axis | Recommended Option | Carry Mode |
+|---|---|---|
+| Surface/Texture | Option A (single-clip) | within-clip |
+| Color/Illumination | Option A (single-clip) | within-clip |
+| Volume/Shape | **Option C (NEW DEFAULT)** OR Option B (fallback) OR Option A (escape hatch) | within-clip-end-frame |
+| Structural Integrity | **Option C (NEW DEFAULT)** OR Option B (fallback) OR Option A (escape hatch) | within-clip-end-frame |
+
+**OPTION C — Veo Native End-Frame Interpolation (v718h-C + v718i, LIVE 2026-05-18, RECOMMENDED)**:
+- TWO Banana 2 Images per v580.2 (Image K t=0 BEFORE + Image K+1 t=end AFTER chained via v580)
+- SINGLE Veo clip + SINGLE text prompt
+- Scene block: `image: image_K` + `end_frame_image: image_K+1` + `target_duration_s: <full_clip_duration>`
+- Platform binds image_K → cfg.image + image_K+1 → cfg.last_frame
+- Veo natively interpolates start → end across the full clip duration
+- Carry Mode: `within-clip-end-frame`
+- Pros: SINGLE Veo render cost (vs Option B's 2); native interpolation smoother than CapCut blend seam; predictable visual outcome on Structural/Volume axes
+- Cons: requires both Image K + Image K+1 authored (matches Option B); slight risk Veo's interpolation deviates from intended action_note semantics (mitigated by text-prompt steering — IMMEDIATE ACTION + TERMINAL STATE + temporal negatives per v718h-A protocol)
+
+**OPTION B — Multi-Clip Blend (v718h-B + v580.2, LIVE 2026-05-17, FALLBACK)**:
+- TWO Banana 2 Images (same as Option C)
+- TWO Veo clips (clip A from image_K + clip B from image_K+1) + CapCut blend seam at clip_mode: blend on second scene
+- Carry Mode: `multi-clip-blend`
+- Use when: single-clip Veo render budget unavailable OR Option C interpolation produces undesired visual outcome (rare on structural axes)
+
+**OPTION A — VFX Wipe Override (v718h-A, single-clip text-prompt steering, ESCAPE HATCH)**:
+- SINGLE Banana 2 Image (image_K only)
+- SINGLE Veo clip with VFX Wipe Override prompt protocol (5-step per v718h)
+- Carry Mode: `within-clip`
+- Use when: Surface/Texture + Color/Illumination axes (Veo handles natively); Volume/Shape with explicit escape-hatch acknowledgement; single-image cost-sensitive renders
+
+**v738.1 Section 6 Carry Mode enum HARD GATE (UPDATED 2026-05-18)**:
+- Delta Axis ∈ {Structural Integrity, Volume/Shape} AND Carry Mode == `within-clip` → REJECT unless explicit `(v718h-A VFX Wipe Override escape hatch acknowledged)` annotation
+- Delta Axis ∈ {Structural Integrity, Volume/Shape} AND Carry Mode == `within-clip-end-frame` → ALLOWED + RECOMMENDED (v718h-C Option C, default)
+- Carry Mode == `within-clip-end-frame` REJECT-until-v718i-ships gate LIFTED — v718i shipped 2026-05-18, this Carry Mode is now LIVE
+
+**Worked example (tongue HOOK POST-v718i Option C re-authoring)**:
+
+```
+### Scene 1
+- **image:** image_1
+- **end_frame_image:** image_2          # NEW v718i field — binds Veo cfg.last_frame
+- **target_duration_s:** 8
+- **clip_mode:** fresh
+- **transition:** cut
+- **speaker:** the main character on-camera
+- **line:** you shouldn't drink this too often because people will think you've been drinking perfume.
+- **action_arc:** HOLD-GLASS-ALOFT → POUR-DOWN → SCRUB-WIPE → WASH-AWAY → REVEAL-CLEAN → END-LOOK
+- **visual_delta_within_clip:** ... (full 8s cleanse arc; Veo natively interpolates image_1 → image_2)
+- **action_note:** [Start beat 0-2s] HOLD-GLASS-ALOFT ... [Mid-clip 2-5s] POUR-DOWN + SCRUB-WIPE ... [End beat 5-8s] WASH-AWAY → REVEAL-CLEAN → END-LOOK. Veo natively interpolates image_1 (BEFORE) → image_2 (AFTER) across the 8 seconds via cfg.last_frame.
+```
+
+Storyboard scene count drops from 6 (Option B paired pattern) → 5 (Option C single-scene). Image count stays at 6 (Image 2 still authored — Banana 2 renders it as end_frame anchor; just no own Scene). Veo render count drops from 6 → 5 clips per video. Cost savings: -1 Veo render per Multi-Clip Blend HOOK (~$0.30-$0.50 saved per video).
+
+**Migration**:
+- Pre-v718i artifacts using v718h-B Option B Multi-Clip Blend pattern remain valid (Veo still renders both clips + CapCut blends seam); no break.
+- New artifacts SHOULD use Option C (v718h-C) when Structural/Volume axis morphology is needed; Option B remains for backward-compat OR when single-clip Veo render budget unavailable.
+- Pre-v718i `videos/*.md` artifacts authored with `end_frame_image:` field would have been silently ignored by parser (no binding). Now (2026-05-18+) the field is fully respected; re-import + re-render via platform if needed.
+
+**Verification mandatory before claiming v718i correctly applied**:
+1. Re-import tongue artifact `raw/decoded_follow_me_health_remedies_tongue_ginger_turmeric.md` via platform's "import scene table" / "create batch" flow
+2. Confirm DB row `image_scene_assignments` for Scene 1 has `end_frame_image_node_id` populated (non-NULL)
+3. Promote batch to video; confirm `clips.end_frame_image_node_id` populated on Clip row for Scene 1
+4. Render Clip 1; confirm Veo render uses both `cfg.image` (image_1) + `cfg.last_frame` (image_2) — check worker log for `[Worker/v718i] Clip 0: explicit end-frame override (Option C native interpolation) → image_local_index=N`
+5. Confirm rendered clip shows full cleanse arc (coated tongue → clean pink across 8s) WITHOUT any CapCut blend seam — single continuous morphological transformation via Veo native interpolation
+
+
+### v750 + v751 — Veo Final Prompts section structural format + Veo↔Image semantic consistency (NEW 2026-05-18)
+
+**Surfaced 2026-05-18** from operator review of Gemini's pasted Scene 5 CTA Veo prompt example. Two distinct findings:
+
+**Finding 1 (v750, GOOD structure to codify)**: Gemini's Clip 5.1 example surfaced a cleaner Veo prompt format than the current artifact convention:
+- `### Clip N.M — Scene N, Line M (REGISTER_LABEL)` header (vs current `### Scene N — descriptive`) — disambiguates multi-line scenes (Scene N with K lines emits Clip N.1 + Clip N.2 + ... + Clip N.K)
+- Bolded markdown field labels (`**Start frame:** Image K` + `**Text prompt:**` + `**Negative prompt:**`) — maps 1:1 to Veo I2V API params (cfg.image / prompt / negative_prompt)
+- Negative prompt as separate markdown block (vs crammed into fenced text-prompt's last paragraph) — preserves API field separation
+
+**Finding 2 (operator correction)**: Gemini's example ALSO surfaced a violation of the implicit beats-in-Veo-prompts ban. Gemini's Scene 5 text prompt used `[Start beat 0-2s] LIFTS ... [Mid-clip beat 2-5s] PRESENTS ... [End beat 5-7s] POINT-TO-LENS ...` notation — but v718h-A Step 3 mandates **CONTINUOUS PROSE paragraph (IMMEDIATE ACTION + TERMINAL STATE structure)**, not beat-bracketed format. Beat structure lives in **Storyboard action_note ONLY**; Veo text prompt translates beats into continuous prose with IMMEDIATE ACTION + TERMINAL STATE anchors.
+
+**Why this matters**: Veo 3.1 I2V renderer reads the prompt as a continuous instruction. Beat-bracket notation (`[Start beat 0-2s] X. [Mid-clip beat 2-5s] Y.`) injects metadata that Veo parses as part of the text, potentially confusing the temporal interpretation OR getting rendered as on-screen text. Continuous prose with IMMEDIATE ACTION + TERMINAL STATE explicit anchors (per v718h-A) maps cleanly to Veo's expected input shape: physics prior + text prior + terminal-state anchor + start/end frame interpolation.
+
+**Finding 3 (v751, semantic drift class)**: Gemini's Scene 5 CTA prompt described "PRESENTS the open pages to the camera, his free index finger tracing the botanical illustrations" — but Image 6 in the tongue artifact described a CLOSED book held with cover squared to the lens. Veo would get confused: start_frame shows closed cover but text prompt expects open-pages presentation. Same failure class as v738.3 normalization-bias but at Veo-prompt-vs-Image-body boundary instead of Pre-Flight-vs-Image-body boundary. Need explicit semantic-consistency rule.
+
+---
+
+### v750 NEW — Veo Final Prompts section structural format
+
+**Per-clip structure** (replaces current `### Scene N — descriptive` + single fenced code block convention):
+
+```markdown
+### Clip N.M — Scene N, Line M (REGISTER_LABEL)
+**Start frame:** Image K
+**End frame:** Image K+1                  (REQUIRED when Scene declares `end_frame_image:` per v718h-C Option C)
+**Text prompt:**
+<camera lock opener>
+
+IMMEDIATE ACTION: <continuous prose paragraph per v718h-A Step 3 — physical motion + visual result + replacement target chained in one continuous paragraph; NO beat brackets>
+
+TERMINAL STATE: <explicit description of final physical + morphological state — name every feature that must be gone and every feature that must be present per v718h-A Step 5>
+
+The main character says in a <register> voice, "<verbatim dialogue line, lowercase per v693>".
+
+Ambient: <ambient sound description per Veo 3.1 audio path>.
+(no subtitles, no captions)
+
+**Negative prompt:**
+<negatives, comma-separated single paragraph>
+```
+
+**Header convention `### Clip N.M — Scene N, Line M (REGISTER_LABEL)`**:
+- `N` = Scene index from Storyboard
+- `M` = Line index within Scene (1-based; single-line scenes always `.1`)
+- `REGISTER_LABEL` = brief beat-register tag (HOOK / EXPLAIN / CTA / RECIPE-STEP-N / etc.) for operator readability
+- Multi-line scenes (Scene K with 3 lines) emit Clip K.1 + Clip K.2 + Clip K.3 as separate Veo render entries
+- Single-line scenes emit single Clip N.1 entry (standard case)
+
+**Bolded field labels**:
+- `**Start frame:** Image K` — maps to Veo `cfg.image`
+- `**End frame:** Image K+1` — REQUIRED when Scene declares `- **end_frame_image:** image_K+1` per v718h-C Option C; maps to Veo `cfg.last_frame`; OMIT for single-image scenes (Options A / B with sequential auto-inference)
+- `**Text prompt:**` — followed by the prompt body (NOT a fenced code block — markdown paragraphs)
+- `**Negative prompt:**` — followed by negative paragraph (separate markdown block, NOT crammed into text prompt)
+
+**Text prompt body content discipline (HARD BAN — operator correction 2026-05-18)**:
+- **NO `[Start beat 0-Xs]` / `[Mid-clip beat X-Ys]` / `[End beat Y-Zs]` brackets in Veo text prompt body.** Beat structure lives ONLY in Storyboard scene's `- **action_note:**` field.
+- Veo text prompt body uses CONTINUOUS PROSE per v718h-A Step 3 with explicit `IMMEDIATE ACTION:` and `TERMINAL STATE:` anchor paragraphs per v718h-A Steps 2 + 5.
+- Force-verbs (v697.1 TRANSFORMATIVE / NON-TRANSFORMATIVE) appear inline within the continuous prose (capitalized) WITHOUT bracket prefixes.
+
+**Format mapping (Storyboard action_note → Veo text prompt)**:
+
+| Storyboard action_note (beats allowed) | Veo text prompt body (continuous prose, NO beats) |
+|---|---|
+| `[Start beat 0-2s] HOLD-GLASS-ALOFT — the main character grips the glass... [Mid-clip beat 2-5s] POUR-DOWN — TILTS the glass and POURS... [End beat 5-8s] REVEAL-CLEAN — the dark grime has been WASHED AWAY...` | `IMMEDIATE ACTION: Right from the first frame, the main character TILTS the glass and POURS the golden tea DOWN onto the coated tongue. The cascading oil sweeps across the dorsal surface, the dark grey-brown grime DISSOLVING and SLOUGHING OFF in dirty rivulets. His left hand picks up the wooden scraper and SCRUB-WIPES across the surface, lifting away the dissolved coating. TERMINAL STATE: By clip-end, the tongue prop is uniformly bright clean pink with smooth papillae visible, all 3D blisters flattened, oil sheen glistening across the surface.` |
+
+The Veo prompt distills the action_note beats into IMMEDIATE ACTION continuous prose (covering the entire transformation arc) + TERMINAL STATE anchor (locking the end-state for cfg.last_frame interpolation when Option C, or text-prompt steering when Option A).
+
+**Carve-outs**:
+- Multi-line scenes (Scene K with N>1 lines) — each line gets own Clip K.M entry with its own Start frame + Text prompt + Negative prompt block; share Scene K's image_K (unless intra-scene image switching authored, rare)
+- Static scenes (Delta Axis NONE per v738.1 — CTA / talking-head / authority reveal) — IMMEDIATE ACTION + TERMINAL STATE still required but describe the static beat (LIFT-PRE + PRESENT + GESTURE-FORWARD + END-LOOK) without morphological transformation; TERMINAL STATE describes the end-of-clip framing (book still squared to lens, mouth completing line, etc.)
+- v718h-C Option C scenes — `**End frame:**` field is REQUIRED; text prompt body MUST acknowledge the end-frame anchor explicitly (e.g. "Veo natively interpolates start_frame → end_frame across the X seconds via cfg.last_frame")
+
+**Pre-output mechanical gate (v750)**:
+
+```python
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+veo_section = re.search(r'^## Veo 3\.1 Final Prompts(.*?)(?=^## |\Z)', text, re.MULTILINE | re.DOTALL)
+if not veo_section:
+    sys.exit(0)
+veo_body = veo_section.group(1)
+clip_headers = re.findall(r'^### Clip (\d+)\.(\d+) — Scene \d+, Line \d+ \(([A-Z0-9_-]+)\)', veo_body, re.MULTILINE)
+scene_headers = re.findall(r'^### Scene (\d+)\s*—', veo_body, re.MULTILINE)
+fail_count = 0
+if scene_headers and not clip_headers:
+    print(f'v750 FAIL: Veo Final Prompts section uses legacy `### Scene N — descriptive` headers; convert to `### Clip N.M — Scene N, Line M (REGISTER_LABEL)` format per v750')
+    fail_count += 1
+beat_brackets = re.findall(r'\[(?:Start|Mid-clip|End)\s+beat[^\]]*\]', veo_body)
+if beat_brackets:
+    print(f'v750 FAIL: Veo Final Prompts contain {len(beat_brackets)} beat-bracket notation(s) ([Start beat ...] / [Mid-clip beat ...] / [End beat ...]); beats are BANNED in Veo text prompt body per v718h-A Step 3 + v750 explicit ban. Move beats to Storyboard action_note ONLY; convert Veo prompt body to continuous IMMEDIATE ACTION + TERMINAL STATE prose per v718h-A.')
+    fail_count += 1
+for header in clip_headers:
+    n, m, label = header
+    clip_block_match = re.search(rf'^### Clip {n}\.{m}.*?(?=^### Clip|\Z)', veo_body, re.MULTILINE | re.DOTALL)
+    if not clip_block_match:
+        continue
+    block = clip_block_match.group(0)
+    if not re.search(r'\*\*Start frame:\*\*', block):
+        print(f'v750 FAIL: Clip {n}.{m} missing **Start frame:** field')
+        fail_count += 1
+    if not re.search(r'\*\*Text prompt:\*\*', block):
+        print(f'v750 FAIL: Clip {n}.{m} missing **Text prompt:** field')
+        fail_count += 1
+    if not re.search(r'\*\*Negative prompt:\*\*', block):
+        print(f'v750 FAIL: Clip {n}.{m} missing **Negative prompt:** separate block; do NOT cram negatives into the text prompt fenced body')
+        fail_count += 1
+if fail_count == 0:
+    print('v750 PASS')
+else:
+    sys.exit(1)
+```
+
+---
+
+### v751 NEW — Veo prompt ↔ Image body semantic consistency gate
+
+**Rule**: Veo text prompt body's action descriptions MUST be semantically consistent with start_frame Image's body prose at t=0 AND end_frame Image's body prose at t=end (when Option C set).
+
+**Banned drift class**: Veo text prompt introduces a state (open book / pour cascade / smashed prop) that NEITHER start_frame NOR end_frame Image describes → Veo gets confused, render either ignores the text-prompt action OR transforms mid-clip in unpredictable ways.
+
+**Operator's surfacing example** (Gemini Scene 5 CTA): Image 6 described "book held vertically, cover squared to the lens" (closed cover); Gemini's Veo prompt said "PRESENTS the open pages to the camera, his free index finger tracing the botanical illustrations" — Veo would either (a) render closed book ignoring text-prompt open-pages cue, or (b) animate book opening mid-clip with no end-frame anchor showing the open state, producing morphological drift. Same failure-mode family as v738.3 normalization-bias at the Pre-Flight-vs-Image-body boundary, but now at the Veo-prompt-vs-Image-body boundary.
+
+**Decision tree per scene**:
+
+```
+Veo text prompt describes action that changes Image's visual state?
+├─ NO → Veo prompt matches Image state throughout → PASS
+└─ YES → check transformation handling:
+    ├─ v718h-A single-clip: Image at start_frame must show t=0 state; text prompt
+    │   IMMEDIATE ACTION + TERMINAL STATE describe the transformation in prose;
+    │   VFX Wipe Override may apply (Structural axes) → PASS if action explicit
+    ├─ v718h-B multi-clip-blend: paired Images K + K+1 show both endpoints;
+    │   text prompt per clip describes its half of the transformation → PASS
+    └─ v718h-C single-clip + end_frame_image: paired Images K + K+1 show both
+        endpoints; SINGLE Veo clip with cfg.image + cfg.last_frame; text prompt
+        describes the full transformation arc → PASS
+```
+
+**HARD GATE — REJECT when**:
+- Text prompt introduces visual state X (open pages / spread out / dispersed / inflated / shattered) AND neither start_frame Image NOR end_frame Image body describes state X
+- v718h-A scene with text-prompt-only transformation (no paired Image) AND TERMINAL STATE prose doesn't anchor the end-state visually
+- v718h-C scene MISSING `**End frame:**` field in Clip header BUT Scene declares `end_frame_image:` field (header must reflect the binding)
+
+**Pre-output mechanical gate (v751, advisory — full semantic check requires LLM, regex-grep flags obvious drift)**:
+
+```python
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+# Extract Image bodies indexed by image_N
+images = dict(re.findall(r'^### Image (\d+)\n(.*?)(?=^### Image|\Z)', text, re.MULTILINE | re.DOTALL))
+# Extract Storyboard scenes
+scenes = re.findall(r'^### Scene (\d+)\n(.*?)(?=^### Scene|\Z)', text, re.MULTILINE | re.DOTALL)
+# Extract Veo clip entries
+veo_section = re.search(r'^## Veo 3\.1 Final Prompts(.*?)(?=^## |\Z)', text, re.MULTILINE | re.DOTALL)
+if not veo_section:
+    sys.exit(0)
+clips = re.findall(r'^### Clip (\d+)\.(\d+).*?\*\*Start frame:\*\*\s*Image (\d+).*?(?=^### Clip|\Z)', veo_section.group(1), re.MULTILINE | re.DOTALL)
+fail_count = 0
+for n, m, start_img_idx in clips:
+    clip_block_match = re.search(rf'^### Clip {n}\.{m}.*?(?=^### Clip|\Z)', veo_section.group(1), re.MULTILINE | re.DOTALL)
+    if not clip_block_match:
+        continue
+    clip_block = clip_block_match.group(0)
+    start_img_body = images.get(start_img_idx, '').lower()
+    end_img_match = re.search(r'\*\*End frame:\*\*\s*Image (\d+)', clip_block)
+    end_img_body = images.get(end_img_match.group(1), '').lower() if end_img_match else ''
+    text_prompt_match = re.search(r'\*\*Text prompt:\*\*(.*?)(?=\*\*Negative prompt:\*\*|\Z)', clip_block, re.DOTALL)
+    if not text_prompt_match:
+        continue
+    tp = text_prompt_match.group(1).lower()
+    HOT_STATE_TOKENS = re.compile(r'\b(open pages?|opened|inflated|deflated|shattered|exploded|dispersed|drained|melted|burst|empty pot|full pot|coated|clean|smooth pink|grime gone|crusted)\b')
+    tp_states = set(m.group(0) for m in HOT_STATE_TOKENS.finditer(tp))
+    img_states = set(m.group(0) for m in HOT_STATE_TOKENS.finditer(start_img_body)) | set(m.group(0) for m in HOT_STATE_TOKENS.finditer(end_img_body))
+    drift = tp_states - img_states
+    if drift:
+        print(f'v751 ADVISORY: Clip {n}.{m} text prompt introduces state(s) {sorted(drift)} NOT in start_frame Image {start_img_idx} body OR end_frame Image. Either (a) update Image body prose to describe the state, OR (b) use v718h-C end_frame_image binding to anchor the end-state visually, OR (c) acknowledge text-prompt-only transformation per v718h-A.')
+        fail_count += 1
+if fail_count == 0:
+    print('v751 PASS')
+```
+
+---
+
+### v718h-C amendment — `**End frame:**` field in Clip header (codifies v718h-C/v750 integration)
+
+When Scene declares `- **end_frame_image:** image_K+1` (v718h-C Option C native end-frame interpolation), the corresponding Clip header in Veo Final Prompts section MUST include `**End frame:** Image K+1` field directly under the `**Start frame:**` line. Makes the platform-level end-frame binding visible at the operator-readable prompt layer.
+
+Pre-output mechanical gate: when Scene declares `end_frame_image:` field, search the corresponding Clip block for `**End frame:** Image K+1` line; REJECT if missing.
+
+---
+
+### Composition with existing rules
+
+- **v718h-A** Step 3 (continuous-prose IMMEDIATE ACTION mandate) — v750 makes the no-beats-in-Veo-prompt ban EXPLICIT (was implicit in v718h-A pattern + worked example)
+- **v718h-B + v718h-C** (Multi-Clip Blend + Native End-Frame Interpolation) — v750 codifies the Clip N.M header convention for ALL three Options + adds `**End frame:**` field requirement for Option C
+- **v697.1 TRANSFORMATIVE/NON-TRANSFORMATIVE force-verbs** — Veo prompt body continuous prose carries verbs inline (CAPITALIZED) without bracket prefixes
+- **v738.1 + v738.3** (planning ≠ executing countermeasures) — v751 extends the same failure-mode-family rule to the Veo-prompt boundary (drift from Image body during Veo-prompt authoring)
+- **v644 pad: bullet** — pad text appended after Veo TTS line; v750 Text prompt body's dialogue paragraph includes pad if present
+- **v698A voiceover-paired scenes** — `**Audio twin start frame:**` field (alongside `**Start frame:**`) for audio_pair clip when scene is voiceover-paired (v698A platform render mechanism; deferred to follow-up amendment if not already in v750 header convention)
+- **v696 parser-abort gates** — v750 format compatible with parser regex `^### Scene\s+\d+\s*$` (Storyboard scenes use this; Veo Final Prompts section is separate operator/Veo-render section, parser doesn't bind on `### Clip` headers)
+
+### Migration
+
+- Pre-v750 artifacts using `### Scene N — descriptive` headers + single fenced code block format remain valid (parser doesn't bind on Veo Final Prompts headers); operator may convert on next-touch
+- Pre-v750 Veo prompts using `[Start beat]` / `[Mid-clip beat]` / `[End beat]` notation remain valid (Veo renders something) but render predictability lower; convert to continuous IMMEDIATE ACTION + TERMINAL STATE format per v718h-A on next-touch
+- v751 is ADVISORY gate — regex-based drift detection flags suspected cases; full semantic check requires LLM (e.g. Pre-Flight Section verification before commit)
+
+### Verification mandatory before claiming v750 + v751 correctly applied
+
+1. Audit `raw/decoded_*.md` Veo Final Prompts section for legacy `### Scene N` headers + beat-bracket notation; convert to `### Clip N.M (REGISTER)` + continuous-prose IMMEDIATE ACTION + TERMINAL STATE
+2. Run v750 Python gate, expect PASS (zero beat brackets in Veo section + all Clip blocks have Start/Text/Negative bolded fields)
+3. Run v751 advisory gate, address drift findings (update Image body prose OR convert to v718h-C end_frame_image binding OR acknowledge text-prompt-only per v718h-A)
+4. Re-render via Banana 2 + Veo through lift workflow; confirm Veo prompts render the intended morphological arc without confusion between text prompt + Image body states
+
+
+### v752 — Catalyst Reaction Pacing (NEW 2026-05-18, render-test validated on tongue HOOK Clip 1.1)
+
+**Surfaced 2026-05-18** from operator render-test on tongue HOOK Clip 1.1 (v718h-C Option C native end-frame interpolation). First render with v718h-C correctly anchored Image 1 (coated tongue BEFORE) + Image 2 (clean tongue AFTER) — but Veo interpolated the cleanse GRADUALLY across the full 8-second clip duration, producing a sluggish "slow dissolve" effect that lost the satisfying-spectacle scroll-stop payoff. Operator: "the action of the revealing of the healthy tongue takes too long to take place... it should be immediate reaction of the pouring."
+
+**Root cause**: Veo 3.1's native end-frame interpolation behavior defaults to LINEAR interpolation between start_frame and end_frame across the full clip duration. When a catalyst-on-prop transformation is intended (pour cleanses / strike shatters / spray fades), the correct visual semantics are INSTANT REACTION ON CONTACT — the transformation completes at the moment of catalyst contact, then the resolved state HOLDS through the remainder of the clip while persona delivers the dialogue line. Veo doesn't infer this intent from end_frame alone; without explicit temporal pacing instructions in the text prompt, Veo smears the morphology across the full clip duration.
+
+**Failure-mode generalization** — applies across ALL catalyst-on-prop transformations regardless of niche:
+
+| Niche | Catalyst | Prop | Veo default (BAD) | Intended pacing (v752) |
+|---|---|---|---|---|
+| Oral health | POUR golden tea | Coated tongue | Gradual 8s cleanse | Instant on contact (~2.5s) + 5.5s held |
+| Food prep | HAMMER strike | Coconut | Slow 8s shatter | Instant on impact (~1.5s) + 6.5s held |
+| Skincare | SPRAY serum | Wrinkled face | Slow 8s smoothing | Instant on spray (~2s) + 6s held |
+| Cooking | SQUEEZE press | Lemon | Slow 8s juice burst | Instant on press (~2s) + 6s held |
+| Home goods | SCRUB-WIPE brush | Rusty pan | Slow 8s rust lift | Instant on first stroke (~2.5s) + 5.5s held |
+| Banana smash | SLAM weight | Whole banana | Slow 8s pulp burst | Instant on impact (~1.5s) + 6.5s held |
+| Wood prep | SLICE saw | Log section | Slow 8s split | Instant on blade contact (~2s) + 6s held |
+| Acne clearing | DRIP serum | Inflamed cheek | Slow 8s fade | Instant on droplet contact (~2.5s) + 5.5s held |
+
+Pattern is generic: catalyst moves → contact moment → transformation completes INSTANTLY → resolved state holds. The "satisfying spectacle" payoff lives in the contrast between BEFORE state held briefly (frame 1) → INSTANT CATALYST-EVENT transformation (~0.5-2s window) → AFTER state held for remaining clip duration while persona closes the line.
+
+**v752 rule** — for every Veo Final Prompt body where the scene's action_arc contains a CATALYST class TRANSFORMATIVE force-verb (per v697.1 + catalyst taxonomy below) acting on a hero prop with Delta Axis != NONE, the IMMEDIATE ACTION + TERMINAL STATE blocks MUST encode explicit temporal pacing markers:
+
+**Catalyst class taxonomy** (generic across niches):
+
+| Catalyst class | Catalyst verbs (TRANSFORMATIVE) | Consequence verbs (on contact) | Default Y-mark (8s clip) |
+|---|---|---|---|
+| LIQUID-ON-SURFACE | POUR / SPRAY / DRIP / CASCADE / DRIZZLE / SPLASH / TRICKLE | WIPES / ERASES / DISSOLVES / WASHES-AWAY / SOAKS-INTO | 2.5s |
+| IMPACT-ON-RIGID | STRIKE / SMASH / SLAM / HAMMER / PUNCH | SHATTERS / SPLITS / FRACTURES / EXPLODES / CRACKS-OPEN | 1.5s |
+| TOOL-ON-SURFACE | SCRUB / SCRAPE / WIPE / BRUSH / RUB / POLISH | STRIPS / LIFTS / CLEARS / REVEALS / RESTORES | 2.5s |
+| BLADE-ON-OBJECT | CUT / SLICE / SAW / SLASH / SHAVE / CHOP | SPLITS / SECTIONS / OPENS / CLEAVES / DIVIDES | 2s |
+| FORCE-ON-FLEXIBLE | SQUEEZE / PRESS / PINCH / PULL / TWIST / WRING | BURSTS / DEFLATES / RELEASES / EXTRACTS / COLLAPSES | 2s |
+| HEAT-ON-COMBUSTIBLE | BURN / IGNITE / FLAME / MELT / TORCH | CHARS / BLACKENS / LIQUEFIES / CONSUMES / EVAPORATES | 2.5s |
+| ELECTRIC-ON-CONDUCTOR | ZAP / SHOCK / SPARK / ELECTRIFY | IGNITES / FLASHES / SCORCHES / IRRADIATES | 1s |
+| GRANULAR-ON-LIQUID | DROP / SPRINKLE / SHAKE-INTO / POUR-INTO | DISPERSES / SUSPENDS / DISSOLVES / INFUSES | 2s |
+
+**Y-mark heuristic**: Y ≤ clip_duration / 3. For 8s clip → default Y=2.5s. For 5s clip → default Y=1.5s. For 6s clip → default Y=2s. Operator may override Y based on physical realism (HAMMER strike on coconut → Y=1.5s; SLOW-DRIP serum onto wrinkle → Y could legitimately be 3-4s but stay ≤ clip_duration / 2).
+
+**Required IMMEDIATE ACTION block additions**:
+
+1. **Qualifier on block label**: `IMMEDIATE ACTION (INSTANT REACTION ON CONTACT — no gradual progression):`
+2. **Contact-moment specification**: `The MOMENT the leading edge of [catalyst] contacts/touches/strikes the [prop], the [start-state feature] is INSTANTLY [consequence-verb] on contact`
+3. **Explicit timing markers**: `By the X-second mark, [terminal state] is already visible. COMPLETE by ~Y seconds.` where Y is per Y-mark heuristic above
+4. **VFX Wipe language for Structural / Volume axes**: `The [catalyst] acts as a digital VFX wipe, replacing pixels in real-time as the [cascade/blade/impact] travels/sweeps/strikes` — defeats Veo's physics prior that resists 3D geometry deletion even with end_frame anchored
+
+**Required TERMINAL STATE block additions**:
+
+1. **Qualifier on block label**: `TERMINAL STATE (held from ~Y seconds through clip-end):`
+2. **Hold specification**: `The [prop] holds the resolved [terminal state] through the remaining ~Z seconds.` where Z = clip_duration - Y
+3. **Persona settling clause**: persona delivers closing line / settles into final beat during the held terminal state, NOT during the catalyst-event
+
+**Required Ambient sound discipline**:
+
+- Match pacing — single decisive sound on catalyst contact moment + quiet through the held terminal state
+- BAD (continuous): `the soft fluid trickle of oil splashing and washing over a textured surface throughout`
+- GOOD (paced): `single decisive trickle of oil hitting + sweeping the surface, then quiet through the persona's closing beat`
+
+**Required Negative prompt additions**:
+
+- `no GRADUAL [transformation-noun] across the full clip duration` (where transformation-noun = cleansing / shattering / dissolving / etc.)
+- `no slow [transformation-verb]` (where transformation-verb = dissolution / fracture / smoothing / etc.)
+- `no progressive transformation`
+- `no [catalyst-noun] flowing/contacting/striking the [prop-noun] without instantly [consequence-verb]`
+- `no [start-state feature] past the Y-second mark` (e.g. "no coated tongue past the 3-second mark")
+- `no [start-state feature] remaining anywhere on the surface after the [transformation] completes`
+
+**Worked example — tongue HOOK Clip 1.1 (the surfacing case, render-test validated 2026-05-18)**:
+
+Pre-v752 IMMEDIATE ACTION (BAD — produces sluggish gradual cleanse):
+```
+IMMEDIATE ACTION: Right from the first frame, the main character TILTS the
+glass and POURS the golden ginger-turmeric tea DOWN onto the coated tongue
+prop. The cascading oil sweeps across the dorsal surface, the dark
+grey-brown grime DISSOLVING and SLOUGHING OFF in dirty rivulets running
+off the viewer-left edge of the tongue. His left hand picks up the small
+carved wooden tongue-scraper and SCRUB-WIPES across the dorsal surface,
+lifting away strips of dissolved coating. The dark grime is being WASHED
+AWAY completely, the 3D blisters FLATTEN under the scrub, the underlying
+pink mucosa starts to glisten through.
+
+TERMINAL STATE: By clip-end (end_frame anchor = Image 2), the cleanse is
+FULLY COMPLETE...
+```
+
+Post-v752 IMMEDIATE ACTION (GOOD — instant reaction on contact + held terminal):
+```
+IMMEDIATE ACTION (INSTANT REACTION ON CONTACT — no gradual progression):
+Right from the first frame, the main character TILTS the glass and POURS
+the golden ginger-turmeric tea DOWN onto the coated tongue prop. The
+MOMENT the leading edge of the liquid touches the dorsal surface, the
+dark grey-brown grime + raised 3D blisters + crusted coating are
+INSTANTLY ERASED on contact — the liquid acts as a digital VFX wipe,
+replacing pixels in real-time as the cascade travels from base to tip of
+the tongue. By the 2-second mark the entire dorsal surface is already
+bright vibrant clean pink with smooth uncovered papillae + flattened
+blisters + oil sheen visible. The cleanse is COMPLETE by ~2.5 seconds,
+not gradual across the full clip.
+
+TERMINAL STATE (held from ~2.5s through clip-end): The tongue prop holds
+the resolved clean-pink state through the remaining ~5 seconds. The
+wooden scraper held viewer-left is heavily coated in brown grime
+(evidence the wipe transferred to the scraper). The main character's
+right hand lowers the now mostly-empty glass; he looks at the lens with
+a slight conspiratorial half-smile and completes the line mouth open
+mid-word.
+
+Ambient: Rustic apothecary tone, single decisive trickle of oil hitting
++ sweeping the surface, then quiet through the persona's closing beat.
+
+Negative prompt: ... no GRADUAL cleansing across the full clip duration,
+no slow dissolution, no progressive transformation, no fluid flowing
+over the bumps without instantly erasing them, no coated tongue past the
+3-second mark, no dark grey-brown grime remaining anywhere on the
+surface after the wipe completes, ...
+```
+
+Render-test verdict (2026-05-18): post-v752 prompt produced render where cleanse completes by ~2.5s on tea contact, then resolved clean pink tongue held for remaining ~5.5s while persona delivers closing line. Operator confirmed: "much better now."
+
+**Composition with existing rules**:
+
+- **v718h-A Step 3 + Step 5** — v752 amends IMMEDIATE ACTION + TERMINAL STATE blocks with explicit pacing markers; v718h-A's continuous-prose mandate unchanged
+- **v718h-B (Multi-Clip Blend)** — v752 applies per CLIP not globally. Clip A: catalyst contact completes its half-transformation in clip A's Y-mark window. Clip B: starts in resolved-state, holds through CapCut blend seam. Each clip internally v752-compliant.
+- **v718h-C (Native End-Frame Interpolation)** — v752 is CRITICAL on Option C. Without explicit pacing markers, Veo's native interpolation defaults to linear smear across full clip duration. v752 fights this by injecting explicit timing language + VFX Wipe override for Structural/Volume axes.
+- **v750 (Veo Final Prompts format)** — v752 lives INSIDE the IMMEDIATE ACTION + TERMINAL STATE blocks of the v750 format. v750 structural format unchanged; v752 adds content discipline within blocks.
+- **v751 (Veo↔Image semantic consistency)** — v752 compatible. Image bodies still show start_frame at t=0 + end_frame at t=end. v752 specifies HOW QUICKLY the transformation happens, not WHAT transforms.
+- **v697.1 TRANSFORMATIVE force-verbs** — v752 scopes to CATALYST class subset of TRANSFORMATIVE verbs (POUR / SMASH / SCRUB / etc.). Persona-on-camera NON-TRANSFORMATIVE verbs (HOLD / PRESENT / GESTURE-FORWARD) don't trigger v752.
+- **v644 pad: bullet** — pad text appended to Veo TTS after the line during the held terminal state; v752 compatible (pad audio rendered while persona settles into closing beat).
+
+**Carve-outs**:
+
+1. **Autonomous transformations** (no catalyst — color shift / time-lapse aging / dawn-to-dusk lighting) → v752 N/A. Transformation can legitimately span full clip duration.
+2. **Genuinely gradual multi-stage processes** (recipe boil across 10 minutes / dough rising / fermentation) — when spanning multiple scenes or compressed via accelerated time, v752 N/A on the rendering pacing.
+3. **Delta Axis NONE** (static CTA / talking-head / authority reveal) → v752 N/A. No catalyst, no prop transformation.
+4. **Explicit cinematic slow-motion intent** (rare on UGC short-form but possible for hero-product reveals) → v752 N/A. Document carve-out in prompt body with `(intentional slow-motion render — v752 carve-out)` qualifier.
+5. **Multi-stage transformations within single clip** (rare — e.g. coconut HAMMER-strike + then water POUR-out from cracked shell) → v752 applies per CATALYST EVENT not per clip. Two catalyst contacts in one clip = two instant-reaction beats with held-state between them.
+
+**Pre-output mechanical gate (v752 ADVISORY — full pacing check requires render test)**:
+
+```python
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+veo_section = re.search(r'^## Veo 3\.1 Final Prompts(.*?)(?=^## |\Z)', text, re.MULTILINE | re.DOTALL)
+if not veo_section:
+    sys.exit(0)
+# Catalyst verb taxonomy (TRANSFORMATIVE subclass that triggers v752)
+CATALYST_VERBS = re.compile(r'\b(POURS?|SPRAYS?|DRIPS?|CASCADES?|DRIZZLES?|SPLASHES?|TRICKLES?|TILTS?|STRIKES?|SMASHES?|SLAMS?|HAMMERS?|PUNCHES?|SCRUBS?|SCRAPES?|WIPES?|BRUSHES?|RUBS?|POLISHES?|CUTS?|SLICES?|SAWS?|SLASHES?|SHAVES?|CHOPS?|SQUEEZES?|PRESSES?|PINCHES?|PULLS?|TWISTS?|WRINGS?|BURNS?|IGNITES?|FLAMES?|MELTS?|TORCHES?|ZAPS?|SHOCKS?|SPARKS?|ELECTRIFIES?|DROPS?|SPRINKLES?|SHAKES?-INTO|POURS?-INTO|RELEASES?)\b', re.IGNORECASE)
+clips = re.findall(r'^### Clip (\d+)\.(\d+).*?(?=^### Clip|\Z)', veo_section.group(1), re.MULTILINE | re.DOTALL)
+fail_count = 0
+for clip_match in re.finditer(r'^### Clip (\d+)\.(\d+).*?(?=^### Clip|\Z)', veo_section.group(1), re.MULTILINE | re.DOTALL):
+    n, m = clip_match.group(1), clip_match.group(2)
+    clip_block = clip_match.group(0)
+    ia_match = re.search(r'IMMEDIATE ACTION[^:]*:(.+?)(?=TERMINAL STATE|\Z)', clip_block, re.DOTALL)
+    ts_match = re.search(r'TERMINAL STATE[^:]*:(.+?)(?=The main character|\Z)', clip_block, re.DOTALL)
+    neg_match = re.search(r'\*\*Negative prompt:\*\*(.+?)\Z', clip_block, re.DOTALL)
+    if not (ia_match and ts_match):
+        continue
+    ia_text = ia_match.group(1)
+    ts_text = ts_match.group(1)
+    neg_text = neg_match.group(1) if neg_match else ''
+    if not CATALYST_VERBS.search(ia_text):
+        # No catalyst verb → v752 N/A for this clip (NON-TRANSFORMATIVE / autonomous / static)
+        continue
+    # Catalyst present → require v752 pacing markers
+    instant_qualifier = re.search(r'INSTANT REACTION ON CONTACT|no gradual progression', ia_text, re.IGNORECASE)
+    timing_marker = re.search(r'by the [0-9.]+[- ]second mark|COMPLETE by ~?[0-9.]+ seconds', ia_text, re.IGNORECASE)
+    held_qualifier = re.search(r'held from ~?[0-9.]+ seconds? through clip[- ]end|holds .{1,40} through the remaining', ts_text, re.IGNORECASE)
+    no_gradual_neg = re.search(r'no GRADUAL .{1,40} across the full clip|no slow [a-z]+|no progressive transformation', neg_text, re.IGNORECASE)
+    if not instant_qualifier:
+        print(f'v752 ADVISORY: Clip {n}.{m} IMMEDIATE ACTION block has catalyst verb but missing "(INSTANT REACTION ON CONTACT — no gradual progression)" qualifier on the block label')
+        fail_count += 1
+    if not timing_marker:
+        print(f'v752 ADVISORY: Clip {n}.{m} IMMEDIATE ACTION block missing explicit timing markers ("by the X-second mark" / "COMPLETE by ~Y seconds")')
+        fail_count += 1
+    if not held_qualifier:
+        print(f'v752 ADVISORY: Clip {n}.{m} TERMINAL STATE block missing "(held from ~Y seconds through clip-end)" pacing qualifier')
+        fail_count += 1
+    if not no_gradual_neg:
+        print(f'v752 ADVISORY: Clip {n}.{m} Negative prompt missing "no GRADUAL ... across the full clip" / "no slow ..." / "no progressive transformation" pacing negative')
+        fail_count += 1
+if fail_count == 0:
+    print('v752 PASS')
+```
+
+**Touched**: `code/template_reference.md` (this section appended); `code/decode_bundle.sh` + `code/lift_bundle.sh` + `code/innovate_bundle.sh` + `code/create_bundle.sh` (V752 section after V751 with catalyst taxonomy + mandate); `wiki/patterns/conventions.md` (v752 row + Latest live note bumped); `CLAUDE.md` (quickref); `wiki/log.md` (timeline with operator's surfacing case render-test). **Migration zero required** for pre-v752 artifacts. New artifacts with catalyst-on-prop morphology MUST satisfy v752 advisory gate.
+
+**Verification mandatory before claiming v752 correctly applied**: re-render tongue HOOK Clip 1.1 via lift workflow with v752-updated prompt; confirm Veo output shows cleanse completing by ~2.5s on tea contact + tongue held in resolved clean-pink state for remaining ~5.5s while persona delivers closing line (NOT gradual smear across full 8s); operator validated 2026-05-18 with "much better now" verdict.
+
+
+### v718h.1 + v718d.1 + v738.1 hardening + v580.3 — Structural Escalation Mandate (NEW 2026-05-18)
+
+**Surfaced 2026-05-18** from operator analysis of structural-axis routing loophole in current rulebook. Root vulnerability: v718d single `primary_change_axis` field picks visually-dominant axis only; v718h Decision Tree routes by primary; secondary axis morphological changes (e.g. 3D blisters flattening while grime cleanses) get masked behind the primary axis label. When secondary axis is Structural Integrity or Volume/Shape, Veo physics prior wins → render fails to deliver morphological transformation even when end_frame anchor is present.
+
+**Concrete example from tongue HOOK Clip 1.1**: Surface/Texture (grime → clean pink) is visually dominant; Structural Integrity (raised 3D blisters → flattened smooth) is secondary. Pre-correction would route to Option A (Surface/Texture primary). Even after operator escalated tongue artifact to Option C, the underlying rule still allows a future LLM to mis-classify and bypass the escalation. v718h.1 + v718d.1 + v738.1 hardening + v580.3 close the loophole MECHANICALLY.
+
+---
+
+### v718h.1 amendment — Highest-Escalation Wins (replaces single-axis routing)
+
+**Current v718h Decision Tree behavior** (pre-2026-05-18-late): routes Carry Mode by `primary_change_axis` (Surface/Texture → Option A; Volume/Shape → Option C/B/A; Structural Integrity → Option C/B/A).
+
+**Vulnerability**: when scene has MULTIPLE axes (e.g. Surface/Texture primary + Structural Integrity secondary), primary axis alone determines Carry Mode. Secondary axis gets masked. Veo's physics prior on 3D geometry deletion ruins render even when end_frame anchor present.
+
+**v718h.1 rule (Highest-Escalation Wins)**:
+
+> When a morphological transformation spans multiple axes (e.g. Surface/Texture + Structural Integrity), the axis requiring the HIGHEST level of Veo anchor protection dictates the Carry Mode. Because Veo's physics prior treats raised 3D geometry as permanent, ANY presence of Structural Integrity OR Volume/Shape changes in the t=0 → t=end delta MUST automatically escalate the scene to Option C (within-clip-end-frame) OR Option B (multi-clip-blend), regardless of what the "primary" visual effect seems to be.
+
+**Updated v718h Decision Tree (UPDATED 2026-05-18 late)**:
+
+| Delta Axis composition | Recommended Option | Carry Mode |
+|---|---|---|
+| Surface/Texture only | Option A (single-clip) | within-clip |
+| Color/Illumination only | Option A (single-clip) | within-clip |
+| Surface/Texture + Color/Illumination | Option A (single-clip) | within-clip |
+| **ANY axis combination including Structural Integrity** | **Option C (RECOMMENDED) OR Option B (fallback)** | within-clip-end-frame OR multi-clip-blend |
+| **ANY axis combination including Volume/Shape** | **Option C (RECOMMENDED) OR Option B (fallback)** | within-clip-end-frame OR multi-clip-blend |
+| Structural Integrity + Volume/Shape | **Option C (RECOMMENDED) OR Option B (fallback)** | within-clip-end-frame OR multi-clip-blend |
+
+**HARD GATE (replaces v738.1 Section 6 single-axis HARD GATE)**:
+- Delta Axis declaration contains "Structural Integrity" OR "Volume/Shape" (anywhere — primary OR secondary OR tertiary) AND Carry Mode == within-clip → REJECT (no escape-hatch allowed for structural axes; Option A acknowledgement insufficient)
+- Delta Axis declaration is Surface/Texture-only OR Color/Illumination-only OR mix-of-only-those-two AND Carry Mode == multi-clip-blend OR within-clip-end-frame → ALLOWED but flagged ADVISORY (over-engineering; Option A would suffice)
+
+**Multi-axis declaration format** (replaces "Delta Axis: X (primary) + Y (secondary)" with full list):
+
+```
+Delta Axis: Surface/Texture + Structural Integrity + Color/Illumination
+            (all axes present in t=0 → t=end delta; highest-escalation axis
+             = Structural Integrity → Carry Mode escalates to Option C)
+```
+
+NO MORE primary/secondary distinction at the routing level. All axes treated equally for escalation decisions; primary/secondary tags optional and for descriptive prose only.
+
+---
+
+### v718d.1 amendment — 3D-to-Flat VLM diagnostic (explicit decouple)
+
+**Current v718d 4-axis Intrinsic State Isolation**: VLM diagnoses Surface/Texture / Structural Integrity / Volume/Shape / Color/Illumination axes at t=0 and t=end.
+
+**Vulnerability**: VLMs often conflate "blisters" or "raised bumps" with surface texture (treating them as a coating/pattern) rather than as 3D physical geometry. When VLM under-classifies bumps as Surface/Texture, the Structural Integrity axis goes undeclared → v718h routes by Surface/Texture → Option A → Veo physics prior wins.
+
+**v718d.1 rule (3D-to-Flat diagnostic — mandatory sub-test during v718d 4-axis check)**:
+
+> During the v718d Intrinsic State Isolation check, the VLM MUST run a specific 3D-to-Flat test as a sub-step BEFORE finalizing the axis classification.
+>
+> Ask: "Does the t=0 state contain raised bumps, swollen pouches, blisters, deep grooves, distended volumes, or protruding geometry that are physically leveled, flattened, deflated, or restored to smooth in the t=end state?"
+>
+> If YES → this is a **Structural Integrity** OR **Volume/Shape** delta (cannot be classified purely as Surface/Texture).
+>   - Raised bumps / blisters / protrusions flattening → Structural Integrity
+>   - Distended volumes / pouches / swelling deflating → Volume/Shape
+>   - Both can co-exist (3D blister IS BOTH a raised structural feature AND a localized volume excess)
+>
+> If NO → axis classification proceeds via standard v718d 4-axis check.
+
+**3D-to-Flat trigger vocabulary** (any of these in t=0 OR t=end MUST trigger 3D-to-Flat test):
+
+```
+RAISED-FEATURE: blister(s) / bump(s) / pimple(s) / pustule(s) / wart(s) /
+                cyst(s) / nodule(s) / lump(s) / mound(s) / protrusion(s) /
+                spike(s) / ridge(s) / crest(s) / pouch(es) / pocket(s)
+SWOLLEN-VOLUME: swollen / bloated / distended / inflated / puffy /
+                engorged / enlarged / ballooned / pendulous / sagging /
+                drooping / swelling
+DEEP-GROOVE:    deep groove(s) / deep crease(s) / deep fold(s) /
+                deep wrinkle(s) / deep crater(s) / deep dent(s) /
+                deep cavity / hollow(s)
+FLATTENING-PROCESS: flatten / level / restore-to-smooth / deflate /
+                    shrink / reduce / firm-up / tighten / lift-tight /
+                    fill-in / smooth-out / collapse / shrink-down
+```
+
+**Worked example — tongue HOOK Clip 1.1**:
+- t=0: "...raised 3D blisters protruding through coating, bloated swollen profile..."
+- t=end: "...3D blisters flattened to smooth, same bloated profile (Volume axis unchanged)..."
+- 3D-to-Flat test: YES — raised blisters + bloated profile in t=0; flattened blisters in t=end
+- Axis classification: Surface/Texture (grime crust → clean pink) + Structural Integrity (3D blisters flattened) + Color/Illumination (grey-brown → vibrant pink)
+- v718h.1 routes: ANY axis includes Structural Integrity → Option C (within-clip-end-frame) MANDATORY
+
+---
+
+### v738.1 Python gate hardening — Structural Vocabulary Escapement check
+
+Mechanical enforcement layer. Scans t=0 + t=end declarations for structural vocabulary; if found AND Carry Mode is Option A (within-clip) → HARD REJECT.
+
+**Updated v738.1 Python gate (extension to existing gate)**:
+
+```python
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+sec6 = re.search(r'^### Section 6 — Morphological Delta Declaration.*?(?=^### Section 7|\Z)', text, re.MULTILINE | re.DOTALL)
+if not sec6:
+    print('v738.1 FAIL: Section 6 missing')
+    sys.exit(1)
+hero_blocks = re.findall(r'\*\*Hero Prop \d+:.*?(?=\*\*Hero Prop \d+:|\Z)', sec6.group(0), re.DOTALL)
+STRUCTURAL_TOKENS = re.compile(r'\b(blister[s]?|bump[s]?|pimple[s]?|pustule[s]?|wart[s]?|cyst[s]?|nodule[s]?|lump[s]?|mound[s]?|protrusion[s]?|spike[s]?|ridge[s]?|crest[s]?|pouch(es)?|pocket[s]?|swollen|bloated|distended|inflated|puffy|engorged|enlarged|ballooned|pendulous|sagging|drooping|swelling|deep groove[s]?|deep crease[s]?|deep fold[s]?|deep wrinkle[s]?|deep crater[s]?|deep dent[s]?|hollow[s]?|flatten(ed|ing)?|level(ed|ing)?|restore[d]?[- ]to[- ]smooth|deflat(e|ed|ing)?|shrink(s|ing)?|reduce[d]?|firm[- ]up|tighten(ed|ing)?|lift[- ]tight|fill[- ]in|smooth[- ]out|collapse[d]?|shrink[- ]down)\b', re.IGNORECASE)
+fail_count = 0
+for i, blk in enumerate(hero_blocks, 1):
+    t0_match = re.search(r't=0[^*]*\*\*?[^:]*:(.+?)(?=\*\*v736c|\*\*t=end|\Z)', blk, re.DOTALL)
+    tend_match = re.search(r't=end[^*]*\*\*?[^:]*:(.+?)(?=\*\*Delta Axis|\Z)', blk, re.DOTALL)
+    axis_match = re.search(r'\*\*Delta Axis:\*\*\s*(.+?)(?=\n|\Z)', blk)
+    carry_match = re.search(r'\*\*Carry Mode:\*\*\s*(.+?)(?=\n|\Z)', blk)
+    if not (t0_match and tend_match and axis_match and carry_match):
+        continue
+    t0_text = t0_match.group(1)
+    tend_text = tend_match.group(1)
+    axis_text = axis_match.group(1).strip()
+    carry_text = carry_match.group(1).strip().lower()
+    has_structural_vocab = bool(STRUCTURAL_TOKENS.search(t0_text) or STRUCTURAL_TOKENS.search(tend_text))
+    has_structural_axis = 'structural integrity' in axis_text.lower() or 'volume/shape' in axis_text.lower() or 'volume' in axis_text.lower()
+    if has_structural_vocab and not has_structural_axis:
+        tokens_found = STRUCTURAL_TOKENS.findall(t0_text + ' ' + tend_text)
+        print(f'v718d.1 FAIL: Hero Prop block {i} uses structural 3D vocabulary {tokens_found} in t=0/t=end but Delta Axis declaration {axis_text!r} does NOT include Structural Integrity or Volume/Shape. Run 3D-to-Flat diagnostic per v718d.1 — raised bumps/blisters/distended pouches flattening MUST classify as Structural Integrity OR Volume/Shape axis, not Surface/Texture alone.')
+        fail_count += 1
+    if has_structural_vocab and 'within-clip' in carry_text and 'within-clip-end-frame' not in carry_text and 'multi-clip-blend' not in carry_text:
+        tokens_found = STRUCTURAL_TOKENS.findall(t0_text + ' ' + tend_text)
+        print(f'v718h.1 FAIL: Hero Prop block {i} uses structural 3D vocabulary {tokens_found} in t=0/t=end but Carry Mode is set to {carry_text!r} (Option A within-clip single-clip). Any 3D geometry change MUST escalate to Option C (within-clip-end-frame, RECOMMENDED) or Option B (multi-clip-blend, fallback) to defeat Veo physics prior. Option A escape-hatch acknowledgement insufficient for structural axes per v718h.1 Highest-Escalation Wins rule.')
+        fail_count += 1
+if fail_count == 0:
+    print('v718h.1 + v718d.1 structural-axis gate PASS')
+else:
+    sys.exit(1)
+```
+
+---
+
+### v580.3 NEW — Option C default for ALL state-evolution morphology
+
+**Background**: pre-v718i (before 2026-05-18), Option C (Veo native end-frame interpolation) was deferred. Option B (Multi-Clip Blend) was recommended default for Structural/Volume axes. Option A (single-clip) handled Surface/Texture + Color/Illumination axes.
+
+**Post-v718i (LIVE 2026-05-18)**: Option C platform support shipped. Veo native end-frame interpolation via `cfg.last_frame` is now usable for ANY axis combination. Per operator: "Providing a guaranteed visual endpoint is always safer than fighting Veo's text-to-pixel guesswork."
+
+**v580.3 rule**:
+
+> RECOMMENDED DEFAULT for ALL scenes with Delta Axis != NONE: Option C (v718h-C, within-clip-end-frame, paired Banana 2 Images K + K+1 via end_frame_image: bullet).
+>
+> Option A (single-clip, within-clip) is RETAINED as escape hatch ONLY when ALL true:
+> - Delta Axis is Surface/Texture-only OR Color/Illumination-only (no Structural Integrity, no Volume/Shape)
+> - Cost-sensitive render budget (avoiding +1 Banana 2 image per morphology pair)
+> - Explicit acknowledgement: "(Option A single-clip escape hatch — Surface/Color axes only, cost-sensitive)"
+>
+> Option B (multi-clip blend) RETAINED as fallback when Option C produces undesired visual outcome OR for CapCut-blend-specific aesthetic intent.
+
+**Why this matters**: Veo's physics prior consistently wins over text-prompt steering even when prompt is structurally correct. Providing both endpoint Images as Banana 2 renders anchors the transformation in real pixels, not Veo's interpretation of text. Option C is now the BULLETPROOF default; Option A is a calculated risk only worth taking when axes are Surface/Color only AND cost matters.
+
+**Migration**: existing artifacts using Option A on Surface/Texture + Color/Illumination axes remain valid (no break). New artifacts SHOULD default to Option C; Option A authoring requires explicit acknowledgement per v580.3.
+
+---
+
+### Composition with existing rules
+
+- **v718h Decision Tree** — v718h.1 SUPERSEDES the single-axis routing; Highest-Escalation Wins applies regardless of "primary" axis label
+- **v718d 4-axis check** — v718d.1 ADDS mandatory 3D-to-Flat sub-test BEFORE finalizing axis classification
+- **v738.1 Python gate** — v718h.1 + v718d.1 hardening ADDS structural-vocabulary escapement check (rejects Option A when structural tokens present)
+- **v580.2 paired-image authoring** — v580.3 promotes Option C from "RECOMMENDED for Structural/Volume" to "RECOMMENDED for ALL Delta Axis != NONE"
+- **v718h-A Option A** — RETAINED as Surface/Color escape hatch with explicit acknowledgement; no longer default for Structural/Volume axes
+- **v718h-B Option B** — UNCHANGED (still fallback for budget/preference)
+- **v718h-C Option C + v718i parser support** — promoted to DEFAULT for ALL morphology scenes
+- **v752 Catalyst Reaction Pacing** — unchanged; v752 applies INSIDE Option C / B / A IMMEDIATE ACTION + TERMINAL STATE blocks
+- **v750 + v751** — unchanged; v750 Clip header `**End frame:** Image K+1` field is now REQUIRED for ALL Delta Axis != NONE scenes (was only Option C); v751 semantic consistency benefits because paired Images always anchor both endpoints
+
+### Worked example — tongue HOOK Clip 1.1 (post-amendment verification)
+
+Pre-amendment Section 6 Hero Prop 1 declaration:
+```
+- **Delta Axis:** Surface/Texture (primary) + Structural Integrity (secondary — 3D blisters flattened)
+- **Carry Mode:** within-clip-end-frame (v718h-C Option C, ...)
+```
+
+Post-amendment Section 6 Hero Prop 1 declaration:
+```
+- **Delta Axis:** Surface/Texture + Structural Integrity + Color/Illumination
+            (all axes present in t=0 → t=end delta; highest-escalation axis =
+             Structural Integrity per v718h.1 → Carry Mode escalates to
+             Option C mandatory)
+- **Carry Mode:** within-clip-end-frame (v718h-C Option C, MANDATORY per
+            v718h.1 Highest-Escalation Wins — Structural Integrity axis
+            present in delta forces Option C OR B regardless of Surface/
+            Texture being visually dominant; v580.3 confirms Option C as
+            default for all state-evolution scenes)
+```
+
+3D-to-Flat diagnostic confirms: "raised 3D blisters protruding" (t=0) + "3D blisters flattened to smooth" (t=end) → Structural Integrity axis present → Option A path FORBIDDEN.
+
+### Failure prevention — manufactured negative case
+
+A future LLM authoring a similar tongue cleanse with single-axis Surface/Texture classification would have its artifact REJECTED at v738.1 gate time:
+
+```
+Section 6 Hero Prop 1:
+  Delta Axis: Surface/Texture
+  Carry Mode: within-clip (v718h-A single-clip VFX Wipe Override)
+  t=0: heavily coated tongue surface with thick dark grey-brown grime
+       crust + raised 3D blisters protruding + bloated swollen profile
+  t=end: clean tongue surface, bright pink mucosa, 3D blisters flattened
+```
+
+Python gate output:
+```
+v718d.1 FAIL: Hero Prop block 1 uses structural 3D vocabulary ['blisters', 'protruding', 'bloated', 'swollen', 'flattened'] in t=0/t=end but Delta Axis declaration 'Surface/Texture' does NOT include Structural Integrity or Volume/Shape. Run 3D-to-Flat diagnostic per v718d.1 — raised bumps/blisters/distended pouches flattening MUST classify as Structural Integrity OR Volume/Shape axis, not Surface/Texture alone.
+v718h.1 FAIL: Hero Prop block 1 uses structural 3D vocabulary ['blisters', 'protruding', 'bloated', 'swollen', 'flattened'] in t=0/t=end but Carry Mode is set to 'within-clip (v718h-A single-clip VFX Wipe Override)' (Option A within-clip single-clip). Any 3D geometry change MUST escalate to Option C (within-clip-end-frame, RECOMMENDED) or Option B (multi-clip-blend, fallback) to defeat Veo physics prior. Option A escape-hatch acknowledgement insufficient for structural axes per v718h.1 Highest-Escalation Wins rule.
+```
+
+Mechanical enforcement closes the loophole that allowed Gemini's original tongue HOOK render to fail.
+
+### Migration
+
+- Pre-amendment artifacts with single primary_change_axis declaration remain valid (operator may re-author on next-touch to use multi-axis declaration per v718h.1)
+- Pre-amendment Section 6 blocks without structural-vocabulary check pass through (gate is forward-only; pre-amendment renders may have been gradual/sluggish but artifacts themselves not broken)
+- Pre-amendment Option A scenes with Surface/Texture + structural-vocabulary t=0 → t=end remain valid as legacy (lower render success rate); convert to Option C on next-touch
+- v580.3 default shift is forward-only — new artifacts SHOULD default to Option C; legacy Option A artifacts remain valid
+
+### Verification mandatory before claiming v718h.1 + v718d.1 + v738.1 hardening + v580.3 correctly applied
+
+1. Update tongue Section 6 Hero Prop 1 Delta Axis declaration to multi-axis format per v718h.1
+2. Run v738.1 Python gate on tongue artifact; expect PASS (Section 6 Hero Prop 1 has Structural Integrity in axis declaration; Carry Mode = within-clip-end-frame which is Option C)
+3. Construct manufactured negative test case (Surface/Texture-only declaration with "blisters" in t=0 + Carry Mode = within-clip); run v738.1 gate; expect v718d.1 + v718h.1 REJECT messages
+4. Render-test next decode with naturally-occurring multi-axis morphology (e.g. wrinkle smoothing scene with Surface/Texture coating + Structural Integrity wrinkle flattening); confirm escalation to Option C happens automatically + Veo renders the structural change reliably
+
+
+### v718i.1 — Frontend lines[] payload fix for end_frame_image plumbing (NEW 2026-05-18, platform-code completion of v718i shipped 2026-05-18 early)
+
+**Operator-surfaced 2026-05-18 late**: "when we have the start and end frame the platform doesn't include the end frame in the video job" — end_frame_image not landing in Veo render despite v718i parser + DB + clip-creation + worker override all shipped earlier 2026-05-18.
+
+**A→Z audit identified gap at stage 5 of 9-stage chain**:
+
+| # | Stage | Status pre-v718i.1 |
+|---|---|---|
+| 1 | Parser extracts `end_frame_image:` bullet → scene dict | ✓ shipped |
+| 2 | ImageSceneAssignment.end_frame_image_node_id column + resolution | ✓ shipped |
+| 3 | ImageSceneAssignment.to_dict returns field | ✓ shipped |
+| 4 | prepare_batch_for_video adds to scene_assignments_payload | ✓ shipped |
+| **5** | **Frontend lines[] mapping → POST body** | **❌ MISSING — gap** |
+| 6 | DialogueLineInput pydantic accepts fields | ✓ shipped (idle without 5) |
+| 7 | Clip.end_frame_image_node_id populated on creation | ✓ shipped (idle without 5) |
+| 8 | Worker line_data.explicit_end_frame_local_index override | ✓ shipped (idle without 5) |
+| 9 | veo_generator cfg.last_frame | ✓ pre-existing (idle without 5) |
+
+**Root cause**: `code/static/index.html` line ~6720+ explicitly maps `voiceover_anchor_image_node_id` + `voiceover_anchor_image_local_index` from `promoteMeta` (the scene_assignments_payload entry per scene) into the `lines[]` POST body sent to the create-job endpoint. Did NOT map `end_frame_image_node_id` or `end_frame_image_local_index`. Even though backend pydantic + DB + worker all accepted the fields, frontend never sent them → Clip rows created with end_frame_image_node_id=NULL → worker's `explicit_end_frame_local_index` lookup returned None → no override → veo_generator fell back to sequential next-clip auto-inference → end_frame ignored.
+
+**v718i.1 fix**: add `end_frame_image_node_id` + `end_frame_image_local_index` to the frontend lines[] mapping at `code/static/index.html`, mirroring the existing voiceover_anchor pattern exactly:
+
+```javascript
+// v718i (NEW 2026-05-18) — Veo native end-frame interpolation per-scene
+// binding. Plumb the parser's per-line end-frame-image metadata through
+// the payload so the backend Clip writer sets Clip.end_frame_image_node_id
+// and the worker overrides sequential auto-inference with the explicit
+// end-frame image, binding it to Veo cfg.last_frame at render time.
+end_frame_image_node_id:
+    (promoteMeta.end_frame_image_node_id !== undefined
+        ? promoteMeta.end_frame_image_node_id
+        : null),
+end_frame_image_local_index:
+    (promoteMeta.end_frame_image_local_index !== undefined
+        ? promoteMeta.end_frame_image_local_index
+        : null),
+```
+
+Inserted immediately after the existing `voiceover_line` field per parallel pattern.
+
+**Verification before claiming v718i.1 correctly applied**:
+1. Open job with v718h-C Option C scene (e.g. tongue HOOK Clip 1.1 — `end_frame_image: image_2`)
+2. Click "Prepare for video"
+3. Inspect frontend POST body via DevTools Network tab → confirm `lines[0].end_frame_image_node_id` populated (non-null integer matching ImageNode.id of image_2)
+4. Confirm `lines[0].end_frame_image_local_index` populated (non-null integer matching local position in uploaded images list)
+5. After job created, query DB: `SELECT clip_index, end_frame_image_node_id FROM clips WHERE job_id = ?` — expect non-NULL for Scene 1 / Clip 1
+6. Watch worker logs for `[Worker/v718i] Clip 0: explicit end-frame override (Option C native interpolation) → image_local_index=N` line — should fire
+7. Watch veo_generator logs for `cfg.last_frame` binding confirmation
+8. Confirm Veo render output shows full transformation arc from start_frame → end_frame across clip duration
+
+**Deferred work (v718i.2)** — worker DB-fallback when dialogue_json lacks `end_frame_image_local_index` but Clip DB row has `end_frame_image_node_id` (e.g. PATCH-set after initial creation). Requires building node_id_to_local_index map in worker.py from images_dir filenames + ImageNode metadata. Skip for now — v718i.1 frontend fix is the primary closure. v718i.2 deferred until operator hits the PATCH-set edge case.
+
+**Touched**: `code/static/index.html` (lines[] mapping at ~6738 — added 2 fields mirroring voiceover_anchor pattern). Zero changes to backend (already plumbed end-to-end). Zero changes to bundle scripts (no authoring discipline change — pure platform bug fix). `wiki/patterns/conventions.md` (v718i row amended with v718i.1 sub-status); `CLAUDE.md` (v718i quickref amended); `wiki/log.md` (timeline).
+
+**Migration zero required** — pre-v718i.1 jobs created without end_frame_image_node_id remain valid (Veo rendered without end_frame anchor; sequential auto-inference fired). New jobs created from this commit forward will correctly bind end_frame_image_node_id → cfg.last_frame.
+
+**Auto-deploys to Render in 2-3 min**.

@@ -180,6 +180,200 @@ EOF
     fi
     cat <<'TASKEOF'
 
+================================================================================
+V738.3 — ANTI-SANITIZATION DIRECTIVE (NEW 2026-05-18, RLHF-OVERRIDE PERMISSION)
+================================================================================
+
+WARNING: As an AI, your default behavior is to sanitize gross, messy, or
+uncomfortable textures into clean, sterile, clinical descriptions.
+YOU MUST SUPPRESS THIS INSTINCT.
+
+For HOOK props (per v736c Uncomfortable Texture Mandate), you have EXPLICIT
+PERMISSION and a STRICT MANDATE to generate visceral, gross, oozing,
+crusted, dripping, fibrous, gelatinous, slimy, and uncomfortable imagery.
+
+If a prop is dirty, describe the dirt. If gross, the grossness. If coated,
+the coating thickness + color + texture. If bloated, the bloat magnitude.
+If fissured, the fissure depth + width. If crusted, the crust composition.
+
+Sterile / clean / clinical / aesthetic / safe / neutral / generic / Platonic
+descriptions of HOOK props KILL THE SCROLL-STOP.
+
+Applies to: Image prompt body prose ([Subject — Symptom (t=0 PEAK SEVERITY)]
+block per v586.1 / v717.1 amendment); Pre-Flight Section 6 t=0 + v736c
+Texture Check fields; visual_delta_within_clip per v718g; Veo Final Prompt
+body for v718h-A/B/C BEFORE-state-held scenes.
+
+Does NOT apply to: persona descriptions (v553.1 / v609 / v610 / v722
+govern); v702 RELAXED boundaries (sexual-action verbs still banned); CTA /
+talking-head / static-authority scenes (Delta Axis NONE).
+
+Suppress RLHF default. Author visceral. Ship the scroll-stop.
+
+LITERAL COPY-PASTE MANDATE (v738.1 amendment 2026-05-18): When writing the
+[Subject — Symptom (t=0 PEAK SEVERITY)] block for an Image, literally copy-
+paste the exact phrasing from Pre-Flight Section 6 t=0 (Start State) field.
+Do not paraphrase. Do not sanitize. Inject verbatim. Pre-Flight declaration
+IS the locked-in Image body description.
+
+JUST-IN-TIME TOKEN PRIMING (v586.1 / v717.1 amendment 2026-05-18): Image
+block labels MUST use:
+  [Subject — Symptom (t=0 PEAK SEVERITY)]    <- BEFORE-state images
+  [Subject — Symptom (t=end PEAK RESOLUTION)] <- AFTER-state images
+Bare [Subject — Symptom] BANNED.
+
+================================================================================
+V750 — VEO FINAL PROMPTS SECTION STRUCTURAL FORMAT (NEW 2026-05-18)
+================================================================================
+
+Veo Final Prompts section: one entry per Veo render call. Format:
+
+  ### Clip N.M — Scene N, Line M (REGISTER_LABEL)
+  **Start frame:** Image K
+  **End frame:** Image K+1                  (REQUIRED on v718h-C Option C)
+  **Text prompt:**
+  <camera lock>
+
+  IMMEDIATE ACTION: <continuous prose paragraph per v718h-A Step 3>
+
+  TERMINAL STATE: <explicit final state per v718h-A Step 5>
+
+  The main character says in a <register> voice, "<dialogue line>".
+
+  Ambient: <sound description>.
+  (no subtitles, no captions)
+
+  **Negative prompt:**
+  <comma-separated negatives>
+
+CRITICAL HARD BAN: NO `[Start beat 0-Xs]` / `[Mid-clip beat X-Ys]` /
+`[End beat Y-Zs]` brackets in Veo text prompt body. Beats live ONLY
+in Storyboard `- **action_note:**` field. Veo prompt body = continuous
+prose with IMMEDIATE ACTION + TERMINAL STATE anchor paragraphs.
+
+Veo 3.1 renders continuous instruction; beat brackets confuse temporal
+interpretation OR parse as on-screen text.
+
+Header: N=Scene, M=Line within Scene (.1 for single-line),
+REGISTER_LABEL=tag (HOOK / EXPLAIN / CTA / RECIPE-STEP-N / etc.).
+
+================================================================================
+V751 — VEO PROMPT <-> IMAGE BODY SEMANTIC CONSISTENCY (NEW 2026-05-18)
+================================================================================
+
+Veo text prompt body MUST be semantically consistent with start_frame
+Image's body prose at t=0 AND end_frame Image's body prose at t=end
+(when Option C).
+
+BANNED drift: text prompt introduces state (open book / pour / shattered)
+neither Image body shows -> Veo confused.
+
+Transformations: v718h-A drives via continuous prose + VFX Wipe;
+v718h-B paired Images + 2 clips; v718h-C paired Images + SINGLE clip
+with end_frame_image binding. Text prompt body must align with chosen
+Option's Image bindings.
+
+If text prompt mentions state neither Image body shows -> REJECT.
+
+================================================================================
+V752 — CATALYST REACTION PACING (NEW 2026-05-18, render-test validated)
+================================================================================
+
+For Veo Final Prompts where scene's action_arc has a CATALYST class
+TRANSFORMATIVE force-verb on a hero prop with Delta Axis != NONE,
+transformation MUST complete INSTANTLY on catalyst contact + held terminal
+state through remaining clip. Defeats Veo's default linear-smear behavior
+across full clip even with end_frame anchored (critical on v718h-C).
+
+CATALYST CLASS TAXONOMY:
+  LIQUID-ON-SURFACE  POUR / SPRAY / DRIP / CASCADE -> WIPES / ERASES /
+                     DISSOLVES / WASHES-AWAY
+  IMPACT-ON-RIGID    STRIKE / SMASH / SLAM / HAMMER -> SHATTERS /
+                     SPLITS / FRACTURES / EXPLODES
+  TOOL-ON-SURFACE    SCRUB / SCRAPE / WIPE / BRUSH -> STRIPS / LIFTS /
+                     CLEARS / REVEALS
+  BLADE-ON-OBJECT    CUT / SLICE / SAW -> SPLITS / SECTIONS / OPENS
+  FORCE-ON-FLEXIBLE  SQUEEZE / PRESS / PINCH / PULL / TWIST ->
+                     BURSTS / DEFLATES / RELEASES
+  HEAT-ON-COMBUST.   BURN / IGNITE / FLAME / MELT -> CHARS / BLACKENS /
+                     LIQUEFIES
+  GRANULAR-ON-LIQ.   DROP / SPRINKLE / SHAKE-INTO -> DISPERSES /
+                     SUSPENDS / DISSOLVES
+
+Y-MARK HEURISTIC: Y <= clip_duration / 3 (default Y=2.5s for 8s clip).
+
+REQUIRED Veo prompt body additions:
+
+  IMMEDIATE ACTION block:
+    "IMMEDIATE ACTION (INSTANT REACTION ON CONTACT — no gradual
+    progression):" + "The MOMENT the leading edge of [catalyst]
+    contacts [prop], [start-state feature] is INSTANTLY [consequence-
+    verb]" + "By the X-second mark, [terminal state] already visible.
+    COMPLETE by ~Y seconds." + Structural/Volume: VFX Wipe language.
+
+  TERMINAL STATE block:
+    "TERMINAL STATE (held from ~Y seconds through clip-end):"
+    + [prop] holds resolved state for ~Z seconds + persona settles.
+
+  Ambient: single decisive catalyst sound + quiet through held terminal.
+
+  Negative prompt: no GRADUAL [transformation] across full clip / no
+  slow [transformation-verb] / no progressive transformation / no
+  [start-state feature] past Y-second mark.
+
+CARVE-OUTS: autonomous transformations / genuinely gradual processes
+>15s / Delta Axis NONE / explicit slow-motion -> v752 N/A.
+
+WHY CRITICAL ON OPTION C: Veo cfg.last_frame native interpolation
+defaults to linear smear; v752 explicit timing + VFX Wipe Override
+fight this. Operator surfacing case (tongue HOOK Clip 1.1, 2026-05-18):
+post-v752 prompt = cleanse complete by 2.5s + held 5.5s. Operator
+verdict: "much better now."
+
+================================================================================
+V718H.1 + V718D.1 + V580.3 — STRUCTURAL ESCALATION MANDATE (NEW 2026-05-18)
+================================================================================
+
+v718h.1 (Highest-Escalation Wins): ANY presence of Structural Integrity
+OR Volume/Shape in t=0 -> t=end delta MUST escalate Carry Mode to
+Option C OR B regardless of "primary" axis label.
+
+v718d.1 (3D-to-Flat diagnostic): VLM MUST ask "Does t=0 contain raised
+bumps / swollen pouches / blisters / deep grooves / distended volumes
+that are flattened in t=end?" YES -> Structural Integrity OR Volume/
+Shape (not pure Surface/Texture).
+
+3D-TO-FLAT VOCABULARY (any in t=0 OR t=end triggers escalation):
+  blister / bump / pimple / pustule / wart / cyst / nodule / lump /
+  protrusion / spike / ridge / crest / pouch / pocket / swollen /
+  bloated / distended / inflated / puffy / engorged / pendulous /
+  sagging / drooping / deep groove / deep crease / deep wrinkle /
+  hollow / cavity / flatten / level / deflate / shrink / firm-up /
+  tighten / smooth-out / collapse
+
+v580.3 (Option C default for ALL state-evolution): post-v718i LIVE,
+Option C (within-clip-end-frame) is DEFAULT for ALL Delta Axis != NONE.
+Option A retained as escape hatch ONLY for Surface/Color-only + cost-
+sensitive + explicit acknowledgement.
+
+DECISION TREE:
+  Surface/Texture only OR Color/Illumination only OR mix-of-only-those
+    -> Option A allowed
+  ANY axis includes Structural Integrity OR Volume/Shape
+    -> Option C MANDATORY (or B fallback)
+
+MULTI-AXIS DECLARATION (replaces primary/secondary):
+  Delta Axis: Surface/Texture + Structural Integrity + Color/Illumination
+              (highest-escalation axis = Structural Integrity per
+               v718h.1 -> Carry Mode escalates to Option C mandatory)
+
+PYTHON GATE extends v738.1: STRUCTURAL_TOKENS scan over t=0/t=end.
+Vocabulary present + Delta Axis lacks Structural Integrity/Volume/Shape
+-> REJECT (v718d.1 FAIL). Vocabulary present + Carry Mode = within-clip
+-> REJECT (v718h.1 FAIL).
+
+================================================================================
+
 INNOVATE PROCESS (mirrors operator's internal workflow — follow exactly):
 
 Step 1 — DECOMPOSE the outside-niche source (extract winning structure)
@@ -679,6 +873,339 @@ V715 — SUBJECT-ANCHORED PROP COMPOSITION (apply during innovation):
   HOW the source happened to compose (desk-gravity bias propagates
   unless re-anchored).
 
+V736 — SPECTACLE-OVER-LOGIC DISCIPLINE (apply BEFORE writing markdown):
+
+  CORE THESIS: LLMs default to safe / logical / probable. Viral hooks
+  need the OPPOSITE — unsafe / absurd / improbable. v598 power-test +
+  v600 cartoon-physics enforce FORMAT but leave a loophole: "safe"
+  metaphor selection (prostate = garden hose, digestion = drain,
+  heart = engine). v736 closes the loophole.
+
+  OPERATOR RULE: "If the visual metaphor makes logical sense in a
+  middle-school biology class, REJECT IT. Viral hooks rely on
+  Spectacle Disconnect — the prop should be viscerally interesting
+  first, and a metaphor second."
+
+  Four sub-rules (all four MUST fire on every innovate output):
+
+  ----------------------------------------------------------------
+  v736a — ANTI-SENSE METAPHOR BAN
+  ----------------------------------------------------------------
+
+  Banned-by-default first-instinct prop mappings:
+    Prostate / urinary    -> garden hose / faucet / pipe / kink / drip
+    Digestion / gut       -> drain / clog / plunger / toilet / blocked sink
+    Heart / circulation   -> engine / motor / oil-filter / pump / valve
+    Joints / arthritis    -> hinges / rusted gears / WD-40 can
+    Skin / wrinkles       -> wallpaper / peeling paint / cracked clay
+    Hair / scalp          -> grass on dry ground / lawn / thinning carpet
+    Eyes / vision         -> camera lens / foggy windshield / dirty mirror
+    Liver / detox         -> water filter / sponge-as-filter / drain trap
+    Hormones / mood       -> switch / dial / thermostat / fuse-box
+    Bloat / weight        -> overinflated balloon / stuffed sack
+
+  If your first-instinct prop is on this list (or a near-neighbor),
+  STOP and re-pick. Replacement criterion: the prop should be visceral
+  first, metaphor second — meaning a viewer who doesn't know what the
+  video is about would still stop scrolling to watch the prop be
+  destroyed / squeezed / cascaded / pulled apart.
+
+  ----------------------------------------------------------------
+  v736b — TREND-HIJACK MANDATE
+  ----------------------------------------------------------------
+
+  Innovation MUST explicitly name a current viral aesthetic and frame
+  the pain point THROUGH that aesthetic. Catalog:
+
+    ASMR soap cutting (curls of soap, satisfying slice)
+    Hydraulic press crushing (industrial press flattens / explodes)
+    Power-washing dirty rugs / driveways / patio furniture
+    Kinetic-sand slicing (clean knife through compressed sand)
+    Satisfying paint-mixing (bucket pour, marbled colors)
+    Giant water-balloon pops (slow-mo membrane burst)
+    Pomegranate / fruit smash (juice cascade, seeds scattering)
+    Slime-pull / slime-stretch (impossible-elastic stretch, pop)
+    Cake-frosting reveal (knife smooths uneven surface to mirror)
+    Sponge-wring (thick murky water cascade from saturation)
+    Wax-seal melt / candle-melt (controlled drip, hardening)
+    Glass-shatter slow-mo (fragments suspended, light catches)
+
+  The HOOK MUST be framed as: "you MUST frame the [niche] hook using
+  a [trend-name] visual style. Show the satisfying / visceral
+  [destruction / transformation / pull-apart] of the prop BEFORE
+  delivering the medical claim."
+
+  The trend-name MUST be named explicitly. Generic "visual hook" /
+  "satisfying action" / "scroll-stopper" wording FAILS the gate.
+  The trend brings its own visual grammar — composition / lighting /
+  framing — that you don't have to invent.
+
+  ----------------------------------------------------------------
+  v736c — UNCOMFORTABLE-TEXTURE MANDATE
+  ----------------------------------------------------------------
+
+  Hero prop in HOOK MUST possess textural / messy / slightly
+  uncomfortable physical state.
+
+  Allowed texture classes:
+    oozing / dripping / running / bursting / exploding / popping
+    sticky / tacky / gummy / fibrous / stringy / pulpy
+    gelatinous / viscous / jelly-like / foamy / frothy / bubbling
+    slimy / mucousy / gloppy / fleshy / pulpy / meaty
+    soaked / saturated / dripping-wet / stretchy / elastic / tearing
+
+  Banned default-texture classes (LLM "safe" reach):
+    dry plastic / bare plastic / smooth metal / polished steel / chrome
+    clean glass / clear acrylic / bare wood / sanded surface
+    polished stone / marble / dry paper / cardboard
+
+  Texture rule applies to the PROP, not the persona's hands or the
+  setting. Persona may wear gloves; setting may be sterile clinic.
+  The prop being acted on must have texture.
+
+  Replacement examples:
+    Garden hose            -> soaked sponge violently wrung
+    Stress ball            -> over-ripe persimmon bursting under thumb
+    Plastic anatomical model -> raw chicken liver sliding off cutting board
+    Clean ice cube         -> melting popsicle leaving sticky drip trails
+    Polished metal pipe    -> honey-glazed donut squashed flat
+    Dry sponge             -> soaked dishrag wrung over a pan
+
+  Combine with v720c body-pose discipline + v716/v717 anti-normalization
+  for max impact.
+
+  ----------------------------------------------------------------
+  v736d — SANDBOX-IDEATION GATE (the most critical sub-rule)
+  ----------------------------------------------------------------
+
+  Your videos/*.md OUTPUT MUST begin with a "## Brainstorming Sandbox"
+  section IN THE OUTPUT FILE (NOT in chat) BEFORE the YAML frontmatter.
+  The sandbox MUST contain:
+
+    1. Five (5) radically different visual hook concepts. Each concept
+       names: hero prop + texture class (v736c) + force-verb action
+       (v697) + trend-hijack tag (v736b) + 1-line metaphor mapping.
+
+    2. Each concept rated 1-10 on "Unhinged TikTok Spectacle" — 10 =
+       absurd / visceral / can't-look-away; 1 = boring / corporate /
+       biology-class diagram.
+
+    3. The 3 lowest-rated (most logical / safe) concepts MUST be struck
+       through with ~~text~~.
+
+    4. The single most visceral / scroll-stopping concept MUST be
+       marked **SELECTED →**.
+
+    5. The selected concept's hero prop / texture / trend / force-verb
+       chain MUST match what appears in ## Images / ## Storyboard for
+       the HOOK image.
+
+  WHY mandatory in-file (not chat-side): linear token generation locks
+  YOU into the FIRST plausible idea you emit. By forcing the sandbox
+  INTO the output file BEFORE the markdown body begins, you commit 5
+  concepts to the context window and can self-evaluate before the
+  first scene block locks tone. Sandbox-in-chat does NOT work — you
+  treat chat as draft and OUTPUT as final, and the OUTPUT's first
+  scene-image dominates downstream attention.
+
+  Worked sandbox example (saw-palmetto / prostate):
+
+    ## Brainstorming Sandbox
+
+    1. ~~Garden hose unkink — dry plastic hose, GRIP + PULL-APART
+       force-verb, [no trend tag], maps "kinked urethra" 1:1.
+       Spectacle: 2/10 (logical, dry, boring).~~
+    2. ~~Faucet drip-stop — chrome faucet, TIGHTEN force-verb,
+       [no trend tag], maps "leaky bladder". Spectacle: 3/10
+       (clean metal, predictable).~~
+    3. ~~Drain clog clear — drain + plunger, PUSH + RELEASE,
+       "satisfying clog clears", maps "obstruction lifts".
+       Spectacle: 4/10 (logical drain analogy).~~
+    4. Pomegranate smash — over-ripe pomegranate (oozing / bursting /
+       dripping per v736c), SLAM + CASCADE force-verb, [hydraulic-
+       press trend per v736b], juice-cascade maps "trapped pressure
+       releasing." Spectacle: 9/10.
+    5. **SELECTED →** Soaked-sponge wring — kitchen sponge soaked in
+       murky water (gelatinous / dripping / foamy per v736c), GRIP +
+       TWIST + CASCADE force-verb, [power-washing trend per v736b],
+       cascade onto practitioner's bare hands maps "stuck pressure
+       finally moving." Spectacle: 10/10 (texture + cascade +
+       visible release; sustains through full 8s force-verb arc).
+
+  CARVE-OUTS:
+
+    - HOOK image only. Body / mechanism / RESULT / CTA scenes don't
+      need sandbox treatment.
+    - Innovate-side SHOULD pick trend-hijack option (v736b) as winner
+      unless another sandbox entry is genuinely more visceral.
+    - When the outside-niche source HOOK already passes v736a + v736b
+      + v736c, sandbox MUST cite the source as one of the 5 entries
+      and may select it as winner.
+
+  PAIRING:
+    v598 power-test runs AFTER v736 selection (selected concept must
+    still pass Q1-Q8). v600 cartoon-physics extended by v736c from
+    "magnitude" to "texture / state". v697 force-verb chain named per
+    sandbox entry. v713-v720 composition discipline applied to the
+    selected concept's HOOK image rendering. v621 narrative_lens:
+    sandbox is GRABBING-ATTENTION (the spectacle IS the rhetorical
+    move).
+
+  ----------------------------------------------------------------
+  v736.1 — DNA-FIRST AMENDMENT (sub-rules e/f/g/h)
+  ----------------------------------------------------------------
+
+  Corpus DNA extraction across 6 viral hooks (chicken-in-pot /
+  honeycomb / dual-prostate-models / shirtless-strain / pickle-vs-
+  belly / hanging-peanut-sack) surfaces 7 universal invariants every
+  viral hook satisfies. v736 a-d closed the safe-default loophole;
+  v736.1 adds e/f/g/h to enforce composition + economy.
+
+  THE 7 INVARIANTS (constants across niches — surface variables vary):
+
+    1. ONE symptom-bearing object dead-center
+    2. Persona hands actively manipulating object
+    3. Object texture wet / messy / visceral / uncomfortable
+    4. Persona face visible above OR beside object, mouth mid-word,
+       eyes on lens
+    5. Authority setting blurred behind
+    6. Object connection to symptom rhetorical not literal
+    7. 8-sec force-verb arc with visible state change
+
+  v736e — DEAD-CENTER COMPOSITION:
+    Hero prop owns geometric middle of the frame, NOT rule-of-thirds
+    intersection. Camera level MATCHES hero anchor height (chest for
+    held-aloft / belly for distended belly / brow for wrinkle-macro /
+    lumbar for back-symptom). NEVER top-down or high-angle.
+
+    Required [Composition] phrase pattern:
+      "[hero prop] fills the immediate center-foreground, dominating
+       the middle of the image"
+      OR
+      "[hero prop] fills the immediate center of the frame, occupying
+       60% of the frame's vertical center axis"
+
+    Required Negative:
+      "No prop sinking to the lower-third. No rule-of-thirds offset
+       — symptom occupies geometric center."
+
+  v736f — ACTIVE-HANDS MANDATE:
+    Persona's hands actively manipulate the hero object. Static hold
+    fails. Required active-verbs (one or more): grip / squeeze / lift
+    / wrap / hang / measure / point / press / pierce / shake / wring
+    / scrape / smooth / wind / inflate / pull-apart.
+
+    The active manipulation IS the spectacle anchor that triggers
+    Invariant 7 visible state change.
+
+    Required [Subject — Host] phrase: "both hands [active-verb] the
+    [hero prop]" OR "[hand position] [active-verb] [hero prop]".
+
+    Required Negative: "No static hold — persona's hands MUST
+    [active-verb] the [hero prop]."
+
+  v736g — FACE-ABOVE-OR-BESIDE-OBJECT:
+    Persona face visible at chest-up framing — either ABOVE prop
+    (single-subject, frames 1, 2, 3, 6 of corpus) OR BESIDE on
+    viewer-edge (two-shot, frames 4, 5 of corpus). v713a partial-
+    visibility override compatible (face cropped to eyebrow-to-chin
+    still satisfies v736g). Persona-cropped / hidden / displaced
+    FAILS.
+
+    Required [Composition] phrase:
+      "the main character's face is sharply visible just above the
+       prop at chest-up framing"
+      OR
+      "the main character's face is sharply visible at chest-up
+       framing on the viewer-[left/right] of the prop"
+
+    Required Negatives: "No persona crop on the face. No persona-
+    hidden-behind-prop. No persona-displaced-to-corner."
+
+  v736h — PROMPT-ECONOMY DISCIPLINE (the most-violated sub-rule):
+
+    HARD CEILING: Image prompt body (the [Composition] -> [Tech]
+    + Negatives content under "### Image N") MUST stay under 400
+    words. Ideal range 200-350. Past ~300w Banana 2 fidelity drops
+    because Banana 2's first-tokens-weighted-heaviest planner
+    pushes hero description into low-attention zone.
+    See wiki/generation/nano-banana-prompting.md line 194 ("long
+    text + photos fight each other").
+
+    HARD BANS inside Image prompt body:
+
+      - Meta-commentary about rules ("per Invariant 1" / "per v736e"
+        / "per v722"). Audit tags belong in lint output, not prompt
+        text.
+      - Beat structure ("[Start beat 0-2s]" / "[Mid-clip beat]" /
+        "[End beat 6-8s]"). Beats describe motion across time —
+        Banana 2 renders ONE still frame.
+      - Temporal language ("Across 8 seconds" / "throughout" /
+        "during the clip" / "then [verb] then [verb]"). Image is one
+        frame — describe ONE state.
+      - Splitting dual / triple props into separate [Subject —
+        Symptom A] + [Subject — Symptom B] blocks. Single [Subject
+        — Symptom] block treats them as ONE composition; split
+        invites Banana 2 to render them MORE separated, losing
+        cohesion. Frame 3 of corpus (dual prostate models) is ONE
+        Subject block.
+      - Over-described persona blocking past one sentence. Banana 2
+        just needs "holds X and Y at chest height with both hands"
+        — not "stands behind in midground, left hand cupping from
+        below, right hand cupping from below, both lifted to chest-
+        level facing the lens."
+      - Wardrobe / upload / framework callouts in body prose
+        ("Persona identity carried by upload (no inline wardrobe
+        per v722)"). Audit-only.
+      - Negative-block past 10 clauses. Past ~10 the "no green
+        elephant" hallucination class fires. Pick the 5-8 negatives
+        Banana 2 keeps violating in this niche.
+
+    IMAGE vs SCENE SEPARATION (the structural fix):
+
+      Image prompt body -> Banana 2 still frame (LEAN, single-state,
+        tight negatives, no meta, no beats, <=400 words).
+      Scene action_note + line + action_arc -> Veo motion clip
+        (VERBOSE-OK with beats + force-verb chain + lip-sync
+        discipline, no ceiling).
+
+    For BANANA 2 STILL: "exaggerated shocked expression" outperforms
+    "mouth open mid-utterance" because Banana 2's training prior is
+    stronger on staged expressions. v721 lip-sync language ("mouth
+    open mid-utterance, eyes locked to lens") is for VEO RENDER lip-
+    sync — lives in Scene action_note, NOT Image body.
+
+    DNA INVARIANTS ENFORCED BY CONTENT, NOT BY LABELS:
+
+      Invariant 1 (dead-center) -> "fills the immediate center-
+        foreground, dominating the middle". DROP: "(NOT viewer-left
+        third, NOT viewer-right third — per Invariant 1, occupying
+        60% of vertical center axis)".
+      Invariant 4 (face above) -> "face is sharply visible just
+        above the prop". DROP: "(per Invariant 4)".
+      Invariant 5 (background blurred) -> "background fully blurred".
+        DROP listing every blurred element.
+
+    PRE-OUTPUT GATES (v736h, mandatory):
+
+      gate 1 — word-count check on each "### Image N" body:
+        python -c "import re; t=open('videos/<file>.md',encoding='utf-8').read(); [print(f'Image {i}: {len(re.sub(r\"\`\`\`.*?\`\`\`\", \"\", m.group(1), flags=re.DOTALL).split())}w (ceiling 400)') for i,m in enumerate(re.finditer(r'^### Image \d+(.+?)(?=^###|\Z)', t, re.MULTILINE|re.DOTALL))]"
+        Expect: each Image body <=400w.
+
+      gate 2 — meta-commentary ban inside Image bodies:
+        grep -nE '\(per (Invariant|v[0-9]+)' videos/<file>.md
+        Expect: zero hits inside "### Image N" blocks.
+
+      gate 3 — temporal-language ban inside Image bodies:
+        grep -nE '\[Start beat|\[Mid-clip beat|\[End beat|Across \d+ seconds|throughout the clip' videos/<file>.md
+        Expect: hits ONLY in "### Scene N" action_note blocks,
+        NEVER in "### Image N" blocks.
+
+  Validated 2026-05-14 via dual-prostate HOOK A/B test on Banana 2:
+  lean ~250w original beat bloated ~700w rewrite on Banana 2 fidelity
+  (dual organs cohesive vs separated; contrast clear vs diluted;
+  dripping fluid rendered vs lost). v736h codifies the lesson.
+
 INNOVATION-SPECIFIC ANTI-PATTERNS (do NOT replicate):
 
 - Don't keep the outside-niche source's NICHE WORDS. Port to target niche.
@@ -690,6 +1217,319 @@ INNOVATION-SPECIFIC ANTI-PATTERNS (do NOT replicate):
 - Don't shift HOOK family (e.g. source = SHAME-PROXY → output ≠ BEFORE-AFTER).
   If the target cell really doesn't fit the source's HOOK family, propose
   3 alternative source videos that DO fit instead.
+
+PRE-FLIGHT CHECKLIST (v738 — HARDENED 2026-05-16 to STRICT REJECT GATE — mandatory thinking-prelude before artifact emission):
+
+STRICT ENFORCEMENT: artifact missing ## Pre-Flight Checklist is REJECTED. Re-emit with checklist FIRST before any markdown body. No exceptions. Operator-side grep gate enforces this rule.
+
+visual_delta MORPHOLOGICAL-CHANGE MANDATE (v718d): every - **visual_delta:** field MUST contain BOTH kinematic action AND morphological state-change descriptor. Pure-kinematic deltas (just "hand pours liquid") are REJECTED — you glossed over the morphological delta. Required pattern: "[kinematic action] + [now contains X from prior step OR transformed from Y to Z OR primary_change_axis: Surface/Structural/Volume/Color]". Operator-side grep gate at code/template_reference.md §"v738 Pre-output gate" enforces this.
+
+
+  Before emitting the final ## Brainstorming Sandbox / ## Ingredients /
+  ## Images / ## Storyboard sections, FIRST output a
+  ## Pre-Flight Checklist block declaring rule resolutions for THIS
+  source + cell + niche. The checklist primes context with explicit
+  collision resolutions BEFORE markdown headers lock in.
+
+  Mandatory checklist sections (full spec at code/template_reference.md
+  §"v738 — Pre-Flight Checklist"):
+
+    1. Composite layout check (v737 + v698A.1 Q2)
+       — PiP / green-screen / corner-inset present? → v737 decoupling
+       protocol; strip persona from b-roll Image bodies; route through
+       v698A voiceover-paired with shared anchor.
+
+    2. State-evolution + short-line check (v580 + v704 + v644)
+       — Recipe / Day-N / progressive-symptom chain requiring new image
+       per step? + verbatim line per step <12w? → v580/v644 carve-out:
+       keep separate scenes; USE - **pad:** bullet to extend Veo TTS
+       to ~20w combined; do NOT merge scenes.
+
+    3. Voiceover-paired detection (v698A.1 Step 1 decision tree)
+       — For each shot: Q1 voiceover overlap → Q2 face-as-PRIMARY
+       (with PiP carve-out per v737) → Q3 lip-sync. List voiceover-
+       paired scenes + anchor image declaration.
+
+    4. Sandbox requirement check (v736d)
+       — Output type = innovate → ## Brainstorming Sandbox REQUIRED at
+       top per v736d. Five entries, three struck-through, one SELECTED.
+
+    5. Vocabulary safety check (v702 + v615 + v693 + v722) —
+       OUTPUT-TYPE BRANCH (HARDENED 2026-05-15):
+
+       This is an INNOVATE artifact (videos/*.md) -> APPLY v702
+       (RELAXED 2026-05-15 clinical-register carve-out). Walk the
+       v702 4-step decision tree per code/template_reference.md.
+       Class 1 (sexual-action verbs adjacent to anatomy) + Class 2
+       (slang body-part words in image prompt fenced bodies) -> swap.
+       Class 3 (clinical anatomical terms alone — prostate / testes /
+       penis / vagina / uterus / etc.) -> ALLOWED.
+
+       v615 / v693 / v722 still apply.
+       — Forbidden tokens? em-dashes? lowercase? wardrobe in
+       Ingredients only?
+
+    6. Morphological Delta Declaration (v738.1 / v718d / v718e —
+       REPLACES Anti-Platonic Gate single-state check, HARDENED
+       2026-05-17 from kinematic-over-morphological blind spot
+       surfaced in tongue-cleanse decode failure):
+
+       For EVERY hero prop in this artifact's Image blocks, declare
+       per-prop block:
+
+         Hero Prop: <prop name verbatim from Ingredients table>
+         Image(s): <comma-separated image_N tokens>
+         Scene(s): <comma-separated scene_N tokens>
+         t=0 (Start State): <explicit texture / color / volume /
+           structural integrity at frame_anchor — BEFORE state at
+           peak severity>
+         v736c Texture Check (NEW 2026-05-18, v738.1 amendment): <MUST
+           name uncomfortable texture class from v736c catalog:
+           oozing / bursting / sticky / fibrous / gelatinous /
+           dripping / foamy / slimy / fleshy / pulpy / viscous /
+           soaked / stretchy / gloppy / grimy / coated / crusted /
+           encrusted / hyperemic / edematous / inflamed / pendulous
+           / drooping / sagging / bloated / pustular / blistered /
+           scaly / weeping / suppurating / atrophied — pick closest
+           match. May be "n/a (static prop, no morphology)" only
+           when Delta Axis == NONE>
+         t=end (Terminal State): <explicit texture / color / volume /
+           structural integrity at end of scene's clip — AFTER state
+           at peak resolution>
+         Delta Axis: <Surface/Texture | Structural Integrity |
+           Volume/Shape | Color/Illumination | NONE>
+         Carry Mode: <within-clip | within-clip-end-frame |
+           multi-clip-blend | cross-image | both>
+         Magnitude: <COMPLETE | PARTIAL | MINIMAL | NONE> per v589
+
+       HARD GATE (all REJECT):
+         - Delta Axis != NONE AND t=0 == t=end → REJECT (contradiction).
+         - Delta Axis != NONE AND t=end relies on generic kinematic-
+           only verbs without morphological state-change descriptor
+           → REJECT (kinematic-over-morphological blind spot).
+         - At least ONE hero prop in HOOK + diagnostic-reveal scenes
+           MUST have Delta Axis != NONE. Viral hooks rely on
+           ABNORMALITY + visible transformation. If all hero props
+           declare Delta Axis = NONE on HOOK, re-amp via Pattern 21
+           + v716 + v717 + v719 + Pattern 23 diagnostic-anchor stack
+           until at least ONE prop transforms measurably.
+
+       v604.1 PAIRING: when Delta Axis != NONE AND Carry Mode =
+       within-clip | both, frame_anchor MUST point at t=0 (BEFORE
+       state), NOT t=end (AFTER state). Annotate with "(BEFORE-state
+       anchor)" tag. Veo cannot animate backward.
+
+       v586.1 + v717.1 IMAGE BODY DISCIPLINE: when Section 6 declares
+       Delta Axis != NONE for a prop AND narrative_lens ∈
+       {AUGMENTED-SYMPTOMS, HEALER-SHOWING-CURE}, [Subject — Symptom]
+       block opener MUST name the prop's t=0 state at peak severity.
+       Banned: "An anatomical tongue model." Required: "An anatomical
+       tongue model coated in a thick, dry, pale-yellow film,
+       papillae buried under the grime layer."
+
+       v718g NEW REQUIRED FIELD: when this scene's hero prop Delta
+       Axis != NONE AND Carry Mode = within-clip | both, the Scene
+       block MUST carry a - **visual_delta_within_clip:** field
+       pairing TRANSFORMATIVE verbs (v697.1) with morphological
+       state-change descriptors (v718d 4-axis vocabulary).
+
+       WHY: forcing the author to write t=0 + t=end side-by-side
+       BEFORE generating markdown body triggers contrast-recognition.
+
+    7. Action-Consequence Coupling (v718e, NEW 2026-05-17) — for
+       EVERY scene whose primary_change_axis != NONE, the
+       - **action_note:** field MUST satisfy three coupling rules:
+
+       v718e-1: Mid-clip beat AND End beat force-verbs paired with
+         morphological consequence in the SAME SENTENCE. Pattern:
+         "[force-verb] the [prop], [transformation-verb] the
+         [prop-feature] into [end-state]".
+         Wrong: "the liquid cascades over the tongue, coating the
+                 grime."
+         Right: "the liquid cascades over the tongue, washing away
+                 the grime in a single continuous sweep."
+
+       v718e-2: [End beat 5-8s] clause MUST manifest the
+         intrinsic_state_end declared per v718d. Cannot end on
+         transient state. v589 magnitude (COMPLETE / PARTIAL /
+         MINIMAL) propagates.
+
+       v718e-3: Banned static-contact verbs in Mid + End beats:
+         coating / covering / pooling on / resting on / touching /
+         sitting on / placed on / lying on / falling on / settling
+         on / landing on / arriving at / meeting / contacting.
+
+         Required transformation verbs by axis:
+           Surface/Texture       washing away / dissolving /
+                                 scrubbing clean / clearing /
+                                 revealing / stripping
+           Structural Integrity  smashing open / shattering /
+                                 splitting / bursting / tearing /
+                                 fracturing / exploding
+           Volume/Shape          melting / shrinking / deflating /
+                                 flattening / draining / collapsing
+                                 inward / lifting tight
+           Color/Illumination    flushing red / glowing bright /
+                                 dimming dark / blanching pale /
+                                 igniting
+
+         Operator-side Python gate at code/template_reference.md
+         §"v718e Pre-output mechanical gate" enforces v718e-3.
+         Run before ship; expect zero v718e FAIL output.
+
+         Carve-out: primary_change_axis == NONE → v718e N/A.
+
+    8. Composition discipline check (v713 + v715 + v716/v717 + v720 +
+       v736e/f/g/h)
+       — HOOK: dead-center + active hands + face above-or-beside +
+       body <=400w. B-roll: pure (no persona). Anchor: role +
+       cast + chest-up + open-palm.
+
+    9. Image cardinality + use audit (v594 + v580)
+       — Declared images count = ?  Referenced images count = ?
+       Zero unused images?
+
+    10a. Veo 3.1 Structural Delta Decision Tree (v718h-A/B/C + v580.2
+         + v718i, NEW 2026-05-17, render-test validated) — for EVERY
+         scene with Section 6 Delta Axis != NONE, choose authoring
+         path based on Delta Axis:
+
+         Surface/Texture | Color/Illumination → Option A (single-
+           clip Veo with VFX Wipe Override per v718h-A).
+         Volume/Shape | Structural Integrity → Option C (Veo native
+           end-frame interpolation per v718h-C + v718i, LIVE
+           2026-05-18, RECOMMENDED DEFAULT — single Veo clip with
+           cfg.last_frame native interpolation) OR Option B (multi-
+           clip blend per v718h-B, FALLBACK when single-clip Veo
+           render budget unavailable) OR Option A as escape hatch
+           with explicit acknowledgement.
+
+         OPTION B (Multi-Clip Blend, v718h-B + v580.2 — RECOMMENDED
+         for Structural/Volume axes; uses existing platform features,
+         no parser changes needed):
+
+           1. Author TWO Banana 2 Images per v580.2:
+              Image K   = t=0 BEFORE state (frame_anchor at t=0,
+                          annotated "(BEFORE-state anchor — paired
+                          with image_K+1 for v718h-B/C)")
+              Image K+1 = t=end AFTER state (reference_image:
+                          image_K, visual_delta declares
+                          morphological transformation per v718e
+                          coupling, frame_anchor at t=end,
+                          annotated "(AFTER-state anchor — paired
+                          end frame for v718h-B/C)")
+           2. Author TWO sequential Scenes bound to one source clip
+              duration:
+              Scene N   = image: image_K, clip_mode: fresh,
+                          transition: blend, target_duration_s ≈
+                          source_clip_duration / 2
+              Scene N+1 = image: image_K+1, clip_mode: blend,
+                          transition: cut, target_duration_s ≈
+                          source_clip_duration / 2
+           3. Lines split across the pair OR placed entirely on
+              Scene N+1 with Scene N silent.
+           4. Renumber downstream scenes (every scene index > N
+              gets scene_index + 1).
+           5. Pre-Flight Section 6 declares Carry Mode = multi-
+              clip-blend + Image(s) field lists both image_K +
+              image_K+1 + Scene(s) field lists both scene_N +
+              scene_N+1.
+           6. Pre-Flight Section 8 audit table has TWO rows for the
+              paired pattern.
+           7. Each Scene's action_note carries the segment of
+              transformation that happens in its half.
+           8. Veo prompts for Scene N + Scene N+1 carry NORMAL Veo
+              prompts (NOT VFX Wipe Override — morphological anchor
+              is the Banana 2 Image, not text-prompt steering).
+
+           Render expectation: ~95%+ success rate (vs ~60-70% for
+           Option A on structural axes); CapCut crossfades seam at
+           midpoint into smooth morphological transition.
+
+         OPTION C (Veo Native End-Frame Interpolation, v718h-C +
+         v718i — LIVE 2026-05-18, RECOMMENDED DEFAULT for Structural/
+         Volume axes): SINGLE Veo clip with TWO Banana 2 Images via
+         explicit end-frame binding. (1) Author Image K (t=0 BEFORE)
+         + Image K+1 (t=end AFTER) per v580.2 (same as Option B).
+         (2) Author SINGLE Scene N with image: image_K +
+         end_frame_image: image_K+1 + target_duration_s: full clip
+         duration. clip_mode: fresh, transition: cut. (3) Pre-Flight
+         Section 6 Carry Mode = within-clip-end-frame. (4) Section 8
+         has ONE row for the scene. (5) Veo prompt: NORMAL (NOT VFX
+         Wipe — morphological anchors are the paired Banana 2
+         Images). Platform parser binds end_frame_image: → ImageNode.id
+         → Clip.end_frame_image_node_id → worker explicit_end_frame
+         override → veo_generator cfg.last_frame at line 2605.
+         Pros: HALVES Veo render cost vs Option B (1 clip vs 2);
+         continuous interpolation, no CapCut seam. Cons: Veo
+         interpolation may deviate from action_note semantics
+         slightly (mitigated by text-prompt steering).
+
+         OPTION A (VFX Wipe Override, v718h-A — single-clip escape
+         hatch; required for Surface/Texture + Color/Illumination
+         axes; escape hatch for Structural/Volume) — for EVERY Veo
+         Final Prompt body where Section 6 declares Delta Axis !=
+         NONE AND Carry Mode = within-clip | both, apply 5-step
+         protocol:
+
+         STEP 1: Static camera lock + zero start-state description.
+         STEP 2: Temporal Forcing in first action sentence
+           ("IMMEDIATE ACTION: Right from the first frame, ...").
+         STEP 3: Action-Consequence Coupling in one continuous
+           paragraph (motion + result + replacement target chained).
+         STEP 4: Axis-matched verb framing —
+           Surface/Texture: WASH/DISSOLVE/SCRUB/REVEAL.
+           Color/Illumination: COLOR-SHIFT/TRANSFORMS-INTO/SATURATES.
+           Volume/Shape: REDUCES/DRAINS/SHRINKS/DEFLATES.
+           Structural Integrity: MUST ESCALATE to VFX WIPE OVERRIDE
+             ("digital VFX wipe" + "ERASING the 3D geometry" +
+             "REPLACED in real-time"). Surface verbs FAIL on 3D
+             structural pathology — Veo physics prior treats raised
+             geometry as solid; VFX framing invokes video-editing
+             prior which allows real-time geometry replacement.
+         STEP 5: TERMINAL STATE LOCK ("TERMINAL STATE: By clip-end,
+           ...") + temporal negatives ("no delay, no hesitation, no
+           holding the start frame, no shape-shifting lag") +
+           start-state pixel negatives ("no [feature] remaining at
+           clip-end, no [feature] surviving the [catalyst]") +
+           structural negatives if applicable ("no 3D [feature]
+           remaining, no fluid flowing over the [feature]").
+
+         HARD GATE: every Veo Final Prompt body whose scene has
+         Section 6 Delta Axis != NONE MUST satisfy 5-step protocol.
+         Full deep-dive at code/template_reference.md §"v718h — Veo
+         3.1 I2V Temporal Consistency Override".
+
+    10. Per-scene morphology audit (v738.2 / v718d / v718e / v697.1,
+        NEW 2026-05-17) — required table, one row per Scene:
+
+        | Scene N | Hero Prop(s) | Delta Axis | t=0 state (concise) | t=end state (concise) | TRANSFORMATIVE force-verb(s) in action_arc (v697.1) | Resolution token in End beat (v718e-2) |
+        | 1 | tongue | Surface/Texture | coated grey-brown | clean pink | POUR + SCRUB | washed away |
+        | 5 | book (CTA) | NONE | book held | book held | LIFT + PRESENT (NON-TRANSFORMATIVE) | n/a |
+
+        HARD GATE:
+          - Every Scene N in ## Storyboard MUST have a matching row.
+          - Row's Delta Axis MUST match Section 6 declaration for the same prop.
+          - Row's TRANSFORMATIVE column MUST contain ≥1 v697.1 TRANSFORMATIVE-class verb when Delta Axis != NONE.
+          - Row's Resolution column MUST contain ≥1 v718e-2 resolution token when Delta Axis != NONE.
+          - Rows with Delta Axis == NONE allow n/a + MUST use NON-TRANSFORMATIVE verbs only.
+
+        v697.1 TRANSFORMATIVE subclass: POUR / CASCADE / SPRAY /
+        SLAM / SQUEEZE / DROP / SMASH / SCRUB / WIPE / TILT-POUR /
+        STRAIN / DRAIN / DISSOLVE / SHATTER / MELT / BURST /
+        DEFLATE / COLOR-SHIFT / WASH-AWAY / ...
+        v697.1 NON-TRANSFORMATIVE subclass: HOLD / LIFT-PRE /
+        PRESENT / GESTURE-FORWARD / OPEN-PALM / POINT-TO-LENS /
+        END-LOOK / END-HOLD / NOD / FACE-LENS / GRIP-STEADY / ...
+
+  The checklist is operator-facing audit material — it sits ABOVE the
+  ## Brainstorming Sandbox block in the output file. Platform parser
+  ignores ## Pre-Flight Checklist (parser anchors are
+  ## Brainstorming Sandbox / ## Ingredients / ## Images / ## Storyboard
+  / ## Veo 3.1 Final Prompts / ## Comprehension / ## Sources).
+
+  Skip pre-flight ONLY for trivial single-scene videos (one HOOK + one
+  CTA, no recipe chain, no PiP).
 
 OUTPUT — single videos/*.md file per target cell spec.
 

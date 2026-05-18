@@ -303,6 +303,16 @@ class Clip(Base):
     paired_clip_id = Column(Integer, ForeignKey("clips.id"), nullable=True)
     voiceover_anchor_image_node_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=True)
     voiceover_line = Column(Text, nullable=True)
+    # v718i (NEW 2026-05-18): per-clip explicit end-frame image binding for
+    # v718h-C Option C Veo native end-frame interpolation. When the Scene
+    # block carries an `- **end_frame_image:** image_K+1` bullet, the
+    # platform binds the named ImageNode here. veo_generator.py:2605
+    # uses this (when set) for cfg.last_frame instead of auto-inferring
+    # from the next clip's start frame. Halves Veo render cost on
+    # structural-axis HOOKs vs v718h-B Multi-Clip Blend (1 clip vs 2).
+    # NULL = sequential auto-inference (legacy default).
+    # Migration registered in image_platform.py (mirrors voiceover_anchor_image_node_id).
+    end_frame_image_node_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=True)
 
     # Status
     status = Column(String(20), default=ClipStatus.PENDING.value)

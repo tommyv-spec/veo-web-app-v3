@@ -204,6 +204,20 @@ def run_image_platform_migrations():
         # building dialogue_json.
         ("image_scene_assignments", "voiceover_anchor_image_node_id",
          "ALTER TABLE image_scene_assignments ADD COLUMN voiceover_anchor_image_node_id INTEGER"),
+        # v718i (NEW 2026-05-18): end_frame_image_node_id on clips +
+        # image_scene_assignments. When a Scene block carries an
+        # `- **end_frame_image:** image_K+1` bullet (v718h-C Option C
+        # Veo native end-frame interpolation for Structural/Volume
+        # morphological deltas), the platform binds the explicit end
+        # image (instead of auto-inferring from next scene's start).
+        # veo_generator.py:2605 already supports cfg.last_frame; v718i
+        # exposes per-scene binding so a single 8s Veo clip can morph
+        # image_K -> image_K+1 via native interpolation, halving Veo
+        # render cost vs v718h-B Multi-Clip Blend (2 clips per HOOK).
+        ("clips", "end_frame_image_node_id",
+         "ALTER TABLE clips ADD COLUMN end_frame_image_node_id INTEGER"),
+        ("image_scene_assignments", "end_frame_image_node_id",
+         "ALTER TABLE image_scene_assignments ADD COLUMN end_frame_image_node_id INTEGER"),
         # v701: when Flow rejects start_frame for content-policy reasons,
         # the worker stamps error_code=CONTENT_POLICY_VIOLATION and the
         # rejected frame's R2 key gets stashed here so the frontend can
@@ -330,6 +344,11 @@ def run_image_platform_migrations():
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS role VARCHAR(40)"),
         ("image_scene_assignments", "voiceover_anchor_image_node_id",
          "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS voiceover_anchor_image_node_id INTEGER"),
+        # v718i (NEW 2026-05-18): see SQLite migration above.
+        ("clips", "end_frame_image_node_id",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS end_frame_image_node_id INTEGER"),
+        ("image_scene_assignments", "end_frame_image_node_id",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS end_frame_image_node_id INTEGER"),
         # v701: see SQLite migration above for the rationale.
         ("clips", "replacement_start_frame",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS replacement_start_frame VARCHAR(512)"),
@@ -1176,6 +1195,20 @@ class ImageSceneAssignment(Base):
     voiceover_anchor_image_node_id = Column(
         Integer, ForeignKey("image_nodes.id"), nullable=True
     )
+    # v718i (NEW 2026-05-18): per-scene explicit end-frame image binding for
+    # v718h-C Option C Veo native end-frame interpolation. When the Scene
+    # block carries an `- **end_frame_image:** image_K+1` bullet, the
+    # platform binds the named ImageNode here. veo_generator.py:2605
+    # uses this (when set) for cfg.last_frame instead of auto-inferring
+    # from the next clip's start frame. Pattern parallels
+    # voiceover_anchor_image_node_id (above) but semantically different:
+    # voiceover anchor = audio-pair start frame; end-frame image = same
+    # scene's Veo end frame for native morphological interpolation across
+    # an 8s clip. NULL on every non-Option-C assignment (default = sequential
+    # auto-inference).
+    end_frame_image_node_id = Column(
+        Integer, ForeignKey("image_nodes.id"), nullable=True
+    )
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1250,6 +1283,11 @@ class ImageSceneAssignment(Base):
             # v698A — anchor binding for voiceover-paired scenes. NULL on
             # non-voiceover assignments.
             "voiceover_anchor_image_node_id": self.voiceover_anchor_image_node_id,
+            # v718i (NEW 2026-05-18) — explicit end-frame image binding for
+            # v718h-C Option C Veo native end-frame interpolation. NULL on
+            # non-Option-C assignments (default = sequential auto-inference
+            # of end_frame from next clip's start image).
+            "end_frame_image_node_id": self.end_frame_image_node_id,
         }
 
 
@@ -3532,6 +3570,38 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     flush=True,
                 )
 
+        # v718i (NEW 2026-05-18): end_frame_image bullet. When the Scene
+        # declares an `- **end_frame_image:** image_K+1` field, the platform
+        # binds the named ImageNode as Veo's explicit end_frame for native
+        # interpolation (cfg.last_frame at veo_generator.py:2605). When
+        # absent, the existing sequential auto-inference fires (end_frame =
+        # next clip's start image).
+        end_frame_image: Optional[int] = None
+        end_frame_match = _re.search(
+            r"^\s*[-*]\s*\*\*end_frame_image:\*\*\s*image_(\d+)\s*$",
+            block, flags=_re.MULTILINE | _re.IGNORECASE,
+        )
+        if end_frame_match:
+            end_frame_image = int(end_frame_match.group(1))
+            if end_frame_image not in known_image_indexes:
+                raise ValueError(
+                    f"Scene {scene_index}: end_frame_image references "
+                    f"image_{end_frame_image} but no such image is "
+                    f"defined. Available: {sorted(known_image_indexes) if known_image_indexes else []}"
+                )
+            if image_index is not None and end_frame_image == image_index:
+                raise ValueError(
+                    f"Scene {scene_index}: end_frame_image image_{end_frame_image} "
+                    f"is the same as the scene's image_{image_index} "
+                    f"(start_frame == end_frame is not a valid v718h-C Option C "
+                    f"pattern; for static reveals, omit end_frame_image entirely)"
+                )
+            print(
+                f"[v718i/parse] scene_{scene_index} "
+                f"end_frame_image=image_{end_frame_image} (Veo native end-frame interpolation)",
+                flush=True,
+            )
+
         # Parse interleaved `- **line:**` / `- **action_note:**` / `- **pad:**`
         # bullets. Order matters: action_note and pad attach to the closest
         # preceding line within the same scene.
@@ -3621,6 +3691,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "bg_color": bg_color,         # v681 — text_card bg color (CSS / hex)
             "duration_s": duration_s,     # v681 — text_card duration in seconds (None → 1.0 at render)
             "voiceover_anchor_image": voiceover_anchor_image,  # v698A — None | int
+            "end_frame_image": end_frame_image,  # v718i (NEW 2026-05-18) — None | int; explicit end-frame image for Veo native interpolation
         })
 
     if not scenes:
@@ -5806,6 +5877,25 @@ def _import_scene_table_impl(
                 )
             anchor_node_id_resolved = anchor_node.id
 
+        # v718i (NEW 2026-05-18) — resolve end_frame_image (markdown int) →
+        # ImageNode.id. The end-frame image must already exist in
+        # created_nodes_by_image_index because PHASE 1 created an ImageNode
+        # for every parsed `### Image N` block (including AFTER-state
+        # anchors authored per v580.2). NULL on every non-Option-C scene
+        # (default = sequential auto-inference of end_frame from next
+        # clip's start image, legacy behavior).
+        end_frame_md_idx = s.get("end_frame_image")
+        end_frame_node_id_resolved = None
+        if end_frame_md_idx is not None:
+            end_frame_node = created_nodes_by_image_index.get(end_frame_md_idx)
+            if end_frame_node is None:
+                raise HTTPException(
+                    500,
+                    f"Scene {s['scene_index']}: end_frame_image references "
+                    f"image_{end_frame_md_idx} but no PHASE 1 node was created for it"
+                )
+            end_frame_node_id_resolved = end_frame_node.id
+
         assignment = ImageSceneAssignment(
             batch_id=batch_id,
             scene_index=s["scene_index"],
@@ -5833,6 +5923,10 @@ def _import_scene_table_impl(
             # v698A — anchor binding for voiceover-paired scenes; NULL on
             # all non-voiceover assignments.
             voiceover_anchor_image_node_id=anchor_node_id_resolved,
+            # v718i (NEW 2026-05-18) — explicit end-frame image binding for
+            # v718h-C Option C Veo native end-frame interpolation; NULL on
+            # all non-Option-C assignments (default = sequential auto-inference).
+            end_frame_image_node_id=end_frame_node_id_resolved,
         )
         db.add(assignment)
         assignments_created += 1
@@ -6370,6 +6464,14 @@ def prepare_batch_for_video(
         if anchor_nid is not None and anchor_nid not in seen:
             referenced_image_node_ids.append(anchor_nid)
             seen.add(anchor_nid)
+        # v718i (NEW 2026-05-18) — v718h-C Option C Veo native end-frame
+        # interpolation scenes also need the end-frame image uploaded so
+        # veo_generator.py can bind it to cfg.last_frame. Add the
+        # end-frame node id to the upload set if present.
+        end_frame_nid = scene.get("end_frame_image_node_id")
+        if end_frame_nid is not None and end_frame_nid not in seen:
+            referenced_image_node_ids.append(end_frame_nid)
+            seen.add(end_frame_nid)
 
     # Build a map node_id → node object for quick lookup
     nodes_by_id = {n.id: n for n in nodes}
@@ -6698,6 +6800,17 @@ def prepare_batch_for_video(
             else None
         )
 
+        # v718i (NEW 2026-05-18) — resolve end-frame image's local_idx for
+        # v718h-C Option C Veo native end-frame interpolation. None on every
+        # non-Option-C scene (sequential auto-inference fires in
+        # veo_generator.py when this is None).
+        _end_frame_node_id = scene.get("end_frame_image_node_id")
+        _end_frame_local_idx = (
+            node_id_to_local_index.get(_end_frame_node_id)
+            if _end_frame_node_id is not None
+            else None
+        )
+
         scene_assignments_payload.append({
             "scene_index": scene["scene_index"],
             "image_local_index": local_idx,
@@ -6733,6 +6846,14 @@ def prepare_batch_for_video(
             # voiceover_anchor_image_node_id.
             "voiceover_anchor_image_node_id": _anchor_node_id,
             "voiceover_anchor_image_local_index": _anchor_local_idx,
+            # v718i (NEW 2026-05-18) — explicit end-frame image binding for
+            # v718h-C Option C Veo native end-frame interpolation. NULL on
+            # every non-Option-C scene; populated values flow through to the
+            # frontend storyboard editor + DialogueLineInput at job creation
+            # so Clip rows get end_frame_image_node_id, then veo_generator.py
+            # binds it to cfg.last_frame instead of sequential auto-inference.
+            "end_frame_image_node_id": _end_frame_node_id,
+            "end_frame_image_local_index": _end_frame_local_idx,
         })
 
         # v681 — scenes with no `- **line:**` bullets but a real video
@@ -6822,6 +6943,13 @@ def prepare_batch_for_video(
                 # received only on-camera lines and silent scenes never
                 # got Clip rows or Veo renders.
                 "speaker_mode": scene_speaker_mode or None,
+                # v718i.2 (NEW 2026-05-18 late) — silent-scene flat row also
+                # needs end_frame_image binding so Option C silent scenes
+                # (e.g. silent state-evolution b-roll with paired anchor)
+                # plumb cfg.last_frame through to Veo. Mirrors per-line
+                # branch below.
+                "end_frame_image_node_id": _end_frame_node_id,
+                "end_frame_image_local_index": _end_frame_local_idx,
             })
             veo_prompts_flat.append(silent_vp)
             pads_flat.append(None)
@@ -6901,6 +7029,20 @@ def prepare_batch_for_video(
                     if (scene_speaker_mode or "").lower() == "voiceover"
                     else None
                 ),
+                # v718i.2 (NEW 2026-05-18 late) — denorm end_frame_image
+                # binding onto every line in the scene so the frontend
+                # dialogue payload builder at static/index.html:6759-6766
+                # reads promoteMeta.end_frame_image_node_id /
+                # end_frame_image_local_index from
+                # window._pendingImagePromoteScenes[i]. Without this the
+                # v718i.1 frontend fix falls through to null because the
+                # per-line metadata dict (scenes_metadata_flat) was never
+                # populated with these fields — only scene_assignments_payload
+                # carried them, but the frontend reads scenes_metadata
+                # (flat per-line array) not scene_assignments (per-scene
+                # array). Closes A→Z chain Stage 4b → 5 gap.
+                "end_frame_image_node_id": _end_frame_node_id,
+                "end_frame_image_local_index": _end_frame_local_idx,
             })
             veo_prompts_flat.append(vp)
             pads_flat.append(pad)

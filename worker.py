@@ -2101,6 +2101,14 @@ class JobWorker:
                 "requires_previous": False,  # Will be set below
                 "start_frame": None,  # Will be set or calculated
                 "end_frame": None,    # Will be set or calculated
+                # v718i (NEW 2026-05-18) — v718h-C Option C Veo native end-frame
+                # interpolation. When the source Scene declared
+                # `- **end_frame_image:** image_K+1`, prepare_batch_for_video
+                # propagated the resolved local_index into line_data. When
+                # present, the end-frame determination below uses this as
+                # actual_end_idx (overriding sequential next-scene auto-inference).
+                # NULL = legacy sequential default fires.
+                "explicit_end_frame_local_index": line_data.get("end_frame_image_local_index"),
             }
             
             # Determine if this clip requires the previous clip to complete first
@@ -2160,9 +2168,23 @@ class JobWorker:
                 use_end_frame = False
                 actual_end_idx = None
                 end_frame_reason = ""
-                
+
+                # v718i (NEW 2026-05-18) — v718h-C Option C Veo native end-frame
+                # interpolation. If the source Scene block declared an explicit
+                # `- **end_frame_image:** image_K+1` field, the parser
+                # propagated it through ImageSceneAssignment.end_frame_image_node_id
+                # → prepare_batch_for_video → line_data.end_frame_image_local_index
+                # → info.explicit_end_frame_local_index. When present, override
+                # sequential next-scene auto-inference and bind this image as
+                # cfg.last_frame for native Veo interpolation across the clip.
+                explicit_end_idx = info.get("explicit_end_frame_local_index")
+                if explicit_end_idx is not None and 0 <= explicit_end_idx < num_images:
+                    use_end_frame = True
+                    actual_end_idx = explicit_end_idx
+                    end_frame_reason = f"v718i Option C: explicit end_frame_image binding (image_local_index={explicit_end_idx})"
+                    print(f"[Worker/v718i] Clip {i}: explicit end-frame override (Option C native interpolation) → image_local_index={explicit_end_idx}", flush=True)
                 # SINGLE IMAGE MODE: Always use same image as end frame for interpolation
-                if single_image_mode and generator.config.use_interpolation:
+                elif single_image_mode and generator.config.use_interpolation:
                     use_end_frame = True
                     actual_end_idx = start_idx  # Same image for smoother motion
                     end_frame_reason = "single image mode, same frame for interpolation"

@@ -2933,6 +2933,28 @@ CLIP_READY_WAIT = 50    # Seconds to wait after submission before clip is ready 
 FAILURE_CHECK_DELAY = 1 # Brief pause before failure check (check itself polls for up to 8s)
 GENERATION_WAIT = 90    # Seconds to wait for generation before download
 
+# v737 — "We noticed some unusual activity" account-block detection.
+# Per-job strike counter. When all tiles fail with the unusual-activity Help-Center
+# notice, the page-refresh (golden restore) usually clears it. If it persists across
+# the restore (strike >= 2), retrying again just burns cycles forever — abort the job.
+UNUSUAL_ACTIVITY_MAX_STRIKES = 2
+_UNUSUAL_ACTIVITY_HITS = {}  # job_id -> int
+_UNUSUAL_ACTIVITY_LOCK = threading.Lock()
+
+# v738 — Stuck-clip detection during inter-clip wait scanner.
+# Veo render may complete server-side but the DOM never updates with the <video>
+# element (SSE completion missed) OR the v700 strict-match never bound a URL.
+# Without intervention the clip bakes to 300s download-worker STUCK_TIMEOUT and
+# gets marked 'failed' with no resubmit attempt. v738 prints heartbeats at 60s
+# intervals showing per-clip bind/URL/fail state, then at 180s downgrades the
+# clip to 'flow_redo_queued' so the submit-side redo poll picks it back up in
+# a fresh tile (instead of letting it rot to a hard failure).
+STUCK_HEARTBEAT_INTERVAL = 60   # seconds — diagnostic log cadence per stuck clip
+STUCK_REDO_THRESHOLD = 180      # seconds — force flow_redo_queued at this age
+_STUCK_HEARTBEAT_BUCKETS = {}   # (account, job_id, clip_index) -> last emitted age_bucket (int seconds // 60)
+_STUCK_REDO_FIRED = set()       # (account, job_id, clip_index) — guard so redo-mark fires at most once per clip per job
+_STUCK_LOCK = threading.Lock()
+
 # ============================================================
 # CLIP CHAIN ANALYSIS (for parallel distribution)
 # ============================================================
@@ -3912,6 +3934,81 @@ class HumanPacer:
                                             print(f"[{self.account_name}] ⚠ Between-clip: could not find Reuse Prompt for clip {_ci}", flush=True)
                                 except Exception:
                                     pass
+
+                                # v738 — stuck-clip diagnostic + redo gate. If clip has no
+                                # URL, no hard fail, no soft fail, AND has aged past the
+                                # heartbeat threshold, emit a heartbeat. At STUCK_REDO_THRESHOLD
+                                # downgrade to flow_redo_queued so the submit-side redo poll
+                                # picks it back up in a fresh tile instead of letting it rot
+                                # to 300s download-worker STUCK_TIMEOUT (which marks failed).
+                                if _ci not in _dl_checked:
+                                    try:
+                                        _age = (_now - _st).total_seconds()
+                                        _bucket = int(_age // STUCK_HEARTBEAT_INTERVAL)
+                                        _key = (self.account_name, job_id, _ci)
+                                        with _STUCK_LOCK:
+                                            _last_bucket = _STUCK_HEARTBEAT_BUCKETS.get(_key, -1)
+                                        # Heartbeat at every new 60s bucket past CLIP_READY_WAIT
+                                        if _bucket > _last_bucket and _age >= STUCK_HEARTBEAT_INTERVAL:
+                                            with _STUCK_LOCK:
+                                                _STUCK_HEARTBEAT_BUCKETS[_key] = _bucket
+                                            # Probe what we know about this clip's tile state
+                                            try:
+                                                _diag = page.evaluate(f"""() => {{
+                                                    const c = document.querySelector('[data-index="{_data_idx}"]');
+                                                    if (!c) return {{exists: false}};
+                                                    const icons = Array.from(c.querySelectorAll('i')).map(i => i.textContent.trim());
+                                                    return {{
+                                                        exists: true,
+                                                        hasVideo: c.querySelectorAll('video').length > 0,
+                                                        hasVideocam: icons.includes('videocam'),
+                                                        hasRefresh: icons.includes('refresh'),
+                                                        hasUndo: icons.includes('undo'),
+                                                        pctMatch: ((c.textContent||'').match(/\d+%/) || [null])[0]
+                                                    }};
+                                                }}""")
+                                            except Exception:
+                                                _diag = {'error': 'eval_failed'}
+                                            # v700 binding state
+                                            _bound = False
+                                            try:
+                                                with _PRIMARY_MEDIA_LOCK:
+                                                    for _b in _PRIMARY_MEDIA_BINDINGS.values():
+                                                        if _b.get('job_id') == job_id and _b.get('clip_index') == _ci:
+                                                            _bound = True
+                                                            break
+                                            except Exception:
+                                                pass
+                                            print(
+                                                f"[{self.account_name}] [v738] clip {_ci+1} stuck heartbeat @{_age:.0f}s "
+                                                f"(data_idx={_data_idx} v700_bound={_bound} tile_state={_diag})",
+                                                flush=True,
+                                            )
+                                        # Redo gate
+                                        if _age >= STUCK_REDO_THRESHOLD:
+                                            with _STUCK_LOCK:
+                                                _already_redo = _key in _STUCK_REDO_FIRED
+                                                if not _already_redo:
+                                                    _STUCK_REDO_FIRED.add(_key)
+                                            if not _already_redo:
+                                                print(
+                                                    f"[{self.account_name}] [v738] ❌ clip {_ci+1} stuck @{_age:.0f}s "
+                                                    f">= {STUCK_REDO_THRESHOLD}s with no URL + no fail signal — "
+                                                    f"marking flow_redo_queued for submit-side resubmit",
+                                                    flush=True,
+                                                )
+                                                try:
+                                                    update_clip_status(
+                                                        _clip_obj['id'], 'flow_redo_queued',
+                                                        error_message=f"Stuck @{_age:.0f}s — no URL captured, no fail signal (v738 redo gate)"
+                                                    )
+                                                except Exception as _redo_err:
+                                                    print(f"[{self.account_name}] [v738] failed to mark flow_redo_queued: {_redo_err}", flush=True)
+                                                _dl_checked.add(_ci)
+                                                # Remove from clip_submit_times so the scanner stops re-checking
+                                                clip_submit_times.pop(_ci, None)
+                                    except Exception as _v738_err:
+                                        print(f"[{self.account_name}] [v738] heartbeat/redo logic error: {_v738_err}", flush=True)
                         except Exception:
                             pass
             # v196: Periodic policy failure scan — catches failures that dialogue-text matching misses
@@ -6871,7 +6968,7 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name=""):
         return [], []
 
 
-def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None):
+def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None, job_id=None):
     """
     Check if the most recently submitted clip has failed.
     
@@ -6891,8 +6988,8 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None)
     TILE_CHECK_JS = r"""
         () => {
             const container = document.querySelector("div[data-index='DATA_INDEX_PLACEHOLDER']");
-            if (!container) return {tiles: 0, hasVideo: false, hasGenerating: false, failedCount: 0, allFailed: false};
-            
+            if (!container) return {tiles: 0, hasVideo: false, hasGenerating: false, failedCount: 0, allFailed: false, unusualActivityCount: 0};
+
             // Deduplicate tiles by data-tile-id (outer wrapper + inner div share same ID)
             const allTileEls = container.querySelectorAll("[data-tile-id]");
             const seen = new Set();
@@ -6901,45 +6998,52 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None)
                 const id = t.getAttribute("data-tile-id");
                 if (id && !seen.has(id)) { seen.add(id); tiles.push(t); }
             });
-            
+
             let hasVideo = false;
             let hasGenerating = false;
             let failedCount = 0;
-            
+            let unusualActivityCount = 0;
+
             tiles.forEach(t => {
                 // Check for completed video
                 if (t.querySelector("video")) {
                     hasVideo = true;
                     return;
                 }
-                
+
                 const text = t.textContent || '';
-                
+
                 // "videocam" = generating (appears before percentage)
                 // percentage = generating
                 if (text.includes('videocam') || /\d+%/.test(text)) {
                     hasGenerating = true;
                     return;
                 }
-                
+
                 // Truly failed = has a refresh (Retry) button
                 // Starting up tiles have "undo" (Reuse Prompt) but NOT "refresh"
-                const hasRefresh = t.querySelector("i") && 
+                const hasRefresh = t.querySelector("i") &&
                     Array.from(t.querySelectorAll("i")).some(i => i.textContent.trim() === 'refresh');
-                
+
                 if (hasRefresh) {
                     failedCount++;
+                    // v737 — Google account-block detection. Signature text on the
+                    // failed tile is "unusual activity" / "Help Center".
+                    if (text.includes('unusual activity') || text.includes('Help Center')) {
+                        unusualActivityCount++;
+                    }
                     return;
                 }
-                
+
                 // Has error/warning text but no refresh button = still starting up, not failed
             });
-            
+
             return {
                 tiles: tiles.length,
                 hasVideo: hasVideo,
                 hasGenerating: hasGenerating,
                 failedCount: failedCount,
+                unusualActivityCount: unusualActivityCount,
                 allFailed: tiles.length > 0 && failedCount === tiles.length && !hasGenerating && !hasVideo
             };
         }
@@ -7025,8 +7129,28 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None)
             
             if rc_failed == rc_tiles and rc_tiles > 0:
                 print(f"[FailCheck] ⚠️ ALL {rc_tiles} tiles still failed after retry + 10s wait", flush=True)
+                # v737 — track unusual-activity strikes per job. After 2 strikes
+                # the page refresh (golden restore) clearly hasn't cleared the
+                # account block, so abort the job instead of looping forever.
+                rc_unusual = recheck.get('unusualActivityCount', 0)
+                if rc_unusual > 0 and job_id:
+                    with _UNUSUAL_ACTIVITY_LOCK:
+                        hits = _UNUSUAL_ACTIVITY_HITS.get(job_id, 0) + 1
+                        _UNUSUAL_ACTIVITY_HITS[job_id] = hits
+                    print(
+                        f"[FailCheck] ⚠ v737 unusual-activity strike {hits}/{UNUSUAL_ACTIVITY_MAX_STRIKES} "
+                        f"for job {job_id[:8]} ({rc_unusual}/{rc_tiles} tiles)",
+                        flush=True,
+                    )
+                    if hits >= UNUSUAL_ACTIVITY_MAX_STRIKES:
+                        print(
+                            f"[FailCheck] ❌ v737 unusual-activity persists after page refresh — "
+                            f"aborting job {job_id[:8]} (no further retries)",
+                            flush=True,
+                        )
+                        return "abort_unusual_activity"
                 return True
-            
+
             print(f"[FailCheck] ✓ Some tiles recovered after retry", flush=True)
             return False
         
@@ -13375,7 +13499,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         # Wait 3 seconds then check for immediate failure
         # IMPORTANT: We do this BEFORE queuing for download on first clip
         time.sleep(FAILURE_CHECK_DELAY)
-        clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1)
+        clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1, job_id=job_id)
         
         # v700h — ghost detection with THREE-signal cross-check.
         # Signals (in order of confidence):
@@ -15081,7 +15205,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
 
         # Wait 3 seconds then check for immediate failure
         time.sleep(FAILURE_CHECK_DELAY)
-        clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1)
+        clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1, job_id=job_id)
 
         # v700g — ghost detection with uuid-binding cross-check (mirror
         # of the parallel-mode site at ~12962). Two-signal check:
@@ -15186,7 +15310,50 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         if not clip_failed:
             update_clip_status(clip['id'], 'generating')
             mark_clip_submitted(cache, job_id, clip_index)
-        
+            # v737 — successful submission clears unusual-activity strike counter for this job
+            with _UNUSUAL_ACTIVITY_LOCK:
+                _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
+
+        # v737 — unusual activity persists after golden restore. Abort job entirely
+        # instead of triggering another (futile) restore-then-resume cycle.
+        if clip_failed == "abort_unusual_activity":
+            print(
+                f"[Flow] ❌ v737 ABORT: Clip {clip_index+1} hit 'unusual activity' block "
+                f"after page refresh — stopping job {job_id[:8]} (no further retries)",
+                flush=True,
+            )
+            update_clip_status(
+                clip['id'], 'failed',
+                error_message="Unusual activity persists after page refresh — job aborted (v737)"
+            )
+            remaining = clips[i+1:]
+            for rc in remaining:
+                update_clip_status(
+                    rc['id'], 'failed',
+                    error_message="Job aborted — unusual activity (v737)"
+                )
+            generating_clips = [c for c in clips[:i] if c.get('status') == 'generating']
+            for gc in generating_clips:
+                update_clip_status(
+                    gc['id'], 'failed',
+                    error_message="Job aborted — unusual activity (v737)"
+                )
+            if download_queued:
+                try:
+                    allowed = set(c['clip_index'] for c in clips[:i] if c.get('status') == 'completed')
+                    download_queue.put({'type': 'limit_clips', 'job_id': job_id, 'allowed_clips': allowed})
+                    download_queue.put({'type': 'shutdown_after_complete', 'job_id': job_id})
+                except Exception:
+                    pass
+            update_job_status(job_id, 'failed')
+            if job_id in cache.get('jobs', {}):
+                cache['jobs'][job_id]['status'] = 'failed'
+                cache['jobs'][job_id]['project_url'] = None
+                save_cache(cache)
+            with _UNUSUAL_ACTIVITY_LOCK:
+                _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
+            raise Exception(f"Job {job_id} aborted — unusual activity persists after page refresh (v737)")
+
         if clip_failed:
             print(f"[Flow] ⚠️ Clip {clip_index+1} failed immediately — stopping submission and triggering restore...", flush=True)
             # Record failure so golden restore triggers
@@ -17097,6 +17264,11 @@ class AccountWorker(threading.Thread):
             if "browser has been closed" in err_str or "Target page" in err_str or "context or browser" in err_str:
                 print(f"[{self.name}] 💀 Browser crash detected — forcing immediate golden restore", flush=True)
                 account_health.record_failure(self.name, force_hot=True)
+            elif "unusual activity persists after page refresh" in err_str:
+                # v737 — job aborted because page-refresh didn't clear the account block.
+                # Do NOT trigger another golden restore (would just loop). Mild failure tally only.
+                print(f"[{self.name}] ❌ v737 Job aborted (unusual activity persists) — skipping golden restore", flush=True)
+                account_health.record_failure(self.name)
             elif "stopping job to trigger golden restore" in err_str:
                 print(f"[{self.name}] Clip failed — forcing golden restore...", flush=True)
                 account_health.record_failure(self.name, force_hot=True)
@@ -17162,6 +17334,11 @@ class AccountWorker(threading.Thread):
             if "browser has been closed" in err_str or "Target page" in err_str or "context or browser" in err_str:
                 print(f"[{self.name}] 💀 Browser crash detected — forcing immediate golden restore", flush=True)
                 account_health.record_failure(self.name, force_hot=True)
+            elif "unusual activity persists after page refresh" in err_str:
+                # v737 — see single-mode handler above.
+                role = "Primary" if is_primary else "Secondary"
+                print(f"[{self.name}] ❌ v737 {role} — job aborted (unusual activity persists) — skipping golden restore", flush=True)
+                account_health.record_failure(self.name)
             elif "stopping job to trigger golden restore" in err_str:
                 role = "Primary" if is_primary else "Secondary"
                 print(f"[{self.name}] {role} — clip failed, forcing golden restore...", flush=True)

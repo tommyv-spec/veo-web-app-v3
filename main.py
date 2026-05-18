@@ -227,6 +227,12 @@ class DialogueLineInput(BaseModel):
     voiceover_anchor_image_node_id: Optional[int] = None
     voiceover_anchor_image_local_index: Optional[int] = None
     voiceover_line: Optional[str] = None
+    # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding.
+    # When set, veo_generator.py:2605 binds cfg.last_frame to this ImageNode's
+    # rendered output instead of auto-inferring from next clip's start image.
+    # NULL on every non-Option-C dialogue line (legacy sequential default).
+    end_frame_image_node_id: Optional[int] = None
+    end_frame_image_local_index: Optional[int] = None
 
 
 class SceneInput(BaseModel):
@@ -351,6 +357,8 @@ class ClipResponse(BaseModel):
     paired_clip_id: Optional[int] = None
     voiceover_anchor_image_node_id: Optional[int] = None
     voiceover_line: Optional[str] = None
+    # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding.
+    end_frame_image_node_id: Optional[int] = None
     # v701 — when error_code == 'CONTENT_POLICY_VIOLATION', the previously
     # rejected start_frame R2 key is exposed here so the frontend can
     # render the offending image inside the "upload replacement" card.
@@ -1944,6 +1952,17 @@ async def _create_job_impl(
         voiceover_line_val = (
             line.get('voiceover_line') if isinstance(line, dict) else None
         )
+        # v718i (NEW 2026-05-18) — v718h-C Option C Veo native end-frame
+        # interpolation per-clip binding. When the source Scene declared
+        # `- **end_frame_image:** image_K+1`, the parsed ImageSceneAssignment
+        # carries end_frame_image_node_id which prepare_batch_for_video
+        # propagated into the line dict. veo_generator.py:2605 uses this
+        # to bind cfg.last_frame (overrides sequential auto-inference from
+        # next clip's start image). NULL on every non-Option-C line.
+        end_frame_image_node_id_val = (
+            line.get('end_frame_image_node_id')
+            if isinstance(line, dict) else None
+        )
 
         clip = Clip(
             job_id=job_id,
@@ -1965,6 +1984,9 @@ async def _create_job_impl(
             clip_role=clip_role_val,
             voiceover_anchor_image_node_id=voiceover_anchor_node_id,
             voiceover_line=voiceover_line_val,
+            # v718i (NEW 2026-05-18) — explicit end-frame image binding for
+            # Veo native end-frame interpolation. NULL = sequential auto-inference.
+            end_frame_image_node_id=end_frame_image_node_id_val,
         )
         db.add(clip)
     db.commit()
@@ -3503,6 +3525,8 @@ async def get_job_clips(
             paired_clip_id=c.paired_clip_id,
             voiceover_anchor_image_node_id=c.voiceover_anchor_image_node_id,
             voiceover_line=c.voiceover_line,
+            # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding
+            end_frame_image_node_id=c.end_frame_image_node_id,
             replacement_start_frame=c.replacement_start_frame,  # v701
         )
         for c in clips
@@ -3592,6 +3616,8 @@ async def get_job_clips_active(
             paired_clip_id=c.paired_clip_id,
             voiceover_anchor_image_node_id=c.voiceover_anchor_image_node_id,
             voiceover_line=c.voiceover_line,
+            # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding
+            end_frame_image_node_id=c.end_frame_image_node_id,
             replacement_start_frame=c.replacement_start_frame,
         )
         for c in clips

@@ -6744,6 +6744,26 @@ Example: A realistic vertical video of a professional presenter speaking directl
                                 ? promoteMeta.voiceover_anchor_image_local_index
                                 : null),
                         voiceover_line: promoteMeta.voiceover_line || null,
+                        // v718i (NEW 2026-05-18) — Veo native end-frame
+                        // interpolation per-scene binding. Plumb the
+                        // parser's per-line end-frame-image metadata
+                        // through the payload so the backend Clip writer
+                        // sets Clip.end_frame_image_node_id and the
+                        // worker overrides sequential auto-inference
+                        // with the explicit end-frame image, binding
+                        // it to Veo cfg.last_frame at render time.
+                        // Without these, the lift's
+                        // `- **end_frame_image:** image_K+1` declaration
+                        // is silently dropped and Veo defaults to
+                        // sequential next-clip-start interpolation.
+                        end_frame_image_node_id:
+                            (promoteMeta.end_frame_image_node_id !== undefined
+                                ? promoteMeta.end_frame_image_node_id
+                                : null),
+                        end_frame_image_local_index:
+                            (promoteMeta.end_frame_image_local_index !== undefined
+                                ? promoteMeta.end_frame_image_local_index
+                                : null),
                         _isTextCard: isTextCardLine,  // used by filter below
                         _isSilent: isSilentLine,
                     };
