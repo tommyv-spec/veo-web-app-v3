@@ -9916,6 +9916,17 @@ def worker_upload_variants(
         if not node2:
             # Node vanished while we were uploading — bail.
             raise HTTPException(404, "Node disappeared during upload")
+        # v754 — re-check status after the slow R2 phase. A manual-variant
+        # upload can take this node over (status->ready, claim cleared) in the
+        # window between the Phase 1 commit and here. If so, do NOT insert the
+        # worker's AI variant rows — they'd pollute the grid the user already
+        # took over. The local files become harmless orphans (GC'd later).
+        if node2.status != "generating":
+            log.info(
+                f"[image_platform] Node {node_id} taken over during R2 phase "
+                f"(status={node2.status}) — skipping {len(pending_variants)} worker variant row(s)"
+            )
+            return {"ok": True, "superseded": True, "saved_count": 0, "node_status": node2.status}
         for idx, filename, rel_str, target in pending_variants:
             v = ImageVariant(
                 node_id=node2.id,
