@@ -7117,7 +7117,42 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     api_pull_mode_parallel._consec_to = 0
 
                 if job:
-                    submitted_ok = _submit_one_job(job)
+                    # v756 — a single node's submission must NEVER kill the whole
+                    # worker. Previously an unhandled Playwright/attachment error
+                    # inside _submit_one_job (e.g. a reference-image attach step)
+                    # propagated out of this loop → main()'s fatal handler →
+                    # browser.close() → process exit, taking the whole batch and
+                    # all in-flight work down with it. Now: a per-node error fails
+                    # just that node and the loop keeps running. Only a genuine
+                    # browser/page death is allowed to propagate (the worker can't
+                    # recover in-loop from that).
+                    try:
+                        submitted_ok = _submit_one_job(job)
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as _sub_e:
+                        _err = str(_sub_e)
+                        _nid = job.get("id")
+                        if any(x in _err for x in (
+                            "browser has been closed", "Target page",
+                            "context or browser", "Target closed", "TargetClosed",
+                        )):
+                            print(f"[API:submit] ❌ Node {_nid} — browser/page closed mid-submit; worker cannot continue in-loop", flush=True)
+                            raise
+                        import traceback as _tb
+                        print(f"[API:submit] ❌ Node {_nid} submission crashed: {_sub_e} — failing this node, worker continues", flush=True)
+                        _tb.print_exc()
+                        try:
+                            _post_status(api_url, api_key, _nid, "failed", error=f"Submission crashed: {_sub_e}")
+                        except Exception:
+                            pass
+                        try:
+                            in_flight.pop(_nid, None)
+                            _gc_pending_submission(_nid)  # v730
+                        except Exception:
+                            pass
+                        submitted_ok = False
+                        _release_cooldown_until = time.time() + 5
                     # If we actually submitted, this tick did work (skip scan).
                     # If we released the claim (batch mismatch), let the main
                     # loop fall through to scan — we want to drain the current
