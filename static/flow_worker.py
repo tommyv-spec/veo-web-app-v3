@@ -1901,8 +1901,26 @@ def check_ultra_account(page, label="", timeout=5):
                 return True
             time.sleep(1)
         
+        # DIAG (remove after ULTRA detection verified): dump any element text
+        # mentioning "ultra" + the page URL, so we can see the real badge markup.
+        try:
+            ultra_diag = page.evaluate("""() => {
+                const hits = [];
+                for (const el of document.querySelectorAll('div, span, button, a, p')) {
+                    const t = (el.textContent || '').trim();
+                    if (t && t.length <= 40 && /ultra|pro\\b|plan/i.test(t)) {
+                        hits.push(el.tagName + ':' + JSON.stringify(t) + ':kids=' + el.children.length);
+                    }
+                }
+                return [...new Set(hits)].slice(0, 25);
+            }""")
+            print(f"{prefix}DIAG url={page.url[:80]}", flush=True)
+            print(f"{prefix}DIAG ultra/plan-like texts: {ultra_diag}", flush=True)
+        except Exception as _ud_e:
+            print(f"{prefix}DIAG ultra dump failed: {_ud_e}", flush=True)
+
         print(f"{prefix}❌ Account is NOT ULTRA — cannot use Flow", flush=True)
-        
+
         # Report to API
         try:
             api_request("POST", "/worker-error", {
