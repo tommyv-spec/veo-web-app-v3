@@ -5897,18 +5897,38 @@ def ensure_vertical_orientation(page, label=""):
 
 
 def ensure_lower_priority_model(page, label=""):
-    """Ensure the model is set to 'Veo 3.1 - Fast [Lower Priority]' before generating.
-    
-    Checks the model button in the bottom bar. If it doesn't say 'Fast' + 'Lower Priority',
-    opens the dropdown and selects the Fast [Lower Priority] option specifically.
+    """Ensure the Flow model matches the job's selected model (page._veo_model).
+
+    Falls back to 'Veo 3.1 - Lite [Lower Priority]' when no model was stashed.
+    Reads the model button in the bottom bar; if it doesn't already show the
+    target, opens the dropdown and clicks the matching menuitem.
+    Function name kept for caller compatibility (called from click_generate_button).
     """
     prefix = f"[{label}] " if label else ""
-    
+    target = getattr(page, "_veo_model", "Veo 3.1 - Lite [Lower Priority]") or "Veo 3.1 - Lite [Lower Priority]"
+
+    # Per-model dropdown selectors (primary then fallback). text-matches is a
+    # Playwright regex; has-text is substring. Distinguish "Lite" from
+    # "Lite [Lower Priority]" and avoid Quality/Fast cross-matches.
+    MODEL_SELECTORS = {
+        "Omni Flash": ["[role='menuitem']:has-text('Omni Flash')",
+                       "button:has-text('Omni Flash')"],
+        "Veo 3.1 - Lite": ["[role='menuitem']:text-matches('Veo 3\\.1 - Lite\\s*$', 'i')",
+                            "[role='menuitem']:has-text('Lite'):not(:has-text('Lower Priority'))"],
+        "Veo 3.1 - Fast": ["[role='menuitem']:text-matches('Veo 3\\.1 - Fast\\s*$', 'i')",
+                           "[role='menuitem']:has-text('Fast'):not(:has-text('Lower Priority'))"],
+        "Veo 3.1 - Quality": ["[role='menuitem']:has-text('Quality')",
+                              "button:has-text('Quality')"],
+        "Veo 3.1 - Lite [Lower Priority]": ["[role='menuitem']:has-text('Lite'):has-text('Lower Priority')",
+                                            "[role='menuitem']:has-text('Lower Priority')"],
+    }
+
     try:
         # Find the model button — content-based selectors (class names change frequently)
         model_btn = page.locator(
             "button:has(span:text('Veo')), "
             "button:has(div:text('Veo')), "
+            "button:has(span:text('Omni')), "
             "button:has(i:text('volume_up')):has(span:text('Veo')), "
             "button.sc-a0dcecfb-3:has(span:text('Veo')), "
             "button.sc-a0dcecfb-1:has(i:text('arrow_drop_down'))"
@@ -5916,49 +5936,52 @@ def ensure_lower_priority_model(page, label=""):
         if not model_btn.is_visible(timeout=2000):
             print(f"{prefix}⚠ Model button not found — skipping model check", flush=True)
             return
-        
-        # Read current model text
+
+        # Read current model text — decide if already on target
         model_text = model_btn.inner_text().lower()
-        
-        if "fast" in model_text and "lower priority" in model_text:
-            return  # Already correct — Fast [Lower Priority]
-        
-        print(f"{prefix}Model is '{model_btn.inner_text().strip()}' — switching to Fast [Lower Priority]...", flush=True)
-        
-        # Click the model button to open dropdown
+        already = False
+        if target == "Veo 3.1 - Lite":
+            already = "lite" in model_text and "lower priority" not in model_text
+        elif target == "Veo 3.1 - Fast":
+            already = "fast" in model_text and "lower priority" not in model_text
+        elif target == "Veo 3.1 - Lite [Lower Priority]":
+            already = "lite" in model_text and "lower priority" in model_text
+        elif target == "Veo 3.1 - Quality":
+            already = "quality" in model_text
+        elif target == "Omni Flash":
+            already = "omni" in model_text
+        if already:
+            print(f"{prefix}✓ Model already {target}", flush=True)
+            return
+
+        print(f"{prefix}Model is '{model_btn.inner_text().strip()}' — switching to {target}...", flush=True)
+
+        # Open dropdown
         model_btn.click(timeout=3000)
         time.sleep(1)
-        
-        # Target specifically "Fast [Lower Priority]" — not "Lite [Lower Priority]"
-        lp_option = page.locator(
-            "[role='menuitem']:has-text('Fast'):has-text('Lower Priority'), "
-            "button:has-text('Fast'):has-text('Lower Priority')"
-        ).first
-        
-        if lp_option.is_visible(timeout=3000):
-            lp_option.click(timeout=3000)
-            print(f"{prefix}✓ Selected Veo 3.1 - Fast [Lower Priority]", flush=True)
-            time.sleep(1)
-        else:
-            # Fallback: try any Lower Priority option
-            lp_any = page.locator(
-                "[role='menuitem']:has-text('Lower Priority'), "
-                "button:has-text('Lower Priority')"
-            ).first
-            if lp_any.is_visible(timeout=2000):
-                lp_any.click(timeout=3000)
-                print(f"{prefix}✓ Selected Lower Priority model (fallback — may be Lite)", flush=True)
-                time.sleep(1)
-            else:
-                print(f"{prefix}⚠ Could not find Fast [Lower Priority] option", flush=True)
-        
+
+        selected = False
+        for sel in MODEL_SELECTORS.get(target, MODEL_SELECTORS["Veo 3.1 - Lite [Lower Priority]"]):
+            try:
+                opt = page.locator(sel).first
+                if opt.is_visible(timeout=2500):
+                    opt.click(timeout=3000)
+                    print(f"{prefix}✓ Selected {target}", flush=True)
+                    selected = True
+                    time.sleep(1)
+                    break
+            except Exception:
+                continue
+        if not selected:
+            print(f"{prefix}⚠ Could not find model option for '{target}'", flush=True)
+
         # Close dropdown
         try:
             page.keyboard.press("Escape")
             time.sleep(0.5)
         except Exception:
             pass
-            
+
     except Exception as e:
         print(f"{prefix}⚠ Model check failed: {e}", flush=True)
 
@@ -12769,7 +12792,12 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
     language = job.get('language', 'English')
     resolution = job.get('resolution', '720p')
     variants = job.get('flow_variants_count', 2)
-    
+    veo_model = job.get('veo_model', 'Veo 3.1 - Lite [Lower Priority]')
+    try:
+        page._veo_model = veo_model  # read by ensure_lower_priority_model at generate time
+    except Exception:
+        pass
+
     clip_modes = {}
     has_end_frame = False
     for c in clips:
@@ -14131,6 +14159,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     language = job.get('language', 'English')
     resolution = job.get('resolution', '720p')
     variants = job.get('flow_variants_count', 2)
+    veo_model = job.get('veo_model', 'Veo 3.1 - Lite [Lower Priority]')
+    try:
+        page._veo_model = veo_model  # read by ensure_lower_priority_model at generate time
+    except Exception:
+        pass
     voice_profile = job.get('voice_profile', '')
     use_interpolation = job.get('use_interpolation', False)
     single_image = job.get('single_image_mode', False)
