@@ -14338,7 +14338,10 @@ Single-frame snapshot reading guesses motion, geometry, and identity. The fix is
 
 **The rule.** Before authoring ANY scene or image in a decode, the decoder MUST:
 
-1. **Generate + read contact sheets first.** Run `python raw/decode_work/make_contact_sheet.py <work-id>`. It writes `contact_full.png` (every frame tiled in a grid, each cell labelled with frame number + approximate timestamp) and `contact_hook.png` (the dense opening strip). Read BOTH before describing anything — the whole motion arc + camera geometry land in one look.
+1. **Generate + read the contact sheet AND the hard-cut shot list first.**
+   - `python raw/decode_work/make_contact_sheet.py <work-id>` → `contact_full.png` (every frame tiled, labelled with frame number + timestamp) + `contact_hook.png` (dense opening strip). Catches motion arc + camera geometry.
+   - `python raw/decode_work/make_shotlist.py <work-id>` → `shots.txt` (PySceneDetect ContentDetector — every hard cut with start/end seconds) + `shots_contact.png` (ONE frame per detected shot). This catches distinct settings / composite inserts / **animation cutaways** that fixed-fps sampling skips between samples. Count the shots; each shot is a candidate distinct setting.
+   - Read all of these before describing anything. (On DYc4AcivvzY the shot list surfaced 8 cuts across FIVE visual modes — live standing-exam + 3D stylized-body animation + PiP belly/doctor composite + 3D organ animation + seated desk — where the fixed-fps pass had read only "two framings of one room.")
 2. **Emit a `### 0. Composition & Identity read` section** in the Pre-Flight Decode Checklist, BEFORE the first Image. For the HOOK and for every demo / body-part / transformation segment, answer:
    - **Camera POV relative to the subject's body** — name what the camera sits relative to ("between the patient's legs, from below, angled up"), not just "low angle."
    - **Every visible person, counted + role-labeled** (patient / healer / assistant / extra). Do NOT invent an off-frame person. Do NOT demote the patient to "observer."
@@ -14347,7 +14350,7 @@ Single-frame snapshot reading guesses motion, geometry, and identity. The fix is
    - **Substance-on-body identity, verified across at least 2 frames** — skin? applied paste? peeling mask?
 3. **Full-res dense-read only the ambiguous frames** the sheet flags (for example mask-versus-skin texture).
 
-**Tooling.** `raw/decode_work/make_contact_sheet.py` (Pillow grid builder). Run it as the standard step right after the v579 frame/audio extraction.
+**Tooling.** `raw/decode_work/make_contact_sheet.py` (Pillow grid builder) + `raw/decode_work/make_shotlist.py` (PySceneDetect hard-cut detector → one frame per shot). Run BOTH as the standard step right after the v579 frame/audio extraction.
 
 **Verification before claiming a decode is composition-accurate.**
 1. `decoded_*.md` contains a `### 0. Composition & Identity read` block before the first `### Image`.
