@@ -1580,7 +1580,8 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             
             # Check for "Create with Flow" (old splash, means NOT logged in)
             try:
-                if p.locator("button:has-text('Create with Flow')").is_visible(timeout=1500):
+                # Regex matches both old "Create with Flow" and new "Create with Google Flow"
+                if p.locator("button:text-matches('Create with.*Flow', 'i')").is_visible(timeout=1500):
                     return 'flow_not_logged_in'
             except Exception:
                 pass
@@ -1596,7 +1597,8 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                     pass
             
             try:
-                if p.locator("button:has-text('Create with Flow')").is_visible(timeout=1500):
+                # Regex matches both old "Create with Flow" and new "Create with Google Flow"
+                if p.locator("button:text-matches('Create with.*Flow', 'i')").is_visible(timeout=1500):
                     return 'flow_not_logged_in'
             except Exception:
                 pass
@@ -1678,6 +1680,8 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                 # Button text has changed over time: "Create with Flow", "Get started", etc.
                 print(f"[{label}] On Flow landing page — looking for entry button...", flush=True)
                 entry_selectors = [
+                    "button:text-matches('Create with.*Flow', 'i')",
+                    "a:text-matches('Create with.*Flow', 'i')",
                     "button:has-text('Create with Flow')",
                     "a:has-text('Create with Flow')",
                     "button:has-text('Get started')",
@@ -1766,6 +1770,8 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             # Still not logged in — try entry buttons in order
             print(f"[{label}] Not logged in — looking for entry button...", flush=True)
             entry_selectors = [
+                "button:text-matches('Create with.*Flow', 'i')",
+                "a:text-matches('Create with.*Flow', 'i')",
                 "button:has-text('Create with Flow')",
                 "a:has-text('Create with Flow')",
                 "button:has-text('Get started')",
@@ -1800,6 +1806,17 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             if not clicked:
                 _consecutive_no_buttons += 1
                 print(f"[{label}] ⚠ No entry button found ({_consecutive_no_buttons}x) — waiting for page to settle...", flush=True)
+                # DIAG (remove after login-loop fix verified): dump visible button/link text
+                try:
+                    btn_texts = page.evaluate(
+                        "() => Array.from(document.querySelectorAll('button, a'))"
+                        ".filter(e => e.offsetParent !== null)"
+                        ".map(e => (e.innerText || e.textContent || '').trim())"
+                        ".filter(t => t).slice(0, 25)"
+                    )
+                    print(f"[{label}] DIAG visible buttons/links: {btn_texts}", flush=True)
+                except Exception as _diag_e:
+                    print(f"[{label}] DIAG button dump failed: {_diag_e}", flush=True)
                 if _consecutive_no_buttons >= 2:
                     # DOM is probably stale from SPA navigation — force a full page reload
                     print(f"[{label}] ⚠ Stuck with no buttons after {_consecutive_no_buttons} attempts — hard reloading Flow...", flush=True)
