@@ -269,6 +269,7 @@ class VideoConfigInput(BaseModel):
     generation_mode: str = "parallel"  # "parallel" (fast) or "sequential" (guaranteed smooth transitions)
     backend_preference: str = "auto"  # "auto", "api", or "flow"
     flow_variants_count: int = 2  # How many variants per clip in Flow (x1/x2/x3/x4)
+    veo_model: str = "Veo 3.1 - Lite [Lower Priority]"  # Which Veo model the worker selects in Flow
     use_gesture_enrichment: bool = False  # Generate content-specific gesture cues via LLM
     short_dialogue_mode: str = "optimized"  # "optimized" = timed speech + silence, "fill" = pad to 25 words
     # v539 — Prefix Short Lines
@@ -9757,6 +9758,7 @@ async def local_worker_get_pending_job(
             "single_image_mode": single_image_mode,
             "flow_project_url": job.flow_project_url,
             "flow_variants_count": config.get("flow_variants_count", 2),
+            "veo_model": config.get("veo_model", "Veo 3.1 - Lite [Lower Priority]"),
             "short_dialogue_mode": config.get("short_dialogue_mode", "optimized"),
             "prefix_short_enabled": config.get("prefix_short_enabled", False),
             "prefix_short_word": config.get("prefix_short_word", "only"),
@@ -9977,6 +9979,7 @@ async def local_worker_get_redo_clips(
             "prefix_short_word": job_config.get("prefix_short_word", "only"),
             "prefix_short_threshold": job_config.get("prefix_short_threshold", 15),
             "flow_variants_count": job_config.get("flow_variants_count", 2),
+            "veo_model": job_config.get("veo_model", "Veo 3.1 - Lite [Lower Priority]"),
         })
     
     return {"clips": clips_data}
@@ -11014,6 +11017,7 @@ async def user_worker_get_pending_job(
             "single_image_mode": single_image_mode,
             "flow_project_url": job.flow_project_url,
             "flow_variants_count": job_config.get("flow_variants_count", 2),
+            "veo_model": job_config.get("veo_model", "Veo 3.1 - Lite [Lower Priority]"),
             "short_dialogue_mode": job_config.get("short_dialogue_mode", "optimized"),
             "prefix_short_enabled": job_config.get("prefix_short_enabled", False),
             "prefix_short_word": job_config.get("prefix_short_word", "only"),
@@ -11201,6 +11205,7 @@ async def user_worker_get_redo_clips(
             "prefix_short_word": job_config.get("prefix_short_word", "only"),
             "prefix_short_threshold": job_config.get("prefix_short_threshold", 15),
             "flow_variants_count": job_config.get("flow_variants_count", 2),
+            "veo_model": job_config.get("veo_model", "Veo 3.1 - Lite [Lower Priority]"),
         })
     
     return {"clips": clips_data}
