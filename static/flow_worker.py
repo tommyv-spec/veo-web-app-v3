@@ -10931,14 +10931,25 @@ def reassign_clip_frames(clips, clip_start_idx, blacklisted_keys, image_pool, or
         old_start = clip.get('start_frame_key')
         old_end = clip.get('end_frame_key')
         
-        # For the first reassigned clip, pick based on what's available
+        # For the first reassigned clip, pick based on what's available.
+        # Guard against None/falsy keys: a clip (or prev clip's end) may have
+        # no frame at all (end_frame=None is common). `None not in blacklisted`
+        # is True, so without the truthiness check new_start would stay None and
+        # crash at image_pool[None]. Fall back to a real available key.
         if i == clip_start_idx:
             # Start frame: use first available that's different from blacklisted
-            new_start = old_start if old_start not in blacklisted_keys else available_keys[0]
+            new_start = old_start if (old_start and old_start not in blacklisted_keys) else available_keys[0]
         else:
-            # Start frame = previous clip's end frame (maintain chain)
+            # Prefer the clip's OWN start if still valid (fresh non-chained clips
+            # keep their image); else the previous clip's end (chain); else any
+            # available. Each candidate must be truthy — None is not a usable key.
             prev_end = clips[i-1].get('end_frame_key')
-            new_start = prev_end if prev_end not in blacklisted_keys else available_keys[0]
+            if old_start and old_start not in blacklisted_keys:
+                new_start = old_start
+            elif prev_end and prev_end not in blacklisted_keys:
+                new_start = prev_end
+            else:
+                new_start = available_keys[0]
         
         # End frame: pick a different available image if possible
         new_end = old_end
