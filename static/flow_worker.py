@@ -4552,60 +4552,85 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                 settings_applied['Portrait'] = False
                 print(f"{prefix}⚠ Portrait tab missed", flush=True)
 
-            # Fast [Lower Priority] model
-            # v620: scope the model-button search INSIDE the open settings
-            # dropdown (`[role='menu'][data-state='open']`) so .first can't
-            # pick up an unrelated "Veo" button elsewhere on the page (e.g.
-            # the Veo logo in the header). Also adds a primary text-content
-            # selector for the actual button text pattern observed in the
-            # live DOM: `Veo 3.1 - Fast [Lower Priority] (leaving N/M)`.
+            # Model selection — honors the job's chosen model (page._veo_model).
+            # v757: was hardcoded "Fast [Lower Priority]" (Flow removed it). The
+            # model button is matched by its TEXT inside the open settings menu
+            # (Veo 3 / Omni / Imagen) — NOT by an arrow_drop_down icon or
+            # aria-haspopup, which Flow's newer markup no longer guarantees
+            # (caused "Model button not found").
             try:
-                # Scope to the open settings dropdown when present
+                target = getattr(page, "_veo_model", "Veo 3.1 - Lite [Lower Priority]") or "Veo 3.1 - Lite [Lower Priority]"
+                MODEL_SELECTORS = {
+                    "Omni Flash": ["[role='menuitem']:has-text('Omni Flash')",
+                                   "button:has-text('Omni Flash')"],
+                    "Veo 3.1 - Lite": ["[role='menuitem']:text-matches('Veo 3\\.1 - Lite\\s*$', 'i')",
+                                        "button:text-matches('Veo 3\\.1 - Lite\\s*$', 'i')"],
+                    "Veo 3.1 - Fast": ["[role='menuitem']:text-matches('Veo 3\\.1 - Fast\\s*$', 'i')",
+                                       "button:text-matches('Veo 3\\.1 - Fast\\s*$', 'i')"],
+                    "Veo 3.1 - Quality": ["[role='menuitem']:has-text('Quality')",
+                                          "button:has-text('Quality')"],
+                    "Veo 3.1 - Lite [Lower Priority]": ["[role='menuitem']:has-text('Lite'):has-text('Lower Priority')",
+                                                        "[role='menuitem']:has-text('Lower Priority')"],
+                }
+                # Scope to the open settings dropdown when present; match by model text.
                 dropdown_scope = "[role='menu'][data-state='open'] "
                 model_btn = page.locator(
-                    f"{dropdown_scope}button[aria-haspopup='menu']:has-text('Veo'), "
-                    f"{dropdown_scope}button:has(i:text-is('arrow_drop_down')):has-text('Veo'), "
-                    "button[aria-haspopup='menu']:has-text('Veo'):has(i:text-is('arrow_drop_down')), "
-                    "button.sc-a0dcecfb-1:has(i:text-is('arrow_drop_down')):has-text('Veo')"
+                    f"{dropdown_scope}button:has-text('Veo 3'), "
+                    f"{dropdown_scope}button:has-text('Omni'), "
+                    f"{dropdown_scope}button:has-text('Imagen'), "
+                    "button[aria-haspopup='menu']:has-text('Veo 3'), "
+                    "button:has-text('Veo 3'):has(i:text-is('arrow_drop_down'))"
                 ).first
                 model_btn.wait_for(state="visible", timeout=3000)
                 model_text = model_btn.inner_text().lower()
-                # The button text observed in live DOM:
-                #   "Veo 3.1 - Fast [Lower Priority] (leaving 5/10)"
-                # Already-correct check is a substring scan for "fast" +
-                # "lower priority" — survives the trailing credit counter.
-                if "fast" in model_text and "lower priority" in model_text:
+
+                already = False
+                if target == "Veo 3.1 - Lite":
+                    already = "lite" in model_text and "lower priority" not in model_text
+                elif target == "Veo 3.1 - Fast":
+                    already = "fast" in model_text and "lower priority" not in model_text
+                elif target == "Veo 3.1 - Lite [Lower Priority]":
+                    already = "lite" in model_text and "lower priority" in model_text
+                elif target == "Veo 3.1 - Quality":
+                    already = "quality" in model_text
+                elif target == "Omni Flash":
+                    already = "omni" in model_text
+
+                if already:
                     settings_applied['Model'] = True
-                    print(f"{prefix}✓ Model already Fast [Lower Priority]", flush=True)
+                    print(f"{prefix}✓ Model already {target}", flush=True)
                 else:
                     human_click_locator(page, model_btn, f"{prefix}Model dropdown")
                     time.sleep(1)
-                    lp_found = False
-                    # Try Fast [Lower Priority] first, then fallback to any Lower Priority
-                    for sel in [
-                        "[role='menuitem']:has-text('Fast'):has-text('Lower Priority')",
-                        "button:has-text('Fast'):has-text('Lower Priority')",
-                        "[role='menuitem']:has-text('Lower Priority')",
-                        "[role='menuitemradio']:has-text('Lower Priority')",
-                        "text=Lower Priority",
-                    ]:
+                    sel_found = False
+                    for sel in MODEL_SELECTORS.get(target, MODEL_SELECTORS["Veo 3.1 - Lite [Lower Priority]"]):
                         try:
                             opt = page.locator(sel).first
-                            opt.wait_for(state="visible", timeout=2000)
-                            human_click_locator(page, opt, f"{prefix}Fast [Lower Priority]")
-                            lp_found = True
+                            opt.wait_for(state="visible", timeout=2500)
+                            human_click_locator(page, opt, f"{prefix}{target}")
+                            sel_found = True
                             time.sleep(0.5)
                             break
                         except:
                             continue
-                    if not lp_found:
-                        print(f"{prefix}⚠ Fast [Lower Priority] option not found", flush=True)
+                    if not sel_found:
+                        print(f"{prefix}⚠ Model option not found for '{target}'", flush=True)
                         page.keyboard.press("Escape")
                         time.sleep(0.3)
                     else:
                         settings_applied['Model'] = True
             except:
                 print(f"{prefix}⚠ Model button not found", flush=True)
+                # DIAG (remove after model-selector fix verified): dump buttons/menuitems
+                # in the open settings menu so we can see the real model-control markup.
+                try:
+                    _mb = page.evaluate(
+                        "() => Array.from(document.querySelectorAll(\"[role='menu'][data-state='open'] button, [role='menu'][data-state='open'] [role='menuitem']\"))"
+                        ".map(e => (e.innerText||'').trim()).filter(t=>t).slice(0,20)"
+                    )
+                    print(f"{prefix}DIAG settings-menu buttons: {_mb}", flush=True)
+                except Exception as _de:
+                    print(f"{prefix}DIAG menu dump failed: {_de}", flush=True)
 
             # Variants
             try:
