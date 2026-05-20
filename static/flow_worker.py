@@ -1424,7 +1424,18 @@ def human_click_element(page, selector_or_locator, label="", timeout=10000):
         
         # Wait for element to be visible
         element.wait_for(state="visible", timeout=timeout)
-        
+
+        # Scroll the element into the viewport BEFORE reading its box. Raw
+        # page.mouse.down()/up() clicks fixed viewport coordinates and skips
+        # Playwright's actionability checks — if the element is below the fold
+        # (e.g. the entry button on Flow's long pricing landing), bounding_box()
+        # returns off-screen coords and the click lands on empty space (no error,
+        # no navigation). scroll_into_view_if_needed keeps the box on-screen.
+        try:
+            element.scroll_into_view_if_needed(timeout=timeout)
+        except Exception:
+            pass
+
         # Get element's bounding box for mouse movement
         box = element.bounding_box()
         
