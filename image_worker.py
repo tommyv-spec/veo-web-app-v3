@@ -790,7 +790,8 @@ def check_and_dismiss_popup(page):
 
 def dismiss_create_with_flow(page, label=""):
     """Click the 'Create with Flow' splash button if present."""
-    for sel in ["button:has-text('Create with Flow')", "a:has-text('Create with Flow')"]:
+    for sel in ["button:text-matches('Create with.*Flow', 'i')", "a:text-matches('Create with.*Flow', 'i')",
+                "button:has-text('Create with Flow')", "a:has-text('Create with Flow')"]:
         try:
             btn = page.locator(sel).first
             if btn.is_visible(timeout=2000):
@@ -855,7 +856,8 @@ def ensure_logged_into_flow(page, label="IMAGE", timeout_minutes=10):
                 except Exception:
                     pass
             try:
-                if p.locator("button:has-text('Create with Flow')").is_visible(timeout=1500):
+                # Regex matches both old "Create with Flow" and new "Create with Google Flow"
+                if p.locator("button:text-matches('Create with.*Flow', 'i')").is_visible(timeout=1500):
                     return 'flow_not_logged_in'
             except Exception:
                 pass
@@ -917,6 +919,7 @@ def ensure_logged_into_flow(page, label="IMAGE", timeout_minutes=10):
                 return
             if state == 'flow_not_logged_in':
                 entry_selectors = [
+                    "button:text-matches('Create with.*Flow', 'i')", "a:text-matches('Create with.*Flow', 'i')",
                     "button:has-text('Create with Flow')", "a:has-text('Create with Flow')",
                     "button:has-text('Get started')", "a:has-text('Get started')",
                     "button:has-text('Try Flow')", "button:has-text('Sign in')",
@@ -959,6 +962,7 @@ def ensure_logged_into_flow(page, label="IMAGE", timeout_minutes=10):
             if recheck == 'flow_logged_in':
                 continue
             entry_selectors = [
+                "button:text-matches('Create with.*Flow', 'i')", "a:text-matches('Create with.*Flow', 'i')",
                 "button:has-text('Create with Flow')", "a:has-text('Create with Flow')",
                 "button:has-text('Get started')", "a:has-text('Get started')",
                 "button:has-text('Try Flow')", "button:has-text('Sign in')",
