@@ -209,6 +209,13 @@ def human_click_element(page, selector_or_locator, label="", timeout=10000):
         else:
             element = selector_or_locator
         element.wait_for(state="visible", timeout=timeout)
+        # Scroll into view BEFORE reading box — raw page.mouse.down()/up() clicks
+        # fixed viewport coords and skips actionability; an off-screen element
+        # yields off-screen box coords and the click lands on empty space.
+        try:
+            element.scroll_into_view_if_needed(timeout=timeout)
+        except Exception:
+            pass
         box = element.bounding_box()
         if box:
             target_x = box['x'] + box['width'] * random.uniform(0.3, 0.7)
