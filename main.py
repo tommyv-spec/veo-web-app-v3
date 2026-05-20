@@ -11964,14 +11964,16 @@ async def download_installer(
 def _generate_windows_installer(token: str, app_url: str, accounts: int = 1, reset: bool = False, update_only: bool = False) -> str:
     """Generate a Windows .bat — simple, one process, everything direct. This is the approach that works."""
     
-    env_accounts = "ACCOUNT1_ENABLED=true"
+    # Each account flag needs its OWN `echo` — a multi-line value after a single
+    # `echo` only writes line 1; the rest run as bare commands and fail to write.
+    env_accounts = "echo ACCOUNT1_ENABLED=true"
     for n in range(2, accounts + 1):
-        env_accounts += f"\nACCOUNT{n}_ENABLED=true"
+        env_accounts += f"\necho ACCOUNT{n}_ENABLED=true"
     for n in range(accounts + 1, 5):
-        env_accounts += f"\nACCOUNT{n}_ENABLED=false"
-    
+        env_accounts += f"\necho ACCOUNT{n}_ENABLED=false"
+
     multi = "true" if accounts > 1 else "false"
-    
+
     folder_cmds = 'mkdir "%WORKER_DIR%\\chrome-session" 2>nul\nmkdir "%WORKER_DIR%\\chrome-download" 2>nul'
     for n in range(2, accounts + 1):
         folder_cmds += f'\nmkdir "%WORKER_DIR%\\chrome-session-{n}" 2>nul'
@@ -12083,7 +12085,7 @@ echo BROWSER_MODE=stealth
 echo MULTI_ACCOUNT={multi}
 echo MULTI_ACCOUNT_MODE={multi}
 echo PROXY_TYPE=none
-echo {env_accounts}
+{env_accounts}
 ) > "%WORKER_DIR%\\.env"
 echo         OK
 
