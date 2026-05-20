@@ -14321,3 +14321,38 @@ Inserted immediately after the existing `voiceover_line` field per parallel patt
 **Migration zero required** — pre-v718i.1 jobs created without end_frame_image_node_id remain valid (Veo rendered without end_frame anchor; sequential auto-inference fired). New jobs created from this commit forward will correctly bind end_frame_image_node_id → cfg.last_frame.
 
 **Auto-deploys to Render in 2-3 min**.
+
+---
+
+### v756 — Contact-Sheet-First + Composition & Identity Gate (decode Stage 4, Section 0)
+
+**Extends v588 (dense-frame walk) + the Pre-Flight Decode Checklist.** Decode-side authoring rule. No platform runtime change, no deploy.
+
+**Problem it fixes.** Decoding the cellulite reel (`raw/videos/decoded_cellulite_coffee_baking_soda_mask_asian_clinic_pair.md`, source DYPUMRkxkwm), the decoder sampled one frame per scene (frames 1 / 20 / 37) and described each as a still picture. That blind spot caused three separate misreads the operator had to correct one at a time:
+
+1. **Motion missed** — the cracked "parched-earth" surface was read as augmented cellulite SKIN. It is actually a thick paste MASK applied, dried, and PEELED off (the peel is the whole hook). Only visible by comparing consecutive frames.
+2. **Camera geometry missed** — read as an eye-level standing group. It is a forced-perspective shot from BETWEEN the patient's spread legs, low, angled up the lap.
+3. **People miscounted + mislabeled** — read as 4 people with a faceless patient + an invented "observer." It is 3 people: the patient is RECLINED, her own thighs form the foreground pillars and her FACE is visible up the lap because the camera is between her legs from below; the healer + assistant lean in.
+
+Single-frame snapshot reading guesses motion, geometry, and identity. The fix is mechanical, not willpower.
+
+**The rule.** Before authoring ANY scene or image in a decode, the decoder MUST:
+
+1. **Generate + read contact sheets first.** Run `python raw/decode_work/make_contact_sheet.py <work-id>`. It writes `contact_full.png` (every frame tiled in a grid, each cell labelled with frame number + approximate timestamp) and `contact_hook.png` (the dense opening strip). Read BOTH before describing anything — the whole motion arc + camera geometry land in one look.
+2. **Emit a `### 0. Composition & Identity read` section** in the Pre-Flight Decode Checklist, BEFORE the first Image. For the HOOK and for every demo / body-part / transformation segment, answer:
+   - **Camera POV relative to the subject's body** — name what the camera sits relative to ("between the patient's legs, from below, angled up"), not just "low angle."
+   - **Every visible person, counted + role-labeled** (patient / healer / assistant / extra). Do NOT invent an off-frame person. Do NOT demote the patient to "observer."
+   - **Whose body is the foreground body part?** The big foreground belongs to one of the visible people — say whom.
+   - **Frame-to-frame action delta** — what changes across the segment (apply / peel / pour / lift / transform).
+   - **Substance-on-body identity, verified across at least 2 frames** — skin? applied paste? peeling mask?
+3. **Full-res dense-read only the ambiguous frames** the sheet flags (for example mask-versus-skin texture).
+
+**Tooling.** `raw/decode_work/make_contact_sheet.py` (Pillow grid builder). Run it as the standard step right after the v579 frame/audio extraction.
+
+**Verification before claiming a decode is composition-accurate.**
+1. `decoded_*.md` contains a `### 0. Composition & Identity read` block before the first `### Image`.
+2. The block names the camera POV relative to the subject body, the exact person count + roles, and whose body is the foreground.
+3. Any "cracked / textured / coated" surface is stated as skin OR an applied substance, with the 2-frame check noted.
+4. The block (or Sources) cites `contact_full.png` + `contact_hook.png` as inspected.
+
+**Touched**: `code/template_reference.md` (this rule), `wiki/patterns/conventions.md` (index row), `raw/decode_work/make_contact_sheet.py` (tool). No platform runtime change — no deploy. Follow-up: fold the Section 0 prompt into the decode bundle script + `wiki/meta/decode-grammar-checklist.md`.
