@@ -4106,60 +4106,100 @@ def create_new_flow_project(page, context=""):
     """
     prefix = f"[{context}] " if context else ""
 
-    try:
-        # SPA navigation preserves session/reCAPTCHA state
-        spa_navigate_to_flow_home(page, context or "NEW_PROJECT")
-        human_delay(1, 2)
+    # v755 — retry the whole land-on-home + click-New-project sequence.
+    # Root cause of the prior single-shot failure: after spa_navigate falls
+    # back to a hard page.goto, the home SPA isn't fully hydrated when we
+    # click "New project". The click either misfires or lands on a non-
+    # navigating button, so the URL never becomes a /project/ URL and the
+    # caller hard-fails the whole node. Retrying — and on each retry forcing
+    # a clean reload to Flow home + confirming the button is visible BEFORE
+    # clicking — recovers from that transient state.
+    new_btn_selectors = (
+        "button:has-text('New project'), "
+        "button:has-text('Nuovo progetto'), "
+        "button:has-text('Nuevo proyecto'), "
+        "button:has-text('Nouveau projet'), "
+        "button:has-text('Neues Projekt'), "
+        "button:has(i:text('add_2'))"
+    )
+    MAX_ATTEMPTS = 3
+    last_url = ""
 
-        ensure_logged_into_flow(page, context or "NEW_PROJECT")
-        check_and_dismiss_popup(page)
-
-        # Human-like "looking around" before first interaction
-        human_mouse_move(page)
-        human_delay(1, 2)
-
-        # Click "New project" — matches English/Italian/Spanish/French/German
-        # labels as well as the '+' icon button variant
-        dismiss_create_with_flow(page, context or "NEW_PROJECT")
-        new_btn_selectors = (
-            "button:has-text('New project'), "
-            "button:has-text('Nuovo progetto'), "
-            "button:has-text('Nuevo proyecto'), "
-            "button:has-text('Nouveau projet'), "
-            "button:has-text('Neues Projekt'), "
-            "button:has(i:text('add_2'))"
-        )
-        print(f"{prefix}Creating new Flow project...", flush=True)
-        human_click_element(page, new_btn_selectors, f"{prefix}New project button")
-        human_delay(2, 3)
-
-        # Wait for URL to become a project URL
+    for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            page.wait_for_url("**/project/**", timeout=30000)
-        except Exception:
-            # Fallback: poll for a while
-            for _ in range(15):
-                time.sleep(1)
-                if "/project/" in page.url:
-                    break
+            # Make sure we're actually on Flow home before clicking. First
+            # attempt uses the SPA-preserving nav; retries hard-reload home
+            # so we never click against a stale/half-hydrated project page.
+            if attempt == 1:
+                spa_navigate_to_flow_home(page, context or "NEW_PROJECT")
+            else:
+                print(f"{prefix}↻ Retry {attempt}/{MAX_ATTEMPTS} — reloading Flow home before re-clicking New project (last URL: {last_url})", flush=True)
+                try:
+                    page.goto(FLOW_HOME_URL, wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                human_delay(3, 5)
+            human_delay(1, 2)
 
-        time.sleep(2)
-        project_url = page.url
+            ensure_logged_into_flow(page, context or "NEW_PROJECT")
+            check_and_dismiss_popup(page)
 
-        if "/project/" not in project_url:
-            print(f"{prefix}❌ Failed to create project — current URL: {project_url}", flush=True)
-            return None
+            # Human-like "looking around" before first interaction
+            human_mouse_move(page)
+            human_delay(1, 2)
 
-        print(f"{prefix}✓ Created project: {project_url}", flush=True)
-        human_delay(1, 2)
-        check_and_dismiss_popup(page)
-        return project_url
+            # Click "New project" — matches English/Italian/Spanish/French/German
+            # labels as well as the '+' icon button variant
+            dismiss_create_with_flow(page, context or "NEW_PROJECT")
 
-    except Exception as e:
-        print(f"{prefix}❌ Error creating new project: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-        return None
+            # v755 — confirm the New project button is present + visible before
+            # clicking. A click against a not-yet-hydrated home page is the main
+            # cause of "clicked but URL never changed to /project/".
+            try:
+                btn = page.locator(new_btn_selectors).first
+                btn.wait_for(state="visible", timeout=15000)
+            except Exception:
+                last_url = page.url
+                print(f"{prefix}⚠ New project button not visible (attempt {attempt}/{MAX_ATTEMPTS}, URL: {last_url}) — retrying", flush=True)
+                continue
+
+            print(f"{prefix}Creating new Flow project... (attempt {attempt}/{MAX_ATTEMPTS})", flush=True)
+            human_click_element(page, new_btn_selectors, f"{prefix}New project button")
+            human_delay(2, 3)
+
+            # Wait for URL to become a project URL
+            try:
+                page.wait_for_url("**/project/**", timeout=30000)
+            except Exception:
+                # Fallback: poll for a while
+                for _ in range(15):
+                    time.sleep(1)
+                    if "/project/" in page.url:
+                        break
+
+            time.sleep(2)
+            project_url = page.url
+
+            if "/project/" in project_url:
+                print(f"{prefix}✓ Created project: {project_url}", flush=True)
+                human_delay(1, 2)
+                check_and_dismiss_popup(page)
+                return project_url
+
+            last_url = project_url
+            print(f"{prefix}⚠ New project click didn't navigate (attempt {attempt}/{MAX_ATTEMPTS}) — current URL: {project_url}", flush=True)
+
+        except Exception as e:
+            try:
+                last_url = page.url
+            except Exception:
+                pass
+            print(f"{prefix}⚠ Error creating project (attempt {attempt}/{MAX_ATTEMPTS}): {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+
+    print(f"{prefix}❌ Failed to create project after {MAX_ATTEMPTS} attempts — last URL: {last_url}", flush=True)
+    return None
 
 
 def api_pull_mode(page, api_url, api_key, worker_id=None):
