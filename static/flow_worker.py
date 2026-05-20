@@ -1828,6 +1828,19 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                     _consecutive_no_buttons = 0
             else:
                 _consecutive_no_buttons = 0
+                # DIAG (remove after login-trigger fix verified): did the click open a
+                # popup/new tab, or navigate, or do nothing? Dump every page in context.
+                try:
+                    time.sleep(1)
+                    ctx_pages = page.context.pages
+                    print(f"[{label}] DIAG post-click: cur={page.url[:70]} | tabs={len(ctx_pages)}", flush=True)
+                    for _pi, _pg in enumerate(ctx_pages):
+                        try:
+                            print(f"[{label}] DIAG tab[{_pi}]={_pg.url[:90]}", flush=True)
+                        except Exception:
+                            pass
+                except Exception as _pc_e:
+                    print(f"[{label}] DIAG post-click dump failed: {_pc_e}", flush=True)
             # Wait for redirect to settle
             state = _wait_for_page_settle(page, max_seconds=15)
             if state == 'google_login':
