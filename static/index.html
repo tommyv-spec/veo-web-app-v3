@@ -8168,6 +8168,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
             let status=c.status,badgeClass=c.status;
             if(redoQueued){status='redo queued';badgeClass='redo_queued';}else if(generating){status='generating';badgeClass='running';}else if(skipped){status='skipped';badgeClass='skipped';}else if(failed){status='failed';badgeClass='failed';}else if(approved){status='approved';badgeClass='approved';}else if(rejected){status='rejected';badgeClass='rejected';}else if(waitingApproval){status='waiting approval';badgeClass='waiting_approval';}else if(preparing){status='preparing';badgeClass='preparing';}else if(pending && isContinueWaiting){status='waiting for #'+c.clip_index;badgeClass='waiting_approval';}else if(pending){status='pending';badgeClass='running';}else if(c.status==='completed'){status=c.approval_status||'pending_review';badgeClass=status;}
             let acts='';const clipId=c.id||0;
+            // Upload-your-own-video control (every clip card). Adds a new variant via /upload-variant.
+            const uploadVideoCtl=clipId?`<input type="file" id="uploadVideoInput_${clipId}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clipId}, '${jid}', this.files[0])"><button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clipId}').click()" title="upload your own video for this clip">📤 video</button>`:'';
             // Small cancel button for any active/pending clip
             const cancelBtn = clipId ? `<button class="btn btn-secondary btn-sm" style="padding:1px 5px;font-size:9px;margin-left:6px;opacity:0.7" onclick="event.stopPropagation();cancelClip(${clipId},${c.clip_index})" title="Skip this clip">✕</button>` : '';
             if(isRegenerating){
@@ -8310,7 +8312,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 ? `<span style="color:#818cf8;font-size:11px;" title="Audio twin lip-syncs this line">🎙 ${c.voiceover_line}</span>`
                 : c.dialogue_text;
 
-            return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}</div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${_v698aPairedBadge}${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}<div class="clip-text">${_v698aDisplayText}</div><div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
+            return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}<div class="clip-upload-own" style="margin-top:6px;text-align:center;">${uploadVideoCtl}</div></div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${_v698aPairedBadge}${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}<div class="clip-text">${_v698aDisplayText}</div><div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
 
         }
 
@@ -8730,6 +8732,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     <div style="display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap;">
                         <input type="file" id="replaceImageInput_${clipId}" accept="image/png,image/jpeg,image/webp" style="display:none;" onchange="replaceClipImage(${clipId}, '${jid}', this.files[0])">
                         <button class="btn btn-primary btn-sm" style="padding:6px 14px;font-size:12px;" onclick="document.getElementById('replaceImageInput_${clipId}').click()" title="upload a new image">📁 upload replacement</button>
+                        <input type="file" id="uploadVideoInput_${clipId}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clipId}, '${jid}', this.files[0])">
+                        <button class="btn btn-secondary btn-sm" style="padding:6px 14px;font-size:12px;margin-left:8px;" onclick="document.getElementById('uploadVideoInput_${clipId}').click()" title="upload your own finished video instead">📤 upload my own video</button>
                         ${((c.versions||[]).some(v => v && v.filename)) ? `<button class="btn btn-secondary btn-sm" style="padding:6px 12px;font-size:12px;background:rgba(99,102,241,0.18);color:#a5b4fc;border-color:rgba(99,102,241,0.4);" onclick="revertToPriorVersion(${clipId},${c.clip_index})" title="restore the clip that rendered fine before this redo">↶ revert to prior render</button>` : ''}
                         <button class="btn btn-secondary btn-sm" style="padding:6px 10px;font-size:12px;color:var(--text-muted);" onclick="confirmDelete(${clipId},${c.clip_index})" title="remove this clip from the lineup">🗑</button>
                     </div>
@@ -8808,6 +8812,35 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 if (selectedJobId) loadClips(selectedJobId);
             } catch(e) {
                 console.error('[v701] replace-image failed:', e);
+                showToast('upload failed: ' + e.message, '#ef4444');
+            }
+        }
+
+        async function uploadClipVideo(clipId, jobId, file) {
+            if (!file) return;
+            if (!file.type || !file.type.startsWith('video/')) {
+                showToast('please choose a video file', '#ef4444');
+                return;
+            }
+            try {
+                markClipLocallyUpdated(clipId);
+                showToast('uploading your video... (large files take a moment)', '#3b82f6');
+                const fd = new FormData();
+                fd.append('file', file);
+                const r = await fetch(`${API}/clips/${clipId}/upload-variant`, {
+                    method: 'POST',
+                    body: fd,
+                });
+                if (!r.ok) {
+                    let _msg = `HTTP ${r.status}`;
+                    try { const j = await r.json(); _msg = j.detail || _msg; } catch(_){}
+                    throw new Error(_msg);
+                }
+                showToast('video uploaded — added as a new variant', '#10b981');
+                try { if (selectedJobId) localStorage.removeItem(`clips_${selectedJobId}`); } catch(_){}
+                if (selectedJobId) loadClips(selectedJobId);
+            } catch(e) {
+                console.error('[upload-variant] failed:', e);
                 showToast('upload failed: ' + e.message, '#ef4444');
             }
         }
