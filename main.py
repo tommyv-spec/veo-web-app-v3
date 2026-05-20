@@ -4366,6 +4366,120 @@ async def update_clip(
     }
 
 
+@app.post("/api/clips/{clip_id}/upload-variant")
+async def upload_clip_variant(
+    clip_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """v757 — Operator uploads their own finished video for a clip. The file
+    is stored in R2 under the job's outputs prefix and appended to the clip's
+    versions_json as a NEW variant, then selected. Resolves rejected/failed
+    clips (status -> completed, approval_status -> pending_review). No worker
+    involvement.
+
+    Follows the worker upload-video pattern (local_worker_upload_video): the R2
+    upload is slow, so NO DB connection is held during it (v507) — brief
+    sessions only, before and after the upload, the second under a
+    with_for_update() row lock so a concurrent worker variant upload cannot
+    clobber versions_json.
+    """
+    from backends.storage import is_storage_configured, get_storage
+    from models import get_db
+    from datetime import datetime as _dt
+
+    if not is_storage_configured():
+        raise HTTPException(status_code=503, detail="Storage not configured")
+
+    # Phase 1 — brief session: authorize + read identifiers, then release.
+    with get_db() as db:
+        clip = get_user_clip(db, clip_id, current_user)
+        job_id = clip.job_id
+        clip_index = clip.clip_index
+        attempt = clip.generation_attempt or 1
+
+    # Validate + read upload (accept any video; no aspect/duration checks per spec).
+    contents = await file.read()
+    if len(contents) < 1024:
+        raise HTTPException(status_code=400, detail="Video too small / empty.")
+    if len(contents) > 200 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Video too large (>200MB).")
+
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        tmp.write(contents)
+        tmp_path = tmp.name
+
+    try:
+        storage = get_storage()
+
+        # Unique, collision-free filename (variant number is assigned later under
+        # the lock; it does NOT need to be encoded in the filename — export and
+        # the proxy URL use output_filename verbatim as the R2 outputs key).
+        ts = _dt.utcnow().strftime("%Y%m%dT%H%M%S")
+        output_filename = f"clip_{clip_index}_user_{ts}.mp4"
+        r2_key = f"jobs/{job_id}/outputs/{output_filename}"
+        output_url = f"/api/jobs/{job_id}/outputs/{output_filename}"
+
+        # Phase 2 — R2 upload, NO DB connection held.
+        await asyncio.to_thread(storage.upload_file, tmp_path, r2_key, "video/mp4")
+
+        # Phase 3 — brief locked session: append variant + point clip at it.
+        with get_db() as db:
+            clip = db.query(Clip).filter(Clip.id == clip_id).with_for_update().first()
+            if not clip:
+                raise HTTPException(status_code=404, detail="Clip not found")
+
+            versions = json.loads(clip.versions_json) if clip.versions_json else []
+            existing = [v.get("variant", 1) for v in versions if v.get("attempt", 1) == attempt]
+            variant = (max(existing) if existing else 0) + 1
+
+            version_entry = {
+                "attempt": attempt,
+                "variant": variant,
+                "version_key": f"{attempt}.{variant}",
+                "filename": output_filename,
+                "url": output_url,
+                "generated_at": _dt.utcnow().isoformat(),
+                "source": "user_upload",
+            }
+            versions.append(version_entry)
+            versions.sort(key=lambda x: (x.get("attempt", 1), x.get("variant", 1)))
+            clip.versions_json = json.dumps(versions)
+
+            # Point the clip at the freshly uploaded variant (mirror select-variant).
+            clip.output_filename = output_filename
+            clip.output_url = output_url
+            clip.selected_variant = variant
+            # Resolve the clip so it stops blocking; operator reviews their upload.
+            clip.status = ClipStatus.COMPLETED.value
+            clip.approval_status = "pending_review"
+            clip.error_code = None
+            clip.error_message = None
+
+            add_job_log(
+                db, job_id,
+                f"Clip {clip_index + 1} variant {attempt}.{variant} uploaded by user",
+                "INFO", "user",
+            )
+            db.commit()
+            clip_dict = clip.to_dict()
+
+        return {"success": True, "clip": clip_dict, "variant": variant, "url": output_url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[UploadVariant] error clip {clip_id}: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
 @app.delete("/api/clips/{clip_id}")
 async def delete_clip(
     clip_id: int, 
