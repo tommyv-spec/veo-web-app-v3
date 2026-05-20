@@ -2852,8 +2852,16 @@ async def upload_manual_variant(
 
     # --- Auto-select (Q3 answer) ---
     node.chosen_variant_id = variant.id
-    if node.status != "ready":
-        node.status = "ready"
+    # v754 — a manual upload onto a 'queued' or 'generating' node TAKES OVER
+    # that node. Clear the worker claim so a late worker variant-upload /
+    # status-post for the in-flight render is treated as superseded (see
+    # worker_upload_variants + worker_update_job_status), not a hard 409 that
+    # cascades into the worker marking the node 'failed' and clobbering this
+    # chosen manual variant.
+    node.status = "ready"
+    node.claimed_by_worker = None
+    node.claimed_at = None
+    node.error_message = None
     node.updated_at = datetime.utcnow()
     db.commit()
 
@@ -9846,7 +9854,19 @@ def worker_upload_variants(
     if not node:
         raise HTTPException(404, "Node not found")
     if node.status != "generating":
-        raise HTTPException(409, f"Node not generating (status={node.status})")
+        # v754 — the node was taken over while the worker was rendering,
+        # almost always a manual-variant upload mid-flight (sets
+        # status='ready' + chosen_variant_id + clears the claim). Treat this
+        # worker result as SUPERSEDED: return 200 so the worker does NOT mark
+        # the job failed, and SKIP the destructive variant cleanup below so
+        # the user's chosen manual variant survives. The worker's AI variants
+        # are discarded — the user already took over this node.
+        log.info(
+            f"[image_platform] Node {node_id} variant-upload superseded "
+            f"(status={node.status}) — discarding worker variants, keeping chosen image"
+        )
+        db.close()
+        return {"ok": True, "superseded": True, "saved_count": 0, "node_status": node.status}
 
     # Clean any stale variants/files (defensive)
     _delete_variant_files(node)
@@ -9942,10 +9962,18 @@ def worker_update_job_status(
         node.claimed_by_worker = None
         node.claimed_at = None
     elif req.status == "failed":
-        node.status = "failed"
-        node.error_message = req.error or "Worker reported failure"
-        node.claimed_by_worker = None
-        node.claimed_at = None
+        # v754 — don't clobber a node that was already taken over. If a manual
+        # upload set this node 'ready' with a chosen variant while the worker
+        # was still rendering, a late 'failed' from that superseded render must
+        # not destroy the user's chosen image — just clear the stale claim.
+        if node.status == "ready" and node.chosen_variant_id is not None:
+            node.claimed_by_worker = None
+            node.claimed_at = None
+        else:
+            node.status = "failed"
+            node.error_message = req.error or "Worker reported failure"
+            node.claimed_by_worker = None
+            node.claimed_at = None
     else:
         raise HTTPException(400, f"Unknown status: {req.status}")
 
