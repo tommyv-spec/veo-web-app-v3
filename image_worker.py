@@ -7006,11 +7006,30 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     _params = {"worker_id": worker_id}
                     if prefer_batch:
                         _params["prefer_batch"] = prefer_batch
+                    # v753 — exclude nodes already in our local in_flight dict so the
+                    # server can't re-serve them. Defense against the duplicate-submit
+                    # cycle observed 2026-05-20 (same 3 nodes claimed repeatedly while
+                    # already mid-render; each re-serve fired another Banana Generate).
+                    if in_flight:
+                        _excl = ",".join(str(nid) for nid in in_flight.keys())
+                        if _excl:
+                            _params["exclude"] = _excl
                     resp = _api_request(api_url, api_key, "GET", "/jobs/pending",
                                         params=_params, timeout=10)
                     consecutive_errors = 0
                     _consecutive_timeouts = 0
                     job = resp.get("job") if isinstance(resp, dict) else None
+                    # v753 — hard guard. If server still hands us a node we already
+                    # have in_flight (older server without exclude support, race during
+                    # status flap, or stale-claim-sweep mid-cycle), skip it. We do NOT
+                    # call /release because the existing claim is correct and held by
+                    # _this_ worker — releasing would un-claim our legitimately
+                    # in-progress render. Just drop the duplicate handout.
+                    if job and job.get("id") in in_flight:
+                        _dup_id = job.get("id")
+                        _existing_status = in_flight[_dup_id].status
+                        print(f"[API:submit] ⚠ v753 GUARD — server handed back node {_dup_id} (already in_flight, status={_existing_status}). Skipping duplicate submit.", flush=True)
+                        job = None
                 except requests.exceptions.HTTPError as he:
                     status = he.response.status_code if he.response is not None else 0
                     if status == 401:

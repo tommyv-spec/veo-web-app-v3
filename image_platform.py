@@ -9588,6 +9588,7 @@ def worker_get_pending_job(
     request: Request,
     worker_id: Optional[str] = None,
     prefer_batch: Optional[str] = None,
+    exclude: Optional[str] = None,
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db_session),
 ):
@@ -9608,12 +9609,33 @@ def worker_get_pending_job(
     preferred batch has nothing queued (meaning the batch is fully
     submitted / downloading and we can safely switch).
 
+    exclude (v753): comma-separated node IDs the worker is currently
+    processing locally. The server filters these out so it can't re-serve
+    a node already in the worker's in_flight dict. Defense against the
+    duplicate-submission cycle observed 2026-05-20 where parallel_slots≥4
+    drained the queue but the same 3 nodes kept cycling through the
+    poll/submit loop — each re-serve fired another Banana Generate on
+    the same prompt+refs, burning credits and confusing v624/FIFO
+    attribution.
+
     Response includes `input_image_urls`: list of URLs the worker can
     GET (with Bearer auth) to download the parent-variant images as
     reference inputs.
     """
     _verify_worker_key(authorization)
     _touch_worker_heartbeat(db, worker_id)
+
+    # v753 — parse exclude list
+    exclude_ids: List[int] = []
+    if exclude:
+        for tok in exclude.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                exclude_ids.append(int(tok))
+            except ValueError:
+                continue
 
     # Release stale claims first (>10 min claimed + still generating)
     stale_cutoff = datetime.utcnow() - timedelta(minutes=10)
@@ -9641,16 +9663,22 @@ def worker_get_pending_job(
         if pb:
             # Match nodes whose name starts with the prefix. SQLAlchemy's
             # startswith() emits a LIKE with autoescaped wildcards.
-            node = db.query(ImageNode).filter(
+            q = db.query(ImageNode).filter(
                 ImageNode.status == "queued",
                 ImageNode.name.startswith(pb),
-            ).order_by(ImageNode.created_at.asc()).first()
+            )
+            if exclude_ids:
+                q = q.filter(ImageNode.id.notin_(exclude_ids))
+            node = q.order_by(ImageNode.created_at.asc()).first()
 
     # Fall back to any queued node if no same-batch match (or no preference)
     if node is None:
-        node = db.query(ImageNode).filter(
+        q = db.query(ImageNode).filter(
             ImageNode.status == "queued"
-        ).order_by(ImageNode.created_at.asc()).first()
+        )
+        if exclude_ids:
+            q = q.filter(ImageNode.id.notin_(exclude_ids))
+        node = q.order_by(ImageNode.created_at.asc()).first()
 
     if node is None:
         return {"job": None}
