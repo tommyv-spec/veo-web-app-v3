@@ -2046,6 +2046,16 @@
                                 </select>
                             </div>
                             <div class="group">
+                                <div class="lbl">Model</div>
+                                <select id="veoModel">
+                                    <option value="Omni Flash">Omni Flash</option>
+                                    <option value="Veo 3.1 - Lite">Veo 3.1 - Lite</option>
+                                    <option value="Veo 3.1 - Fast">Veo 3.1 - Fast</option>
+                                    <option value="Veo 3.1 - Quality">Veo 3.1 - Quality</option>
+                                    <option value="Veo 3.1 - Lite [Lower Priority]" selected>Veo 3.1 - Lite [Lower Priority]</option>
+                                </select>
+                            </div>
+                            <div class="group">
                                 <div class="lbl">Words / Line</div>
                                 <input type="number" id="wordsPerLine" min="10" max="35" value="21" 
                                     style="text-align:center;" oninput="debounceWordsPerLine()">
@@ -3170,6 +3180,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
         function getFlowVariantsCount(){
             const a=document.querySelector('#flowVariantsSeg button.active');
             return a ? parseInt(a.dataset.value) : 2;
+        }
+        function getVeoModel(){
+            const el=document.getElementById('veoModel');
+            return el ? el.value : 'Veo 3.1 - Lite [Lower Priority]';
         }
         function selectInterpSeg(el){ document.querySelectorAll('#interpSeg button').forEach(b=>b.classList.remove('active')); el.classList.add('active'); }
         function selectAISeg(el){ document.querySelectorAll('#aiSeg button').forEach(b=>b.classList.remove('active')); el.classList.add('active'); const isOn=el.dataset.value==='true'; document.getElementById('gestureRow').style.display=isOn?'':'none'; document.querySelectorAll('#gestureSeg button').forEach(b=>b.classList.remove('active'));document.querySelector('#gestureSeg button[data-value="'+(isOn?'true':'false')+'"]').classList.add('active'); }
@@ -6790,7 +6804,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 
                 const selectedBackend = document.querySelector('#backendToggle button.active')?.dataset.value || 'auto';
                 const useGestures=useAI&&(document.querySelector('#gestureSeg button.active')?.dataset.value||'false')==='true';
-                const cfg={aspect_ratio:getSelectedAspect(),resolution:getSelectedResolution(),duration:document.getElementById('duration').value,language:document.getElementById('language').value,use_interpolation:useInterpolation,use_openai_prompt_tuning:useAI,use_frame_vision:useAI,custom_prompt:useAI?'':customPrompt,user_context:useAI?contextInput:'',single_image_mode:uploadedImages.length===1,max_retries_per_clip:5,parallel_clips:1,storyboard_mode:editorMode==='storyboard',generation_mode:generationMode,backend_preference:promptOnly?'prompt_only':selectedBackend,flow_variants_count:getFlowVariantsCount(),use_gesture_enrichment:useGestures,short_dialogue_mode:document.querySelector('#shortDialogueSeg button.active')?.dataset.value||'optimized',prefix_short_enabled:(document.querySelector('#prefixShortSeg button.active')?.dataset.value||'off')==='on',prefix_short_word:(document.getElementById('prefixShortWord')?.value||'only').trim()||'only',prefix_short_threshold:(parseInt(document.getElementById('prefixShortThreshold')?.value,10)||15)};
+                const cfg={aspect_ratio:getSelectedAspect(),resolution:getSelectedResolution(),duration:document.getElementById('duration').value,language:document.getElementById('language').value,use_interpolation:useInterpolation,use_openai_prompt_tuning:useAI,use_frame_vision:useAI,custom_prompt:useAI?'':customPrompt,user_context:useAI?contextInput:'',single_image_mode:uploadedImages.length===1,max_retries_per_clip:5,parallel_clips:1,storyboard_mode:editorMode==='storyboard',generation_mode:generationMode,backend_preference:promptOnly?'prompt_only':selectedBackend,flow_variants_count:getFlowVariantsCount(),veo_model:getVeoModel(),use_gesture_enrichment:useGestures,short_dialogue_mode:document.querySelector('#shortDialogueSeg button.active')?.dataset.value||'optimized',prefix_short_enabled:(document.querySelector('#prefixShortSeg button.active')?.dataset.value||'off')==='on',prefix_short_word:(document.getElementById('prefixShortWord')?.value||'only').trim()||'only',prefix_short_threshold:(parseInt(document.getElementById('prefixShortThreshold')?.value,10)||15)};
                 
                 const payload = {config:cfg, dialogue_lines:lines, api_keys:{gemini_keys:[],openai_key:null}, job_id:uploadJobId};
                 if(scenesPayload) payload.scenes = scenesPayload;
@@ -12390,7 +12404,11 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 // Duration
                 const durationEl = document.getElementById('duration');
                 if(durationEl && cfg.duration) durationEl.value = cfg.duration;
-                
+
+                // Veo model
+                const veoModelEl = document.getElementById('veoModel');
+                if(veoModelEl && cfg.veo_model) veoModelEl.value = cfg.veo_model;
+
                 // Language
                 const langEl = document.getElementById('language');
                 if(langEl && cfg.language) langEl.value = cfg.language;
