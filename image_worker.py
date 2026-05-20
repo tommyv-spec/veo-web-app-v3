@@ -1584,7 +1584,8 @@ def configure_image_settings(page, aspect_ratio="16:9", resolution="1K",
     # Clicking it opens a sub-dropdown to pick NB2 / NB Pro / NB (2.5 Flash)
     try:
         model_btn = page.locator(
-            "button:has-text('Nano Banana'):has(i:text('arrow_drop_down'))"
+            "button:has-text('Nano Banana'):has(i:text('arrow_drop_down')), "
+            "button:has-text('Imagen'):has(i:text('arrow_drop_down'))"
         ).first
         model_btn.wait_for(state="visible", timeout=3000)
         
@@ -1597,6 +1598,9 @@ def configure_image_settings(page, aspect_ratio="16:9", resolution="1K",
         elif model == "nano_banana":
             target_text = "Nano Banana"  # 2.5 Flash (the basic one)
             target_search = "nano banana"
+        elif model == "imagen_4":
+            target_text = "Imagen 4"
+            target_search = "imagen"
         else:
             target_text = "Nano Banana 2"
             target_search = "nano banana 2"
