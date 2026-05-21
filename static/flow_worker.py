@@ -11755,6 +11755,7 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                 return False
 
         # Confirm: wait for the frame button count to drop (same signal as after upload)
+        remaining = expected_btn_count
         for w in range(12):
             time.sleep(1)
             remaining = page.locator(frame_selector).count()
@@ -11763,7 +11764,25 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                 return True
 
         # Button count didn't change — selection may not have registered
-        print(f"[Gallery] ⚠ Frame button count unchanged after gallery click — will upload", flush=True)
+        # DIAG (remove after frame-binding fix verified): capture the real counts +
+        # whether a frame thumbnail actually filled, to tell apart (A) click did
+        # nothing vs (B) it filled but the count heuristic is stale.
+        print(f"[Gallery] ⚠ Frame button count unchanged after gallery click — will upload "
+              f"(expected_btn={expected_btn_count} remaining={remaining} sel={frame_selector!r})", flush=True)
+        try:
+            _diag = page.evaluate(
+                "() => {"
+                "  const dlg = document.querySelector(\"[role='dialog']\") || document;"
+                "  const imgs = Array.from(dlg.querySelectorAll('img')).map(i => (i.getAttribute('alt')||i.src||'').slice(0,40)).filter(Boolean).slice(0,12);"
+                "  const btns = Array.from(dlg.querySelectorAll('button')).map(b => (b.innerText||'').trim()).filter(Boolean).slice(0,15);"
+                "  const dialogOpen = !!document.querySelector(\"[role='dialog']\");"
+                "  const selectedFrame = !!dlg.querySelector(\"[aria-pressed='true'], [data-selected='true'], .selected\");"
+                "  return {dialogOpen, selectedFrame, imgCount: dlg.querySelectorAll('img').length, imgs, btns};"
+                "}"
+            )
+            print(f"[Gallery] DIAG frame-state: {_diag}", flush=True)
+        except Exception as _ge:
+            print(f"[Gallery] DIAG dump failed: {_ge}", flush=True)
         # Press Escape to close the dialog so the caller can re-open and upload
         try:
             page.keyboard.press("Escape")
