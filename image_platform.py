@@ -30,7 +30,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header, Request, Body, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float
@@ -2884,10 +2884,50 @@ async def upload_manual_variant(
 
 # ---- file serving --------------------------------------------------------
 
+# v756 — thumbnail buckets. The gallery shows tiles at ~128px; serving the
+# full-res PNG (multi-MB) for each is the dominant cold-load cost. ?w=N gives
+# a small webp resized to the nearest bucket, cached next to the original.
+_THUMB_WIDTHS = (128, 256, 512)
+
+
+def _make_or_get_thumb(abs_path: Path, w: int):
+    """Resize abs_path to a webp thumbnail at the nearest bucket width.
+
+    Returns (thumb_path, None) when a cached/just-written file is on disk,
+    (None, bytes) when the disk is not writable, or None on any failure
+    (caller falls back to serving the full-res original).
+    """
+    try:
+        tw = min(_THUMB_WIDTHS, key=lambda a: abs(a - w))
+        tpath = abs_path.parent / f"{abs_path.stem}.w{tw}.webp"
+        if tpath.exists():
+            return (tpath, None)
+        from PIL import Image as PILImage
+        im = PILImage.open(abs_path)
+        if im.mode not in ("RGB", "RGBA"):
+            im = im.convert("RGB")
+        ow, oh = im.size
+        if ow > tw:
+            nh = max(1, round(oh * tw / ow))
+            im = im.resize((tw, nh), PILImage.LANCZOS)
+        try:
+            im.save(tpath, format="WEBP", quality=80, method=4)
+            return (tpath, None)
+        except Exception:
+            from io import BytesIO
+            buf = BytesIO()
+            im.save(buf, format="WEBP", quality=80, method=4)
+            return (None, buf.getvalue())
+    except Exception as e:
+        log.warning(f"[image_platform v756] thumb failed {abs_path.name}: {e}")
+        return None
+
+
 @router.get("/files/{path:path}")
 def serve_image_file(
     path: str,
     direct: int = 0,
+    w: int = 0,
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -2985,10 +3025,22 @@ def serve_image_file(
                     log.warning(f"[image_platform] Lazy orphan cleanup failed: {e}")
             raise HTTPException(404, "File not found (and not in R2 backup)")
 
-    return FileResponse(
-        abs_path,
-        headers={"Cache-Control": "public, max-age=31536000, immutable"},
-    )
+    _imm = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+    # v756 — thumbnail mode. abs_path is guaranteed local here (R2-restored
+    # above if needed). On ?w=N serve a small webp; full-res only when w=0.
+    # Safe to cache forever for the same reason the full image is (the URL
+    # carries ?v={variant.id}; a regen makes a new id = new URL).
+    if w and w > 0:
+        thumb = _make_or_get_thumb(abs_path, w)
+        if thumb is not None:
+            tpath, tbytes = thumb
+            if tpath is not None:
+                return FileResponse(tpath, media_type="image/webp", headers=_imm)
+            return Response(content=tbytes, media_type="image/webp", headers=_imm)
+        # resize failed → fall through to full-res
+
+    return FileResponse(abs_path, headers=_imm)
 
 
 @router.post("/cleanup-orphans")
@@ -9861,19 +9913,34 @@ def worker_upload_variants(
     if not node:
         raise HTTPException(404, "Node not found")
     if node.status != "generating":
-        # v754 — the node was taken over while the worker was rendering,
-        # almost always a manual-variant upload mid-flight (sets
-        # status='ready' + chosen_variant_id + clears the claim). Treat this
-        # worker result as SUPERSEDED: return 200 so the worker does NOT mark
-        # the job failed, and SKIP the destructive variant cleanup below so
-        # the user's chosen manual variant survives. The worker's AI variants
-        # are discarded — the user already took over this node.
+        # v757 — the node is no longer 'generating'. Only treat the worker's
+        # upload as SUPERSEDED when there is actually a MANUAL variant to
+        # protect: a user upload mid-flight sets status='ready' + a
+        # source='manual' variant + clears the claim, and that chosen image
+        # must not be clobbered.
+        #
+        # v754 keyed superseded on status alone — that was the bug behind
+        # "Worker reported completion but no variants uploaded": an automated
+        # render whose status merely RACED off 'generating' during the slow R2
+        # phase got its variants skipped, leaving the node empty, and the
+        # completion POST then marked it 'failed'. If no manual variant exists
+        # there is nothing to preserve, so fall through and save the worker's
+        # variants — never leave the node empty.
+        manual_exists = db.query(ImageVariant).filter(
+            ImageVariant.node_id == node_id,
+            ImageVariant.source == "manual",
+        ).count() > 0
+        if manual_exists:
+            log.info(
+                f"[image_platform] Node {node_id} variant-upload superseded "
+                f"(status={node.status}, manual variant present) — keeping user's chosen image"
+            )
+            db.close()
+            return {"ok": True, "superseded": True, "saved_count": 0, "node_status": node.status}
         log.info(
-            f"[image_platform] Node {node_id} variant-upload superseded "
-            f"(status={node.status}) — discarding worker variants, keeping chosen image"
+            f"[image_platform] Node {node_id} upload with status={node.status} and no manual "
+            f"variant — saving worker variants anyway (avoids empty-node 'no variants' failure)"
         )
-        db.close()
-        return {"ok": True, "superseded": True, "saved_count": 0, "node_status": node.status}
 
     # Clean any stale variants/files (defensive)
     _delete_variant_files(node)
@@ -9923,17 +9990,28 @@ def worker_upload_variants(
         if not node2:
             # Node vanished while we were uploading — bail.
             raise HTTPException(404, "Node disappeared during upload")
-        # v754 — re-check status after the slow R2 phase. A manual-variant
-        # upload can take this node over (status->ready, claim cleared) in the
-        # window between the Phase 1 commit and here. If so, do NOT insert the
-        # worker's AI variant rows — they'd pollute the grid the user already
-        # took over. The local files become harmless orphans (GC'd later).
+        # v757 — re-check after the slow R2 phase. Only SKIP the insert when a
+        # MANUAL variant exists to protect (a user upload took this node over).
+        # Phase 1 already DELETED the prior variant rows, so skipping the insert
+        # for any other reason (status raced off 'generating') would leave the
+        # node with ZERO variants → the completion POST marks it 'failed'
+        # ("no variants uploaded"). That was the v754 regression. If there is no
+        # manual variant, always insert so the node never ends up empty.
         if node2.status != "generating":
+            manual_exists = db2.query(ImageVariant).filter(
+                ImageVariant.node_id == node_id,
+                ImageVariant.source == "manual",
+            ).count() > 0
+            if manual_exists:
+                log.info(
+                    f"[image_platform] Node {node_id} taken over during R2 phase "
+                    f"(status={node2.status}, manual variant present) — skipping {len(pending_variants)} worker variant row(s)"
+                )
+                return {"ok": True, "superseded": True, "saved_count": 0, "node_status": node2.status}
             log.info(
-                f"[image_platform] Node {node_id} taken over during R2 phase "
-                f"(status={node2.status}) — skipping {len(pending_variants)} worker variant row(s)"
+                f"[image_platform] Node {node_id} status={node2.status} during R2 phase but no "
+                f"manual variant — inserting worker variants anyway (avoids empty-node 'no variants' failure)"
             )
-            return {"ok": True, "superseded": True, "saved_count": 0, "node_status": node2.status}
         for idx, filename, rel_str, target in pending_variants:
             v = ImageVariant(
                 node_id=node2.id,
