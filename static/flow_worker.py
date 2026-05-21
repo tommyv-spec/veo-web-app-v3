@@ -11794,55 +11794,64 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                 f"[title='{filename}']",
             ]
 
-            for sel in candidate_selectors:
-                try:
-                    item = dialog.locator(sel)
-                    if item.count() == 0:
-                        continue
-                    if not item.first.is_visible(timeout=1500):
-                        # Item exists but not visible — try scrolling to it
-                        try:
-                            item.first.scroll_into_view_if_needed(timeout=3000)
-                            time.sleep(0.3)
-                            if not item.first.is_visible(timeout=1000):
-                                continue
-                        except Exception:
-                            continue
-                    # Scroll into view in case virtuoso hasn't rendered it yet
-                    item.first.scroll_into_view_if_needed(timeout=2000)
-                    time.sleep(0.3)
-                    item.first.click(timeout=3000)
-                    print(f"[Gallery] ✓ Clicked gallery item '{filename}' (selector: {sel})", flush=True)
-                    clicked = True
-                    break
-                except Exception:
-                    continue
-
-            if not clicked:
-                # Scroll through gallery to render more items, then retry
-                _gallery_list = dialog.locator("div[data-virtuoso-scroller], div.virtuoso-grid-list, div[style*='overflow']").first
-                if _gallery_list.count() > 0:
-                    for _scroll in range(5):
-                        try:
-                            _gallery_list.evaluate("el => el.scrollTop += 200")
-                            time.sleep(0.5)
-                            for sel in candidate_selectors:
-                                item = dialog.locator(sel)
-                                if item.count() > 0 and item.first.is_visible(timeout=800):
-                                    item.first.scroll_into_view_if_needed(timeout=2000)
-                                    time.sleep(0.3)
-                                    item.first.click(timeout=3000)
-                                    print(f"[Gallery] ✓ Clicked gallery item '{filename}' (after scroll {_scroll+1})", flush=True)
-                                    clicked = True
-                                    break
-                        except Exception:
-                            continue
-                        if clicked:
-                            break
-
-            if not clicked:
-                print(f"[Gallery] ⚠ '{filename}' not found in gallery — will upload", flush=True)
+            # v740 — duplicate-safe selection. Re-uploading the same image N times
+            # makes N gallery items with the SAME alt. Locator.first picks the first
+            # DOM node, which in a virtuoso virtualized grid is often an offscreen /
+            # stale duplicate whose click never binds the frame slot (operator
+            # confirmed a single click on the LIVE thumbnail binds fine). So click
+            # EACH visible matching instance and confirm the slot actually filled
+            # before declaring success — landing on whichever duplicate is live.
+            def _confirm_bind(seconds=4):
+                for _w in range(seconds):
+                    time.sleep(1)
+                    try:
+                        if page.locator(frame_selector).count() < expected_btn_count:
+                            return True
+                    except Exception:
+                        pass
                 return False
+
+            def _try_all_instances(label):
+                for sel in candidate_selectors:
+                    try:
+                        items = dialog.locator(sel)
+                        n = items.count()
+                    except Exception:
+                        continue
+                    for j in range(n):
+                        it = items.nth(j)
+                        try:
+                            it.scroll_into_view_if_needed(timeout=2000)
+                            time.sleep(0.2)
+                            if not it.is_visible(timeout=1000):
+                                continue
+                            it.click(timeout=3000)
+                            print(f"[Gallery] clicked '{filename}' instance {j+1}/{n} (sel={sel}{label})", flush=True)
+                        except Exception:
+                            continue
+                        if _confirm_bind():
+                            print(f"[Gallery] ✓ Frame slot filled from gallery (instance {j+1}/{n}{label})", flush=True)
+                            return True
+                return False
+
+            if _try_all_instances(""):
+                return True
+            # Scroll to render more virtuoso items, then retry every instance
+            _gallery_list = dialog.locator("div[data-virtuoso-scroller], div.virtuoso-grid-list, div[style*='overflow']").first
+            try:
+                _has_list = _gallery_list.count() > 0
+            except Exception:
+                _has_list = False
+            if _has_list:
+                for _scroll in range(5):
+                    try:
+                        _gallery_list.evaluate("el => el.scrollTop += 200")
+                        time.sleep(0.5)
+                    except Exception:
+                        pass
+                    if _try_all_instances(f", scroll {_scroll+1}"):
+                        return True
+            # Nothing bound — fall through to the shared DIAG + Escape tail below.
 
         # Confirm: wait for the frame button count to drop (same signal as after upload)
         remaining = expected_btn_count
