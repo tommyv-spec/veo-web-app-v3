@@ -4102,16 +4102,58 @@ class HumanPacer:
                                                     f"bound_mediaIds={_v738diag_bound} grid={_v738diag_grid}",
                                                     flush=True,
                                                 )
-                                                try:
-                                                    update_clip_status(
-                                                        _clip_obj['id'], 'flow_redo_queued',
-                                                        error_message=f"Stuck @{_age:.0f}s — no URL captured, no fail signal (v738 redo gate)"
-                                                    )
-                                                except Exception as _redo_err:
-                                                    print(f"[{self.account_name}] [v738] failed to mark flow_redo_queued: {_redo_err}", flush=True)
-                                                _dl_checked.add(_ci)
-                                                # Remove from clip_submit_times so the scanner stops re-checking
-                                                clip_submit_times.pop(_ci, None)
+                                                # v739 — mediaId rescue before redo. v738 polls ONE
+                                                # position (_data_idx); Flow reorders its grid so a
+                                                # FINISHED video for this clip often sits at a different
+                                                # data-index and the single-position poll misses it →
+                                                # false stuck → wasteful redo of an already-rendered clip.
+                                                # Scan EVERY grid <video> for a non-blob src whose uuid
+                                                # matches a bound primaryMediaId; a finished clip exposes a
+                                                # real URL (blob only while rendering) and primaryMediaId ==
+                                                # the uuid in that URL. Found → enqueue + skip redo.
+                                                _v739_rescued = False
+                                                if _v738diag_bound:
+                                                    try:
+                                                        _v739_srcs = page.evaluate("""() => {
+                                                            const out = [];
+                                                            document.querySelectorAll('video').forEach(v => {
+                                                                const u = v.src || ((v.querySelector('source')||{}).src) || '';
+                                                                if (u && !u.startsWith('blob:')) out.push(u);
+                                                            });
+                                                            return out;
+                                                        }""") or []
+                                                    except Exception:
+                                                        _v739_srcs = []
+                                                    _v739_boundset = set(_v738diag_bound)
+                                                    _v739_match = [u for u in _v739_srcs
+                                                                   if (_extract_uuid_from_url(u) or '') in _v739_boundset]
+                                                    if _v739_match:
+                                                        try:
+                                                            http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                                                'clip_id': _clip_obj['id'], 'urls': _v739_match, 'temp_dir': temp_dir})
+                                                            _dl_checked.add(_ci)
+                                                            clip_submit_times.pop(_ci, None)
+                                                            _v739_rescued = True
+                                                            print(
+                                                                f"[{self.account_name}] [v739] clip {_ci+1} RESCUED — finished "
+                                                                f"video found by bound mediaId at a drifted grid position "
+                                                                f"(polled data_idx={_data_idx} was wrong); enqueued "
+                                                                f"{len(_v739_match)} url(s), skipping redo",
+                                                                flush=True,
+                                                            )
+                                                        except Exception as _resc_err:
+                                                            print(f"[{self.account_name}] [v739] rescue enqueue failed: {_resc_err}", flush=True)
+                                                if not _v739_rescued:
+                                                    try:
+                                                        update_clip_status(
+                                                            _clip_obj['id'], 'flow_redo_queued',
+                                                            error_message=f"Stuck @{_age:.0f}s — no URL captured, no fail signal (v738 redo gate)"
+                                                        )
+                                                    except Exception as _redo_err:
+                                                        print(f"[{self.account_name}] [v738] failed to mark flow_redo_queued: {_redo_err}", flush=True)
+                                                    _dl_checked.add(_ci)
+                                                    # Remove from clip_submit_times so the scanner stops re-checking
+                                                    clip_submit_times.pop(_ci, None)
                                     except Exception as _v738_err:
                                         print(f"[{self.account_name}] [v738] heartbeat/redo logic error: {_v738_err}", flush=True)
                         except Exception:
