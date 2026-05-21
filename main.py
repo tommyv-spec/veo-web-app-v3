@@ -4387,11 +4387,15 @@ async def upload_clip_variant(
     from backends.storage import is_storage_configured, get_storage
     from models import get_db
     from datetime import datetime as _dt
+    from uuid import uuid4
 
     if not is_storage_configured():
         raise HTTPException(status_code=503, detail="Storage not configured")
 
     # Phase 1 — brief session: authorize + read identifiers, then release.
+    # get_user_clip raises if the clip is not owned by current_user, so this
+    # gates the WHOLE request: an unauthorized caller never reaches the upload
+    # or the Phase-3 mutation below (clip_id is immutable across phases).
     with get_db() as db:
         clip = get_user_clip(db, clip_id, current_user)
         job_id = clip.job_id
@@ -4417,7 +4421,7 @@ async def upload_clip_variant(
         # the lock; it does NOT need to be encoded in the filename — export and
         # the proxy URL use output_filename verbatim as the R2 outputs key).
         ts = _dt.utcnow().strftime("%Y%m%dT%H%M%S")
-        output_filename = f"clip_{clip_index}_user_{ts}.mp4"
+        output_filename = f"clip_{clip_index}_user_{ts}_{uuid4().hex[:8]}.mp4"
         r2_key = f"jobs/{job_id}/outputs/{output_filename}"
         output_url = f"/api/jobs/{job_id}/outputs/{output_filename}"
 
