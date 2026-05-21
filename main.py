@@ -5958,33 +5958,59 @@ async def download_output(
     if filepath.exists():
         return FileResponse(filepath, media_type="video/mp4", filename=filename, headers=video_cache_headers)
 
-    # Method 2: R2 storage — cache to disk on first request, stream on subsequent ones
-    # Uses .download.tmp staging to prevent race condition (partial file served).
+    # Method 2: R2 storage — stream progressively (v753).
+    # Render's local disk is wiped on every redeploy (≈every push during
+    # active dev), so the old "download the whole file to disk, then
+    # FileResponse" path ran on nearly every clip load and made the browser
+    # wait for the FULL R2 download before a single byte arrived — this is
+    # the redo-clip "takes forever to load". We now pipe the R2 body straight
+    # to the client and forward the browser's Range header so <video> seeking
+    # still works. No disk write — ephemeral disk made the cache near-useless.
+    # v695 footgun is NOT reintroduced: still a same-origin proxied URL, still
+    # cacheable; we never hand the browser a presigned/redirect URL.
     try:
         from backends.storage import is_storage_configured, get_storage
 
         if is_storage_configured():
             storage = get_storage()
             r2_key = f"jobs/{job_id}/outputs/{filename}"
+            range_header = request.headers.get("range")
 
-            if storage.exists(r2_key):
-                output_dir.mkdir(parents=True, exist_ok=True)
-                tmp_filepath = filepath.with_suffix(".download.tmp")
+            try:
+                s = await asyncio.to_thread(storage.stream_object, r2_key, range_header)
+            except Exception as se:
+                print(f"[Download v753] stream miss {filename}: {se}", flush=True)
+                raise HTTPException(status_code=404, detail="File not found")
 
-                # Wait if another request is already downloading this file
-                waited = 0
-                while tmp_filepath.exists() and waited < 30:
-                    await asyncio.sleep(0.5)
-                    waited += 0.5
-                    if filepath.exists():
-                        break
+            body = s["body"]
 
-                if not filepath.exists():
-                    await asyncio.to_thread(storage.download_file, r2_key, str(tmp_filepath))
-                    tmp_filepath.rename(filepath)
-                    print(f"[Download] Cached from R2: {filename}", flush=True)
+            async def _iter_r2():
+                try:
+                    while True:
+                        chunk = await asyncio.to_thread(body.read, 262144)  # 256KB
+                        if not chunk:
+                            break
+                        yield chunk
+                finally:
+                    body.close()
 
-                return FileResponse(filepath, media_type="video/mp4", filename=filename, headers=video_cache_headers)
+            headers = dict(video_cache_headers)
+            headers["Accept-Ranges"] = "bytes"
+            if s["content_length"] is not None:
+                headers["Content-Length"] = str(s["content_length"])
+            if s["content_range"]:
+                headers["Content-Range"] = s["content_range"]
+            # v753 diagnostic — REMOVE after operator confirms stream path live.
+            print(f"[Download v753] STREAM {filename} status={s['status']} "
+                  f"range={range_header or 'none'} len={s['content_length']}", flush=True)
+            return StreamingResponse(
+                _iter_r2(),
+                status_code=s["status"],
+                media_type=s["content_type"],
+                headers=headers,
+            )
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[Download] R2 error: {e}", flush=True)
 

@@ -9516,19 +9516,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     window.ensurePollingActive(selectedJobId);
                 }
                 // Don't reload the whole page — markClipRegenerating already updated the UI.
-                // Start a mini-poll to catch the status update (main poll may have stopped).
+                // v753 — REMOVED the separate 5s redoPoll loop. It ran in
+                // parallel with the main job poller (ensurePollingActive
+                // re-arms it just above), so after a redo BOTH loops called
+                // loadClips every 5s = double /clips fetch + double DOM diff
+                // every tick. The main poll already catches the redo via its
+                // _hasActiveClipsNow guard (the clip is redo_queued/generating)
+                // AND skips redundant work via the /clips/active signature
+                // check — which redoPoll did not. We keep one immediate refresh
+                // to seed cachedClipsData so the main poll sees the active clip.
                 if(selectedJobId) {
                     const jid = selectedJobId;
-                    let redoPollCount = 0;
-                    const redoPoll = setInterval(() => {
-                        if(selectedJobId !== jid || redoPollCount++ > 36) { // 3 min max
-                            clearInterval(redoPoll);
-                            return;
-                        }
-                        loadClips(jid);
-                        loadLogs(jid);
-                    }, 5000);
-                    // Also do one immediate refresh
                     setTimeout(() => loadClips(jid), 1500);
                 }
             }).catch(e=>{

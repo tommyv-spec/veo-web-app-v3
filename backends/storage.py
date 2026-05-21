@@ -246,7 +246,34 @@ class ObjectStorage:
         
         buffer.seek(0)
         return buffer.read()
-    
+
+    def stream_object(self, remote_key: str, range_header: str = None):
+        """
+        Open an object for progressive streaming (no full download first).
+
+        Returns a dict the caller turns into a StreamingResponse:
+          - body:           boto3 StreamingBody (iterate in chunks)
+          - status:         200 (full) or 206 (partial, when Range sent)
+          - content_length: int bytes in THIS response
+          - content_type:   stored MIME (falls back to video/mp4)
+          - content_range:  "bytes a-b/total" when partial, else None
+
+        Passing the browser's raw Range header straight to S3/R2 means the
+        <video> element's seek requests are honored — without this the player
+        breaks scrubbing and some browsers refuse to play.
+        """
+        kwargs = {"Bucket": self.bucket_name, "Key": remote_key}
+        if range_header:
+            kwargs["Range"] = range_header
+        resp = self.client.get_object(**kwargs)
+        return {
+            "body": resp["Body"],
+            "status": 206 if range_header and resp.get("ContentRange") else 200,
+            "content_length": resp.get("ContentLength"),
+            "content_type": resp.get("ContentType") or "video/mp4",
+            "content_range": resp.get("ContentRange"),
+        }
+
     def get_presigned_url(
         self,
         remote_key: str,
