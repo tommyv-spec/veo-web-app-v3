@@ -2907,7 +2907,14 @@ def serve_image_file(
     crashed. Now: query needed data, release session BEFORE R2 work
     or FileResponse, reopen briefly for any DB writes (orphan cleanup).
 
-    Sets Cache-Control: no-cache so browsers always revalidate."""
+    v755: serve as public + immutable instead of no-cache. The frontend
+    image_url carries `?v={variant.id}` (see ImageVariant.to_dict), and a
+    regen always creates a NEW variant row → a NEW id → a NEW URL. So the
+    bytes behind any given URL never change, which makes the response safe
+    to cache forever. Pre-v755 this was `no-cache`, forcing every gallery
+    tile to re-fetch from the single 1-CPU origin on every view (the "all
+    images load slow"). public+immutable lets the browser AND Cloudflare
+    edge-cache each versioned URL; regen busts it via the new id."""
     # Prevent path traversal
     safe = Path(path).as_posix()
     if ".." in safe.split("/"):
@@ -2980,7 +2987,7 @@ def serve_image_file(
 
     return FileResponse(
         abs_path,
-        headers={"Cache-Control": "no-cache"},
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
 
 

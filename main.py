@@ -8698,8 +8698,10 @@ async def get_job_image(
     media_types = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp'}
     media_type = media_types.get(suffix, 'image/png')
     
-    # Cache headers — thumbnails never change, cache for 1 hour
-    cache_headers = {"Cache-Control": "public, max-age=3600, immutable"}
+    # Cache headers — frame filenames are unique + never mutate, so cache
+    # for 365d (v755: was 1h; the short TTL forced a full re-download of
+    # every frame through the 1-CPU origin once an hour / each new session).
+    cache_headers = {"Cache-Control": "public, max-age=31536000, immutable"}
     
     # Method 1: Check local filesystem first
     images_path = safe_images_dir(job_images_dir)
