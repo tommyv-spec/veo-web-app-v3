@@ -4056,6 +4056,52 @@ class HumanPacer:
                                                     f"marking flow_redo_queued for submit-side resubmit",
                                                     flush=True,
                                                 )
+                                                # v738-diag (TEMP) — before redoing, dump the WHOLE grid so we can
+                                                # see whether a FINISHED video for this clip already exists at a
+                                                # DIFFERENT data-index than the one we polled (_data_idx). Also list
+                                                # the bound primaryMediaId(s) so we can test whether tile data-tile-id
+                                                # == mediaId (→ enables locate-by-id fix). Remove after evidence lands.
+                                                try:
+                                                    _v738diag_grid = page.evaluate("""() => {
+                                                        const out = [];
+                                                        document.querySelectorAll('[data-index]').forEach(c => {
+                                                            const di = c.getAttribute('data-index');
+                                                            const tids = [];
+                                                            c.querySelectorAll('[data-tile-id]').forEach(t => {
+                                                                const id = t.getAttribute('data-tile-id'); if (id) tids.push(id);
+                                                            });
+                                                            const vids = [];
+                                                            c.querySelectorAll('video').forEach(v => {
+                                                                const u = v.src || ((v.querySelector('source')||{}).src) || '';
+                                                                vids.push(u ? u.slice(0, 60) : '(empty)');
+                                                            });
+                                                            const icons = Array.from(c.querySelectorAll('i')).map(i => i.textContent.trim());
+                                                            out.push({
+                                                                di: di,
+                                                                tile_ids: Array.from(new Set(tids)),
+                                                                n_video: vids.length,
+                                                                video_src: vids,
+                                                                pct: ((c.textContent||'').match(/\\d+%/) || [null])[0],
+                                                                icons: Array.from(new Set(icons)),
+                                                            });
+                                                        });
+                                                        return out;
+                                                    }""")
+                                                except Exception as _diag_err:
+                                                    _v738diag_grid = [{'eval_error': str(_diag_err)}]
+                                                _v738diag_bound = []
+                                                try:
+                                                    with _PRIMARY_MEDIA_LOCK:
+                                                        for _uid, _b in _PRIMARY_MEDIA_BINDINGS.items():
+                                                            if _b.get('job_id') == job_id and _b.get('clip_index') == _ci:
+                                                                _v738diag_bound.append(_uid)
+                                                except Exception:
+                                                    pass
+                                                print(
+                                                    f"[{self.account_name}] [v738-diag] clip {_ci+1} polled_data_idx={_data_idx} "
+                                                    f"bound_mediaIds={_v738diag_bound} grid={_v738diag_grid}",
+                                                    flush=True,
+                                                )
                                                 try:
                                                     update_clip_status(
                                                         _clip_obj['id'], 'flow_redo_queued',
