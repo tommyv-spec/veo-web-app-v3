@@ -16019,12 +16019,19 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
 
             const tilesHtml = nodes.map((n, idx) => {
-                const thumbUrl = n.chosen_variant ? n.chosen_variant.image_url
+                const fullUrl = n.chosen_variant ? n.chosen_variant.image_url
                                : (n.variants && n.variants.length ? n.variants[0].image_url : null);
+                // v756 — tiles display at ~128px; request a small webp thumb
+                // (?w=256 retina) instead of the full-res PNG. Only for
+                // image-platform /files URLs; full-res still served on click
+                // (variant modal). Cuts cold first-load bytes ~95%.
+                const thumbUrl = (fullUrl && fullUrl.indexOf('/api/images/files/') !== -1)
+                    ? fullUrl + (fullUrl.indexOf('?') >= 0 ? '&' : '?') + 'w=256'
+                    : fullUrl;
                 const statusLabel = n.kind === 'upload' ? 'upload' : n.status;
                 const isGenerating = n.status === 'generating' || n.status === 'queued';
                 const thumbContent = thumbUrl
-                    ? `<img src="${thumbUrl}" alt="" onerror="this.outerHTML='<div>⚠</div>'">`
+                    ? `<img src="${thumbUrl}" loading="lazy" decoding="async" alt="" onerror="this.outerHTML='<div>⚠</div>'">`
                     : (isGenerating ? '⏳' : (n.status === 'failed' ? '❌' : '🖼'));
                 const nameSafe = imgEscape(n.name || ('Node ' + n.id));
                 // Chronological index label: "Scene N" if extractable, else sequential
