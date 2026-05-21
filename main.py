@@ -5954,7 +5954,15 @@ async def download_output(
     # User reported clips reload on every job open; 24h cache lost on
     # day-overs / cache pressure / private mode quirks. 365d + immutable
     # = browser disk cache hit on every subsequent open.
-    video_cache_headers = {"Cache-Control": "private, max-age=31536000, immutable"}
+    # v754: was "private" — that FORBADE Cloudflare (in front of Render) from
+    # edge-caching clips, so every clip load on every device hit the single
+    # 1-CPU origin and proxied bytes through it (the "everything loads slow").
+    # Operator OK'd public media (UUID filenames are unguessable). "public"
+    # lets Cloudflare cache each clip at the edge after the first fetch, so
+    # repeat/other-device loads skip the origin entirely and the origin CPU is
+    # freed for fresh redos. Same bytes for a given URL (no per-user variance),
+    # so shared caching is safe.
+    video_cache_headers = {"Cache-Control": "public, max-age=31536000, immutable"}
     if filepath.exists():
         return FileResponse(filepath, media_type="video/mp4", filename=filename, headers=video_cache_headers)
 
