@@ -4131,9 +4131,11 @@ class HumanPacer:
                                                         try:
                                                             http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
                                                                 'clip_id': _clip_obj['id'], 'urls': _v739_match, 'temp_dir': temp_dir})
+                                                            # set guard FIRST so the redo body below can never
+                                                            # also fire for this clip, even on a later throw.
+                                                            _v739_rescued = True
                                                             _dl_checked.add(_ci)
                                                             clip_submit_times.pop(_ci, None)
-                                                            _v739_rescued = True
                                                             print(
                                                                 f"[{self.account_name}] [v739] clip {_ci+1} RESCUED — finished "
                                                                 f"video found by bound mediaId at a drifted grid position "
