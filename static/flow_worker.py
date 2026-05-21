@@ -12566,7 +12566,17 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                 print(f"[REDO] detection eval error: {_e}", flush=True)
                 _state = 'wait'
             if _state in ('err-text', 'err-link'):
-                print(f"[REDO] ⚠ Project not accessible ({_state}) — creating new project", flush=True)
+                # v741 — Flow's "Something went wrong" / error page is its
+                # throttle/overload signal. Immediately spawning a replacement
+                # project amplifies the throttle AND accumulates dead projects
+                # (which itself slows every later page load — the "platform got
+                # slow lately" symptom). Cool down first so Flow can recover
+                # before we create another project. Only fires on a real error
+                # signal, so healthy redos are unaffected.
+                _REDO_THROTTLE_COOLDOWN_S = 45
+                print(f"[REDO] ⚠ Flow error page ({_state}) — likely throttle/overload; "
+                      f"cooling down {_REDO_THROTTLE_COOLDOWN_S}s before creating new project", flush=True)
+                time.sleep(_REDO_THROTTLE_COOLDOWN_S)
                 _need_new_project = True
                 break
             if _state == 'ok':
