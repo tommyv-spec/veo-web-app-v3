@@ -5982,6 +5982,11 @@ async def download_output(
                 print(f"[Download v753] stream miss {filename}: {se}", flush=True)
                 raise HTTPException(status_code=404, detail="File not found")
 
+            # Unsatisfiable Range — return 416 so the player retries cleanly.
+            if s["status"] == 416:
+                from fastapi.responses import Response
+                return Response(status_code=416, headers={"Accept-Ranges": "bytes"})
+
             body = s["body"]
 
             async def _iter_r2():

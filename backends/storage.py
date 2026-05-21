@@ -76,7 +76,12 @@ class ObjectStorage:
                 region_name=self.region,
                 config=Config(
                     signature_version='s3v4',
-                    retries={'max_attempts': 3, 'mode': 'adaptive'}
+                    retries={'max_attempts': 3, 'mode': 'adaptive'},
+                    # v753 — clip serving now streams the R2 body to the
+                    # browser, holding one connection open per in-flight
+                    # <video> for the duration of playback. The default pool
+                    # of 10 is exhausted by a gallery of concurrent clips.
+                    max_pool_connections=50,
                 )
             )
         
@@ -265,7 +270,17 @@ class ObjectStorage:
         kwargs = {"Bucket": self.bucket_name, "Key": remote_key}
         if range_header:
             kwargs["Range"] = range_header
-        resp = self.client.get_object(**kwargs)
+        try:
+            resp = self.client.get_object(**kwargs)
+        except ClientError as e:
+            # Unsatisfiable Range → tell the caller to return 416, not 404,
+            # so the <video> player retries with a valid range instead of
+            # treating the clip as missing.
+            code = e.response.get("Error", {}).get("Code", "")
+            if code in ("InvalidRange", "416", "RequestedRangeNotSatisfiable"):
+                return {"status": 416, "body": None, "content_length": None,
+                        "content_type": "video/mp4", "content_range": None}
+            raise
         return {
             "body": resp["Body"],
             "status": 206 if range_header and resp.get("ContentRange") else 200,
