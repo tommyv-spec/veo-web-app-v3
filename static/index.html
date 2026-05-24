@@ -15486,6 +15486,16 @@ Example: A realistic vertical video of a professional presenter speaking directl
             return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
 
+        // v75x — append a webp thumbnail width to an image-platform /files URL.
+        // No-op for non-/files URLs and when a width is already present. Tiles
+        // display ~128-256px; a 256px retina thumb is ~95% fewer bytes than the
+        // full-res PNG. Full-res is still served on click (variant modal).
+        function imgThumbUrl(url, w) {
+            if (!url || url.indexOf('/api/images/files/') === -1) return url;
+            if (/[?&]w=\d+/.test(url)) return url;
+            return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'w=' + (w || 256);
+        }
+
         // v649 — find which sidebar group key a node belongs to. Used by
         // the "← Back to job" button on the node detail header. Walks
         // imgState.groupsByKey (already populated by the sidebar render).
@@ -16037,9 +16047,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     // during debug iteration: keep manual variants + storyboard
                     // intact, just refresh the prompts via a new Job. The old
                     // job becomes an orphan but stays in the Videos tab list.
-                    bulkActions.push(`<button class="btn btn-secondary" onclick="imgPrepareBatchForVideo('${sharedBatchId}')" title="Re-stage this batch and create a NEW video job (the old job stays in the Videos tab; new Job picks up latest markdown + parser fixes)">🔄 Re-promote (new video)</button>`);
+                    bulkActions.push(`<button class="btn btn-secondary" onclick="imgPrepareBatchForVideo(event, '${sharedBatchId}')" title="Re-stage this batch and create a NEW video job (the old job stays in the Videos tab; new Job picks up latest markdown + parser fixes)">🔄 Re-promote (new video)</button>`);
                 } else {
-                    bulkActions.push(`<button class="btn btn-primary" onclick="imgPrepareBatchForVideo('${sharedBatchId}')" title="Stage this batch in the Videos tab for visual review before generation">🎬 Promote to video</button>`);
+                    bulkActions.push(`<button class="btn btn-primary" onclick="imgPrepareBatchForVideo(event, '${sharedBatchId}')" title="Stage this batch in the Videos tab for visual review before generation">🎬 Promote to video</button>`);
                 }
             } else if (allReadyChosen && !sharedBatchId
                        && !groupKey.startsWith('__')
@@ -16075,9 +16085,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 // (?w=256 retina) instead of the full-res PNG. Only for
                 // image-platform /files URLs; full-res still served on click
                 // (variant modal). Cuts cold first-load bytes ~95%.
-                const thumbUrl = (fullUrl && fullUrl.indexOf('/api/images/files/') !== -1)
-                    ? fullUrl + (fullUrl.indexOf('?') >= 0 ? '&' : '?') + 'w=256'
-                    : fullUrl;
+                const thumbUrl = imgThumbUrl(fullUrl, 256);
                 const statusLabel = n.kind === 'upload' ? 'upload' : n.status;
                 const isGenerating = n.status === 'generating' || n.status === 'queued';
                 const thumbContent = thumbUrl
@@ -16270,8 +16278,14 @@ Example: A realistic vertical video of a professional presenter speaking directl
         // confirms, then hits the normal Generate button when happy.
         //
         // On 409, surfaces the same missing-scenes list as the old flow.
-        async function imgPrepareBatchForVideo(batchId) {
+        async function imgPrepareBatchForVideo(event, batchId) {
             if (!batchId) return;
+            // Promote can take a few seconds while the server copies/rehydrates
+            // images from R2. Show progress so the UI isn't a frozen dead screen.
+            const _promoteBtn = (event && event.target) ? event.target.closest('button') : null;
+            const _promoteBtnHtml = _promoteBtn ? _promoteBtn.innerHTML : null;
+            if (_promoteBtn) { _promoteBtn.disabled = true; _promoteBtn.innerHTML = '⏳ Preparing video…'; }
+            try {
             let res;
             try {
                 res = await fetch(`/api/images/batches/${batchId}/prepare-for-video`, { method: 'POST' });
@@ -16299,6 +16313,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
             const data = await res.json();
             imgPopulateVideoTabFromBatch(data);
+            } finally {
+                if (_promoteBtn) { _promoteBtn.disabled = false; if (_promoteBtnHtml !== null) _promoteBtn.innerHTML = _promoteBtnHtml; }
+            }
         }
 
         // Apply the prepare-for-video response to the Videos tab state.
@@ -16871,7 +16888,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         if (refThumb) {
                             refTileHtml = `
                                 <div class="img-variant img-reference-tile" onclick="imgSelectNode(${refEdge.parent_node_id})" title="Open ${refName}">
-                                    <img src="${refThumb}" alt="reference">
+                                    <img src="${imgThumbUrl(refThumb, 256)}" loading="lazy" decoding="async" alt="reference">
                                     <span class="variant-label ref-label">← Previous scene</span>
                                     <div class="ref-name">${refName}</div>
                                 </div>`;
@@ -16890,7 +16907,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                             const isManual = (v.source === 'manual');
                             return `
                                 <div class="img-variant ${chosen ? 'chosen' : ''} ${isManual ? 'manual-variant' : ''}" onclick="imgChooseVariant(event, ${node.id}, ${v.id})">
-                                    <img src="${v.image_url}" alt="variant ${v.variant_index}">
+                                    <img src="${imgThumbUrl(v.image_url, 256)}" loading="lazy" decoding="async" alt="variant ${v.variant_index}">
                                     ${isManual ? '<div class="manual-badge">M</div>' : ''}
                                     <span class="variant-label">${v.variant_index}</span>
                                     ${isManual ? '<div class="manual-icon" title="Manual upload">📁</div>' : ''}
