@@ -12171,6 +12171,14 @@ def fill_prompt_textarea(page, prompt):
     Slate editor doesn't respond to textContent/innerText changes.
     Must use keyboard-level input or execCommand to update Slate's internal state.
     """
+    # v758: in Omni Flash / Ingredients mode, always anchor the prompt to the
+    # attached photo so Omni keeps the reference framing. Appended once
+    # (idempotent — skipped if the prompt already contains it).
+    if is_omni(getattr(page, "_veo_model", "")):
+        anchor = "Important: use the photo I added, do not change the framing/camera angle."
+        if anchor not in (prompt or ""):
+            prompt = (prompt or "").rstrip() + "\n\n" + anchor
+
     # New UI (Feb 2025+): contenteditable div with role="textbox" (Slate editor)
     # Old UI: textarea#PINHOLE_TEXT_AREA_ELEMENT_ID
     
