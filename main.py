@@ -1801,8 +1801,19 @@ async def _create_job_impl(
     # Check for user's backend preference from UI toggle
     config_dict_raw = config.model_dump() if hasattr(config, 'model_dump') else {}
     backend_preference = config_dict_raw.get('backend_preference', 'auto')
-    
-    if backend_preference == 'prompt_only':
+    video_backend_pref = config_dict_raw.get('video_backend', '')
+
+    if video_backend_pref == 'higgsfield':
+        # Kling (Higgsfield) toggle is ON — overrides the mode selector.
+        # Clips animate via the Higgsfield API on the server-side JobWorker
+        # (not Flow, not Gemini). Needs only the server HF_KEY.
+        from config import get_higgsfield_credentials_from_env
+        backend = BackendType.HIGGSFIELD
+        if get_higgsfield_credentials_from_env():
+            print(f"[main.py] Backend = HIGGSFIELD (Kling i2v toggle ON)", flush=True)
+        else:
+            errors.append("Kling (Higgsfield) is ON but HF_KEY is not configured on the server.")
+    elif backend_preference == 'prompt_only':
         # Prompt Only mode — run the full prompt pipeline but skip generation
         backend = BackendType.FLOW  # Use Flow pipeline for prompt generation
         print(f"[main.py] PROMPT ONLY mode — will generate prompts without submitting", flush=True)
@@ -1820,15 +1831,6 @@ async def _create_job_impl(
         else:
             errors.append("Flow backend is not available. Set up your worker first or switch to API Keys.")
             backend = BackendType.FLOW
-    elif backend_preference == 'higgsfield':
-        # Kling image-to-video via the Higgsfield API. Runs on the server-side
-        # JobWorker (not Flow, not Gemini). Needs only the server HF_KEY.
-        from config import get_higgsfield_credentials_from_env
-        backend = BackendType.HIGGSFIELD
-        if get_higgsfield_credentials_from_env():
-            print(f"[main.py] Backend = HIGGSFIELD (Kling i2v via Higgsfield API)", flush=True)
-        else:
-            errors.append("Kling (Higgsfield) backend selected but HF_KEY is not configured on the server.")
     else:
         backend = choose_backend_for_job(db, current_user.id, user_effective_keys)
         print(f"[main.py] Backend auto-selected: {backend.value} (user keys: {len(user_effective_keys)})", flush=True)
