@@ -773,6 +773,23 @@ def _storage_download_to_local(rel_path: str) -> bool:
 _r2_known_missing: Set[str] = set()
 
 
+def _materialize_variant_file(image_path: str, dst_path) -> None:
+    """Ensure a variant file exists locally (rehydrate from R2 if missing) and
+    copy it to dst_path. File IO only — NO DB access — so it is safe to run in
+    a thread (the SQLAlchemy session is not thread-safe). Raises on
+    unrecoverable failure so the caller can map it to an HTTP error."""
+    src_path = images_root() / image_path
+    if not src_path.exists():
+        # Ephemeral Render disk wipes /app/data on every deploy; variant files
+        # are mirrored to R2. Rehydrate before failing.
+        log.info(f"[image_platform] Variant file missing locally, attempting R2 restore: {image_path}")
+        if not _storage_download_to_local(image_path):
+            raise RuntimeError(f"variant file missing at {src_path} and not recoverable from R2")
+        if not src_path.exists():
+            raise RuntimeError(f"R2 reported success but file still missing at {src_path}")
+    shutil.copy2(src_path, dst_path)
+
+
 def _storage_delete(rel_path: str):
     """Delete a file from R2 if configured. Silently ignores errors."""
     storage = _storage_or_none()
@@ -6729,8 +6746,13 @@ def prepare_batch_for_video(
 
     uploaded: List[Dict[str, Any]] = []
     node_id_to_local_index: Dict[int, int] = {}
-    _media_types = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp'}
 
+    # ===== Pass 1 (sequential, DB): resolve each referenced node to its
+    # chosen variant. The SQLAlchemy session is NOT thread-safe, so ALL DB
+    # work stays on this thread. Orphaned assignments are skipped (not fatal).
+    # local_idx is the enumerate index over referenced_image_node_ids and is
+    # preserved verbatim (downstream scene_assignments index into it).
+    resolved: List[Dict[str, Any]] = []
     for local_idx, node_id in enumerate(referenced_image_node_ids):
         n = nodes_by_id.get(node_id)
         if n is None:
@@ -6751,51 +6773,63 @@ def prepare_batch_for_video(
             raise HTTPException(
                 500, f"Node {n.id}: chosen variant {n.chosen_variant_id} missing"
             )
-        src_path = images_root() / variant.image_path
-        if not src_path.exists():
-            # v477: try R2 rehydration before failing. Ephemeral disk on
-            # Render wipes /app/data on every deploy; variant files are
-            # mirrored to R2 but not kept on local disk indefinitely.
-            log.info(f"[image_platform] Variant file missing locally, attempting R2 restore: {variant.image_path}")
-            if not _storage_download_to_local(variant.image_path):
-                raise HTTPException(
-                    500,
-                    f"Node {n.id}: variant file missing at {src_path} and not recoverable from R2"
-                )
-            if not src_path.exists():
-                raise HTTPException(500, f"Node {n.id}: R2 reported success but file still missing at {src_path}")
-
-        ext = src_path.suffix or ".png"
+        ext = (images_root() / variant.image_path).suffix or ".png"
         new_filename = f"image_{local_idx:02d}{ext}"
-        dst_path = upload_dir / new_filename
-        try:
-            copy2(src_path, dst_path)
-        except Exception as e:
-            raise HTTPException(500, f"Node {n.id}: failed to copy variant file: {e}")
+        resolved.append({
+            "local_idx": local_idx,
+            "node_id": node_id,
+            "n": n,
+            "variant": variant,
+            "new_filename": new_filename,
+            "dst_path": upload_dir / new_filename,
+        })
 
-        # Base64 data URL for instant frontend thumbnails (no Job row to
-        # serve from yet).
-        try:
-            with open(dst_path, "rb") as fh:
-                data_bytes = fh.read()
-            data_url = (
-                f"data:{_media_types.get(ext.lower(), 'image/png')};base64,"
-                + _b64.b64encode(data_bytes).decode("ascii")
-            )
-        except Exception as e:
-            log.warning(f"[prepare-for-video] data-url for {dst_path}: {e}")
-            data_url = None
+    # ===== Pass 2 (parallel, file IO only): rehydrate-if-missing + copy each
+    # variant file. No DB access in the worker, so it is thread-safe. On a cold
+    # Render container every file is an R2 download; running them concurrently
+    # turns N serial round-trips into ~1, which is the dominant promote delay.
+    if resolved:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time as _time
+        _mat_start = _time.monotonic()
+        with ThreadPoolExecutor(max_workers=min(8, len(resolved))) as _ex:
+            _futs = {
+                _ex.submit(_materialize_variant_file, r["variant"].image_path, r["dst_path"]): r
+                for r in resolved
+            }
+            for _fut in as_completed(_futs):
+                r = _futs[_fut]
+                try:
+                    _fut.result()
+                except Exception as e:
+                    raise HTTPException(500, f"Node {r['n'].id}: failed to materialize variant file: {e}")
+        log.info(f"[prepare-for-video][v75x] materialized {len(resolved)} files in {_time.monotonic()-_mat_start:.2f}s (parallel)")
 
+    # ===== Pass 3 (sequential): assemble ordered uploaded[] + index map.
+    # v75x — data_url is now a served thumbnail URL, NOT base64-inlined bytes
+    # (that built a multi-MB payload before the first byte returned).
+    # serve_image_file streams from disk, rehydrates from R2 on demand, and
+    # returns a small webp for ?w=256 with immutable cache headers; the browser
+    # loads these lazily + in parallel. Generation does NOT use this URL — it
+    # resolves bytes by server-side index from upload_job_id (the copy above),
+    # so this is display-only.
+    for r in resolved:
+        local_idx = r["local_idx"]
+        n = r["n"]
+        variant = r["variant"]
+        dst_path = r["dst_path"]
+        data_url = f"/api/images/files/{variant.image_path}?v={variant.id}&w=256"
         uploaded.append({
-            "filename": new_filename,
+            "filename": r["new_filename"],
             "original_filename": n.name or f"scene_{local_idx}.png",
             "size": dst_path.stat().st_size if dst_path.exists() else 0,
             "path": str(dst_path),
             "index": local_idx,
             "data_url": data_url,
-            "source_image_node_id": node_id,
+            "source_image_node_id": r["node_id"],
         })
-        node_id_to_local_index[node_id] = local_idx
+        node_id_to_local_index[r["node_id"]] = local_idx
+    log.info(f"[prepare-for-video][v75x] assembled {len(uploaded)} uploads (served-url thumbs, no base64)")
 
     # ===== Build scene_assignments for the frontend =====
     # Each entry maps to one storyboard scene. image_local_index points
