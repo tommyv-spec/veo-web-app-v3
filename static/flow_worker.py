@@ -4677,16 +4677,19 @@ def select_frames_to_video_mode(page, context="", **kwargs):
             # (caused "Model button not found").
             try:
                 target = getattr(page, "_veo_model", "Veo 3.1 - Lite [Lower Priority]") or "Veo 3.1 - Lite [Lower Priority]"
+                # v758.4: match the model option by the EXACT span text in the
+                # menu (operator DOM: each option is [role=menuitem] with the
+                # name in <span>). text-is is exact, so "Veo 3.1 - Lite" no
+                # longer collides with "Veo 3.1 - Lite [Lower Priority]" — the
+                # old text-matches regex was failing to match at all.
                 MODEL_SELECTORS = {
-                    "Omni Flash": ["[role='menuitem']:has-text('Omni Flash')",
-                                   "button:has-text('Omni Flash')"],
-                    "Veo 3.1 - Lite": ["[role='menuitem']:text-matches('Veo 3\\.1 - Lite\\s*$', 'i')",
-                                        "button:text-matches('Veo 3\\.1 - Lite\\s*$', 'i')"],
-                    "Veo 3.1 - Fast": ["[role='menuitem']:text-matches('Veo 3\\.1 - Fast\\s*$', 'i')",
-                                       "button:text-matches('Veo 3\\.1 - Fast\\s*$', 'i')"],
-                    "Veo 3.1 - Quality": ["[role='menuitem']:has-text('Quality')",
-                                          "button:has-text('Quality')"],
-                    "Veo 3.1 - Lite [Lower Priority]": ["[role='menuitem']:has-text('Lite'):has-text('Lower Priority')",
+                    "Omni Flash": ["[role='menuitem']:has(span:text-is('Omni Flash'))",
+                                   "[role='menuitem']:has-text('Omni Flash')"],
+                    "Veo 3.1 - Lite": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Lite'))"],
+                    "Veo 3.1 - Fast": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Fast'))"],
+                    "Veo 3.1 - Quality": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Quality'))",
+                                          "[role='menuitem']:has-text('Quality')"],
+                    "Veo 3.1 - Lite [Lower Priority]": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Lite [Lower Priority]'))",
                                                         "[role='menuitem']:has-text('Lower Priority')"],
                 }
                 # Scope to the open settings dropdown when present; match by model text.
@@ -6056,16 +6059,16 @@ def ensure_lower_priority_model(page, label=""):
     # Per-model dropdown selectors (primary then fallback). text-matches is a
     # Playwright regex; has-text is substring. Distinguish "Lite" from
     # "Lite [Lower Priority]" and avoid Quality/Fast cross-matches.
+    # v758.4: exact span-text match (see main-path note) — fixes
+    # "Model option not found for 'Veo 3.1 - Lite'".
     MODEL_SELECTORS = {
-        "Omni Flash": ["[role='menuitem']:has-text('Omni Flash')",
-                       "button:has-text('Omni Flash')"],
-        "Veo 3.1 - Lite": ["[role='menuitem']:text-matches('Veo 3\\.1 - Lite\\s*$', 'i')",
-                            "button:text-matches('Veo 3\\.1 - Lite\\s*$', 'i')"],
-        "Veo 3.1 - Fast": ["[role='menuitem']:text-matches('Veo 3\\.1 - Fast\\s*$', 'i')",
-                           "button:text-matches('Veo 3\\.1 - Fast\\s*$', 'i')"],
-        "Veo 3.1 - Quality": ["[role='menuitem']:has-text('Quality')",
-                              "button:has-text('Quality')"],
-        "Veo 3.1 - Lite [Lower Priority]": ["[role='menuitem']:has-text('Lite'):has-text('Lower Priority')",
+        "Omni Flash": ["[role='menuitem']:has(span:text-is('Omni Flash'))",
+                       "[role='menuitem']:has-text('Omni Flash')"],
+        "Veo 3.1 - Lite": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Lite'))"],
+        "Veo 3.1 - Fast": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Fast'))"],
+        "Veo 3.1 - Quality": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Quality'))",
+                              "[role='menuitem']:has-text('Quality')"],
+        "Veo 3.1 - Lite [Lower Priority]": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Lite [Lower Priority]'))",
                                             "[role='menuitem']:has-text('Lower Priority')"],
     }
 
