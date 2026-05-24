@@ -842,6 +842,7 @@ class JobWorker:
                     user_context=config_data.get("user_context", ""),
                     single_image_mode=config_data.get("single_image_mode", False),
                     generation_mode=config_data.get("generation_mode", "parallel"),
+                    video_backend=config_data.get("video_backend", ""),
                 )
                 
                 # Parse API keys (with env fallback)
@@ -942,12 +943,17 @@ class JobWorker:
                     raise ValueError(f"No images found in {images_dir}")
                 
                 # Create generator for redo (uses dynamic key pool - all keys shared)
-                generator = VeoGenerator(
-                    config=config,
-                    api_keys=api_keys,
-                    openai_key=api_keys.openai_api_key,
-                    job_id=job_id,
-                )
+                if getattr(config, "video_backend", "") == "higgsfield":
+                    from higgsfield_generator import HiggsfieldGenerator
+                    generator = HiggsfieldGenerator(config=config, job_id=job_id)
+                    print(f"[Worker] Using HiggsfieldGenerator (Kling i2v) for job {job_id[:8]}", flush=True)
+                else:
+                    generator = VeoGenerator(
+                        config=config,
+                        api_keys=api_keys,
+                        openai_key=api_keys.openai_api_key,
+                        job_id=job_id,
+                    )
                 
                 # Set up callbacks
                 def on_progress(clip_index, status, message, details):
@@ -1500,6 +1506,7 @@ class JobWorker:
                 single_image_mode=config_data.get("single_image_mode", False),
                 generation_mode=config_data.get("generation_mode", "parallel"),
                 skip_on_celebrity_filter=storyboard_mode,
+                video_backend=config_data.get("video_backend", ""),
             )
             
             with get_db() as db:
@@ -1723,20 +1730,26 @@ class JobWorker:
                 add_job_log(db, job_id, "[DEBUG] Step 4: Creating VeoGenerator...", "DEBUG", "system")
                 db.commit()
                 
-                generator = VeoGenerator(
-                    config=config,
-                    api_keys=api_keys,
-                    openai_key=api_keys.openai_api_key,
-                    job_id=job_id,
-                )
+                if getattr(config, "video_backend", "") == "higgsfield":
+                    from higgsfield_generator import HiggsfieldGenerator
+                    generator = HiggsfieldGenerator(config=config, job_id=job_id)
+                    print(f"[Worker] Using HiggsfieldGenerator (Kling i2v) for job {job_id[:8]}", flush=True)
+                else:
+                    generator = VeoGenerator(
+                        config=config,
+                        api_keys=api_keys,
+                        openai_key=api_keys.openai_api_key,
+                        job_id=job_id,
+                    )
                 
                 add_job_log(db, job_id, "[DEBUG] Step 5: VeoGenerator created OK", "DEBUG", "system")
                 db.commit()
                 
-                # Check if ALL keys are rate-limited or invalid (using dynamic pool)
+                # Check if ALL keys are rate-limited or invalid (using dynamic pool).
+                # Skipped for the Higgsfield/Kling backend — it uses no Gemini keys.
                 from config import key_pool
                 pool_status = key_pool.get_pool_status_summary(api_keys)
-                if pool_status["available"] == 0:
+                if getattr(config, "video_backend", "") != "higgsfield" and pool_status["available"] == 0:
                     # No keys available - pause job to wait for rate limits to clear
                     job.status = JobStatus.PAUSED.value
                     db.commit()

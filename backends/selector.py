@@ -18,6 +18,7 @@ class BackendType(str, Enum):
     """Available backends for video generation"""
     API = "api"      # Direct API calls (requires user API keys)
     FLOW = "flow"    # Browser automation via Google Flow UI
+    HIGGSFIELD = "higgsfield"  # Kling image-to-video via Higgsfield API (server-side, no Gemini keys)
 
 
 def has_valid_api_keys(

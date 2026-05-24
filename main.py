@@ -270,6 +270,7 @@ class VideoConfigInput(BaseModel):
     backend_preference: str = "auto"  # "auto", "api", or "flow"
     flow_variants_count: int = 2  # How many variants per clip in Flow (x1/x2/x3/x4)
     veo_model: str = "Veo 3.1 - Lite [Lower Priority]"  # Which Veo model the worker selects in Flow
+    video_backend: str = ""  # "" = normal (Veo). "higgsfield" = Kling image-to-video via Higgsfield API.
     use_gesture_enrichment: bool = False  # Generate content-specific gesture cues via LLM
     short_dialogue_mode: str = "optimized"  # "optimized" = timed speech + silence, "fill" = pad to 25 words
     # v539 — Prefix Short Lines
@@ -1819,6 +1820,15 @@ async def _create_job_impl(
         else:
             errors.append("Flow backend is not available. Set up your worker first or switch to API Keys.")
             backend = BackendType.FLOW
+    elif backend_preference == 'higgsfield':
+        # Kling image-to-video via the Higgsfield API. Runs on the server-side
+        # JobWorker (not Flow, not Gemini). Needs only the server HF_KEY.
+        from config import get_higgsfield_credentials_from_env
+        backend = BackendType.HIGGSFIELD
+        if get_higgsfield_credentials_from_env():
+            print(f"[main.py] Backend = HIGGSFIELD (Kling i2v via Higgsfield API)", flush=True)
+        else:
+            errors.append("Kling (Higgsfield) backend selected but HF_KEY is not configured on the server.")
     else:
         backend = choose_backend_for_job(db, current_user.id, user_effective_keys)
         print(f"[main.py] Backend auto-selected: {backend.value} (user keys: {len(user_effective_keys)})", flush=True)
@@ -1862,9 +1872,26 @@ async def _create_job_impl(
             "openai_key": api_keys_config.openai_api_key
         }
         print(f"[main.py] FLOW backend: no Gemini keys needed", flush=True)
-    
+
+    elif backend == BackendType.HIGGSFIELD:
+        # Kling i2v via Higgsfield API — no Gemini/Flow needed, just the server HF_KEY.
+        errors = [e for e in errors if "API key" not in e and "Gemini" not in e and "Flow" not in e]
+        if errors:
+            raise HTTPException(
+                status_code=400,
+                detail={"errors": errors, "code": ErrorCode.INVALID_CONFIG.value}
+            )
+        api_keys_data = {
+            "gemini_keys": [],
+            "openai_key": api_keys_config.openai_api_key
+        }
+        print(f"[main.py] HIGGSFIELD backend: Kling i2v, no Gemini keys needed", flush=True)
+
     # Create job record
     config_dict = config.model_dump()
+    # Ensure the worker's VideoConfig diverts to Kling for this backend.
+    if backend == BackendType.HIGGSFIELD:
+        config_dict['video_backend'] = 'higgsfield'
     print(f"[main.py] Creating job with config: language={config_dict.get('language')}, user_context='{config_dict.get('user_context', '')[:50] if config_dict.get('user_context') else 'empty'}'")
     
     # Convert dialogue lines to dict, preserving all clip settings

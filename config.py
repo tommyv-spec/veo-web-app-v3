@@ -55,6 +55,26 @@ def get_openai_key_from_env() -> Optional[str]:
     return None
 
 
+# Higgsfield Kling image-to-video backend (opt-in add-on; Veo/Flow stays default).
+# Verify a newer Kling 3.0 slug at https://cloud.higgsfield.ai/explore before bumping.
+KLING_I2V_SLUG = "kling-video/v2.1/pro/image-to-video"
+
+
+def get_higgsfield_credentials_from_env() -> Optional[str]:
+    """Higgsfield API creds as 'KEY_ID:KEY_SECRET'. None when unset (backend disabled).
+
+    Accepts single HF_KEY='KEY_ID:KEY_SECRET' or split HF_API_KEY + HF_API_SECRET.
+    """
+    single = os.environ.get("HF_KEY")
+    if single and single.strip() and not single.startswith("your-"):
+        return single.strip()
+    key = os.environ.get("HF_API_KEY")
+    secret = os.environ.get("HF_API_SECRET")
+    if key and secret and key.strip() and secret.strip():
+        return f"{key.strip()}:{secret.strip()}"
+    return None
+
+
 class AspectRatio(str, Enum):
     PORTRAIT = "9:16"
     LANDSCAPE = "16:9"
@@ -269,6 +289,10 @@ class VideoConfig:
     
     # Custom prompt (used when use_openai_prompt_tuning is False)
     custom_prompt: str = ""
+
+    # Video generation backend override. "" = normal (Veo via API/Flow).
+    # "higgsfield" routes clips to Kling image-to-video via the Higgsfield API.
+    video_backend: str = ""
     
     # Gesture enrichment (content-specific action cues via LLM)
     use_gesture_enrichment: bool = False
