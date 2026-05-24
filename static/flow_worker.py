@@ -10583,19 +10583,21 @@ def is_omni(model) -> bool:
     return bool(model) and "omni" in str(model).lower()
 
 
+def _omni_chip_count(page):
+    """Count attached Ingredient chips. In Ingredients mode (Omni) the frame
+    button never disappears, so the chip appearing is the 'frame is being
+    used' signal that replaces the frame-button-gone / count-drop check."""
+    try:
+        return page.locator("button[data-card-open]:has(img[src*='getMediaUrlRedirect'])").count()
+    except Exception:
+        return 0
+
+
 def click_frame_and_upload(page, image_path, is_end_frame=False, context=""):
     """Click a frame button, open dialog, upload file. Used for individual frame uploads."""
     prefix = f"{context} " if context else ""
     frame_name = "END frame" if is_end_frame else "START frame"
 
-    # v758: Omni Flash → ingredient attach (see policy variant). Skip END frame.
-    if is_omni(getattr(page, "_veo_model", "")):
-        if is_end_frame:
-            print(f"{prefix}[Omni/Ingredients] skipping END frame (single ingredient)", flush=True)
-            return
-        attach_ingredient_image_with_check(page, image_path, context)
-        return
-    
     check_and_dismiss_popup(page)
     
     frame_btns = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]')
@@ -10685,94 +10687,69 @@ def attach_ingredient_image_with_check(page, image_path, context="", extra_image
         print(f"{prefix}⚠ [Omni/Ingredients] add dialog did not open", flush=True)
         return (False, 'no_buttons')
 
-    # Upload the image unless it is already in the gallery (dedup by file hash,
-    # so repeat images are not re-uploaded). The file-chooser EVENT is
-    # unreliable in this dialog (observed 10s timeouts), so set the file input
-    # directly — the proven-working path from the live logs.
-    already = bool(gallery_cache and img_hash and img_hash in gallery_cache)
-    if not already and image_path and os.path.exists(image_path):
-        monitor = FramePolicyMonitor(page)
-        monitor.start()
-        try:
-            _fi = dialog.locator("input[type='file']").first
-            if _fi.count() == 0:
-                _fi = page.locator("input[type='file']").first
-            _fi.set_input_files(image_path)
-            print(f"{prefix}✓ [Omni/Ingredients] uploaded {target_name}", flush=True)
-            for _ in range(40):
-                time.sleep(1)
-                if monitor.is_rejected():
-                    print(f"{prefix}⚠ [Omni/Ingredients] policy rejected", flush=True)
-                    return (False, 'policy')
-                if monitor.is_resolved():
-                    break
-        except Exception as _ue:
-            print(f"{prefix}⚠ [Omni/Ingredients] upload failed: {_ue}", flush=True)
-            return (False, 'no_buttons')
-        finally:
-            monitor.stop()
-        if gallery_cache is not None and img_hash:
-            gallery_cache[img_hash] = target_name
-
-    # Select the target image in the gallery, then Add to Prompt. This SELECT
-    # step was the missing piece — clicking Add to Prompt with nothing selected
-    # left the chip unattached (the intermittent failures in the live run).
-    selected = False
-    if target_name:
-        for sel in (f"img[alt='{target_name}']", f"[aria-label='{target_name}']", f"[title='{target_name}']"):
-            try:
-                items = dialog.locator(sel)
-                n = items.count()
-            except Exception:
-                n = 0
-            for j in range(n):
-                it = items.nth(j)
-                try:
-                    it.scroll_into_view_if_needed(timeout=2000)
-                    if not it.is_visible(timeout=1000):
-                        continue
-                    it.click(timeout=3000)
-                    print(f"{prefix}[Omni/Ingredients] selected '{target_name}' ({j+1}/{n})", flush=True)
-                    selected = True
-                    break
-                except Exception:
-                    continue
-            if selected:
+    # Upload the image via the file INPUT directly (the file-chooser EVENT
+    # times out in this dialog). ALWAYS upload — the add_2 dialog's gallery
+    # shows 'No results found' (nothing to pre-select); the upload itself is
+    # what produces the ingredient. gallery_cache is pre-populated
+    # optimistically by the frames path, so it must NOT be used to skip the
+    # upload here (that caused the 'No results found' failures).
+    if not (image_path and os.path.exists(image_path)):
+        print(f"{prefix}⚠ [Omni/Ingredients] no image file to upload", flush=True)
+        return (False, 'no_buttons')
+    monitor = FramePolicyMonitor(page)
+    monitor.start()
+    try:
+        _fi = dialog.locator("input[type='file']").first
+        if _fi.count() == 0:
+            _fi = page.locator("input[type='file']").first
+        _fi.set_input_files(image_path)
+        print(f"{prefix}✓ [Omni/Ingredients] uploaded {target_name}", flush=True)
+        # Wait for the upload to RESOLVE (uploadImage 200) before adding.
+        resolved = False
+        for _ in range(45):
+            time.sleep(1)
+            if monitor.is_rejected():
+                print(f"{prefix}⚠ [Omni/Ingredients] policy rejected", flush=True)
+                return (False, 'policy')
+            if monitor.is_resolved():
+                resolved = True
                 break
-    if not selected:
-        try:
-            alts = dialog.locator("img").evaluate_all("els => els.map(e => e.alt).filter(Boolean).slice(0,15)")
-            print(f"{prefix}⚠ [Omni/Ingredients] could not select '{target_name}'. dialog imgs = {alts}", flush=True)
-        except Exception:
-            print(f"{prefix}⚠ [Omni/Ingredients] could not select '{target_name}'", flush=True)
+        if not resolved:
+            print(f"{prefix}⚠ [Omni/Ingredients] upload did not resolve in time", flush=True)
+    except Exception as _ue:
+        print(f"{prefix}⚠ [Omni/Ingredients] upload failed: {_ue}", flush=True)
+        return (False, 'no_buttons')
+    finally:
+        monitor.stop()
 
-    # Click 'Add to Prompt' (or detect a chip that attached directly).
-    for _ in range(20):
-        try:
-            if page.locator(chip_sel).count() > 0:
-                print(f"{prefix}✓ [Omni/Ingredients] chip attached (direct)", flush=True)
-                return (True, None)
-        except Exception:
-            pass
-        try:
-            atp = page.locator("button:has-text('Add to Prompt')").first
-            if atp.count() > 0 and atp.is_visible():
-                human_click_locator(page, atp, f"{prefix}[Omni/Ingredients] Add to Prompt")
-                break
-        except Exception:
-            pass
-        time.sleep(1)
-
-    # Verify the ingredient chip landed.
-    for _ in range(15):
-        time.sleep(1)
+    # Once the upload resolves the chip may attach automatically; otherwise
+    # click 'Add to Prompt' (once). Then confirm the chip.
+    clicked_add = False
+    for _ in range(30):
         try:
             if page.locator(chip_sel).count() > 0:
                 print(f"{prefix}✓ [Omni/Ingredients] chip attached", flush=True)
                 return (True, None)
         except Exception:
             pass
-    print(f"{prefix}⚠ [Omni/Ingredients] chip never appeared", flush=True)
+        if not clicked_add:
+            try:
+                atp = page.locator("button:has-text('Add to Prompt')").first
+                if atp.count() > 0 and atp.is_visible():
+                    human_click_locator(page, atp, f"{prefix}[Omni/Ingredients] Add to Prompt")
+                    clicked_add = True
+            except Exception:
+                pass
+        time.sleep(1)
+
+    # DIAG (remove after live run): dump what the dialog shows so the real
+    # post-upload attach control can be confirmed.
+    try:
+        alts = dialog.locator("img").evaluate_all("els => els.map(e => e.alt).filter(Boolean).slice(0,15)")
+        atp_n = page.locator("button:has-text('Add to Prompt')").count()
+        print(f"{prefix}⚠ [Omni/Ingredients] chip never appeared. dialog imgs={alts} add_to_prompt_btns={atp_n}", flush=True)
+    except Exception:
+        print(f"{prefix}⚠ [Omni/Ingredients] chip never appeared", flush=True)
     return (False, 'no_buttons')
 
 
@@ -10787,15 +10764,6 @@ def click_frame_and_upload_with_policy_check(page, image_path, is_end_frame=Fals
     prefix = f"{context} " if context else ""
     frame_name = "END frame" if is_end_frame else "START frame"
     which = 'end' if is_end_frame else 'start'
-
-    # v758: Omni Flash runs in Ingredients mode. Attach the START image as an
-    # ingredient; skip the END frame (single reference). Never fall back to
-    # frames for Omni.
-    if is_omni(getattr(page, "_veo_model", "")):
-        if is_end_frame:
-            print(f"{prefix}[Omni/Ingredients] skipping END frame (single ingredient)", flush=True)
-            return (True, None)
-        return attach_ingredient_image_with_check(page, image_path, context)
 
     check_and_dismiss_popup(page)
     
@@ -10858,6 +10826,11 @@ def click_frame_and_upload_with_policy_check(page, image_path, is_end_frame=Fals
             remaining = page.locator(frame_selector).count()
             if remaining < btn_count:
                 print(f"{prefix}✓ {frame_name} button gone ({w+1}s), waiting for uploadImage response...", flush=True)
+                btn_gone = True
+            elif is_omni(getattr(page, "_veo_model", "")) and _omni_chip_count(page) > 0:
+                # Ingredients mode: frame button never disappears — the
+                # ingredient chip appearing is the success signal.
+                print(f"{prefix}✓ {frame_name} ingredient chip attached ({w+1}s)", flush=True)
                 btn_gone = True
         
         if monitor.is_resolved() and not monitor.is_rejected():
@@ -11532,20 +11505,21 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
     except Exception:
         pass  # No clear button = input already empty, proceed normally
 
-    # v758.1: Omni Flash uses Ingredients mode. The pipeline is identical to
-    # other models — the shared clear-prompt above already ran, and prompt
-    # fill, submit, generation and download all follow unchanged. ONLY the
-    # attach differs: the START image is added as an ingredient
-    # (add_2 → upload → Add to Prompt → chip) instead of bound to a frame
-    # slot. There is no END frame / frame slot in this mode.
+    # v758.3: Omni Flash uses Ingredients mode. The ONLY change from the
+    # frames flow is the success check (ingredient chip present, not frame
+    # button gone). Clear any leftover ingredient chip here so each clip
+    # starts from zero chips and a freshly attached chip reliably reads as
+    # THIS clip's success.
     if is_omni(getattr(page, "_veo_model", "")):
-        if not start_image:
-            print(f"{prefix}[Flow] Omni/Ingredients: no image — text-only", flush=True)
-            return (True, None)
-        ok_ing, reason_ing = attach_ingredient_image_with_check(
-            page, start_image, context=context,
-            extra_images=extra_images, gallery_cache=gallery_cache)
-        return (True, None) if ok_ing else (False, 'start')
+        try:
+            for _ in range(4):
+                _cx = page.locator("button[data-card-open] i:text-is('cancel')").first
+                if _cx.count() == 0:
+                    break
+                _cx.click(timeout=2000)
+                time.sleep(0.3)
+        except Exception:
+            pass
 
     def _upload_one_frame(frame_name, image_path, image_hash, image_basename,
                           btn_getter, max_attempts=3):
@@ -11733,6 +11707,10 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
                 now_count = page.locator(frame_selector).count()
                 if not btn_gone and now_count < btn_count_before:
                     print(f"{prefix}✓ {frame_name} button gone ({w+1}s)", flush=True)
+                    btn_gone = True
+                elif not btn_gone and is_omni(getattr(page, "_veo_model", "")) and _omni_chip_count(page) > 0:
+                    # Ingredients mode: success = ingredient chip attached.
+                    print(f"{prefix}✓ {frame_name} ingredient chip attached ({w+1}s)", flush=True)
                     btn_gone = True
 
                 if monitor.is_resolved() and not monitor.is_rejected():
@@ -12023,10 +12001,13 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
             # EACH visible matching instance and confirm the slot actually filled
             # before declaring success — landing on whichever duplicate is live.
             def _confirm_bind(seconds=4):
+                _omni = is_omni(getattr(page, "_veo_model", ""))
                 for _w in range(seconds):
                     time.sleep(1)
                     try:
                         if page.locator(frame_selector).count() < expected_btn_count:
+                            return True
+                        if _omni and _omni_chip_count(page) > 0:
                             return True
                     except Exception:
                         pass
