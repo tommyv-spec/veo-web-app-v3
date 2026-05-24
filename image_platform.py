@@ -9443,6 +9443,39 @@ def worker_status(
         except Exception:
             pass
 
+    # v758 — HTTP-pull worker heartbeat: surface the freshest row's age +
+    # worker_id so the UI can show "online, last beat Ns ago (worker X)"
+    # instead of a bare "● Online" with no age. Without an age the operator
+    # can't tell a live worker from a stale/zombie row, and a false "online"
+    # hides the launch UI. Also GC rows well past the stale window so a dead
+    # worker doesn't linger in the table.
+    http_worker_id = None
+    http_heartbeat_age = None
+    try:
+        freshest = (
+            db.query(ImageWorkerHeartbeat)
+            .order_by(ImageWorkerHeartbeat.last_heartbeat_at.desc())
+            .first()
+        )
+        if freshest and freshest.last_heartbeat_at:
+            http_heartbeat_age = round(
+                (datetime.utcnow() - freshest.last_heartbeat_at).total_seconds(), 1
+            )
+            http_worker_id = freshest.worker_id
+        gc_cutoff = datetime.utcnow() - timedelta(seconds=120)
+        deleted = db.query(ImageWorkerHeartbeat).filter(
+            ImageWorkerHeartbeat.last_heartbeat_at < gc_cutoff
+        ).delete()
+        if deleted:
+            db.commit()
+    except Exception:
+        db.rollback()
+
+    http_online = (
+        http_heartbeat_age is not None
+        and http_heartbeat_age < WORKER_HEARTBEAT_STALE_SECONDS
+    )
+
     return {
         "queued": n_queued,
         "generating": n_generating,
@@ -9453,7 +9486,9 @@ def worker_status(
         "worker_online": worker_online,
         "worker_heartbeat_age_seconds": heartbeat_age,
         # HTTP-pull mode heartbeat (separate from filesystem one)
-        "http_worker_online": _worker_http_is_online(db),
+        "http_worker_online": http_online,
+        "http_worker_id": http_worker_id,
+        "http_worker_heartbeat_age_seconds": http_heartbeat_age,
     }
 
 

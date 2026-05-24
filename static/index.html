@@ -14193,16 +14193,34 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const indicator = isOnline
                     ? '<span style="color:var(--success);">● Online</span>'
                     : '<span style="color:var(--error);">● Offline</span>';
-                const ageStr = s.worker_heartbeat_age_seconds != null
-                    ? ` <span style="color:var(--text-muted);">(last heartbeat ${s.worker_heartbeat_age_seconds}s ago)</span>`
+                // v758 — show the heartbeat age for HTTP-pull workers too (the
+                // filesystem age is null for them). Surfacing the age + worker_id
+                // lets the operator see a stale/zombie row instead of a bare
+                // "● Online".
+                const beatAge = s.worker_heartbeat_age_seconds != null
+                    ? s.worker_heartbeat_age_seconds
+                    : s.http_worker_heartbeat_age_seconds;
+                const ageStr = beatAge != null
+                    ? ` <span style="color:var(--text-muted);">(last heartbeat ${beatAge}s ago${s.http_worker_id ? ' · ' + s.http_worker_id : ''})</span>`
                     : '';
 
                 const queueLine = (s.queued || s.generating)
                     ? `<div style="margin-top:6px;">⏳ Queued: <strong>${s.queued}</strong> · Generating: <strong>${s.generating}</strong></div>`
                     : '';
 
+                // v758 — the launch/setup UI used to render ONLY when offline,
+                // so a false "online" (stale/zombie heartbeat row that hasn't
+                // expired, or a worker on another machine) hid the launcher and
+                // the operator "couldn't launch it". Always make setup reachable:
+                // show it when offline, OR when the operator force-reveals it via
+                // the relaunch link below.
+                const showSetup = !isOnline || window._imgForceShowSetup;
+                let onlineControls = '';
+                if (isOnline && !window._imgForceShowSetup) {
+                    onlineControls = `<div style="margin-top:6px;font-size:11px;"><a href="#" onclick="imgForceWorkerSetup(event)" style="color:var(--text-muted);text-decoration:none;">Worker not responding? Set up / relaunch ▾</a></div>`;
+                }
                 let helpLine = '';
-                if (!isOnline) {
+                if (showSetup) {
                     // v492: installer-based setup matching the video worker
                     // pattern (my-worker.html). OS pills + reset checkbox +
                     // Download Installer primary button, with the legacy
@@ -14313,6 +14331,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
                 body.innerHTML = `
                     <div data-worker-online-line>${indicator}${ageStr}</div>
+                    ${onlineControls}
                     ${queueLine}
                     ${helpLine}
                 `;
@@ -14347,6 +14366,14 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if (!window.imgWorkerSetupState) window.imgWorkerSetupState = {};
             imgWorkerSetupState.os = os;
             imgRefreshWorkerStatus();  // re-render to swap button label + help text
+        }
+        // v758 — force the setup/launch UI to appear even when the status reads
+        // "online". Used when a stale/zombie heartbeat row keeps the indicator
+        // green so the operator can still download + relaunch the worker.
+        function imgForceWorkerSetup(e) {
+            if (e) e.preventDefault();
+            window._imgForceShowSetup = true;
+            imgRefreshWorkerStatus();
         }
         function imgToggleWorkerReset(checked) {
             if (!window.imgWorkerSetupState) window.imgWorkerSetupState = {};
