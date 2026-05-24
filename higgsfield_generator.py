@@ -191,29 +191,37 @@ class HiggsfieldGenerator:
             storage = get_storage()
             tmp_key = f"higgsfield_tmp/{uuid.uuid4().hex}{start_frame.suffix or '.png'}"
             storage.upload_file(str(start_frame), tmp_key)
-            image_url = storage.get_presigned_url(tmp_key, expires_in=3600, method="get_object")
-
-            duration = 5
             try:
-                duration = int(override_duration or getattr(self.config, "duration", 5))
-            except (TypeError, ValueError):
+                # TTL > worst-case poll window (max_polls*poll_interval) + download.
+                image_url = storage.get_presigned_url(tmp_key, expires_in=7200, method="get_object")
+
                 duration = 5
+                try:
+                    duration = int(override_duration or getattr(self.config, "duration", 5))
+                except (TypeError, ValueError):
+                    duration = 5
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") if getattr(self.config, "timestamp_names", True) else ""
-            output_filename = generate_output_filename(dialogue_id, start_frame, None, timestamp)
-            output_path = _Path(output_dir) / output_filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") if getattr(self.config, "timestamp_names", True) else ""
+                output_filename = generate_output_filename(dialogue_id, start_frame, None, timestamp)
+                output_path = _Path(output_dir) / output_filename
 
-            print(f"[higgsfield-kling] clip={clip_index} slug={KLING_I2V_SLUG} dur={duration} prompt_len={len(motion_prompt)}", flush=True)
-            self._emit_progress(clip_index, "generating", f"Kling: {start_frame.name}", {"start": start_frame.name})
+                print(f"[higgsfield-kling] clip={clip_index} slug={KLING_I2V_SLUG} dur={duration} prompt_len={len(motion_prompt)}", flush=True)
+                self._emit_progress(clip_index, "generating", f"Kling: {start_frame.name}", {"start": start_frame.name})
 
-            animate_image(
-                image_url=image_url,
-                prompt=motion_prompt,
-                credentials=creds,
-                out_path=output_path,
-                slug=KLING_I2V_SLUG,
-                duration=duration,
-            )
+                animate_image(
+                    image_url=image_url,
+                    prompt=motion_prompt,
+                    credentials=creds,
+                    out_path=output_path,
+                    slug=KLING_I2V_SLUG,
+                    duration=duration,
+                )
+            finally:
+                # Always remove the transient R2 upload — it exists only to give Kling a fetchable URL.
+                try:
+                    storage.delete(tmp_key)
+                except Exception as _del_e:
+                    print(f"[higgsfield-kling] WARN could not delete temp {tmp_key}: {_del_e}", flush=True)
 
             result["success"] = True
             result["output_path"] = output_path
