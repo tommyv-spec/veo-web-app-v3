@@ -945,7 +945,7 @@ class JobWorker:
                 # Create generator for redo (uses dynamic key pool - all keys shared)
                 if getattr(config, "video_backend", "") == "higgsfield":
                     from higgsfield_generator import HiggsfieldGenerator
-                    generator = HiggsfieldGenerator(config=config, job_id=job_id)
+                    generator = HiggsfieldGenerator(config=config, job_id=job_id, api_keys=api_keys)
                     print(f"[Worker] Using HiggsfieldGenerator (Kling i2v) for job {job_id[:8]}", flush=True)
                 else:
                     generator = VeoGenerator(
@@ -1522,7 +1522,11 @@ class JobWorker:
                 validation_logs.append(msg)
                 print(msg, flush=True)
             
-            working_now, rate_limited_count, invalid_count = api_keys.validate_keys_with_api(log_callback=validation_log)
+            if getattr(config, "video_backend", "") == "higgsfield":
+                # Kling (Higgsfield) uses no Gemini keys — skip key validation.
+                working_now, rate_limited_count, invalid_count = 1, 0, 0
+            else:
+                working_now, rate_limited_count, invalid_count = api_keys.validate_keys_with_api(log_callback=validation_log)
             
             # Step 5: Log validation results (quick DB operation)
             with get_db() as db:
@@ -1732,7 +1736,7 @@ class JobWorker:
                 
                 if getattr(config, "video_backend", "") == "higgsfield":
                     from higgsfield_generator import HiggsfieldGenerator
-                    generator = HiggsfieldGenerator(config=config, job_id=job_id)
+                    generator = HiggsfieldGenerator(config=config, job_id=job_id, api_keys=api_keys)
                     print(f"[Worker] Using HiggsfieldGenerator (Kling i2v) for job {job_id[:8]}", flush=True)
                 else:
                     generator = VeoGenerator(

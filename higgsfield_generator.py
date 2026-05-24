@@ -99,6 +99,8 @@ class HiggsfieldGenerator:
     def __init__(self, config, job_id=None, api_keys=None, openai_key=None, **kwargs):
         self.config = config
         self.job_id = job_id
+        self.api_keys = api_keys  # carried so worker code that reads generator.api_keys is safe
+        self.openai_key = openai_key
         self.on_progress = None
         self.on_error = None
         self._cancelled = False
