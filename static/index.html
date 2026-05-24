@@ -14204,6 +14204,14 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     ? ` <span style="color:var(--text-muted);">(last heartbeat ${beatAge}s ago${s.http_worker_id ? ' · ' + s.http_worker_id : ''})</span>`
                     : '';
 
+                // v758 — once a genuinely fresh heartbeat appears (a real worker
+                // actively pinging, age well below the stale window — not a
+                // zombie row sitting near expiry), drop the forced-setup view so
+                // it doesn't linger after a successful relaunch.
+                if (window._imgForceShowSetup && beatAge != null && beatAge < 8) {
+                    window._imgForceShowSetup = false;
+                }
+
                 const queueLine = (s.queued || s.generating)
                     ? `<div style="margin-top:6px;">⏳ Queued: <strong>${s.queued}</strong> · Generating: <strong>${s.generating}</strong></div>`
                     : '';
