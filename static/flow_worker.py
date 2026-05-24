@@ -4610,21 +4610,48 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                 settings_applied['Video'] = False
                 print(f"{prefix}⚠ Video tab missed", flush=True)
 
-            # Frames tab — text-fallback added per v620 (defensive).
-            try:
-                tab = page.locator(
-                    "button.flow_tab_slider_trigger:has(i:text-is('crop_free')), "
-                    "button.flow_tab_slider_trigger:has-text('Frames')"
-                ).first
-                tab.wait_for(state="visible", timeout=5000)
-                if tab.get_attribute("aria-selected") != "true":
-                    human_click_element(page, tab, f"{prefix}Frames tab")
-                    time.sleep(0.5)
-                settings_applied['Frames'] = True
-                print(f"{prefix}✓ Frames tab OK", flush=True)
-            except:
-                settings_applied['Frames'] = False
-                print(f"{prefix}⚠ Frames tab missed", flush=True)
+            # Frames vs Ingredients tab. v758: Omni Flash uses Ingredients
+            # mode (image attached as an ingredient); every other model uses
+            # Frames (start/end frame). Ingredients-tab selectors are inferred
+            # (text + icon fallbacks) and diagnosed on a miss.
+            if is_omni(getattr(page, "_veo_model", "")):
+                try:
+                    ing = page.locator(
+                        "button.flow_tab_slider_trigger:has-text('Ingredients'), "
+                        "button.flow_tab_slider_trigger:has(i:text-is('experiment')), "
+                        "button.flow_tab_slider_trigger:has(i:text-is('cards'))"
+                    ).first
+                    ing.wait_for(state="visible", timeout=5000)
+                    if ing.get_attribute("aria-selected") != "true":
+                        human_click_element(page, ing, f"{prefix}Ingredients tab")
+                        time.sleep(0.5)
+                    settings_applied['Ingredients'] = True
+                    print(f"{prefix}✓ Ingredients tab OK (Omni)", flush=True)
+                except Exception:
+                    # DIAG (remove after live Omni run): dump every slider-tab
+                    # label so the real Ingredients selector can be confirmed.
+                    try:
+                        labels = page.locator("button.flow_tab_slider_trigger").all_inner_texts()
+                        print(f"{prefix}⚠ [Omni/Ingredients] tab not found. slider tabs = {labels}", flush=True)
+                    except Exception:
+                        print(f"{prefix}⚠ [Omni/Ingredients] tab not found and could not enumerate tabs", flush=True)
+                    settings_applied['Ingredients'] = False
+            else:
+                # Frames tab — text-fallback added per v620 (defensive).
+                try:
+                    tab = page.locator(
+                        "button.flow_tab_slider_trigger:has(i:text-is('crop_free')), "
+                        "button.flow_tab_slider_trigger:has-text('Frames')"
+                    ).first
+                    tab.wait_for(state="visible", timeout=5000)
+                    if tab.get_attribute("aria-selected") != "true":
+                        human_click_element(page, tab, f"{prefix}Frames tab")
+                        time.sleep(0.5)
+                    settings_applied['Frames'] = True
+                    print(f"{prefix}✓ Frames tab OK", flush=True)
+                except:
+                    settings_applied['Frames'] = False
+                    print(f"{prefix}⚠ Frames tab missed", flush=True)
 
             # Portrait tab — text-fallback added per v620 (defensive).
             try:
@@ -10545,10 +10572,25 @@ class DownloadHelper:
     
 
 
+def is_omni(model) -> bool:
+    """True when the chosen model is Omni Flash (drives Ingredients mode).
+    Single source of truth for the Omni branch; matches loosely so suffixes
+    like '[Beta]' still count."""
+    return bool(model) and "omni" in str(model).lower()
+
+
 def click_frame_and_upload(page, image_path, is_end_frame=False, context=""):
     """Click a frame button, open dialog, upload file. Used for individual frame uploads."""
     prefix = f"{context} " if context else ""
     frame_name = "END frame" if is_end_frame else "START frame"
+
+    # v758: Omni Flash → ingredient attach (see policy variant). Skip END frame.
+    if is_omni(getattr(page, "_veo_model", "")):
+        if is_end_frame:
+            print(f"{prefix}[Omni/Ingredients] skipping END frame (single ingredient)", flush=True)
+            return
+        attach_ingredient_image_with_check(page, image_path, context)
+        return
     
     check_and_dismiss_popup(page)
     
@@ -10579,9 +10621,68 @@ def click_frame_and_upload(page, image_path, is_end_frame=False, context=""):
     upload_frame(page, image_path, frame_name)
 
 
+def attach_ingredient_image_with_check(page, image_path, context=""):
+    """Attach one image as an Ingredient (Omni Flash mode).
+
+    Returns:
+        (True, None)          chip attached
+        (False, 'policy')     uploadImage rejected by policy (blacklist)
+        (False, 'no_buttons') no add-ingredient slot found (do NOT blacklist)
+    Never falls back to Frames — Omni must run in Ingredients mode.
+    """
+    prefix = f"{context} " if context else ""
+    check_and_dismiss_popup(page)
+
+    chip_sel = "button[data-card-open] img[src*='getMediaUrlRedirect']"
+    # Already attached from a prior attempt? Treat as success.
+    try:
+        if page.locator(chip_sel).count() > 0:
+            print(f"{prefix}✓ [Omni/Ingredients] chip already present", flush=True)
+            return (True, None)
+    except Exception:
+        pass
+
+    # The add-ingredient slot shares the frames' dialog-trigger markup.
+    add_btns = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]')
+    if add_btns.count() == 0:
+        time.sleep(2)
+        add_btns = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]')
+    if add_btns.count() == 0:
+        print(f"{prefix}⚠ [Omni/Ingredients] no add-ingredient slot found", flush=True)
+        return (False, 'no_buttons')
+
+    add_btns.first.wait_for(state="visible", timeout=5000)
+    human_click_locator(page, add_btns.first, f"{prefix}[Omni/Ingredients] add slot")
+    time.sleep(1)
+
+    # Network monitor + shared upload (file chooser → set_files, with the
+    # input[type=file] fallback) exactly as the frames path uses.
+    monitor = FramePolicyMonitor(page)
+    monitor.start()
+    upload_frame(page, image_path, "ingredient")
+
+    # Confirm the chip landed (or policy rejected) within ~35s.
+    try:
+        for w in range(35):
+            time.sleep(1)
+            if monitor.is_rejected():
+                print(f"{prefix}⚠ [Omni/Ingredients] policy rejected", flush=True)
+                return (False, 'policy')
+            try:
+                if page.locator(chip_sel).count() > 0:
+                    print(f"{prefix}✓ [Omni/Ingredients] chip attached", flush=True)
+                    return (True, None)
+            except Exception:
+                pass
+        print(f"{prefix}⚠ [Omni/Ingredients] chip never appeared after upload", flush=True)
+        return (False, 'no_buttons')
+    finally:
+        monitor.stop()
+
+
 def click_frame_and_upload_with_policy_check(page, image_path, is_end_frame=False, context=""):
     """Click a frame button, upload file, and wait for uploadImage policy check.
-    
+
     Returns:
         (True, None) if upload succeeded
         (False, 'policy') if rejected by policy (should blacklist)
@@ -10590,7 +10691,16 @@ def click_frame_and_upload_with_policy_check(page, image_path, is_end_frame=Fals
     prefix = f"{context} " if context else ""
     frame_name = "END frame" if is_end_frame else "START frame"
     which = 'end' if is_end_frame else 'start'
-    
+
+    # v758: Omni Flash runs in Ingredients mode. Attach the START image as an
+    # ingredient; skip the END frame (single reference). Never fall back to
+    # frames for Omni.
+    if is_omni(getattr(page, "_veo_model", "")):
+        if is_end_frame:
+            print(f"{prefix}[Omni/Ingredients] skipping END frame (single ingredient)", flush=True)
+            return (True, None)
+        return attach_ingredient_image_with_check(page, image_path, context)
+
     check_and_dismiss_popup(page)
     
     frame_selector = 'div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]'
