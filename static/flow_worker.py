@@ -10625,8 +10625,12 @@ def click_frame_and_upload(page, image_path, is_end_frame=False, context=""):
     upload_frame(page, image_path, frame_name)
 
 
-def attach_ingredient_image_with_check(page, image_path, context=""):
+def attach_ingredient_image_with_check(page, image_path, context="", extra_images=None, gallery_cache=None):
     """Attach one image as an Ingredient (Omni Flash mode).
+
+    extra_images / gallery_cache are accepted for parity with the frames
+    upload path (reserved for batch pre-loading all images together — a
+    follow-up once the single-image path is confirmed live).
 
     Returns:
         (True, None)          chip attached
@@ -10638,6 +10642,11 @@ def attach_ingredient_image_with_check(page, image_path, context=""):
     check_and_dismiss_popup(page)
 
     chip_sel = "button[data-card-open]:has(img[src*='getMediaUrlRedirect'])"
+    target_name = os.path.basename(image_path) if image_path else None
+    try:
+        img_hash = _file_hash(image_path) if image_path else None
+    except Exception:
+        img_hash = None
 
     # Clear any ingredient chip left over from the previous clip (its 'cancel'
     # icon, per the operator's DOM) so each clip attaches exactly its own image.
@@ -10652,8 +10661,7 @@ def attach_ingredient_image_with_check(page, image_path, context=""):
         pass
 
     # Open the add-ingredient dialog. The control is the 'add_2' Create button
-    # (operator DOM: button[aria-haspopup=dialog] containing i 'add_2'), NOT a
-    # generic frame slot.
+    # (operator DOM: button[aria-haspopup=dialog] containing i 'add_2').
     add_btn = page.locator(
         "button[aria-haspopup='dialog']:has(i:text-is('add_2')), "
         "button[aria-haspopup='dialog']:has-text('Create')"
@@ -10670,40 +10678,90 @@ def attach_ingredient_image_with_check(page, image_path, context=""):
     human_click_locator(page, add_btn, f"{prefix}[Omni/Ingredients] add ingredient (add_2)")
     time.sleep(1)
 
-    # Push the file into the open dialog (same upload helper the frames use).
-    monitor = FramePolicyMonitor(page)
-    monitor.start()
+    dialog = page.locator('[role="dialog"]').first
     try:
-        upload_frame(page, image_path, "ingredient")
+        dialog.wait_for(state="visible", timeout=8000)
+    except Exception:
+        print(f"{prefix}⚠ [Omni/Ingredients] add dialog did not open", flush=True)
+        return (False, 'no_buttons')
 
-        # After the upload resolves, click 'Add to Prompt' to attach it as an
-        # ingredient (button label confirmed from the live gallery DIAG). Some
-        # flows attach the chip directly — detect that too.
-        added = False
-        for _ in range(35):
-            time.sleep(1)
-            if monitor.is_rejected():
-                print(f"{prefix}⚠ [Omni/Ingredients] policy rejected", flush=True)
-                return (False, 'policy')
-            try:
-                if page.locator(chip_sel).count() > 0:
-                    print(f"{prefix}✓ [Omni/Ingredients] chip attached (direct)", flush=True)
-                    return (True, None)
-            except Exception:
-                pass
-            try:
-                atp = page.locator("button:has-text('Add to Prompt')").first
-                if atp.count() > 0 and atp.is_visible():
-                    human_click_locator(page, atp, f"{prefix}[Omni/Ingredients] Add to Prompt")
-                    added = True
+    # Upload the image unless it is already in the gallery (dedup by file hash,
+    # so repeat images are not re-uploaded). The file-chooser EVENT is
+    # unreliable in this dialog (observed 10s timeouts), so set the file input
+    # directly — the proven-working path from the live logs.
+    already = bool(gallery_cache and img_hash and img_hash in gallery_cache)
+    if not already and image_path and os.path.exists(image_path):
+        monitor = FramePolicyMonitor(page)
+        monitor.start()
+        try:
+            _fi = dialog.locator("input[type='file']").first
+            if _fi.count() == 0:
+                _fi = page.locator("input[type='file']").first
+            _fi.set_input_files(image_path)
+            print(f"{prefix}✓ [Omni/Ingredients] uploaded {target_name}", flush=True)
+            for _ in range(40):
+                time.sleep(1)
+                if monitor.is_rejected():
+                    print(f"{prefix}⚠ [Omni/Ingredients] policy rejected", flush=True)
+                    return (False, 'policy')
+                if monitor.is_resolved():
                     break
-            except Exception:
-                pass
-        if not added:
-            print(f"{prefix}⚠ [Omni/Ingredients] 'Add to Prompt' never appeared after upload", flush=True)
+        except Exception as _ue:
+            print(f"{prefix}⚠ [Omni/Ingredients] upload failed: {_ue}", flush=True)
             return (False, 'no_buttons')
-    finally:
-        monitor.stop()
+        finally:
+            monitor.stop()
+        if gallery_cache is not None and img_hash:
+            gallery_cache[img_hash] = target_name
+
+    # Select the target image in the gallery, then Add to Prompt. This SELECT
+    # step was the missing piece — clicking Add to Prompt with nothing selected
+    # left the chip unattached (the intermittent failures in the live run).
+    selected = False
+    if target_name:
+        for sel in (f"img[alt='{target_name}']", f"[aria-label='{target_name}']", f"[title='{target_name}']"):
+            try:
+                items = dialog.locator(sel)
+                n = items.count()
+            except Exception:
+                n = 0
+            for j in range(n):
+                it = items.nth(j)
+                try:
+                    it.scroll_into_view_if_needed(timeout=2000)
+                    if not it.is_visible(timeout=1000):
+                        continue
+                    it.click(timeout=3000)
+                    print(f"{prefix}[Omni/Ingredients] selected '{target_name}' ({j+1}/{n})", flush=True)
+                    selected = True
+                    break
+                except Exception:
+                    continue
+            if selected:
+                break
+    if not selected:
+        try:
+            alts = dialog.locator("img").evaluate_all("els => els.map(e => e.alt).filter(Boolean).slice(0,15)")
+            print(f"{prefix}⚠ [Omni/Ingredients] could not select '{target_name}'. dialog imgs = {alts}", flush=True)
+        except Exception:
+            print(f"{prefix}⚠ [Omni/Ingredients] could not select '{target_name}'", flush=True)
+
+    # Click 'Add to Prompt' (or detect a chip that attached directly).
+    for _ in range(20):
+        try:
+            if page.locator(chip_sel).count() > 0:
+                print(f"{prefix}✓ [Omni/Ingredients] chip attached (direct)", flush=True)
+                return (True, None)
+        except Exception:
+            pass
+        try:
+            atp = page.locator("button:has-text('Add to Prompt')").first
+            if atp.count() > 0 and atp.is_visible():
+                human_click_locator(page, atp, f"{prefix}[Omni/Ingredients] Add to Prompt")
+                break
+        except Exception:
+            pass
+        time.sleep(1)
 
     # Verify the ingredient chip landed.
     for _ in range(15):
@@ -10714,7 +10772,7 @@ def attach_ingredient_image_with_check(page, image_path, context=""):
                 return (True, None)
         except Exception:
             pass
-    print(f"{prefix}⚠ [Omni/Ingredients] chip never appeared after Add to Prompt", flush=True)
+    print(f"{prefix}⚠ [Omni/Ingredients] chip never appeared", flush=True)
     return (False, 'no_buttons')
 
 
@@ -11235,25 +11293,6 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
         (False, ...) if all images blacklisted (clip marked as failed)
     """
 
-    # v758: Omni Flash uses Ingredients mode. Attach the START image as a
-    # single ingredient (add_2 → upload → Add to Prompt → chip) and skip the
-    # entire frames / gallery / FrameReassign machinery, which does not apply
-    # to ingredients. END frame is ignored (single reference).
-    if is_omni(getattr(page, "_veo_model", "")):
-        if start_frame:
-            print(f"{context}[Flow] Omni/Ingredients: attaching {os.path.basename(start_frame)} as ingredient", flush=True)
-            ok_ing, reason_ing = attach_ingredient_image_with_check(page, start_frame, context=context)
-            if not ok_ing:
-                msg = ("⚠️ Image rejected by Flow content policy — try a different image"
-                       if reason_ing == 'policy'
-                       else "⚠️ Could not attach the ingredient image (Omni mode)")
-                update_clip_status(clip['id'], 'failed', error_message=msg)
-                permanently_failed_clips.add(clip_index)
-                return (False, start_frame, end_frame, start_frame_key, end_frame_key)
-        else:
-            print(f"{context}[Flow] Omni/Ingredients: no start image — text-only generation", flush=True)
-        return (True, start_frame, end_frame, start_frame_key, end_frame_key)
-
     if start_frame and end_frame:
         s_sz = os.path.getsize(start_frame) if os.path.exists(start_frame) else 0
         e_sz = os.path.getsize(end_frame) if os.path.exists(end_frame) else 0
@@ -11492,6 +11531,21 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
             print(f"{prefix}[Flow] ✓ Cleared previous prompt — input reset", flush=True)
     except Exception:
         pass  # No clear button = input already empty, proceed normally
+
+    # v758.1: Omni Flash uses Ingredients mode. The pipeline is identical to
+    # other models — the shared clear-prompt above already ran, and prompt
+    # fill, submit, generation and download all follow unchanged. ONLY the
+    # attach differs: the START image is added as an ingredient
+    # (add_2 → upload → Add to Prompt → chip) instead of bound to a frame
+    # slot. There is no END frame / frame slot in this mode.
+    if is_omni(getattr(page, "_veo_model", "")):
+        if not start_image:
+            print(f"{prefix}[Flow] Omni/Ingredients: no image — text-only", flush=True)
+            return (True, None)
+        ok_ing, reason_ing = attach_ingredient_image_with_check(
+            page, start_image, context=context,
+            extra_images=extra_images, gallery_cache=gallery_cache)
+        return (True, None) if ok_ing else (False, 'start')
 
     def _upload_one_frame(frame_name, image_path, image_hash, image_basename,
                           btn_getter, max_attempts=3):
