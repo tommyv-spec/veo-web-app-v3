@@ -3953,11 +3953,49 @@ class HumanPacer:
                                         return null;
                                     }}""")
                                     if _fail_info == 'hard':
-                                        # Flow killed this clip (e.g. reached 99% then failed)
-                                        # Don't retry — abort job so golden restore can fix it
-                                        print(f"[{self.account_name}] ⚠ HARD FAILURE: clip {_ci+1} failed after generating (refresh button detected) — aborting job", flush=True)
-                                        delayed_failures.append(_ci)
-                                        _dl_checked.add(_ci)
+                                        # v758.6: a 'hard' reading (refresh icon + NO video)
+                                        # often fires while ONE variant failed but the OTHER
+                                        # is still rendering (no <video> mounted yet) — the
+                                        # clip is actually fine in Flow but was being redone.
+                                        # Re-verify before aborting: poll for a real video.
+                                        # If a URL appears → download the good variant (no redo).
+                                        # If a <video> is rendering (blob) → leave for the next
+                                        # cycle. Only abort if still no video at all.
+                                        _rv_recovered = False
+                                        _rv_rendering = False
+                                        for _rv in range(15):
+                                            time.sleep(1)
+                                            _rv_urls = page.evaluate(f"""() => {{
+                                                const c = document.querySelector('[data-index="{_data_idx}"]');
+                                                if (!c) return [];
+                                                const urls = [];
+                                                for (const v of c.querySelectorAll('video')) {{
+                                                    const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                                    if (u && !u.startsWith('blob:')) urls.push(u);
+                                                }}
+                                                if (urls.length) return urls;
+                                                if (c.querySelectorAll('video').length > 0) return ['__blob__'];
+                                                return [];
+                                            }}""")
+                                            if _rv_urls and _rv_urls != ['__blob__']:
+                                                http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                                    'clip_id': _clip_obj['id'], 'urls': _rv_urls, 'temp_dir': temp_dir})
+                                                print(f"[{self.account_name}] ✓ clip {_ci+1} recovered (one variant failed, good variant ready) → HTTP worker — NOT redoing", flush=True)
+                                                _dl_checked.add(_ci)
+                                                _rv_recovered = True
+                                                break
+                                            if _rv_urls == ['__blob__']:
+                                                _rv_rendering = True
+                                                break
+                                        if _rv_recovered:
+                                            pass
+                                        elif _rv_rendering:
+                                            print(f"[{self.account_name}] clip {_ci+1}: a variant is still rendering after a partial fail — re-checking next cycle (not a hard failure)", flush=True)
+                                            # leave un-checked so the normal URL poll picks it up
+                                        else:
+                                            print(f"[{self.account_name}] ⚠ HARD FAILURE: clip {_ci+1} failed after generating (refresh button + no video after re-verify) — aborting job", flush=True)
+                                            delayed_failures.append(_ci)
+                                            _dl_checked.add(_ci)
                                     elif _fail_info == 'soft':
                                         # Transient failure — retry in-place via Reuse Prompt.
                                         # v663: data-index lookup (was: dialogue match).
