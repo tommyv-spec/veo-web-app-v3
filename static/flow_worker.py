@@ -12114,6 +12114,10 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                             it.scroll_into_view_if_needed(timeout=2000)
                             time.sleep(0.3)
                             human_click_element(page, it, f"[Gallery] first '{_alt}'")
+                            if _omni:
+                                # 1st click selects, 2nd adds it into the prompt.
+                                time.sleep(0.4)
+                                human_click_element(page, it, f"[Gallery] first '{_alt}' (2nd → into prompt)")
                             print(f"[Gallery] ✓ Clicked first gallery item '{_alt}' (blind reuse after restore)", flush=True)
                             clicked = True
                             break
@@ -12171,6 +12175,11 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                                 continue
                             human_click_element(page, it, f"[Gallery] {filename} #{j+1}")
                             print(f"[Gallery] clicked '{filename}' instance {j+1}/{n} (sel={sel}{label})", flush=True)
+                            if _omni:
+                                # Ingredients mode: 1st click selects, 2nd click
+                                # adds it into the prompt (operator-confirmed).
+                                time.sleep(0.4)
+                                human_click_element(page, it, f"[Gallery] {filename} #{j+1} (2nd → into prompt)")
                         except Exception:
                             continue
                         if _confirm_bind():
