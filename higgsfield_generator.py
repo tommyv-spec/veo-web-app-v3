@@ -55,7 +55,9 @@ def animate_image(
         json={"image_url": image_url, "prompt": prompt, "duration": duration},
         timeout=timeout,
     )
-    submit.raise_for_status()
+    if submit.status_code >= 400:
+        # Surface the server's explanation (403 body says WHY: scope/model/path).
+        raise RuntimeError(f"Higgsfield submit {submit.status_code} @ /{slug}: {submit.text[:600]}")
     body = submit.json()
     status_url = body.get("status_url") or f"{BASE_URL}/requests/{body['request_id']}/status"
 
