@@ -4308,15 +4308,17 @@ class HumanPacer:
                                 if _clip_obj:
                                     clip_id = _clip_obj.get('id')
                                     if clip_id:
-                                        # v701 — report via dedicated endpoint so the frontend can
-                                        # render an "upload replacement image" card. Helper
-                                        # falls back to plain update_clip_status('failed') if
-                                        # the endpoint is unavailable.
-                                        report_policy_violation(
-                                            clip_id,
-                                            rejected_image_key=(_clip_obj.get('start_frame') or _clip_obj.get('start_frame_key')),
+                                        # v758.14: "This generation might violate our policies"
+                                        # is a PROMPT/generation policy block, NOT an image
+                                        # rejection — the image is fine (the uploadImage
+                                        # PROMINENT_PEOPLE path handles bad images → "different
+                                        # image"). So fail with a try-a-different-PROMPT message
+                                        # and KEEP the image; do NOT render the replace-image card.
+                                        update_clip_status(
+                                            clip_id, 'failed',
+                                            error_message="⚠️ Generation blocked by Flow content policy — try a different PROMPT (the image is fine, no need to change it).",
                                         )
-                                        print(f"[{self.account_name}] [PolicyScan] ❌ Clip {_fail_ci+1} permanently failed (policy violation)", flush=True)
+                                        print(f"[{self.account_name}] [PolicyScan] ❌ Clip {_fail_ci+1} permanently failed — generation/PROMPT policy (image kept)", flush=True)
                 except Exception:
                     pass
             gap = random.uniform(2, 6)
