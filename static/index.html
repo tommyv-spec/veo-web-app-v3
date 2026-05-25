@@ -15286,6 +15286,34 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
             grid.innerHTML = html;
 
+            // v759 — "Show older days" footer at the BOTTOM of the job list,
+            // mirroring the Videos sidebar. The same window controls also get
+            // written into #imgNodesSummary, but that element is overwritten by
+            // the batch-overview summary (imgRefreshNodeCounts), so the button
+            // was invisible — the operator couldn't widen past the default
+            // 3-day window. A dedicated footer here is never clobbered and makes
+            // the active window obvious ("Showing last 3 days").
+            try {
+                const _sd = (imgState && typeof imgState.sinceDays === 'number') ? imgState.sinceDays : 3;
+                const _ls = 'background:none;border:none;color:var(--accent);cursor:pointer;padding:0;font:inherit;text-decoration:underline';
+                let _inner;
+                if (_sd === 0) {
+                    _inner = `Showing all time · <button onclick="imgResetWindow()" style="${_ls}">↺ Reset to 3 days</button>`;
+                } else {
+                    const _next = _imgNextStep(_sd);
+                    const _delta = _next === 0 ? 'all' : `+${_next - _sd}d → ${_next}d`;
+                    let _btns = `<button onclick="imgShowOlder()" style="${_ls}">Show older (${_delta})</button>`;
+                    if (_next !== 0) {
+                        _btns += ` · <button onclick="imgShowAll()" style="${_ls};opacity:0.7">Show all</button>`;
+                    }
+                    _inner = `Showing last ${_sd} day${_sd === 1 ? '' : 's'} · ${_btns}`;
+                }
+                const _footer = document.createElement('div');
+                _footer.style.cssText = 'padding:10px;text-align:center;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border-color);margin-top:8px';
+                _footer.innerHTML = _inner;
+                grid.appendChild(_footer);
+            } catch (e) { /* non-fatal — footer is an affordance, not core */ }
+
             // v460: populate attention banner at the top of the sidebar.
             // Any batch with pending or failed scenes gets a row showing
             // what's missing. Clicking a row selects + expands that batch.
