@@ -13221,26 +13221,15 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                             print(f"[REDO] ⚠ Retry failed: {_re}", flush=True)
                     else:
                         # Already retried once and still failed — this is a persistent failure (likely policy).
-                        # v701 — report via the dedicated policy-violation
-                        # endpoint so the frontend can render an "upload
-                        # replacement image" card instead of leaving the
-                        # clip dead. Falls back to plain failed status if
-                        # the endpoint is unavailable.
-                        # v701-fix — `clip` is the in-scope dict in
-                        # process_redo_clip (was incorrectly `clip_data`
-                        # which raised NameError on every persistent
-                        # failure).
-                        print(f"[REDO] ❌ Clip {clip_index+1} failed persistently after retry — likely policy violation", flush=True)
-                        try:
-                            _v701_rejected_key = (
-                                (clip.get('start_frame') if isinstance(clip, dict) else None)
-                                or (clip.get('start_frame_key') if isinstance(clip, dict) else None)
-                            )
-                        except Exception:
-                            _v701_rejected_key = None
-                        report_policy_violation(
-                            clip_id,
-                            rejected_image_key=_v701_rejected_key,
+                        # v758.16: a persistent generation failure after retry is a
+                        # PROMPT/generation policy block ("This generation might
+                        # violate our policies"), NOT an image rejection — bad images
+                        # are caught at uploadImage (→ "different image"). Fail with a
+                        # try-a-different-PROMPT message; keep the image.
+                        print(f"[REDO] ❌ Clip {clip_index+1} failed persistently after retry — generation/PROMPT policy (image kept)", flush=True)
+                        update_clip_status(
+                            clip_id, 'failed',
+                            error_message="⚠️ Generation blocked by Flow content policy — try a different PROMPT (the image is fine, no need to change it).",
                         )
                         shutil.rmtree(temp_dir, ignore_errors=True)
                         return False
@@ -16688,15 +16677,18 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                 if _clip_obj:
                                     clip_id = _clip_obj.get('id')
                                     if clip_id:
-                                        # v701 — report via dedicated endpoint so frontend
-                                        # renders the upload-replacement card.
-                                        report_policy_violation(
-                                            clip_id,
-                                            rejected_image_key=(_clip_obj.get('start_frame') or _clip_obj.get('start_frame_key')),
+                                        # v758.16: a persistent "violate our policies"
+                                        # generation failure is a PROMPT policy block — the
+                                        # image already passed uploadImage (bad images are
+                                        # caught there → "different image"). Fail with a
+                                        # try-a-different-PROMPT message; keep the image.
+                                        update_clip_status(
+                                            clip_id, 'failed',
+                                            error_message="⚠️ Generation blocked by Flow content policy — try a different PROMPT (the image is fine, no need to change it).",
                                         )
                                         permanently_failed_clips.add(_fail_ci)
                                         _pending_left.discard(_fail_ci)
-                                        print(f"[Flow] [PolicyScan] ❌ Clip {_fail_ci+1} permanently failed — image policy violation", flush=True)
+                                        print(f"[Flow] [PolicyScan] ❌ Clip {_fail_ci+1} permanently failed — generation/PROMPT policy (image kept)", flush=True)
 
                     for _ci in sorted(list(_pending_left)):
                         if _ci in http_enqueued_clips:
