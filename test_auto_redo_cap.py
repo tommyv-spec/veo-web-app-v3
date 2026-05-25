@@ -36,3 +36,20 @@ def test_auto_redo_cap_ignores_empty_clip_id():
     fw = _load()
     assert fw.register_auto_redo_cycle(None) == 0
     assert fw.register_auto_redo_cycle(0) == 0
+
+
+def test_clear_resets_counter_for_fresh_budget():
+    fw = _load()
+    cid = 999002
+    assert fw.register_auto_redo_cycle(cid) == 1
+    assert fw.register_auto_redo_cycle(cid) == 2  # exhausted / gave up
+    fw.clear_auto_redo_cycle(cid)                 # success or give-up reset
+    # A later attempt (e.g. user Retry) starts from a fresh budget.
+    assert fw.register_auto_redo_cycle(cid) == 1
+    assert fw.auto_redo_exhausted(1) is False
+
+
+def test_clear_ignores_empty_clip_id():
+    fw = _load()
+    fw.clear_auto_redo_cycle(None)  # must not raise
+    fw.clear_auto_redo_cycle(0)

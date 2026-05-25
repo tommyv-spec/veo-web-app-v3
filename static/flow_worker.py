@@ -3043,6 +3043,17 @@ def auto_redo_exhausted(count):
     return count >= MAX_AUTO_REDO_CYCLES
 
 
+def clear_auto_redo_cycle(clip_id):
+    """Reset a clip's delayed-hard-failure counter — called when the clip
+    passes its failure check (recovered) or when we give up on it. Gives a
+    later attempt (including a user-initiated Retry) a fresh budget, and keeps
+    the module dict from growing without bound."""
+    if not clip_id:
+        return
+    with _AUTO_REDO_LOCK:
+        _AUTO_REDO_CYCLES.pop(clip_id, None)
+
+
 def _swap_model_for_policy(current_model):
     """Policy fallback target: Omni (Ingredients) -> Veo Frames, and any Veo
     model -> Omni (Ingredients)."""
@@ -16182,6 +16193,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 submitted_so_far = cache['jobs'][job_id].get('clips_submitted', [])
                 save_cache(cache)
                 print(f"[Flow] Proactive restore: preserving state for self-resume. Submitted clips: {[c+1 for c in sorted(submitted_so_far)]}", flush=True)
+        # v758.19 — clip passed its failure check (not a hard failure): clear
+        # its auto-redo counter so a later hard failure or a user Retry starts
+        # from a fresh budget, and recovered clips don't linger in the dict.
+        if not clip_failed:
+            clear_auto_redo_cycle(clip.get('id'))
         # Queue for download after FIRST clip that passes failure check.
         # MUST happen before proactive restore raise so acc.ready_event is always
         # set — otherwise the permanent download thread waits 300s and skips the job.
@@ -16318,6 +16334,10 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             update_clip_status(_df_clip['id'], 'flow_redo_queued',
                                 error_message="Flow delayed failure — clip generated then killed by Flow")
                             print(f"[Flow] ↩ clip {_dfc+1} hard-failed {_df_cycles}x — re-queuing for redo (auto-redo cap {MAX_AUTO_REDO_CYCLES})", flush=True)
+                        if auto_redo_exhausted(_df_cycles):
+                            # Gave up — drop the counter so a future user Retry
+                            # starts fresh and the dict doesn't accumulate.
+                            clear_auto_redo_cycle(_df_clip['id'])
                 # Reset remaining unsubmitted clips to pending
                 remaining = clips[i+1:]
                 if remaining:
