@@ -6011,61 +6011,39 @@ async def download_output(
     if filepath.exists():
         return FileResponse(filepath, media_type="video/mp4", filename=filename, headers=video_cache_headers)
 
-    # Method 2: R2 storage — stream progressively (v753).
-    # Render's local disk is wiped on every redeploy (≈every push during
-    # active dev), so the old "download the whole file to disk, then
-    # FileResponse" path ran on nearly every clip load and made the browser
-    # wait for the FULL R2 download before a single byte arrived — this is
-    # the redo-clip "takes forever to load". We now pipe the R2 body straight
-    # to the client and forward the browser's Range header so <video> seeking
-    # still works. No disk write — ephemeral disk made the cache near-useless.
-    # v695 footgun is NOT reintroduced: still a same-origin proxied URL, still
-    # cacheable; we never hand the browser a presigned/redirect URL.
+    # Method 2: R2 storage — v75x: REDIRECT the player straight to a presigned
+    # R2 URL instead of proxying the bytes through this 1-CPU origin.
+    #
+    # Why this replaces the v753 proxy-stream: every clip request authed
+    # (session cookie) and returned 206 range partials. Cloudflare caches
+    # NEITHER cookie-bearing requests NOR 206 partials, so despite the v754
+    # public,immutable header EVERY clip byte funneled through the single CPU
+    # + a per-request DB-auth query -> playback stalled and re-buffered (~1s
+    # then stuck). Redirecting puts R2 (native Range/seeking, real bandwidth,
+    # geo-distributed) in the byte path; the origin only does the cheap auth
+    # + sign, so it can handle many concurrent players.
+    #
+    # v695 footgun guard: the 302 MUST be no-store. The redirect removed in
+    # v695 inherited the year-long video cache header, so the browser cached
+    # the 302; when the 1h presign expired the cached redirect pointed at a
+    # dead URL -> 404 on older clips. no-store makes the browser always re-hit
+    # this (cheap) endpoint for a FRESH presign. The bytes are cached by R2 /
+    # the browser via the presigned response's own headers, not via the 302.
     try:
         from backends.storage import is_storage_configured, get_storage
 
         if is_storage_configured():
             storage = get_storage()
-            r2_key = f"jobs/{job_id}/outputs/{filename}"
-            range_header = request.headers.get("range")
-
-            try:
-                s = await asyncio.to_thread(storage.stream_object, r2_key, range_header)
-            except Exception as se:
-                print(f"[Download v753] stream miss {filename}: {se}", flush=True)
-                raise HTTPException(status_code=404, detail="File not found")
-
-            # Unsatisfiable Range — return 416 so the player retries cleanly.
-            if s["status"] == 416:
-                from fastapi.responses import Response
-                return Response(status_code=416, headers={"Accept-Ranges": "bytes"})
-
-            body = s["body"]
-
-            async def _iter_r2():
-                try:
-                    while True:
-                        chunk = await asyncio.to_thread(body.read, 1048576)  # 1MB (v75x: fewer thread hops per clip)
-                        if not chunk:
-                            break
-                        yield chunk
-                finally:
-                    body.close()
-
-            headers = dict(video_cache_headers)
-            headers["Accept-Ranges"] = "bytes"
-            if s["content_length"] is not None:
-                headers["Content-Length"] = str(s["content_length"])
-            if s["content_range"]:
-                headers["Content-Range"] = s["content_range"]
-            # v753 diagnostic — REMOVE after operator confirms stream path live.
-            print(f"[Download v753] STREAM {filename} status={s['status']} "
-                  f"range={range_header or 'none'} len={s['content_length']}", flush=True)
-            return StreamingResponse(
-                _iter_r2(),
-                status_code=s["status"],
-                media_type=s["content_type"],
-                headers=headers,
+            # generate_presigned_url is a local signing op (no network), so no
+            # to_thread needed. 24h expiry comfortably outlasts a review
+            # session; no-store means an expired presign can never be replayed.
+            presigned = storage.get_job_output_url(job_id, filename, expires_in=86400)
+            from fastapi.responses import RedirectResponse
+            print(f"[Download v75x] REDIRECT {filename} -> presigned R2 (no-store 302)", flush=True)
+            return RedirectResponse(
+                url=presigned,
+                status_code=302,
+                headers={"Cache-Control": "no-store"},
             )
     except HTTPException:
         raise
