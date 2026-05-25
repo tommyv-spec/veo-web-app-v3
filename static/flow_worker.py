@@ -12658,9 +12658,17 @@ def rebuild_clip(page, start_frame_path, end_frame_path, prompt, is_first_clip=F
                 print(f"{context} ⚠️ Frame upload failed (rejected: {rejected_which})", flush=True)
                 return False
         elif s_path:
-            result, reason = click_frame_and_upload_with_policy_check(page, s_path, is_end_frame=False, context=context)
-            if not result and reason == 'policy':
-                print(f"{context} ⚠️ START frame rejected by policy", flush=True)
+            # v758.10: route single-start (the redo case) through the SAME robust
+            # upload_both_frames path as the main submit (start, end=None). It
+            # clears any stale ingredient chip first and confirms via
+            # gallery-select + chip, so Omni redos actually attach the image.
+            # The old single-frame path false-positived on a leftover chip in the
+            # reused project (chip "attached" in 1s) and its simple upload_frame
+            # times out in the ingredient dialog without binding.
+            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+                page, s_path, None, context=context, gallery_cache=_gallery_cache)
+            if not upload_ok:
+                print(f"{context} ⚠️ START frame upload failed (rejected: {rejected_which})", flush=True)
                 return False
         elif e_path:
             result, reason = click_frame_and_upload_with_policy_check(page, e_path, is_end_frame=True, context=context)
