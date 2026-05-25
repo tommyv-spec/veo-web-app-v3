@@ -864,6 +864,37 @@ def get_version():
     }
 
 
+@app.get("/api/admin/higgsfield-ping")
+def higgsfield_ping(
+    slug: str = "kling-video/v2.1/pro/image-to-video",
+    image_url: str = "https://picsum.photos/seed/hf/720/1280",
+):
+    """Diagnostic: raw POST to the Higgsfield REST API with the server HF_KEY.
+    Returns status + body so we can find which model_id the key is allowed to
+    use. A 403 burns no credits; a 200 queues a real generation (~10 credits).
+    Try ?slug=<model_id> to probe different models."""
+    import requests as _rq
+    from config import get_higgsfield_credentials_from_env
+    creds = get_higgsfield_credentials_from_env()
+    if not creds:
+        return {"ok": False, "error": "HF_KEY / HF_API_KEY+HF_API_SECRET not set on server"}
+    key_shape = {
+        "has_colon": ":" in creds,
+        "key_id_prefix": (creds.split(":", 1)[0][:6] + "…") if creds else "",
+        "len": len(creds),
+    }
+    try:
+        r = _rq.post(
+            f"https://platform.higgsfield.ai/{slug}",
+            headers={"Authorization": f"Key {creds}", "Content-Type": "application/json", "Accept": "application/json"},
+            json={"image_url": image_url, "prompt": "subtle natural motion, static locked-off camera", "duration": 5},
+            timeout=30,
+        )
+        return {"ok": r.status_code < 400, "slug": slug, "status": r.status_code, "body": r.text[:1500], "key_shape": key_shape}
+    except Exception as e:
+        return {"ok": False, "slug": slug, "error": str(e), "key_shape": key_shape}
+
+
 @app.post("/api/admin/cleanup-stale-redos")
 async def cleanup_stale_redos(
     hours: int = Query(0, description="Only clean redos older than N hours. 0 = all."),
