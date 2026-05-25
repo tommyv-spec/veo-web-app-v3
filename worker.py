@@ -368,15 +368,21 @@ def generate_kling_variant_for_clip(clip_id: int) -> bool:
         dialogue_json = job.dialogue_json if job else None
         frames_map = _parse_frames_map(job) if job else {}
 
-    # Resolve the start-frame R2 key via the job's frames_storage_keys map.
-    if not start_frame or not frames_map:
-        return False  # not ready — frames not assigned/backed up yet
-    r2_key = frames_map.get(start_frame)
-    if not r2_key:
-        for fn, k in frames_map.items():
-            if str(fn).endswith(str(start_frame)) or str(start_frame).endswith(str(fn)):
-                r2_key = k
-                break
+    # Resolve the start-frame R2 key. clip.start_frame is set during setup to
+    # "jobs/{job_id}/frames/{fname}" (already the R2 key). Fall back to the
+    # frames_storage_keys map (filename -> key) for older/other shapes.
+    if not start_frame:
+        return False  # not ready — frame not assigned yet
+    r2_key = None
+    if str(start_frame).startswith("jobs/"):
+        r2_key = start_frame
+    elif frames_map:
+        r2_key = frames_map.get(start_frame)
+        if not r2_key:
+            for fn, k in frames_map.items():
+                if str(start_frame).endswith(str(fn)) or str(fn).endswith(str(start_frame)):
+                    r2_key = k
+                    break
     if not r2_key:
         return False
 
@@ -462,15 +468,25 @@ def run_kling_pass_for_job(job_id: str, max_wait_s: int = 1200):
         print(f"[kling-pass] job={job_id[:8]} HF key not set — skipping", flush=True)
         return
     deadline = _t.time() + max_wait_s
+    def _log(msg, level="INFO"):
+        print(f"[kling-pass] job={job_id[:8]} {msg}", flush=True)
+        try:
+            with get_db() as db:
+                add_job_log(db, job_id, f"🎬 Kling: {msg}", level, "kling")
+                db.commit()
+        except Exception:
+            pass
     try:
         with get_db() as db:
             pending = [c.id for c in db.query(Clip).filter(
                 Clip.job_id == job_id,
                 Clip.kling_variant_status == 'queued',
             ).order_by(Clip.id.asc()).all()]
-        print(f"[kling-pass] job={job_id[:8]} starting, {len(pending)} clips queued", flush=True)
+        _log(f"pass started — {len(pending)} clips queued")
         from sqlalchemy import update as _u
+        sweep = 0
         while pending and _t.time() < deadline:
+            sweep += 1
             still = []
             for cid in pending:
                 with get_db() as db:
@@ -484,21 +500,23 @@ def run_kling_pass_for_job(job_id: str, max_wait_s: int = 1200):
                 try:
                     ok = generate_kling_variant_for_clip(cid)
                 except Exception as e:
-                    print(f"[kling-pass] clip {cid} error: {e}", flush=True)
+                    _log(f"clip id={cid} FAILED: {e}", "ERROR")
                     _set_kling_status(cid, 'failed')
                     ok = True
                 if not ok:
                     _set_kling_status(cid, 'queued')  # not ready — retry next sweep
                     still.append(cid)
+            if still and sweep == 1:
+                _log(f"{len(still)} clips not ready yet (waiting for frames) — will retry")
             pending = still
             if pending:
                 _t.sleep(10)
         if pending:
-            print(f"[kling-pass] job={job_id[:8]} timed out, {len(pending)} clips never became ready", flush=True)
+            _log(f"timed out — {len(pending)} clips never became ready (start_frame/frames missing)", "WARNING")
         else:
-            print(f"[kling-pass] job={job_id[:8]} done", flush=True)
+            _log("pass complete — all queued clips done")
     except Exception as e:
-        print(f"[kling-pass] job={job_id[:8]} fatal: {e}", flush=True)
+        _log(f"fatal: {e}", "ERROR")
 
 
 class JobWorker:

@@ -2093,6 +2093,7 @@ async def _create_job_impl(
             import asyncio as _aio
             from worker import run_kling_pass_for_job as _run_kling_pass
             _aio.create_task(_aio.to_thread(_run_kling_pass, job_id))
+            add_job_log(db, job_id, "🎬 Kling pass spawned (server-side, independent of Flow worker)", "INFO", "kling")
             print(f"[main.py] Kling pass spawned for job {job_id[:8]}", flush=True)
         except Exception as _e:
             try:
