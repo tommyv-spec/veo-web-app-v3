@@ -412,6 +412,22 @@ async def lifespan(app: FastAPI):
     shrinks accordingly.
     """
     # ========== PHASE 1: BLOCKING (required before serving) ==========
+    # v75x — video stall relief. Clips stream through this Render proxy; each
+    # in-flight <video> pins one anyio worker thread for its whole playback
+    # (download_output reads the R2 body 1MB at a time via asyncio.to_thread).
+    # The default anyio limiter is 40 threads → on the 1-CPU origin a few
+    # concurrent clips + the per-request DB-auth thread + the clip poll
+    # saturate it, so new chunk reads queue behind busy threads and the player
+    # gets ~1s then stalls/re-buffers. These threads are IO-bound (blocked on
+    # R2 network reads), NOT CPU-bound, so raising the cap is safe on 1 CPU and
+    # directly relieves the saturation. Must run inside the event loop.
+    try:
+        import anyio
+        anyio.to_thread.current_default_thread_limiter().total_tokens = 256
+        print("[startup][v75x] anyio thread limiter total_tokens=256 (video stream relief)", flush=True)
+    except Exception as _tle:
+        print(f"[startup][v75x] thread limiter bump failed: {_tle}", flush=True)
+
     init_db()
 
     # Image platform schema migrations (adds claim columns on image_nodes
@@ -6029,7 +6045,7 @@ async def download_output(
             async def _iter_r2():
                 try:
                     while True:
-                        chunk = await asyncio.to_thread(body.read, 262144)  # 256KB
+                        chunk = await asyncio.to_thread(body.read, 1048576)  # 1MB (v75x: fewer thread hops per clip)
                         if not chunk:
                             break
                         yield chunk
