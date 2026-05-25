@@ -12074,6 +12074,16 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
 
         clicked = False
 
+        # v758.11: Ingredients mode (Omni) has no frame slot — clicking the
+        # gallery image attaches it directly (operator: no "Add to Prompt"
+        # needed), and success = a NEW ingredient chip appears (frames mode
+        # confirms via the frame-button count dropping instead). Baseline the
+        # chip count so a stale chip from a prior clip can't false-positive, and
+        # the click below uses a real humanized mouse click (bare img.click did
+        # not reliably bind the thumbnail).
+        _omni = is_omni(getattr(page, "_veo_model", ""))
+        _omni_chip0 = _omni_chip_count(page) if _omni else 0
+
         if filename is None:
             # No specific name known — click the first visible real gallery image.
             # Used after restore when gallery_cache is empty but the project
@@ -12103,7 +12113,7 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                                 continue
                             it.scroll_into_view_if_needed(timeout=2000)
                             time.sleep(0.3)
-                            it.click(timeout=3000)
+                            human_click_element(page, it, f"[Gallery] first '{_alt}'")
                             print(f"[Gallery] ✓ Clicked first gallery item '{_alt}' (blind reuse after restore)", flush=True)
                             clicked = True
                             break
@@ -12133,13 +12143,13 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
             # EACH visible matching instance and confirm the slot actually filled
             # before declaring success — landing on whichever duplicate is live.
             def _confirm_bind(seconds=4):
-                _omni = is_omni(getattr(page, "_veo_model", ""))
                 for _w in range(seconds):
                     time.sleep(1)
                     try:
-                        if page.locator(frame_selector).count() < expected_btn_count:
-                            return True
-                        if _omni and _omni_chip_count(page) > 0:
+                        if _omni:
+                            if _omni_chip_count(page) > _omni_chip0:
+                                return True
+                        elif page.locator(frame_selector).count() < expected_btn_count:
                             return True
                     except Exception:
                         pass
@@ -12159,7 +12169,7 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                             time.sleep(0.2)
                             if not it.is_visible(timeout=1000):
                                 continue
-                            it.click(timeout=3000)
+                            human_click_element(page, it, f"[Gallery] {filename} #{j+1}")
                             print(f"[Gallery] clicked '{filename}' instance {j+1}/{n} (sel={sel}{label})", flush=True)
                         except Exception:
                             continue
@@ -12187,14 +12197,23 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                         return True
             # Nothing bound — fall through to the shared DIAG + Escape tail below.
 
-        # Confirm: wait for the frame button count to drop (same signal as after upload)
+        # Confirm: frames → frame-button count drops; Omni Ingredients → a new
+        # ingredient chip appears (vs the baseline captured at entry).
         remaining = expected_btn_count
         for w in range(12):
             time.sleep(1)
-            remaining = page.locator(frame_selector).count()
-            if remaining < expected_btn_count:
-                print(f"[Gallery] ✓ Frame slot filled from gallery ({w+1}s)", flush=True)
-                return True
+            try:
+                if _omni:
+                    if _omni_chip_count(page) > _omni_chip0:
+                        print(f"[Gallery] ✓ Ingredient chip attached from gallery ({w+1}s)", flush=True)
+                        return True
+                    continue
+                remaining = page.locator(frame_selector).count()
+                if remaining < expected_btn_count:
+                    print(f"[Gallery] ✓ Frame slot filled from gallery ({w+1}s)", flush=True)
+                    return True
+            except Exception:
+                pass
 
         # Button count didn't change — selection may not have registered
         # DIAG (remove after frame-binding fix verified): capture the real counts +
