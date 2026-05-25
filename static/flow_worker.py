@@ -3013,6 +3013,35 @@ _COOKIE_CLEAR_DONE = set()  # job_ids that already had a cookie-clear recovery
 _POLICY_FALLBACK_VEO_MODEL = "Veo 3.1 - Fast"  # the "lite/fast (frames)" target when leaving Omni
 _POLICY_SWAP_DONE = {}  # clip_id -> swapped-to model string
 
+# v758.19 — cap the worker auto-redo loop for DELAYED HARD FAILURES (a clip
+# that generated then got killed by Flow — refresh button + no video on
+# re-verify). Today such a clip is marked flow_redo_queued (NOT failed) and
+# resubmitted with NO attempt counter — only the 30-min DB "zombie" timeout
+# eventually stops it, so the same clip churns for half an hour (golden
+# restore + reset-to-pending + resubmit, over and over). Track per-clip
+# hard-failure cycles here; after MAX_AUTO_REDO_CYCLES, mark the clip 'failed'
+# with an actionable message instead of re-queuing, so the loop stops in
+# minutes. The 30-min zombie timeout stays as the cross-process backstop.
+MAX_AUTO_REDO_CYCLES = 2  # delayed-hard-failures per clip before giving up
+_AUTO_REDO_CYCLES = {}    # clip_id -> int (cumulative delayed-hard-failures)
+_AUTO_REDO_LOCK = threading.Lock()
+
+
+def register_auto_redo_cycle(clip_id):
+    """Record one delayed-hard-failure cycle for this clip and return the new
+    cumulative count. Thread-safe — parallel accounts share the module dict."""
+    if not clip_id:
+        return 0
+    with _AUTO_REDO_LOCK:
+        _AUTO_REDO_CYCLES[clip_id] = _AUTO_REDO_CYCLES.get(clip_id, 0) + 1
+        return _AUTO_REDO_CYCLES[clip_id]
+
+
+def auto_redo_exhausted(count):
+    """True when this many delayed-hard-failure cycles means we stop
+    re-queuing and fail the clip."""
+    return count >= MAX_AUTO_REDO_CYCLES
+
 
 def _swap_model_for_policy(current_model):
     """Policy fallback target: Omni (Ingredients) -> Veo Frames, and any Veo
@@ -16272,8 +16301,23 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 for _dfc in _delayed_failures:
                     _df_clip = next((c for c in clips if c.get('clip_index') == _dfc), None)
                     if _df_clip:
-                        update_clip_status(_df_clip['id'], 'flow_redo_queued',
-                            error_message="Flow delayed failure — clip generated then killed by Flow")
+                        # v758.19 — cap the auto-redo loop. Each delayed hard
+                        # failure for this clip increments a per-clip counter;
+                        # once it hits MAX_AUTO_REDO_CYCLES we stop re-queuing
+                        # and mark the clip 'failed' (actionable) instead of
+                        # churning it for 30 min until the zombie timeout.
+                        _df_cycles = register_auto_redo_cycle(_df_clip['id'])
+                        if auto_redo_exhausted(_df_cycles):
+                            update_clip_status(_df_clip['id'], 'failed',
+                                error_message=(
+                                    f"Flow killed this clip after generating on {_df_cycles} attempts. "
+                                    f"Gave up to stop the retry loop. Click Retry to try again, "
+                                    f"or change the prompt/image."))
+                            print(f"[Flow] ⛔ clip {_dfc+1} hard-failed {_df_cycles}x — marking FAILED (auto-redo cap {MAX_AUTO_REDO_CYCLES} reached), not re-queuing", flush=True)
+                        else:
+                            update_clip_status(_df_clip['id'], 'flow_redo_queued',
+                                error_message="Flow delayed failure — clip generated then killed by Flow")
+                            print(f"[Flow] ↩ clip {_dfc+1} hard-failed {_df_cycles}x — re-queuing for redo (auto-redo cap {MAX_AUTO_REDO_CYCLES})", flush=True)
                 # Reset remaining unsubmitted clips to pending
                 remaining = clips[i+1:]
                 if remaining:
