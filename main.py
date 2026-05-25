@@ -10359,12 +10359,26 @@ async def local_worker_update_clip_status(
     if update.error_code:  # v701-cleanup
         clip.error_code = update.error_code
     
+    # v761f — clear stale redo pre-set rejection on completion. The redo
+    # flow sets approval_status='rejected' (old variant shows rejected
+    # while regenerating); the gated reset below only fires when old_status
+    # is still in the redo/generating set. If an intermediate or duplicate
+    # status update knocked clip.status off that set before this 'completed'
+    # landed, the reset was skipped and the freshly-rendered clip stayed
+    # stuck on 'rejected' (good video, REJECTED label, no approve button).
+    # A worker 'completed' report always means a fresh render finished —
+    # never a deliberate user rejection — so clear a stale 'rejected'.
+    # 'approved' is left untouched (preserved across completed re-reports).
+    if update.status == 'completed' and clip.approval_status == 'rejected':
+        print(f"[v761f] local-worker: clip {clip.id} completed with stale approval=rejected (old_status={old_status}) — reset to pending_review", flush=True)
+        clip.approval_status = 'pending_review'
+
     # When completing a clip (from redo or initial generation), update approval status
     # Include flow_redo_queued for Flow backend redos
     if update.status == 'completed' and old_status in ['generating', 'redo_queued', 'flow_redo_queued']:
         clip.approval_status = 'pending_review'
         clip.completed_at = datetime.utcnow()
-        
+
         # Extract filename from output_url for video playback
         if update.output_url:
             # URL format: .../outputs/clip_X.mp4
@@ -11641,11 +11655,22 @@ async def user_worker_update_clip_status(
         clip.error_message = update.error_message
     if update.error_code:  # v701-cleanup
         clip.error_code = update.error_code
-    
+
+    # v761f — clear stale redo pre-set rejection on completion (see the
+    # local-worker endpoint for the full rationale). A worker 'completed'
+    # report always means a fresh render finished, never a deliberate user
+    # rejection, so a 'rejected' approval at this point is the stale redo
+    # pre-set and must flip to pending_review. The gated reset below only
+    # fires when old_status stayed in the redo/generating set, which an
+    # intermediate/duplicate status update can defeat. 'approved' untouched.
+    if update.status == 'completed' and clip.approval_status == 'rejected':
+        print(f"[v761f] user-worker: clip {clip.id} completed with stale approval=rejected (old_status={old_status}) — reset to pending_review", flush=True)
+        clip.approval_status = 'pending_review'
+
     if update.status == 'completed' and old_status in ['generating', 'redo_queued', 'flow_redo_queued']:
         clip.approval_status = 'pending_review'
         clip.completed_at = datetime.utcnow()
-        
+
         if update.output_url:
             import re as re_mod
             match = re_mod.search(r'/outputs/([^/]+\.mp4)', update.output_url)
