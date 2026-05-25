@@ -3007,13 +3007,15 @@ _UNUSUAL_ACTIVITY_LOCK = threading.Lock()
 _COOKIE_CLEAR_DONE = set()  # job_ids that already had a cookie-clear recovery
 
 
-def clear_flow_cookies(page, label=""):
-    """Delete labs.google site cookies (keep google.com / accounts auth intact)
-    so a reload re-issues fresh cookies via the still-valid Google session —
-    the same thing the operator does manually via chrome site-settings. Returns
-    True if cleared. Scoped by domain substring so the Google SSO login is NOT
-    touched (no manual re-login needed)."""
+def clear_flow_site_data(page, label=""):
+    """Replicate the operator's manual chrome 'Delete data' for labs.google:
+    clear its COOKIES + CACHE + SITE STORAGE (localStorage / sessionStorage /
+    CacheStorage / IndexedDB). Keeps the google.com / accounts SSO auth so a
+    reload re-signs-in automatically (no manual login). Returns True if the
+    cookie clear succeeded."""
     prefix = f"[{label}] " if label else ""
+    ok = False
+    # 1) Cookies — labs.google only (keep Google SSO auth on google.com/accounts).
     try:
         ctx = page.context
         all_c = ctx.cookies()
@@ -3022,11 +3024,52 @@ def clear_flow_cookies(page, label=""):
         ctx.clear_cookies()
         if keep:
             ctx.add_cookies(keep)
-        print(f"{prefix}🧹 Cleared labs.google cookies ({removed} removed, {len(keep)} kept) — unusual-activity manual-fix replication", flush=True)
-        return True
+        print(f"{prefix}🧹 cookies: {removed} labs.google removed, {len(keep)} kept", flush=True)
+        ok = True
     except Exception as e:
-        print(f"{prefix}⚠ clear_flow_cookies failed: {e}", flush=True)
-        return False
+        print(f"{prefix}⚠ cookie clear failed: {e}", flush=True)
+    # 2) Site storage for labs.google — runs in-page, only while on a
+    #    labs.google origin (localStorage / sessionStorage / caches / IndexedDB).
+    try:
+        if "labs.google" in (page.url or ""):
+            page.evaluate("""async () => {
+                try { localStorage.clear(); } catch (e) {}
+                try { sessionStorage.clear(); } catch (e) {}
+                try {
+                    if (window.caches) {
+                        const ks = await caches.keys();
+                        await Promise.all(ks.map(k => caches.delete(k)));
+                    }
+                } catch (e) {}
+                try {
+                    if (window.indexedDB && indexedDB.databases) {
+                        const dbs = await indexedDB.databases();
+                        await Promise.all(dbs.map(d => (d && d.name) ? indexedDB.deleteDatabase(d.name) : null));
+                    }
+                } catch (e) {}
+            }""")
+            print(f"{prefix}🧹 site storage cleared (localStorage / sessionStorage / cacheStorage / indexedDB)", flush=True)
+        else:
+            print(f"{prefix}ⓘ skip storage clear — not on labs.google ({(page.url or '')[:40]})", flush=True)
+    except Exception as e:
+        print(f"{prefix}⚠ storage clear failed (non-fatal): {e}", flush=True)
+    # 3) Origin-scoped clear via CDP — ONLY the labs.google origin, NOT the
+    #    whole browser session. Excludes cookies (handled scoped above so the
+    #    Google SSO auth survives). This is the chrome per-site "Delete data".
+    try:
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Storage.clearDataForOrigin", {
+            "origin": "https://labs.google",
+            "storageTypes": "cache_storage,indexeddb,local_storage,service_workers,websql,file_systems,shader_cache",
+        })
+        try:
+            cdp.detach()
+        except Exception:
+            pass
+        print(f"{prefix}🧹 labs.google origin storage cleared via CDP (site-scoped, cookies untouched)", flush=True)
+    except Exception as e:
+        print(f"{prefix}⚠ CDP origin clear failed (non-fatal): {e}", flush=True)
+    return ok
 
 # v738 — Stuck-clip detection during inter-clip wait scanner.
 # Veo render may complete server-side but the DOM never updates with the <video>
@@ -7440,17 +7483,28 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                 # account block, so abort the job instead of looping forever.
                 rc_unusual = recheck.get('unusualActivityCount', 0)
                 if rc_unusual > 0 and job_id:
+                    # v758.9: on the FIRST unusual-activity sign, route straight to
+                    # the cookie-clear recovery (the v758.7 abort handler clears
+                    # labs.google cookies + reloads + retries) INSTEAD of letting it
+                    # golden-restore — golden re-applies the flagged cookies and never
+                    # clears the block. The cookie clear is the operator's proven
+                    # manual fix, so do it ASAP. Only if the block persists AFTER one
+                    # cookie clear do we count strikes toward a permanent abort
+                    # (the handler is guarded once-per-job via _COOKIE_CLEAR_DONE).
+                    if job_id not in _COOKIE_CLEAR_DONE:
+                        print(f"[FailCheck] ⚠ unusual-activity detected ({rc_unusual}/{rc_tiles} tiles) — routing to labs.google cookie-clear recovery (v758.9)", flush=True)
+                        return "abort_unusual_activity"
                     with _UNUSUAL_ACTIVITY_LOCK:
                         hits = _UNUSUAL_ACTIVITY_HITS.get(job_id, 0) + 1
                         _UNUSUAL_ACTIVITY_HITS[job_id] = hits
                     print(
                         f"[FailCheck] ⚠ v737 unusual-activity strike {hits}/{UNUSUAL_ACTIVITY_MAX_STRIKES} "
-                        f"for job {job_id[:8]} ({rc_unusual}/{rc_tiles} tiles)",
+                        f"for job {job_id[:8]} ({rc_unusual}/{rc_tiles} tiles) — already cookie-cleared once",
                         flush=True,
                     )
                     if hits >= UNUSUAL_ACTIVITY_MAX_STRIKES:
                         print(
-                            f"[FailCheck] ❌ v737 unusual-activity persists after page refresh — "
+                            f"[FailCheck] ❌ v737 unusual-activity persists after cookie clear + refresh — "
                             f"aborting job {job_id[:8]} (no further retries)",
                             flush=True,
                         )
@@ -15877,7 +15931,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             if job_id not in _COOKIE_CLEAR_DONE:
                 _COOKIE_CLEAR_DONE.add(job_id)
                 print(f"[Flow] 🧹 v758.7: 'unusual activity' — clearing labs.google cookies + reloading, then retrying job {job_id[:8]} (manual-fix replication)", flush=True)
-                clear_flow_cookies(page, label="Flow")
+                clear_flow_site_data(page, label="Flow")
                 try:
                     page.reload(wait_until="domcontentloaded", timeout=30000)
                     time.sleep(3)
