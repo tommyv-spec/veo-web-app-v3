@@ -3003,8 +3003,16 @@ _UNUSUAL_ACTIVITY_LOCK = threading.Lock()
 # v758.7 — replicate the operator's manual fix for the "unusual activity"
 # block: delete the labs.google site cookies (keeping the Google SSO auth so
 # the reload re-signs-in automatically) instead of permanently aborting.
-# Done at most once per job to avoid a loop if the block truly persists.
-_COOKIE_CLEAR_DONE = set()  # job_ids that already had a cookie-clear recovery
+# v758.21 — operator wants this EVERY time the block appears (not once-per-job,
+# no strike-abort). A short cooldown dedupes rapid back-to-back detections
+# (parallel accounts / several failed clips in the same cycle) so we don't fire
+# the clear many times within a few seconds. The natural retry loop (clear ->
+# reload -> resubmit -> generate -> fail) paces itself in minutes, so a real
+# persistent block keeps getting re-cleared, exactly as the operator asked.
+_COOKIE_CLEAR_DONE = set()  # legacy: job_ids that have had >=1 cookie-clear
+_COOKIE_CLEAR_LAST = {}     # job_id -> last cookie-clear epoch (cooldown dedupe)
+_COOKIE_CLEAR_LOCK = threading.Lock()
+COOKIE_CLEAR_COOLDOWN = 30  # seconds — skip a redundant clear within this window
 
 # v758.17 — on a generation policy block, swap the model+mode and retry once:
 # Omni (Ingredients) <-> Veo Frames. Only if the swapped model ALSO gets
@@ -7499,7 +7507,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         # recovery here. Only when the job hasn't already cleared once (the
         # once-per-job gate); otherwise fall through to the retry + strike path.
         _first_unusual = result.get('unusualActivityCount', 0)
-        if _first_unusual > 0 and job_id and job_id not in _COOKIE_CLEAR_DONE:
+        if _first_unusual > 0 and job_id:
             print(f"[FailCheck] ⚠ unusual-activity on FIRST check ({_first_unusual}/{tiles} tiles) — routing to cookie-clear before retry (retry would mask it) (v758.20)", flush=True)
             return "abort_unusual_activity"
 
@@ -7569,37 +7577,15 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
             
             if rc_failed == rc_tiles and rc_tiles > 0:
                 print(f"[FailCheck] ⚠️ ALL {rc_tiles} tiles still failed after retry + 10s wait", flush=True)
-                # v737 — track unusual-activity strikes per job. After 2 strikes
-                # the page refresh (golden restore) clearly hasn't cleared the
-                # account block, so abort the job instead of looping forever.
+                # v758.21 — if the block is unusual-activity, route to the
+                # cookie-clear recovery EVERY time (operator request). No
+                # once-per-job gate, no strike-abort — the handler re-clears
+                # (cooldown-deduped) and retries for as long as the block keeps
+                # appearing.
                 rc_unusual = recheck.get('unusualActivityCount', 0)
                 if rc_unusual > 0 and job_id:
-                    # v758.9: on the FIRST unusual-activity sign, route straight to
-                    # the cookie-clear recovery (the v758.7 abort handler clears
-                    # labs.google cookies + reloads + retries) INSTEAD of letting it
-                    # golden-restore — golden re-applies the flagged cookies and never
-                    # clears the block. The cookie clear is the operator's proven
-                    # manual fix, so do it ASAP. Only if the block persists AFTER one
-                    # cookie clear do we count strikes toward a permanent abort
-                    # (the handler is guarded once-per-job via _COOKIE_CLEAR_DONE).
-                    if job_id not in _COOKIE_CLEAR_DONE:
-                        print(f"[FailCheck] ⚠ unusual-activity detected ({rc_unusual}/{rc_tiles} tiles) — routing to labs.google cookie-clear recovery (v758.9)", flush=True)
-                        return "abort_unusual_activity"
-                    with _UNUSUAL_ACTIVITY_LOCK:
-                        hits = _UNUSUAL_ACTIVITY_HITS.get(job_id, 0) + 1
-                        _UNUSUAL_ACTIVITY_HITS[job_id] = hits
-                    print(
-                        f"[FailCheck] ⚠ v737 unusual-activity strike {hits}/{UNUSUAL_ACTIVITY_MAX_STRIKES} "
-                        f"for job {job_id[:8]} ({rc_unusual}/{rc_tiles} tiles) — already cookie-cleared once",
-                        flush=True,
-                    )
-                    if hits >= UNUSUAL_ACTIVITY_MAX_STRIKES:
-                        print(
-                            f"[FailCheck] ❌ v737 unusual-activity persists after cookie clear + refresh — "
-                            f"aborting job {job_id[:8]} (no further retries)",
-                            flush=True,
-                        )
-                        return "abort_unusual_activity"
+                    print(f"[FailCheck] ⚠ unusual-activity detected ({rc_unusual}/{rc_tiles} tiles) — routing to labs.google cookie-clear recovery (v758.9)", flush=True)
+                    return "abort_unusual_activity"
                 return True
 
             print(f"[FailCheck] ✓ Some tiles recovered after retry", flush=True)
@@ -16066,17 +16052,22 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             with _UNUSUAL_ACTIVITY_LOCK:
                 _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
 
-        # v737 — unusual activity persists after golden restore. Abort job entirely
-        # instead of triggering another (futile) restore-then-resume cycle.
+        # v758.21 — "unusual activity" block: replicate the operator's manual
+        # fix EVERY time it appears — delete the labs.google cookies + reload
+        # (Google SSO keeps us signed in), then retry the job. No once-per-job
+        # gate and no permanent abort: as long as the block keeps coming back
+        # we keep clearing. A short cooldown skips a redundant clear when
+        # several clips / parallel accounts trip the same block within seconds.
         if clip_failed == "abort_unusual_activity":
-            # v758.7: before giving up, replicate the operator's manual fix —
-            # delete the labs.google cookies + reload (Google SSO keeps us
-            # signed in), which clears the "unusual activity" block. Do this at
-            # most ONCE per job; if the block persists after the clear, fall
-            # through to the permanent abort below.
-            if job_id not in _COOKIE_CLEAR_DONE:
+            _now_ts = time.time()
+            with _COOKIE_CLEAR_LOCK:
+                _last_clear = _COOKIE_CLEAR_LAST.get(job_id, 0)
+                _do_clear = (_now_ts - _last_clear) >= COOKIE_CLEAR_COOLDOWN
+                if _do_clear:
+                    _COOKIE_CLEAR_LAST[job_id] = _now_ts
                 _COOKIE_CLEAR_DONE.add(job_id)
-                print(f"[Flow] 🧹 v758.7: 'unusual activity' — clearing labs.google cookies + reloading, then retrying job {job_id[:8]} (manual-fix replication)", flush=True)
+            if _do_clear:
+                print(f"[Flow] 🧹 v758.21: 'unusual activity' — clearing labs.google cookies + reloading, then retrying job {job_id[:8]} (manual-fix replication)", flush=True)
                 clear_flow_site_data(page, label="Flow")
                 try:
                     page.reload(wait_until="domcontentloaded", timeout=30000)
@@ -16084,57 +16075,23 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     ensure_logged_into_flow(page, "CookieClear")
                 except Exception as _re:
                     print(f"[Flow] ⚠ reload/login after cookie clear failed: {_re}", flush=True)
-                # Reset this clip + remaining + in-flight to pending so the job
-                # retries cleanly with the fresh cookies.
-                update_clip_status(clip['id'], 'pending', error_message=None)
-                for rc in clips[i+1:]:
-                    update_clip_status(rc['id'], 'pending', error_message=None)
-                for gc in [c for c in clips[:i] if c.get('status') == 'generating']:
-                    update_clip_status(gc['id'], 'pending', error_message=None)
-                update_job_status(job_id, 'pending')
-                if job_id in cache.get('jobs', {}):
-                    cache['jobs'][job_id]['status'] = 'pending'
-                    cache['jobs'][job_id]['project_url'] = None
-                    save_cache(cache)
-                with _UNUSUAL_ACTIVITY_LOCK:
-                    _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
-                raise Exception(f"Job {job_id} retrying after labs.google cookie clear (v758.7 unusual-activity fix)")
-            print(
-                f"[Flow] ❌ v737 ABORT: Clip {clip_index+1} hit 'unusual activity' block "
-                f"after page refresh + cookie clear — stopping job {job_id[:8]} (no further retries)",
-                flush=True,
-            )
-            update_clip_status(
-                clip['id'], 'failed',
-                error_message="Unusual activity persists after page refresh — job aborted (v737)"
-            )
-            remaining = clips[i+1:]
-            for rc in remaining:
-                update_clip_status(
-                    rc['id'], 'failed',
-                    error_message="Job aborted — unusual activity (v737)"
-                )
-            generating_clips = [c for c in clips[:i] if c.get('status') == 'generating']
-            for gc in generating_clips:
-                update_clip_status(
-                    gc['id'], 'failed',
-                    error_message="Job aborted — unusual activity (v737)"
-                )
-            if download_queued:
-                try:
-                    allowed = set(c['clip_index'] for c in clips[:i] if c.get('status') == 'completed')
-                    download_queue.put({'type': 'limit_clips', 'job_id': job_id, 'allowed_clips': allowed})
-                    download_queue.put({'type': 'shutdown_after_complete', 'job_id': job_id})
-                except Exception:
-                    pass
-            update_job_status(job_id, 'failed')
+            else:
+                print(f"[Flow] 🧹 v758.21: 'unusual activity' again within {COOKIE_CLEAR_COOLDOWN}s of last clear — skipping redundant clear, just retrying job {job_id[:8]}", flush=True)
+            # Reset this clip + remaining + in-flight to pending so the job
+            # retries cleanly with the fresh cookies.
+            update_clip_status(clip['id'], 'pending', error_message=None)
+            for rc in clips[i+1:]:
+                update_clip_status(rc['id'], 'pending', error_message=None)
+            for gc in [c for c in clips[:i] if c.get('status') == 'generating']:
+                update_clip_status(gc['id'], 'pending', error_message=None)
+            update_job_status(job_id, 'pending')
             if job_id in cache.get('jobs', {}):
-                cache['jobs'][job_id]['status'] = 'failed'
+                cache['jobs'][job_id]['status'] = 'pending'
                 cache['jobs'][job_id]['project_url'] = None
                 save_cache(cache)
             with _UNUSUAL_ACTIVITY_LOCK:
                 _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
-            raise Exception(f"Job {job_id} aborted — unusual activity persists after page refresh (v737)")
+            raise Exception(f"Job {job_id} retrying after labs.google cookie clear (v758.7 unusual-activity fix)")
 
         if clip_failed:
             print(f"[Flow] ⚠️ Clip {clip_index+1} failed immediately — stopping submission and triggering restore...", flush=True)
