@@ -12123,9 +12123,15 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                             time.sleep(0.3)
                             human_click_element(page, it, f"[Gallery] first '{_alt}'")
                             if _omni:
-                                # 1st click selects, 2nd adds it into the prompt.
+                                # 1st click selects, 2nd adds it — but only if the
+                                # thumbnail is still there (1st click often adds it
+                                # + closes the dialog). Quick check, no 10s wait.
                                 time.sleep(0.4)
-                                human_click_element(page, it, f"[Gallery] first '{_alt}' (2nd → into prompt)")
+                                try:
+                                    if it.is_visible(timeout=1500):
+                                        human_click_element(page, it, f"[Gallery] first '{_alt}' (2nd → into prompt)")
+                                except Exception:
+                                    pass
                             print(f"[Gallery] ✓ Clicked first gallery item '{_alt}' (blind reuse after restore)", flush=True)
                             clicked = True
                             break
@@ -12184,10 +12190,17 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                             human_click_element(page, it, f"[Gallery] {filename} #{j+1}")
                             print(f"[Gallery] clicked '{filename}' instance {j+1}/{n} (sel={sel}{label})", flush=True)
                             if _omni:
-                                # Ingredients mode: 1st click selects, 2nd click
-                                # adds it into the prompt (operator-confirmed).
+                                # Ingredients: a 2nd click adds the selected image
+                                # to the prompt — but the 1st click often adds it
+                                # directly and closes the dialog. Only click again
+                                # if the thumbnail is STILL there; if it vanished it
+                                # was already added. Quick check, no 10s wait.
                                 time.sleep(0.4)
-                                human_click_element(page, it, f"[Gallery] {filename} #{j+1} (2nd → into prompt)")
+                                try:
+                                    if it.is_visible(timeout=1500):
+                                        human_click_element(page, it, f"[Gallery] {filename} #{j+1} (2nd → into prompt)")
+                                except Exception:
+                                    pass
                         except Exception:
                             continue
                         if _confirm_bind():
