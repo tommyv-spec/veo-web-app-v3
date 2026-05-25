@@ -47,6 +47,9 @@ def animate_image(
         "Authorization": f"Key {credentials}",
         "Content-Type": "application/json",
         "Accept": "application/json",
+        # The official client sends this UA; the platform blocks unknown/default
+        # (python-requests) UAs as "browser usage" → 403. Mimic the server SDK.
+        "User-Agent": "higgsfield-server-js/2.0",
     }
 
     submit = requests.post(
