@@ -1892,6 +1892,19 @@ class NotUltraError(Exception):
     pass
 
 
+_ULTRA_VERIFIED = set()  # account labels confirmed ULTRA at least once this session
+
+# v758.22 — the ULTRA-badge probe. Shared by the first check and the
+# previously-verified re-check so they agree on what "ULTRA" looks like.
+_ULTRA_BADGE_JS = """() => {
+    const els = document.querySelectorAll('div, span');
+    for (const d of els) {
+        if (d.textContent.trim() === 'ULTRA' && d.children.length === 0) return true;
+    }
+    return false;
+}"""
+
+
 def check_ultra_account(page, label="", timeout=5):
     """Check if the logged-in Google account has ULTRA access on Flow.
     
@@ -1911,20 +1924,38 @@ def check_ultra_account(page, label="", timeout=5):
         
         # Check for ULTRA badge — multiple selector strategies
         for _ in range(timeout):
-            is_ultra = page.evaluate("""() => {
-                // Strategy 1: exact text match
-                const divs = document.querySelectorAll('div, span');
-                for (const d of divs) {
-                    if (d.textContent.trim() === 'ULTRA' && d.children.length === 0) return true;
-                }
-                return false;
-            }""")
-            
+            is_ultra = page.evaluate(_ULTRA_BADGE_JS)
+
             if is_ultra:
+                _ULTRA_VERIFIED.add(label)
                 print(f"{prefix}✓ Account verified: ULTRA", flush=True)
                 return True
             time.sleep(1)
-        
+
+        # v758.22 — badge not found. If this account was ALREADY verified ULTRA
+        # earlier this session, this is almost certainly a transient post-reload
+        # state: right after a cookie/site-storage clear (v758.21) the app
+        # re-hydrates a plan/pricing panel before the nav ULTRA badge renders,
+        # and the strict text==='ULTRA' probe times out. Do NOT permanently kill
+        # a known-good account on that. Reload once, re-poll longer, then continue
+        # with a warning if still not visible (Flow itself will gate a truly
+        # non-ULTRA account). Permanent kill is reserved for an account that was
+        # NEVER ULTRA this session (caught at startup).
+        if label in _ULTRA_VERIFIED:
+            print(f"{prefix}⚠ ULTRA badge not found on re-check, but account was verified earlier this session — transient state (likely post cookie-clear reload). Reloading + re-polling, NOT killing.", flush=True)
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=30000)
+                time.sleep(3)
+                for _ in range(10):
+                    if page.evaluate(_ULTRA_BADGE_JS):
+                        print(f"{prefix}✓ ULTRA re-confirmed after reload", flush=True)
+                        return True
+                    time.sleep(1)
+            except Exception as _re_e:
+                print(f"{prefix}⚠ reload during ULTRA re-check failed: {_re_e}", flush=True)
+            print(f"{prefix}⚠ ULTRA badge still not visible — continuing anyway (account previously verified this session).", flush=True)
+            return True
+
         # DIAG (remove after ULTRA detection verified): dump any element text
         # mentioning "ultra" + the page URL, so we can see the real badge markup.
         try:
