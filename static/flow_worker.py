@@ -10936,6 +10936,8 @@ def click_frame_and_upload_with_policy_check(page, image_path, is_end_frame=Fals
     # Wait for uploadImage response (up to 35s)
     print(f"{prefix}Waiting for {frame_name} policy check...", flush=True)
     btn_gone = False
+    # v758.13: baseline chips so a stale chip can't false-confirm (need INCREASE).
+    _omni_chip_before = _omni_chip_count(page)
     for w in range(35):
         time.sleep(1)
         if w % random.randint(3, 6) == 0:
@@ -10959,8 +10961,8 @@ def click_frame_and_upload_with_policy_check(page, image_path, is_end_frame=Fals
             if remaining < btn_count:
                 print(f"{prefix}✓ {frame_name} button gone ({w+1}s), waiting for uploadImage response...", flush=True)
                 btn_gone = True
-            elif is_omni(getattr(page, "_veo_model", "")) and _omni_chip_count(page) > 0:
-                # Ingredients mode: frame button never disappears — the
+            elif is_omni(getattr(page, "_veo_model", "")) and _omni_chip_count(page) > _omni_chip_before:
+                # Ingredients mode: frame button never disappears — a NEW
                 # ingredient chip appearing is the success signal.
                 print(f"{prefix}✓ {frame_name} ingredient chip attached ({w+1}s)", flush=True)
                 btn_gone = True
@@ -11823,6 +11825,10 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
             print(f"{prefix}Waiting for {frame_name} upload + policy check...", flush=True)
             policy_ok = False
             btn_gone = False
+            # v758.13: baseline ingredient chips BEFORE this upload resolves so a
+            # stale chip (e.g. from a prior clip in a reused project) cannot
+            # false-confirm — Omni success requires the chip count to INCREASE.
+            _omni_chip_before = _omni_chip_count(page)
             for w in range(40):
                 time.sleep(1)
                 if w % random.randint(3, 6) == 0:
@@ -11840,8 +11846,8 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
                 if not btn_gone and now_count < btn_count_before:
                     print(f"{prefix}✓ {frame_name} button gone ({w+1}s)", flush=True)
                     btn_gone = True
-                elif not btn_gone and is_omni(getattr(page, "_veo_model", "")) and _omni_chip_count(page) > 0:
-                    # Ingredients mode: success = ingredient chip attached.
+                elif not btn_gone and is_omni(getattr(page, "_veo_model", "")) and _omni_chip_count(page) > _omni_chip_before:
+                    # Ingredients mode: success = a NEW ingredient chip attached.
                     print(f"{prefix}✓ {frame_name} ingredient chip attached ({w+1}s)", flush=True)
                     btn_gone = True
 
