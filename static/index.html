@@ -14408,13 +14408,22 @@ Example: A realistic vertical video of a professional presenter speaking directl
         // State persists in localStorage so a folded section stays folded across
         // refreshes/reloads. Both sections re-render on a poll cycle, so the
         // apply-helper is called after each render to re-assert the fold.
+        function _imgSectionGet(key) {
+            // localStorage can throw in private mode / when disabled — never let
+            // that crash a render. Default: expanded ('0').
+            try { return localStorage.getItem('imgSection_' + key) === '1'; }
+            catch (e) { return false; }
+        }
+        function _imgSectionSet(key, collapsed) {
+            try { localStorage.setItem('imgSection_' + key, collapsed ? '1' : '0'); }
+            catch (e) { /* non-fatal */ }
+        }
         function imgToggleSection(key) {
-            const collapsed = localStorage.getItem('imgSection_' + key) === '1';
-            localStorage.setItem('imgSection_' + key, collapsed ? '0' : '1');
+            _imgSectionSet(key, !_imgSectionGet(key));
             imgApplySectionCollapse(key);
         }
         function imgApplySectionCollapse(key) {
-            const collapsed = localStorage.getItem('imgSection_' + key) === '1';
+            const collapsed = _imgSectionGet(key);
             if (key === 'worker') {
                 const body = document.getElementById('imgWorkerStatus');
                 const chev = document.getElementById('imgWorkerChevron');
