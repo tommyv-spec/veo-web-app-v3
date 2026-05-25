@@ -533,6 +533,24 @@ def run_kling_pass_for_job(job_id: str, max_wait_s: int = 1200):
             _log(f"timed out — {len(pending)} clips never became ready (start_frame/frames missing)", "WARNING")
         else:
             _log("pass complete — all queued clips done")
+            # If Kling drove this job (Veo skipped/failed on no keys), reflect
+            # completion so the header isn't stuck on RUNNING/FAILED and the
+            # frontend stops polling. Only when every clip is COMPLETED.
+            try:
+                with get_db() as db:
+                    job = db.query(Job).filter(Job.id == job_id).first()
+                    if job and job.status not in (JobStatus.CANCELLED.value, JobStatus.COMPLETED.value):
+                        total = db.query(Clip).filter(Clip.job_id == job_id).count()
+                        done = db.query(Clip).filter(
+                            Clip.job_id == job_id, Clip.status == ClipStatus.COMPLETED.value
+                        ).count()
+                        if total > 0 and done == total:
+                            job.status = JobStatus.COMPLETED.value
+                            job.completed_at = datetime.utcnow()
+                            db.commit()
+                            _log("job marked completed (all clips have a Kling variant)")
+            except Exception as _je:
+                print(f"[kling-pass] job-complete update failed: {_je}", flush=True)
     except Exception as e:
         _log(f"fatal: {e}", "ERROR")
 
@@ -1943,6 +1961,15 @@ class JobWorker:
                         # Raise special exception that won't mark job as failed
                         raise JobPausedException(f"All API keys are rate-limited. Job paused.")
                     else:
+                        # No valid keys. If Kling variants are enabled, DON'T fail —
+                        # the server-side Kling pass (no Gemini keys) drives every clip.
+                        if config_data.get("kling_variant"):
+                            add_job_log(db, job_id, "Veo skipped (no Gemini keys) — Kling will generate each clip.", "INFO", "kling")
+                            # Don't clobber a COMPLETED set by a fast Kling pass.
+                            if job.status not in (JobStatus.COMPLETED.value, JobStatus.CANCELLED.value):
+                                job.status = JobStatus.RUNNING.value
+                                db.commit()
+                            return  # exit Veo pipeline; run_kling_pass_for_job completes clips + job
                         # No valid keys at all
                         raise ValueError("No valid API keys available. All keys are suspended or invalid. Please add working API keys.")
                 
