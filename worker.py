@@ -368,33 +368,10 @@ def generate_kling_variant_for_clip(clip_id: int) -> bool:
         dialogue_json = job.dialogue_json if job else None
         frames_map = _parse_frames_map(job) if job else {}
 
-    # Resolve the start-frame R2 key. clip.start_frame is set during setup to
-    # "jobs/{job_id}/frames/{fname}" (already the R2 key). Fall back to the
-    # frames_storage_keys map (filename -> key) for older/other shapes.
-    if not start_frame:
-        return False  # not ready — frame not assigned yet
-    r2_key = None
-    if str(start_frame).startswith("jobs/"):
-        r2_key = start_frame
-    elif frames_map:
-        r2_key = frames_map.get(start_frame)
-        if not r2_key:
-            for fn, k in frames_map.items():
-                if str(start_frame).endswith(str(fn)) or str(fn).endswith(str(start_frame)):
-                    r2_key = k
-                    break
-    if not r2_key:
-        return False
-
-    storage = get_storage()
-    try:
-        if not storage.exists(r2_key):
-            return False
-    except Exception:
-        return False
-
-    # Motion prompt: the clip's verbatim Veo prompt override, else the spoken line.
+    # Read the clip's dialogue line once: motion prompt (veo_prompt_override)
+    # + start_image_idx (which of the job's images this clip animates).
     motion_prompt = dialogue_text
+    start_image_idx = None
     try:
         if dialogue_json:
             data = _json.loads(dialogue_json)
@@ -403,11 +380,41 @@ def generate_kling_variant_for_clip(clip_id: int) -> bool:
                     ov = line.get("veo_prompt_override")
                     if ov and ov.strip():
                         motion_prompt = ov.strip()
+                    start_image_idx = line.get("start_image_idx")
                     break
     except Exception:
         pass
     if not (motion_prompt or "").strip():
         motion_prompt = "Subtle natural motion, static locked-off camera."
+
+    # Resolve the start-frame R2 key WITHOUT depending on the normal pipeline.
+    # 1) clip.start_frame if setup already set it to an R2 key.
+    # 2) else compute from the job's frames_storage_keys + the line's
+    #    start_image_idx — so Kling works even if the Veo/Flow setup never
+    #    ran or failed (e.g. invalid Gemini keys). Kling needs no Gemini keys.
+    r2_key = None
+    if start_frame and str(start_frame).startswith("jobs/"):
+        r2_key = start_frame
+    elif start_frame and frames_map.get(start_frame):
+        r2_key = frames_map.get(start_frame)
+    if not r2_key and frames_map:
+        frames_list = sorted(frames_map.keys())
+        if frames_list:
+            idx = start_image_idx if isinstance(start_image_idx, int) else (clip_index % len(frames_list))
+            try:
+                fname = frames_list[idx % len(frames_list)]
+            except Exception:
+                fname = frames_list[0]
+            r2_key = frames_map.get(fname)
+    if not r2_key:
+        return False  # frames not backed up yet — retry later
+
+    storage = get_storage()
+    try:
+        if not storage.exists(r2_key):
+            return False
+    except Exception:
+        return False
 
     image_url = storage.get_presigned_url(r2_key, expires_in=7200, method="get_object")
     ts = _dt.utcnow().strftime("%Y%m%dT%H%M%S")
@@ -500,7 +507,11 @@ def run_kling_pass_for_job(job_id: str, max_wait_s: int = 1200):
                 try:
                     ok = generate_kling_variant_for_clip(cid)
                 except Exception as e:
-                    _log(f"clip id={cid} FAILED: {e}", "ERROR")
+                    emsg = str(e)
+                    if "401" in emsg or "Unauthorized" in emsg:
+                        _log("auth FAILED (401) — HF_KEY invalid. Get an API key+secret from cloud.higgsfield.ai and set HF_KEY=KEY_ID:KEY_SECRET in Render env.", "ERROR")
+                    else:
+                        _log(f"clip id={cid} FAILED: {emsg}", "ERROR")
                     _set_kling_status(cid, 'failed')
                     ok = True
                 if not ok:
