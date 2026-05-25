@@ -769,7 +769,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     
     # Routes that don't require authentication
     PUBLIC_ROUTES = {
-        "/login", "/auth/login", "/auth/google/callback", 
+        "/login", "/auth/login", "/auth/google/callback",
         "/auth/me", "/api/health", "/favicon.ico"
     }
     PUBLIC_PREFIXES = {"/static/", "/auth/", "/api/local-worker/", "/api/user-worker/", "/api/images/worker/"}
@@ -864,25 +864,22 @@ def get_version():
     }
 
 
-@app.get("/api/admin/higgsfield-ping")
+@app.get("/api/higgsfield-ping")
 def higgsfield_ping(
     slug: str = "kling-video/v2.1/pro/image-to-video",
     image_url: str = "https://picsum.photos/seed/hf/720/1280",
+    current_user: User = Depends(get_current_user),
 ):
-    """Diagnostic: raw POST to the Higgsfield REST API with the server HF_KEY.
-    Returns status + body so we can find which model_id the key is allowed to
-    use. A 403 burns no credits; a 200 queues a real generation (~10 credits).
-    Try ?slug=<model_id> to probe different models."""
+    """Diagnostic (auth required): raw POST to the Higgsfield REST API with the
+    server HF_KEY. Returns status + body so we can find which model_id the key
+    is allowed to use. A 403 burns no credits; a 200 queues a ~10-credit gen.
+    Probe other models with ?slug=<model_id>."""
     import requests as _rq
     from config import get_higgsfield_credentials_from_env
     creds = get_higgsfield_credentials_from_env()
     if not creds:
         return {"ok": False, "error": "HF_KEY / HF_API_KEY+HF_API_SECRET not set on server"}
-    key_shape = {
-        "has_colon": ":" in creds,
-        "key_id_prefix": (creds.split(":", 1)[0][:6] + "…") if creds else "",
-        "len": len(creds),
-    }
+    key_shape = {"has_colon": ":" in creds, "key_id_prefix": (creds.split(":", 1)[0][:6] + "…"), "len": len(creds)}
     try:
         r = _rq.post(
             f"https://platform.higgsfield.ai/{slug}",
