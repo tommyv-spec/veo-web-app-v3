@@ -458,6 +458,13 @@ def generate_kling_variant_for_clip(clip_id: int) -> bool:
         clip.output_url = output_url
         clip.selected_variant = len({v.get("attempt", 1) for v in versions})
         clip.kling_variant_status = 'done'
+        # Mark the clip COMPLETED so the card renders the variant. The card only
+        # shows a clip's video when status is completed; without this the Kling
+        # variant stays hidden behind the Veo pipeline's PREPARING/FAILED state.
+        clip.status = ClipStatus.COMPLETED.value
+        clip.approval_status = "pending_review"
+        clip.error_code = None
+        clip.error_message = None
         db.commit()
         add_job_log(db, job_id, f"🎬 Kling variant added to clip {clip_index + 1}", "INFO", "system")
     print(f"[kling-variant] clip={clip_index} OK → {output_filename}", flush=True)
