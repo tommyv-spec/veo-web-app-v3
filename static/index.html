@@ -7855,19 +7855,31 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     }
                 }
                 if (newVideoKey !== oldVideoKey) {
-                    // Video content changed (new file, status transition) → full re-render required
-                    const freshCards = container.querySelectorAll('.clip-card');
-                    if (freshCards[clip.clip_index]) {
-                        freshCards[clip.clip_index].outerHTML = renderClip(clip, id);
+                    // Video content changed (new file, status transition) → full re-render required.
+                    // v761e — locate the card by its data-clip-index attribute, NOT by
+                    // positional NodeList index. visibleClips is filtered (audio_pairs
+                    // hidden, policy-violations deduped, lineup filter), so the Nth
+                    // .clip-card in the DOM is NOT necessarily clip_index N. The old
+                    // freshCards[clip.clip_index] form missed the card whenever an earlier
+                    // clip was filtered out — the generating→completed re-render never
+                    // landed and the card stayed frozen on "generating" until a manual
+                    // refresh (which rebuilds every card via the initial-render path).
+                    // Same DOM-position-vs-clip_index drift the v705 fix patched in approve().
+                    const targetCard = container.querySelector(`.clip-card[data-clip-index="${clip.clip_index}"]`);
+                    if (targetCard) {
+                        targetCard.outerHTML = renderClip(clip, id);
+                    } else {
+                        console.warn(`[v761e] video-key changed for clip_index=${clip.clip_index} (id=${clip.id}, ${oldVideoKey} → ${newVideoKey}) but no matching .clip-card in DOM`);
                     }
                     clipStates[clip.clip_index] = getClipStateKey(clip);
                     clipVideoKeys[clip.clip_index] = newVideoKey;
                     clipUIKeys[clip.clip_index] = newUIKey;
                     preloadClipVariants(clip, id);
                 } else if (newUIKey !== oldUIKey) {
-                    // Only UI changed (approval, variant selection) → patch in-place, preserve <video>
-                    const freshCards = container.querySelectorAll('.clip-card');
-                    patchClipUI(freshCards[clip.clip_index], clip, id);
+                    // Only UI changed (approval, variant selection) → patch in-place, preserve <video>.
+                    // v761e — same data-clip-index lookup (patchClipUI no-ops on null).
+                    const targetCard = container.querySelector(`.clip-card[data-clip-index="${clip.clip_index}"]`);
+                    patchClipUI(targetCard, clip, id);
                     clipStates[clip.clip_index] = getClipStateKey(clip);
                     clipUIKeys[clip.clip_index] = newUIKey;
                 }
