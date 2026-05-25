@@ -2492,7 +2492,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
                 <!-- Worker status (compact) -->
                 <div class="card" id="imgWorkerStatusCard" style="padding:10px 12px;">
-                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                    <!-- v760 — collapsible header so the worker panel can be folded
+                         away to reveal the job list underneath. -->
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;cursor:pointer;user-select:none;" onclick="imgToggleSection('worker')" title="Collapse / expand">
+                        <span id="imgWorkerChevron" style="display:inline-block;font-size:9px;color:var(--text-muted);transition:transform .15s;">▼</span>
                         <span style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);font-weight:600;">⚙ Worker</span>
                     </div>
                     <div id="imgWorkerStatus" style="font-size:12px;color:var(--text-secondary);">
@@ -14358,6 +14361,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     ${queueLine}
                     ${helpLine}
                 `;
+                // v760 — re-assert the persisted collapse after the rewrite.
+                imgApplySectionCollapse('worker');
             } catch (e) { /* ignore */ }
         }
 
@@ -14397,6 +14402,30 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if (e) e.preventDefault();
             window._imgForceShowSetup = true;
             imgRefreshWorkerStatus();
+        }
+
+        // v760 — collapsible sidebar sections (worker panel + attention banner).
+        // State persists in localStorage so a folded section stays folded across
+        // refreshes/reloads. Both sections re-render on a poll cycle, so the
+        // apply-helper is called after each render to re-assert the fold.
+        function imgToggleSection(key) {
+            const collapsed = localStorage.getItem('imgSection_' + key) === '1';
+            localStorage.setItem('imgSection_' + key, collapsed ? '0' : '1');
+            imgApplySectionCollapse(key);
+        }
+        function imgApplySectionCollapse(key) {
+            const collapsed = localStorage.getItem('imgSection_' + key) === '1';
+            if (key === 'worker') {
+                const body = document.getElementById('imgWorkerStatus');
+                const chev = document.getElementById('imgWorkerChevron');
+                if (body) body.style.display = collapsed ? 'none' : '';
+                if (chev) chev.style.transform = collapsed ? 'rotate(-90deg)' : '';
+            } else if (key === 'attention') {
+                const list = document.querySelector('#imgAttentionBanner .attn-list');
+                const chev = document.getElementById('imgAttnChevron');
+                if (list) list.style.display = collapsed ? 'none' : '';
+                if (chev) chev.style.transform = collapsed ? 'rotate(-90deg)' : '';
+            }
         }
         function imgToggleWorkerReset(checked) {
             if (!window.imgWorkerSetupState) window.imgWorkerSetupState = {};
@@ -15383,10 +15412,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
                     banner.className = 'img-attention-banner' + (hasCritical ? ' critical' : '');
                     banner.style.display = 'block';
+                    // v760 — collapsible attention banner: click the header to fold
+                    // the item list away and reveal the job list underneath.
                     banner.innerHTML = `
-                        <div class="attn-header">${headerText}</div>
+                        <div class="attn-header" style="cursor:pointer;user-select:none;" onclick="imgToggleSection('attention')" title="Collapse / expand">
+                            <span id="imgAttnChevron" style="display:inline-block;font-size:9px;margin-right:4px;transition:transform .15s;">▼</span>${headerText}
+                        </div>
                         <div class="attn-list">${itemsHtml}</div>
                     `;
+                    imgApplySectionCollapse('attention');
                 }
             }
 
