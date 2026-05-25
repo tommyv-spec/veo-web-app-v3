@@ -2087,6 +2087,13 @@ async def _create_job_impl(
             )
             db.commit()
             add_job_log(db, job_id, "🎬 Kling (Higgsfield) variant queued for each clip", "INFO", "system")
+            # Fire the Kling pass NOW from the web process — independent of the
+            # Flow worker / JobWorker. It waits for frames to land in R2, then
+            # generates a Kling variant per clip.
+            import asyncio as _aio
+            from worker import run_kling_pass_for_job as _run_kling_pass
+            _aio.create_task(_aio.to_thread(_run_kling_pass, job_id))
+            print(f"[main.py] Kling pass spawned for job {job_id[:8]}", flush=True)
         except Exception as _e:
             try:
                 db.rollback()

@@ -305,6 +305,202 @@ def get_api_keys_with_fallback(api_keys_json: str = None) -> APIKeysConfig:
     
     return api_keys_config
 
+def _parse_frames_map(job) -> dict:
+    """job.frames_storage_keys → {filename: R2 key}. Tolerant of JSON or dict-string."""
+    raw = getattr(job, "frames_storage_keys", None)
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        import ast
+        try:
+            return ast.literal_eval(raw)
+        except Exception:
+            return {}
+
+
+def _set_kling_status(clip_id: int, status):
+    try:
+        from models import get_db as _gdb, Clip as _Clip
+        from sqlalchemy import update as _u
+        with _gdb() as db:
+            db.execute(_u(_Clip).where(_Clip.id == clip_id).values(kling_variant_status=status))
+            db.commit()
+    except Exception:
+        pass
+
+
+def generate_kling_variant_for_clip(clip_id: int) -> bool:
+    """Generate one Kling (Higgsfield) variant for a clip and append it as the
+    selected variant. Returns True when handled (success or hard-skip), False if
+    the clip is not ready yet (no start frame in R2 — caller should retry later).
+
+    Independent of the Flow worker and the JobWorker — only needs the start
+    frame in R2 + the HF key. Safe to call from anywhere (web process or worker).
+    """
+    import json as _json
+    import tempfile
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    from pathlib import Path as _P
+    from models import get_db, Clip, Job
+    from config import get_higgsfield_credentials_from_env, KLING_I2V_SLUG
+    from backends.storage import get_storage
+    from higgsfield_generator import animate_image
+
+    creds = get_higgsfield_credentials_from_env()
+    if not creds:
+        _set_kling_status(clip_id, 'failed')
+        return True  # hard skip — nothing we can do without the key
+
+    with get_db() as db:
+        clip = db.query(Clip).filter(Clip.id == clip_id).first()
+        if not clip:
+            return True
+        job = db.query(Job).filter(Job.id == clip.job_id).first()
+        job_id = clip.job_id
+        clip_index = clip.clip_index
+        dialogue_id = clip.dialogue_id
+        dialogue_text = clip.dialogue_text or ""
+        start_frame = clip.start_frame
+        gen_attempt = clip.generation_attempt or 1
+        dialogue_json = job.dialogue_json if job else None
+        frames_map = _parse_frames_map(job) if job else {}
+
+    # Resolve the start-frame R2 key via the job's frames_storage_keys map.
+    if not start_frame or not frames_map:
+        return False  # not ready — frames not assigned/backed up yet
+    r2_key = frames_map.get(start_frame)
+    if not r2_key:
+        for fn, k in frames_map.items():
+            if str(fn).endswith(str(start_frame)) or str(start_frame).endswith(str(fn)):
+                r2_key = k
+                break
+    if not r2_key:
+        return False
+
+    storage = get_storage()
+    try:
+        if not storage.exists(r2_key):
+            return False
+    except Exception:
+        return False
+
+    # Motion prompt: the clip's verbatim Veo prompt override, else the spoken line.
+    motion_prompt = dialogue_text
+    try:
+        if dialogue_json:
+            data = _json.loads(dialogue_json)
+            for line in (data.get("lines") or []):
+                if isinstance(line, dict) and line.get("id") == dialogue_id:
+                    ov = line.get("veo_prompt_override")
+                    if ov and ov.strip():
+                        motion_prompt = ov.strip()
+                    break
+    except Exception:
+        pass
+    if not (motion_prompt or "").strip():
+        motion_prompt = "Subtle natural motion, static locked-off camera."
+
+    image_url = storage.get_presigned_url(r2_key, expires_in=7200, method="get_object")
+    ts = _dt.utcnow().strftime("%Y%m%dT%H%M%S")
+    output_filename = f"clip_{clip_index}_kling_{ts}_{_uuid.uuid4().hex[:8]}.mp4"
+    out_r2_key = f"jobs/{job_id}/outputs/{output_filename}"
+    output_url = f"/api/jobs/{job_id}/outputs/{output_filename}"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        tmp_path = tmp.name
+    print(f"[kling-variant] clip={clip_index} generating via Kling (slug={KLING_I2V_SLUG})…", flush=True)
+    animate_image(
+        image_url=image_url, prompt=motion_prompt, credentials=creds,
+        out_path=tmp_path, slug=KLING_I2V_SLUG, duration=5,
+    )
+    storage.upload_file(tmp_path, out_r2_key, "video/mp4")
+    try:
+        _P(tmp_path).unlink()
+    except Exception:
+        pass
+
+    with get_db() as db:
+        clip = db.query(Clip).filter(Clip.id == clip_id).with_for_update().first()
+        if not clip:
+            return True
+        versions = _json.loads(clip.versions_json) if clip.versions_json else []
+        if any(v.get("source") == "kling" for v in versions):
+            clip.kling_variant_status = 'done'
+            db.commit()
+            return True
+        existing_attempts = [v.get("attempt", 1) for v in versions]
+        kling_attempt = (max(existing_attempts) if existing_attempts else gen_attempt) + 1
+        versions.append({
+            "attempt": kling_attempt,
+            "filename": output_filename,
+            "url": output_url,
+            "generated_at": _dt.utcnow().isoformat(),
+            "source": "kling",
+        })
+        clip.versions_json = _json.dumps(versions)
+        clip.output_filename = output_filename
+        clip.output_url = output_url
+        clip.selected_variant = len({v.get("attempt", 1) for v in versions})
+        clip.kling_variant_status = 'done'
+        db.commit()
+        add_job_log(db, job_id, f"🎬 Kling variant added to clip {clip_index + 1}", "INFO", "system")
+    print(f"[kling-variant] clip={clip_index} OK → {output_filename}", flush=True)
+    return True
+
+
+def run_kling_pass_for_job(job_id: str, max_wait_s: int = 1200):
+    """Server-side Kling-variant pass for a whole job. Fires at job creation,
+    independent of the Flow worker / JobWorker. Waits for each clip's start
+    frame to land in R2, then generates + appends the variant."""
+    import time as _t
+    from models import get_db, Clip
+    from config import get_higgsfield_credentials_from_env
+    if not get_higgsfield_credentials_from_env():
+        print(f"[kling-pass] job={job_id[:8]} HF key not set — skipping", flush=True)
+        return
+    deadline = _t.time() + max_wait_s
+    try:
+        with get_db() as db:
+            pending = [c.id for c in db.query(Clip).filter(
+                Clip.job_id == job_id,
+                Clip.kling_variant_status == 'queued',
+            ).order_by(Clip.id.asc()).all()]
+        print(f"[kling-pass] job={job_id[:8]} starting, {len(pending)} clips queued", flush=True)
+        from sqlalchemy import update as _u
+        while pending and _t.time() < deadline:
+            still = []
+            for cid in pending:
+                with get_db() as db:
+                    res = db.execute(
+                        _u(Clip).where(Clip.id == cid, Clip.kling_variant_status == 'queued')
+                        .values(kling_variant_status='processing')
+                    )
+                    db.commit()
+                    if res.rowcount == 0:
+                        continue  # claimed elsewhere (JobWorker) — skip
+                try:
+                    ok = generate_kling_variant_for_clip(cid)
+                except Exception as e:
+                    print(f"[kling-pass] clip {cid} error: {e}", flush=True)
+                    _set_kling_status(cid, 'failed')
+                    ok = True
+                if not ok:
+                    _set_kling_status(cid, 'queued')  # not ready — retry next sweep
+                    still.append(cid)
+            pending = still
+            if pending:
+                _t.sleep(10)
+        if pending:
+            print(f"[kling-pass] job={job_id[:8]} timed out, {len(pending)} clips never became ready", flush=True)
+        else:
+            print(f"[kling-pass] job={job_id[:8]} done", flush=True)
+    except Exception as e:
+        print(f"[kling-pass] job={job_id[:8]} fatal: {e}", flush=True)
+
+
 class JobWorker:
     """
     Background worker that processes video generation jobs.
@@ -593,7 +789,15 @@ class JobWorker:
             print(f"[kling-variant] queue check error: {e}", flush=True)
 
     def _run_kling_variant(self, clip_id: int):
-        """Generate one Kling variant for a clip and append it as the selected variant."""
+        """Delegate to the module-level generator; requeue if the clip isn't ready yet."""
+        try:
+            if not generate_kling_variant_for_clip(clip_id):
+                self._set_kling_status(clip_id, 'queued')
+        except Exception as e:
+            print(f"[kling-variant] clip {clip_id} ERROR: {e}", flush=True)
+            self._set_kling_status(clip_id, 'failed')
+        return
+        # --- legacy inline body (unreachable; superseded by module fn) ---
         import json as _json
         import tempfile
         import uuid as _uuid
