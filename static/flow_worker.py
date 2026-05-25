@@ -6508,7 +6508,14 @@ def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retrie
             if frame_btns_count == 0:
                 # Also check without aria-haspopup
                 frame_btns_count = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]').count()
-            
+            # v758.5: Omni/Ingredients — the add_2 button always matches the
+            # frame selector, so the button count is meaningless here. The real
+            # "asset carried over by reuse" signal is the ingredient CHIP; map
+            # it onto the existing (count > 0 == missing) semantics so the rest
+            # of this block is unchanged.
+            if is_omni(getattr(page, "_veo_model", "")):
+                frame_btns_count = 0 if _omni_chip_count(page) > 0 else 1
+
             if frame_btns_count > 0:
                 # Frames NOT loaded — reuse didn't include them
                 print(f"{prefix}⚠️ Frames not included in reuse (found {frame_btns_count} frame buttons) — re-clicking reuse...", flush=True)
@@ -6535,7 +6542,9 @@ def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retrie
                     frame_btns_count = page.locator(frame_check_selector).count()
                     if frame_btns_count == 0:
                         frame_btns_count = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]').count()
-                
+                    if is_omni(getattr(page, "_veo_model", "")):
+                        frame_btns_count = 0 if _omni_chip_count(page) > 0 else 1
+
                 if frame_btns_count > 0:
                     # Still no frames after second reuse attempt — upload manually
                     print(f"{prefix}⚠️ Frames still missing after re-click — uploading manually...", flush=True)
