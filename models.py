@@ -364,6 +364,10 @@ class Clip(Base):
     
     # Currently selected variant (1-based, matches attempt number)
     selected_variant = Column(Integer, default=1)
+
+    # Kling (Higgsfield) additional-variant generation status.
+    # None = not requested; 'queued'/'processing'/'done'/'failed' = server-side pass state.
+    kling_variant_status = Column(String(20), nullable=True)
     
     # === Worker Claiming Fields (for redos) ===
     claimed_by_worker = Column(String(100), nullable=True)  # Worker ID that claimed this redo
@@ -727,6 +731,7 @@ def _run_migrations_postgresql(engine):
     migrations = [
         # (table, column, sql)
         ("clips", "selected_variant", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS selected_variant INTEGER DEFAULT 1"),
+        ("clips", "kling_variant_status", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS kling_variant_status VARCHAR(20)"),
         ("jobs", "user_id", "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS user_id TEXT"),
         ("user_api_keys", "key_status", "ALTER TABLE user_api_keys ADD COLUMN IF NOT EXISTS key_status TEXT DEFAULT 'unknown'"),
         ("user_api_keys", "last_checked", "ALTER TABLE user_api_keys ADD COLUMN IF NOT EXISTS last_checked TIMESTAMP"),

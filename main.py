@@ -271,6 +271,7 @@ class VideoConfigInput(BaseModel):
     flow_variants_count: int = 2  # How many variants per clip in Flow (x1/x2/x3/x4)
     veo_model: str = "Veo 3.1 - Lite [Lower Priority]"  # Which Veo model the worker selects in Flow
     video_backend: str = ""  # "" = normal (Veo). "higgsfield" = Kling image-to-video via Higgsfield API.
+    kling_variant: bool = False  # When True, server adds a Kling i2v variant to each clip (alongside Veo).
     use_gesture_enrichment: bool = False  # Generate content-specific gesture cues via LLM
     short_dialogue_mode: str = "optimized"  # "optimized" = timed speech + silence, "fill" = pad to 25 words
     # v539 — Prefix Short Lines
@@ -2073,8 +2074,28 @@ async def _create_job_impl(
                 pass
             print(f"[main.py] Could not stamp batch promotion link (non-fatal): {e}", flush=True)
     
+    # Kling (Higgsfield) additional-variant pass: queue each clip so the
+    # server-side JobWorker generates a Kling variant alongside the normal
+    # (Flow/Veo) output. Job backend is unchanged — this only adds variants.
+    if config_dict.get('kling_variant'):
+        try:
+            from sqlalchemy import update as _sa_update
+            db.execute(
+                _sa_update(Clip)
+                .where(Clip.job_id == job_id)
+                .values(kling_variant_status='queued')
+            )
+            db.commit()
+            add_job_log(db, job_id, "🎬 Kling (Higgsfield) variant queued for each clip", "INFO", "system")
+        except Exception as _e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print(f"[main.py] Could not queue Kling variants (non-fatal): {_e}", flush=True)
+
     add_job_log(db, job_id, f"Job created (backend: {backend_str})", "INFO", "system")
-    
+
     # Return immediately — heavy work runs in background
     response = JobResponse(
         id=job.id,

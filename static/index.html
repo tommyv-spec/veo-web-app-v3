@@ -6819,7 +6819,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 
                 const selectedBackend = document.querySelector('#backendToggle button.active')?.dataset.value || 'auto';
                 const useGestures=useAI&&(document.querySelector('#gestureSeg button.active')?.dataset.value||'false')==='true';
-                const cfg={aspect_ratio:getSelectedAspect(),resolution:getSelectedResolution(),duration:document.getElementById('duration').value,language:document.getElementById('language').value,use_interpolation:useInterpolation,use_openai_prompt_tuning:useAI,use_frame_vision:useAI,custom_prompt:useAI?'':customPrompt,user_context:useAI?contextInput:'',single_image_mode:uploadedImages.length===1,max_retries_per_clip:5,parallel_clips:1,storyboard_mode:editorMode==='storyboard',generation_mode:generationMode,backend_preference:promptOnly?'prompt_only':selectedBackend,flow_variants_count:getFlowVariantsCount(),veo_model:getVeoModel(),video_backend:getVideoBackend(),use_gesture_enrichment:useGestures,short_dialogue_mode:document.querySelector('#shortDialogueSeg button.active')?.dataset.value||'optimized',prefix_short_enabled:(document.querySelector('#prefixShortSeg button.active')?.dataset.value||'off')==='on',prefix_short_word:(document.getElementById('prefixShortWord')?.value||'only').trim()||'only',prefix_short_threshold:(parseInt(document.getElementById('prefixShortThreshold')?.value,10)||15)};
+                const cfg={aspect_ratio:getSelectedAspect(),resolution:getSelectedResolution(),duration:document.getElementById('duration').value,language:document.getElementById('language').value,use_interpolation:useInterpolation,use_openai_prompt_tuning:useAI,use_frame_vision:useAI,custom_prompt:useAI?'':customPrompt,user_context:useAI?contextInput:'',single_image_mode:uploadedImages.length===1,max_retries_per_clip:5,parallel_clips:1,storyboard_mode:editorMode==='storyboard',generation_mode:generationMode,backend_preference:promptOnly?'prompt_only':selectedBackend,flow_variants_count:getFlowVariantsCount(),veo_model:getVeoModel(),kling_variant:(getVideoBackend()==='higgsfield'),use_gesture_enrichment:useGestures,short_dialogue_mode:document.querySelector('#shortDialogueSeg button.active')?.dataset.value||'optimized',prefix_short_enabled:(document.querySelector('#prefixShortSeg button.active')?.dataset.value||'off')==='on',prefix_short_word:(document.getElementById('prefixShortWord')?.value||'only').trim()||'only',prefix_short_threshold:(parseInt(document.getElementById('prefixShortThreshold')?.value,10)||15)};
                 
                 const payload = {config:cfg, dialogue_lines:lines, api_keys:{gemini_keys:[],openai_key:null}, job_id:uploadJobId};
                 if(scenesPayload) payload.scenes = scenesPayload;
@@ -12486,7 +12486,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 if(veoModelEl && cfg.veo_model) veoModelEl.value = cfg.veo_model;
 
                 // Kling (Higgsfield) toggle
-                const klingOn = cfg.video_backend === 'higgsfield';
+                const klingOn = !!cfg.kling_variant;
                 document.querySelectorAll('#klingSeg button').forEach(b=>b.classList.toggle('active', b.dataset.value===(klingOn?'on':'off')));
 
                 // Language

@@ -401,7 +401,11 @@ class JobWorker:
                 
                 # Check for redo requests
                 self._check_redo_queue()
-                
+
+                # Check for queued Kling (Higgsfield) additional-variant work
+                # (independent of Gemini keys — Kling uses the HF API).
+                self._check_kling_variant_queue()
+
                 # Periodically check if paused jobs can be resumed (rate limits may have expired)
                 # Check every 30 seconds
                 if time.time() - last_resume_check > 30:
@@ -547,6 +551,154 @@ class JobWorker:
                 # Start redo - it creates its own generator, independent of the main job
                 self._start_redo(clip.job_id, clip.id)
     
+    def _set_kling_status(self, clip_id: int, status):
+        try:
+            from sqlalchemy import update as _u
+            with get_db() as db:
+                db.execute(_u(Clip).where(Clip.id == clip_id).values(kling_variant_status=status))
+                db.commit()
+        except Exception:
+            pass
+
+    def _check_kling_variant_queue(self):
+        """Generate a Kling (Higgsfield) additional variant for queued clips.
+
+        Independent of Gemini keys — Kling uses the Higgsfield API. Runs the
+        slow generation on the shared executor; appends the result as a new
+        (auto-selected) variant on the clip, alongside the Veo/Flow output.
+        """
+        try:
+            from config import get_higgsfield_credentials_from_env
+            if not get_higgsfield_credentials_from_env():
+                return  # HF not configured on server — nothing to do
+            if self.executor is None:
+                return
+            from sqlalchemy import update as _sa_update
+            with get_db() as db:
+                clips = db.query(Clip).filter(
+                    Clip.kling_variant_status == 'queued',
+                    Clip.start_frame.isnot(None),
+                ).order_by(Clip.id.asc()).limit(3).all()
+                for clip in clips:
+                    res = db.execute(
+                        _sa_update(Clip)
+                        .where(Clip.id == clip.id, Clip.kling_variant_status == 'queued')
+                        .values(kling_variant_status='processing')
+                    )
+                    db.commit()
+                    if res.rowcount == 0:
+                        continue  # claimed by another cycle
+                    self.executor.submit(self._run_kling_variant, clip.id)
+        except Exception as e:
+            print(f"[kling-variant] queue check error: {e}", flush=True)
+
+    def _run_kling_variant(self, clip_id: int):
+        """Generate one Kling variant for a clip and append it as the selected variant."""
+        import json as _json
+        import tempfile
+        import uuid as _uuid
+        from datetime import datetime as _dt
+        from pathlib import Path as _P
+        try:
+            from config import get_higgsfield_credentials_from_env, KLING_I2V_SLUG
+            from backends.storage import get_storage
+            from higgsfield_generator import animate_image
+
+            creds = get_higgsfield_credentials_from_env()
+
+            with get_db() as db:
+                clip = db.query(Clip).filter(Clip.id == clip_id).first()
+                if not clip:
+                    return
+                job = db.query(Job).filter(Job.id == clip.job_id).first()
+                job_id = clip.job_id
+                clip_index = clip.clip_index
+                dialogue_id = clip.dialogue_id
+                dialogue_text = clip.dialogue_text or ""
+                start_frame = clip.start_frame
+                gen_attempt = clip.generation_attempt or 1
+                dialogue_json = job.dialogue_json if job else None
+
+            if not creds:
+                self._set_kling_status(clip_id, 'failed')
+                return
+
+            # Motion prompt: the clip's verbatim Veo prompt override, else the spoken line.
+            motion_prompt = dialogue_text
+            try:
+                if dialogue_json:
+                    data = _json.loads(dialogue_json)
+                    for line in (data.get("lines") or []):
+                        if isinstance(line, dict) and line.get("id") == dialogue_id:
+                            ov = line.get("veo_prompt_override")
+                            if ov and ov.strip():
+                                motion_prompt = ov.strip()
+                            break
+            except Exception:
+                pass
+            if not (motion_prompt or "").strip():
+                motion_prompt = "Subtle natural motion, static locked-off camera."
+
+            # Resolve the start-frame R2 key + presign a fetchable URL for Higgsfield.
+            storage = get_storage()
+            key = start_frame if str(start_frame).startswith("jobs/") else f"jobs/{job_id}/frames/{start_frame}"
+            if not storage.exists(key):
+                # Frame not backed up to R2 yet — requeue for a later cycle.
+                self._set_kling_status(clip_id, 'queued')
+                return
+            image_url = storage.get_presigned_url(key, expires_in=7200, method="get_object")
+
+            ts = _dt.utcnow().strftime("%Y%m%dT%H%M%S")
+            output_filename = f"clip_{clip_index}_kling_{ts}_{_uuid.uuid4().hex[:8]}.mp4"
+            r2_key = f"jobs/{job_id}/outputs/{output_filename}"
+            output_url = f"/api/jobs/{job_id}/outputs/{output_filename}"
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+                tmp_path = tmp.name
+            print(f"[kling-variant] clip={clip_index} generating via Kling (slug={KLING_I2V_SLUG})…", flush=True)
+            animate_image(
+                image_url=image_url, prompt=motion_prompt, credentials=creds,
+                out_path=tmp_path, slug=KLING_I2V_SLUG, duration=5,
+            )
+            storage.upload_file(tmp_path, r2_key, "video/mp4")
+            try:
+                _P(tmp_path).unlink()
+            except Exception:
+                pass
+
+            # Append as a new (highest-attempt) version so it survives to_dict's
+            # dedupe-by-attempt and shows as a separate, selected variant.
+            with get_db() as db:
+                clip = db.query(Clip).filter(Clip.id == clip_id).with_for_update().first()
+                if not clip:
+                    return
+                versions = _json.loads(clip.versions_json) if clip.versions_json else []
+                if any(v.get("source") == "kling" for v in versions):
+                    clip.kling_variant_status = 'done'
+                    db.commit()
+                    return
+                existing_attempts = [v.get("attempt", 1) for v in versions]
+                kling_attempt = (max(existing_attempts) if existing_attempts else gen_attempt) + 1
+                versions.append({
+                    "attempt": kling_attempt,
+                    "filename": output_filename,
+                    "url": output_url,
+                    "generated_at": _dt.utcnow().isoformat(),
+                    "source": "kling",
+                })
+                clip.versions_json = _json.dumps(versions)
+                distinct_attempts = len({v.get("attempt", 1) for v in versions})
+                clip.output_filename = output_filename
+                clip.output_url = output_url
+                clip.selected_variant = distinct_attempts  # kling = highest attempt → last position → selected
+                clip.kling_variant_status = 'done'
+                db.commit()
+                add_job_log(db, job_id, f"🎬 Kling variant added to clip {clip_index + 1}", "INFO", "system")
+            print(f"[kling-variant] clip={clip_index} OK → {output_filename}", flush=True)
+        except Exception as e:
+            print(f"[kling-variant] clip {clip_id} ERROR: {e}", flush=True)
+            self._set_kling_status(clip_id, 'failed')
+
     def _start_redo(self, job_id: str, clip_id: int):
         """Start processing a single clip redo"""
         print(f"[Worker {WORKER_VERSION}] _start_redo called for clip {clip_id}, job {job_id[:8]}", flush=True)
