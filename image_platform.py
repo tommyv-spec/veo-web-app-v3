@@ -30,7 +30,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header, Request, Body, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float
@@ -2996,6 +2996,55 @@ def serve_image_file(
     # wrapper's finally block will call db.close() again (no-op).
     db.close()
 
+    _imm = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+    # v75y — thumbnail bucketed rel path, reused by the fast path + the mirror.
+    thumb_rel = None
+    if w and w > 0:
+        _tw = min(_THUMB_WIDTHS, key=lambda a: abs(a - w))
+        _p = Path(safe)
+        _parent = _p.parent.as_posix()
+        thumb_rel = (
+            f"{_parent}/{_p.stem}.w{_tw}.webp"
+            if _parent not in ("", ".")
+            else f"{_p.stem}.w{_tw}.webp"
+        )
+
+    # v75y — thumbnail FAST PATH that never touches the full-res file. The
+    # deploy "cold flood" was: after Render wipes the disk, every ?w= gallery
+    # tile had no local thumb AND no local full-res, so each request downloaded
+    # the WHOLE full-res PNG from R2 to disk + PIL-resized — dozens, serialized,
+    # on 1 CPU. Fix: thumbs are mirrored to R2 (below). A cold thumb now STREAMS
+    # the small webp straight from R2 (no full-res download, no resize, no disk),
+    # so a disk wipe no longer re-triggers the flood. Still a same-origin proxy
+    # (NOT an r2-host redirect), so it works on networks that block r2 hosts
+    # (the v695 footgun) and keeps the per-user auth check above.
+    if thumb_rel is not None:
+        local_thumb = images_root() / thumb_rel
+        if local_thumb.exists():
+            return FileResponse(local_thumb, media_type="image/webp", headers=_imm)
+        storage = _storage_or_none()
+        if storage is not None:
+            try:
+                s = storage.stream_object(_r2_key_for(thumb_rel))
+            except Exception:
+                s = None  # not in R2 yet → fall through to generate
+            if s and s.get("status") in (200, 206) and s.get("body") is not None:
+                _body = s["body"]
+
+                def _iter_thumb():
+                    try:
+                        while True:
+                            chunk = _body.read(262144)
+                            if not chunk:
+                                break
+                            yield chunk
+                    finally:
+                        _body.close()
+
+                print(f"[image_platform/v75y] thumb R2 stream hit: {thumb_rel}", flush=True)
+                return StreamingResponse(_iter_thumb(), media_type="image/webp", headers=_imm)
+
     if not abs_path.exists():
         # v695 — REDIRECT-TO-R2 PATH REMOVED ENTIRELY. v694 made it opt-in
         # via ?direct=1, but presigned R2 URLs continued to leak in cached
@@ -3042,17 +3091,23 @@ def serve_image_file(
                     log.warning(f"[image_platform] Lazy orphan cleanup failed: {e}")
             raise HTTPException(404, "File not found (and not in R2 backup)")
 
-    _imm = {"Cache-Control": "public, max-age=31536000, immutable"}
-
     # v756 — thumbnail mode. abs_path is guaranteed local here (R2-restored
     # above if needed). On ?w=N serve a small webp; full-res only when w=0.
     # Safe to cache forever for the same reason the full image is (the URL
     # carries ?v={variant.id}; a regen makes a new id = new URL).
-    if w and w > 0:
+    # v75y — MIRROR the generated thumb to R2 so the next request (and every
+    # request after the next deploy wipe) hits the R2 fast path above instead
+    # of re-downloading the full-res PNG. This is what turns the per-deploy
+    # flood into a one-time warm.
+    if thumb_rel is not None:
         thumb = _make_or_get_thumb(abs_path, w)
         if thumb is not None:
             tpath, tbytes = thumb
             if tpath is not None:
+                try:
+                    _storage_upload_file(tpath, thumb_rel)
+                except Exception:
+                    pass
                 return FileResponse(tpath, media_type="image/webp", headers=_imm)
             return Response(content=tbytes, media_type="image/webp", headers=_imm)
         # resize failed → fall through to full-res
