@@ -12768,7 +12768,15 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     start_frame_url = clip.get('start_frame_url')
     end_frame_url = clip.get('end_frame_url')
     project_url = clip.get('flow_project_url')
-    
+
+    # v758.8: set the model for this redo so select_frames_to_video_mode picks
+    # the Ingredients tab and rebuild_clip's attach confirms via the ingredient
+    # chip when the job is Omni Flash. Without this, page._veo_model carries
+    # over from a prior job / defaults to Veo → the redo wrongly uses the
+    # frames path and the ingredient is never attached. veo_model is serialized
+    # onto the redo clip by the redo-pending API.
+    page._veo_model = clip.get('veo_model') or getattr(page, '_veo_model', None) or "Veo 3.1 - Lite [Lower Priority]"
+
     # Multi-account fix: the job-level project URL may belong to a different account.
     # Check cache for this specific account's project URL.
     account_name = clip.get('_account_name', '')
