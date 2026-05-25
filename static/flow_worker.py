@@ -3030,16 +3030,34 @@ def clear_flow_site_data(page, label=""):
     cookie clear succeeded."""
     prefix = f"[{label}] " if label else ""
     ok = False
-    # 1) Cookies — labs.google only (keep Google SSO auth on google.com/accounts).
+    # 1) Cookies — SURGICALLY delete ONLY labs.google cookies via CDP. Do NOT
+    #    clear_cookies()+add_cookies(): clearing all then re-adding is lossy and
+    #    dropped the Google SSO auth cookies, forcing a re-login on the next run
+    #    and corrupting the saved profile. CDP delete-by-name/domain touches
+    #    only the labs.google entries; google.com / accounts cookies are never
+    #    cleared.
     try:
         ctx = page.context
-        all_c = ctx.cookies()
-        keep = [c for c in all_c if "labs.google" not in (c.get("domain") or "")]
-        removed = len(all_c) - len(keep)
-        ctx.clear_cookies()
-        if keep:
-            ctx.add_cookies(keep)
-        print(f"{prefix}🧹 cookies: {removed} labs.google removed, {len(keep)} kept", flush=True)
+        cdp = ctx.new_cdp_session(page)
+        all_c = cdp.send("Network.getCookies").get("cookies", [])
+        removed = 0
+        for c in all_c:
+            dom = c.get("domain") or ""
+            if "labs.google" in dom:
+                try:
+                    cdp.send("Network.deleteCookies", {
+                        "name": c.get("name", ""),
+                        "domain": dom,
+                        "path": c.get("path", "/"),
+                    })
+                    removed += 1
+                except Exception:
+                    pass
+        try:
+            cdp.detach()
+        except Exception:
+            pass
+        print(f"{prefix}🧹 cookies: removed {removed} labs.google (Google SSO auth untouched)", flush=True)
         ok = True
     except Exception as e:
         print(f"{prefix}⚠ cookie clear failed: {e}", flush=True)
