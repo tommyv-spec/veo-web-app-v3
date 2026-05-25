@@ -103,7 +103,12 @@ class HiggsfieldGenerator:
         self.openai_key = openai_key
         self.on_progress = None
         self.on_error = None
-        self._cancelled = False
+        # v761g — public `cancelled` (not `_cancelled`) to match the
+        # VeoGenerator interface. worker.py polls `generator.cancelled` in
+        # its clip loops (e.g. worker.py:3750); the private name left the
+        # attribute missing and every higgsfield job crashed instantly with
+        # AttributeError: 'HiggsfieldGenerator' object has no attribute 'cancelled'.
+        self.cancelled = False
         self._overrides_by_dialogue_id = None  # lazy-loaded from job.dialogue_json
 
     # --- VeoGenerator-compatible lifecycle (mostly no-ops) ---
@@ -111,7 +116,7 @@ class HiggsfieldGenerator:
         return None
 
     def cancel(self):
-        self._cancelled = True
+        self.cancelled = True
 
     def cleanup(self):
         return None
