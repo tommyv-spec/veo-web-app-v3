@@ -3000,6 +3000,34 @@ UNUSUAL_ACTIVITY_MAX_STRIKES = 2
 _UNUSUAL_ACTIVITY_HITS = {}  # job_id -> int
 _UNUSUAL_ACTIVITY_LOCK = threading.Lock()
 
+# v758.7 — replicate the operator's manual fix for the "unusual activity"
+# block: delete the labs.google site cookies (keeping the Google SSO auth so
+# the reload re-signs-in automatically) instead of permanently aborting.
+# Done at most once per job to avoid a loop if the block truly persists.
+_COOKIE_CLEAR_DONE = set()  # job_ids that already had a cookie-clear recovery
+
+
+def clear_flow_cookies(page, label=""):
+    """Delete labs.google site cookies (keep google.com / accounts auth intact)
+    so a reload re-issues fresh cookies via the still-valid Google session —
+    the same thing the operator does manually via chrome site-settings. Returns
+    True if cleared. Scoped by domain substring so the Google SSO login is NOT
+    touched (no manual re-login needed)."""
+    prefix = f"[{label}] " if label else ""
+    try:
+        ctx = page.context
+        all_c = ctx.cookies()
+        keep = [c for c in all_c if "labs.google" not in (c.get("domain") or "")]
+        removed = len(all_c) - len(keep)
+        ctx.clear_cookies()
+        if keep:
+            ctx.add_cookies(keep)
+        print(f"{prefix}🧹 Cleared labs.google cookies ({removed} removed, {len(keep)} kept) — unusual-activity manual-fix replication", flush=True)
+        return True
+    except Exception as e:
+        print(f"{prefix}⚠ clear_flow_cookies failed: {e}", flush=True)
+        return False
+
 # v738 — Stuck-clip detection during inter-clip wait scanner.
 # Veo render may complete server-side but the DOM never updates with the <video>
 # element (SSE completion missed) OR the v700 strict-match never bound a URL.
@@ -15833,9 +15861,39 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # v737 — unusual activity persists after golden restore. Abort job entirely
         # instead of triggering another (futile) restore-then-resume cycle.
         if clip_failed == "abort_unusual_activity":
+            # v758.7: before giving up, replicate the operator's manual fix —
+            # delete the labs.google cookies + reload (Google SSO keeps us
+            # signed in), which clears the "unusual activity" block. Do this at
+            # most ONCE per job; if the block persists after the clear, fall
+            # through to the permanent abort below.
+            if job_id not in _COOKIE_CLEAR_DONE:
+                _COOKIE_CLEAR_DONE.add(job_id)
+                print(f"[Flow] 🧹 v758.7: 'unusual activity' — clearing labs.google cookies + reloading, then retrying job {job_id[:8]} (manual-fix replication)", flush=True)
+                clear_flow_cookies(page, label="Flow")
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=30000)
+                    time.sleep(3)
+                    ensure_logged_into_flow(page, "CookieClear")
+                except Exception as _re:
+                    print(f"[Flow] ⚠ reload/login after cookie clear failed: {_re}", flush=True)
+                # Reset this clip + remaining + in-flight to pending so the job
+                # retries cleanly with the fresh cookies.
+                update_clip_status(clip['id'], 'pending', error_message=None)
+                for rc in clips[i+1:]:
+                    update_clip_status(rc['id'], 'pending', error_message=None)
+                for gc in [c for c in clips[:i] if c.get('status') == 'generating']:
+                    update_clip_status(gc['id'], 'pending', error_message=None)
+                update_job_status(job_id, 'pending')
+                if job_id in cache.get('jobs', {}):
+                    cache['jobs'][job_id]['status'] = 'pending'
+                    cache['jobs'][job_id]['project_url'] = None
+                    save_cache(cache)
+                with _UNUSUAL_ACTIVITY_LOCK:
+                    _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
+                raise Exception(f"Job {job_id} retrying after labs.google cookie clear (v758.7 unusual-activity fix)")
             print(
                 f"[Flow] ❌ v737 ABORT: Clip {clip_index+1} hit 'unusual activity' block "
-                f"after page refresh — stopping job {job_id[:8]} (no further retries)",
+                f"after page refresh + cookie clear — stopping job {job_id[:8]} (no further retries)",
                 flush=True,
             )
             update_clip_status(
@@ -17780,6 +17838,12 @@ class AccountWorker(threading.Thread):
             if "browser has been closed" in err_str or "Target page" in err_str or "context or browser" in err_str:
                 print(f"[{self.name}] 💀 Browser crash detected — forcing immediate golden restore", flush=True)
                 account_health.record_failure(self.name, force_hot=True)
+            elif "retrying after labs.google cookie clear" in err_str:
+                # v758.7 — cookies cleared + job reset to pending; let it retry
+                # WITHOUT a golden restore (golden would re-apply the flagged
+                # profile cookies and undo the clear).
+                print(f"[{self.name}] 🧹 v758.7 cookie-clear recovery — retrying job without golden restore", flush=True)
+                account_health.record_failure(self.name)
             elif "unusual activity persists after page refresh" in err_str:
                 # v737 — job aborted because page-refresh didn't clear the account block.
                 # Do NOT trigger another golden restore (would just loop). Mild failure tally only.
@@ -17850,6 +17914,12 @@ class AccountWorker(threading.Thread):
             if "browser has been closed" in err_str or "Target page" in err_str or "context or browser" in err_str:
                 print(f"[{self.name}] 💀 Browser crash detected — forcing immediate golden restore", flush=True)
                 account_health.record_failure(self.name, force_hot=True)
+            elif "retrying after labs.google cookie clear" in err_str:
+                # v758.7 — cookies cleared + job reset to pending; retry without
+                # golden restore (which would re-apply the flagged cookies).
+                role = "Primary" if is_primary else "Secondary"
+                print(f"[{self.name}] 🧹 v758.7 {role} — cookie-clear recovery, retrying job without golden restore", flush=True)
+                account_health.record_failure(self.name)
             elif "unusual activity persists after page refresh" in err_str:
                 # v737 — see single-mode handler above.
                 role = "Primary" if is_primary else "Secondary"
