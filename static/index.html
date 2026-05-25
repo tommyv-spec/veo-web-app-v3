@@ -8049,9 +8049,12 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const ind=variantNav.querySelector('.variant-indicator');
                 if(ind)ind.textContent=`${versionLabel} (${selectedVariant}/${totalVariants})`;
             } else if(hasMultipleVariants&&clip.output_filename&&!variantNav){
-                // Variant nav needs to appear — need full re-render for this clip
-                const freshCards=card.parentElement.querySelectorAll('.clip-card');
-                if(freshCards[clip.clip_index])freshCards[clip.clip_index].outerHTML=renderClip(clip,jobId);
+                // Variant nav needs to appear — need full re-render for this clip.
+                // v761e — `card` is already the correct element (resolved by the
+                // diff-path's data-clip-index lookup). The old
+                // freshCards[clip.clip_index] positional re-query hit the wrong
+                // card / undefined whenever an earlier clip was filtered out.
+                card.outerHTML=renderClip(clip,jobId);
             }
         }
         
