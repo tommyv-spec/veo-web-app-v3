@@ -1941,7 +1941,9 @@ def check_ultra_account(page, label="", timeout=5):
         # with a warning if still not visible (Flow itself will gate a truly
         # non-ULTRA account). Permanent kill is reserved for an account that was
         # NEVER ULTRA this session (caught at startup).
-        if label in _ULTRA_VERIFIED:
+        # `label` must be truthy: a blank label would let one account's
+        # verification suppress another's genuine non-ULTRA kill (shared "" key).
+        if label and label in _ULTRA_VERIFIED:
             print(f"{prefix}⚠ ULTRA badge not found on re-check, but account was verified earlier this session — transient state (likely post cookie-clear reload). Reloading + re-polling, NOT killing.", flush=True)
             try:
                 page.reload(wait_until="domcontentloaded", timeout=30000)

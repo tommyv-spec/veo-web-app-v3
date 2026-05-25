@@ -68,3 +68,16 @@ def test_previously_verified_reconfirms_after_reload():
     p = FakePage([False, False, False, True])
     assert fw.check_ultra_account(p, "Acc1", timeout=3) is True
     assert p.reloads == 1
+
+
+def test_blank_label_does_not_bypass_kill():
+    fw = _load()
+    fw._ULTRA_VERIFIED.add("")  # a blank-label "verification" must not shield others
+    p = FakePage([False, False, False])
+    raised = False
+    try:
+        fw.check_ultra_account(p, "", timeout=3)
+    except fw.NotUltraError:
+        raised = True
+    assert raised is True
+    assert p.reloads == 0  # blank label never takes the bypass
