@@ -7489,7 +7489,20 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         all_failed = result.get('allFailed', False)
         
         print(f"[FailCheck] data-index={data_index}: {tiles} tiles, {failed_count} failed, generating={has_generating}, video={has_video}", flush=True)
-        
+
+        # v758.20 — detect 'We noticed some unusual activity' on the FIRST read,
+        # BEFORE clicking Retry. Retry can't clear an account block, and worse:
+        # it flips the blocked tile to a transient 'generating %' state, so the
+        # post-retry recheck below returns early on `rc_generating` and never
+        # reaches the unusual-activity branch — the block is never caught and
+        # cookie-clear never fires. So short-circuit straight to the cookie-clear
+        # recovery here. Only when the job hasn't already cleared once (the
+        # once-per-job gate); otherwise fall through to the retry + strike path.
+        _first_unusual = result.get('unusualActivityCount', 0)
+        if _first_unusual > 0 and job_id and job_id not in _COOKIE_CLEAR_DONE:
+            print(f"[FailCheck] ⚠ unusual-activity on FIRST check ({_first_unusual}/{tiles} tiles) — routing to cookie-clear before retry (retry would mask it) (v758.20)", flush=True)
+            return "abort_unusual_activity"
+
         # Click Retry on truly failed tiles (ones with 'refresh' button)
         if failed_count > 0:
             print(f"[FailCheck] ⚠️ {failed_count} tile(s) truly failed — clicking Retry on each...", flush=True)
