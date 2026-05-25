@@ -5425,6 +5425,31 @@ async def retry_stuck_clips(
     reset_stale_generating = []
     reset_stale_redo = []
 
+    # v761d DIAGNOSTIC — operator reports "Retry stuck (1)" shows in the UI
+    # but the endpoint returns reset_count=0 ("No stuck clips found"). The
+    # frontend stuck-count and this endpoint's reset criteria diverge. Log
+    # every clip's status + claim/age + skip reason so the next operator
+    # click reveals WHY a visibly-stuck clip is not being re-queued.
+    # Remove once root cause confirmed.
+    _diag = []
+    for clip in candidates:
+        _st = clip.status
+        _ca = getattr(clip, 'claimed_at', None)
+        _ua = getattr(clip, 'updated_at', None) or getattr(clip, 'created_at', None)
+        _age_c = (now - _ca).total_seconds() if _ca else None
+        _age_u = (now - _ua).total_seconds() if _ua else None
+        _decision = "skip(status-not-covered)"
+        if _st == ClipStatus.PENDING.value:
+            _decision = "reset(pending)"
+        elif _st == ClipStatus.GENERATING.value:
+            _decision = "reset(stale-generating)" if (_ca is None or _ca < stale_cutoff) else "skip(generating-fresh-claim)"
+        elif _st in (ClipStatus.REDO_QUEUED.value, ClipStatus.FLOW_REDO_QUEUED.value):
+            _decision = "reset(stale-redo)" if (_ua is None or _ua < stale_cutoff) else "skip(redo-fresh)"
+        _diag.append(f"clip#{getattr(clip,'clip_index','?')} status={_st} claimed_age={_age_c}s upd_age={_age_u}s -> {_decision}")
+    print(f"[retry-stuck v761d] job={job_id} backend={job.backend} clips={len(candidates)}", flush=True)
+    for _d in _diag:
+        print(f"[retry-stuck v761d]   {_d}", flush=True)
+
     for clip in candidates:
         if clip.status == ClipStatus.PENDING.value:
             reset_pending.append(clip)
@@ -5439,6 +5464,14 @@ async def retry_stuck_clips(
 
     all_to_reset = reset_pending + reset_stale_generating + reset_stale_redo
     if not all_to_reset:
+        # v761d — surface the per-clip diagnostic into the job log too, so
+        # the operator can read it without Render log access.
+        add_job_log(
+            db, job_id,
+            "retry-stuck found 0 resettable clips. Per-clip: " + " | ".join(_diag),
+            "INFO", "system",
+        )
+        db.commit()
         return {
             "job_id": job_id,
             "reset_count": 0,
