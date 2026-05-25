@@ -8858,6 +8858,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 }
                 showToast('video uploaded — added as a new variant', '#10b981');
                 try { if (selectedJobId) localStorage.removeItem(`clips_${selectedJobId}`); } catch(_){}
+                // v761 — upload does NO optimistic DOM update; it relies on
+                // loadClips to paint the new variant. But the markClipLocallyUpdated
+                // at the top of this fn sets a 10s race-guard that makes the
+                // loadClips diff-path skip re-rendering this clip (see line ~7841),
+                // so the new variant only showed after a manual refresh (which hits
+                // the unconditional initial-render path). Clear the guard now —
+                // the POST returned, server is truth, we WANT the fresh render.
+                clearClipLocalUpdate(clipId);
+                console.log(`[v761 upload-variant] cleared local-update guard for clip ${clipId}, reloading clips`);
                 if (selectedJobId) loadClips(selectedJobId);
             } catch(e) {
                 console.error('[upload-variant] failed:', e);
