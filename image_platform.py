@@ -9750,13 +9750,16 @@ def worker_release_claims(
     gives the indicator near-real-time accuracy: well-behaved
     shutdowns flip immediately, crashes flip within ~10s.
     """
-    _verify_worker_user(authorization, db)
+    user_id = _verify_worker_user(authorization, db)
     if not worker_id:
         raise HTTPException(400, "worker_id required")
 
+    # v759: scope to the token's user so a worker can't release/offline
+    # another account's worker even if it knows the worker_id string.
     stale_own = db.query(ImageNode).filter(
         ImageNode.status == "generating",
         ImageNode.claimed_by_worker == worker_id,
+        ImageNode.user_id == user_id,
     ).all()
     n = len(stale_own)
     for node in stale_own:
@@ -9768,7 +9771,8 @@ def worker_release_claims(
     n_heartbeats_deleted = 0
     if going_offline:
         n_heartbeats_deleted = db.query(ImageWorkerHeartbeat).filter(
-            ImageWorkerHeartbeat.worker_id == worker_id
+            ImageWorkerHeartbeat.worker_id == worker_id,
+            ImageWorkerHeartbeat.user_id == user_id,
         ).delete()
 
     if n or n_heartbeats_deleted:
@@ -9803,11 +9807,14 @@ def worker_release_single_claim(
 
     Silent no-op if neither condition holds — idempotent.
     """
-    _verify_worker_user(authorization, db)
+    user_id = _verify_worker_user(authorization, db)
     if not worker_id:
         raise HTTPException(400, "worker_id required")
 
-    node = db.query(ImageNode).filter(ImageNode.id == node_id).first()
+    # v759: scope by user_id so a worker only releases its owner's node.
+    node = db.query(ImageNode).filter(
+        ImageNode.id == node_id, ImageNode.user_id == user_id
+    ).first()
     if not node:
         raise HTTPException(404, f"Node {node_id} not found")
 
@@ -10080,13 +10087,16 @@ def worker_upload_variants(
     Now: DB work happens in 3 quick bursts, with all slow I/O (R2
     uploads) done WITHOUT a DB connection held.
     """
-    _verify_worker_user(authorization, db)
+    user_id = _verify_worker_user(authorization, db)
 
     # ==== Phase 1: quick DB validation + cleanup ====
     # Read node, verify state, clean stale variants. Commit, then
     # explicitly close this session to release the connection back to
     # the pool before we do slow I/O.
-    node = db.query(ImageNode).filter(ImageNode.id == node_id).first()
+    # v759: scope by user_id so a worker can only touch its owner's nodes.
+    node = db.query(ImageNode).filter(
+        ImageNode.id == node_id, ImageNode.user_id == user_id
+    ).first()
     if not node:
         raise HTTPException(404, "Node not found")
     if node.status != "generating":
@@ -10216,8 +10226,11 @@ def worker_update_job_status(
     db: Session = Depends(get_db_session),
 ):
     """Worker marks a job done (success or failure)."""
-    _verify_worker_user(authorization, db)
-    node = db.query(ImageNode).filter(ImageNode.id == node_id).first()
+    user_id = _verify_worker_user(authorization, db)
+    # v759: scope by user_id so a worker can only update its owner's nodes.
+    node = db.query(ImageNode).filter(
+        ImageNode.id == node_id, ImageNode.user_id == user_id
+    ).first()
     if not node:
         raise HTTPException(404, "Node not found")
 
