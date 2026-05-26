@@ -2102,9 +2102,11 @@ async def _create_job_impl(
                 pass
             print(f"[main.py] Could not stamp batch promotion link (non-fatal): {e}", flush=True)
     
-    # Kling (Higgsfield) additional-variant pass: queue each clip so the
-    # server-side JobWorker generates a Kling variant alongside the normal
-    # (Flow/Veo) output. Job backend is unchanged — this only adds variants.
+    # Kling (Higgsfield) additional-variant pass: queue each clip. The LOCAL
+    # user-worker drains this queue (/api/user-worker/clips/kling-pending) using
+    # the operator's authenticated `higgsfield` CLI — Kling 3.0 with audio, from
+    # a residential IP. The server does NOT generate Kling itself (the official
+    # key API only exposes silent Kling v2.1 + Cloudflare-blocks the v3 web API).
     if config_dict.get('kling_variant'):
         try:
             from sqlalchemy import update as _sa_update
@@ -2114,15 +2116,7 @@ async def _create_job_impl(
                 .values(kling_variant_status='queued')
             )
             db.commit()
-            add_job_log(db, job_id, "🎬 Kling (Higgsfield) variant queued for each clip", "INFO", "system")
-            # Fire the Kling pass NOW from the web process — independent of the
-            # Flow worker / JobWorker. It waits for frames to land in R2, then
-            # generates a Kling variant per clip.
-            import asyncio as _aio
-            from worker import run_kling_pass_for_job as _run_kling_pass
-            _aio.create_task(_aio.to_thread(_run_kling_pass, job_id))
-            add_job_log(db, job_id, "🎬 Kling pass spawned (server-side, independent of Flow worker)", "INFO", "kling")
-            print(f"[main.py] Kling pass spawned for job {job_id[:8]}", flush=True)
+            add_job_log(db, job_id, "🎬 Kling variant queued for each clip — local worker will generate (Kling 3.0 + audio)", "INFO", "kling")
         except Exception as _e:
             try:
                 db.rollback()
@@ -11497,6 +11491,104 @@ async def user_worker_get_redo_clips(
     return {"clips": clips_data}
 
 
+@app.get("/api/user-worker/clips/kling-pending")
+async def user_worker_get_kling_clips(
+    request: Request,
+    worker_id: Optional[str] = Query(None),
+    db: DBSession = Depends(get_db_session),
+    user_id: str = Depends(verify_user_worker_token),
+):
+    """Clips queued for a Kling (Higgsfield) variant, for THIS user's jobs.
+    The local worker generates each via the `higgsfield` CLI (Kling 3.0 + audio,
+    residential IP) and uploads via
+    /api/user-worker/jobs/{job_id}/upload-video/{clip_index}.
+    """
+    import json as _json
+    import os as _os
+    from datetime import timedelta as _td
+
+    # Release stale claims (>15 min stuck in 'processing').
+    stale_cut = datetime.utcnow() - _td(minutes=15)
+    db.query(Clip).join(Job).filter(
+        Job.user_id == user_id,
+        Clip.kling_variant_status == 'processing',
+        Clip.claimed_at < stale_cut,
+    ).update({Clip.kling_variant_status: 'queued'}, synchronize_session=False)
+    db.commit()
+
+    clips = db.query(Clip).join(Job).filter(
+        Job.user_id == user_id,
+        Clip.kling_variant_status == 'queued',
+    ).order_by(Clip.id.asc()).limit(5).all()
+
+    base_url = str(request.base_url).rstrip('/')
+    out = []
+    for clip in clips:
+        job = db.query(Job).filter(Job.id == clip.job_id).first()
+        if not job:
+            continue
+        try:
+            frames_map = _json.loads(job.frames_storage_keys) if job.frames_storage_keys else {}
+        except Exception:
+            frames_map = {}
+        frames_list = sorted(frames_map.keys())
+        # Resolve the start-frame filename (basename of clip.start_frame, else by start_image_idx).
+        start_filename = _os.path.basename(str(clip.start_frame)) if clip.start_frame else None
+        idx = None
+        try:
+            data = _json.loads(job.dialogue_json or "{}")
+            for line in (data.get("lines") or []):
+                if isinstance(line, dict) and line.get("id") == clip.dialogue_id:
+                    idx = line.get("start_image_idx")
+                    break
+        except Exception:
+            idx = None
+        if (not start_filename or start_filename not in frames_map) and frames_list:
+            i = idx if isinstance(idx, int) else (clip.clip_index % len(frames_list))
+            start_filename = frames_list[i % len(frames_list)]
+        if not start_filename:
+            continue  # frames not ready yet — leave queued
+
+        # Motion prompt: the clip's verbatim Veo prompt override, else the spoken line.
+        prompt = clip.dialogue_text or ""
+        try:
+            data = _json.loads(job.dialogue_json or "{}")
+            for line in (data.get("lines") or []):
+                if isinstance(line, dict) and line.get("id") == clip.dialogue_id:
+                    ov = line.get("veo_prompt_override")
+                    if ov and ov.strip():
+                        prompt = ov.strip()
+                    break
+        except Exception:
+            pass
+        if not (prompt or "").strip():
+            prompt = "Subtle natural motion, static locked-off camera."
+
+        duration = 5
+        try:
+            cfg = _json.loads(job.config_json or "{}")
+            duration = int(cfg.get("duration") or 5)
+        except Exception:
+            duration = 5
+
+        # Claim it so a second poll/worker doesn't double-generate.
+        clip.kling_variant_status = 'processing'
+        clip.claimed_at = datetime.utcnow()
+        if worker_id:
+            clip.claimed_by_worker = worker_id
+
+        out.append({
+            "clip_id": clip.id,
+            "job_id": clip.job_id,
+            "clip_index": clip.clip_index,
+            "start_frame_url": f"{base_url}/api/user-worker/frames/{clip.job_id}/{start_filename}",
+            "prompt": prompt,
+            "duration": duration,
+        })
+    db.commit()
+    return {"clips": out}
+
+
 @app.get("/api/user-worker/jobs/{job_id}")
 async def user_worker_get_job(
     job_id: str,
@@ -11993,9 +12085,15 @@ async def user_worker_upload_video(
                 clip.generation_attempt = attempt
                 clip.selected_variant = 1
             
+            # Close the Kling-variant loop: a clip queued/processing for a Kling
+            # variant is now satisfied by this upload → mark done so the
+            # kling-pending poll stops re-serving it.
+            if clip.kling_variant_status in ('queued', 'processing'):
+                clip.kling_variant_status = 'done'
+
             add_job_log(db, job_id, f"Clip {clip_index + 1} variant {attempt}.{variant} uploaded via user worker", "INFO", "flow")
             db.commit()
-        
+
         return {"success": True, "key": r2_key, "url": output_url, "attempt": attempt, "variant": variant}
     except Exception as e:
         import traceback
