@@ -16098,26 +16098,19 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # we keep clearing. A short cooldown skips a redundant clear when
         # several clips / parallel accounts trip the same block within seconds.
         if clip_failed == "abort_unusual_activity":
-            _now_ts = time.time()
-            with _COOKIE_CLEAR_LOCK:
-                _last_clear = _COOKIE_CLEAR_LAST.get(job_id, 0)
-                _do_clear = (_now_ts - _last_clear) >= COOKIE_CLEAR_COOLDOWN
-                if _do_clear:
-                    _COOKIE_CLEAR_LAST[job_id] = _now_ts
-                _COOKIE_CLEAR_DONE.add(job_id)
-            if _do_clear:
-                print(f"[Flow] 🧹 v758.21: 'unusual activity' — clearing labs.google cookies + reloading, then retrying job {job_id[:8]} (manual-fix replication)", flush=True)
-                clear_flow_site_data(page, label="Flow")
-                try:
-                    page.reload(wait_until="domcontentloaded", timeout=30000)
-                    time.sleep(3)
-                    ensure_logged_into_flow(page, "CookieClear")
-                except Exception as _re:
-                    print(f"[Flow] ⚠ reload/login after cookie clear failed: {_re}", flush=True)
-            else:
-                print(f"[Flow] 🧹 v758.21: 'unusual activity' again within {COOKIE_CLEAR_COOLDOWN}s of last clear — skipping redundant clear, just retrying job {job_id[:8]}", flush=True)
-            # Reset this clip + remaining + in-flight to pending so the job
-            # retries cleanly with the fresh cookies.
+            # v758.24 — operator decision: skip the cookie-clear and go straight
+            # to a GOLDEN RESTORE. The cookie-clear logs the account out of Flow
+            # (removing the labs.google session cookie drops the SPA to the
+            # marketing landing page on a project URL); a plain reload does NOT
+            # re-auth, so the worker stranded until a golden restore ran anyway.
+            # Golden restore re-supplies a clean signed-in profile and reliably
+            # clears the block, so trigger it directly. Reset this clip +
+            # remaining + in-flight to pending and drop the project URL so the
+            # self-resume re-submits into a fresh project after the restore. The
+            # raise string matches the existing "stopping job to trigger golden
+            # restore" branch in _process_parallel_job / _process_job_with_failover,
+            # which force-marks the account HOT so run() golden-restores + self-resumes.
+            print(f"[Flow] 🔥 v758.24: 'unusual activity' on job {job_id[:8]} — stopping job to trigger golden restore (cookie-clear can't re-auth into Flow)", flush=True)
             update_clip_status(clip['id'], 'pending', error_message=None)
             for rc in clips[i+1:]:
                 update_clip_status(rc['id'], 'pending', error_message=None)
@@ -16130,7 +16123,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 save_cache(cache)
             with _UNUSUAL_ACTIVITY_LOCK:
                 _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
-            raise Exception(f"Job {job_id} retrying after labs.google cookie clear (v758.7 unusual-activity fix)")
+            raise Exception(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
 
         if clip_failed:
             print(f"[Flow] ⚠️ Clip {clip_index+1} failed immediately — stopping submission and triggering restore...", flush=True)
