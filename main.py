@@ -12093,9 +12093,17 @@ async def user_worker_upload_video(
             
             # Close the Kling-variant loop: a clip queued/processing for a Kling
             # variant is now satisfied by this upload → mark done so the
-            # kling-pending poll stops re-serving it.
+            # kling-pending poll stops re-serving it. attempt==9 = the Kling
+            # marker; mark the clip viewable now so the variant shows even if the
+            # Flow/Veo pass for this clip hasn't finished yet.
             if clip.kling_variant_status in ('queued', 'processing'):
                 clip.kling_variant_status = 'done'
+            if attempt == 9:
+                clip.status = ClipStatus.COMPLETED.value
+                if clip.approval_status not in ('approved', 'rejected'):
+                    clip.approval_status = 'pending_review'
+                clip.error_code = None
+                clip.error_message = None
 
             add_job_log(db, job_id, f"Clip {clip_index + 1} variant {attempt}.{variant} uploaded via user worker", "INFO", "flow")
             db.commit()
@@ -12351,7 +12359,8 @@ async def download_installer(
         
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-            info = zipfile.ZipInfo(inner_filename)
+            import time as _t
+            info = zipfile.ZipInfo(inner_filename, date_time=_t.localtime()[:6])
             # Set Unix execute permission (rwxr-xr-x = 0o755)
             info.external_attr = 0o755 << 16
             info.create_system = 3  # Unix

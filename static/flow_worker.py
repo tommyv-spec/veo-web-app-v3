@@ -20463,19 +20463,29 @@ def _kling_drain_loop():
                            "--sound", sound,
                            "--wait", "--wait-timeout", f"{gen_timeout}s", "--json"]
                     print(f"[kling-local] clip {ci}: generating Kling 3.0…", flush=True)
-                    p = _sub.run(cmd, capture_output=True, text=True, timeout=gen_timeout + 60)
-                    # Token expired mid-run? Re-login (browser) once and retry.
-                    _outl = (p.stdout + p.stderr).lower()
-                    if p.returncode != 0 and ("not authenticated" in _outl or "auth login" in _outl or "session expired" in _outl):
-                        print("[kling-local] session expired — re-opening Higgsfield login, then retrying clip…", flush=True)
-                        _sub.run([hf_cli, "auth", "login"], capture_output=True, text=True, timeout=300)
+                    p = None
+                    for _att in range(3):
                         p = _sub.run(cmd, capture_output=True, text=True, timeout=gen_timeout + 60)
+                        if p.returncode == 0:
+                            break
+                        _outl = (p.stdout + p.stderr).lower()
+                        if "not authenticated" in _outl or "auth login" in _outl or "session expired" in _outl:
+                            print("[kling-local] session expired — re-opening Higgsfield login, then retrying…", flush=True)
+                            _sub.run([hf_cli, "auth", "login"], capture_output=True, text=True, timeout=300)
+                            continue
+                        # Transient Higgsfield/upload errors (flaky cloudfront fetch, gateway, network) → retry.
+                        if any(t in _outl for t in ("cannot reach", "timeout", "timed out", "connection",
+                                                     "502", "503", "504", "temporarily", "try again")):
+                            print(f"[kling-local] clip {ci} transient error (attempt {_att + 1}/3) — retrying in 5s…", flush=True)
+                            _t.sleep(5)
+                            continue
+                        break  # non-retryable failure
                     try:
                         os.remove(fp)
                     except Exception:
                         pass
-                    if p.returncode != 0:
-                        print(f"[kling-local] clip {ci} CLI failed: {(p.stdout + p.stderr).strip()[:300]}", flush=True)
+                    if p is None or p.returncode != 0:
+                        print(f"[kling-local] clip {ci} CLI failed: {((p.stdout + p.stderr) if p else '').strip()[:300]}", flush=True)
                         continue
                     vurl = None
                     try:
