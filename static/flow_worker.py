@@ -20269,12 +20269,39 @@ def _kling_drain_loop():
     hdr = {"Authorization": f"Bearer {API_KEY}"}
     base = f"{WEB_APP_URL}{API_PATH_PREFIX}"
     url_re = _re.compile(r"https?://[^\s\"']+\.mp4", _re.I)
-    try:
-        _sub.run([hf_cli, "version"], capture_output=True, text=True, timeout=30)
-    except Exception as e:
-        print(f"[kling-local] CLI `{hf_cli}` unavailable ({e}) — Kling variants disabled. "
-              f"Install once: npm i -g @higgsfield/cli && higgsfield auth login", flush=True)
-        return
+    # Ensure the higgsfield CLI is installed + authenticated — guided, like the
+    # Flow personal login (auto-install, then open the login browser once).
+    def _run(cmd, timeout=60):
+        try:
+            return _sub.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except Exception:
+            class _R:
+                returncode = 1; stdout = ""; stderr = ""
+            return _R()
+
+    def _cli_ok():
+        return _run([hf_cli, "version"]).returncode == 0
+
+    def _authed():
+        # `higgsfield account` succeeds only when logged in.
+        return _run([hf_cli, "account"]).returncode == 0
+
+    if not _cli_ok():
+        print("[kling-local] installing higgsfield CLI (npm i -g @higgsfield/cli)…", flush=True)
+        _run(["npm", "install", "-g", "@higgsfield/cli"], timeout=300)
+        if not _cli_ok():
+            print("[kling-local] higgsfield CLI unavailable (needs Node/npm). Kling disabled; "
+                  "Flow unaffected. Retries next launch.", flush=True)
+            return
+
+    if not _authed():
+        print("[kling-local] opening Higgsfield login (one-time, like your Flow login)…", flush=True)
+        _run([hf_cli, "auth", "login"], timeout=300)
+        if not _authed():
+            print("[kling-local] Higgsfield not logged in yet — Kling disabled until login completes "
+                  "(retries next launch).", flush=True)
+            return
+    print("[kling-local] higgsfield ready (CLI + auth).", flush=True)
 
     def _find_url(o):
         if isinstance(o, str):
