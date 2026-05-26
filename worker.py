@@ -824,6 +824,20 @@ class JobWorker:
             if self.executor is None:
                 return
             from sqlalchemy import update as _sa_update
+            # Self-heal: clips whose Kling variant finished but whose status is
+            # stuck non-completed (generated before the COMPLETED-status fix, or
+            # reset by the Veo pipeline) → flip to completed so the card renders.
+            with get_db() as db:
+                healed = db.execute(
+                    _sa_update(Clip).where(
+                        Clip.kling_variant_status == 'done',
+                        Clip.output_filename.isnot(None),
+                        Clip.status != ClipStatus.COMPLETED.value,
+                    ).values(status=ClipStatus.COMPLETED.value, approval_status='pending_review')
+                )
+                db.commit()
+                if healed.rowcount:
+                    print(f"[kling-heal] flipped {healed.rowcount} done-variant clips to completed", flush=True)
             with get_db() as db:
                 clips = db.query(Clip).filter(
                     Clip.kling_variant_status == 'queued',
