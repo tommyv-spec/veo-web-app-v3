@@ -3104,11 +3104,14 @@ def _swap_model_for_policy(current_model):
 
 
 def clear_flow_site_data(page, label=""):
-    """Replicate the operator's manual chrome 'Delete data' for labs.google:
-    clear its COOKIES + CACHE + SITE STORAGE (localStorage / sessionStorage /
-    CacheStorage / IndexedDB). Keeps the google.com / accounts SSO auth so a
-    reload re-signs-in automatically (no manual login). Returns True if the
-    cookie clear succeeded."""
+    """Clear the labs.google COOKIES + CACHE layers to lift the "unusual
+    activity" block, while PRESERVING localStorage / sessionStorage / IndexedDB.
+    The block is cookie-keyed; the cookie removal + reload re-signs-in via the
+    untouched google.com SSO. v758.23 — we deliberately do NOT wipe the app's
+    local storage: doing so drops the Flow SPA to the marketing landing page on
+    a project URL (no settings / Videos tab / frame controls), stranding the
+    worker until a golden restore (and previously a false "NOT ULTRA").
+    Returns True if the cookie clear succeeded."""
     prefix = f"[{label}] " if label else ""
     ok = False
     # 1) Cookies — SURGICALLY delete ONLY labs.google cookies via CDP. Do NOT
@@ -3146,41 +3149,44 @@ def clear_flow_site_data(page, label=""):
     #    labs.google origin (localStorage / sessionStorage / caches / IndexedDB).
     try:
         if "labs.google" in (page.url or ""):
+            # v758.23 — clear ONLY the Cache-Storage layer here. Do NOT clear
+            # localStorage / sessionStorage / IndexedDB: those hold Flow's app +
+            # route state, and wiping them drops the SPA back to the marketing
+            # landing page on a project URL (settings / Videos tab / frame
+            # controls all missing), which strands the worker on reuse-fallback
+            # until a golden restore bails it out (also caused the v758.22
+            # false "NOT ULTRA"). The "unusual activity" block lives in the
+            # cookies (cleared above), not in the app's local storage.
             page.evaluate("""async () => {
-                try { localStorage.clear(); } catch (e) {}
-                try { sessionStorage.clear(); } catch (e) {}
                 try {
                     if (window.caches) {
                         const ks = await caches.keys();
                         await Promise.all(ks.map(k => caches.delete(k)));
                     }
                 } catch (e) {}
-                try {
-                    if (window.indexedDB && indexedDB.databases) {
-                        const dbs = await indexedDB.databases();
-                        await Promise.all(dbs.map(d => (d && d.name) ? indexedDB.deleteDatabase(d.name) : null));
-                    }
-                } catch (e) {}
             }""")
-            print(f"{prefix}🧹 site storage cleared (localStorage / sessionStorage / cacheStorage / indexedDB)", flush=True)
+            print(f"{prefix}🧹 cacheStorage cleared (localStorage / sessionStorage / IndexedDB preserved — keeps editor route)", flush=True)
         else:
             print(f"{prefix}ⓘ skip storage clear — not on labs.google ({(page.url or '')[:40]})", flush=True)
     except Exception as e:
         print(f"{prefix}⚠ storage clear failed (non-fatal): {e}", flush=True)
     # 3) Origin-scoped clear via CDP — ONLY the labs.google origin, NOT the
     #    whole browser session. Excludes cookies (handled scoped above so the
-    #    Google SSO auth survives). This is the chrome per-site "Delete data".
+    #    Google SSO auth survives). v758.23 — also EXCLUDES local_storage,
+    #    indexeddb and websql: clearing them drops the SPA to the marketing
+    #    landing page on a project URL and strands the worker (see section 2).
+    #    Only the cache / service-worker / code-cache layers are cleared here.
     try:
         cdp = page.context.new_cdp_session(page)
         cdp.send("Storage.clearDataForOrigin", {
             "origin": "https://labs.google",
-            "storageTypes": "cache_storage,indexeddb,local_storage,service_workers,websql,file_systems,shader_cache",
+            "storageTypes": "cache_storage,service_workers,file_systems,shader_cache",
         })
         try:
             cdp.detach()
         except Exception:
             pass
-        print(f"{prefix}🧹 labs.google origin storage cleared via CDP (site-scoped, cookies untouched)", flush=True)
+        print(f"{prefix}🧹 labs.google cache/service-worker storage cleared via CDP (cookies + localStorage/IndexedDB untouched)", flush=True)
     except Exception as e:
         print(f"{prefix}⚠ CDP origin clear failed (non-fatal): {e}", flush=True)
     return ok
