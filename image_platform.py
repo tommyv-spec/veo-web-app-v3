@@ -9648,40 +9648,24 @@ def _verify_worker_user(authorization: Optional[str], db: Session) -> str:
     return token.user_id
 
 
-def _touch_worker_heartbeat(db: Session, worker_id: Optional[str]):
+def _touch_worker_heartbeat(db: Session, worker_id: Optional[str], user_id: Optional[str]):
     """Upsert the last-heartbeat timestamp for this worker in the DB.
-    DB-backed state is process-agnostic — works correctly whether the
-    webapp runs as a single uvicorn process or under gunicorn with N
-    worker processes.
-
-    v518/v545: throttled last-heartbeat writes. Workers poll
-    /worker/heartbeat every 5 seconds when idle, which previously meant
-    a commit per poll. Throttling reduces DB write load while keeping
-    the row fresh enough for the online indicator.
-
-    v545: throttle window 5s → 4s. The previous 5s window matched the
-    worker's send interval exactly, so timing jitter routinely caused
-    every other heartbeat to skip the write — leaving the DB row
-    sometimes 10s+ old, right at the stale-window edge. With 4s, the
-    worker's 5s sends are reliably accepted and the row is updated at
-    the worker's actual cadence.
-    """
+    v545: 4s throttle. v759: also stamps user_id so the online lookup
+    scopes per account."""
     wid = worker_id or "default"
     row = db.query(ImageWorkerHeartbeat).filter(
         ImageWorkerHeartbeat.worker_id == wid
     ).first()
     now = datetime.utcnow()
     if row is None:
-        row = ImageWorkerHeartbeat(worker_id=wid, last_heartbeat_at=now)
+        row = ImageWorkerHeartbeat(worker_id=wid, user_id=user_id, last_heartbeat_at=now)
         db.add(row)
         db.commit()
         return
-    # v545: 4s throttle (was 5s). Worker sends every 5s, so any value
-    # below 5 ensures the write is accepted on every send. 4s gives a
-    # 1s safety margin for jitter without reducing the DB write rate.
     age = (now - row.last_heartbeat_at).total_seconds() if row.last_heartbeat_at else 999
-    if age < 4.0:
-        return  # skip — recent enough
+    if age < 4.0 and row.user_id == user_id:
+        return  # skip — recent enough and owner unchanged
+    row.user_id = user_id
     row.last_heartbeat_at = now
     db.commit()
 
@@ -9707,12 +9691,10 @@ def worker_heartbeat(
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db_session),
 ):
-    """Worker pings this on every poll cycle. Counted toward 'online'
-    indicator in the UI. Persisted in DB so multi-process webapp
-    deployments see a consistent online status."""
-    _verify_worker_key(authorization)
-    _touch_worker_heartbeat(db, worker_id)
-    return {"ok": True}
+    """Worker pings this on every poll cycle. v759: per-user heartbeat."""
+    user_id = _verify_worker_user(authorization, db)
+    _touch_worker_heartbeat(db, worker_id, user_id)
+    return {"ok": True, "user_id": user_id}
 
 
 @router.post("/worker/release-claims")
@@ -9856,7 +9838,7 @@ def worker_get_pending_job(
     reference inputs.
     """
     _verify_worker_key(authorization)
-    _touch_worker_heartbeat(db, worker_id)
+    _touch_worker_heartbeat(db, worker_id, None)
 
     # v753 — parse exclude list
     exclude_ids: List[int] = []
