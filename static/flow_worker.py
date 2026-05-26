@@ -3152,6 +3152,11 @@ def fail_clip_general_policy(clip_id, message):
     except Exception as _e:
         print(f"[policy] general-policy fail POST failed for clip {clip_id}: {_e}", flush=True)
         update_clip_status(clip_id, 'failed', error_message=message)
+    # Drop the per-clip attempt count so a later user-initiated Retry of this
+    # clip starts the same->swap->fail sequence fresh (and the dict doesn't grow).
+    with _POLICY_GEN_LOCK:
+        _POLICY_GEN_ATTEMPTS.pop(clip_id, None)
+    _POLICY_SWAP_DONE.pop(clip_id, None)
 
 
 def clear_flow_site_data(page, label=""):
@@ -11624,7 +11629,7 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
             end_frame_key = clip.get('end_frame_key')
             
             if start_frame_key in blacklisted_images or end_frame_key in blacklisted_images:
-                report_policy_violation(clip['id'], rejected_image_key=start_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
+                report_policy_violation(clip['id'], rejected_image_key=(end_frame_key if end_frame_key in blacklisted_images else start_frame_key), detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
                 permanently_failed_clips.add(clip_index)
                 return (False, start_frame, end_frame, start_frame_key, end_frame_key)
             
@@ -15782,7 +15787,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 has_new_frames = has_new_start or has_new_end
                 if start_frame_key in blacklisted_images or end_frame_key in blacklisted_images:
                     print(f"[Flow] ❌ Clip {i+1}: all images blacklisted after reassign", flush=True)
-                    report_policy_violation(clip['id'], rejected_image_key=start_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
+                    report_policy_violation(clip['id'], rejected_image_key=(end_frame_key if end_frame_key in blacklisted_images else start_frame_key), detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
                     permanently_failed_clips.add(clip_index)
                     prev_start_frame_key = start_frame_key
                     prev_end_frame_key = end_frame_key
