@@ -9561,6 +9561,7 @@ def worker_status(
     try:
         freshest = (
             db.query(ImageWorkerHeartbeat)
+            .filter(ImageWorkerHeartbeat.user_id == current_user.id)
             .order_by(ImageWorkerHeartbeat.last_heartbeat_at.desc())
             .first()
         )
@@ -9670,13 +9671,16 @@ def _touch_worker_heartbeat(db: Session, worker_id: Optional[str], user_id: Opti
     db.commit()
 
 
-def _worker_http_is_online(db: Session) -> bool:
-    """Any heartbeat row within the stale window counts as online."""
+def _worker_http_is_online(db: Session, user_id: Optional[str] = None) -> bool:
+    """Any heartbeat row within the stale window counts as online.
+    v759: when user_id is given, only rows owned by that user count."""
     cutoff = datetime.utcnow() - timedelta(seconds=WORKER_HEARTBEAT_STALE_SECONDS)
-    fresh = db.query(ImageWorkerHeartbeat).filter(
+    q = db.query(ImageWorkerHeartbeat).filter(
         ImageWorkerHeartbeat.last_heartbeat_at >= cutoff
-    ).first()
-    return fresh is not None
+    )
+    if user_id is not None:
+        q = q.filter(ImageWorkerHeartbeat.user_id == user_id)
+    return q.first() is not None
 
 
 @router.get("/worker/health")
