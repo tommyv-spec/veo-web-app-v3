@@ -9718,6 +9718,7 @@ def worker_heartbeat(
 ):
     """Worker pings this on every poll cycle. v759: per-user heartbeat."""
     user_id = _verify_worker_user(authorization, db)
+    log.info(f"[image_platform][v759-diag] heartbeat worker={worker_id} user={user_id}")
     _touch_worker_heartbeat(db, worker_id, user_id)
     return {"ok": True, "user_id": user_id}
 

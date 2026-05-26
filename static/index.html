@@ -14233,8 +14233,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const isOnline = window._imgWorkerDisplayedOnline;
 
                 const indicator = isOnline
-                    ? '<span style="color:var(--success);">● Online</span>'
-                    : '<span style="color:var(--error);">● Offline</span>';
+                    ? '<span style="color:var(--success);">Your image worker: ● Online</span>'
+                    : '<span style="color:var(--error);">Your image worker: ● Offline</span>';
                 // v758 — show the heartbeat age for HTTP-pull workers too (the
                 // filesystem age is null for them). Surfacing the age + worker_id
                 // lets the operator see a stale/zombie row instead of a bare

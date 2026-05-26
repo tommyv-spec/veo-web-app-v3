@@ -7473,7 +7473,11 @@ Examples:
             interactive_mode(page)
 
         elif args.api_url:
-            api_key = args.api_key or os.environ.get("LOCAL_WORKER_API_KEY", "local-worker-secret-key-12345")
+            api_key = args.api_key or os.environ.get("LOCAL_WORKER_API_KEY")
+            if not api_key:
+                print("[IMAGE] ERROR: no worker token. Re-download the installer "
+                      "from the website (it bakes your per-account token).", flush=True)
+                sys.exit(1)
             if args.parallel >= 2:
                 cross_batch_mode = bool(getattr(args, 'cross_batch', False))
                 # Cross-batch auto-enables once inside api_pull_mode_parallel
