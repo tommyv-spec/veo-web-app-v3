@@ -3067,6 +3067,17 @@ MAX_AUTO_REDO_CYCLES = 2  # delayed-hard-failures per clip before giving up
 _AUTO_REDO_CYCLES = {}    # clip_id -> int (cumulative delayed-hard-failures)
 _AUTO_REDO_LOCK = threading.Lock()
 
+# v758.24 — bound the unusual-activity golden-restore loop per job. Each
+# "unusual activity" block triggers a golden restore (clean profile reliably
+# clears it). But a golden restore RESETS the account's throttle cooldown, so
+# an unbounded loop on a genuinely-flagged account makes Google throttling
+# worse, not better (see flow-worker-throttle-redo-dynamics). After this many
+# golden restores for one job, give up and fail the job's clips with an
+# actionable message; the operator can Retry once the account cools off.
+MAX_UNUSUAL_GOLDEN_RESTORES = 4  # per job, then fail instead of restoring again
+_UNUSUAL_GOLDEN_RESTORES = {}    # job_id -> int (cumulative golden restores)
+_UNUSUAL_GR_LOCK = threading.Lock()
+
 
 def register_auto_redo_cycle(clip_id):
     """Record one delayed-hard-failure cycle for this clip and return the new
@@ -16110,7 +16121,35 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # raise string matches the existing "stopping job to trigger golden
             # restore" branch in _process_parallel_job / _process_job_with_failover,
             # which force-marks the account HOT so run() golden-restores + self-resumes.
-            print(f"[Flow] 🔥 v758.24: 'unusual activity' on job {job_id[:8]} — stopping job to trigger golden restore (cookie-clear can't re-auth into Flow)", flush=True)
+            with _UNUSUAL_GR_LOCK:
+                _gr_count = _UNUSUAL_GOLDEN_RESTORES.get(job_id, 0) + 1
+                _UNUSUAL_GOLDEN_RESTORES[job_id] = _gr_count
+            if _gr_count > MAX_UNUSUAL_GOLDEN_RESTORES:
+                # Block persists after N golden restores — the account is
+                # genuinely flagged. Stop looping (more golden restores just
+                # reset the throttle cooldown and worsen the block). Fail the
+                # job's clips with an actionable message; operator retries later.
+                print(f"[Flow] ⛔ v758.24: 'unusual activity' persists after {MAX_UNUSUAL_GOLDEN_RESTORES} golden restores on job {job_id[:8]} — giving up (account flagged; retry later)", flush=True)
+                _to_fail = [clip] + clips[i+1:] + [c for c in clips[:i] if c.get('status') in ('generating', 'pending')]
+                for _c in _to_fail:
+                    try:
+                        update_clip_status(_c['id'], 'failed',
+                            error_message=(f"Account hit 'unusual activity' and stayed blocked after "
+                                           f"{MAX_UNUSUAL_GOLDEN_RESTORES} golden restores. The Google account is "
+                                           f"rate-limited — wait a while, then click Retry."))
+                    except Exception:
+                        pass
+                update_job_status(job_id, 'failed')
+                if job_id in cache.get('jobs', {}):
+                    cache['jobs'][job_id]['status'] = 'failed'
+                    cache['jobs'][job_id]['project_url'] = None
+                    save_cache(cache)
+                with _UNUSUAL_GR_LOCK:
+                    _UNUSUAL_GOLDEN_RESTORES.pop(job_id, None)
+                with _UNUSUAL_ACTIVITY_LOCK:
+                    _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
+                raise Exception(f"Job {job_id} aborted — unusual activity persists after {MAX_UNUSUAL_GOLDEN_RESTORES} golden restores")
+            print(f"[Flow] 🔥 v758.24: 'unusual activity' on job {job_id[:8]} (golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}) — stopping job to trigger golden restore (cookie-clear can't re-auth into Flow)", flush=True)
             update_clip_status(clip['id'], 'pending', error_message=None)
             for rc in clips[i+1:]:
                 update_clip_status(rc['id'], 'pending', error_message=None)
