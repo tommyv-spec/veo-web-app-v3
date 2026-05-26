@@ -56,8 +56,9 @@ def get_openai_key_from_env() -> Optional[str]:
 
 
 # Higgsfield Kling image-to-video backend (opt-in add-on; Veo/Flow stays default).
-# Verify a newer Kling 3.0 slug at https://cloud.higgsfield.ai/explore before bumping.
-KLING_I2V_SLUG = "kling-video/v2.1/pro/image-to-video"
+# Override with HF_KLING_SLUG in Render once the Kling 3.0 model_id is known
+# (grab it from cloud.higgsfield.ai/explore → model → API/Code panel).
+KLING_I2V_SLUG = os.environ.get("HF_KLING_SLUG", "kling-video/v2.1/pro/image-to-video")
 
 
 def get_higgsfield_credentials_from_env() -> Optional[str]:
