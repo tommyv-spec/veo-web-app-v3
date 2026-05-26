@@ -20269,8 +20269,11 @@ def _kling_drain_loop():
     hdr = {"Authorization": f"Bearer {API_KEY}"}
     base = f"{WEB_APP_URL}{API_PATH_PREFIX}"
     url_re = _re.compile(r"https?://[^\s\"']+\.mp4", _re.I)
-    # Ensure the higgsfield CLI is installed + authenticated — guided, like the
-    # Flow personal login (auto-install, then open the login browser once).
+    # Ensure the higgsfield CLI is present + authenticated — guided, like the
+    # Flow personal login. The CLI is a standalone native binary (NO Node
+    # needed): if it isn't on PATH we download the `hf` binary for this OS from
+    # GitHub Releases into the worker dir, then run `hf auth login` once.
+    import platform as _plat
     def _run(cmd, timeout=60):
         try:
             return _sub.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -20279,20 +20282,57 @@ def _kling_drain_loop():
                 returncode = 1; stdout = ""; stderr = ""
             return _R()
 
-    def _cli_ok():
-        return _run([hf_cli, "version"]).returncode == 0
+    worker_dir = os.path.dirname(os.path.abspath(__file__))
+    _bin_name = "hf.exe" if _plat.system() == "Windows" else "hf"
+    local_hf = os.path.join(worker_dir, _bin_name)
 
     def _authed():
-        # `higgsfield account` succeeds only when logged in.
         return _run([hf_cli, "account"]).returncode == 0
 
-    if not _cli_ok():
-        print("[kling-local] installing higgsfield CLI (npm i -g @higgsfield/cli)…", flush=True)
-        _run(["npm", "install", "-g", "@higgsfield/cli"], timeout=300)
-        if not _cli_ok():
-            print("[kling-local] higgsfield CLI unavailable (needs Node/npm). Kling disabled; "
-                  "Flow unaffected. Retries next launch.", flush=True)
-            return
+    def _download_hf_binary():
+        import io as _io, tarfile as _tar, zipfile as _zip
+        sysname = {"Windows": "windows", "Darwin": "darwin", "Linux": "linux"}.get(_plat.system())
+        mach = _plat.machine().lower()
+        arch = "arm64" if mach in ("arm64", "aarch64") else "amd64"
+        rel = requests.get("https://api.github.com/repos/higgsfield-ai/cli/releases/latest",
+                           headers={"User-Agent": "flow-worker"}, timeout=30).json()
+        want = f"{sysname}_{arch}"
+        asset = next((a for a in rel.get("assets", [])
+                      if want in a["name"] and (a["name"].endswith(".tar.gz") or a["name"].endswith(".zip"))), None)
+        if not asset:
+            raise RuntimeError(f"no release asset for {want}")
+        print(f"[kling-local] downloading {asset['name']} (no Node needed)…", flush=True)
+        data = requests.get(asset["browser_download_url"], headers={"User-Agent": "flow-worker"}, timeout=300).content
+        if asset["name"].endswith(".zip"):
+            z = _zip.ZipFile(_io.BytesIO(data))
+            m = next((n for n in z.namelist() if n.endswith("hf.exe") or n.rstrip("/").endswith("hf")), None)
+            with z.open(m) as s, open(local_hf, "wb") as o:
+                o.write(s.read())
+        else:
+            t = _tar.open(fileobj=_io.BytesIO(data), mode="r:gz")
+            m = next((mm for mm in t.getmembers() if mm.name.endswith("hf.exe") or mm.name.endswith("hf")), None)
+            with t.extractfile(m) as s, open(local_hf, "wb") as o:
+                o.write(s.read())
+        try:
+            os.chmod(local_hf, 0o755)
+        except Exception:
+            pass
+
+    # Resolve a working binary: PATH `higgsfield` → previously-downloaded local → fresh download.
+    if _run([hf_cli, "version"]).returncode != 0:
+        if os.path.exists(local_hf) and _run([local_hf, "version"]).returncode == 0:
+            hf_cli = local_hf
+        else:
+            try:
+                _download_hf_binary()
+            except Exception as e:
+                print(f"[kling-local] could not obtain hf binary ({e}) — Kling disabled; Flow unaffected. Retries next launch.", flush=True)
+                return
+            if _run([local_hf, "version"]).returncode == 0:
+                hf_cli = local_hf
+            else:
+                print("[kling-local] hf binary not runnable — Kling disabled (Flow unaffected).", flush=True)
+                return
 
     if not _authed():
         print("[kling-local] opening Higgsfield login (one-time, like your Flow login)…", flush=True)
@@ -20301,7 +20341,7 @@ def _kling_drain_loop():
             print("[kling-local] Higgsfield not logged in yet — Kling disabled until login completes "
                   "(retries next launch).", flush=True)
             return
-    print("[kling-local] higgsfield ready (CLI + auth).", flush=True)
+    print(f"[kling-local] higgsfield ready (CLI={hf_cli}, authed).", flush=True)
 
     def _find_url(o):
         if isinstance(o, str):
