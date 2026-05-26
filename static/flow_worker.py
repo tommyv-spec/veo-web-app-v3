@@ -20464,6 +20464,12 @@ def _kling_drain_loop():
                            "--wait", "--wait-timeout", f"{gen_timeout}s", "--json"]
                     print(f"[kling-local] clip {ci}: generating Kling 3.0…", flush=True)
                     p = _sub.run(cmd, capture_output=True, text=True, timeout=gen_timeout + 60)
+                    # Token expired mid-run? Re-login (browser) once and retry.
+                    _outl = (p.stdout + p.stderr).lower()
+                    if p.returncode != 0 and ("not authenticated" in _outl or "auth login" in _outl or "session expired" in _outl):
+                        print("[kling-local] session expired — re-opening Higgsfield login, then retrying clip…", flush=True)
+                        _sub.run([hf_cli, "auth", "login"], capture_output=True, text=True, timeout=300)
+                        p = _sub.run(cmd, capture_output=True, text=True, timeout=gen_timeout + 60)
                     try:
                         os.remove(fp)
                     except Exception:
