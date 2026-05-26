@@ -11507,17 +11507,23 @@ async def user_worker_get_kling_clips(
     import os as _os
     from datetime import timedelta as _td
 
+    # User's job ids (used to scope clip queries without an UPDATE..JOIN,
+    # which SQLAlchemy ORM .update() does not support).
+    user_job_ids = [row[0] for row in db.query(Job.id).filter(Job.user_id == user_id).all()]
+    if not user_job_ids:
+        return {"clips": []}
+
     # Release stale claims (>15 min stuck in 'processing').
     stale_cut = datetime.utcnow() - _td(minutes=15)
-    db.query(Clip).join(Job).filter(
-        Job.user_id == user_id,
+    db.query(Clip).filter(
+        Clip.job_id.in_(user_job_ids),
         Clip.kling_variant_status == 'processing',
         Clip.claimed_at < stale_cut,
     ).update({Clip.kling_variant_status: 'queued'}, synchronize_session=False)
     db.commit()
 
-    clips = db.query(Clip).join(Job).filter(
-        Job.user_id == user_id,
+    clips = db.query(Clip).filter(
+        Clip.job_id.in_(user_job_ids),
         Clip.kling_variant_status == 'queued',
     ).order_by(Clip.id.asc()).limit(5).all()
 
