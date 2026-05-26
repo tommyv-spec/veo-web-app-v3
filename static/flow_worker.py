@@ -20247,9 +20247,116 @@ def recover_stuck_jobs(cache):
             print("  ✓ Download status cleared - run worker to retry")
 
 
+def _kling_drain_loop():
+    """Background: drain the platform's Kling-variant queue via the local
+    `higgsfield` CLI (Kling 3.0 + audio). Runs alongside Flow generation so
+    Kling variants happen automatically — no separate command. If the CLI is
+    absent/unauthed it logs once and disables itself (Flow keeps working)."""
+    import json as _json, re as _re, subprocess as _sub, tempfile as _tf, time as _t
+    if not API_KEY:
+        return
+    hf_cli = os.environ.get("HF_CLI", "higgsfield")
+    model = os.environ.get("HF_KLING_MODEL", "kling3_0")
+    sound = os.environ.get("HF_KLING_SOUND", "on")
+    gen_timeout = int(os.environ.get("KLING_GEN_TIMEOUT", "900"))
+    poll = int(os.environ.get("KLING_POLL_INTERVAL", "20"))
+    hdr = {"Authorization": f"Bearer {API_KEY}"}
+    base = f"{WEB_APP_URL}{API_PATH_PREFIX}"
+    url_re = _re.compile(r"https?://[^\s\"']+\.mp4", _re.I)
+    try:
+        _sub.run([hf_cli, "version"], capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        print(f"[kling-local] CLI `{hf_cli}` unavailable ({e}) — Kling variants disabled. "
+              f"Install once: npm i -g @higgsfield/cli && higgsfield auth login", flush=True)
+        return
+
+    def _find_url(o):
+        if isinstance(o, str):
+            m = url_re.search(o); return m.group(0) if m else None
+        if isinstance(o, dict):
+            for k in ("result_url", "url", "video_url", "output_url"):
+                if o.get(k):
+                    f = _find_url(o[k])
+                    if f:
+                        return f
+            for v in o.values():
+                f = _find_url(v)
+                if f:
+                    return f
+        if isinstance(o, (list, tuple)):
+            for v in o:
+                f = _find_url(v)
+                if f:
+                    return f
+        return None
+
+    print(f"[kling-local] drain started (model={model}, sound={sound})", flush=True)
+    while True:
+        try:
+            r = requests.get(f"{base}/clips/kling-pending", headers=hdr,
+                             params={"worker_id": WORKER_ID}, timeout=30)
+            if r.status_code == 401:
+                _t.sleep(poll); continue
+            r.raise_for_status()
+            clips = r.json().get("clips", [])
+            if not clips:
+                _t.sleep(poll); continue
+            for c in clips:
+                ci = c.get("clip_index"); jid = c.get("job_id")
+                try:
+                    fr = requests.get(c["start_frame_url"], headers=hdr, timeout=60)
+                    fr.raise_for_status()
+                    sfx = ".png" if "png" in c["start_frame_url"].lower() else ".jpg"
+                    with _tf.NamedTemporaryFile(delete=False, suffix=sfx) as tf:
+                        tf.write(fr.content); fp = tf.name
+                    cmd = [hf_cli, "generate", "create", model,
+                           "--prompt", c.get("prompt") or "",
+                           "--start-image", fp,
+                           "--duration", str(int(c.get("duration") or 5)),
+                           "--sound", sound,
+                           "--wait", "--wait-timeout", f"{gen_timeout}s", "--json"]
+                    print(f"[kling-local] clip {ci}: generating Kling 3.0…", flush=True)
+                    p = _sub.run(cmd, capture_output=True, text=True, timeout=gen_timeout + 60)
+                    try:
+                        os.remove(fp)
+                    except Exception:
+                        pass
+                    if p.returncode != 0:
+                        print(f"[kling-local] clip {ci} CLI failed: {(p.stdout + p.stderr).strip()[:300]}", flush=True)
+                        continue
+                    vurl = None
+                    try:
+                        vurl = _find_url(_json.loads(p.stdout.strip()))
+                    except Exception:
+                        pass
+                    if not vurl:
+                        m = url_re.search(p.stdout + p.stderr)
+                        vurl = m.group(0) if m else None
+                    if not vurl:
+                        print(f"[kling-local] clip {ci}: no result URL in CLI output", flush=True)
+                        continue
+                    mp4 = requests.get(vurl, timeout=180); mp4.raise_for_status()
+                    fn = f"clip_{ci}_9.1.mp4"  # attempt 9 = Kling marker (distinct from Flow 1.x)
+                    up = requests.post(f"{base}/jobs/{jid}/upload-video/{ci}", headers=hdr,
+                                       files={"file": (fn, mp4.content, "video/mp4")}, timeout=180)
+                    up.raise_for_status()
+                    print(f"[kling-local] clip {ci}: Kling variant uploaded ✓", flush=True)
+                except Exception as e:
+                    print(f"[kling-local] clip {ci} error: {e}", flush=True)
+        except Exception as e:
+            print(f"[kling-local] poll error: {e}", flush=True)
+            _t.sleep(poll)
+
+
 if __name__ == "__main__":
     import sys
     import argparse
+    # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
+    try:
+        import threading as _kthread
+        _kthread.Thread(target=_kling_drain_loop, daemon=True).start()
+    except Exception as _ke:
+        print(f"[kling-local] could not start drain thread: {_ke}", flush=True)
 
     # ── DISPLAY: ensure Xvfb is reachable for headless:false Chrome on VPS ──
     # When launched from SSH, DISPLAY is not set even if Xvfb is running on :99.
