@@ -3067,6 +3067,37 @@ MAX_AUTO_REDO_CYCLES = 2  # delayed-hard-failures per clip before giving up
 _AUTO_REDO_CYCLES = {}    # clip_id -> int (cumulative delayed-hard-failures)
 _AUTO_REDO_LOCK = threading.Lock()
 
+# v760 — per-clip attempt timeline. Every submit/restore/redo/policy/complete
+# logs a tagged line so the operator can grep ONE clip's full history:
+#   [clip 3 attempt 2] SUBMITTED
+#   [clip 3 attempt 2] RESTORE — unusual-activity (golden restore 1/4)
+#   [clip 3 attempt 3] COMPLETED
+# `attempt` increments on each real submit of that clip (fresh / redo / resubmit
+# after restore), keyed by the DB clip id so it survives across restores.
+_CLIP_ATTEMPTS = {}   # clip_id -> attempt number
+_CLIP_ATTEMPT_LOCK = threading.Lock()
+
+
+def clip_attempt_inc(clip_id):
+    """Bump and return this clip's attempt number (call once per real submit)."""
+    if not clip_id:
+        return 0
+    with _CLIP_ATTEMPT_LOCK:
+        _CLIP_ATTEMPTS[clip_id] = _CLIP_ATTEMPTS.get(clip_id, 0) + 1
+        return _CLIP_ATTEMPTS[clip_id]
+
+
+def clip_log(clip_id, clip_index, event, reason=""):
+    """Emit a per-clip timeline line: [clip N attempt M] EVENT — reason.
+    grep `attempt M` or `clip N` to follow one clip across the whole run."""
+    with _CLIP_ATTEMPT_LOCK:
+        m = _CLIP_ATTEMPTS.get(clip_id, 0)
+    n = (clip_index + 1) if isinstance(clip_index, int) else "?"
+    line = f"[clip {n} attempt {m}] {event}"
+    if reason:
+        line += f" — {reason}"
+    print(line, flush=True)
+
 # v758.24 — bound the unusual-activity golden-restore loop per job. Each
 # "unusual activity" block triggers a golden restore (clean profile reliably
 # clears it). But a golden restore RESETS the account's throttle cooldown, so
@@ -4494,9 +4525,11 @@ class HumanPacer:
                                         if _pa == 'fail':
                                             fail_clip_general_policy(clip_id, _pmsg)
                                             print(f"[{self.account_name}] [PolicyScan] ❌ Clip {_fail_ci+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
+                                            clip_log(clip_id, _fail_ci, "FAILED", "generation policy (blocked on both models)")
                                         else:
                                             update_clip_status(clip_id, 'flow_redo_queued', error_message=_pmsg)
                                             print(f"[{self.account_name}] [PolicyScan] 🔀 Clip {_fail_ci+1} policy-blocked — {_pa} + requeuing redo", flush=True)
+                                            clip_log(clip_id, _fail_ci, "REDO", f"generation policy, {_pa}")
                 except Exception:
                     pass
             gap = random.uniform(2, 6)
@@ -5554,6 +5587,7 @@ def report_policy_violation(clip_id, rejected_image_key=None, detail=None):
             f"awaiting user image replacement",
             flush=True,
         )
+        clip_log(clip_id, None, "FAILED", "image content policy (e.g. prominent people) — replace-image card shown")
         return result
     # Fallback so the clip doesn't dangle in 'generating' if the endpoint
     # is missing on the deployed server (e.g. mid-rollout).
@@ -16018,6 +16052,8 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # Record submission time BEFORE failcheck (needed for download timing)
         clip_submit_times[clip_index] = datetime.now()
         print(f"[Flow] Clip {clip_index+1} submitted at {clip_submit_times[clip_index].strftime('%H:%M:%S')}", flush=True)
+        clip_attempt_inc(clip.get('id'))
+        clip_log(clip.get('id'), clip_index, "SUBMITTED")
 
         # v700 — bind primaryMediaId(s) from the just-captured submit response(s).
         try:
@@ -16181,6 +16217,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # reset the throttle cooldown and worsen the block). Fail the
                 # job's clips with an actionable message; operator retries later.
                 print(f"[Flow] ⛔ v758.24: 'unusual activity' persists after {MAX_UNUSUAL_GOLDEN_RESTORES} golden restores on job {job_id[:8]} — giving up (account flagged; retry later)", flush=True)
+                clip_log(clip.get('id'), clip_index, "FAILED", f"unusual-activity persisted after {MAX_UNUSUAL_GOLDEN_RESTORES} golden restores (account rate-limited)")
                 _to_fail = [clip] + clips[i+1:] + [c for c in clips[:i] if c.get('status') in ('generating', 'pending')]
                 for _c in _to_fail:
                     if _c.get('status') == 'completed':
@@ -16203,6 +16240,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
                 raise Exception(f"Job {job_id} aborted — unusual activity persists after {MAX_UNUSUAL_GOLDEN_RESTORES} golden restores")
             print(f"[Flow] 🔥 v758.24: 'unusual activity' on job {job_id[:8]} (golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}) — stopping job to trigger golden restore (cookie-clear can't re-auth into Flow)", flush=True)
+            clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}")
             if clip.get('status') != 'completed':
                 update_clip_status(clip['id'], 'pending', error_message=None)
             for rc in clips[i+1:]:
@@ -16221,6 +16259,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
 
         if clip_failed:
             print(f"[Flow] ⚠️ Clip {clip_index+1} failed immediately — stopping submission and triggering restore...", flush=True)
+            clip_log(clip.get('id'), clip_index, "RESTORE", "failed immediate check — re-queue + golden restore")
             # v758.25 — refresh DB truth so the 'generating' filter below excludes
             # clips the HTTP worker already completed (stale in-memory status would
             # otherwise reset a done clip to pending = "waiting" again in the UI).
@@ -16349,6 +16388,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             })
             backfill_clip_submit_times(clip_submit_times, clips, job_id=job_id, cache=cache)
             print(f"[Flow] ✓ Queued for download after clip {clip_index+1} passed check (parallel mode)", flush=True)
+            clip_log(clip.get('id'), clip_index, "PASSED check → generating, queued for download")
             download_queued = True
 
         # Proactive restore raise AFTER queueing — so download thread always gets job_data
@@ -16430,10 +16470,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                     f"Gave up to stop the retry loop. Click Retry to try again, "
                                     f"or change the prompt/image."))
                             print(f"[Flow] ⛔ clip {_dfc+1} hard-failed {_df_cycles}x — marking FAILED (auto-redo cap {MAX_AUTO_REDO_CYCLES} reached), not re-queuing", flush=True)
+                            clip_log(_df_clip['id'], _dfc, "FAILED", f"hard failure x{_df_cycles} (auto-redo cap reached)")
                         else:
                             update_clip_status(_df_clip['id'], 'flow_redo_queued',
                                 error_message="Flow delayed failure — clip generated then killed by Flow")
                             print(f"[Flow] ↩ clip {_dfc+1} hard-failed {_df_cycles}x — re-queuing for redo (auto-redo cap {MAX_AUTO_REDO_CYCLES})", flush=True)
+                            clip_log(_df_clip['id'], _dfc, "REDO", f"hard failure x{_df_cycles}, re-queuing")
                         if auto_redo_exhausted(_df_cycles):
                             # Gave up — drop the counter so a future user Retry
                             # starts fresh and the dict doesn't accumulate.
@@ -18099,6 +18141,7 @@ class AccountWorker(threading.Thread):
                     if all_ok or any_ok:
                         update_clip_status(clip_id, 'completed')
                         print(f"[{account_name}-HTTP-DL] ✓ Clip {ci+1} done — marked completed", flush=True)
+                        clip_log(clip_id, ci, "COMPLETED")
                         total_job_clips = item.get('total_job_clips')
                         if total_job_clips:
                             try:
