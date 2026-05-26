@@ -3114,6 +3114,46 @@ def _swap_model_for_policy(current_model):
     return "Omni Flash"
 
 
+# v759 — GENERATION-policy ("this generation might violate our policies")
+# retry sequence per clip: block 1 -> retry SAME model, block 2 -> retry
+# DIFFERENT model (swap), block 3 -> give up with a general policy error.
+# (IMAGE policy — PROMINENT_PEOPLE caught at uploadImage — is handled
+# separately by registering the image non-compliant; see report_policy_violation.)
+GEN_POLICY_ERROR_CODE = "GENERATION_POLICY"
+_POLICY_GEN_ATTEMPTS = {}   # clip_id -> generation-policy blocks seen this run
+_POLICY_GEN_LOCK = threading.Lock()
+
+
+def policy_gen_next_action(clip_id, current_model):
+    """Decide what to do on a generation-policy block for this clip.
+    Returns (action, message): action is 'retry_same' | 'retry_swap' | 'fail'.
+    On 'retry_swap' the swapped model is recorded in _POLICY_SWAP_DONE so the
+    redo picks it up; 'retry_same' leaves it unset so the redo keeps the
+    original model."""
+    with _POLICY_GEN_LOCK:
+        n = _POLICY_GEN_ATTEMPTS.get(clip_id, 0) + 1
+        _POLICY_GEN_ATTEMPTS[clip_id] = n
+    if n == 1:
+        return ('retry_same', "Policy block — retrying same model")
+    if n == 2:
+        swap = _swap_model_for_policy(current_model)
+        _POLICY_SWAP_DONE[clip_id] = swap
+        return ('retry_swap', f"Policy block — retrying with {swap}")
+    return ('fail', "⚠️ Generation blocked by Flow content policy after retrying both models — try a different prompt.")
+
+
+def fail_clip_general_policy(clip_id, message):
+    """Mark a clip failed with the GENERATION_POLICY error_code. Uses a direct
+    /status POST because update_clip_status can't set error_code. NOT
+    image-attributable — no replace-image card; the user must change the prompt."""
+    try:
+        api_request_ex("POST", f"/clips/{clip_id}/status",
+                       {"status": "failed", "error_message": message, "error_code": GEN_POLICY_ERROR_CODE})
+    except Exception as _e:
+        print(f"[policy] general-policy fail POST failed for clip {clip_id}: {_e}", flush=True)
+        update_clip_status(clip_id, 'failed', error_message=message)
+
+
 def clear_flow_site_data(page, label=""):
     """Clear the labs.google COOKIES + CACHE layers to lift the "unusual
     activity" block, while PRESERVING localStorage / sessionStorage / IndexedDB.
@@ -4445,14 +4485,13 @@ class HumanPacer:
                                         # PROMINENT_PEOPLE path handles bad images → "different
                                         # image"). So fail with a try-a-different-PROMPT message
                                         # and KEEP the image; do NOT render the replace-image card.
-                                        if clip_id not in _POLICY_SWAP_DONE:
-                                            _swap = _swap_model_for_policy(getattr(page, "_veo_model", ""))
-                                            _POLICY_SWAP_DONE[clip_id] = _swap
-                                            update_clip_status(clip_id, 'flow_redo_queued', error_message=f"Policy block — retrying with {_swap}")
-                                            print(f"[{self.account_name}] [PolicyScan] 🔀 Clip {_fail_ci+1} policy-blocked — swapping model to {_swap} + requeuing redo", flush=True)
+                                        _pa, _pmsg = policy_gen_next_action(clip_id, getattr(page, "_veo_model", ""))
+                                        if _pa == 'fail':
+                                            fail_clip_general_policy(clip_id, _pmsg)
+                                            print(f"[{self.account_name}] [PolicyScan] ❌ Clip {_fail_ci+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
                                         else:
-                                            update_clip_status(clip_id, 'failed', error_message="⚠️ Generation blocked by Flow content policy on both Omni and Veo — try a different prompt.")
-                                            print(f"[{self.account_name}] [PolicyScan] ❌ Clip {_fail_ci+1} policy-blocked on BOTH models — failed", flush=True)
+                                            update_clip_status(clip_id, 'flow_redo_queued', error_message=_pmsg)
+                                            print(f"[{self.account_name}] [PolicyScan] 🔀 Clip {_fail_ci+1} policy-blocked — {_pa} + requeuing redo", flush=True)
                 except Exception:
                     pass
             gap = random.uniform(2, 6)
@@ -11585,7 +11624,7 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
             end_frame_key = clip.get('end_frame_key')
             
             if start_frame_key in blacklisted_images or end_frame_key in blacklisted_images:
-                update_clip_status(clip['id'], 'failed', error_message="⚠️ Image rejected by Flow content policy — try a different image")
+                report_policy_violation(clip['id'], rejected_image_key=start_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
                 permanently_failed_clips.add(clip_index)
                 return (False, start_frame, end_frame, start_frame_key, end_frame_key)
             
@@ -11624,7 +11663,7 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
                         break
             
             if not retry_success:
-                update_clip_status(clip['id'], 'failed', error_message="⚠️ Image rejected by Flow content policy — try a different image")
+                report_policy_violation(clip['id'], rejected_image_key=end_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
                 permanently_failed_clips.add(clip_index)
                 return (False, start_frame, end_frame, start_frame_key, end_frame_key)
     
@@ -11684,7 +11723,7 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
                     else:
                         break
                 if not retry_success:
-                    update_clip_status(clip['id'], 'failed', error_message="⚠️ Image rejected by Flow content policy — try a different image")
+                    report_policy_violation(clip['id'], rejected_image_key=start_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
                     permanently_failed_clips.add(clip_index)
                     return (False, start_frame, end_frame, start_frame_key, end_frame_key)
     
@@ -11721,7 +11760,7 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
                     else:
                         break
                 if not retry_success:
-                    update_clip_status(clip['id'], 'failed', error_message="⚠️ Image rejected by Flow content policy — try a different image")
+                    report_policy_violation(clip['id'], rejected_image_key=end_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
                     permanently_failed_clips.add(clip_index)
                     return (False, start_frame, end_frame, start_frame_key, end_frame_key)
     
@@ -13359,14 +13398,13 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                         # violate our policies"), NOT an image rejection — bad images
                         # are caught at uploadImage (→ "different image"). Fail with a
                         # try-a-different-PROMPT message; keep the image.
-                        if clip_id not in _POLICY_SWAP_DONE:
-                            _swap = _swap_model_for_policy(getattr(page, "_veo_model", ""))
-                            _POLICY_SWAP_DONE[clip_id] = _swap
-                            print(f"[REDO] 🔀 Clip {clip_index+1} policy-blocked — swapping model to {_swap} + requeuing redo", flush=True)
-                            update_clip_status(clip_id, 'flow_redo_queued', error_message=f"Policy block — retrying with {_swap}")
+                        _pa, _pmsg = policy_gen_next_action(clip_id, getattr(page, "_veo_model", ""))
+                        if _pa == 'fail':
+                            print(f"[REDO] ❌ Clip {clip_index+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
+                            fail_clip_general_policy(clip_id, _pmsg)
                         else:
-                            print(f"[REDO] ❌ Clip {clip_index+1} policy-blocked on BOTH models — failed", flush=True)
-                            update_clip_status(clip_id, 'failed', error_message="⚠️ Generation blocked by Flow content policy on both Omni and Veo — try a different prompt.")
+                            print(f"[REDO] 🔀 Clip {clip_index+1} policy-blocked — {_pa} + requeuing redo", flush=True)
+                            update_clip_status(clip_id, 'flow_redo_queued', error_message=_pmsg)
                         shutil.rmtree(temp_dir, ignore_errors=True)
                         return False
                 
@@ -15744,7 +15782,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 has_new_frames = has_new_start or has_new_end
                 if start_frame_key in blacklisted_images or end_frame_key in blacklisted_images:
                     print(f"[Flow] ❌ Clip {i+1}: all images blacklisted after reassign", flush=True)
-                    update_clip_status(clip['id'], 'failed', error_message="⚠️ Image rejected by Flow content policy — try a different image")
+                    report_policy_violation(clip['id'], rejected_image_key=start_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
                     permanently_failed_clips.add(clip_index)
                     prev_start_frame_key = start_frame_key
                     prev_end_frame_key = end_frame_key
@@ -16834,17 +16872,16 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                         # image already passed uploadImage (bad images are
                                         # caught there → "different image"). Fail with a
                                         # try-a-different-PROMPT message; keep the image.
-                                        if clip_id not in _POLICY_SWAP_DONE:
-                                            _swap = _swap_model_for_policy(getattr(page, "_veo_model", ""))
-                                            _POLICY_SWAP_DONE[clip_id] = _swap
-                                            update_clip_status(clip_id, 'flow_redo_queued', error_message=f"Policy block — retrying with {_swap}")
-                                            _pending_left.discard(_fail_ci)
-                                            print(f"[Flow] [PolicyScan] 🔀 Clip {_fail_ci+1} policy-blocked — swapping model to {_swap} + requeuing redo", flush=True)
-                                        else:
-                                            update_clip_status(clip_id, 'failed', error_message="⚠️ Generation blocked by Flow content policy on both Omni and Veo — try a different prompt.")
+                                        _pa, _pmsg = policy_gen_next_action(clip_id, getattr(page, "_veo_model", ""))
+                                        if _pa == 'fail':
+                                            fail_clip_general_policy(clip_id, _pmsg)
                                             permanently_failed_clips.add(_fail_ci)
                                             _pending_left.discard(_fail_ci)
-                                            print(f"[Flow] [PolicyScan] ❌ Clip {_fail_ci+1} policy-blocked on BOTH models — failed", flush=True)
+                                            print(f"[Flow] [PolicyScan] ❌ Clip {_fail_ci+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
+                                        else:
+                                            update_clip_status(clip_id, 'flow_redo_queued', error_message=_pmsg)
+                                            _pending_left.discard(_fail_ci)
+                                            print(f"[Flow] [PolicyScan] 🔀 Clip {_fail_ci+1} policy-blocked — {_pa} + requeuing redo", flush=True)
 
                     for _ci in sorted(list(_pending_left)):
                         if _ci in http_enqueued_clips:
