@@ -38,7 +38,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Session, relationship, joinedload, selectinload
 
 # Reuse the existing SQLAlchemy Base so init_db() picks up these models
-from models import Base, get_db_session, get_db, User, read_query_with_retry
+from models import Base, get_db_session, get_db, User, read_query_with_retry, UserWorkerToken
 from config import app_config
 from auth import get_current_user
 
@@ -9622,6 +9622,30 @@ def _verify_worker_key(authorization: Optional[str]):
     if token != _get_worker_api_key():
         raise HTTPException(401, "Invalid API key")
     return True
+
+
+def _verify_worker_user(authorization: Optional[str], db: Session) -> str:
+    """Resolve a Bearer UserWorkerToken to its user_id (BYO image worker).
+
+    Mirrors main.py verify_user_worker_token: per-user token, throttled
+    last_seen write (>60s) to avoid a write storm from frequent polls.
+    Replaces the shared-key _verify_worker_key for all image worker
+    endpoints — each worker now acts only on its owner's jobs.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing Authorization header")
+    token_value = authorization[7:]
+    token = db.query(UserWorkerToken).filter(
+        UserWorkerToken.id == token_value,
+        UserWorkerToken.is_active == True,
+    ).first()
+    if not token:
+        raise HTTPException(401, "Invalid or revoked worker token")
+    now = datetime.utcnow()
+    if token.last_seen is None or (now - token.last_seen).total_seconds() > 60:
+        token.last_seen = now
+        db.commit()
+    return token.user_id
 
 
 def _touch_worker_heartbeat(db: Session, worker_id: Optional[str]):
