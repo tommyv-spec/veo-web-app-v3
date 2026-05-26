@@ -16164,6 +16164,14 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # raise string matches the existing "stopping job to trigger golden
             # restore" branch in _process_parallel_job / _process_job_with_failover,
             # which force-marks the account HOT so run() golden-restores + self-resumes.
+            # v758.25 — refresh DB truth FIRST. The HTTP download worker
+            # completes clips asynchronously, so the in-memory clips[].status is
+            # stale: a clip that already finished still shows 'generating'/'pending'
+            # here. Without this, the reset loops below flip an already-COMPLETED
+            # clip back to 'pending' — which shows "waiting" again in the UI and
+            # re-submits a done clip. refresh_clip_statuses patches clips[].status
+            # from the DB so the 'completed' guards work.
+            refresh_clip_statuses(job)
             with _UNUSUAL_GR_LOCK:
                 _gr_count = _UNUSUAL_GOLDEN_RESTORES.get(job_id, 0) + 1
                 _UNUSUAL_GOLDEN_RESTORES[job_id] = _gr_count
@@ -16175,6 +16183,8 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 print(f"[Flow] ⛔ v758.24: 'unusual activity' persists after {MAX_UNUSUAL_GOLDEN_RESTORES} golden restores on job {job_id[:8]} — giving up (account flagged; retry later)", flush=True)
                 _to_fail = [clip] + clips[i+1:] + [c for c in clips[:i] if c.get('status') in ('generating', 'pending')]
                 for _c in _to_fail:
+                    if _c.get('status') == 'completed':
+                        continue  # never fail a clip that already finished
                     try:
                         update_clip_status(_c['id'], 'failed',
                             error_message=(f"Account hit 'unusual activity' and stayed blocked after "
@@ -16193,9 +16203,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
                 raise Exception(f"Job {job_id} aborted — unusual activity persists after {MAX_UNUSUAL_GOLDEN_RESTORES} golden restores")
             print(f"[Flow] 🔥 v758.24: 'unusual activity' on job {job_id[:8]} (golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}) — stopping job to trigger golden restore (cookie-clear can't re-auth into Flow)", flush=True)
-            update_clip_status(clip['id'], 'pending', error_message=None)
+            if clip.get('status') != 'completed':
+                update_clip_status(clip['id'], 'pending', error_message=None)
             for rc in clips[i+1:]:
-                update_clip_status(rc['id'], 'pending', error_message=None)
+                if rc.get('status') != 'completed':
+                    update_clip_status(rc['id'], 'pending', error_message=None)
             for gc in [c for c in clips[:i] if c.get('status') == 'generating']:
                 update_clip_status(gc['id'], 'pending', error_message=None)
             update_job_status(job_id, 'pending')
@@ -16209,6 +16221,10 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
 
         if clip_failed:
             print(f"[Flow] ⚠️ Clip {clip_index+1} failed immediately — stopping submission and triggering restore...", flush=True)
+            # v758.25 — refresh DB truth so the 'generating' filter below excludes
+            # clips the HTTP worker already completed (stale in-memory status would
+            # otherwise reset a done clip to pending = "waiting" again in the UI).
+            refresh_clip_statuses(job)
             # Record failure so golden restore triggers
             # Mark this clip pending (NOT failed) — it will be retried after restore
             update_clip_status(clip['id'], 'pending', error_message=None)
@@ -16422,12 +16438,13 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             # Gave up — drop the counter so a future user Retry
                             # starts fresh and the dict doesn't accumulate.
                             clear_auto_redo_cycle(_df_clip['id'])
-                # Reset remaining unsubmitted clips to pending
+                # Reset remaining unsubmitted clips to pending (never a completed one)
                 remaining = clips[i+1:]
                 if remaining:
                     print(f"[Flow] ⛔ {len(remaining)} remaining clip(s) reset to pending for retry after restore", flush=True)
                     for rc in remaining:
-                        update_clip_status(rc['id'], 'pending', error_message=None)
+                        if rc.get('status') != 'completed':
+                            update_clip_status(rc['id'], 'pending', error_message=None)
                 # Job → pending, cache → null project
                 update_job_status(job_id, 'pending')
                 if job_id in cache.get('jobs', {}):
