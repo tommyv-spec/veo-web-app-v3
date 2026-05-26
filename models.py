@@ -761,8 +761,10 @@ def _run_migrations_postgresql(engine):
         ("jobs", "has_voice_clone", "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS has_voice_clone BOOLEAN DEFAULT FALSE"),
         # v455: worker abort signal
         ("jobs", "abort_requested", "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS abort_requested BOOLEAN DEFAULT FALSE"),
+        # v759: per-user image worker scoping
+        ("image_worker_heartbeats", "user_id", "ALTER TABLE image_worker_heartbeats ADD COLUMN IF NOT EXISTS user_id TEXT"),
     ]
-    
+
     with engine.connect() as conn:
         for table, column, sql in migrations:
             try:
@@ -822,6 +824,8 @@ def _run_migrations_sqlite(engine):
         ("jobs", "has_voice_clone", "ALTER TABLE jobs ADD COLUMN has_voice_clone INTEGER DEFAULT 0"),
         # v455: worker abort signal
         ("jobs", "abort_requested", "ALTER TABLE jobs ADD COLUMN abort_requested INTEGER DEFAULT 0"),
+        # v759: per-user image worker scoping
+        ("image_worker_heartbeats", "user_id", "ALTER TABLE image_worker_heartbeats ADD COLUMN user_id TEXT"),
     ]
     
     with engine.connect() as conn:

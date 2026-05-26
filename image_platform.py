@@ -1126,10 +1126,15 @@ class ImageWorkerHeartbeat(Base):
     """Per-worker heartbeat timestamp — stored in DB so the online
     indicator works correctly in multi-process webapp deployments
     (uvicorn --workers N on Render). In-memory state would only live in
-    one process, making the status lookup racy across requests."""
+    one process, making the status lookup racy across requests.
+
+    v759: user_id ties each heartbeat row to the account whose
+    UserWorkerToken the worker authed with, so the online indicator and
+    job claiming scope per-user (BYO worker model, matching video)."""
     __tablename__ = "image_worker_heartbeats"
 
     worker_id = Column(String(100), primary_key=True)
+    user_id = Column(String, nullable=True, index=True)
     last_heartbeat_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
