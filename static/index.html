@@ -14286,7 +14286,6 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         window.imgWorkerSetupState.parallel = 2;
                     }
                     const st = window.imgWorkerSetupState;
-                    const oneLinerWin = `powershell -c "irm ${apiUrl}/api/images/worker/download/setup.ps1 | iex"`;
                     helpLine = `
                         <div style="margin-top:10px;padding:12px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:6px;font-size:12px;color:var(--text-secondary);line-height:1.5;">
                             <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
@@ -14330,19 +14329,6 @@ Example: A realistic vertical video of a professional presenter speaking directl
                                     ? 'double-click the <code>.bat</code> file. Approve Chrome permissions if asked.'
                                     : 'unzip, then double-click the <code>.command</code> file. If macOS blocks it, right-click → Open.'}
                                 <br>Log in to Google Flow once if the browser prompts. Keep the terminal window open while generating.
-                            </div>
-
-                            <!-- Advanced / manual fallback -->
-                            <div style="margin-top:10px;border-top:1px solid rgba(128,128,128,0.2);padding-top:8px;">
-                                <a href="#" onclick="imgToggleWorkerAdvanced(event)" id="imgAdvToggle" style="color:var(--text-muted);font-size:10px;text-decoration:none;">Advanced / manual setup ▾</a>
-                                <div id="imgAdvBlock" style="display:none;margin-top:8px;font-size:11px;color:var(--text-muted);line-height:1.5;">
-                                    <strong>Windows one-liner</strong> (paste into PowerShell):
-                                    <code style="display:block;margin-top:4px;padding:4px 8px;background:var(--bg-primary);border-radius:4px;font-size:10px;word-break:break-all;user-select:all;">${oneLinerWin}</code>
-                                    <button onclick="imgCopyWorkerCmd(event)" data-cmd='${oneLinerWin.replace(/'/g, "&apos;")}' style="margin-top:6px;background:transparent;border:1px solid var(--border-color);color:var(--text-secondary);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px;">📋 Copy</button>
-                                    <div style="margin-top:8px;color:var(--text-muted);font-size:10px;">
-                                        Not recommended on Mac — use the installer above. The one-liner is Windows-only.
-                                    </div>
-                                </div>
                             </div>
                         </div>`;
                 }
