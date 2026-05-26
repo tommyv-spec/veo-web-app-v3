@@ -20497,6 +20497,20 @@ def _kling_drain_loop():
                     return f
         return None
 
+    def _req(method, url, **kw):
+        """HTTP with retry on transient network errors (ConnectionReset, timeouts)."""
+        last = None
+        for i in range(3):
+            try:
+                resp = requests.request(method, url, **kw)
+                resp.raise_for_status()
+                return resp
+            except Exception as e:
+                last = e
+                print(f"[kling-local] net {method} retry {i + 1}/3: {str(e)[:120]}", flush=True)
+                _t.sleep(4)
+        raise last
+
     print(f"[kling-local] drain started (model={model}, sound={sound})", flush=True)
     while True:
         try:
@@ -20511,8 +20525,7 @@ def _kling_drain_loop():
             for c in clips:
                 ci = c.get("clip_index"); jid = c.get("job_id")
                 try:
-                    fr = requests.get(c["start_frame_url"], headers=hdr, timeout=60)
-                    fr.raise_for_status()
+                    fr = _req("GET", c["start_frame_url"], headers=hdr, timeout=60)
                     sfx = ".png" if "png" in c["start_frame_url"].lower() else ".jpg"
                     with _tf.NamedTemporaryFile(delete=False, suffix=sfx) as tf:
                         tf.write(fr.content); fp = tf.name
@@ -20558,11 +20571,10 @@ def _kling_drain_loop():
                     if not vurl:
                         print(f"[kling-local] clip {ci}: no result URL in CLI output", flush=True)
                         continue
-                    mp4 = requests.get(vurl, timeout=180); mp4.raise_for_status()
+                    mp4 = _req("GET", vurl, timeout=180)
                     fn = f"clip_{ci}_9.1.mp4"  # attempt 9 = Kling marker (distinct from Flow 1.x)
-                    up = requests.post(f"{base}/jobs/{jid}/upload-video/{ci}", headers=hdr,
-                                       files={"file": (fn, mp4.content, "video/mp4")}, timeout=180)
-                    up.raise_for_status()
+                    _req("POST", f"{base}/jobs/{jid}/upload-video/{ci}", headers=hdr,
+                         files={"file": (fn, mp4.content, "video/mp4")}, timeout=180)
                     print(f"[kling-local] clip {ci}: Kling variant uploaded ✓", flush=True)
                 except Exception as e:
                     print(f"[kling-local] clip {ci} error: {e}", flush=True)
