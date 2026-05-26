@@ -9180,7 +9180,8 @@ def download_image_worker_installer(
             parallel_slots=parallel)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            info = zipfile.ZipInfo("KavenoImageWorker-Setup.command")
+            import time as _t
+            info = zipfile.ZipInfo("KavenoImageWorker-Setup.command", date_time=_t.localtime()[:6])
             info.external_attr = 0o755 << 16  # rwxr-xr-x
             info.create_system = 3  # Unix
             zf.writestr(info, content)
@@ -9433,7 +9434,19 @@ ENVEOF
 log ".env written"
 echo "        OK"
 
-echo "  [5/5] Ready."
+echo "  [5/5] Creating launcher..."
+# Reusable relaunch script — run this to restart the worker later
+# WITHOUT re-running the full setup (skips Python/package/download steps).
+# Mirrors the video worker's start_worker.sh (main.py).
+cat > "$DIR/start_worker.sh" << LAUNCHEOF
+#!/bin/bash
+cd "$DIR"
+set -a; source .env; set +a
+$PY image_worker.py --api-url "{app_url}" --api-key "{api_key}" --session "$DIR/image-chrome-session" --parallel {parallel_slots}
+LAUNCHEOF
+chmod +x "$DIR/start_worker.sh"
+log "launcher created: $DIR/start_worker.sh"
+echo "        OK"
 echo ""
 echo "  ======================================================"
 echo "   Setup complete! Starting worker..."

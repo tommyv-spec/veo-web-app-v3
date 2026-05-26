@@ -356,7 +356,7 @@
             <div class="step-num" style="background:var(--warning);color:#000;font-size:11px;">⚠</div>
             <div class="step-body">
                 <div class="step-title" style="color:var(--warning);">macOS Gatekeeper</div>
-                <div class="step-desc">If macOS blocks the file: <strong>System Settings → Privacy & Security</strong> → scroll down → click <strong>"Open Anyway"</strong> next to the blocked file message.</div>
+                <div class="step-desc">If macOS blocks the file: <strong>System Settings → Privacy & Security</strong> → scroll to <strong>Security</strong> → click <strong>"Open Anyway"</strong> next to the blocked file message.</div>
             </div>
         </div>
         <div class="step-item" id="step3">
@@ -643,7 +643,7 @@ function showWorkerError(err) {
         document.body.appendChild(banner);
     }
     const msg = err.error_type === 'not_ultra'
-        ? `⚠️ Account "${err.account_name}" does not have ULTRA access. Delete session folders (Reset Sessions) and restart with an ULTRA Google account.`
+        ? `⚠️ Account "${err.account_name}" does not have ULTRA access. Turn ON "Wipe saved login" above, then Start Worker again and log in with an ULTRA Google account.`
         : `⚠️ Worker error: ${err.message}`;
     banner.innerHTML = `<span>${msg}</span><button onclick="dismissWorkerError()" style="background:rgba(255,255,255,0.2);border:none;color:white;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap;">✕ Dismiss</button>`;
     banner.style.display = 'flex';
