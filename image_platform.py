@@ -9728,7 +9728,7 @@ def worker_release_claims(
     gives the indicator near-real-time accuracy: well-behaved
     shutdowns flip immediately, crashes flip within ~10s.
     """
-    _verify_worker_key(authorization)
+    _verify_worker_user(authorization, db)
     if not worker_id:
         raise HTTPException(400, "worker_id required")
 
@@ -9781,7 +9781,7 @@ def worker_release_single_claim(
 
     Silent no-op if neither condition holds — idempotent.
     """
-    _verify_worker_key(authorization)
+    _verify_worker_user(authorization, db)
     if not worker_id:
         raise HTTPException(400, "worker_id required")
 
@@ -9841,8 +9841,8 @@ def worker_get_pending_job(
     GET (with Bearer auth) to download the parent-variant images as
     reference inputs.
     """
-    _verify_worker_key(authorization)
-    _touch_worker_heartbeat(db, worker_id, None)
+    user_id = _verify_worker_user(authorization, db)
+    _touch_worker_heartbeat(db, worker_id, user_id)
 
     # v753 — parse exclude list
     exclude_ids: List[int] = []
@@ -9884,6 +9884,7 @@ def worker_get_pending_job(
             # startswith() emits a LIKE with autoescaped wildcards.
             q = db.query(ImageNode).filter(
                 ImageNode.status == "queued",
+                ImageNode.user_id == user_id,
                 ImageNode.name.startswith(pb),
             )
             if exclude_ids:
@@ -9893,7 +9894,8 @@ def worker_get_pending_job(
     # Fall back to any queued node if no same-batch match (or no preference)
     if node is None:
         q = db.query(ImageNode).filter(
-            ImageNode.status == "queued"
+            ImageNode.status == "queued",
+            ImageNode.user_id == user_id,
         )
         if exclude_ids:
             q = q.filter(ImageNode.id.notin_(exclude_ids))
@@ -9983,6 +9985,7 @@ _worker_file_tokens: Dict[str, str] = {}
 def worker_download_file(
     token: str,
     authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db_session),
 ):
     """Download a parent-variant image by its deterministic token.
 
@@ -9992,7 +9995,7 @@ def worker_download_file(
     images per project) and hash each to find the match. This survives
     webapp restarts (no in-memory state required) and R2 restores.
     """
-    _verify_worker_key(authorization)
+    _verify_worker_user(authorization, db)
 
     # Fast path: check in-memory cache first (filled when we issued the job)
     path = _worker_file_tokens.get(token)
@@ -10055,7 +10058,7 @@ def worker_upload_variants(
     Now: DB work happens in 3 quick bursts, with all slow I/O (R2
     uploads) done WITHOUT a DB connection held.
     """
-    _verify_worker_key(authorization)
+    _verify_worker_user(authorization, db)
 
     # ==== Phase 1: quick DB validation + cleanup ====
     # Read node, verify state, clean stale variants. Commit, then
@@ -10191,7 +10194,7 @@ def worker_update_job_status(
     db: Session = Depends(get_db_session),
 ):
     """Worker marks a job done (success or failure)."""
-    _verify_worker_key(authorization)
+    _verify_worker_user(authorization, db)
     node = db.query(ImageNode).filter(ImageNode.id == node_id).first()
     if not node:
         raise HTTPException(404, "Node not found")
