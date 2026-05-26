@@ -25,6 +25,7 @@ def animate_image(
     out_path: Union[str, Path],
     slug: str = "kling-video/v2.1/pro/image-to-video",
     duration: int = 5,
+    sound: str = "on",
     poll_interval: float = 5.0,
     max_polls: int = 120,
     timeout: float = 60.0,
@@ -55,7 +56,7 @@ def animate_image(
     submit = requests.post(
         f"{BASE_URL}/{slug}",
         headers=headers,
-        json={"image_url": image_url, "prompt": prompt, "duration": duration},
+        json={"image_url": image_url, "prompt": prompt, "duration": duration, "sound": sound},
         timeout=timeout,
     )
     if submit.status_code >= 400:
