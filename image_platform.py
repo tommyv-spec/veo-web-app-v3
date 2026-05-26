@@ -25,6 +25,7 @@ import uuid
 import shutil
 import asyncio
 import logging
+import secrets
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set, Tuple
@@ -9002,7 +9003,11 @@ def serve_image_worker_script():
 
 
 @router.get("/worker/download/setup.ps1")
-def serve_image_worker_setup_ps1(request: Request, api_key: Optional[str] = None):
+def serve_image_worker_setup_ps1(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db_session),
+):
     """Serve a self-contained PowerShell script that:
       1. Finds/installs Python
       2. Installs patchright + requests if needed
@@ -9012,13 +9017,24 @@ def serve_image_worker_setup_ps1(request: Request, api_key: Optional[str] = None
     Usage from Windows terminal:
         powershell -c "irm <app>/api/images/worker/download/setup.ps1 | iex"
 
-    Optionally the api_key can be prefilled via ?api_key=... (URL is
-    built dynamically by the UI).
+    Requires login — bakes the user's personal worker token into the script.
     """
     from fastapi.responses import Response as FAResponse
 
-    # Use env var default if user didn't pass one via query string
-    default_key = api_key or _get_worker_api_key()
+    # Get or create the user's personal worker token
+    token = db.query(UserWorkerToken).filter(
+        UserWorkerToken.user_id == user.id,
+        UserWorkerToken.is_active == True,
+    ).first()
+    if not token:
+        token = UserWorkerToken(
+            id=secrets.token_urlsafe(48),
+            user_id=user.id,
+            name=f"ImageWorker-{datetime.utcnow().strftime('%Y%m%d-%H%M')}",
+        )
+        db.add(token)
+        db.commit()
+    default_key = token.id
     app_url = str(request.base_url).rstrip("/")
 
     script = r"""# KavenoBuilder Image Worker - Quick Setup (Windows)
@@ -9136,12 +9152,15 @@ def download_image_worker_installer(
     reset: int = Query(0),
     update_only: int = Query(0),
     parallel: int = Query(2, ge=1, le=8),
-    api_key: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db_session),
 ):
     """Generate a downloadable installer for the image worker.
 
     Windows → .bat file
     Mac/Linux → .command inside a .zip (preserves exec bit)
+
+    Requires login — bakes the user's personal worker token into the installer.
 
     Query params:
       os: 'windows' | 'mac' | 'linux'
@@ -9156,9 +9175,20 @@ def download_image_worker_installer(
     """
     from fastapi.responses import Response as FAResponse
 
-    # Bake the worker API key into the installer so users don't have to
-    # paste it. Same env-var lookup as the inline setup.ps1.
-    effective_key = api_key or _get_worker_api_key()
+    # Get or create the user's personal worker token and bake it in.
+    token = db.query(UserWorkerToken).filter(
+        UserWorkerToken.user_id == user.id,
+        UserWorkerToken.is_active == True,
+    ).first()
+    if not token:
+        token = UserWorkerToken(
+            id=secrets.token_urlsafe(48),
+            user_id=user.id,
+            name=f"ImageWorker-{datetime.utcnow().strftime('%Y%m%d-%H%M')}",
+        )
+        db.add(token)
+        db.commit()
+    effective_key = token.id
     app_url = str(request.base_url).rstrip("/")
     if "kavenobuilder.com" not in app_url and "localhost" not in app_url and "127.0.0.1" not in app_url:
         app_url = "https://kavenobuilder.com"
@@ -9614,15 +9644,6 @@ from fastapi.responses import Response as FAResponse
 def _get_worker_api_key() -> str:
     """Share the same key as the video local-worker so users set it once."""
     return os.environ.get("LOCAL_WORKER_API_KEY", "local-worker-secret-key-12345")
-
-
-def _verify_worker_key(authorization: Optional[str]):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing Authorization header")
-    token = authorization[7:]
-    if token != _get_worker_api_key():
-        raise HTTPException(401, "Invalid API key")
-    return True
 
 
 def _verify_worker_user(authorization: Optional[str], db: Session) -> str:
