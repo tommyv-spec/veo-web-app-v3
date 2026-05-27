@@ -13899,6 +13899,16 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
 
         clip_index = clip['clip_index']
 
+        # v765 — never auto-resubmit a clip the DB already marks 'failed' (see
+        # the matching guard in the resume loop): terminal failures await a
+        # user Retry, not an automatic re-render of the same failing content.
+        if (clip.get('status') or '').lower() == 'failed':
+            print(f"\n--- Clip {i+1}/{len(clips)} SKIPPED (already FAILED — awaiting user Retry, not auto-resubmitting) ---", flush=True)
+            clip_log(clip.get('id'), clip_index, "SKIP", "already failed — awaiting user Retry")
+            prev_start_frame_key = clip.get('start_frame_key')
+            prev_end_frame_key = clip.get('end_frame_key')
+            continue
+
         # v764 — skip clips with a pending policy model-swap; the redo path
         # submits them with the swapped model in a fresh project (this shared
         # project is locked to the job's original model). See the matching
@@ -15511,6 +15521,19 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             raise
 
         clip_index = clip['clip_index']
+
+        # v765 — never auto-resubmit a clip the DB already marks 'failed'. A
+        # terminal failure (policy give-up, auto-redo cap, unusual-activity
+        # give-up) is awaiting a USER Retry. Re-submitting it on every
+        # self-resume just reruns the same failing content — that is the
+        # "it keeps going back to the failed clip" loop. The user's Retry
+        # re-queues it (flow_redo_queued/pending + fresh attempt) when ready.
+        if (clip.get('status') or '').lower() == 'failed':
+            print(f"\n--- Clip {i+1}/{len(clips)} SKIPPED (already FAILED — awaiting user Retry, not auto-resubmitting) ---", flush=True)
+            clip_log(clip.get('id'), clip_index, "SKIP", "already failed — awaiting user Retry")
+            prev_start_frame_key = clip.get('start_frame_key')
+            prev_end_frame_key = clip.get('end_frame_key')
+            continue
 
         # v764 — a clip with a pending POLICY model-swap must be submitted ONLY
         # by the redo path, which builds a fresh project with the swapped model
