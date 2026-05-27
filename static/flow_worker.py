@@ -4123,6 +4123,11 @@ class HumanPacer:
                            already_enqueued=None):
         self.clips_this_session += 1
         delayed_failures = []
+        # v762 — clip_indices whose hard-failure tile carries the Flow content-policy
+        # text ("...violate our policies"). The caller routes these to the v759
+        # generation-policy path (retry same → swap → mark GENERATION_POLICY) instead
+        # of the generic hard-failure auto-redo. Reset per wait call.
+        self._last_policy_killed = set()
         delay = self._calculate_delay(clip_number, total_clips)
         is_break = self.clips_this_session >= self._next_break_at
         if is_break:
@@ -4272,6 +4277,22 @@ class HumanPacer:
                                             # leave un-checked so the normal URL poll picks it up
                                         else:
                                             print(f"[{self.account_name}] ⚠ HARD FAILURE: clip {_ci+1} failed after generating (refresh button + no video after re-verify) — aborting job", flush=True)
+                                            # v762 — was this a CONTENT-POLICY kill? A tile that
+                                            # generated then died carrying "...violate our policies"
+                                            # is a post-generation policy block, not a Flow hiccup.
+                                            # Tag it so the caller routes it to the v759 policy path.
+                                            try:
+                                                _is_policy_kill = page.evaluate(f"""() => {{
+                                                    const c = document.querySelector('[data-index="{_data_idx}"]');
+                                                    if (!c) return false;
+                                                    const t = (c.textContent || '').toLowerCase();
+                                                    return t.includes('violate') && t.includes('policies');
+                                                }}""")
+                                            except Exception:
+                                                _is_policy_kill = False
+                                            if _is_policy_kill:
+                                                self._last_policy_killed.add(_ci)
+                                                print(f"[{self.account_name}] ⚠ clip {_ci+1} hard failure carries content-policy text ('violate...policies') — routing to policy handling", flush=True)
                                             delayed_failures.append(_ci)
                                             _dl_checked.add(_ci)
                                     elif _fail_info == 'soft':
@@ -16454,9 +16475,28 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # Abort job — submitting more clips to a broken Flow is pointless
             if _delayed_failures:
                 print(f"[Flow] ⛔ DELAYED HARD FAILURE: clip(s) {[c+1 for c in _delayed_failures]} failed after generating — aborting job for golden restore", flush=True)
+                _policy_killed = getattr(_pacer, '_last_policy_killed', set())
                 for _dfc in _delayed_failures:
                     _df_clip = next((c for c in clips if c.get('clip_index') == _dfc), None)
                     if _df_clip:
+                        # v762 — a hard failure whose tile carried the Flow
+                        # content-policy text is a POST-GENERATION policy block,
+                        # not a Flow hiccup. Route it to the v759 generation-policy
+                        # path (retry same → swap model → mark GENERATION_POLICY)
+                        # instead of the generic hard-failure auto-redo, so the
+                        # clip ends with a clear policy reason, not a vague
+                        # "killed by Flow" + endless redo of content that can't pass.
+                        if _dfc in _policy_killed:
+                            _pa, _pmsg = policy_gen_next_action(_df_clip['id'], getattr(page, "_veo_model", ""))
+                            if _pa == 'fail':
+                                fail_clip_general_policy(_df_clip['id'], _pmsg)
+                                print(f"[Flow] ❌ clip {_dfc+1} content-policy killed after generating, both models tried — failed (general policy error)", flush=True)
+                                clip_log(_df_clip['id'], _dfc, "FAILED", "content policy after generating (blocked on both models)")
+                            else:
+                                update_clip_status(_df_clip['id'], 'flow_redo_queued', error_message=_pmsg)
+                                print(f"[Flow] 🔀 clip {_dfc+1} content-policy killed after generating — {_pa} + requeuing redo", flush=True)
+                                clip_log(_df_clip['id'], _dfc, "REDO", f"content policy after generating, {_pa}")
+                            continue
                         # v758.19 — cap the auto-redo loop. Each delayed hard
                         # failure for this clip increments a per-clip counter;
                         # once it hits MAX_AUTO_REDO_CYCLES we stop re-queuing
