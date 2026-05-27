@@ -20512,6 +20512,16 @@ def _kling_drain_loop():
                 _t.sleep(_back)
         raise last
 
+    def _mark(cid, status):
+        """Set a clip's Kling status on the platform. 'failed' is terminal (stops re-queue)."""
+        if not cid:
+            return
+        try:
+            requests.post(f"{base}/clips/{cid}/kling-status", headers=hdr,
+                          params={"status": status}, timeout=30)
+        except Exception:
+            pass
+
     print(f"[kling-local] drain started (model={model}, sound={sound})", flush=True)
     while True:
         try:
@@ -20524,7 +20534,7 @@ def _kling_drain_loop():
             if not clips:
                 _t.sleep(poll); continue
             for c in clips:
-                ci = c.get("clip_index"); jid = c.get("job_id")
+                ci = c.get("clip_index"); jid = c.get("job_id"); cid_db = c.get("clip_id")
                 try:
                     fr = _req("GET", c["start_frame_url"], headers=hdr, timeout=60)
                     sfx = ".png" if "png" in c["start_frame_url"].lower() else ".jpg"
@@ -20547,6 +20557,9 @@ def _kling_drain_loop():
                             print("[kling-local] session expired — re-opening Higgsfield login, then retrying…", flush=True)
                             _sub.run([hf_cli, "auth", "login"], capture_output=True, text=True, timeout=300)
                             continue
+                        if "enough_credit" in _outl or "not enough credit" in _outl:
+                            print(f"[kling-local] clip {ci}: OUT OF HIGGSFIELD CREDITS — top up at higgsfield.ai. Marking failed.", flush=True)
+                            break  # terminal — no point retrying
                         # Transient Higgsfield/upload errors (flaky cloudfront fetch, gateway, network) → retry with backoff.
                         if any(t in _outl for t in ("cannot reach", "timeout", "timed out", "connection",
                                                      "502", "503", "504", "temporarily", "try again", "reset")):
@@ -20561,6 +20574,7 @@ def _kling_drain_loop():
                         pass
                     if p is None or p.returncode != 0:
                         print(f"[kling-local] clip {ci} CLI failed: {((p.stdout + p.stderr) if p else '').strip()[:300]}", flush=True)
+                        _mark(cid_db, "failed")  # terminal — stop re-firing this clip
                         continue
                     vurl = None
                     try:
@@ -20572,6 +20586,7 @@ def _kling_drain_loop():
                         vurl = m.group(0) if m else None
                     if not vurl:
                         print(f"[kling-local] clip {ci}: no result URL — raw output: {p.stdout.strip()[:400]}", flush=True)
+                        _mark(cid_db, "failed")
                         continue
                     mp4 = _req("GET", vurl, timeout=180)
                     fn = f"clip_{ci}_9.1.mp4"  # attempt 9 = Kling marker (distinct from Flow 1.x)
@@ -20580,6 +20595,7 @@ def _kling_drain_loop():
                     print(f"[kling-local] clip {ci}: Kling variant uploaded ✓", flush=True)
                 except Exception as e:
                     print(f"[kling-local] clip {ci} error: {e}", flush=True)
+                    _mark(cid_db, "failed")  # terminal — stop re-firing on repeated network failure
                 # Space clips apart — rapid bursts trip Higgsfield/CDN throttling (connection resets).
                 _t.sleep(8)
         except Exception as e:

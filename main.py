@@ -11595,6 +11595,26 @@ async def user_worker_get_kling_clips(
     return {"clips": out}
 
 
+@app.post("/api/user-worker/clips/{clip_id}/kling-status")
+async def user_worker_set_kling_status(
+    clip_id: int,
+    status: str = Query(...),
+    db: DBSession = Depends(get_db_session),
+    user_id: str = Depends(verify_user_worker_token),
+):
+    """Worker marks a clip's Kling state. 'failed' is TERMINAL — the kling-pending
+    poll never re-serves it, so a give-up (out of credits / NSFW / exhausted
+    retries) stops the clip from re-firing forever."""
+    if status not in ("queued", "processing", "done", "failed"):
+        raise HTTPException(status_code=400, detail="bad status")
+    clip = db.query(Clip).join(Job).filter(Clip.id == clip_id, Job.user_id == user_id).first()
+    if not clip:
+        raise HTTPException(status_code=404, detail="clip not found")
+    clip.kling_variant_status = status
+    db.commit()
+    return {"ok": True, "clip_id": clip_id, "kling_variant_status": status}
+
+
 @app.get("/api/user-worker/jobs/{job_id}")
 async def user_worker_get_job(
     job_id: str,
