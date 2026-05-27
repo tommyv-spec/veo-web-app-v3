@@ -13899,6 +13899,17 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
 
         clip_index = clip['clip_index']
 
+        # v764 — skip clips with a pending policy model-swap; the redo path
+        # submits them with the swapped model in a fresh project (this shared
+        # project is locked to the job's original model). See the matching
+        # guard in the resume loop.
+        if clip.get('id') in _POLICY_SWAP_DONE:
+            print(f"\n--- Clip {i+1}/{len(clips)} SKIPPED (policy model-swap pending → redo path submits with the swapped model) ---", flush=True)
+            clip_log(clip.get('id'), clip_index, "SKIP", "policy model-swap pending — leaving for redo path (fresh project + swapped model)")
+            prev_start_frame_key = clip.get('start_frame_key')
+            prev_end_frame_key = clip.get('end_frame_key')
+            continue
+
         if clip_index in clips_done:
             print(f"\n--- Clip {i+1}/{len(clips)} SKIPPED (cached) ---")
             prev_start_frame_key = clip.get('start_frame_key')
@@ -15500,7 +15511,21 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             raise
 
         clip_index = clip['clip_index']
-        
+
+        # v764 — a clip with a pending POLICY model-swap must be submitted ONLY
+        # by the redo path, which builds a fresh project with the swapped model
+        # + matching mode (Omni Ingredients <-> Veo Frames). This shared project
+        # is locked to the job's original model, so submitting the clip here
+        # would re-render it with the SAME model (ignoring the swap) → same
+        # content + same model → policy-killed again → loop. Skip it; the
+        # redo-pending poll (process_redo_clip) will handle it with the swap.
+        if clip.get('id') in _POLICY_SWAP_DONE:
+            print(f"\n--- Clip {i+1}/{len(clips)} SKIPPED (policy model-swap pending → redo path submits with the swapped model) ---", flush=True)
+            clip_log(clip.get('id'), clip_index, "SKIP", "policy model-swap pending — leaving for redo path (fresh project + swapped model)")
+            prev_start_frame_key = clip.get('start_frame_key')
+            prev_end_frame_key = clip.get('end_frame_key')
+            continue
+
         if clip_index in clips_done:
             print(f"\n--- Clip {i+1}/{len(clips)} SKIPPED (cached) ---")
             prev_start_frame_key = clip.get('start_frame_key')
