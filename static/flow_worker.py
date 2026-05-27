@@ -20498,17 +20498,18 @@ def _kling_drain_loop():
         return None
 
     def _req(method, url, **kw):
-        """HTTP with retry on transient network errors (ConnectionReset, timeouts)."""
+        """HTTP with retry + backoff on transient network errors (ConnectionReset, timeouts)."""
         last = None
-        for i in range(3):
+        for i in range(5):
             try:
                 resp = requests.request(method, url, **kw)
                 resp.raise_for_status()
                 return resp
             except Exception as e:
                 last = e
-                print(f"[kling-local] net {method} retry {i + 1}/3: {str(e)[:120]}", flush=True)
-                _t.sleep(4)
+                _back = min(4 * (i + 1), 30)
+                print(f"[kling-local] net {method} retry {i + 1}/5 in {_back}s: {str(e)[:120]}", flush=True)
+                _t.sleep(_back)
         raise last
 
     print(f"[kling-local] drain started (model={model}, sound={sound})", flush=True)
@@ -20537,7 +20538,7 @@ def _kling_drain_loop():
                            "--wait", "--wait-timeout", f"{gen_timeout}s", "--json"]
                     print(f"[kling-local] clip {ci}: generating Kling 3.0…", flush=True)
                     p = None
-                    for _att in range(3):
+                    for _att in range(5):
                         p = _sub.run(cmd, capture_output=True, text=True, timeout=gen_timeout + 60)
                         if p.returncode == 0:
                             break
@@ -20546,11 +20547,12 @@ def _kling_drain_loop():
                             print("[kling-local] session expired — re-opening Higgsfield login, then retrying…", flush=True)
                             _sub.run([hf_cli, "auth", "login"], capture_output=True, text=True, timeout=300)
                             continue
-                        # Transient Higgsfield/upload errors (flaky cloudfront fetch, gateway, network) → retry.
+                        # Transient Higgsfield/upload errors (flaky cloudfront fetch, gateway, network) → retry with backoff.
                         if any(t in _outl for t in ("cannot reach", "timeout", "timed out", "connection",
-                                                     "502", "503", "504", "temporarily", "try again")):
-                            print(f"[kling-local] clip {ci} transient error (attempt {_att + 1}/3) — retrying in 5s…", flush=True)
-                            _t.sleep(5)
+                                                     "502", "503", "504", "temporarily", "try again", "reset")):
+                            _back = min(8 * (_att + 1), 40)
+                            print(f"[kling-local] clip {ci} transient error (attempt {_att + 1}/5) — retrying in {_back}s…", flush=True)
+                            _t.sleep(_back)
                             continue
                         break  # non-retryable failure
                     try:
@@ -20569,7 +20571,7 @@ def _kling_drain_loop():
                         m = url_re.search(p.stdout + p.stderr)
                         vurl = m.group(0) if m else None
                     if not vurl:
-                        print(f"[kling-local] clip {ci}: no result URL in CLI output", flush=True)
+                        print(f"[kling-local] clip {ci}: no result URL — raw output: {p.stdout.strip()[:400]}", flush=True)
                         continue
                     mp4 = _req("GET", vurl, timeout=180)
                     fn = f"clip_{ci}_9.1.mp4"  # attempt 9 = Kling marker (distinct from Flow 1.x)
@@ -20578,6 +20580,8 @@ def _kling_drain_loop():
                     print(f"[kling-local] clip {ci}: Kling variant uploaded ✓", flush=True)
                 except Exception as e:
                     print(f"[kling-local] clip {ci} error: {e}", flush=True)
+                # Space clips apart — rapid bursts trip Higgsfield/CDN throttling (connection resets).
+                _t.sleep(8)
         except Exception as e:
             print(f"[kling-local] poll error: {e}", flush=True)
             _t.sleep(poll)
