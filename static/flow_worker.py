@@ -16525,34 +16525,44 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # Hard failure detected (e.g. clip reached 99% then Flow killed it)
             # Abort job — submitting more clips to a broken Flow is pointless
             if _delayed_failures:
-                print(f"[Flow] ⛔ DELAYED HARD FAILURE: clip(s) {[c+1 for c in _delayed_failures]} failed after generating — aborting job for golden restore", flush=True)
                 _policy_killed = getattr(_pacer, '_last_policy_killed', set())
-                for _dfc in _delayed_failures:
+                _policy_fails = [c for c in _delayed_failures if c in _policy_killed]
+                _hard_fails = [c for c in _delayed_failures if c not in _policy_killed]
+
+                # v766 — a CONTENT-POLICY kill is one clip's content problem, NOT
+                # a broken Flow. Handle that clip (switch model via redo, or mark
+                # GENERATION_POLICY) and KEEP GOING with the rest of the job — do
+                # NOT abort / reset remaining / golden-restore for policy kills.
+                # The swapped clip is flow_redo_queued and the redo path (fresh
+                # project + swapped model) handles it; v764 keeps this account from
+                # re-submitting it. Only a GENUINE hard failure (no policy text)
+                # means Flow may be broken → then we abort + golden restore.
+                for _dfc in _policy_fails:
                     _df_clip = next((c for c in clips if c.get('clip_index') == _dfc), None)
-                    if _df_clip:
-                        # v762 — a hard failure whose tile carried the Flow
-                        # content-policy text is a POST-GENERATION policy block,
-                        # not a Flow hiccup. Route it to the v759 generation-policy
-                        # path (retry same → swap model → mark GENERATION_POLICY)
-                        # instead of the generic hard-failure auto-redo, so the
-                        # clip ends with a clear policy reason, not a vague
-                        # "killed by Flow" + endless redo of content that can't pass.
-                        if _dfc in _policy_killed:
-                            _pa, _pmsg = policy_gen_next_action(_df_clip['id'], getattr(page, "_veo_model", ""))
-                            if _pa == 'fail':
-                                fail_clip_general_policy(_df_clip['id'], _pmsg)
-                                print(f"[Flow] ❌ clip {_dfc+1} content-policy killed after generating, both models tried — failed (general policy error)", flush=True)
-                                clip_log(_df_clip['id'], _dfc, "FAILED", "content policy after generating (blocked on both models)")
-                            else:
-                                update_clip_status(_df_clip['id'], 'flow_redo_queued', error_message=_pmsg)
-                                print(f"[Flow] 🔀 clip {_dfc+1} content-policy killed after generating — {_pa} + requeuing redo", flush=True)
-                                clip_log(_df_clip['id'], _dfc, "REDO", f"content policy after generating, {_pa}")
+                    if not _df_clip:
+                        continue
+                    _pa, _pmsg = policy_gen_next_action(_df_clip['id'], getattr(page, "_veo_model", ""))
+                    if _pa == 'fail':
+                        fail_clip_general_policy(_df_clip['id'], _pmsg)
+                        print(f"[Flow] ❌ clip {_dfc+1} content-policy killed, both models tried — failed (general policy error); job continues", flush=True)
+                        clip_log(_df_clip['id'], _dfc, "FAILED", "content policy (blocked on both models)")
+                    else:
+                        update_clip_status(_df_clip['id'], 'flow_redo_queued', error_message=_pmsg)
+                        print(f"[Flow] 🔀 clip {_dfc+1} content-policy killed — {_pa} + requeuing redo; job continues (no abort)", flush=True)
+                        clip_log(_df_clip['id'], _dfc, "REDO", f"content policy, {_pa}")
+
+                if not _hard_fails:
+                    # Policy-only failure(s) — Flow is healthy, do NOT abort the
+                    # job. Fall through and keep submitting the remaining clips.
+                    print(f"[Flow] ✓ policy-only failure(s) {[c+1 for c in _policy_fails]} handled — continuing with the rest of the job (no abort, no golden restore)", flush=True)
+                else:
+                    # Genuine hard failure(s) → submitting more clips to a broken
+                    # Flow is pointless → abort + golden restore (existing v758.19).
+                    print(f"[Flow] ⛔ DELAYED HARD FAILURE: clip(s) {[c+1 for c in _hard_fails]} failed after generating — aborting job for golden restore", flush=True)
+                    for _dfc in _hard_fails:
+                        _df_clip = next((c for c in clips if c.get('clip_index') == _dfc), None)
+                        if not _df_clip:
                             continue
-                        # v758.19 — cap the auto-redo loop. Each delayed hard
-                        # failure for this clip increments a per-clip counter;
-                        # once it hits MAX_AUTO_REDO_CYCLES we stop re-queuing
-                        # and mark the clip 'failed' (actionable) instead of
-                        # churning it for 30 min until the zombie timeout.
                         _df_cycles = register_auto_redo_cycle(_df_clip['id'])
                         if auto_redo_exhausted(_df_cycles):
                             update_clip_status(_df_clip['id'], 'failed',
@@ -16562,34 +16572,31 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                     f"or change the prompt/image."))
                             print(f"[Flow] ⛔ clip {_dfc+1} hard-failed {_df_cycles}x — marking FAILED (auto-redo cap {MAX_AUTO_REDO_CYCLES} reached), not re-queuing", flush=True)
                             clip_log(_df_clip['id'], _dfc, "FAILED", f"hard failure x{_df_cycles} (auto-redo cap reached)")
+                            clear_auto_redo_cycle(_df_clip['id'])
                         else:
                             update_clip_status(_df_clip['id'], 'flow_redo_queued',
                                 error_message="Flow delayed failure — clip generated then killed by Flow")
                             print(f"[Flow] ↩ clip {_dfc+1} hard-failed {_df_cycles}x — re-queuing for redo (auto-redo cap {MAX_AUTO_REDO_CYCLES})", flush=True)
                             clip_log(_df_clip['id'], _dfc, "REDO", f"hard failure x{_df_cycles}, re-queuing")
-                        if auto_redo_exhausted(_df_cycles):
-                            # Gave up — drop the counter so a future user Retry
-                            # starts fresh and the dict doesn't accumulate.
-                            clear_auto_redo_cycle(_df_clip['id'])
-                # Reset remaining unsubmitted clips to pending (never a completed one)
-                remaining = clips[i+1:]
-                if remaining:
-                    print(f"[Flow] ⛔ {len(remaining)} remaining clip(s) reset to pending for retry after restore", flush=True)
-                    for rc in remaining:
-                        if rc.get('status') != 'completed':
-                            update_clip_status(rc['id'], 'pending', error_message=None)
-                # Job → pending, cache → null project
-                update_job_status(job_id, 'pending')
-                if job_id in cache.get('jobs', {}):
-                    confirmed_done = set()
-                    for _chk_ci in cache['jobs'][job_id].get('clips_submitted', []):
-                        if _chk_ci not in _delayed_failures:
-                            confirmed_done.add(_chk_ci)
-                    cache['jobs'][job_id]['clips_submitted'] = [ci for ci in cache['jobs'][job_id].get('clips_submitted', []) if ci in confirmed_done]
-                    cache['jobs'][job_id]['project_url'] = None
-                    cache['jobs'][job_id]['status'] = 'pending'
-                    save_cache(cache)
-                raise Exception(f"Flow delayed failure — clip(s) {[c+1 for c in _delayed_failures]} failed after generating")
+                    # Reset remaining unsubmitted clips to pending (never a completed one)
+                    remaining = clips[i+1:]
+                    if remaining:
+                        print(f"[Flow] ⛔ {len(remaining)} remaining clip(s) reset to pending for retry after restore", flush=True)
+                        for rc in remaining:
+                            if rc.get('status') != 'completed':
+                                update_clip_status(rc['id'], 'pending', error_message=None)
+                    # Job → pending, cache → null project
+                    update_job_status(job_id, 'pending')
+                    if job_id in cache.get('jobs', {}):
+                        confirmed_done = set()
+                        for _chk_ci in cache['jobs'][job_id].get('clips_submitted', []):
+                            if _chk_ci not in _hard_fails:
+                                confirmed_done.add(_chk_ci)
+                        cache['jobs'][job_id]['clips_submitted'] = [ci for ci in cache['jobs'][job_id].get('clips_submitted', []) if ci in confirmed_done]
+                        cache['jobs'][job_id]['project_url'] = None
+                        cache['jobs'][job_id]['status'] = 'pending'
+                        save_cache(cache)
+                    raise Exception(f"Flow delayed failure — clip(s) {[c+1 for c in _hard_fails]} failed after generating")
             # After wait: check if any clips have hit 70s since submission
             if http_dl_queue is not None:
                 _now = datetime.now()
