@@ -1,0 +1,29 @@
+{
+  "_comment": "Copy to model_map.json and fill with REAL videoModelKey strings captured via capture_helper.py. config.load_model_map() reads model_map.json when present, else falls back to config._DEFAULT_MODEL_MAP. Keys: model_name -> gen_type -> aspect -> videoModelKey.",
+  "Veo 3.1 - Lite [Lower Priority]": {
+    "frame_2_video": {
+      "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_lite_low_priority"
+    },
+    "start_end_frame_2_video": {
+      "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_lite_low_priority"
+    }
+  },
+  "Veo 3.1 - Fast": {
+    "frame_2_video": {
+      "VIDEO_ASPECT_RATIO_PORTRAIT": "FILL_FROM_CAPTURE"
+    },
+    "start_end_frame_2_video": {
+      "VIDEO_ASPECT_RATIO_PORTRAIT": "FILL_FROM_CAPTURE"
+    }
+  },
+  "Veo 3.1 - Quality": {
+    "frame_2_video": {
+      "VIDEO_ASPECT_RATIO_PORTRAIT": "FILL_FROM_CAPTURE"
+    }
+  },
+  "Omni Flash": {
+    "reference_frame_2_video": {
+      "VIDEO_ASPECT_RATIO_PORTRAIT": "FILL_FROM_CAPTURE"
+    }
+  }
+}

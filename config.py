@@ -61,6 +61,16 @@ def get_openai_key_from_env() -> Optional[str]:
 KLING_I2V_SLUG = os.environ.get("HF_KLING_SLUG", "kling-video/v2.1/pro/image-to-video")
 
 
+# Flow worker generation path (stability rebuild). Drives Google Flow via its private
+# JSON API from inside the logged-in Patchright page instead of clicking DOM + scraping
+# data-index tiles. See flow_api/ module + flow_api/README.md.
+#   "off"  = current DOM-click path only (default, unchanged behaviour)
+#   "on"   = try the API path per clip; fall back to the DOM path if any API step fails
+# NOTE: do NOT enable until flow_api/model_map.json is filled via flow_api/capture_helper.py
+# (the exact videoModelKey strings + Omni Ingredients shape must be confirmed on live traffic).
+FLOW_API_MODE = os.environ.get("FLOW_API_MODE", "off").strip().lower()
+
+
 def get_higgsfield_credentials_from_env() -> Optional[str]:
     """Higgsfield API creds as 'KEY_ID:KEY_SECRET'. None when unset (backend disabled).
 
