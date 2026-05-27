@@ -309,6 +309,109 @@ def _submit_buffer_key(account_label):
     return f"tid:{threading.get_ident()}"
 
 
+def _flow_api_capture_enabled():
+    """True when the operator set FLOW_API_CAPTURE=1 (read-only traffic capture for
+    the flow_api private-API rebuild). Off by default — captures nothing, changes
+    nothing about generation."""
+    return os.environ.get("FLOW_API_CAPTURE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _flow_api_capture_path():
+    return os.environ.get(
+        "FLOW_API_CAPTURE_PATH",
+        os.path.join(tempfile.gettempdir(), "flow_api_capture.jsonl"),
+    )
+
+
+def _install_flow_api_capture(page):
+    """Attach a READ-ONLY request listener that records the real Flow submit/upload
+    bodies + videoModelKey, so we can confirm the exact model keys and the Omni
+    Ingredients shape for the flow_api rebuild. Inert unless FLOW_API_CAPTURE=1.
+
+    Logs one concise line per matching request to worker stdout AND appends the full
+    body to FLOW_API_CAPTURE_PATH (default: temp/flow_api_capture.jsonl). Never raises.
+    """
+    if page is None or not _flow_api_capture_enabled():
+        return
+    try:
+        if getattr(page, '_flow_api_capture_installed', False):
+            return
+    except Exception:
+        return
+    out_path = _flow_api_capture_path()
+    _watch = (
+        "batchAsyncGenerateVideoStartImage",
+        "batchAsyncGenerateVideoStartAndEndImage",
+        "batchAsyncGenerateVideoReferenceImages",
+        "batchAsyncGenerateVideo",   # catch Omni / any other submit variant
+        "uploadImage",
+        "batchCheckAsyncVideoGenerationStatus",
+    )
+
+    def _on_request(req):
+        try:
+            url = getattr(req, 'url', '') or ''
+            if 'aisandbox-pa.googleapis.com' not in url:
+                return
+            if not any(w in url for w in _watch):
+                return
+            try:
+                body = req.post_data
+            except Exception:
+                body = None
+            model_key = ''
+            ingredient_shape = ''
+            if body:
+                try:
+                    j = json.loads(body)
+                    for r in (j.get('requests') or []):
+                        if not isinstance(r, dict):
+                            continue
+                        if r.get('videoModelKey'):
+                            model_key = r['videoModelKey']
+                        # note which input shape this submit used (start vs reference/ingredient)
+                        if 'referenceImages' in r:
+                            ingredient_shape = 'referenceImages'
+                        elif 'startImage' in r and 'endImage' in r:
+                            ingredient_shape = 'startImage+endImage'
+                        elif 'startImage' in r:
+                            ingredient_shape = 'startImage'
+                        if model_key:
+                            break
+                except Exception:
+                    pass
+            endpoint = url.split('?', 1)[0]
+            print(
+                f"[flow-api-capture] {endpoint.rsplit('/', 1)[-1]} "
+                f"videoModelKey={model_key or '-'} shape={ingredient_shape or '-'}",
+                flush=True,
+            )
+            try:
+                with open(out_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({
+                        'ts': time.time(),
+                        'method': getattr(req, 'method', ''),
+                        'url': url,
+                        'videoModelKey': model_key,
+                        'shape': ingredient_shape,
+                        'body_raw': body,
+                    }) + "\n")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    try:
+        page.on('request', _on_request)
+        try:
+            page._flow_api_capture_installed = True
+        except Exception:
+            pass
+        print(f"[flow-api-capture] enabled -> {out_path}", flush=True)
+    except Exception as e:
+        print(f"[flow-api-capture] failed to install: {e}", flush=True)
+
+
 def _install_submit_response_listener(page, account_label=""):
     """v700 — install a one-shot Playwright `response` handler on `page`
     that captures `batchAsyncGenerateVideoStartImage` 200 responses into
@@ -450,6 +553,10 @@ def _install_submit_response_listener(page, account_label=""):
             pass
     except Exception as e:
         print(f"[v700] failed to install submit listener for {account_label}: {e}", flush=True)
+
+    # flow_api rebuild: read-only capture of real submit bodies/model keys.
+    # Inert unless FLOW_API_CAPTURE=1. Never affects generation.
+    _install_flow_api_capture(page)
 
 
 def _drain_submit_responses(account_label=""):
