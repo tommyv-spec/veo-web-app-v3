@@ -164,7 +164,15 @@
   ============================================================
 
   • Image prompts: always open with "Shot on iPhone with wide-angle lens, handheld,
-    deep focus throughout, vibrant natural HDR daylight." Never cinema camera specs.
+    deep focus throughout, natural daylight." Never cinema camera specs.
+    UGC-REALISM STANDARD (house standard — wiki [[realistic-ugc-prompt-templates]]; src raw/Basic prompt templates...):
+      our look is a phone-shot UGC photo, NOT professional photography. Every image prompt must satisfy:
+        - NO blur anywhere — background, walls, furniture all SHARP. NO bokeh, NO shallow depth of field. ("deep focus" = correct.)
+        - ONLY natural lighting, no artificial lighting.
+        - colors ultra-realistic — NOT oversaturated, not too warm/cold/dark/bright. (Drop "vibrant HDR / warm palette" exaggeration.)
+        - realism bank: visible pores, skin texture, single hair strands, subtle wrinkles, imperfections, realistic fabric textures, reflections + shadows.
+        - close with "looks like a natural smartphone photo, not professional photography."
+      BANNED in image prompts: bokeh, shallow depth of field, f/1.8|f/5.6, softbox, three-point/studio lighting, cinematic, film grain, editorial.
   • Main character: NEVER described — character reference is passed externally to
     Nano Banana 2 on every generation as IMAGE 1. Refer to them as "the main
     character". Describe only pose, expression direction, position in frame.
@@ -889,11 +897,31 @@ The reproduction-ready analysis layer (per v587). Five required subsections — 
 - **Setting tier**: <Tier-0 selfie-arm / Tier-1 single-setting / Tier-2 multi-setting>
 - **Specific settings used**: <kitchen, anatomy-clinic, bedroom, etc.>
 
+### Transfer surface (v758)
+
+The portable-abstraction layer — what makes this video INNOVATABLE. For each load-bearing element only (the ones that carry virality; cross-ref the v598 mechanism stack), split the abstract mechanism from the concrete instance and tag transferability. To innovate later, read ONLY the abstract column and ask "where else does this mechanism go?"
+
+| Load-bearing element | Abstract mechanism (portable, NO niche/prop noun) | Concrete instance (this video) | Transferability |
+|---|---|---|---|
+| <hook prop> | <e.g. phallic-food shame-proxy> | <e.g. banana + frowny card> | <niche-bound (male shame) / niche-agnostic> |
+| <catalyst> | <e.g. violent agent-of-change pour> | <e.g. tea poured → liver melts> | <niche-agnostic> |
+| <frame> | <e.g. taboo direct-address + bystander> | <e.g. "don't show your man too often"> | <niche-agnostic> |
+
+- Abstract cell carries NO niche/prop noun (strip "banana" → "phallic-food").
+- Only mechanism-carrying elements belong here — not every surface detail.
+- Tag each row `niche-agnostic` or `niche-bound (<binder>)`.
+
 ---
 
 ## Veo 3.1 Final Prompts (per clip)
 
 What the platform's prompt-builder will emit per scene at job emission. One Veo generation per clip = ONE 8-second video. Each prompt is the **assembled** form of camera spec + action narrative + dialogue + ambient — built from the start-frame image + action_note + line in the Storyboard section. Per the canonical convention, **each clip carries its own `**Negative prompt:**` block** immediately after its text prompt.
+
+UGC AUDIO + VOICE STANDARD (house standard — wiki [[realistic-ugc-prompt-templates]] §4; matches the runtime isolated-voice enforcement in `flow_backend.py`/`veo_generator.py`):
+  - VOICE: the speaker talks fast, dynamic, emotive, passionate, expressive, **English with an American accent** (compose with the v642 voice-qualifier tokens; ADD the American-accent clause).
+  - AUDIO: **no music and no background noise** — clean isolated VO. The `Ambient:` line below should read "no music, no background noise" (NOT a room-tone/ambient-cue description); the runtime already forces isolated voice.
+  - HANDHELD only: add "the main character does NOT move the arm extended to the side of frame, because that hand holds the camera."
+  - PACING: ~2 lines of speech per clip (add a short filler sentence if the line is too short; trim in CapCut). Keep ≤8s VO (v577 / production-execution).
 
 ### Clip 1.1 — Scene 1, Line 1 (<block tag, e.g. HOOK>)
 **Start frame:** Image 1
@@ -905,12 +933,12 @@ What the platform's prompt-builder will emit per scene at job emission. One Veo 
 
 The main AI generated character says in a [voice qualifier] voice, "[exact dialogue from the Storyboard's line for this scene][space + pad text from the Storyboard's pad bullet, if present — v644]". (v642+v665: quoted text triggers Veo lip-sync; subject is always "The main AI generated character" — never "She" / "He" / "the man" / "the woman" / persona name — so Veo binds dialogue to the persona-reference upload regardless of perceived gender or wardrobe in the start frame; voice qualifier composes 1-3 tokens from {pace: measured/deliberate/brisk/clipped}, {volume: low/quiet/projected/breathy}, {emotion: weary/serious/urgent/calm/warm/clinical/authoritative/cold/disgusted}. Multi-adjective form uses commas, e.g. "serious, urgent voice". For `**speaker:** voiceover` scenes use: A voiceover with [voice quality] speaks in a [tone] tone, "[line]". See template_reference.md §"Dialogue lip-sync trigger and voice qualifier syntax (v642)" + §"Speaker-subject normalization (v665)" for the full rubric.)
 
-Ambient: [setting tone + ambient sound cues that Veo's audio path can pick up — built from the Style & Ambiance block of the action_note].
+Ambient: no music, no background noise (clean isolated voice).
 (no subtitles, no captions)
 ```
 **Negative prompt:**
 ```
-no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, no cinematic transitions, no burnt-in text, no captions, no on-screen titles, no face distortion, no morphing, no warping, no duplicate limbs, no extra fingers, no inconsistent lighting, no composite split-screen layouts, no disembodied hands.
+no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, no cinematic transitions, no burnt-in text, no captions, no on-screen titles, no face distortion, no morphing, no warping, no duplicate limbs, no extra fingers, no inconsistent lighting, no composite split-screen layouts, no disembodied hands, no music, no background noise.
 ```
 
 ### Clip 2.1 — Scene 2, Line 1 (<block tag>)
@@ -923,7 +951,7 @@ no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, 
 
 The main AI generated character says in a [voice qualifier] voice, "[exact dialogue]".
 
-Ambient: [setting tone + ambient cues].
+Ambient: no music, no background noise (clean isolated voice).
 (no subtitles, no captions)
 ```
 **Negative prompt:**

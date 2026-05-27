@@ -14034,6 +14034,8 @@ if fail_count == 0:
 
 **Verification mandatory before claiming v752 correctly applied**: re-render tongue HOOK Clip 1.1 via lift workflow with v752-updated prompt; confirm Veo output shows cleanse completing by ~2.5s on tea contact + tongue held in resolved clean-pink state for remaining ~5.5s while persona delivers closing line (NOT gradual smear across full 8s); operator validated 2026-05-18 with "much better now" verdict.
 
+**v752 ADDENDUM (2026-05-21) — the opposite failure: instant snap with NO visible morph.** Operator render of the cucumber HOOK (v7) surfaced the inverse of the sluggish-smear problem: a first-last-frame transformation that described only the two ENDPOINTS + "INSTANT REACTION ON CONTACT" rendered as the prop just *being* firm — Veo held the start state then popped to the end, no visible change. "It just turns firm without changing status, while we want a clear transformation." Pacing is a BAND, not a switch: ban the 8s slow dissolve AND ban the instant snap. Target = **visible-but-punchy**: catalyst lands fast, the morph plays out *clearly over ~1.5-2.5s so the eye follows it*, then the resolved state HOLDS. To force the morph to animate, the Veo prompt MUST (a) name it as a continuous transition between the frames, (b) describe the INTERMEDIATE states (not just start+end), (c) timestamp-pace the change with `[mm:ss-mm:ss]` segments per Veo Workflow 3, (d) add negatives `no snap cut / no holding then jumping / prop must visibly change`. Full wording guidance: `wiki/concepts/prompting/veo-prompting.md` §"Wording so a morph reads clearly".
+
 
 ### v718h.1 + v718d.1 + v738.1 hardening + v580.3 — Structural Escalation Mandate (NEW 2026-05-18)
 
@@ -14359,3 +14361,45 @@ Single-frame snapshot reading guesses motion, geometry, and identity. The fix is
 4. The block (or Sources) cites `contact_full.png` + `contact_hook.png` as inspected.
 
 **Touched**: `code/template_reference.md` (this rule), `wiki/patterns/conventions.md` (index row), `raw/decode_work/make_contact_sheet.py` (tool). No platform runtime change — no deploy. Follow-up: fold the Section 0 prompt into the decode bundle script + `wiki/meta/decode-grammar-checklist.md`.
+
+---
+
+## v758 — Transfer surface (decode the portable abstraction, not just the instance)
+
+**Source: 2026-05-21 Salvora 1-1 call (Can Beytut) + principle re-read of `preserve-swap-framework` / `iteration-rule` / `what-matters-most`.** Can, asked "what info from a video makes a good new video?", refused a fixed answer: "there's not one variable you change... for every video, there's 10 variables or more." The goal he named: "keep the framework, because that's the reason it went viral, but change it so it's new for the audience."
+
+**The principle this rule encodes.** Virality lives in the **mechanism**, not the surface. Niche, prop, pain point, persona are surface. The mechanism (why the scroll stops, why it converts) is the invariant. "Everything is a remix" therefore means: **keep the abstract mechanism, change the concrete instance.** That single move IS adaptation, iteration, AND innovation — the only difference is how far across a boundary you carry the instance (same niche = lift; outside niche = innovate).
+
+**Why decode needs a new field.** Decode already records the WHAT (frontmatter swap values, scene/image counts) and the WHY-of-the-hook (v598 4-mechanism psychology stack). What it does NOT record is the **portable abstraction** — the mechanism stated at a level that can travel, plus whether it is niche-bound or niche-agnostic. Without it, a decoder reading `banana = penis shame-proxy` sees one ED prop; it cannot see that *"phallic-food shame-proxy"* ports to any male-shame niche while *"violent catalyst pour"* ports anywhere. Innovation is a cross-boundary port; **you can only port what has been abstracted.** This is also why Can says "study the wave-origin + its viral spin-offs" — the spin-offs are other concrete instances of one abstraction; capture the abstraction and you can GENERATE spin-offs instead of only observing them.
+
+**The rule.** Every `decoded_*.md` Comprehension layer emits a `### Transfer surface` subsection: a table that, for each load-bearing element, splits the **abstract mechanism** (portable) from the **concrete instance** (this video) and tags **transferability**.
+
+```
+### Transfer surface
+
+| Load-bearing element | Abstract mechanism (portable) | Concrete instance (this video) | Transferability |
+|---|---|---|---|
+| hook prop | phallic-food shame-proxy | banana + frowny card | niche-bound (male shame) |
+| catalyst | violent agent-of-change pour | tea poured → liver melts | niche-agnostic |
+| frame | taboo direct-address + bystander | "don't show your man too often" | niche-agnostic |
+```
+
+- **Load-bearing element** — only the elements that carry virality (cross-reference the v598 mechanism stack + the structure beats). Do NOT list every surface detail; if removing it would not kill the video, it is not load-bearing.
+- **Abstract mechanism** — the reusable template, stated with NO niche/prop nouns. "phallic-food shame-proxy", not "banana".
+- **Concrete instance** — exactly what this video used.
+- **Transferability** — `niche-agnostic` (ports anywhere) or `niche-bound (<what binds it>)`.
+
+**How it serves innovation.** To innovate, read ONLY the abstract column and ask "where else does this mechanism go?" The `niche-agnostic` rows are free ports; the `niche-bound` rows need a same-shape mechanism re-supplied in the new niche. Surface cases (change-the-food, change-the-symptom, change-the-pain-point) all collapse into the concrete-instance column — no taxonomy of video types is needed, because the type is just which surface column you are varying.
+
+**Anti-patterns.**
+- ❌ Stating the abstraction with a niche noun in it ("banana shame-proxy") — that is the instance, not the abstraction. Strip the noun.
+- ❌ Listing non-load-bearing surface in the table — bloats it; only mechanism-carrying elements belong.
+- ❌ Duplicating v598 — v598 names the hook psychology; v758 records its PORTABILITY. Reference v598 mechanisms, do not re-derive them.
+
+**Verification before claiming a decode carries a transfer surface.**
+1. `decoded_*.md` Comprehension contains a `### Transfer surface` table.
+2. Every row's Abstract-mechanism cell contains NO niche/prop noun (port-ready).
+3. Every row is tagged `niche-agnostic` or `niche-bound (<binder>)`.
+4. The load-bearing rows reconcile with the v598 mechanism stack already named in the same decode.
+
+**Touched**: `code/template_reference.md` (this rule), `code/template_new_format.md` (Comprehension skeleton — new subsection), `wiki/patterns/conventions.md` (index row), `wiki/concepts/script-adaptation/innovation-moves.md` + `innovation-ideation-pipeline.md` (link in). No platform runtime change — no deploy.

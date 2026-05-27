@@ -70,7 +70,7 @@ The platform parser regexes are STRICT and silent on failure — bad headers don
 - v750/v751 Veo Final Prompts format (Clip N.M headers + bolded fields + NO beat brackets in Veo prompts)
 - v718h-C Option C native end-frame interpolation via `- **end_frame_image:** image_K+1`
 - v718i + v718i.1 + v718i.2 + v718i.3 platform code (frontend + backend + Flow-path plumbing)
-- v718j paired-image identification (`- **pair_role:** start | end` + `- **paired_with:** image_K`)
+- v718j paired-image identification: START image gets `- **pair_role:** start` ONLY (NO paired_with). END image gets `- **pair_role:** end` + `- **paired_with:** image_K` (back-ref to its START partner). Parser HARD-FAILS if `paired_with` appears on a non-`end` image (`image_platform.py` ~L3434: "START images do not carry paired_with").
 - v718d.3 per-axis Pre-Flight Section 6 schema (all 4 axes individually for t=0 + t=end)
 - v738 Pre-Flight Checklist + v738.1 + v738.3 normalization-bias countermeasures
 - v752 INSTANT REACTION ON CONTACT catalyst pacing
