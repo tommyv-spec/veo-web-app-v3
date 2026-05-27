@@ -8,8 +8,26 @@ clip → stuck/redo bugs) and breaks whenever Google moves a button. The API pat
 the clip's real `media_id` UUID straight from the submit response, so a finished clip is
 always the one we submitted, and there are no buttons to break.
 
-**Status:** BUILT, NOT WIRED INTO THE WORKER YET, NOT DEPLOYED. `FLOW_API_MODE` defaults
-to `off`. Do not enable until the capture step below is done.
+**Status:** module + capture hook BUILT. Registered as an additional backend mode
+(`BackendType.FLOW_API`). Generate-seam wiring into the live worker is the remaining
+step — do it AFTER the capture run (below), so we wire once against confirmed model keys
+and can verify live. `FLOW_API_MODE` defaults `off`.
+
+## Modes (this is an ADDITIONAL, removable mode)
+
+`backends/selector.py` `BackendType`: `api` (Veo direct), `flow` (DOM clicks + tile
+scrape), **`flow_api` (NEW — same logged-in Flow session, private API in-page)**,
+`higgsfield`. The worker is "launched in flow_api mode" by setting `FLOW_API_MODE=on`;
+per clip it tries the API path and falls back to the DOM path on any failure.
+
+**Launch switches (env):**
+- `FLOW_API_CAPTURE=1` — record real submit bodies/model keys (read-only; step 1 below).
+- `FLOW_API_MODE=on` — run the API generation path (after model_map.json is filled).
+
+**To remove this mode entirely later:** delete the `flow_api/` package, the
+`BackendType.FLOW_API` enum member + `worker_flow_api_enabled()` in `selector.py`, the
+`FLOW_API_MODE` line in `config.py`, and the capture hook in `static/flow_worker.py`
+(`_install_flow_api_capture` + its one call site). Nothing else depends on it.
 
 Sources: ported from FlowKit (`crisng95/flowkit`), cross-checked vs useapi.net's
 documented Flow API + multiple independent extensions. Same private API, multiple

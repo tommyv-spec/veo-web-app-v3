@@ -17,8 +17,20 @@ from sqlalchemy.orm import Session
 class BackendType(str, Enum):
     """Available backends for video generation"""
     API = "api"      # Direct API calls (requires user API keys)
-    FLOW = "flow"    # Browser automation via Google Flow UI
+    FLOW = "flow"    # Browser automation via Google Flow UI (DOM clicks + tile scrape)
+    FLOW_API = "flow_api"  # Same logged-in Flow session, but drives Flow's private JSON API
+                           # in-page (no DOM clicks / tile scrape). Additional opt-in mode —
+                           # see flow_api/ + flow_api/README.md. Removable: delete this enum
+                           # member + the flow_api/ package; nothing else depends on it.
     HIGGSFIELD = "higgsfield"  # Kling image-to-video via Higgsfield API (server-side, no Gemini keys)
+
+
+def worker_flow_api_enabled() -> bool:
+    """Launch switch for the additional FLOW_API mode. The Flow worker runs its normal
+    browser session but routes per-clip generation through the private API (with DOM
+    fallback) when this is on. Off by default — set FLOW_API_MODE=on to launch in this mode."""
+    import os
+    return os.environ.get("FLOW_API_MODE", "off").strip().lower() in ("on", "1", "true", "yes")
 
 
 def has_valid_api_keys(
@@ -156,7 +168,15 @@ def get_backend_status() -> dict:
         "queue_configured": bool(os.environ.get("KEYVALUE_URL") or os.environ.get("REDIS_URL")),
     }
     
+    # FLOW_API additional mode (opt-in, removable)
+    flow_api_status = {
+        "enabled": worker_flow_api_enabled(),
+        "capture": os.environ.get("FLOW_API_CAPTURE", "").strip().lower() in ("1", "true", "yes", "on"),
+        "note": "drives Flow private API in-page; falls back to DOM per clip. Needs model_map.json filled via capture.",
+    }
+
     return {
         "api": api_status,
         "flow": flow_status,
+        "flow_api": flow_api_status,
     }
