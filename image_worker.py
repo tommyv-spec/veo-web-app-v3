@@ -727,9 +727,16 @@ def check_and_dismiss_popup(page):
                         print(f"✓ Dismissed cookie banner ({btn_text})", flush=True)
                         time.sleep(1)
                         return True
+                # Fallback: click any button in the banner
+                any_btn = cookie_bar.locator("button").last
+                if any_btn.count() > 0:
+                    any_btn.click(force=True)
+                    print(f"✓ Dismissed cookie banner (fallback)", flush=True)
+                    time.sleep(1)
+                    return True
         except:
             pass
-        
+
         # "Meet the new Flow" splash
         try:
             splash = page.locator("text=Meet the new Flow, text=what's new")
@@ -755,7 +762,25 @@ def check_and_dismiss_popup(page):
                     return True
             except:
                 pass
-        
+
+        # "Continue as X" profile-chooser splash (parity with video worker):
+        # prefer "Use Chrome without", else click "Continue as <name>" to proceed.
+        try:
+            no_btn = page.locator("button:has-text('Use Chrome without')")
+            continue_btn = page.locator("button:has-text('Continue as')")
+            if no_btn.count() > 0 and no_btn.first.is_visible(timeout=500):
+                no_btn.first.click(force=True)
+                print(f"✓ Dismissed Chrome sign-in dialog (no account)", flush=True)
+                time.sleep(1)
+                return True
+            elif continue_btn.count() > 0 and continue_btn.first.is_visible(timeout=500):
+                continue_btn.first.click(force=True)
+                print(f"✓ Clicked Continue as profile", flush=True)
+                time.sleep(1)
+                return True
+        except:
+            pass
+
         # Flow Notice dialog
         try:
             dialog = page.locator("div[role='dialog']")
