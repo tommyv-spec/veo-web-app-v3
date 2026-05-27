@@ -3157,20 +3157,23 @@ _POLICY_GEN_LOCK = threading.Lock()
 
 def policy_gen_next_action(clip_id, current_model):
     """Decide what to do on a generation-policy block for this clip.
-    Returns (action, message): action is 'retry_same' | 'retry_swap' | 'fail'.
+    Returns (action, message): action is 'retry_swap' | 'fail'.
+
+    v763 — policy sequence is SWITCH-MODEL → mark-policy. We do NOT retry the
+    SAME model: a content-policy block is the same content + same prompt, so
+    the same model just re-blocks (wasted redo that looks stuck). So:
+      block 1 -> switch model (Omni<->Veo Fast), redo once with the new model
+      block 2 -> give up, mark GENERATION_POLICY in the UI.
     On 'retry_swap' the swapped model is recorded in _POLICY_SWAP_DONE so the
-    redo picks it up; 'retry_same' leaves it unset so the redo keeps the
-    original model."""
+    redo picks it up."""
     with _POLICY_GEN_LOCK:
         n = _POLICY_GEN_ATTEMPTS.get(clip_id, 0) + 1
         _POLICY_GEN_ATTEMPTS[clip_id] = n
     if n == 1:
-        return ('retry_same', "Policy block — retrying same model")
-    if n == 2:
         swap = _swap_model_for_policy(current_model)
         _POLICY_SWAP_DONE[clip_id] = swap
-        return ('retry_swap', f"Policy block — retrying with {swap}")
-    return ('fail', "⚠️ Generation blocked by Flow content policy after retrying both models — try a different prompt.")
+        return ('retry_swap', f"Policy block — switching model to {swap}")
+    return ('fail', "⚠️ Generation blocked by Flow content policy (also failed after switching the model) — change the prompt.")
 
 
 def fail_clip_general_policy(clip_id, message):
