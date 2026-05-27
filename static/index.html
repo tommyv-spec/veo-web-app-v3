@@ -8006,7 +8006,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             const selectedVariant=clip.selected_variant||totalVariants,hasMultipleVariants=totalVariants>1;
             const versions = clip.versions || [];
             const currentVersion = selectedVariant > 0 && selectedVariant <= versions.length ? versions[selectedVariant - 1] : null;
-            const versionLabel = currentVersion && currentVersion.version_key ? currentVersion.version_key : (currentVersion ? `${currentVersion.attempt||1}.${currentVersion.variant||1}` : `${clip.generation_attempt||1}.1`);
+            const versionLabel = currentVersion && (currentVersion.attempt==9) ? '🎬 Kling' : (currentVersion && currentVersion.version_key ? currentVersion.version_key : (currentVersion ? `${currentVersion.attempt||1}.${currentVersion.variant||1}` : `${clip.generation_attempt||1}.1`));
             // Update card classes
             card.classList.toggle('clip-approved', approved);
             card.classList.toggle('clip-rejected', rejected&&!(clip.status==='redo_queued'||clip.status==='flow_redo_queued'));
@@ -8179,7 +8179,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // Get current version's attempt.variant for display
             const versions = c.versions || [];
             const currentVersion = selectedVariant > 0 && selectedVariant <= versions.length ? versions[selectedVariant - 1] : null;
-            const versionLabel = currentVersion && currentVersion.version_key ? currentVersion.version_key : (currentVersion ? `${currentVersion.attempt||1}.${currentVersion.variant||1}` : `${c.generation_attempt||1}.1`);
+            const versionLabel = currentVersion && (currentVersion.attempt==9) ? '🎬 Kling' : (currentVersion && currentVersion.version_key ? currentVersion.version_key : (currentVersion ? `${currentVersion.attempt||1}.${currentVersion.variant||1}` : `${c.generation_attempt||1}.1`));
             let vid='';
             // During redo/generating: show previous version's video with overlay if available
             const _prevVersion = (redoQueued || generating) && versions.length > 0 ? versions[versions.length - 1] : null;
@@ -8286,7 +8286,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 attemptKeys.forEach(attemptNum => {
                     const group = attemptGroups[attemptNum];
                     if (needsGroupHeaders) {
-                        const label = parseInt(attemptNum) === 1 ? 'Original' : `Redo #${parseInt(attemptNum) - 1}`;
+                        const label = parseInt(attemptNum) === 9 ? '🎬 Kling' : (parseInt(attemptNum) === 1 ? 'Original' : `Redo #${parseInt(attemptNum) - 1}`);
                         gridHtml += `<div class="variant-group-header">${label} <span class="variant-group-count">${group.length} variant${group.length>1?'s':''}</span></div>`;
                     }
                     gridHtml += `<div class="variants-grid">${group.map(v => {
@@ -8297,7 +8297,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         if(!vFile) return '';
                         return `<div class="variant-card ${isSelected ? 'variant-selected' : ''}" onclick="selectAndApprove(${c.id}, ${vNum})">
                             <video preload="none" playsinline loop onmouseenter="document.querySelectorAll('.clip-video-expanded video').forEach(v=>{if(v!==this){v.pause();v.currentTime=0}});this.play().catch(()=>{})" onmouseleave="this.pause();this.currentTime=0"><source src="${API}/jobs/${jid}/outputs/${vFile}" type="video/mp4"></video>
-                            <span class="variant-label">v${vLabel}</span>
+                            <span class="variant-label">${v.attempt==9 ? '🎬 Kling' : 'v'+vLabel}</span>
                             <button class="variant-select-btn" onclick="event.stopPropagation();selectAndApprove(${c.id}, ${vNum})">${isSelected && approved ? '\u2605 Selected' : '\u2606 Select'}</button>
                         </div>`;
                     }).join('')}</div>`;
@@ -8384,7 +8384,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             const hasMultipleVariants = totalVariants > 1;
             const versions = clip.versions || [];
             const currentVersion = selectedVariant > 0 && selectedVariant <= versions.length ? versions[selectedVariant - 1] : null;
-            const versionLabel = currentVersion && currentVersion.version_key ? currentVersion.version_key : (currentVersion ? `${currentVersion.attempt||1}.${currentVersion.variant||1}` : `${clip.generation_attempt||1}.1`);
+            const versionLabel = currentVersion && (currentVersion.attempt==9) ? '🎬 Kling' : (currentVersion && currentVersion.version_key ? currentVersion.version_key : (currentVersion ? `${currentVersion.attempt||1}.${currentVersion.variant||1}` : `${clip.generation_attempt||1}.1`));
 
             let vid = '';
             if (generating) {
@@ -9203,7 +9203,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     const versions = clipData.versions || [];
                     const totalVariants = clipData.total_variants || versions.length || 1;
                     const currentVersion = variantNum > 0 && variantNum <= versions.length ? versions[variantNum - 1] : null;
-                    const versionLabel = currentVersion && currentVersion.version_key ? currentVersion.version_key : (currentVersion ? `${currentVersion.attempt||1}.${currentVersion.variant||1}` : `${clipData.generation_attempt||1}.1`);
+                    const versionLabel = currentVersion && (currentVersion.attempt==9) ? '🎬 Kling' : (currentVersion && currentVersion.version_key ? currentVersion.version_key : (currentVersion ? `${currentVersion.attempt||1}.${currentVersion.variant||1}` : `${clipData.generation_attempt||1}.1`));
                     
                     // v745 — scope nav indicator + buttons to the
                     // .clip-paired-side (or card for non-paired) so paired
