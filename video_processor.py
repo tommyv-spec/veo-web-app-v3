@@ -318,6 +318,49 @@ def detect_speech_segments_whisper(
     
     Returns list of (start_time, end_time) tuples for segments WITH speech.
     """
+    # v773 — forced-alignment pipeline behind feature flag.
+    # When ALIGN_ENABLED=1 in env, route to transcript_alignment module.
+    # Default (flag unset or "0") keeps legacy V708/V731 path below.
+    import os as _os
+    if _os.environ.get("ALIGN_ENABLED", "0").lower() in ("1", "true", "yes"):
+        from transcript_alignment import detect_speech_segments_aligned as _new_path
+        _script = " ".join(
+            (t or "").strip() for t in (dialogue_texts or []) if (t or "").strip()
+        )
+        _segments, _audit = _new_path(
+            audio_path=video_path,
+            script_text=_script,
+            language=language,
+            padding=padding,
+        )
+        # v709 audit sink shape preserved for downstream consumer compatibility.
+        if v709_audit_sink is not None:
+            v709_audit_sink.update({
+                "script_provided": _audit["script_provided"],
+                "backend": _audit["backend"],
+                "script_words": _audit["script_words"],
+                "aligned_words": _audit["aligned_words"],
+                "low_confidence_words": _audit["low_confidence_words"],
+                "audio_duration": _audit["audio_duration"],
+                "speech_duration": _audit["speech_duration"],
+                "trim_ratio": _audit["trim_ratio"],
+                "fallback_reason": _audit["fallback_reason"],
+                # Legacy fields zeroed so old consumers don't break:
+                "trust": 1.0 if _audit["backend"] == "mms-fa" else 0.0,
+                "matched": _audit["aligned_words"],
+                "heard_words": _audit["aligned_words"],
+                "missing": [],
+                "failsafe": None if _audit["fallback_reason"] is None else "FALLBACK",
+            })
+        print(
+            f"[Align/v773] script={_audit['script_words']}w aligned={_audit['aligned_words']}w "
+            f"low_conf={_audit['low_confidence_words']} "
+            f"dur={_audit['audio_duration']:.2f}s speech={_audit['speech_duration']:.2f}s "
+            f"trim_ratio={_audit['trim_ratio']:.2f} backend={_audit['backend']}",
+            flush=True,
+        )
+        return _segments
+    # === Legacy V708/V731 path below (default until v773.10 flips flag) ===
     import subprocess, tempfile, re
     
     info = ffprobe_json(video_path)
@@ -4699,6 +4742,28 @@ def export_final_video(
                         stats["v708_audit_heard_words"] = sum_heard
                         stats["v708_audit_error"] = None
                         stats["v708_per_clip_audit"] = per_clip_audit
+                        # v773 — log summary works for both legacy + aligned audit shapes
+                        for _i, _a in enumerate(per_clip_audit or []):
+                            if "backend" in _a:
+                                # New shape (v773 forced-alignment)
+                                print(
+                                    f"[ExportAudit/v773] clip={_i} "
+                                    f"backend={_a.get('backend','?')} "
+                                    f"script={_a.get('script_words',0)}w "
+                                    f"aligned={_a.get('aligned_words',0)}w "
+                                    f"low_conf={_a.get('low_confidence_words',[])} "
+                                    f"trim_ratio={_a.get('trim_ratio',1.0):.2f}",
+                                    flush=True,
+                                )
+                            else:
+                                # Legacy V708 shape
+                                print(
+                                    f"[ExportAudit/v708] clip={_i} "
+                                    f"trust={_a.get('trust',0):.2f} "
+                                    f"matched={_a.get('matched',0)} "
+                                    f"missing={_a.get('missing',[])}",
+                                    flush=True,
+                                )
                         print(
                             f"[v709-AUDIT] schema=v709.2 per-clip aggregate: "
                             f"clips={len(per_clip_audit)} "
