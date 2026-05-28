@@ -145,3 +145,25 @@ def test_empty_script_returns_full_audio():
     assert segments[0][0] == 0.0
     assert audit["script_provided"] is False
     assert audit["aligned_words"] == 0
+
+
+def test_transcribe_for_audit_returns_words():
+    """Audit ASR returns list of (word, start, end) tuples for clean fixture."""
+    import transcript_alignment as ta
+
+    words = ta.transcribe_for_audit(FIXTURES / "align_clean.wav", language="English")
+    assert isinstance(words, list)
+    assert len(words) >= 5  # script has 10 words; allow some compression
+    for w, s, e in words:
+        assert isinstance(w, str) and w
+        assert 0.0 <= s <= e
+
+
+def test_release_audit_asr_frees_singleton():
+    """release_audit_asr clears the cached audit model."""
+    import transcript_alignment as ta
+
+    _ = ta.transcribe_for_audit(FIXTURES / "align_clean.wav", language="English")
+    assert ta._AUDIT_ASR is not None
+    ta.release_audit_asr()
+    assert ta._AUDIT_ASR is None

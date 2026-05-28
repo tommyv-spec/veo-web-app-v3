@@ -57,9 +57,45 @@ def warmup() -> None:
     raise NotImplementedError
 
 
+# Whisper language code map (ISO 639-1)
+_LANG_ISO_WHISPER = {
+    "english": "en", "spanish": "es", "french": "fr", "german": "de",
+    "italian": "it", "portuguese": "pt", "dutch": "nl", "russian": "ru",
+    "chinese": "zh", "japanese": "ja", "korean": "ko", "arabic": "ar",
+    "hindi": "hi", "turkish": "tr", "polish": "pl", "swedish": "sv",
+}
+
+
+def _ensure_audit_asr():
+    """Lazy-load faster-whisper distil-large-v3 int8 into module-level singleton."""
+    global _AUDIT_ASR
+    if _AUDIT_ASR is None:
+        from faster_whisper import WhisperModel
+        _AUDIT_ASR = WhisperModel(AUDIT_MODEL_ID, device="cpu", compute_type="int8")
+    return _AUDIT_ASR
+
+
 def release_audit_asr() -> None:
     """Free distil-large-v3 RSS after post-export audit. Aligner stays resident."""
-    raise NotImplementedError
+    global _AUDIT_ASR
+    if _AUDIT_ASR is not None:
+        try:
+            del _AUDIT_ASR
+        except Exception:
+            pass
+        _AUDIT_ASR = None
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+        # On Linux, nudge glibc to return freed pages to OS.
+        # No-op on Windows/macOS (libc.so.6 not present).
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
 
 
 # === Aligner helpers ===
@@ -288,5 +324,33 @@ def transcribe_for_audit(
     audio_path: Path,
     language: str = "English",
 ) -> list[tuple[str, float, float]]:
-    """One-shot post-concat audit transcription using distil-large-v3 int8."""
-    raise NotImplementedError
+    """One-shot post-concat audit transcription using distil-large-v3 int8.
+
+    Returns list of (word, start_sec, end_sec) tuples.
+    Fallback: if faster-whisper returns segments without word-level timestamps
+    (seg.words is None), each segment text is split on whitespace and the
+    segment start/end timestamps are shared across its words.
+    """
+    model = _ensure_audit_asr()
+    iso = _LANG_ISO_WHISPER.get(language.lower(), None)
+    segs, _info = model.transcribe(
+        str(audio_path),
+        language=iso,
+        word_timestamps=True,
+        beam_size=1,
+        vad_filter=True,
+        condition_on_previous_text=False,
+    )
+    out: list[tuple[str, float, float]] = []
+    for seg in segs:
+        if seg.words:
+            for w in seg.words:
+                token = w.word.strip()
+                if token:
+                    out.append((token, float(w.start), float(w.end)))
+        else:
+            # Fallback: no per-word timestamps — split segment text, share timing.
+            tokens = [t for t in seg.text.strip().split() if t]
+            for token in tokens:
+                out.append((token, float(seg.start), float(seg.end)))
+    return out
