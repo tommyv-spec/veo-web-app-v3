@@ -9434,6 +9434,14 @@ Example: A realistic vertical video of a professional presenter speaking directl
         // and audio-policy fallback behavior; remove once verified live.
         function playWithAudio(v) {
             try {
+                // v767.1 — guard: only fire in expanded mode. Pre-fix the
+                // hover handler attached to paired-clip videos (which live in
+                // .clip-paired-grid present in BOTH collapsed and expanded
+                // modes) would auto-start audio on hover in collapsed mode
+                // too, regressing pre-v767 silent-thumbnail behavior. The
+                // .clips-grid.expanded-mode class only exists when the user
+                // has clicked the Expand toggle.
+                if (!document.querySelector('.clips-grid.expanded-mode')) return;
                 document.querySelectorAll('.clip-video-expanded video, .clip-paired-grid video').forEach(o => {
                     if (o !== v) {
                         try { o.pause(); o.muted = true; o.currentTime = 0; } catch(_){}
