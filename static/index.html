@@ -1891,6 +1891,29 @@
         }
         /* ===== END v771 ===== */
 
+        /* ======================================================================
+           v772 — ROOT-CAUSE FIX: video panel was eating ENTIRE card width
+           ----------------------------------------------------------------------
+           Pre-v768 dual-view rule at ~line 1318 set
+              .clips-grid.expanded-mode .clip-video-expanded {
+                  display: block; width: 100%; background: #000;
+              }
+           My v768 added flex:0 1 auto + height:100% but NEVER overrode
+           width:100%. Result: video panel basis resolved to 100% of card
+           in flex distribution → content panel got 0 width → header/text/
+           actions all rendered in a 0-width strip on the far right edge
+           of the card (only "#1" label was barely visible).
+           The huge "black void" operator saw = video panel's
+           background: #000, NOT the content panel.
+           Fix: explicit width: auto !important + background: transparent
+           on the video panel so flex distribution gives content its
+           share of the card width. */
+        .clips-grid.expanded-mode .clip-video-expanded {
+            width: auto !important;
+            background: transparent !important;
+        }
+        /* ===== END v772 ===== */
+
         .variant-group-header { padding: 8px 12px 4px; font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-top: 1px solid var(--border); margin-top: 4px; }
         .variant-group-header:first-child { border-top: none; margin-top: 0; }
         .variant-group-count { font-weight: 400; font-size: 11px; opacity: 0.6; text-transform: none; letter-spacing: 0; }
