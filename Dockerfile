@@ -40,8 +40,13 @@ RUN mkdir -p /app/data /app/uploads /app/outputs /app/static
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
+# Install Python dependencies.
+# v773.10.10 — pre-install numpy + setuptools BEFORE the main requirements
+# pass. aeneas' setup.py imports numpy at build time, and pip's resolver
+# does NOT guarantee install order — so a direct `pip install -r requirements.txt`
+# fails with "[ERRO] You must install numpy before installing aeneas".
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir "numpy>=1.24.0" && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
