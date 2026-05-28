@@ -6047,8 +6047,21 @@ async def download_output(
     job_id: str,
     filename: str,
     request: Request,
+    download: int = 0,
 ):
-    """Download a generated video. Works with local filesystem or R2 storage."""
+    """Download a generated video. Works with local filesystem or R2 storage.
+
+    v76x: when `?download=1` is set, force a browser save dialog instead of
+    inline playback. The R2 redirect path defaults to `Content-Disposition:
+    inline`, so `<a download="...">` clicks on the cross-origin presigned URL
+    open the .mp4 in a new tab. Setting an explicit `response-content-
+    disposition=attachment; filename="..."` override on the presign makes R2
+    serve the file with `Content-Disposition: attachment`, which every
+    browser honors regardless of origin. The local FileResponse path is
+    already attachment-by-default (Starlette FileResponse with `filename=...`
+    sets `Content-Disposition: attachment` when `content_disposition_type`
+    defaults to "attachment"), but we explicitly pass it for clarity.
+    """
     # Use a short-lived DB context instead of dependency injection so we can
     # release the connection immediately — the R2 download can take 30s+
     # and holding a dependency-injected session that long exhausts the pool.
@@ -6093,7 +6106,19 @@ async def download_output(
     # so shared caching is safe.
     video_cache_headers = {"Cache-Control": "public, max-age=31536000, immutable"}
     if filepath.exists():
-        return FileResponse(filepath, media_type="video/mp4", filename=filename, headers=video_cache_headers)
+        # v76x: when ?download=1, force attachment so the browser saves the
+        # file instead of opening it inline. FileResponse with filename=...
+        # already serves Content-Disposition: attachment by default; we pass
+        # content_disposition_type explicitly so this stays correct even if
+        # Starlette ever changes its default.
+        cd_type = "attachment" if download else "inline"
+        return FileResponse(
+            filepath,
+            media_type="video/mp4",
+            filename=filename,
+            headers=video_cache_headers,
+            content_disposition_type=cd_type,
+        )
 
     # Method 2: R2 storage — v75x: REDIRECT the player straight to a presigned
     # R2 URL instead of proxying the bytes through this 1-CPU origin.
@@ -6121,9 +6146,27 @@ async def download_output(
             # generate_presigned_url is a local signing op (no network), so no
             # to_thread needed. 24h expiry comfortably outlasts a review
             # session; no-store means an expired presign can never be replayed.
-            presigned = storage.get_job_output_url(job_id, filename, expires_in=86400)
+            # v76x: when ?download=1, sign the URL with a Content-Disposition
+            # override so R2 returns the bytes as `attachment; filename="..."`
+            # — the only way to make a cross-origin .mp4 download instead of
+            # play in a new tab. Strip embedded quotes/CR/LF from the filename
+            # before interpolating to keep the header well-formed.
+            disposition = None
+            if download:
+                safe_name = filename.replace('"', '').replace('\r', '').replace('\n', '')
+                disposition = f'attachment; filename="{safe_name}"'
+            presigned = storage.get_job_output_url(
+                job_id,
+                filename,
+                expires_in=86400,
+                response_content_disposition=disposition,
+            )
             from fastapi.responses import RedirectResponse
-            print(f"[Download v75x] REDIRECT {filename} -> presigned R2 (no-store 302)", flush=True)
+            print(
+                f"[Download v76x] REDIRECT {filename} -> presigned R2 "
+                f"(no-store 302, download={bool(download)})",
+                flush=True,
+            )
             return RedirectResponse(
                 url=presigned,
                 status_code=302,

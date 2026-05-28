@@ -293,26 +293,35 @@ class ObjectStorage:
         self,
         remote_key: str,
         expires_in: int = 3600,
-        method: str = "get_object"
+        method: str = "get_object",
+        response_content_disposition: str | None = None,
     ) -> str:
         """
         Generate a presigned URL for an object.
-        
+
         Args:
             remote_key: Object key in bucket
             expires_in: URL expiration in seconds (default 1 hour)
             method: S3 method (get_object, put_object)
-            
+            response_content_disposition: optional override of the
+                Content-Disposition response header (S3/R2 sigv4 supports
+                `response-content-disposition` as a query-param override on
+                presigned GETs). Use `attachment; filename="..."` to force
+                a browser download instead of inline playback.
+
         Returns:
             Presigned URL
         """
+        params: dict = {
+            "Bucket": self.bucket_name,
+            "Key": remote_key,
+        }
+        if response_content_disposition:
+            params["ResponseContentDisposition"] = response_content_disposition
         return self.client.generate_presigned_url(
             method,
-            Params={
-                "Bucket": self.bucket_name,
-                "Key": remote_key
-            },
-            ExpiresIn=expires_in
+            Params=params,
+            ExpiresIn=expires_in,
         )
     
     def exists(self, remote_key: str) -> bool:
@@ -436,21 +445,28 @@ class ObjectStorage:
         self,
         job_id: str,
         output_name: str,
-        expires_in: int = 86400  # 24 hours
+        expires_in: int = 86400,  # 24 hours
+        response_content_disposition: str | None = None,
     ) -> str:
         """
         Get a presigned URL for a job output.
-        
+
         Args:
             job_id: Job ID
             output_name: Output filename
             expires_in: URL expiration in seconds
-            
+            response_content_disposition: optional Content-Disposition
+                override for forcing browser download (see get_presigned_url).
+
         Returns:
             Presigned URL
         """
         key = f"jobs/{job_id}/outputs/{output_name}"
-        return self.get_presigned_url(key, expires_in)
+        return self.get_presigned_url(
+            key,
+            expires_in,
+            response_content_disposition=response_content_disposition,
+        )
     
     # === Flow auth state helpers ===
     
