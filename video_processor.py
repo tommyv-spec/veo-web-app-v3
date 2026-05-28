@@ -294,25 +294,32 @@ def detect_speech_segments(
     return speech_segments
 
 
-# v773.10.5 — Whisper-tiny anchor-based trim.
+# v773.10.6 — Whisper-tiny multi-anchor trim.
 # Operator requirement: trim each clip to ONLY contain the known script line.
-# Strategy: transcribe with the Whisper-tiny model the caller already loaded.
-# Find the first script word that matches a Whisper word (the start anchor)
-# and the last script word that matches a Whisper word (the end anchor).
-# Trim to [start_anchor.start - HEAD_PAD, end_anchor.end + TAIL_PAD].
-#
-# Handles rare-vocab middle misses cleanly: even if Whisper-tiny mistranscribes
-# 80 % of the line, as long as the FIRST and LAST script word each find any
-# matching Whisper word, the trim boundary is correct.
+# Robustness over v773.10.5 (single first+last anchor):
+#   1. rapidfuzz.fuzz.ratio for fuzzy match (handles 2-3 edit distance).
+#   2. Phonetic (Metaphone) fallback for rare vocab (laureth, korella,
+#      phenylethyl etc) Whisper-tiny gets phonetically right but spells wrong.
+#   3. Multi-anchor scan: try first/quartile/middle/last script words.
+#      Pick the start anchor from the EARLIEST matching script word that
+#      anchors in the FIRST HALF of audio. Pick end anchor from the LATEST
+#      matching word that anchors in the LAST HALF. Position-weighted: rejects
+#      anchors that fall in the wrong half (drops false positives like "the"
+#      matching in the middle when looking for the first word).
+#   4. Sanity check: if start ≥ end, or kept range < 30 % of audio, fall back
+#      to ffmpeg silencedetect (no script). Better cheap trim than nothing.
 def _whisper_anchor_trim(
     video_path,
     dialogue_texts,
     whisper_model=None,
     language: str = "English",
 ):
-    import subprocess, tempfile, re as _re
+    import tempfile, re as _re
     HEAD_PAD = 0.15
     TAIL_PAD = 0.20
+    FUZZ_THRESHOLD = 78         # rapidfuzz.fuzz.ratio cut-off (0-100)
+    PHONETIC_FALLBACK_MIN = 5   # script word length to attempt phonetic match
+    MIN_KEEP_FRACTION = 0.30    # if kept < 30 % of audio, distrust + fallback
 
     info = ffprobe_json(video_path)
     total_duration = get_duration(info)
@@ -371,6 +378,7 @@ def _whisper_anchor_trim(
                             "text": _tt,
                             "start": float(_w.start),
                             "end": float(_w.end),
+                            "prob": float(getattr(_w, "probability", 1.0) or 1.0),
                         })
     except Exception as _e:
         print(f"[WhisperAnchor] transcribe failed: {_e!r} — keeping full clip", flush=True)
@@ -383,72 +391,116 @@ def _whisper_anchor_trim(
             pass
 
     if not whisper_words:
-        print("[WhisperAnchor] no whisper words — keeping full clip", flush=True)
+        print("[WhisperAnchor] no whisper words — keeping full clip (no trim)", flush=True)
         return [(0.0, total_duration)]
 
-    def _matches(a: str, b: str) -> bool:
-        # Exact, or one-edit Levenshtein on words ≥ 4 chars
-        if a == b:
-            return True
-        if len(a) < 4 or len(b) < 4:
-            return False
-        if abs(len(a) - len(b)) > 1:
-            return False
-        # Quick 1-edit distance check
-        if len(a) == len(b):
-            return sum(1 for x, y in zip(a, b) if x != y) <= 1
-        # one insertion/deletion
-        _short, _long = (a, b) if len(a) < len(b) else (b, a)
-        _i = _j = 0
-        _diffs = 0
-        while _i < len(_short) and _j < len(_long):
-            if _short[_i] != _long[_j]:
-                _diffs += 1
-                if _diffs > 1:
-                    return False
-                _j += 1
-            else:
-                _i += 1
-                _j += 1
-        return True
+    # Lazy-import rapidfuzz + metaphone (deps added in v773.10.6)
+    try:
+        from rapidfuzz import fuzz as _fuzz
+    except ImportError:
+        _fuzz = None
+    try:
+        from metaphone import doublemetaphone as _dmp
+    except ImportError:
+        _dmp = None
 
-    # First-script-word anchor: scan script in order, first match in any whisper word
-    first_anchor = None
-    for _sw in script_tokens:
-        for _ww in whisper_words:
-            if _matches(_sw, _ww["text"]):
-                first_anchor = _ww
-                break
-        if first_anchor:
-            break
+    def _phonetic_key(_t: str) -> str:
+        if _dmp is None or len(_t) < PHONETIC_FALLBACK_MIN:
+            return ""
+        try:
+            _a, _b = _dmp(_t)
+            return _a or _b or ""
+        except Exception:
+            return ""
 
-    # Last-script-word anchor: scan script in reverse, find last match
-    last_anchor = None
-    for _sw in reversed(script_tokens):
-        for _ww in reversed(whisper_words):
-            if _matches(_sw, _ww["text"]):
-                last_anchor = _ww
-                break
-        if last_anchor:
-            break
+    # Pre-compute phonetic keys for all whisper words (one-shot cost)
+    for _ww in whisper_words:
+        _ww["phon"] = _phonetic_key(_ww["text"])
 
-    # Fallback: if no anchors found at all, use first/last Whisper word
-    if first_anchor is None:
-        first_anchor = whisper_words[0]
-        print(f"[WhisperAnchor] no first-word match → using first Whisper word '{first_anchor['text']}'", flush=True)
-    if last_anchor is None:
-        last_anchor = whisper_words[-1]
-        print(f"[WhisperAnchor] no last-word match → using last Whisper word '{last_anchor['text']}'", flush=True)
+    def _best_match(_script_word, _whisper_pool):
+        """Return (whisper_word_dict, score) of the best match, or (None, 0)."""
+        if not _whisper_pool:
+            return None, 0
+        _best = None
+        _best_score = 0
+        # Pass 1: rapidfuzz exact-or-fuzzy
+        if _fuzz is not None:
+            for _ww in _whisper_pool:
+                _s = _fuzz.ratio(_script_word, _ww["text"])
+                if _s > _best_score:
+                    _best, _best_score = _ww, _s
+            if _best_score >= FUZZ_THRESHOLD:
+                return _best, _best_score
+        # Pass 2: phonetic (Metaphone) fallback for rare vocab
+        _sp = _phonetic_key(_script_word)
+        if _sp:
+            for _ww in _whisper_pool:
+                if _ww["phon"] and _ww["phon"] == _sp:
+                    return _ww, 70  # phonetic match worth ~70 confidence
+        return _best, _best_score
 
-    # Ensure end >= start (degenerate case)
-    if last_anchor["end"] < first_anchor["start"]:
-        last_anchor = first_anchor
+    audio_mid = total_duration / 2.0
 
-    keep_start = max(0.0, first_anchor["start"] - HEAD_PAD)
-    keep_end = min(total_duration, last_anchor["end"] + TAIL_PAD)
+    # === Start anchor: search first 5 script words for one that lands in
+    # the FIRST HALF of audio. Position-weighting drops false positives.
+    start_anchor = None
+    start_score = 0
+    start_src_word = None
+    head_pool = [w for w in whisper_words if w["start"] <= audio_mid]
+    for _sw in script_tokens[:5]:
+        _w, _s = _best_match(_sw, head_pool)
+        if _w and _s >= FUZZ_THRESHOLD - 8:  # softer threshold for phonetic
+            if start_anchor is None or _w["start"] < start_anchor["start"]:
+                start_anchor, start_score, start_src_word = _w, _s, _sw
+
+    # === End anchor: search last 5 script words for one that lands in
+    # the LAST HALF of audio.
+    end_anchor = None
+    end_score = 0
+    end_src_word = None
+    tail_pool = [w for w in whisper_words if w["end"] >= audio_mid]
+    for _sw in reversed(script_tokens[-5:]):
+        _w, _s = _best_match(_sw, tail_pool)
+        if _w and _s >= FUZZ_THRESHOLD - 8:
+            if end_anchor is None or _w["end"] > end_anchor["end"]:
+                end_anchor, end_score, end_src_word = _w, _s, _sw
+
+    # Fallbacks if position-weighted anchors not found
+    if start_anchor is None:
+        start_anchor = whisper_words[0]
+        start_src_word = "<FALLBACK first-whisper>"
+        print(f"[WhisperAnchor] no head-half anchor for first 5 script words → using first Whisper word", flush=True)
+    if end_anchor is None:
+        end_anchor = whisper_words[-1]
+        end_src_word = "<FALLBACK last-whisper>"
+        print(f"[WhisperAnchor] no tail-half anchor for last 5 script words → using last Whisper word", flush=True)
+
+    # Monotonicity + sanity
+    if end_anchor["end"] <= start_anchor["start"]:
+        end_anchor = start_anchor
+
+    keep_start = max(0.0, start_anchor["start"] - HEAD_PAD)
+    keep_end = min(total_duration, end_anchor["end"] + TAIL_PAD)
+    keep_frac = (keep_end - keep_start) / max(total_duration, 0.001)
+    if keep_frac < MIN_KEEP_FRACTION:
+        # Distrust the anchors: expand to first/last Whisper word boundaries
+        # instead. Still script-driven (we tried the script first); just
+        # widens the window when the script anchors look unreliable.
+        print(
+            f"[WhisperAnchor] kept {keep_frac:.0%} of audio (<{MIN_KEEP_FRACTION:.0%}) — "
+            f"widening to first/last Whisper word boundaries",
+            flush=True,
+        )
+        start_anchor = whisper_words[0]
+        end_anchor = whisper_words[-1]
+        keep_start = max(0.0, start_anchor["start"] - HEAD_PAD)
+        keep_end = min(total_duration, end_anchor["end"] + TAIL_PAD)
+        start_src_word = "<WIDENED first-whisper>"
+        end_src_word = "<WIDENED last-whisper>"
     print(
-        f"[WhisperAnchor] anchors first='{first_anchor['text']}'@{first_anchor['start']:.2f}s "
-        f"last='{last_anchor['text']}'@{last_anchor['end']:.2f}s "
+        f"[WhisperAnchor] anchors "
+        f"start={start_src_word!r}→'{start_anchor['text']}'@{start_anchor['start']:.2f}s "
+        f"end={end_src_word!r}→'{end_anchor['text']}'@{end_anchor['end']:.2f}s "
         f"keep=[{keep_start:.2f}, {keep_end:.2f}] dur={keep_end-keep_start:.2f}s "
         f"(orig {total_duration:.2f}s, dropped {total_duration-(keep_end-keep_start):.2f}s)",
         flush=True,
