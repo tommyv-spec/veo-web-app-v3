@@ -1802,13 +1802,11 @@
                buttons so they cannot collapse into a narrow stack
            ====================================================================== */
 
-        /* Keep magenta deploy marker for verification — confirm v771 live */
-        .clips-grid.expanded-mode .clip-card {
-            border-top: 3px solid #ff00ff !important;
-            background: var(--bg-elevated) !important;
-        }
-        /* Content panel — explicit flex column + visible debug bg + force
-           width allocation so it can't collapse */
+        /* v773 — cleanup: removed magenta deploy marker, indigo content
+           bg, yellow action-bar bg (all diagnostic-only from v770-v771).
+           Functional layout (flex column with !important + explicit width
+           allocation, paired with v772's width:auto override on
+           .clip-video-expanded) retained. */
         .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content {
             flex: 1 1 0 !important;
             min-width: 0 !important;
@@ -1818,7 +1816,6 @@
             padding: 16px 20px !important;
             gap: 10px !important;
             overflow: hidden !important;
-            background: rgba(99, 102, 241, 0.08) !important;
             color: var(--text-primary) !important;
         }
         .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-header {
@@ -1864,7 +1861,6 @@
             padding: 12px 0 4px !important;
             border-top: 1px solid var(--border) !important;
             width: 100% !important;
-            background: rgba(255, 200, 0, 0.06) !important;
         }
         .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-actions-expanded > * {
             display: flex !important;
