@@ -327,11 +327,29 @@ def detect_speech_segments_whisper(
     with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
         audio_path = tmp.name
     
+    # v709 — early-return helper. Populates caller's sink with a "Whisper
+    # broke on this clip" marker so the post-concat aggregator surfaces it
+    # instead of silently skipping. Mirrors HARD-failsafe shape so existing
+    # downstream consumers see a familiar low-trust failed-clip entry.
+    def _v709_mark_sink_failed(_reason: str) -> None:
+        if v709_audit_sink is not None:
+            v709_audit_sink.update({
+                "script_provided": bool(dialogue_texts and any(dialogue_texts)),
+                "trust": 0.0,
+                "matched": 0,
+                "script_words": 0,
+                "heard_words": 0,
+                "missing": [],
+                "failsafe": "HARD",
+                "error": _reason,
+            })
+
     try:
         cmd = [FFMPEG_BIN, '-y', '-i', str(video_path), '-ar', '16000', '-ac', '1', '-f', 'wav', audio_path]
         code, _, err = run(cmd)
         if code != 0:
             print(f"[WhisperVAD] Audio extraction failed: {err[:200]}")
+            _v709_mark_sink_failed(f"audio extract failed: {err[:200]}")
             return [(0.0, total_duration)]
         
         try:
@@ -1437,10 +1455,15 @@ def detect_speech_segments_whisper(
             
         except ImportError:
             print("[WhisperVAD] ❌ faster-whisper not installed — cannot detect speech")
+            _v709_mark_sink_failed("faster_whisper unavailable")
             return [(0.0, total_duration)]
         except Exception as e:
             print(f"[WhisperVAD] ❌ Transcription error: {e}")
             import traceback; traceback.print_exc()
+            # v709 — only overwrite sink if BEST-pass populate hasn't already run.
+            # Sink dict will be empty {} if exception fired before BEST pass.
+            if v709_audit_sink is not None and not v709_audit_sink:
+                _v709_mark_sink_failed(f"whisper transcription error: {e}")
             return [(0.0, total_duration)]
     finally:
         import os
@@ -4612,6 +4635,7 @@ def export_final_video(
                             "heard_words": int(_au.get("heard_words", 0) or 0),
                             "missing": list(_au.get("missing") or []),
                             "failsafe": _au.get("failsafe"),
+                            "error": _au.get("error"),  # v709 — None on success, str on Whisper failure
                         }
                         per_clip_audit.append(entry)
                         sum_script += entry["script_words"]
@@ -4662,6 +4686,8 @@ def export_final_video(
                     stats["v708_audit_ok"] = False
                     stats["v708_audit_missing_words"] = []
                     stats["v708_audit_model"] = "tiny-per-clip-v709"
+                    stats["v708_audit_script_words"] = 0
+                    stats["v708_audit_heard_words"] = 0
                     stats["v708_audit_error"] = f"v709 aggregation exception: {_audit_err}"
                     stats["v708_per_clip_audit"] = []
                     print(
