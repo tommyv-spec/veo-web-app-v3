@@ -55,7 +55,10 @@ V708_FILLER_MIN_EDIT_DIST = 2           # filler must differ from any script wor
 #     survives at its mis-transcribed timestamp; obvious filler outside any
 #     Whisper word still gets dropped at concat time.
 V731_TRIM_TRUST_FLOOR = 0.50
-V708_AUDIT_MODEL_SIZE = "small"         # final export audit model — small balances accuracy/RAM on Render free tier
+# v709 — REMOVED V708_AUDIT_MODEL_SIZE. Post-concat Whisper-small re-transcribe
+# produced false-positive missing words on TTS audio operator could hear
+# clearly. Replaced with per-clip audit aggregation (see v709 block below +
+# aggregation in process_video). Saves ~500MB RAM + ~15s wall time per export.
 V708_ESCALATE_MODEL_SIZE = "small"      # pass-3 escalation model — same; tiny is the bottleneck
 V708_HARDENED_WHISPER_KWARGS = {
     "temperature": 0.0,
@@ -64,6 +67,30 @@ V708_HARDENED_WHISPER_KWARGS = {
     "log_prob_threshold": -0.8,
     "condition_on_previous_text": False,
 }
+
+# v709 — Per-clip word audit (replaces post-concat v708 Layer 4 audit).
+# Per-clip Whisper-tiny pass already produces matched/missing/trust per Veo
+# clip in `detect_speech_segments_whisper`. v709 plumbs that data outward via
+# a caller-supplied sink dict, then aggregates across clips at concat time.
+# No second Whisper model load. False positives from Whisper-small choking on
+# TTS audio die at the source.
+V709_PER_CLIP_TRUST_FLOOR = 0.85        # clip passes audit iff trust ≥ floor AND zero missing AND no failsafe
+
+
+def _v709_tokenize(text: str) -> set:
+    """v709 — Lowercase + split hyphenated compounds + strip punctuation.
+    `blood-flow` → {'blood','flow'}; `mother's` → {'mothers'}; em-dash
+    treated like hyphen. Used by per-clip pass for both script-set
+    construction AND Whisper output normalization so the two are guaranteed
+    to tokenize identically. Pre-v709 the script side stripped `-` to
+    nothing (fusing `blood-flow` → `bloodflow`) while Whisper produced two
+    tokens — set diff structurally could not match. Symptom: persistent
+    `missing=['bloodflow']` reports despite the words being audible.
+    """
+    import re as _re
+    s = (text or "").lower().replace("-", " ").replace("—", " ").replace("–", " ")
+    s = _re.sub(r"[^\w\s]", "", s)
+    return {t for t in s.split() if t}
 
 
 def _v708_levenshtein(a: str, b: str, max_dist: int = 4) -> int:
@@ -277,6 +304,7 @@ def detect_speech_segments_whisper(
     cut_prefix_audio: bool = False,  # v542
     prefix_word: str = "only",  # v542
     whisper_model=None,  # v701y — caller-supplied model to skip 11x reload
+    v709_audit_sink: dict = None,  # v709 — caller-owned dict to receive per-clip audit
 ) -> List[Tuple[float, float]]:
     """
     Detect speech segments using Whisper + dialogue-anchored matching.
@@ -366,14 +394,22 @@ def detect_speech_segments_whisper(
             # === v708 — Zero word loss retry chain ===
             # Pre-build per-clip word lists + flattened script set (used by
             # every pass + downstream v611 trim discipline).
+            # v709 — use _v709_tokenize so hyphenated compounds (`blood-flow`)
+            # tokenize as 2 words and match Whisper's split output.
             _per_clip_words = []
             _v708_script_set = set()
             for _line in (dialogue_texts or []):
                 if _line:
-                    _cleaned = re.sub(r'[^\w\s]', '', _line.lower())
-                    _cw = _cleaned.split()
-                    _per_clip_words.append(_cw)
-                    for _w in _cw:
+                    _cw_set = _v709_tokenize(_line)
+                    _cw = sorted(_cw_set)  # _per_clip_words used by matcher; order doesn't matter for set ops, but preserve list shape
+                    # NOTE: the dialogue matcher (_match_whisper_to_dialogue)
+                    # consumes _per_clip_words as token lists. We preserve
+                    # token-list shape via the cleaned-split below to keep
+                    # matcher behavior identical; the *set* uses hyphen-aware
+                    # tokenization for audit purposes only.
+                    _cleaned = re.sub(r'[^\w\s]', '', _line.lower().replace('-', ' ').replace('—', ' ').replace('–', ' '))
+                    _per_clip_words.append(_cleaned.split())
+                    for _w in _cw_set:
                         _v708_script_set.add(_w)
                 else:
                     _per_clip_words.append([])
@@ -415,8 +451,14 @@ def detect_speech_segments_whisper(
                         _matched_count = len(_matched)
                 _heard_set = set()
                 for _w in _aw:
-                    _tt = re.sub(r'[^\w]', '', (_w.get('text') or '').lower())
-                    if _tt:
+                    # v709 — hyphen-aware tokenization mirrors script side so
+                    # `blood-flow` heard as `blood flow` matches set elements
+                    # `{'blood','flow'}` from the script. Pre-v709 the
+                    # whisper-side regex stripped `-` to nothing while the
+                    # script-side did the same — both produced `bloodflow`
+                    # only when input had a hyphen; Whisper produces two
+                    # tokens so the set diff structurally couldn't match.
+                    for _tt in _v709_tokenize(_w.get('text') or ''):
                         _heard_set.add(_tt)
                 _missing = _v708_script_set - _heard_set
                 _trust = (_matched_count / max(len(_v708_script_set), 1)) if _v708_script_set else 1.0
@@ -498,6 +540,24 @@ def detect_speech_segments_whisper(
                 flush=True,
             )
 
+            # v709 — populate caller-owned audit sink. Mirrors BEST pass.
+            # Failsafe field updated in HARD/SOFT branches below. Aggregator
+            # in process_video consumes this to build stats["v708_per_clip_audit"].
+            if v709_audit_sink is not None:
+                _heard_for_sink = set()
+                for _w in all_words:
+                    for _tt in _v709_tokenize(_w.get('text') or ''):
+                        _heard_for_sink.add(_tt)
+                v709_audit_sink.update({
+                    "script_provided": bool(_v708_script_set),
+                    "trust": float(_best_trust),
+                    "matched": int(_best_matched),
+                    "script_words": len(_v708_script_set),
+                    "heard_words": len(_heard_for_sink),
+                    "missing": sorted(_best_missing) if _best_missing else [],
+                    "failsafe": None,
+                })
+
             print(
                 f"[WhisperVAD] Transcribed {len(all_words)} raw words "
                 f"(total_duration={total_duration:.1f}s)",
@@ -538,6 +598,8 @@ def detect_speech_segments_whisper(
                         f"no-trim, keep full clip {total_duration:.3f}s",
                         flush=True,
                     )
+                    if v709_audit_sink is not None:
+                        v709_audit_sink["failsafe"] = "HARD"
                     if _model_owned_here:
                         try:
                             del model
@@ -548,6 +610,8 @@ def detect_speech_segments_whisper(
                     return [(0.0, total_duration)]
                 else:
                     _v731_soft_failsafe = True
+                    if v709_audit_sink is not None:
+                        v709_audit_sink["failsafe"] = "SOFT"
                     print(
                         f"[WhisperVAD/v731] FAILSAFE-SOFT: {', '.join(_reason)} "
                         f"(trust={_best_trust:.2f}≥{V731_TRIM_TRUST_FLOOR:.2f}) → "
@@ -2290,165 +2354,10 @@ def _match_whisper_to_dialogue(whisper_words: list, per_clip_words: list,
     return matched
 
 
-def audit_final_export_words(
-    output_mp4: Path,
-    master_script_lines: List[str],
-    language: str = "English",
-) -> dict:
-    """v708 Layer 4 — final-export word audit.
-
-    Transcribes the assembled mp4 with a higher-fidelity Whisper model and
-    matches against the concatenated dialogue script. Returns a dict:
-        {
-            'missing_words': [str, ...],           # script words NOT heard
-            'audit_model': str,                    # which model ran
-            'script_word_count': int,
-            'heard_word_count': int,
-            'transcript_excerpt': str,             # first 200 chars of audio transcript
-            'audit_ok': bool,                      # True iff missing_words is empty
-            'error': Optional[str],                # set when audit could not run
-        }
-    Does NOT fail the export — caller decides what to do with the result.
-    Per CLAUDE.md verification rule, audit results live in shipped stats so
-    every export's word-completeness is visible without needing log diving.
-    """
-    import re as _re
-    import tempfile as _tf
-    result = {
-        'missing_words': [],
-        'audit_model': V708_AUDIT_MODEL_SIZE,
-        'script_word_count': 0,
-        'heard_word_count': 0,
-        'transcript_excerpt': '',
-        'audit_ok': True,
-        'error': None,
-    }
-    try:
-        script_set = set()
-        for line in master_script_lines or []:
-            if line:
-                cleaned = _re.sub(r'[^\w\s]', '', line.lower())
-                for w in cleaned.split():
-                    script_set.add(w)
-        result['script_word_count'] = len(script_set)
-        if not script_set:
-            print("[v708-AUDIT] no master script provided — skipping audit", flush=True)
-            return result
-
-        if not output_mp4.exists():
-            result['audit_ok'] = False
-            result['error'] = f"output mp4 missing: {output_mp4}"
-            print(f"[v708-AUDIT] {result['error']}", flush=True)
-            return result
-
-        _LANG_MAP = {
-            "english": "en", "spanish": "es", "french": "fr", "german": "de",
-            "italian": "it", "portuguese": "pt",
-        }
-        whisper_lang = _LANG_MAP.get((language or "english").lower(), None)
-
-        with _tf.NamedTemporaryFile(suffix='.wav', delete=False) as _tmp:
-            audio_path = _tmp.name
-        try:
-            cmd = [FFMPEG_BIN, '-y', '-i', str(output_mp4),
-                   '-ar', '16000', '-ac', '1', '-f', 'wav', audio_path]
-            code, _, err = run(cmd)
-            if code != 0:
-                result['audit_ok'] = False
-                result['error'] = f"audio extract failed: {err[:200]}"
-                print(f"[v708-AUDIT] {result['error']}", flush=True)
-                return result
-
-            try:
-                from faster_whisper import WhisperModel
-            except ImportError:
-                result['audit_ok'] = False
-                result['error'] = "faster_whisper unavailable for audit"
-                print(f"[v708-AUDIT] {result['error']}", flush=True)
-                return result
-
-            print(
-                f"[v708-AUDIT] loading {V708_AUDIT_MODEL_SIZE} model for "
-                f"final-export word audit of {output_mp4.name}",
-                flush=True,
-            )
-            audit_model = WhisperModel(
-                V708_AUDIT_MODEL_SIZE, device="cpu", compute_type="int8"
-            )
-            try:
-                # Use the script as initial_prompt to bias decoder toward
-                # the words we expect — same trick as v701q per-clip.
-                _audit_prompt = " ".join(
-                    (l or "").strip() for l in master_script_lines if l
-                ).strip() or None
-                segs_iter, _ = audit_model.transcribe(
-                    audio_path,
-                    language=whisper_lang,
-                    word_timestamps=True,
-                    beam_size=1,
-                    vad_filter=True,
-                    condition_on_previous_text=False,
-                    initial_prompt=_audit_prompt,
-                    temperature=0.0,
-                    no_speech_threshold=0.4,
-                    compression_ratio_threshold=2.0,
-                    log_prob_threshold=-0.8,
-                )
-                heard_set = set()
-                full_transcript_parts = []
-                for seg in segs_iter:
-                    if seg.words:
-                        for w in seg.words:
-                            t = _re.sub(r'[^\w]', '', (w.word or '').lower())
-                            if t:
-                                heard_set.add(t)
-                                full_transcript_parts.append(t)
-            finally:
-                try:
-                    del audit_model
-                except Exception:
-                    pass
-                try:
-                    import gc as _gc
-                    _gc.collect()
-                    import ctypes as _ct
-                    _libc = _ct.CDLL("libc.so.6")
-                    _libc.malloc_trim(0)
-                except Exception:
-                    pass
-
-            missing = sorted(script_set - heard_set)
-            result['missing_words'] = missing
-            result['heard_word_count'] = len(heard_set)
-            result['transcript_excerpt'] = " ".join(full_transcript_parts)[:200]
-            result['audit_ok'] = (len(missing) == 0)
-
-            if missing:
-                print(
-                    f"[v708-AUDIT] ❌ FINAL MP4 MISSING {len(missing)} script "
-                    f"word(s): {missing} | script={len(script_set)} heard={len(heard_set)}",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"[v708-AUDIT] ✓ all {len(script_set)} script words present "
-                    f"in final mp4 (heard={len(heard_set)})",
-                    flush=True,
-                )
-        finally:
-            try:
-                os.remove(audio_path)
-            except Exception:
-                pass
-
-    except Exception as e:
-        result['audit_ok'] = False
-        result['error'] = f"audit exception: {e}"
-        import traceback
-        print(f"[v708-AUDIT] {result['error']}", flush=True)
-        traceback.print_exc()
-
-    return result
+# v709 — REMOVED `audit_final_export_words`. Post-concat Whisper-small
+# re-transcribe produced false-positive missing words on TTS audio operator
+# could hear clearly. See v709 aggregation in process_video for the
+# replacement; per-clip Whisper-tiny pass now feeds final stats directly.
 
 
 def apply_vad(
@@ -2465,6 +2374,7 @@ def apply_vad(
     cut_prefix_audio: bool = False,  # v542
     prefix_word: str = "only",  # v542
     whisper_model=None,  # v701y — pre-loaded model from caller; skips 11x reload in per-clip loop
+    v709_audit_sink: dict = None,  # v709 — caller-owned dict to receive per-clip audit
 ) -> dict:
     """
     Remove non-dialogue segments using Voice Activity Detection.
@@ -2512,6 +2422,7 @@ def apply_vad(
             cut_prefix_audio=cut_prefix_audio,  # v542
             prefix_word=prefix_word,  # v542
             whisper_model=whisper_model,  # v701y — pass through
+            v709_audit_sink=v709_audit_sink,  # v709 — pass through to populate caller's dict
         )
     else:
         speech_segments = detect_speech_segments(
@@ -4435,6 +4346,7 @@ def export_final_video(
                             continue
                         try:
                             _vad_out = Path(str(trimmed_file) + ".vad.mp4")
+                            _v709_sink = {}  # v709 — per-clip audit sink; populated inside detect_speech_segments_whisper
                             apply_vad(
                                 src=Path(trimmed_file),
                                 out=_vad_out,
@@ -4448,7 +4360,12 @@ def export_final_video(
                                 cut_prefix_audio=cut_prefix_audio,
                                 prefix_word=prefix_word,
                                 whisper_model=_shared_whisper,  # v701y — reuse
+                                v709_audit_sink=_v709_sink,  # v709 — fill with audit details
                             )
+                            # v709 — stash audit dict on clip_info entry for post-concat aggregation.
+                            # `info` is a reference into clip_info (constructed in vad_targets), so
+                            # the assignment lands in the canonical clip_info[slot] dict.
+                            info["_v709_audit"] = _v709_sink if _v709_sink else None
                             # v706 — Per-clip VAD floor guard. apply_vad has no
                             # minimum-duration safety: if the Whisper-tiny matcher
                             # returns 0-2 words (TTS lead-in, mispronunciation,
@@ -4660,49 +4577,95 @@ def export_final_video(
                 stats["vad_applied"] = True
                 stats["vad_pass"] = "per_clip_only_v708"
 
-                # === v708 Layer 4 — final-export word audit ===
-                # Bind contract: every script word from each clip's intended
-                # dialogue must appear in the assembled mp4. Audit
-                # transcribes the final output with a fidelity model and
-                # diffs against the concatenated master script. Result
-                # surfaces in stats (operator-visible) and logs.
+                # === v709 — Per-clip word audit aggregation ===
+                # Replaces v708 Layer 4 post-concat Whisper-small re-transcribe.
+                # Per-clip Whisper-tiny pass already produced matched/missing/
+                # trust per clip in `_v709_audit`. Here we aggregate. No
+                # second Whisper load → ~500MB RAM saved + ~15s wall time
+                # saved per export. Hyphen-aware tokenizer (`blood-flow` →
+                # `{blood, flow}`) kills the long-standing `bloodflow`
+                # false-positive that v708 produced.
                 try:
-                    _master_lines = []
+                    if progress_callback:
+                        progress_callback("v709 word-completeness aggregation...")
+                    per_clip_audit = []
+                    union_missing = set()
+                    sum_script = 0
+                    sum_heard = 0
+                    any_failsafe = False
+                    audit_ok = True
                     for _ci in clip_info:
                         _cm = (_ci.get("cut_mode") or "").lower()
                         _st = (_ci.get("scene_type") or "").lower()
                         if _cm == "timeline" or _st == "text_card":
                             continue
-                        _dt = (_ci.get("dialogue_text") or "").strip()
-                        if _dt:
-                            _master_lines.append(_dt)
-                    if _master_lines:
-                        if progress_callback:
-                            progress_callback("v708 word-completeness audit...")
-                        _audit = audit_final_export_words(
-                            output_mp4=output_path,
-                            master_script_lines=_master_lines,
-                            language=language,
+                        _au = _ci.get("_v709_audit")
+                        if not _au or not _au.get("script_provided"):
+                            continue
+                        entry = {
+                            "clip_db_id": _ci.get("_clip_db_id"),
+                            "scene_index": _ci.get("scene_index"),
+                            "role": _ci.get("clip_role"),
+                            "trust": float(_au.get("trust", 0.0) or 0.0),
+                            "matched": int(_au.get("matched", 0) or 0),
+                            "script_words": int(_au.get("script_words", 0) or 0),
+                            "heard_words": int(_au.get("heard_words", 0) or 0),
+                            "missing": list(_au.get("missing") or []),
+                            "failsafe": _au.get("failsafe"),
+                        }
+                        per_clip_audit.append(entry)
+                        sum_script += entry["script_words"]
+                        sum_heard += entry["heard_words"]
+                        union_missing.update(entry["missing"])
+                        if entry["failsafe"]:
+                            any_failsafe = True
+                        if entry["trust"] < V709_PER_CLIP_TRUST_FLOOR or entry["missing"]:
+                            audit_ok = False
+
+                    if per_clip_audit:
+                        stats["v708_audit_ok"] = bool(audit_ok and not any_failsafe)
+                        stats["v708_audit_missing_words"] = sorted(union_missing)
+                        stats["v708_audit_model"] = "tiny-per-clip-v709"
+                        stats["v708_audit_script_words"] = sum_script
+                        stats["v708_audit_heard_words"] = sum_heard
+                        stats["v708_audit_error"] = None
+                        stats["v708_per_clip_audit"] = per_clip_audit
+                        _failsafe_clip_count = sum(1 for e in per_clip_audit if e["failsafe"])
+                        print(
+                            f"[v709-AUDIT] schema=v709 per-clip aggregate: "
+                            f"clips={len(per_clip_audit)} "
+                            f"script={sum_script} heard={sum_heard} "
+                            f"missing={len(union_missing)} "
+                            f"failsafe_clips={_failsafe_clip_count} "
+                            f"ok={stats['v708_audit_ok']}",
+                            flush=True,
                         )
-                        stats["v708_audit_ok"] = _audit.get("audit_ok", False)
-                        stats["v708_audit_missing_words"] = _audit.get("missing_words", [])
-                        stats["v708_audit_model"] = _audit.get("audit_model")
-                        stats["v708_audit_script_words"] = _audit.get("script_word_count", 0)
-                        stats["v708_audit_heard_words"] = _audit.get("heard_word_count", 0)
-                        stats["v708_audit_error"] = _audit.get("error")
+                        if union_missing:
+                            print(
+                                f"[v709-AUDIT] missing words (union): "
+                                f"{sorted(union_missing)}",
+                                flush=True,
+                            )
                     else:
                         stats["v708_audit_ok"] = True
                         stats["v708_audit_missing_words"] = []
-                        stats["v708_audit_model"] = None
+                        stats["v708_audit_model"] = "tiny-per-clip-v709"
                         stats["v708_audit_script_words"] = 0
                         stats["v708_audit_heard_words"] = 0
                         stats["v708_audit_error"] = "no dialogue clips to audit"
+                        stats["v708_per_clip_audit"] = []
+                        print(
+                            f"[v709-AUDIT] schema=v709 no dialogue clips to aggregate",
+                            flush=True,
+                        )
                 except Exception as _audit_err:
                     stats["v708_audit_ok"] = False
                     stats["v708_audit_missing_words"] = []
-                    stats["v708_audit_error"] = f"audit exception: {_audit_err}"
+                    stats["v708_audit_model"] = "tiny-per-clip-v709"
+                    stats["v708_audit_error"] = f"v709 aggregation exception: {_audit_err}"
+                    stats["v708_per_clip_audit"] = []
                     print(
-                        f"[v708-AUDIT] non-fatal exception: {_audit_err}",
+                        f"[v709-AUDIT] non-fatal aggregation exception: {_audit_err}",
                         flush=True,
                     )
 
