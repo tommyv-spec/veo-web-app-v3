@@ -360,6 +360,20 @@ def detect_speech_segments_aligned(
         )
         return [(0.0, duration)], _build_audit("", empty_result, [(0.0, duration)])
 
+    # v773.10.3 — ALIGN_MODE env gates which backend tries first.
+    # mms_fa (default)  → torchaudio MMS_FA forced alignment (best, ~1.2 GB RAM)
+    # silero            → skip MMS_FA entirely, go straight to silero-VAD-only
+    #                     (no per-word, only speech-boundary trim; fits 2 GB Render)
+    # auto              → try MMS_FA; on any Python exception fall back to silero
+    import os as _os
+    _align_mode = _os.environ.get("ALIGN_MODE", "mms_fa").lower()
+
+    if _align_mode == "silero":
+        segments, fallback_result = _silero_fallback(
+            audio_path, "ALIGN_MODE=silero (operator-forced)",
+        )
+        return segments, _build_audit(script_text, fallback_result, segments)
+
     try:
         result = align_script_to_audio(audio_path, script_text, language)
     except Exception as e:

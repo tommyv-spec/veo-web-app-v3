@@ -173,6 +173,10 @@ def test_silero_fallback_when_aligner_raises(monkeypatch):
     """If aligner raises OOM, silero-VAD path returns coarse segments + audit flag."""
     import transcript_alignment as ta
 
+    # Force the default-MMS-FA path so the failure mode under test is the
+    # aligner raising, not ALIGN_MODE=silero short-circuiting.
+    monkeypatch.delenv("ALIGN_MODE", raising=False)
+
     def boom(*args, **kwargs):
         raise RuntimeError("simulated aligner OOM")
 
@@ -192,3 +196,27 @@ def test_silero_fallback_when_aligner_raises(monkeypatch):
     assert speech_dur > 0.5
     # silero-VAD singleton must be loaded by the fallback path (not the stub)
     assert ta._VAD is not None, "silero-VAD singleton must be loaded by the fallback path"
+
+
+def test_align_mode_silero_skips_mms_fa(monkeypatch):
+    """ALIGN_MODE=silero env routes to silero-VAD without touching MMS_FA at all."""
+    import transcript_alignment as ta
+
+    monkeypatch.setenv("ALIGN_MODE", "silero")
+
+    # If MMS_FA were touched, this would raise — proves the path was skipped.
+    def must_not_be_called(*args, **kwargs):
+        raise AssertionError("MMS_FA path called despite ALIGN_MODE=silero")
+
+    monkeypatch.setattr(ta, "align_script_to_audio", must_not_be_called)
+
+    segments, audit = ta.detect_speech_segments_aligned(
+        audio_path=FIXTURES / "align_clean.wav",
+        script_text="any script",
+        language="English",
+    )
+    assert audit["backend"] == "silero-fallback"
+    assert "operator-forced" in audit["fallback_reason"]
+    assert len(segments) >= 1
+    speech_dur = sum(e - s for s, e in segments)
+    assert speech_dur > 0.5
