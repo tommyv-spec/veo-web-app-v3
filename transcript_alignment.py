@@ -156,7 +156,8 @@ def align_script_to_audio(
     # TokenSpan: .start (int frame), .end (int frame), .score (float, probability after exp())
     word_spans = a["aligner"](emission_2d, targets)
 
-    # ratio: audio samples per emission frame
+    # ratio: audio samples per emission frame.
+    # emission shape is (1, T_frames, vocab); shape[1] is the time-dim, not batch.
     ratio = waveform.shape[-1] / emission.shape[1]
 
     aligned: list[AlignedWord] = []

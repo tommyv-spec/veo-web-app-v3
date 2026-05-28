@@ -67,9 +67,11 @@ def test_align_dropped_word_flagged_low_conf():
     # and meaningfully below the average of the rest.
     is_low_absolute = dropped_conf < ta.CONF_FLAG
     is_low_relative = dropped_conf < 0.5 * avg_other
-    assert is_low_absolute or is_low_relative, (
+    min_conf_idx = min(range(len(result.words)), key=lambda i: result.words[i].confidence)
+    assert (is_low_absolute or is_low_relative) and min_conf_idx == dropped_idx, (
         f"dropped word '{script_words[dropped_idx]}' conf={dropped_conf:.3f} "
-        f"not flagged: CONF_FLAG={ta.CONF_FLAG}, avg_other={avg_other:.3f}"
+        f"not flagged: CONF_FLAG={ta.CONF_FLAG}, avg_other={avg_other:.3f}, "
+        f"min_conf_idx={min_conf_idx} (expected {dropped_idx})"
     )
 
 
