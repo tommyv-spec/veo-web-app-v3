@@ -184,6 +184,55 @@ def align_script_to_audio(
     )
 
 
+def _audio_duration_seconds(audio_path: Path) -> float:
+    import subprocess
+    import json as _json
+    res = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "json", str(audio_path)],
+        capture_output=True, text=True, check=False,
+    )
+    if res.returncode != 0:
+        return 0.0
+    try:
+        return float(_json.loads(res.stdout)["format"]["duration"])
+    except Exception:
+        return 0.0
+
+
+def _build_audit(
+    script_text: str,
+    result: AlignmentResult,
+    segments: list[tuple[float, float]],
+) -> dict:
+    audio_dur = result.audio_duration or 0.0
+    speech_dur = sum(e - s for s, e in segments)
+    low_conf = [w.text for w in result.words if w.confidence < CONF_FLAG]
+    return {
+        "script_provided": bool(script_text.strip()),
+        "backend": result.backend,
+        "script_words": len(script_text.split()) if script_text.strip() else 0,
+        "aligned_words": len(result.words),
+        "low_confidence_words": low_conf,
+        "audio_duration": audio_dur,
+        "speech_duration": speech_dur,
+        "trim_ratio": (speech_dur / audio_dur) if audio_dur > 0 else 1.0,
+        "fallback_reason": result.fallback_reason,
+    }
+
+
+def _silero_fallback(audio_path: Path, reason: str):
+    """STUB — Task 7 replaces with real silero-VAD invocation.
+
+    Returns ([(0, duration)], AlignmentResult(backend='silero-fallback')).
+    """
+    duration = _audio_duration_seconds(audio_path)
+    return [(0.0, duration)], AlignmentResult(
+        words=[], audio_duration=duration,
+        backend="silero-fallback", fallback_reason=reason,
+    )
+
+
 def detect_speech_segments_aligned(
     audio_path: Path,
     script_text: str,
@@ -191,7 +240,48 @@ def detect_speech_segments_aligned(
     padding: float = 0.15,
 ) -> tuple[list[tuple[float, float]], dict]:
     """Returns (segments_to_keep, audit_dict). See spec section 4.2 audit_dict shape."""
-    raise NotImplementedError
+    audio_path = Path(audio_path)
+
+    if not script_text.strip():
+        duration = _audio_duration_seconds(audio_path)
+        empty_result = AlignmentResult(
+            words=[], audio_duration=duration, backend="empty-script",
+        )
+        return [(0.0, duration)], _build_audit("", empty_result, [(0.0, duration)])
+
+    try:
+        result = align_script_to_audio(audio_path, script_text, language)
+    except Exception as e:
+        segments, fallback_result = _silero_fallback(audio_path, str(e))
+        return segments, _build_audit(script_text, fallback_result, segments)
+
+    if not result.words:
+        # Aligner returned nothing (rare edge) — keep full audio
+        full = [(0.0, result.audio_duration)]
+        return full, _build_audit(script_text, result, full)
+
+    # Step A: head/tail clamp around aligned span
+    first = result.words[0]
+    last = result.words[-1]
+    keep_start = max(0.0, first.start - HEAD_PAD)
+    keep_end = min(result.audio_duration, last.end + TAIL_PAD)
+
+    # Step B: inter-word gap trim — drop gaps longer than GAP_TRIGGER,
+    # keeping GAP_KEEP padding on each side.
+    segments: list[tuple[float, float]] = []
+    cur_start = keep_start
+    for i in range(1, len(result.words)):
+        gap = result.words[i].start - result.words[i - 1].end
+        if gap > GAP_TRIGGER:
+            seg_end = min(keep_end, result.words[i - 1].end + GAP_KEEP)
+            if seg_end > cur_start:
+                segments.append((cur_start, seg_end))
+            cur_start = max(keep_start, result.words[i].start - GAP_KEEP)
+    if keep_end > cur_start:
+        segments.append((cur_start, keep_end))
+
+    audit = _build_audit(script_text, result, segments)
+    return segments, audit
 
 
 def transcribe_for_audit(

@@ -88,3 +88,60 @@ def test_align_rare_vocab_chemistry_terms():
     assert len(result.words) == len(script_words)
     for i in range(1, len(result.words)):
         assert result.words[i].start >= result.words[i - 1].start
+
+
+def test_filler_excluded_from_segments():
+    """TTS with inserted 'uhh' filler: returned segments skip the filler gap."""
+    import transcript_alignment as ta
+
+    cfg = json.loads((FIXTURES / "align_filler.json").read_text())
+    segments, audit = ta.detect_speech_segments_aligned(
+        audio_path=FIXTURES / "align_filler.wav",
+        script_text=cfg["script"],
+        language="English",
+        padding=0.15,
+    )
+    assert audit["backend"] == "mms-fa"
+    assert audit["script_provided"] is True
+    assert audit["script_words"] == len(cfg["script"].split())
+    assert audit["aligned_words"] == audit["script_words"]
+    # speech_duration should be less than full audio (filler trimmed)
+    assert audit["speech_duration"] < audit["audio_duration"]
+    # trim_ratio = speech / audio, must be in plausible window
+    assert 0.3 < audit["trim_ratio"] < 0.99
+    assert audit["fallback_reason"] is None
+
+
+def test_segments_monotonic_and_in_bounds():
+    """Returned segments are monotonic, non-overlapping, within audio bounds."""
+    import transcript_alignment as ta
+
+    cfg = json.loads((FIXTURES / "align_clean.json").read_text())
+    segments, audit = ta.detect_speech_segments_aligned(
+        audio_path=FIXTURES / "align_clean.wav",
+        script_text=cfg["script"],
+        language="English",
+        padding=0.15,
+    )
+    assert len(segments) >= 1
+    prev_end = 0.0
+    for s, e in segments:
+        assert 0.0 <= s < e
+        assert s >= prev_end
+        assert e <= audit["audio_duration"] + 0.01
+        prev_end = e
+
+
+def test_empty_script_returns_full_audio():
+    """No script (text_card path) returns single full-audio segment with empty backend."""
+    import transcript_alignment as ta
+
+    segments, audit = ta.detect_speech_segments_aligned(
+        audio_path=FIXTURES / "align_clean.wav",
+        script_text="",
+        language="English",
+    )
+    assert len(segments) == 1
+    assert segments[0][0] == 0.0
+    assert audit["script_provided"] is False
+    assert audit["aligned_words"] == 0
