@@ -8,13 +8,18 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
-# Install system dependencies including ffmpeg
+# Install system dependencies including ffmpeg, espeak-ng (for aeneas
+# forced-alignment fallback), and build tools (aeneas pip install needs
+# to compile a C extension).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsm6 \
     libxext6 \
     libgl1 \
     curl \
+    espeak-ng \
+    libespeak-ng-dev \
+    build-essential \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 

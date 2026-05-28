@@ -294,6 +294,102 @@ def detect_speech_segments(
     return speech_segments
 
 
+# v773.10.9 — module-level Whisper-base singleton (lazy).
+# faster-whisper int8 base: ~150 MB resident, 2-3× lower WER than tiny.
+# Loaded once per worker process; reused across all clips in all exports.
+_WHISPER_BASE_MODEL = None
+
+
+def _ensure_whisper_base():
+    """Lazy-load faster-whisper base int8 model. Cached for the process lifetime."""
+    global _WHISPER_BASE_MODEL
+    if _WHISPER_BASE_MODEL is None:
+        from faster_whisper import WhisperModel
+        _WHISPER_BASE_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+    return _WHISPER_BASE_MODEL
+
+
+# v773.10.9 — Aeneas fallback: text↔audio MFCC-DTW alignment, no ASR.
+# When whisper_anchor can't find script anchors (Whisper-base mistranscribes
+# the rare vocab cluster), aeneas synthesizes the script line via eSpeak,
+# extracts MFCC features, and DTW-aligns against the real audio MFCCs.
+# Returns (start_s, end_s) of where the script line lands in the audio.
+# Returns None on any failure (caller falls back to keep-full-clip).
+def _aeneas_trim(video_path, dialogue_texts, language: str = "English"):
+    import os as _os
+    import json as _json
+    import tempfile as _tempfile
+
+    _script_text = "\n".join(
+        (t or "").strip() for t in (dialogue_texts or []) if (t or "").strip()
+    ).strip()
+    if not _script_text:
+        return None
+
+    _LANG_AENEAS = {
+        "english": "eng", "spanish": "spa", "french": "fra", "german": "deu",
+        "italian": "ita", "portuguese": "por", "dutch": "nld", "russian": "rus",
+    }
+    _alang = _LANG_AENEAS.get(language.lower(), "eng")
+
+    _tmpdir = _tempfile.mkdtemp(prefix="aeneas_")
+    _audio_path = _os.path.join(_tmpdir, "audio.wav")
+    _text_path = _os.path.join(_tmpdir, "script.txt")
+    _sync_path = _os.path.join(_tmpdir, "sync.json")
+
+    try:
+        # 1. Extract 16k mono wav from clip
+        _cmd = [FFMPEG_BIN, "-y", "-i", str(video_path), "-ar", "16000",
+                "-ac", "1", "-f", "wav", _audio_path]
+        _code, _, _err = run(_cmd)
+        if _code != 0:
+            print(f"[Aeneas] audio extract failed: {_err[:200]}", flush=True)
+            return None
+
+        with open(_text_path, "w", encoding="utf-8") as _f:
+            _f.write(_script_text)
+
+        # 2. Run aeneas: synthesize text via eSpeak → MFCC → DTW vs real audio
+        from aeneas.executetask import ExecuteTask
+        from aeneas.task import Task
+        _cfg = (
+            f"task_language={_alang}"
+            f"|is_text_type=plain"
+            f"|os_task_file_format=json"
+        )
+        _task = Task(config_string=_cfg)
+        _task.audio_file_path_absolute = _audio_path
+        _task.text_file_path_absolute = _text_path
+        _task.sync_map_file_path_absolute = _sync_path
+        ExecuteTask(_task).execute()
+        _task.output_sync_map_file()
+
+        # 3. Parse sync map: list of fragments with begin/end timestamps
+        with open(_sync_path, "r", encoding="utf-8") as _f:
+            _smap = _json.load(_f)
+        _fragments = _smap.get("fragments", [])
+        if not _fragments:
+            print("[Aeneas] no fragments returned", flush=True)
+            return None
+
+        _begin = float(_fragments[0]["begin"])
+        _end = float(_fragments[-1]["end"])
+        print(
+            f"[Aeneas] aligned {_script_text[:60]!r}... → [{_begin:.2f}, {_end:.2f}]",
+            flush=True,
+        )
+        return (_begin, _end)
+    except Exception as _e:
+        print(f"[Aeneas] failed: {_e!r}", flush=True)
+        return None
+    finally:
+        try:
+            import shutil as _sh
+            _sh.rmtree(_tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 # v773.10.6 — Whisper-tiny multi-anchor trim.
 # Operator requirement: trim each clip to ONLY contain the known script line.
 # Robustness over v773.10.5 (single first+last anchor):
@@ -347,26 +443,43 @@ def _whisper_anchor_trim(
         print(f"[WhisperAnchor] audio extract failed: {_err[:200]} — keeping full clip", flush=True)
         return [(0.0, total_duration)]
 
-    # Use caller-supplied Whisper-tiny model (already loaded once per export)
+    # v773.10.9 — use a dedicated Whisper-base lazy singleton (~150 MB int8).
+    # 2-3× lower WER than tiny on the same audio, especially on rare vocab.
+    # We IGNORE the caller-supplied tiny model: it's still pre-loaded by the
+    # legacy V708/V731 callsite, which wastes ~50 MB while ALIGN_ENABLED=1,
+    # but switching the caller is out of scope for this hot-fix.
     try:
-        if whisper_model is None:
-            from faster_whisper import WhisperModel
-            whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        whisper_model = _ensure_whisper_base()
 
         _LANG_ISO = {"english": "en", "spanish": "es", "french": "fr",
                      "german": "de", "italian": "it", "portuguese": "pt"}
         _iso = _LANG_ISO.get(language.lower(), None)
 
-        # initial_prompt biases Whisper toward script vocab (cheap accuracy win)
-        _init = " ".join((t or "").strip() for t in dialogue_texts if (t or "").strip())[:200]
+        # initial_prompt: full script (faster-whisper truncates to 224 tokens
+        # internally). Rare-vocab terms in the prompt get explicit decoder bias.
+        _init = " ".join((t or "").strip() for t in dialogue_texts if (t or "").strip())
+
+        # hotwords: 5+ char script tokens that are decoder-hard for tiny/base.
+        # faster-whisper passes these as a separate generation bias on top of
+        # initial_prompt — Whisper specifically attends to them at each step.
+        _rare_tokens = sorted({
+            _t for _t in script_tokens
+            if len(_t) >= 5 and _t.isalpha() and _t not in (
+                "where", "should", "blood", "drink", "drive", "boost",
+                "boosts", "right", "stop", "taking", "never",
+            )
+        })
+        _hotwords = " ".join(_rare_tokens)[:200] if _rare_tokens else None
+
         _segs, _ = whisper_model.transcribe(
             _audio_path,
             language=_iso,
             word_timestamps=True,
-            beam_size=1,
+            beam_size=5,             # was 1 (greedy); 5 = ~10% WER drop
             vad_filter=True,
             condition_on_previous_text=False,
             initial_prompt=_init or None,
+            hotwords=_hotwords,
         )
         whisper_words = []
         for _seg in _segs:
@@ -465,18 +578,28 @@ def _whisper_anchor_trim(
             if end_anchor is None or _w["end"] > end_anchor["end"]:
                 end_anchor, end_score, end_src_word = _w, _s, _sw
 
-    # v773.10.8 — when no script anchor matches in a half, KEEP MORE not LESS.
-    # Reason: pre-v773.10.8 fell back to first/last Whisper word — but if
-    # Whisper misheard the start of the line (rare vocab like "pomegranate",
-    # "korella"), the first Whisper word is some hallucination 3+ seconds in.
-    # Anchoring there cuts all real opening words.
-    # New policy: no head match → keep from 0.0. No tail match → keep to end.
-    # Worst case = full clip (acceptable; legacy V731 behavior). Best case =
-    # script anchor on the other side trims one side cleanly.
+    # v773.10.9 — when no script anchor matches in a half, try Aeneas
+    # MFCC-DTW fallback BEFORE giving up. Aeneas synthesizes the script via
+    # eSpeak and DTW-aligns audio features, so it doesn't depend on Whisper
+    # transcribing the rare vocab correctly. If aeneas succeeds, use its
+    # boundary directly. Otherwise keep more (not less) — same policy as v773.10.8.
+    if start_anchor is None or end_anchor is None:
+        _aeneas_bounds = _aeneas_trim(video_path, dialogue_texts, language=language)
+        if _aeneas_bounds is not None:
+            _ab_start, _ab_end = _aeneas_bounds
+            keep_start = max(0.0, _ab_start - HEAD_PAD)
+            keep_end = min(total_duration, _ab_end + TAIL_PAD)
+            print(
+                f"[WhisperAnchor] script anchors missing → Aeneas DTW fallback: "
+                f"keep=[{keep_start:.2f}, {keep_end:.2f}] dur={keep_end-keep_start:.2f}s "
+                f"(orig {total_duration:.2f}s, dropped {total_duration-(keep_end-keep_start):.2f}s)",
+                flush=True,
+            )
+            return [(keep_start, keep_end)]
+
     if start_anchor is None and end_anchor is None:
         print(
-            "[WhisperAnchor] NO script anchors at either end → keeping full clip "
-            "(Whisper-tiny couldn't match any of the first 5 or last 5 script words)",
+            "[WhisperAnchor] NO script anchors at either end + Aeneas failed → keeping full clip",
             flush=True,
         )
         return [(0.0, total_duration)]

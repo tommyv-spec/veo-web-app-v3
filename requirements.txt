@@ -70,3 +70,10 @@ torchaudio>=2.1,<3
 # v773.10.6 — robust fuzzy + phonetic matching for whisper_anchor multi-anchor
 rapidfuzz>=3.5,<4
 metaphone>=0.6,<1
+
+# v773.10.9 — aeneas: text↔audio MFCC-DTW alignment (no ASR).
+# Needs espeak-ng + libespeak-ng-dev + build-essential system packages
+# (installed in Dockerfile). Used as fallback when whisper_anchor can't
+# find script anchors — bypasses ASR entirely by matching audio-feature
+# shapes of synthesized script vs real audio.
+aeneas>=1.7,<2
