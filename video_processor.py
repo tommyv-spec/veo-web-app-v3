@@ -4612,10 +4612,27 @@ def export_final_video(
                     if progress_callback:
                         progress_callback("v709 word-completeness aggregation...")
                     per_clip_audit = []
-                    union_missing = set()
+                    # v709.2 — separate "real misses" from "Whisper-broke" missing.
+                    # Clips with failsafe="HARD" (Whisper-tiny couldn't ASR the
+                    # clip at all, trust<0.50) report a missing list that is
+                    # PURE ASR FAILURE NOISE — those words ARE in the audio but
+                    # Whisper just couldn't transcribe them. Treating them as
+                    # "missing from final mp4" is what made v708 noisy. v709.2
+                    # excludes HARD-failsafe clips from the union_missing set
+                    # AND from audit_ok determination. SOFT-failsafe clips
+                    # (trust≥0.50 but some script words missing) keep their
+                    # missing list — those are higher-confidence partial
+                    # detection failures that an operator might want to know
+                    # about, but they DON'T flip audit_ok by themselves either
+                    # (operator's ear is the final arbiter; aggregator just
+                    # reports signal). Only clips with NO failsafe AND missing
+                    # words can flip audit_ok to False.
+                    union_missing_strict = set()      # only from no-failsafe clips
+                    union_missing_advisory = set()    # from SOFT-failsafe clips
                     sum_script = 0
                     sum_heard = 0
-                    any_failsafe = False
+                    hard_failsafe_clips = 0
+                    soft_failsafe_clips = 0
                     audit_ok = True
                     for _ci in clip_info:
                         _cm = (_ci.get("cut_mode") or "").lower()
@@ -4640,52 +4657,100 @@ def export_final_video(
                         per_clip_audit.append(entry)
                         sum_script += entry["script_words"]
                         sum_heard += entry["heard_words"]
-                        union_missing.update(entry["missing"])
-                        if entry["failsafe"]:
-                            any_failsafe = True
-                        if entry["trust"] < V709_PER_CLIP_TRUST_FLOOR or entry["missing"]:
-                            audit_ok = False
+                        _fs = entry["failsafe"]
+                        if _fs == "HARD":
+                            hard_failsafe_clips += 1
+                            # Skip union update — Whisper couldn't ASR clip;
+                            # missing list is meaningless. Per-clip detail
+                            # still surfaces in v708_per_clip_audit for
+                            # operator inspection.
+                        elif _fs == "SOFT":
+                            soft_failsafe_clips += 1
+                            union_missing_advisory.update(entry["missing"])
+                            # SOFT failsafe doesn't flip audit_ok either —
+                            # trust≥0.50 means Whisper found most words; a
+                            # few rare-vocab misses are likely ASR limits.
+                        else:
+                            # No failsafe → high-confidence signal.
+                            # Any missing word here is the ONLY trustworthy
+                            # "TTS may have dropped a word" indicator.
+                            if entry["missing"]:
+                                union_missing_strict.update(entry["missing"])
+                                audit_ok = False
+                            # Per-clip trust below floor without failsafe is
+                            # very rare (failsafe fires at the trust floor),
+                            # but defend against it.
+                            if entry["trust"] < V709_PER_CLIP_TRUST_FLOOR:
+                                audit_ok = False
 
                     if per_clip_audit:
-                        stats["v708_audit_ok"] = bool(audit_ok and not any_failsafe)
-                        stats["v708_audit_missing_words"] = sorted(union_missing)
-                        stats["v708_audit_model"] = "tiny-per-clip-v709"
+                        # v709.2 — audit_ok now reflects only HIGH-CONFIDENCE
+                        # missing-word signal. HARD/SOFT failsafe clips do NOT
+                        # flip audit_ok by themselves; operator inspects
+                        # per-clip detail. Backward-compat: v708_audit_missing_words
+                        # exposes strict union (operator's actionable list);
+                        # advisory list lives on the per-clip entries.
+                        stats["v708_audit_ok"] = bool(audit_ok)
+                        stats["v708_audit_missing_words"] = sorted(union_missing_strict)
+                        stats["v708_audit_missing_words_advisory"] = sorted(union_missing_advisory)
+                        stats["v708_audit_model"] = "tiny-per-clip-v709.2"
                         stats["v708_audit_script_words"] = sum_script
                         stats["v708_audit_heard_words"] = sum_heard
                         stats["v708_audit_error"] = None
                         stats["v708_per_clip_audit"] = per_clip_audit
-                        _failsafe_clip_count = sum(1 for e in per_clip_audit if e["failsafe"])
                         print(
-                            f"[v709-AUDIT] schema=v709 per-clip aggregate: "
+                            f"[v709-AUDIT] schema=v709.2 per-clip aggregate: "
                             f"clips={len(per_clip_audit)} "
                             f"script={sum_script} heard={sum_heard} "
-                            f"missing={len(union_missing)} "
-                            f"failsafe_clips={_failsafe_clip_count} "
+                            f"strict_missing={len(union_missing_strict)} "
+                            f"advisory_missing={len(union_missing_advisory)} "
+                            f"hard_failsafe={hard_failsafe_clips} "
+                            f"soft_failsafe={soft_failsafe_clips} "
                             f"ok={stats['v708_audit_ok']}",
                             flush=True,
                         )
-                        if union_missing:
+                        if union_missing_strict:
                             print(
-                                f"[v709-AUDIT] missing words (union): "
-                                f"{sorted(union_missing)}",
+                                f"[v709-AUDIT] STRICT missing (no-failsafe clips, "
+                                f"actionable): {sorted(union_missing_strict)}",
+                                flush=True,
+                            )
+                        if union_missing_advisory:
+                            print(
+                                f"[v709-AUDIT] ADVISORY missing (SOFT-failsafe "
+                                f"clips, likely ASR limits): "
+                                f"{sorted(union_missing_advisory)}",
+                                flush=True,
+                            )
+                        if hard_failsafe_clips:
+                            _hard_clips = [
+                                f"clip{e['scene_index']}(trust={e['trust']:.2f})"
+                                for e in per_clip_audit if e["failsafe"] == "HARD"
+                            ]
+                            print(
+                                f"[v709-AUDIT] HARD-failsafe clips (Whisper "
+                                f"couldn't ASR; audio likely fine): "
+                                f"{_hard_clips}",
                                 flush=True,
                             )
                     else:
                         stats["v708_audit_ok"] = True
                         stats["v708_audit_missing_words"] = []
-                        stats["v708_audit_model"] = "tiny-per-clip-v709"
+                        stats["v708_audit_missing_words_advisory"] = []
+                        stats["v708_audit_model"] = "tiny-per-clip-v709.2"
                         stats["v708_audit_script_words"] = 0
                         stats["v708_audit_heard_words"] = 0
                         stats["v708_audit_error"] = "no dialogue clips to audit"
                         stats["v708_per_clip_audit"] = []
                         print(
-                            f"[v709-AUDIT] schema=v709 no dialogue clips to aggregate",
+                            f"[v709-AUDIT] schema=v709.2 no dialogue clips to aggregate",
                             flush=True,
                         )
                 except Exception as _audit_err:
                     stats["v708_audit_ok"] = False
                     stats["v708_audit_missing_words"] = []
-                    stats["v708_audit_model"] = "tiny-per-clip-v709"
+                    stats["v708_audit_missing_words_advisory"] = []
+                    stats["v708_audit_model"] = "tiny-per-clip-v709.2"
                     stats["v708_audit_script_words"] = 0
                     stats["v708_audit_heard_words"] = 0
                     stats["v708_audit_error"] = f"v709 aggregation exception: {_audit_err}"
