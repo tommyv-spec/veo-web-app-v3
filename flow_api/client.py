@@ -79,8 +79,13 @@ class FlowApiClient:
                      reference_media_ids: list = None,
                      base_image_media_id: str = "",
                      aspect: str = None,
-                     seed: int = None):
-        """Synchronous image gen (Nano Banana). Returns (media_id UUID, fife/imageUri)."""
+                     seed: int = None,
+                     cooldown: bool = True):
+        """Synchronous image gen (Nano Banana). Returns (media_id UUID, fife/imageUri).
+
+        `cooldown=False` skips the inter-call cooldown — use for variants of the
+        same batch (mimics the UI's parallel-fire behavior; cooldown is for cross-job
+        anti-spam, not intra-batch variants)."""
         if not image_model_name:
             raise FlowApiError("no imageModelName resolved (check IMAGE_MODELS)")
         body = builders.build_generate_image(
@@ -92,7 +97,7 @@ class FlowApiClient:
             tier=self.tier,
         )
         url = builders.build_url("generate_images", project_id=self.project_id)
-        res = self._submit_with_captcha(url, body, action=config.CAPTCHA_IMAGE)
+        res = self._submit_with_captcha(url, body, action=config.CAPTCHA_IMAGE, cooldown=cooldown)
         media_id = parsing.extract_image_media_id(res)
         if not media_id:
             raise FlowApiError(
@@ -101,12 +106,16 @@ class FlowApiClient:
             )
         return media_id, parsing.extract_image_url(res)
 
-    def _submit_with_captcha(self, url: str, body: dict, action: str = None) -> dict:
-        """Mint captcha in-page, inject, POST. Retries captcha-only failures."""
+    def _submit_with_captcha(self, url: str, body: dict, action: str = None,
+                              cooldown: bool = True) -> dict:
+        """Mint captcha in-page, inject, POST. Retries captcha-only failures.
+
+        cooldown=False skips the inter-call gate for intra-batch variants."""
         action = action or config.CAPTCHA_VIDEO
         last = {}
         for attempt in range(config.CAPTCHA_MAX_RETRIES):
-            self._cooldown()
+            if cooldown:
+                self._cooldown()
             token = mint_or_empty(self.page, action=action)
             if not token:
                 last = {"error": "captcha mint failed"}

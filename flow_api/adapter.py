@@ -61,6 +61,67 @@ def generate_clip_via_api(
     return {"media_id": media_id, "url": url, "path": "api", "operation": poll.get("operation", {})}
 
 
+def generate_image_variants_via_api(
+    page,
+    *,
+    prompt: str,
+    count: int = 1,
+    model_name: str = "Nano Banana 2",
+    project_id: str = "",
+    reference_image_bytes_list: list = None,
+    base_image_bytes: bytes = None,
+    aspect: str = None,
+    tier: str = "PAYGATE_TIER_TWO",
+    client: FlowApiClient = None,
+) -> list:
+    """Generate N image variants via the private API. Uploads each reference image
+    ONCE (shared across variants) then fires N independent submits — cooldown gate
+    bypassed for variants 2..N (mimics the UI's parallel fire; cooldown is for
+    cross-job anti-spam, not intra-batch).
+
+    Returns a list of {"media_id": uuid, "url": str, "path": "api"} dicts (one per
+    successful variant). Raises FlowApiError on the FIRST submit failure — caller
+    should fall back to DOM and discard any partial results. If at least one variant
+    succeeds the partial list is returned with no exception (caller decides).
+    """
+    count = max(1, int(count or 1))
+    image_model = config.resolve_image_model_name(model_name)
+    if not image_model:
+        raise FlowApiError(
+            f"no imageModelName for model='{model_name}' (see flow_api/config.py IMAGE_MODELS)"
+        )
+
+    cli = client or FlowApiClient(page, project_id=project_id, tier=tier)
+
+    # Upload references ONCE; reused across variants.
+    base_media_id = ""
+    ref_ids = []
+    if base_image_bytes:
+        base_media_id = cli.upload_image(base_image_bytes, file_name="base.jpg")
+    for i, b in enumerate(reference_image_bytes_list or []):
+        ref_ids.append(cli.upload_image(b, file_name=f"ref_{i}.jpg"))
+
+    out = []
+    for v in range(count):
+        try:
+            media_id, url = cli.submit_image(
+                prompt=prompt,
+                image_model_name=image_model,
+                reference_media_ids=ref_ids or None,
+                base_image_media_id=base_media_id,
+                aspect=aspect,
+                cooldown=(v == 0),  # only the first call pays cooldown
+            )
+        except FlowApiError as e:
+            if v == 0:
+                raise  # nothing worked, signal full fall-back
+            logger.warning("flow_api: variant %d/%d failed (%s); returning %d partial", v + 1, count, e, len(out))
+            break
+        out.append({"media_id": media_id, "url": url, "path": "api"})
+        logger.info("flow_api: variant %d/%d generated media_id=%s", v + 1, count, media_id)
+    return out
+
+
 def generate_image_via_api(
     page,
     *,

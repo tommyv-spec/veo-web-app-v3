@@ -3170,6 +3170,100 @@ def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_p
     return True
 
 
+def _flow_api_image_multi_try(page, input_paths, prompt, aspect_ratio, model,
+                              variants, output_dir, context=""):
+    """Multi-variant flow_api path for process_image_job_multi.
+
+    Returns a list of saved filenames on success (caller short-circuits the DOM
+    Generate-click + URL capture + download). Returns [] on any failure (caller
+    falls through to the DOM path); latches API off for the rest of this page's
+    life so the next job skips the API attempt entirely.
+    """
+    if not _flow_api_mode_enabled():
+        return []
+    try:
+        if getattr(page, "_flow_api_disabled_this_session", False):
+            return []
+    except Exception:
+        pass
+
+    pfx = f"[{context}] " if context else ""
+
+    def _latch_off(reason: str):
+        try:
+            page._flow_api_disabled_this_session = True
+        except Exception:
+            pass
+        print(f"{pfx}[flow_api] disabling API path for this page session: {reason}", flush=True)
+        return []
+
+    try:
+        from flow_api.adapter import generate_image_variants_via_api
+    except Exception as e:
+        return _latch_off(f"flow_api module not available: {e}")
+
+    project_id = ""
+    try:
+        m = re.search(r"/project/([0-9a-fA-F-]{36})", page.url or "")
+        project_id = m.group(1) if m else ""
+    except Exception:
+        project_id = ""
+    if not project_id:
+        return _latch_off("no projectId in URL")
+
+    api_aspect = _IMG_API_ASPECT_MAP.get(aspect_ratio, "IMAGE_ASPECT_RATIO_PORTRAIT")
+    model_label = _IMG_API_MODEL_MAP.get((model or "").lower(), "Nano Banana 2")
+
+    # v703 manifest is normally prepended after Step 3 (upload). The API path
+    # uploads via uploadImage instead and skips that DOM step, so we still want
+    # the manifest in the prompt for the model. Build it here.
+    try:
+        v703_manifest = _build_reference_manifest(input_paths) if input_paths else ""
+        api_prompt = (v703_manifest + _strip_stale_reference_lines(prompt)) if input_paths else prompt
+    except Exception:
+        api_prompt = prompt
+
+    ref_bytes_list = []
+    for p in (input_paths or []):
+        try:
+            with open(p, "rb") as f:
+                ref_bytes_list.append(f.read())
+        except Exception as e:
+            return _latch_off(f"failed to read input {p}: {e}")
+
+    try:
+        results = generate_image_variants_via_api(
+            page,
+            prompt=api_prompt,
+            count=int(variants or 1),
+            model_name=model_label,
+            project_id=project_id,
+            reference_image_bytes_list=(ref_bytes_list or None),
+            aspect=api_aspect,
+        )
+    except Exception as e:
+        return _latch_off(f"api path raised: {e}")
+
+    urls = [r.get("url") for r in (results or []) if r.get("url")]
+    if not urls:
+        return _latch_off("api produced no URLs")
+
+    try:
+        saved = download_image_urls(page, urls, output_dir, context=context)
+    except Exception as e:
+        return _latch_off(f"download_image_urls raised: {e}")
+    if not saved:
+        return _latch_off("download_image_urls returned empty")
+
+    media_ids = [r.get("media_id") for r in (results or [])]
+    print(
+        f"{pfx}[flow_api] path=api variants={len(saved)}/{variants} "
+        f"model={model_label} media_ids={','.join(media_ids[:4])}",
+        flush=True,
+    )
+    return saved
+
+
 def _install_flow_api_capture_image(page):
     """Read-only request listener that records real image submit/upload bodies +
     imageModelName + shape (with/without imageInputs base/reference). Inert unless
@@ -3595,6 +3689,15 @@ def process_image_job_multi(page, input_paths, prompt, output_dir,
                                          resolution=resolution, model=model,
                                          variants=variants, context=context):
             return False, [], "Failed to configure image settings"
+
+        # 2.5) Optional flow_api (private-API) multi-variant path.
+        # On any failure: falls through to the DOM Steps 3-8 below unchanged.
+        api_saved = _flow_api_image_multi_try(
+            page, input_paths, prompt, aspect_ratio, model, variants, output_dir, context=context
+        )
+        if api_saved:
+            print(f"{prefix}✓ [flow_api] saved {len(api_saved)} variant(s) to: {output_dir}", flush=True)
+            return True, api_saved, None
 
         # 3) Upload reference image(s) if provided
         if input_paths:
