@@ -1776,6 +1776,108 @@
         }
         /* ===== END v769 ROW LAYOUT POLISH ===== */
 
+        /* ======================================================================
+           v770 — AGGRESSIVE OVERRIDE + DEPLOY MARKER
+           ----------------------------------------------------------------------
+           v769 didn't take effect for operator. Three possible reasons:
+              (a) CSS specificity loss to base rules
+              (b) browser cache serving pre-v769 CSS
+              (c) my selectors don't match the actual rendered DOM
+           v770 addresses all three:
+              1. VISIBLE DEPLOY MARKER — magenta 3px top border on every
+                 expanded-mode card. If operator sees it, v770 IS live and
+                 any remaining layout issue is a real CSS bug to fix. If
+                 operator does NOT see it, cache is the problem; cache-bust
+                 with ?v=770 in the URL or full DevTools cache disable.
+              2. !important on every action-bar layout property so no base
+                 rule can compete on specificity.
+              3. Restructure: use CSS grid on .clip-content with explicit
+                 named areas. Action bar gets its own grid-area row at the
+                 bottom with explicit width 100% and centered flex so it
+                 CANNOT collapse into a narrow right-edge stack.
+           ====================================================================== */
+
+        /* (1) DEPLOY MARKER — magenta 3px top border on every expanded card */
+        .clips-grid.expanded-mode .clip-card {
+            border-top: 3px solid #ff00ff !important;
+        }
+
+        /* (2) Explicit grid layout on non-paired .clip-content. Three rows:
+           header / text / actions. Action bar always at the bottom, full
+           width, centered flex. Prevents any flex-distribution collapse. */
+        .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content {
+            display: grid !important;
+            grid-template-rows: auto 1fr auto !important;
+            grid-template-columns: 1fr !important;
+            gap: 12px !important;
+            padding: 16px 20px !important;
+            overflow: hidden !important;
+        }
+        .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-header {
+            grid-row: 1 !important;
+            align-self: start !important;
+        }
+        .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-frames {
+            grid-row: 1 !important;
+            justify-self: end !important;
+            align-self: start !important;
+        }
+        .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-text {
+            grid-row: 2 !important;
+            min-height: 0 !important;
+            overflow-y: auto !important;
+            display: block !important;
+            -webkit-line-clamp: unset !important;
+            -webkit-box-orient: unset !important;
+            color: var(--text-primary) !important;
+            font-size: 14px !important;
+            line-height: 1.55 !important;
+            background: rgba(255, 255, 255, 0.04) !important;
+            border-left: 3px solid var(--accent) !important;
+            padding: 12px 14px !important;
+            border-radius: 0 8px 8px 0 !important;
+            margin: 0 !important;
+        }
+        .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-actions-collapsed {
+            display: none !important;
+        }
+        .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-actions-expanded {
+            grid-row: 3 !important;
+            display: flex !important;
+            flex-direction: row !important;
+            align-items: center !important;
+            justify-content: center !important;
+            width: 100% !important;
+            padding: 12px 0 4px !important;
+            border-top: 1px solid var(--border) !important;
+        }
+        .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-actions-expanded > * {
+            display: flex !important;
+            flex-direction: row !important;
+            flex-wrap: nowrap !important;
+            align-items: center !important;
+            justify-content: center !important;
+            gap: 12px !important;
+            width: auto !important;
+            max-width: 100% !important;
+            margin: 0 auto !important;
+        }
+        .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-actions-expanded .btn {
+            flex: 0 0 auto !important;
+            min-width: 90px !important;
+            padding: 9px 18px !important;
+            font-size: 14px !important;
+            font-weight: 600 !important;
+        }
+        /* Inline-styled centered text spans inside the action bar (the
+           "Click a variant to select & approve" hint) stay centered */
+        .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-actions-expanded span {
+            font-size: 12px !important;
+            color: var(--text-muted) !important;
+            white-space: nowrap !important;
+        }
+        /* ===== END v770 ===== */
+
         .variant-group-header { padding: 8px 12px 4px; font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-top: 1px solid var(--border); margin-top: 4px; }
         .variant-group-header:first-child { border-top: none; margin-top: 0; }
         .variant-group-count { font-weight: 400; font-size: 11px; opacity: 0.6; text-transform: none; letter-spacing: 0; }
