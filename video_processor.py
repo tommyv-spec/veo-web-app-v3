@@ -315,23 +315,11 @@ def _whisper_anchor_trim(
     language: str = "English",
 ):
     import tempfile, re as _re
-    # v773.10.7 — generous padding because Whisper-tiny word timestamps
-    # are systematically biased:
-    #   start_timestamp is ~0.10-0.20 s LATER than real start (Whisper VAD
-    #     skips initial onset consonants)
-    #   end_timestamp is ~0.20-0.40 s EARLIER than real end (Whisper closes
-    #     on the silence inside a syllable's tail)
-    # Safer to over-include than to cut.
-    HEAD_PAD = 0.30
-    TAIL_PAD = 0.45
+    HEAD_PAD = 0.15
+    TAIL_PAD = 0.20
     FUZZ_THRESHOLD = 78         # rapidfuzz.fuzz.ratio cut-off (0-100)
     PHONETIC_FALLBACK_MIN = 5   # script word length to attempt phonetic match
-    MIN_KEEP_FRACTION = 0.30    # if kept < 30 % of audio, widen to first/last Whisper word
-    # Position weighting tolerance: head anchor can land anywhere in first
-    # POSITION_WINDOW of the clip; tail anchor anywhere in last POSITION_WINDOW.
-    # 0.70 (was 0.50) is more permissive — handles Veo TTS clips with a long
-    # intro breath before the first script word.
-    POSITION_WINDOW = 0.70
+    MIN_KEEP_FRACTION = 0.30    # if kept < 30 % of audio, distrust + fallback
 
     info = ffprobe_json(video_path)
     total_duration = get_duration(info)
@@ -451,16 +439,14 @@ def _whisper_anchor_trim(
                     return _ww, 70  # phonetic match worth ~70 confidence
         return _best, _best_score
 
-    head_cutoff = total_duration * POSITION_WINDOW
-    tail_cutoff = total_duration * (1.0 - POSITION_WINDOW)
+    audio_mid = total_duration / 2.0
 
     # === Start anchor: search first 5 script words for one that lands in
-    # the first POSITION_WINDOW (70 %) of audio. Drops false positives where
-    # a script word matches a Whisper word late in the clip.
+    # the FIRST HALF of audio. Position-weighting drops false positives.
     start_anchor = None
     start_score = 0
     start_src_word = None
-    head_pool = [w for w in whisper_words if w["start"] <= head_cutoff]
+    head_pool = [w for w in whisper_words if w["start"] <= audio_mid]
     for _sw in script_tokens[:5]:
         _w, _s = _best_match(_sw, head_pool)
         if _w and _s >= FUZZ_THRESHOLD - 8:  # softer threshold for phonetic
@@ -472,22 +458,46 @@ def _whisper_anchor_trim(
     end_anchor = None
     end_score = 0
     end_src_word = None
-    tail_pool = [w for w in whisper_words if w["end"] >= tail_cutoff]
+    tail_pool = [w for w in whisper_words if w["end"] >= audio_mid]
     for _sw in reversed(script_tokens[-5:]):
         _w, _s = _best_match(_sw, tail_pool)
         if _w and _s >= FUZZ_THRESHOLD - 8:
             if end_anchor is None or _w["end"] > end_anchor["end"]:
                 end_anchor, end_score, end_src_word = _w, _s, _sw
 
-    # Fallbacks if position-weighted anchors not found
+    # v773.10.8 — when no script anchor matches in a half, KEEP MORE not LESS.
+    # Reason: pre-v773.10.8 fell back to first/last Whisper word — but if
+    # Whisper misheard the start of the line (rare vocab like "pomegranate",
+    # "korella"), the first Whisper word is some hallucination 3+ seconds in.
+    # Anchoring there cuts all real opening words.
+    # New policy: no head match → keep from 0.0. No tail match → keep to end.
+    # Worst case = full clip (acceptable; legacy V731 behavior). Best case =
+    # script anchor on the other side trims one side cleanly.
+    if start_anchor is None and end_anchor is None:
+        print(
+            "[WhisperAnchor] NO script anchors at either end → keeping full clip "
+            "(Whisper-tiny couldn't match any of the first 5 or last 5 script words)",
+            flush=True,
+        )
+        return [(0.0, total_duration)]
     if start_anchor is None:
-        start_anchor = whisper_words[0]
-        start_src_word = "<FALLBACK first-whisper>"
-        print(f"[WhisperAnchor] no head-half anchor for first 5 script words → using first Whisper word", flush=True)
+        # Pseudo-anchor at audio start; effectively disables HEAD_PAD trim
+        start_anchor = {"start": 0.0, "end": 0.0, "text": "<KEEP_FROM_0>"}
+        start_src_word = "<NO_HEAD_MATCH>"
+        print(
+            "[WhisperAnchor] no head-half script match for first 5 script tokens → "
+            "keeping clip from 0.0 (trust tail anchor only)",
+            flush=True,
+        )
     if end_anchor is None:
-        end_anchor = whisper_words[-1]
-        end_src_word = "<FALLBACK last-whisper>"
-        print(f"[WhisperAnchor] no tail-half anchor for last 5 script words → using last Whisper word", flush=True)
+        # Pseudo-anchor at audio end; effectively disables TAIL_PAD trim
+        end_anchor = {"start": total_duration, "end": total_duration, "text": "<KEEP_TO_END>"}
+        end_src_word = "<NO_TAIL_MATCH>"
+        print(
+            f"[WhisperAnchor] no tail-half script match for last 5 script tokens → "
+            f"keeping clip to {total_duration:.2f}s (trust head anchor only)",
+            flush=True,
+        )
 
     # Monotonicity + sanity
     if end_anchor["end"] <= start_anchor["start"]:
@@ -497,20 +507,16 @@ def _whisper_anchor_trim(
     keep_end = min(total_duration, end_anchor["end"] + TAIL_PAD)
     keep_frac = (keep_end - keep_start) / max(total_duration, 0.001)
     if keep_frac < MIN_KEEP_FRACTION:
-        # Distrust the anchors: expand to first/last Whisper word boundaries
-        # instead. Still script-driven (we tried the script first); just
-        # widens the window when the script anchors look unreliable.
+        # Anchors look unreliable (<30 % of audio kept). Don't trust hallucinated
+        # Whisper words — keep the FULL clip instead. Same principle as the
+        # no-anchor-at-either-end path above: better to keep filler than to
+        # cut real script audio.
         print(
             f"[WhisperAnchor] kept {keep_frac:.0%} of audio (<{MIN_KEEP_FRACTION:.0%}) — "
-            f"widening to first/last Whisper word boundaries",
+            f"anchors unreliable, keeping full clip (no trim)",
             flush=True,
         )
-        start_anchor = whisper_words[0]
-        end_anchor = whisper_words[-1]
-        keep_start = max(0.0, start_anchor["start"] - HEAD_PAD)
-        keep_end = min(total_duration, end_anchor["end"] + TAIL_PAD)
-        start_src_word = "<WIDENED first-whisper>"
-        end_src_word = "<WIDENED last-whisper>"
+        return [(0.0, total_duration)]
     print(
         f"[WhisperAnchor] anchors "
         f"start={start_src_word!r}→'{start_anchor['text']}'@{start_anchor['start']:.2f}s "
