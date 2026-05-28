@@ -83,12 +83,18 @@ services:
       - key: ALIGN_ENABLED
         value: "1"
 
-      # v773.10.3 — pick alignment backend:
-      #   mms_fa  → torchaudio MMS-300M forced alignment (needs ~1.5 GB RAM peak)
-      #   silero  → silero-VAD only (no per-word; fits 2 GB Render standard plan)
-      #   auto    → try mms_fa, on exception fall back to silero
+      # v773.10.5 — pick alignment backend:
+      #   whisper_anchor → reuse the Whisper-tiny model the caller pre-loads,
+      #                    use first+last script word as trim anchors. Zero
+      #                    new RAM, handles rare-vocab middle misses.
+      #                    RECOMMENDED — fits 2 GB Render standard, uses
+      #                    known-script anchoring (not pure silence cut).
+      #   ffmpeg         → ffmpeg silencedetect only (silence cuts, no script).
+      #   silero         → silero-VAD only (~2 MB model, no script).
+      #   mms_fa         → torchaudio MMS-300M forced alignment (~1.5 GB peak,
+      #                    needs Render 4 GB pro plan).
       - key: ALIGN_MODE
-        value: "silero"
+        value: "whisper_anchor"
 
       # v773.10.3 — cache torch model downloads on persistent disk so MMS-300M
       # doesn't re-download on every container restart (when ALIGN_MODE=mms_fa).

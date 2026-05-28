@@ -294,6 +294,168 @@ def detect_speech_segments(
     return speech_segments
 
 
+# v773.10.5 — Whisper-tiny anchor-based trim.
+# Operator requirement: trim each clip to ONLY contain the known script line.
+# Strategy: transcribe with the Whisper-tiny model the caller already loaded.
+# Find the first script word that matches a Whisper word (the start anchor)
+# and the last script word that matches a Whisper word (the end anchor).
+# Trim to [start_anchor.start - HEAD_PAD, end_anchor.end + TAIL_PAD].
+#
+# Handles rare-vocab middle misses cleanly: even if Whisper-tiny mistranscribes
+# 80 % of the line, as long as the FIRST and LAST script word each find any
+# matching Whisper word, the trim boundary is correct.
+def _whisper_anchor_trim(
+    video_path,
+    dialogue_texts,
+    whisper_model=None,
+    language: str = "English",
+):
+    import subprocess, tempfile, re as _re
+    HEAD_PAD = 0.15
+    TAIL_PAD = 0.20
+
+    info = ffprobe_json(video_path)
+    total_duration = get_duration(info)
+
+    # Flatten script → token list (lowercase, no punctuation)
+    script_tokens = []
+    for _line in (dialogue_texts or []):
+        if not _line:
+            continue
+        _clean = _re.sub(r"[^\w\s'-]", "", _line.lower())
+        _clean = _clean.replace("-", " ").replace("—", " ").replace("–", " ")
+        for _t in _clean.split():
+            if _t:
+                script_tokens.append(_t)
+    if not script_tokens:
+        return [(0.0, total_duration)]
+
+    # Extract 16kHz mono wav for Whisper
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _tmp:
+        _audio_path = _tmp.name
+    _cmd = [FFMPEG_BIN, "-y", "-i", str(video_path), "-ar", "16000",
+            "-ac", "1", "-f", "wav", _audio_path]
+    _code, _, _err = run(_cmd)
+    if _code != 0:
+        print(f"[WhisperAnchor] audio extract failed: {_err[:200]} — keeping full clip", flush=True)
+        return [(0.0, total_duration)]
+
+    # Use caller-supplied Whisper-tiny model (already loaded once per export)
+    try:
+        if whisper_model is None:
+            from faster_whisper import WhisperModel
+            whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+
+        _LANG_ISO = {"english": "en", "spanish": "es", "french": "fr",
+                     "german": "de", "italian": "it", "portuguese": "pt"}
+        _iso = _LANG_ISO.get(language.lower(), None)
+
+        # initial_prompt biases Whisper toward script vocab (cheap accuracy win)
+        _init = " ".join((t or "").strip() for t in dialogue_texts if (t or "").strip())[:200]
+        _segs, _ = whisper_model.transcribe(
+            _audio_path,
+            language=_iso,
+            word_timestamps=True,
+            beam_size=1,
+            vad_filter=True,
+            condition_on_previous_text=False,
+            initial_prompt=_init or None,
+        )
+        whisper_words = []
+        for _seg in _segs:
+            if _seg.words:
+                for _w in _seg.words:
+                    _tt = _re.sub(r"[^\w']", "", (_w.word or "").strip().lower())
+                    if _tt:
+                        whisper_words.append({
+                            "text": _tt,
+                            "start": float(_w.start),
+                            "end": float(_w.end),
+                        })
+    except Exception as _e:
+        print(f"[WhisperAnchor] transcribe failed: {_e!r} — keeping full clip", flush=True)
+        return [(0.0, total_duration)]
+    finally:
+        try:
+            import os as _os2
+            _os2.unlink(_audio_path)
+        except Exception:
+            pass
+
+    if not whisper_words:
+        print("[WhisperAnchor] no whisper words — keeping full clip", flush=True)
+        return [(0.0, total_duration)]
+
+    def _matches(a: str, b: str) -> bool:
+        # Exact, or one-edit Levenshtein on words ≥ 4 chars
+        if a == b:
+            return True
+        if len(a) < 4 or len(b) < 4:
+            return False
+        if abs(len(a) - len(b)) > 1:
+            return False
+        # Quick 1-edit distance check
+        if len(a) == len(b):
+            return sum(1 for x, y in zip(a, b) if x != y) <= 1
+        # one insertion/deletion
+        _short, _long = (a, b) if len(a) < len(b) else (b, a)
+        _i = _j = 0
+        _diffs = 0
+        while _i < len(_short) and _j < len(_long):
+            if _short[_i] != _long[_j]:
+                _diffs += 1
+                if _diffs > 1:
+                    return False
+                _j += 1
+            else:
+                _i += 1
+                _j += 1
+        return True
+
+    # First-script-word anchor: scan script in order, first match in any whisper word
+    first_anchor = None
+    for _sw in script_tokens:
+        for _ww in whisper_words:
+            if _matches(_sw, _ww["text"]):
+                first_anchor = _ww
+                break
+        if first_anchor:
+            break
+
+    # Last-script-word anchor: scan script in reverse, find last match
+    last_anchor = None
+    for _sw in reversed(script_tokens):
+        for _ww in reversed(whisper_words):
+            if _matches(_sw, _ww["text"]):
+                last_anchor = _ww
+                break
+        if last_anchor:
+            break
+
+    # Fallback: if no anchors found at all, use first/last Whisper word
+    if first_anchor is None:
+        first_anchor = whisper_words[0]
+        print(f"[WhisperAnchor] no first-word match → using first Whisper word '{first_anchor['text']}'", flush=True)
+    if last_anchor is None:
+        last_anchor = whisper_words[-1]
+        print(f"[WhisperAnchor] no last-word match → using last Whisper word '{last_anchor['text']}'", flush=True)
+
+    # Ensure end >= start (degenerate case)
+    if last_anchor["end"] < first_anchor["start"]:
+        last_anchor = first_anchor
+
+    keep_start = max(0.0, first_anchor["start"] - HEAD_PAD)
+    keep_end = min(total_duration, last_anchor["end"] + TAIL_PAD)
+    print(
+        f"[WhisperAnchor] anchors first='{first_anchor['text']}'@{first_anchor['start']:.2f}s "
+        f"last='{last_anchor['text']}'@{last_anchor['end']:.2f}s "
+        f"keep=[{keep_start:.2f}, {keep_end:.2f}] dur={keep_end-keep_start:.2f}s "
+        f"(orig {total_duration:.2f}s, dropped {total_duration-(keep_end-keep_start):.2f}s)",
+        flush=True,
+    )
+    return [(keep_start, keep_end)]
+
+
 def detect_speech_segments_whisper(
     video_path: Path,
     min_silence_duration: float = 0.3,
@@ -323,6 +485,85 @@ def detect_speech_segments_whisper(
     # Default (flag unset or "0") keeps legacy V708/V731 path below.
     import os as _os
     if _os.environ.get("ALIGN_ENABLED", "0").lower() in ("1", "true", "yes"):
+        _mode = _os.environ.get("ALIGN_MODE", "whisper_anchor").lower()
+
+        # v773.10.5 — ALIGN_MODE=whisper_anchor (DEFAULT).
+        # Reuses the Whisper-tiny model the caller already pre-loaded.
+        # Strategy:
+        #   1. Transcribe clip audio → word list with timestamps.
+        #   2. Find first script word that fuzzy-matches a Whisper word
+        #      → first anchor. Same from the end → last anchor.
+        #   3. Trim to [first_anchor.start - HEAD_PAD, last_anchor.end + TAIL_PAD].
+        # Zero new RAM. Handles rare-vocab middle-misses cleanly: as long as
+        # the first + last script word match anywhere in the Whisper output,
+        # the trim boundary is correct even when chemistry/brand names in the
+        # middle were misheard.
+        if _mode == "whisper_anchor":
+            _seg_list = _whisper_anchor_trim(
+                video_path,
+                dialogue_texts or [],
+                whisper_model=whisper_model,
+                language=language,
+            )
+            if v709_audit_sink is not None:
+                _wa_dur = sum(e - s for s, e in _seg_list)
+                v709_audit_sink.update({
+                    "script_provided": bool(dialogue_texts and any(dialogue_texts)),
+                    "backend": "whisper-anchor",
+                    "script_words": sum(len((t or "").split()) for t in (dialogue_texts or [])),
+                    "aligned_words": 0,
+                    "low_confidence_words": [],
+                    "audio_duration": 0.0,
+                    "speech_duration": _wa_dur,
+                    "trim_ratio": 1.0,
+                    "fallback_reason": None,
+                    "trust": 1.0,
+                    "matched": 0,
+                    "heard_words": 0,
+                    "missing": [],
+                    "failsafe": None,
+                })
+            print(
+                f"[Align/v773] backend=whisper-anchor "
+                f"segments={len(_seg_list)} kept={sum(e-s for s,e in _seg_list):.2f}s",
+                flush=True,
+            )
+            return _seg_list
+
+        # ALIGN_MODE=ffmpeg → pure silence removal (no script).
+        # Standard auto-editor / jumpcutter approach. Zero RAM cost.
+        if _mode == "ffmpeg":
+            _segments = detect_speech_segments(
+                video_path,
+                threshold=0.75,
+                min_silence_duration=0.5,
+                padding_before=0.15,
+                padding_after=0.20,
+            )
+            if v709_audit_sink is not None:
+                _ffmpeg_dur = sum(e - s for s, e in _segments)
+                v709_audit_sink.update({
+                    "script_provided": bool(dialogue_texts and any(dialogue_texts)),
+                    "backend": "ffmpeg-silencedetect",
+                    "script_words": sum(len((t or "").split()) for t in (dialogue_texts or [])),
+                    "aligned_words": 0,
+                    "low_confidence_words": [],
+                    "audio_duration": 0.0,
+                    "speech_duration": _ffmpeg_dur,
+                    "trim_ratio": 1.0,
+                    "fallback_reason": None,
+                    "trust": 1.0,
+                    "matched": 0,
+                    "heard_words": 0,
+                    "missing": [],
+                    "failsafe": None,
+                })
+            print(
+                f"[Align/v773] backend=ffmpeg-silencedetect "
+                f"segments={len(_segments)} speech_kept={sum(e-s for s,e in _segments):.2f}s",
+                flush=True,
+            )
+            return _segments
         from transcript_alignment import detect_speech_segments_aligned as _new_path
         _script = " ".join(
             (t or "").strip() for t in (dialogue_texts or []) if (t or "").strip()
