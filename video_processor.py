@@ -338,8 +338,14 @@ def _whisper_anchor_trim(
     language: str = "English",
 ):
     import tempfile, re as _re
-    HEAD_PAD = 0.15
-    TAIL_PAD = 0.20
+    # v773.10.13 — tight cut: exactly +1 frame of audio buffer before the
+    # first script word and after the last script word. Operator wants the
+    # final export trimmed flush to the line boundaries with minimal safety.
+    # At 24 fps, 1 frame = 1/24 ≈ 0.0417 s. Whisper-base + beam=5 + hotwords
+    # (v773.10.12) made word timestamps tight enough for this to be viable.
+    _FRAME_PAD = 1.0 / 24.0
+    HEAD_PAD = _FRAME_PAD
+    TAIL_PAD = _FRAME_PAD
     FUZZ_THRESHOLD = 78         # rapidfuzz.fuzz.ratio cut-off (0-100)
     PHONETIC_FALLBACK_MIN = 5   # script word length to attempt phonetic match
     MIN_KEEP_FRACTION = 0.30    # if kept < 30 % of audio, distrust + fallback
