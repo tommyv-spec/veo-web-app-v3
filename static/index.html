@@ -1299,7 +1299,11 @@
            min so 1920px fits ~5 per row, 1280px fits ~3 per row. B-roll
            still readable at ~280-380px wide; voice inset shrinks
            proportionally (120px column, max-height 180px). */
-        .clips-grid.expanded-mode { grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; }
+        /* v767 — bigger expanded cards (~560px min) so 2-3 per row at 1920px
+           viewport. Each clip card now wide enough that ALL its variants fit
+           on ONE horizontal flex row (see .variants-grid override below)
+           rather than wrapping into multiple rows of the 4-per-row grid. */
+        .clips-grid.expanded-mode { grid-template-columns: repeat(auto-fill, minmax(560px, 1fr)); gap: 16px; }
         .clip-card.clip-paired { grid-column: span 2; }
         .clips-grid.expanded-mode .clip-card.clip-paired { grid-column: span 1; }
         /* Dual-view: collapsed shown by default, expanded hidden */
@@ -1322,6 +1326,44 @@
         .variants-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 8px; }
         @media (max-width: 900px) { .variants-grid { grid-template-columns: repeat(3, 1fr); } }
         @media (max-width: 600px) { .variants-grid { grid-template-columns: repeat(2, 1fr); } }
+        /* v767 — expanded-mode: ALL variants for a clip on ONE horizontal
+           row (no wrap), even when split across multiple per-attempt
+           .variants-grid blocks. CSS-only via display:contents on the inner
+           .variants-grid so each variant-card + variant-group-header becomes
+           a direct child of .clip-video-expanded, which is itself a flex row.
+           Equal-width cards via flex:1 1 0 with a sensible min-width so 4+
+           variants stay readable. If too many to fit, horizontal scroll. */
+        .clips-grid.expanded-mode .clip-video-expanded {
+            display: flex; flex-wrap: nowrap; gap: 8px; padding: 8px;
+            overflow-x: auto; scrollbar-width: thin; align-items: stretch;
+        }
+        .clips-grid.expanded-mode .clip-video-expanded .variants-grid {
+            display: contents;
+        }
+        .clips-grid.expanded-mode .clip-video-expanded .variant-card {
+            flex: 1 1 0; min-width: 150px;
+        }
+        /* Inline attempt-group label tile — flows between variant-cards as a
+           thin vertical divider with the group name (Original / Redo #N /
+           🎬 Kling). Replaces the pre-v767 full-width row header that broke
+           the single-row layout. */
+        .clips-grid.expanded-mode .clip-video-expanded .variant-group-header {
+            flex: 0 0 auto;
+            display: flex; align-items: center; justify-content: center;
+            border: none; border-top: none; border-left: 2px solid var(--border);
+            margin: 0; padding: 0 8px;
+            font-size: 10px; font-weight: 700; color: var(--accent);
+            text-transform: uppercase; letter-spacing: 0.04em;
+            background: transparent;
+            writing-mode: vertical-rl; transform: rotate(180deg);
+            white-space: nowrap;
+        }
+        .clips-grid.expanded-mode .clip-video-expanded .variant-group-header:first-child {
+            border-left: none;
+        }
+        .clips-grid.expanded-mode .clip-video-expanded .variant-group-count {
+            display: none;
+        }
         /* v742 — paired-clip grid (v698A visual_pair + audio_pair). Default
            = collapsed thumb scale, two roughly balanced columns. Expanded
            mode = b-roll dominates (3fr), voice shrinks to inset (1fr) with
@@ -1345,7 +1387,12 @@
            v746 expanded cards (~380-500px wide vs v745's 540-700px). Voice
            now fixed 110px PiP, video max-height 160px. Badge gets smaller
            padding + font so it still fits above the inset on narrow cards. */
-        .clips-grid.expanded-mode .clip-paired-grid { grid-template-columns: 1fr 110px; gap: 10px; align-items: start; }
+        /* v767 — paired voice inset bumped to 180px column / 260px max-height
+           to match the v767 wider expanded cards (~560px). v746's 110px /
+           160px was sized for the v746 380px expanded cards; on the v767
+           560px cards that PiP was too small to comfortably verify lip-sync.
+           B-roll (1fr) still dominates as the visible side. */
+        .clips-grid.expanded-mode .clip-paired-grid { grid-template-columns: 1fr 180px; gap: 12px; align-items: start; }
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] {
             background: rgba(99, 102, 241, 0.06);
             border: 1px solid rgba(99, 102, 241, 0.18);
@@ -1353,7 +1400,7 @@
             padding: 8px 6px 6px;
             position: relative;
             margin-top: 12px;
-            max-width: 110px;
+            max-width: 180px;
         }
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"]::before {
             font-size: 8px;
@@ -1364,7 +1411,7 @@
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] .clip-video,
         .clips-grid.expanded-mode .clip-paired-side[data-side="voice"] video {
             max-width: 100%;
-            max-height: 160px;
+            max-height: 260px;
             object-fit: contain;
         }
         /* v746 — hover-to-preview on expanded-mode video tiles. Without this
@@ -8296,7 +8343,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         const vFile = v.filename;
                         if(!vFile) return '';
                         return `<div class="variant-card ${isSelected ? 'variant-selected' : ''}" onclick="selectAndApprove(${c.id}, ${vNum})">
-                            <video preload="none" playsinline loop onmouseenter="document.querySelectorAll('.clip-video-expanded video').forEach(v=>{if(v!==this){v.pause();v.currentTime=0}});this.play().catch(()=>{})" onmouseleave="this.pause();this.currentTime=0"><source src="${API}/jobs/${jid}/outputs/${vFile}" type="video/mp4"></video>
+                            <video preload="none" playsinline loop onmouseenter="playWithAudio(this)" onmouseleave="stopWithAudio(this)"><source src="${API}/jobs/${jid}/outputs/${vFile}" type="video/mp4"></video>
                             <span class="variant-label">${v.attempt==9 ? '🎬 Kling' : 'v'+vLabel}</span>
                             <button class="variant-select-btn" onclick="event.stopPropagation();selectAndApprove(${c.id}, ${vNum})">${isSelected && approved ? '\u2605 Selected' : '\u2606 Select'}</button>
                         </div>`;
@@ -8310,7 +8357,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             } else if(c.output_filename && !isRegenerating && !failed && !pending && !skipped) {
                 // Single variant — show it as a card in expanded mode too
                 expandedVid = `<div class="variants-grid"><div class="variant-card variant-selected">
-                    <video preload="none" playsinline loop onmouseenter="this.play().catch(()=>{})" onmouseleave="this.pause();this.currentTime=0"><source src="${API}/jobs/${jid}/outputs/${c.output_filename}" type="video/mp4"></video>
+                    <video preload="none" playsinline loop onmouseenter="playWithAudio(this)" onmouseleave="stopWithAudio(this)"><source src="${API}/jobs/${jid}/outputs/${c.output_filename}" type="video/mp4"></video>
                     <span class="variant-label">v${versionLabel}</span>
                 </div></div>`;
                 if(approved) expandedActs = `<div style="display:flex;align-items:center;justify-content:center;gap:8px"><span style="color:var(--success);font-size:13px">\u2713 Approved</span><button class="btn btn-secondary btn-sm" style="padding:4px 8px;font-size:11px" onclick="downloadClip('${API}/jobs/${selectedJobId}/outputs/${c.output_filename}','clip_${c.clip_index+1}.mp4')">\ud83d\udce5</button><button class="btn btn-redo btn-sm" style="padding:4px 8px;font-size:11px" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})" ${c.attempts_remaining<=0?'disabled':''} title="Redo clip">\u21bb</button></div>`;
@@ -8397,7 +8444,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 vid = `<div class="pending-state"><div class="pending-icon">⏸️</div><div class="pending-text">awaiting approval</div></div>`;
             } else if (clip.output_filename) {
                 const _vidSrc = `${API}/jobs/${jid}/outputs/${clip.output_filename}`;
-                vid = `<div class="video-container"><video controls preload="metadata" playsinline><source src="${_vidSrc}" type="video/mp4"></video></div>`;
+                vid = `<div class="video-container"><video controls preload="metadata" playsinline onmouseenter="playWithAudio(this)" onmouseleave="stopWithAudio(this)"><source src="${_vidSrc}" type="video/mp4"></video></div>`;
             } else {
                 vid = `<div style="color:var(--text-muted);font-size:14px;text-align:center;padding:20px 0;">${icon}</div>`;
             }
@@ -9366,6 +9413,45 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
             return true;
         }
+        // v767 — hover-to-play WITH AUDIO on every expanded review tile
+        // (variant cards, single-variant fallback, paired-side b-roll AND
+        // voice). Operator wanted audible preview on hover so each take can
+        // be auditioned without clicking through every variant individually.
+        //
+        // Behavior:
+        //   1. On enter: pause + reset + mute EVERY other expanded video
+        //      across the page (variant grids + paired sides) so audio never
+        //      overlaps. Then unmute the hovered tile and play().
+        //   2. Browser autoplay-with-audio is generally allowed once the user
+        //      has interacted with the page (clicking the Expand button
+        //      counts), so play() should succeed. If a stricter policy blocks
+        //      it we fall back to muted play so the visual still previews.
+        //   3. On leave: pause + reset + re-mute so re-entering another tile
+        //      starts from a clean state.
+        //
+        // Two diagnostic console.debug() lines included (TEMPORARY per the
+        // CLAUDE.md verify-after-deploy rule) — operator can confirm hover
+        // and audio-policy fallback behavior; remove once verified live.
+        function playWithAudio(v) {
+            try {
+                document.querySelectorAll('.clip-video-expanded video, .clip-paired-grid video').forEach(o => {
+                    if (o !== v) {
+                        try { o.pause(); o.muted = true; o.currentTime = 0; } catch(_){}
+                    }
+                });
+                v.muted = false;
+                const p = v.play();
+                if (p && p.catch) p.catch(() => {
+                    console.debug('[v767] unmuted hover-play blocked; falling back to muted', v.currentSrc);
+                    v.muted = true;
+                    v.play().catch(()=>{});
+                });
+                console.debug('[v767] hover-play', v.currentSrc);
+            } catch(e) { console.debug('[v767] playWithAudio error', e); }
+        }
+        function stopWithAudio(v) {
+            try { v.pause(); v.currentTime = 0; v.muted = true; } catch(_) {}
+        }
         function toggleVariantsExpanded() {
             variantsExpanded = !variantsExpanded;
             // Instant toggle: just flip CSS class, no DOM rebuild
@@ -9669,17 +9755,21 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
         
         // Download a single clip by URL - using direct link for speed on Render free tier
+        // v76x: append ?download=1 so the backend serves the file as
+        // Content-Disposition: attachment (R2 presigned redirect defaults to
+        // inline, and the <a download> attribute is ignored cross-origin, so
+        // without this the browser opens the .mp4 in a new tab instead of
+        // saving it). The query param is only added for download intent;
+        // <video src=...> playback URLs are unchanged and keep streaming.
         function downloadClip(url, filename) {
-            // Direct download (no second fetch request - fastest approach)
-            // This starts the download immediately
+            const dlUrl = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'download=1';
             const a = document.createElement('a');
-            a.href = url;
+            a.href = dlUrl;
             a.download = filename || 'clip.mp4';
             a.style.display = 'none';
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            
             // Return resolved promise for compatibility with downloadAll's await
             return Promise.resolve();
         }
