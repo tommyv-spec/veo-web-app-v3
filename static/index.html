@@ -1651,6 +1651,131 @@
         }
         /* ===== END v768 ROW LAYOUT ===== */
 
+        /* ======================================================================
+           v769 ROW LAYOUT POLISH — content panel readability + action bar fix
+           ----------------------------------------------------------------------
+           Operator feedback on v768 (2026-05-28): "make the clips a bit
+           bigger and fix the info section and approval which now is
+           disappearing on the side".
+
+           Three fixes:
+           1. CARD HEIGHT — bump clamp(280, 30vh, 460) → clamp(340, 40vh, 540)
+              for a bit more vertical room as requested.
+           2. INFO SECTION — base .clip-text has -webkit-line-clamp:2 which
+              truncates the script line in row mode too. Override in
+              expanded mode: unclip, larger font, accent border, scroll if
+              overflow. Script line is the primary signal during review.
+           3. APPROVAL BAR — base .clip-actions has flex-wrap:wrap +
+              .btn{flex:1; min-width:36px}. In v768's wide content panel
+              the buttons grew to ~500px each but with wrap+flex the layout
+              collapsed into a narrow stack on the right edge of the card.
+              Fix: force expandedActs container to be a centered nowrap
+              row with explicit button sizing (~80-120px each), bordered
+              top + padded so the action bar reads as a distinct UI region
+              rather than overflowing into the script text area.
+
+           All overrides scoped to .clips-grid.expanded-mode like v768 so
+           collapsed mode is unaffected. Pure CSS.
+           ====================================================================== */
+
+        /* (1) Bigger cards */
+        .clips-grid.expanded-mode .clip-card {
+            height: clamp(340px, 40vh, 540px);
+        }
+
+        /* (2) Info section: layout content panel with header / readable
+           script body (1fr, scrolls) / action bar (sticky bottom) */
+        .clips-grid.expanded-mode .clip-content {
+            padding: 16px 20px;
+            gap: 12px;
+            overflow: hidden;
+        }
+        .clips-grid.expanded-mode .clip-content > .clip-header {
+            flex: 0 0 auto;
+            font-size: 13px;
+        }
+        .clips-grid.expanded-mode .clip-content > .clip-text {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            /* Override base .clip-text's -webkit-line-clamp:2 + display:
+               -webkit-box so full script line is visible (not truncated). */
+            display: block !important;
+            -webkit-line-clamp: unset !important;
+            -webkit-box-orient: unset !important;
+            color: var(--text-primary);
+            font-size: 14px;
+            line-height: 1.5;
+            background: rgba(255, 255, 255, 0.04);
+            border-left: 3px solid var(--accent);
+            padding: 10px 14px;
+            border-radius: 0 6px 6px 0;
+            margin: 0;
+        }
+
+        /* (3) Action bar: explicit visible bottom strip with prominent
+           buttons. Forces .clip-actions-expanded's inline-flex wrapper to
+           a centered row + overrides the base .clip-actions wrap-behavior
+           that was collapsing buttons into a stack on the right edge. */
+        .clips-grid.expanded-mode .clip-content > .clip-actions-expanded {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            padding-top: 10px;
+            border-top: 1px solid var(--border);
+        }
+        .clips-grid.expanded-mode .clip-content > .clip-actions-expanded > div {
+            display: flex !important;
+            flex-direction: row;
+            flex-wrap: nowrap;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            width: auto;
+            max-width: 100%;
+        }
+        .clips-grid.expanded-mode .clip-content > .clip-actions-expanded .clip-actions {
+            flex-wrap: nowrap;
+            width: auto;
+            max-width: none;
+        }
+        .clips-grid.expanded-mode .clip-content > .clip-actions-expanded .clip-actions .btn,
+        .clips-grid.expanded-mode .clip-content > .clip-actions-expanded > div > .btn {
+            flex: 0 0 auto;
+            min-width: 80px;
+            padding: 8px 16px;
+            font-size: 13px;
+        }
+        /* The "rejected-notice" + "max-notice" variants used by failed /
+           maxed clips also live inside .clip-actions-expanded — let them
+           sit naturally without flex squeezing. */
+        .clips-grid.expanded-mode .clip-content > .clip-actions-expanded .rejected-notice,
+        .clips-grid.expanded-mode .clip-content > .clip-actions-expanded .max-notice {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            justify-content: center;
+            font-size: 13px;
+        }
+
+        /* (2b) Same text unclipping for paired clips inside row layout */
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-text {
+            display: block !important;
+            -webkit-line-clamp: unset !important;
+            -webkit-box-orient: unset !important;
+            color: var(--text-primary);
+            font-size: 13px;
+            line-height: 1.5;
+            background: rgba(255, 255, 255, 0.04);
+            border-left: 3px solid var(--accent);
+            padding: 8px 12px;
+            border-radius: 0 6px 6px 0;
+            font-style: normal !important;
+        }
+        /* ===== END v769 ROW LAYOUT POLISH ===== */
+
         .variant-group-header { padding: 8px 12px 4px; font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-top: 1px solid var(--border); margin-top: 4px; }
         .variant-group-header:first-child { border-top: none; margin-top: 0; }
         .variant-group-count { font-weight: 400; font-size: 11px; opacity: 0.6; text-transform: none; letter-spacing: 0; }
