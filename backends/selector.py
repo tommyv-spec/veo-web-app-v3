@@ -26,11 +26,11 @@ class BackendType(str, Enum):
 
 
 def worker_flow_api_enabled() -> bool:
-    """Launch switch for the additional FLOW_API mode. The Flow worker runs its normal
-    browser session but routes per-clip generation through the private API (with DOM
-    fallback) when this is on. Off by default — set FLOW_API_MODE=on to launch in this mode."""
+    """Launch switch for the FLOW_API mode. The Flow worker runs its normal browser
+    session but routes per-generation through the private API (with DOM fallback).
+    Default ON; set FLOW_API_MODE=off (or 0/false/no) as the kill-switch."""
     import os
-    return os.environ.get("FLOW_API_MODE", "off").strip().lower() in ("on", "1", "true", "yes")
+    return os.environ.get("FLOW_API_MODE", "on").strip().lower() not in ("off", "0", "false", "no")
 
 
 def has_valid_api_keys(

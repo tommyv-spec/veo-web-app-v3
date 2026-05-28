@@ -3084,7 +3084,9 @@ _IMG_API_MODEL_MAP = {
 
 
 def _flow_api_mode_enabled():
-    return os.environ.get("FLOW_API_MODE", "off").strip().lower() in ("on", "1", "true", "yes")
+    """Default ON (automatic). Set FLOW_API_MODE=off to disable, falling back to the
+    DOM-click path globally. Any value other than the off-set re-enables it."""
+    return os.environ.get("FLOW_API_MODE", "on").strip().lower() not in ("off", "0", "false", "no")
 
 
 def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_path):
@@ -3093,14 +3095,30 @@ def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_p
     Returns True on success (output_path written, caller short-circuits the DOM path).
     Returns False on any failure (caller falls through to the existing DOM steps).
     Never raises into the caller.
+
+    Per-page latch: once the API path falls back on a given page, subsequent calls on
+    the SAME page skip the API attempt entirely (saves captcha-mint + upload latency
+    when something is broken). Cleared by closing/relaunching the page.
     """
     if not _flow_api_mode_enabled():
         return False
     try:
+        if getattr(page, "_flow_api_disabled_this_session", False):
+            return False
+    except Exception:
+        pass
+
+    def _latch_off(reason: str) -> bool:
+        try:
+            page._flow_api_disabled_this_session = True
+        except Exception:
+            pass
+        print(f"[flow_api] disabling API path for this page session: {reason}", flush=True)
+        return False
+    try:
         from flow_api.adapter import generate_image_via_api
     except Exception as e:
-        print(f"[flow_api] module not available: {e}", flush=True)
-        return False
+        return _latch_off(f"flow_api module not available: {e}")
 
     project_id = ""
     try:
@@ -3109,8 +3127,7 @@ def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_p
     except Exception:
         project_id = ""
     if not project_id:
-        print("[flow_api] no projectId in URL; falling back to DOM", flush=True)
-        return False
+        return _latch_off("no projectId in URL")
 
     api_aspect = _IMG_API_ASPECT_MAP.get(aspect_ratio, "IMAGE_ASPECT_RATIO_PORTRAIT")
     model_label = _IMG_API_MODEL_MAP.get((model or "").lower(), "Nano Banana 2")
@@ -3121,8 +3138,7 @@ def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_p
             with open(p, "rb") as f:
                 ref_bytes_list.append(f.read())
         except Exception as e:
-            print(f"[flow_api] failed to read input {p}: {e}; falling back to DOM", flush=True)
-            return False
+            return _latch_off(f"failed to read input {p}: {e}")
 
     try:
         result = generate_image_via_api(
@@ -3134,25 +3150,21 @@ def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_p
             aspect=api_aspect,
         )
     except Exception as e:
-        print(f"[flow_api] api path raised, falling back to DOM: {e}", flush=True)
-        return False
+        return _latch_off(f"api path raised: {e}")
 
     url = (result or {}).get("url") or ""
     if not url:
-        print("[flow_api] api success but no URL; falling back to DOM", flush=True)
-        return False
+        return _latch_off("api success but no URL")
 
     # Download via the page's HTTP request context (carries cookies).
     try:
         resp = page.request.get(url)
         if resp.status != 200:
-            print(f"[flow_api] download HTTP {resp.status}; falling back to DOM", flush=True)
-            return False
+            return _latch_off(f"download HTTP {resp.status}")
         with open(output_path, "wb") as f:
             f.write(resp.body())
     except Exception as e:
-        print(f"[flow_api] download failed ({e}); falling back to DOM", flush=True)
-        return False
+        return _latch_off(f"download failed ({e})")
 
     print(f"[flow_api] path=api media_id={result.get('media_id')} model={model_label} -> {output_path}", flush=True)
     return True
