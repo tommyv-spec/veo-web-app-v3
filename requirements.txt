@@ -72,8 +72,8 @@ rapidfuzz>=3.5,<4
 metaphone>=0.6,<1
 
 # v773.10.9 — aeneas: text↔audio MFCC-DTW alignment (no ASR).
-# Needs espeak-ng + libespeak-ng-dev + build-essential system packages
-# (installed in Dockerfile). Used as fallback when whisper_anchor can't
-# find script anchors — bypasses ASR entirely by matching audio-feature
-# shapes of synthesized script vs real audio.
-aeneas>=1.7,<2
+# Installed SEPARATELY in the Dockerfile with --no-build-isolation because
+# aeneas' setup.py imports numpy at build time and pip's isolated build
+# environment cannot see the numpy installed in the main environment.
+# Needs espeak-ng + libespeak-ng-dev + build-essential system packages.
+# aeneas>=1.7,<2   <-- handled by Dockerfile, kept here as documentation

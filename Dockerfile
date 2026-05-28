@@ -41,13 +41,16 @@ RUN mkdir -p /app/data /app/uploads /app/outputs /app/static
 COPY requirements.txt .
 
 # Install Python dependencies.
-# v773.10.10 — pre-install numpy + setuptools BEFORE the main requirements
-# pass. aeneas' setup.py imports numpy at build time, and pip's resolver
-# does NOT guarantee install order — so a direct `pip install -r requirements.txt`
-# fails with "[ERRO] You must install numpy before installing aeneas".
+# v773.10.11 — aeneas needs --no-build-isolation because its setup.py
+# imports numpy at build time. pip's default isolated build environment
+# is a FRESH venv that only has setuptools+wheel, so even when numpy is
+# installed in the main env the build can't see it. Solution: install
+# numpy and the main requirements first; then install aeneas separately
+# with --no-build-isolation so it sees numpy.
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir "numpy>=1.24.0" && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --no-build-isolation "aeneas>=1.7,<2"
 
 # Copy application code
 COPY . .
