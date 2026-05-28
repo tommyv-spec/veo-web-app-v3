@@ -2889,7 +2889,13 @@ def process_image_job(page, input_paths, prompt, output_path,
         # --- Step 3: Configure settings ---
         configure_image_settings(page, aspect_ratio, resolution, model, variants=1)
         human_delay(1, 2)
-        
+
+        # --- Step 3.5: optional flow_api (private-API) path ---
+        # FLOW_API_MODE=on routes generation through the in-page private API.
+        # On any failure, falls through to the DOM path below (Steps 4-8).
+        if _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_path):
+            return True
+
         # --- Step 4: Upload input images (if any) ---
         if input_paths:
             upload_reference_images(page, input_paths)
@@ -3064,6 +3070,92 @@ def _flow_api_capture_path():
         "FLOW_API_CAPTURE_PATH",
         os.path.join(tempfile.gettempdir(), "flow_api_capture.jsonl"),
     )
+
+
+_IMG_API_ASPECT_MAP = {
+    "9:16": "IMAGE_ASPECT_RATIO_PORTRAIT",
+    "16:9": "IMAGE_ASPECT_RATIO_LANDSCAPE",
+    "1:1":  "IMAGE_ASPECT_RATIO_SQUARE",
+}
+_IMG_API_MODEL_MAP = {
+    "nano_banana_2":   "Nano Banana 2",
+    "nano_banana_pro": "Nano Banana Pro",
+}
+
+
+def _flow_api_mode_enabled():
+    return os.environ.get("FLOW_API_MODE", "off").strip().lower() in ("on", "1", "true", "yes")
+
+
+def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_path):
+    """Try the flow_api (private-API) path for one image generation.
+
+    Returns True on success (output_path written, caller short-circuits the DOM path).
+    Returns False on any failure (caller falls through to the existing DOM steps).
+    Never raises into the caller.
+    """
+    if not _flow_api_mode_enabled():
+        return False
+    try:
+        from flow_api.adapter import generate_image_via_api
+    except Exception as e:
+        print(f"[flow_api] module not available: {e}", flush=True)
+        return False
+
+    project_id = ""
+    try:
+        m = re.search(r"/project/([0-9a-fA-F-]{36})", page.url or "")
+        project_id = m.group(1) if m else ""
+    except Exception:
+        project_id = ""
+    if not project_id:
+        print("[flow_api] no projectId in URL; falling back to DOM", flush=True)
+        return False
+
+    api_aspect = _IMG_API_ASPECT_MAP.get(aspect_ratio, "IMAGE_ASPECT_RATIO_PORTRAIT")
+    model_label = _IMG_API_MODEL_MAP.get((model or "").lower(), "Nano Banana 2")
+
+    ref_bytes_list = []
+    for p in (input_paths or []):
+        try:
+            with open(p, "rb") as f:
+                ref_bytes_list.append(f.read())
+        except Exception as e:
+            print(f"[flow_api] failed to read input {p}: {e}; falling back to DOM", flush=True)
+            return False
+
+    try:
+        result = generate_image_via_api(
+            page,
+            prompt=prompt,
+            model_name=model_label,
+            project_id=project_id,
+            reference_image_bytes_list=(ref_bytes_list or None),
+            aspect=api_aspect,
+        )
+    except Exception as e:
+        print(f"[flow_api] api path raised, falling back to DOM: {e}", flush=True)
+        return False
+
+    url = (result or {}).get("url") or ""
+    if not url:
+        print("[flow_api] api success but no URL; falling back to DOM", flush=True)
+        return False
+
+    # Download via the page's HTTP request context (carries cookies).
+    try:
+        resp = page.request.get(url)
+        if resp.status != 200:
+            print(f"[flow_api] download HTTP {resp.status}; falling back to DOM", flush=True)
+            return False
+        with open(output_path, "wb") as f:
+            f.write(resp.body())
+    except Exception as e:
+        print(f"[flow_api] download failed ({e}); falling back to DOM", flush=True)
+        return False
+
+    print(f"[flow_api] path=api media_id={result.get('media_id')} model={model_label} -> {output_path}", flush=True)
+    return True
 
 
 def _install_flow_api_capture_image(page):

@@ -1,12 +1,11 @@
-"""In-page primitives: run captcha + fetch INSIDE the logged-in labs.google page via
-Patchright page.evaluate, and sniff the auth bearer off the page's own traffic.
+"""In-page primitives (sync Patchright): run captcha + fetch INSIDE the logged-in
+labs.google page, and sniff the auth bearer off the page's own traffic.
 
-These are the only pieces that touch the live browser. Everything else is pure Python.
-All async (matches the worker's async Patchright usage).
+Sync flavor — both image_worker.py and flow_worker.py use sync_playwright. These are
+the only pieces that touch the live browser; everything else is pure Python.
 """
-import asyncio
-import json
 import logging
+import json
 import time
 
 from . import config
@@ -53,14 +52,13 @@ def install_token_capture(page) -> TokenStore:
     return store
 
 
-async def wait_for_token(store: TokenStore, page=None, timeout: float = 30.0) -> str:
-    """Wait until a bearer has been sniffed. Optionally nudge the page to emit one
-    by reloading project data is the caller's job; here we just poll the store."""
+def wait_for_token(store: TokenStore, page=None, timeout: float = 30.0) -> str:
+    """Block until a bearer has been sniffed."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if store.token and store.age_s < 3000:  # ~50 min freshness guard
             return store.token
-        await asyncio.sleep(0.5)
+        time.sleep(0.5)
     return store.token  # may be '' — caller treats empty as failure
 
 
@@ -83,9 +81,9 @@ async ([siteKey, action]) => {
 """
 
 
-async def mint_captcha(page, action: str) -> str:
+def mint_captcha(page, action: str) -> str:
     """Mint a reCAPTCHA Enterprise token in the page's MAIN world. Free."""
-    return await page.evaluate(_CAPTCHA_JS, [config.RECAPTCHA_SITE_KEY, action])
+    return page.evaluate(_CAPTCHA_JS, [config.RECAPTCHA_SITE_KEY, action])
 
 
 _FETCH_JS = """
@@ -107,8 +105,8 @@ async ([url, method, headers, bodyStr]) => {
 """
 
 
-async def api_fetch(page, url: str, method: str, token: str,
-                    body_obj=None, extra_headers: dict = None) -> dict:
+def api_fetch(page, url: str, method: str, token: str,
+              body_obj=None, extra_headers: dict = None) -> dict:
     """Run a fetch to the Flow API from inside the page (correct origin/cookies).
 
     Returns {status, ok, data, text}. Never raises — network errors come back as
@@ -121,6 +119,6 @@ async def api_fetch(page, url: str, method: str, token: str,
         headers.update(extra_headers)
     body_str = json.dumps(body_obj) if body_obj is not None else None
     try:
-        return await page.evaluate(_FETCH_JS, [url, method, headers, body_str])
+        return page.evaluate(_FETCH_JS, [url, method, headers, body_str])
     except Exception as e:
         return {"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
