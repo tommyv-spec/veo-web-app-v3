@@ -3264,6 +3264,137 @@ def _flow_api_image_multi_try(page, input_paths, prompt, aspect_ratio, model,
     return saved
 
 
+def _flow_api_pull_submit_try(page, node_id, prompt, input_paths, variants,
+                              aspect_ratio, model, ctx,
+                              listener_state, pending_submissions):
+    """flow_api path for the parallel HTTP-pull `_submit_one_job` entrypoint.
+
+    Fires N batchGenerateImages POSTs via in-page page.evaluate(fetch). The existing
+    v624 response listener + v627 request-tag flag catch + attribute these the same
+    way they would for a DOM-driven click; the scanner + downloader pipeline picks
+    them up unchanged.
+
+    Returns True on success (all N submits fired). Returns False on any failure —
+    caller falls through to the DOM path. Latches off for the page session on first
+    failure so subsequent jobs skip the API attempt.
+    """
+    if not _flow_api_mode_enabled():
+        return False
+    try:
+        if getattr(page, "_flow_api_disabled_this_session", False):
+            return False
+    except Exception:
+        pass
+
+    pfx = f"[{ctx}] " if ctx else ""
+
+    def _latch_off(reason: str):
+        try:
+            page._flow_api_disabled_this_session = True
+        except Exception:
+            pass
+        print(f"{pfx}[flow_api] disabling API path for this page session: {reason}", flush=True)
+        return False
+
+    try:
+        from flow_api.client import FlowApiClient, FlowApiError
+        from flow_api import config as _fa_cfg
+    except Exception as e:
+        return _latch_off(f"flow_api module not available: {e}")
+
+    project_id = ""
+    try:
+        m = re.search(r"/project/([0-9a-fA-F-]{36})", page.url or "")
+        project_id = m.group(1) if m else ""
+    except Exception:
+        project_id = ""
+    if not project_id:
+        return _latch_off("no projectId in URL")
+
+    api_aspect = _IMG_API_ASPECT_MAP.get(aspect_ratio, "IMAGE_ASPECT_RATIO_PORTRAIT")
+    model_label = _IMG_API_MODEL_MAP.get((model or "").lower(), "Nano Banana 2")
+    image_model = _fa_cfg.resolve_image_model_name(model_label)
+    if not image_model:
+        return _latch_off(f"no imageModelName for '{model_label}'")
+
+    # v703 manifest — same shape the DOM path applies after upload_reference_images.
+    try:
+        if input_paths:
+            manifest = _build_reference_manifest(input_paths)
+            api_prompt = manifest + _strip_stale_reference_lines(prompt)
+            preview = manifest.replace("\n", " | ").strip(" |")
+            print(f"{pfx}[flow_api] v703 manifest ({len(input_paths)} ref(s)): {preview}", flush=True)
+        else:
+            api_prompt = prompt
+    except Exception:
+        api_prompt = prompt
+
+    # Read reference bytes once.
+    ref_bytes_list = []
+    for p in (input_paths or []):
+        try:
+            with open(p, "rb") as f:
+                ref_bytes_list.append(f.read())
+        except Exception as e:
+            return _latch_off(f"failed to read ref {p}: {e}")
+
+    cli = FlowApiClient(page, project_id=project_id)
+
+    # Upload references via private API. uploadImage has no captcha.
+    try:
+        ref_ids = []
+        for i, b in enumerate(ref_bytes_list):
+            ref_ids.append(cli.upload_image(b, file_name=f"ref_{i}.jpg"))
+        if ref_ids:
+            print(f"{pfx}[flow_api] uploaded {len(ref_ids)} ref(s) via API", flush=True)
+    except Exception as e:
+        return _latch_off(f"upload_image raised: {e}")
+
+    # Tag upcoming POSTs to this node via the v627 request-tag flag,
+    # and register a pending_submissions entry so the listener's FIFO
+    # fallback also attributes them correctly if the flag is missed.
+    try:
+        listener_state['current_submitting_node_id'] = node_id
+        try:
+            _proj_url = page.url
+        except Exception:
+            _proj_url = None
+        pending_submissions.append({
+            'node_id': node_id,
+            'expected_count': int(variants or 1),
+            'ts': time.time(),
+            'tagged_count': 0,
+            'project_url': _proj_url,
+        })
+        # cap pending list at 60s (matches existing DOM path)
+        cutoff = time.time() - 60
+        pending_submissions[:] = [p for p in pending_submissions if p['ts'] > cutoff]
+    except Exception as e:
+        return _latch_off(f"flag/pending registration failed: {e}")
+
+    # Fire N submits in-page; v624 listener catches each response,
+    # v627 tags them, scanner attributes, downloader downloads.
+    try:
+        for v in range(int(variants or 1)):
+            cli.submit_image(
+                prompt=api_prompt,
+                image_model_name=image_model,
+                reference_media_ids=ref_ids or None,
+                aspect=api_aspect,
+                cooldown=(v == 0),  # only first call pays cooldown
+            )
+    except Exception as e:
+        # Restore flag before bailing so the DOM path doesn't see a stale tag.
+        try:
+            listener_state['current_submitting_node_id'] = None
+        except Exception:
+            pass
+        return _latch_off(f"submit_image raised: {e}")
+
+    print(f"{pfx}[flow_api] fired {variants}x batchGenerateImages POSTs via in-page API", flush=True)
+    return True
+
+
 def _install_flow_api_capture_image(page):
     """Read-only request listener that records real image submit/upload bodies +
     imageModelName + shape (with/without imageInputs base/reference). Inert unless
@@ -6504,6 +6635,23 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
 
             # --- All Playwright calls on the main thread; no lock needed ---
             _ensure_project_ready(new_job_key, context=ctx)
+
+            # --- flow_api private-API path (FLOW_API_MODE=on, default) ---
+            # Skips mode/settings/DOM-upload/click; uploads refs + fires N
+            # batchGenerateImages POSTs in-page (page.evaluate). The existing
+            # v624 response listener + v627 request-tag flag catch + attribute
+            # these the same way they would for a DOM-driven click → the
+            # scanner + HTTP downloader pipeline handles the rest unchanged.
+            # On any failure: latches off for the page session and falls
+            # through to the DOM path below.
+            if _flow_api_pull_submit_try(
+                page, node_id, prompt, input_paths, variants,
+                aspect_ratio, model, ctx,
+                listener_state, pending_submissions,
+            ):
+                _save_state()
+                print(f"[API:submit] ✓ Node {node_id} submitted via flow_api (in_flight={len(in_flight)+1})", flush=True)
+                return True
 
             if not select_image_mode(page, context=ctx):
                 raise RuntimeError("Failed to switch to Image mode")
