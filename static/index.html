@@ -1617,22 +1617,37 @@
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side > div:first-child {
             display: none !important;
         }
-        /* Paired side video sizing: side has explicit height (100% of row).
-           .clip-video uses aspect-ratio + flex to compute a 9:16 box from
-           that height; existing base CSS (width/height 100% object-fit) on
-           the inner video fills it. v767's voice max-height: 260px override
-           is invalidated here so voice scales with the row instead of
-           capping. */
+        /* v768.1 — paired side video sizing fix. v768's original rules used
+           `aspect-ratio: 9/16; height: auto; flex: 1 1 0; min-height: 0`
+           which in flex-row layouts collapses the box to 0 height: flex-
+           basis:0 + height:auto leaves the browser with no content size to
+           compute from, and aspect-ratio resolves against 0. Result:
+           invisible paired clips.
+           Fix: drop aspect-ratio on .clip-video (override base 9/16 with
+           auto) and let the <video> element itself drive sizing via its
+           intrinsic aspect ratio + height:100% + width:auto. .clip-video
+           grows to fill the side's available height; video-container fills
+           clip-video; <video> computes its width from intrinsic aspect
+           ratio so the box is correctly sized regardless of flex-basis
+           interactions. v767's voice max-height: 260px override is
+           invalidated so voice scales with the row instead of capping. */
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-video {
-            aspect-ratio: 9 / 16;
-            height: auto;
+            aspect-ratio: auto;
             flex: 1 1 0;
             min-height: 0;
+            width: auto;
             max-height: 100%;
         }
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .video-container {
+            height: 100%;
+            width: auto;
+        }
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side video {
+            height: 100%;
+            width: auto;
             max-height: 100%;
             max-width: 100%;
+            object-fit: contain;
         }
         /* ===== END v768 ROW LAYOUT ===== */
 
