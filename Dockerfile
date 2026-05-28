@@ -8,18 +8,13 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
-# Install system dependencies including ffmpeg, espeak-ng (for aeneas
-# forced-alignment fallback), and build tools (aeneas pip install needs
-# to compile a C extension).
+# Install system dependencies including ffmpeg.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsm6 \
     libxext6 \
     libgl1 \
     curl \
-    espeak-ng \
-    libespeak-ng-dev \
-    build-essential \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -41,16 +36,8 @@ RUN mkdir -p /app/data /app/uploads /app/outputs /app/static
 COPY requirements.txt .
 
 # Install Python dependencies.
-# v773.10.11 — aeneas needs --no-build-isolation because its setup.py
-# imports numpy at build time. pip's default isolated build environment
-# is a FRESH venv that only has setuptools+wheel, so even when numpy is
-# installed in the main env the build can't see it. Solution: install
-# numpy and the main requirements first; then install aeneas separately
-# with --no-build-isolation so it sees numpy.
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir "numpy>=1.24.0" && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --no-build-isolation "aeneas>=1.7,<2"
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .

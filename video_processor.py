@@ -309,85 +309,12 @@ def _ensure_whisper_base():
     return _WHISPER_BASE_MODEL
 
 
-# v773.10.9 — Aeneas fallback: text↔audio MFCC-DTW alignment, no ASR.
-# When whisper_anchor can't find script anchors (Whisper-base mistranscribes
-# the rare vocab cluster), aeneas synthesizes the script line via eSpeak,
-# extracts MFCC features, and DTW-aligns against the real audio MFCCs.
-# Returns (start_s, end_s) of where the script line lands in the audio.
-# Returns None on any failure (caller falls back to keep-full-clip).
-def _aeneas_trim(video_path, dialogue_texts, language: str = "English"):
-    import os as _os
-    import json as _json
-    import tempfile as _tempfile
-
-    _script_text = "\n".join(
-        (t or "").strip() for t in (dialogue_texts or []) if (t or "").strip()
-    ).strip()
-    if not _script_text:
-        return None
-
-    _LANG_AENEAS = {
-        "english": "eng", "spanish": "spa", "french": "fra", "german": "deu",
-        "italian": "ita", "portuguese": "por", "dutch": "nld", "russian": "rus",
-    }
-    _alang = _LANG_AENEAS.get(language.lower(), "eng")
-
-    _tmpdir = _tempfile.mkdtemp(prefix="aeneas_")
-    _audio_path = _os.path.join(_tmpdir, "audio.wav")
-    _text_path = _os.path.join(_tmpdir, "script.txt")
-    _sync_path = _os.path.join(_tmpdir, "sync.json")
-
-    try:
-        # 1. Extract 16k mono wav from clip
-        _cmd = [FFMPEG_BIN, "-y", "-i", str(video_path), "-ar", "16000",
-                "-ac", "1", "-f", "wav", _audio_path]
-        _code, _, _err = run(_cmd)
-        if _code != 0:
-            print(f"[Aeneas] audio extract failed: {_err[:200]}", flush=True)
-            return None
-
-        with open(_text_path, "w", encoding="utf-8") as _f:
-            _f.write(_script_text)
-
-        # 2. Run aeneas: synthesize text via eSpeak → MFCC → DTW vs real audio
-        from aeneas.executetask import ExecuteTask
-        from aeneas.task import Task
-        _cfg = (
-            f"task_language={_alang}"
-            f"|is_text_type=plain"
-            f"|os_task_file_format=json"
-        )
-        _task = Task(config_string=_cfg)
-        _task.audio_file_path_absolute = _audio_path
-        _task.text_file_path_absolute = _text_path
-        _task.sync_map_file_path_absolute = _sync_path
-        ExecuteTask(_task).execute()
-        _task.output_sync_map_file()
-
-        # 3. Parse sync map: list of fragments with begin/end timestamps
-        with open(_sync_path, "r", encoding="utf-8") as _f:
-            _smap = _json.load(_f)
-        _fragments = _smap.get("fragments", [])
-        if not _fragments:
-            print("[Aeneas] no fragments returned", flush=True)
-            return None
-
-        _begin = float(_fragments[0]["begin"])
-        _end = float(_fragments[-1]["end"])
-        print(
-            f"[Aeneas] aligned {_script_text[:60]!r}... → [{_begin:.2f}, {_end:.2f}]",
-            flush=True,
-        )
-        return (_begin, _end)
-    except Exception as _e:
-        print(f"[Aeneas] failed: {_e!r}", flush=True)
-        return None
-    finally:
-        try:
-            import shutil as _sh
-            _sh.rmtree(_tmpdir, ignore_errors=True)
-        except Exception:
-            pass
+# v773.10.12 — aeneas DTW fallback removed: aeneas 1.7.3.0 (2017) uses
+# numpy.distutils which numpy 2.x deleted, so the wheel build fails on
+# modern Python. Quality upgrade is now carried entirely by the
+# Whisper-base + beam=5 + hotwords + full-script initial_prompt stack.
+# If rare-vocab edges still slip through, next step is a manual MFCC-DTW
+# implementation using torchaudio (already installed) + dtw-python.
 
 
 # v773.10.6 — Whisper-tiny multi-anchor trim.
@@ -578,28 +505,13 @@ def _whisper_anchor_trim(
             if end_anchor is None or _w["end"] > end_anchor["end"]:
                 end_anchor, end_score, end_src_word = _w, _s, _sw
 
-    # v773.10.9 — when no script anchor matches in a half, try Aeneas
-    # MFCC-DTW fallback BEFORE giving up. Aeneas synthesizes the script via
-    # eSpeak and DTW-aligns audio features, so it doesn't depend on Whisper
-    # transcribing the rare vocab correctly. If aeneas succeeds, use its
-    # boundary directly. Otherwise keep more (not less) — same policy as v773.10.8.
-    if start_anchor is None or end_anchor is None:
-        _aeneas_bounds = _aeneas_trim(video_path, dialogue_texts, language=language)
-        if _aeneas_bounds is not None:
-            _ab_start, _ab_end = _aeneas_bounds
-            keep_start = max(0.0, _ab_start - HEAD_PAD)
-            keep_end = min(total_duration, _ab_end + TAIL_PAD)
-            print(
-                f"[WhisperAnchor] script anchors missing → Aeneas DTW fallback: "
-                f"keep=[{keep_start:.2f}, {keep_end:.2f}] dur={keep_end-keep_start:.2f}s "
-                f"(orig {total_duration:.2f}s, dropped {total_duration-(keep_end-keep_start):.2f}s)",
-                flush=True,
-            )
-            return [(keep_start, keep_end)]
-
+    # v773.10.12 — aeneas DTW fallback removed (build failure on numpy 2.x).
+    # Quality is carried by Whisper-base + beam=5 + hotwords + full prompt.
+    # When anchors still miss, fall back to keep-more policy (v773.10.8).
     if start_anchor is None and end_anchor is None:
         print(
-            "[WhisperAnchor] NO script anchors at either end + Aeneas failed → keeping full clip",
+            "[WhisperAnchor] NO script anchors at either end → keeping full clip "
+            "(Whisper-base + hotwords couldn't match any of first/last 5 script words)",
             flush=True,
         )
         return [(0.0, total_duration)]
