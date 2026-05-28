@@ -54,7 +54,9 @@ _AUDIT_ASR = None
 
 def warmup() -> None:
     """Pre-load aligner + VAD + audit ASR. Call once at worker boot."""
-    raise NotImplementedError
+    _ensure_aligner()
+    _ensure_vad()
+    _ensure_audit_asr()
 
 
 # Whisper language code map (ISO 639-1)
@@ -261,15 +263,61 @@ def _build_audit(
     }
 
 
-def _silero_fallback(audio_path: Path, reason: str):
-    """STUB — Task 7 replaces with real silero-VAD invocation.
+def _ensure_vad():
+    """Lazy-load silero-VAD v5.1.2 ONNX model into module-level singleton.
 
-    Returns ([(0, duration)], AlignmentResult(backend='silero-fallback')).
+    silero_vad v5.1.2 exports:
+      load_silero_vad(onnx=False) -> model
+      get_speech_timestamps(audio_1d, model, sampling_rate, min_silence_duration_ms,
+                            speech_pad_ms, ...) -> list[dict{start, end}]
+    Timestamps returned in samples (not seconds); divide by sampling_rate for seconds.
+    onnx=True selects ONNX runtime backend (faster inference, no GPU required).
+    """
+    global _VAD
+    if _VAD is None:
+        from silero_vad import load_silero_vad, get_speech_timestamps
+        _VAD = {
+            "model": load_silero_vad(onnx=True),
+            "get_speech_timestamps": get_speech_timestamps,
+        }
+    return _VAD
+
+
+def _silero_fallback(audio_path: Path, reason: str):
+    """Coarse VAD-only segmentation when forced alignment unavailable.
+
+    Returns ([(start_s, end_s), ...], AlignmentResult(backend='silero-fallback')).
+    Timestamps from silero are in samples at 16 kHz; divided by 16000 for seconds.
     """
     duration = _audio_duration_seconds(audio_path)
-    return [(0.0, duration)], AlignmentResult(
-        words=[], audio_duration=duration,
-        backend="silero-fallback", fallback_reason=reason,
+    try:
+        vad = _ensure_vad()
+        waveform, sr = _load_audio_mono16k(audio_path)
+        # silero expects 1-D float tensor at 16 kHz
+        audio_1d = waveform.squeeze(0)
+        ts = vad["get_speech_timestamps"](
+            audio_1d,
+            vad["model"],
+            sampling_rate=16000,
+            min_silence_duration_ms=int(GAP_TRIGGER * 1000),
+            speech_pad_ms=int(GAP_KEEP * 1000),
+        )
+        if not ts:
+            segments = [(0.0, duration)]
+        else:
+            segments = [
+                (max(0.0, t["start"] / 16000), min(duration, t["end"] / 16000))
+                for t in ts
+            ]
+    except Exception as e:
+        segments = [(0.0, duration)]
+        reason = f"{reason}; silero also failed: {e}"
+
+    return segments, AlignmentResult(
+        words=[],
+        audio_duration=duration,
+        backend="silero-fallback",
+        fallback_reason=reason,
     )
 
 

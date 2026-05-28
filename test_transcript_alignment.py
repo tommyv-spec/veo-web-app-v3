@@ -167,3 +167,28 @@ def test_release_audit_asr_frees_singleton():
     assert ta._AUDIT_ASR is not None
     ta.release_audit_asr()
     assert ta._AUDIT_ASR is None
+
+
+def test_silero_fallback_when_aligner_raises(monkeypatch):
+    """If aligner raises OOM, silero-VAD path returns coarse segments + audit flag."""
+    import transcript_alignment as ta
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated aligner OOM")
+
+    monkeypatch.setattr(ta, "align_script_to_audio", boom)
+
+    segments, audit = ta.detect_speech_segments_aligned(
+        audio_path=FIXTURES / "align_clean.wav",
+        script_text="placeholder script text",
+        language="English",
+    )
+    assert audit["backend"] == "silero-fallback"
+    assert audit["fallback_reason"] is not None
+    assert "OOM" in audit["fallback_reason"]
+    assert len(segments) >= 1
+    # silero must produce SOME speech; fixture is non-silent
+    speech_dur = sum(e - s for s, e in segments)
+    assert speech_dur > 0.5
+    # silero-VAD singleton must be loaded by the fallback path (not the stub)
+    assert ta._VAD is not None, "silero-VAD singleton must be loaded by the fallback path"
