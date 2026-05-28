@@ -63,6 +63,10 @@ _LANG_ISO_WHISPER = {
     "italian": "it", "portuguese": "pt", "dutch": "nl", "russian": "ru",
     "chinese": "zh", "japanese": "ja", "korean": "ko", "arabic": "ar",
     "hindi": "hi", "turkish": "tr", "polish": "pl", "swedish": "sv",
+    "norwegian": "no", "danish": "da", "finnish": "fi", "greek": "el",
+    "hebrew": "he", "thai": "th", "vietnamese": "vi", "indonesian": "id",
+    "malay": "ms", "tagalog": "tl", "swahili": "sw", "czech": "cs",
+    "romanian": "ro", "hungarian": "hu", "ukrainian": "uk",
 }
 
 
