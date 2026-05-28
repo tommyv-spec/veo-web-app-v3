@@ -1,5 +1,10 @@
 # Veo Web App Dependencies
 
+# v773 — pull CPU-only torch wheels (10x smaller than the CUDA-bundled PyPI default).
+# Without this, `pip install torch` pulls the ~800MB GPU wheel which OOMs the
+# Render build container. The +cpu wheel is ~250MB and fits the build budget.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 # Web Framework
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
