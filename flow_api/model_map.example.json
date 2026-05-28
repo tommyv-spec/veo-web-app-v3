@@ -25,5 +25,10 @@
     "reference_frame_2_video": {
       "VIDEO_ASPECT_RATIO_PORTRAIT": "FILL_FROM_CAPTURE"
     }
+  },
+  "image_models": {
+    "_comment": "CONFIRMED from HAR 2026-05-28: Nano Banana 2 -> NARWHAL; Pro -> GEM_PIX_2 (FlowKit-derived, confirm if used).",
+    "Nano Banana 2": "NARWHAL",
+    "Nano Banana Pro": "GEM_PIX_2"
   }
 }

@@ -96,3 +96,30 @@ def resolve_model_key(model_name: str, gen_type: str, aspect: str) -> str:
     if not key or key == NEEDS_CAPTURE:
         return ""
     return key
+
+
+# ─── Image generation (HAR-confirmed 2026-05-28) ─────────────
+# Endpoint: /v1/projects/{project_id}/flowMedia:batchGenerateImages
+# imageModelName values seen / from FlowKit:
+#   NARWHAL  = Nano Banana 2 (CONFIRMED via HAR)
+#   GEM_PIX_2 = Nano Banana Pro (from FlowKit; not in this HAR — confirm if used)
+DEFAULT_IMAGE_ASPECT_RATIO = os.environ.get("FLOW_API_IMAGE_ASPECT", "IMAGE_ASPECT_RATIO_PORTRAIT")
+
+_DEFAULT_IMAGE_MODEL_MAP = {
+    "Nano Banana 2": "NARWHAL",
+    "Nano Banana Pro": "GEM_PIX_2",  # FlowKit-derived; confirm via Pro HAR if used
+}
+
+
+def load_image_model_map() -> dict:
+    mp = load_model_map()
+    img = mp.get("image_models")
+    if isinstance(img, dict) and img:
+        return img
+    return _DEFAULT_IMAGE_MODEL_MAP
+
+
+def resolve_image_model_name(model_name: str) -> str:
+    """Return the imageModelName for a worker-facing model label, or '' if unknown."""
+    name = load_image_model_map().get(model_name, "")
+    return "" if name == NEEDS_CAPTURE else name

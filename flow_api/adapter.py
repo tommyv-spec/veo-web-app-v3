@@ -63,3 +63,50 @@ async def generate_clip_via_api(
         raise FlowApiError(f"clip done but no media URL resolved for {media_id}")
 
     return {"media_id": media_id, "url": url, "path": "api", "operation": poll.get("operation", {})}
+
+
+async def generate_image_via_api(
+    page,
+    *,
+    prompt: str,
+    model_name: str = "Nano Banana 2",
+    project_id: str = "",
+    reference_image_bytes_list: list = None,
+    base_image_bytes: bytes = None,
+    aspect: str = None,
+    seed: int = None,
+    tier: str = "PAYGATE_TIER_TWO",
+    client: FlowApiClient = None,
+) -> dict:
+    """Generate one image through the Flow private API, fully in-page.
+
+    Returns {"media_id": uuid, "url": str, "path": "api"}.
+    Raises FlowApiError on any failure (caller falls back to DOM path).
+    """
+    image_model = config.resolve_image_model_name(model_name)
+    if not image_model:
+        raise FlowApiError(
+            f"no imageModelName for model='{model_name}' "
+            f"(see flow_api/config.py IMAGE_MODELS)"
+        )
+
+    cli = client or FlowApiClient(page, project_id=project_id, tier=tier)
+
+    # Upload any reference/base images first to obtain media_ids.
+    base_media_id = ""
+    ref_ids = []
+    if base_image_bytes:
+        base_media_id = await cli.upload_image(base_image_bytes, file_name="base.jpg")
+    for i, b in enumerate(reference_image_bytes_list or []):
+        ref_ids.append(await cli.upload_image(b, file_name=f"ref_{i}.jpg"))
+
+    media_id, url = await cli.submit_image(
+        prompt=prompt,
+        image_model_name=image_model,
+        reference_media_ids=ref_ids or None,
+        base_image_media_id=base_media_id,
+        aspect=aspect,
+        seed=seed,
+    )
+    logger.info("flow_api: image generated model=%s media_id=%s", image_model, media_id)
+    return {"media_id": media_id, "url": url, "path": "api"}

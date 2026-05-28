@@ -74,12 +74,13 @@ class FlowApiClient:
             raise FlowApiError(f"submit returned no media_id: {parsing.error_reason(res) or res.get('text','')[:200]}")
         return media_id, parsing.extract_operation(res)
 
-    async def _submit_with_captcha(self, url: str, body: dict) -> dict:
+    async def _submit_with_captcha(self, url: str, body: dict, action: str = None) -> dict:
         """Mint captcha in-page, inject, POST. Retries captcha-only failures."""
+        action = action or config.CAPTCHA_VIDEO
         last = {}
         for attempt in range(config.CAPTCHA_MAX_RETRIES):
             await self._cooldown()
-            token = await mint_or_empty(self.page)
+            token = await mint_or_empty(self.page, action=action)
             if not token:
                 last = {"error": "captcha mint failed"}
                 continue
@@ -120,6 +121,37 @@ class FlowApiClient:
                 return {"status": "failed", "operation": ops[0], "reason": parsing.error_reason(res)}
         return {"status": "timeout"}
 
+    # ─── image generation (Nano Banana) ──────────────────────
+    async def submit_image(self, prompt: str, image_model_name: str,
+                           reference_media_ids: list = None,
+                           base_image_media_id: str = "",
+                           aspect: str = None,
+                           seed: int = None) -> tuple[str, str]:
+        """Submit a Nano Banana image generation. Returns (media_id UUID, fife/imageUri).
+
+        Image generation is synchronous in the response (no poll loop) — `batchGenerateImages`
+        returns the finished media in data.media[0].
+        """
+        if not image_model_name:
+            raise FlowApiError("no imageModelName resolved (check IMAGE_MODELS)")
+        body = builders.build_generate_image(
+            prompt=prompt, project_id=self.project_id,
+            image_model_name=image_model_name,
+            aspect=aspect, seed=seed,
+            reference_media_ids=reference_media_ids,
+            base_image_media_id=base_image_media_id,
+            tier=self.tier,
+        )
+        url = builders.build_url("generate_images", project_id=self.project_id)
+        res = await self._submit_with_captcha(url, body, action=config.CAPTCHA_IMAGE)
+        media_id = parsing.extract_image_media_id(res)
+        if not media_id:
+            raise FlowApiError(
+                f"image submit returned no media_id: "
+                f"{parsing.error_reason(res) or (res.get('text','') or '')[:200]}"
+            )
+        return media_id, parsing.extract_image_url(res)
+
     # ─── resolve a fresh media URL ───────────────────────────
     async def get_media_url(self, media_id: str) -> str:
         await self._cooldown()
@@ -130,9 +162,10 @@ class FlowApiClient:
         return parsing.extract_output_url(res)
 
 
-async def mint_or_empty(page) -> str:
+async def mint_or_empty(page, action: str = None) -> str:
+    action = action or config.CAPTCHA_VIDEO
     try:
-        return await page_ops.mint_captcha(page, config.CAPTCHA_VIDEO)
+        return await page_ops.mint_captcha(page, action)
     except Exception as e:
         logger.warning("flow_api: captcha mint error: %s", e)
         return ""

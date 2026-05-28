@@ -3055,6 +3055,100 @@ def interactive_mode(page):
 # MULTI-VARIANT DOWNLOAD
 # ============================================================
 
+def _flow_api_capture_enabled():
+    return os.environ.get("FLOW_API_CAPTURE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _flow_api_capture_path():
+    return os.environ.get(
+        "FLOW_API_CAPTURE_PATH",
+        os.path.join(tempfile.gettempdir(), "flow_api_capture.jsonl"),
+    )
+
+
+def _install_flow_api_capture_image(page):
+    """Read-only request listener that records real image submit/upload bodies +
+    imageModelName + shape (with/without imageInputs base/reference). Inert unless
+    FLOW_API_CAPTURE=1. Mirrors the flow_worker.py capture hook. Never raises into
+    Playwright; changes nothing about generation."""
+    if page is None or not _flow_api_capture_enabled():
+        return
+    try:
+        if getattr(page, '_flow_api_capture_installed', False):
+            return
+    except Exception:
+        return
+    out_path = _flow_api_capture_path()
+    _watch = (
+        "flowMedia:batchGenerateImages",
+        "flow/uploadImage",
+        "flow/upsampleImage",
+    )
+
+    def _on_request(req):
+        try:
+            url = getattr(req, 'url', '') or ''
+            if 'aisandbox-pa.googleapis.com' not in url:
+                return
+            if not any(w in url for w in _watch):
+                return
+            try:
+                body = req.post_data
+            except Exception:
+                body = None
+            image_model = ''
+            input_shape = ''
+            input_count = 0
+            if body:
+                try:
+                    j = json.loads(body)
+                    for r in (j.get('requests') or []):
+                        if not isinstance(r, dict):
+                            continue
+                        if r.get('imageModelName'):
+                            image_model = r['imageModelName']
+                        inputs = r.get('imageInputs') or []
+                        if inputs:
+                            input_count = len(inputs)
+                            types = [i.get('imageInputType', '') for i in inputs if isinstance(i, dict)]
+                            input_shape = '+'.join(sorted(set(t.replace('IMAGE_INPUT_TYPE_', '') for t in types)))
+                        if image_model:
+                            break
+                except Exception:
+                    pass
+            endpoint = url.split('?', 1)[0]
+            print(
+                f"[flow-api-capture] {endpoint.rsplit('/', 1)[-1]} "
+                f"imageModelName={image_model or '-'} inputs={input_count} shape={input_shape or '-'}",
+                flush=True,
+            )
+            try:
+                with open(out_path, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({
+                        'ts': time.time(),
+                        'method': getattr(req, 'method', ''),
+                        'url': url,
+                        'imageModelName': image_model,
+                        'input_shape': input_shape,
+                        'input_count': input_count,
+                        'body_raw': body,
+                    }) + "\n")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    try:
+        page.on('request', _on_request)
+        try:
+            page._flow_api_capture_installed = True
+        except Exception:
+            pass
+        print(f"[flow-api-capture] (image) enabled -> {out_path}", flush=True)
+    except Exception as e:
+        print(f"[flow-api-capture] (image) failed to install: {e}", flush=True)
+
+
 def attach_image_url_listener(page):
     """Attach a network response listener that captures generated image
     URLs directly from `batchGenerateImages` JSON responses.
@@ -3093,6 +3187,10 @@ def attach_image_url_listener(page):
                 captured.append(fife)
 
     page.on('response', on_response)
+
+    # flow_api rebuild: read-only capture of real image submit/upload bodies +
+    # imageModelName. Inert unless FLOW_API_CAPTURE=1. Never affects generation.
+    _install_flow_api_capture_image(page)
 
     def get_captured():
         return list(captured)

@@ -97,6 +97,55 @@ def build_generate_video_references(prompt: str, reference_media_ids: list,
     }
 
 
+def build_generate_image(prompt: str, project_id: str, image_model_name: str,
+                         aspect: str = None, seed: int = None,
+                         reference_media_ids: list = None,
+                         base_image_media_id: str = "",
+                         tier: str = "PAYGATE_TIER_TWO") -> dict:
+    """Image generation via Nano Banana. Captcha required.
+
+    HAR-confirmed shape (2026-05-28). Per-request item carries the prompt/model/seed/
+    aspect/imageInputs; top-level clientContext carries the projectId + recaptcha
+    placeholder + tool. reference_media_ids -> imageInputs as REFERENCE; passing a
+    base_image_media_id prepends it as IMAGE_INPUT_TYPE_BASE_IMAGE (edit_image flow).
+    """
+    aspect = aspect or config.DEFAULT_IMAGE_ASPECT_RATIO
+    seed_val = seed if seed is not None else (int(time.time() * 1000) % 1000000)
+
+    request_item = {
+        "imageAspectRatio": aspect,
+        "imageModelName": image_model_name,
+        "seed": seed_val,
+        "structuredPrompt": {"parts": [{"text": prompt}]},
+    }
+
+    image_inputs = []
+    if base_image_media_id:
+        image_inputs.append({
+            "name": base_image_media_id,
+            "imageInputType": "IMAGE_INPUT_TYPE_BASE_IMAGE",
+        })
+    if reference_media_ids:
+        for mid in reference_media_ids:
+            image_inputs.append({
+                "name": mid,
+                "imageInputType": "IMAGE_INPUT_TYPE_REFERENCE",
+            })
+    if image_inputs:
+        request_item["imageInputs"] = image_inputs
+
+    body = {
+        "clientContext": client_context(project_id, tier),
+        "requests": [request_item],
+    }
+    # Edit / reference flows: add a fresh batch id + useNewMedia (mirrors FlowKit;
+    # consistent with the HAR shape when references are involved).
+    if image_inputs:
+        body["mediaGenerationContext"] = {"batchId": f"{uuid.uuid4()}"}
+        body["useNewMedia"] = True
+    return body
+
+
 def build_check_status(operations: list) -> dict:
     """No captcha."""
     return {"operations": operations}

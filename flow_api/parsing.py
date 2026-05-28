@@ -80,6 +80,48 @@ def extract_video_media_id(result: dict) -> str:
     return ""
 
 
+def extract_image_media_id(result: dict) -> str:
+    """media_id UUID of a generated image from a batchGenerateImages response.
+
+    Shape: data.media[0].name (UUID). Falls back to UUID parsed out of the image's
+    fifeUrl / imageUri. Returns '' if none found.
+    """
+    data = result.get("data", result) if isinstance(result, dict) else {}
+    if not isinstance(data, dict):
+        return ""
+    media = data.get("media") or []
+    if not media:
+        return ""
+    item = media[0]
+    if not isinstance(item, dict):
+        return ""
+    name = item.get("name", "")
+    if is_uuid(name):
+        return name
+    gen = (item.get("image") or {}).get("generatedImage") or {}
+    val = gen.get("mediaId", "")
+    if is_uuid(val):
+        return val
+    for url_field in ("fifeUrl", "imageUri"):
+        url = gen.get(url_field, "")
+        got = uuid_from_url(url)
+        if got:
+            return got
+    return ""
+
+
+def extract_image_url(result: dict) -> str:
+    """Finished-image URL from a batchGenerateImages response."""
+    data = result.get("data", result) if isinstance(result, dict) else {}
+    if not isinstance(data, dict):
+        return ""
+    media = data.get("media") or []
+    if not media:
+        return ""
+    gen = (media[0].get("image") or {}).get("generatedImage") or {}
+    return gen.get("fifeUrl", gen.get("imageUri", gen.get("encodedImage", "")))
+
+
 def extract_operation(result: dict) -> dict:
     """The operation object to feed back into batchCheckAsyncVideoGenerationStatus."""
     data = result.get("data", result) if isinstance(result, dict) else {}

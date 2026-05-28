@@ -60,6 +60,19 @@ have a logged-in page via Patchright, so we use `page.evaluate` instead. Per cli
 | `capture_helper.py` | attach to page to record real submit bodies/model keys from live traffic |
 | `tests/` | offline unit tests (no browser/network) — `python -m pytest flow_api/tests/ -q` |
 
+## Image generation (HAR-confirmed 2026-05-28)
+
+The image side is now CONFIRMED end-to-end from a HAR capture:
+
+- Endpoint: `POST /v1/projects/{project_id}/flowMedia:batchGenerateImages` (captcha: `IMAGE_GENERATION`).
+- `imageModelName`: `NARWHAL` = **Nano Banana 2** (confirmed). `GEM_PIX_2` = **Nano Banana Pro** (from FlowKit, not in this HAR — confirm if used).
+- Per-request keys (plain t2i): `imageAspectRatio, imageModelName, seed, structuredPrompt`.
+- With reference/base images: add `imageInputs: [{name, imageInputType: IMAGE_INPUT_TYPE_BASE_IMAGE | IMAGE_INPUT_TYPE_REFERENCE}]` and top-level `mediaGenerationContext.batchId` + `useNewMedia: true`.
+- `uploadImage` confirmed identical to video: `POST /v1/flow/uploadImage`, projectId in clientContext, no captcha.
+- Image submit returns the finished media in the same response (no separate poll loop) — read `data.media[0].name` (UUID) and `.image.generatedImage.fifeUrl`.
+
+Built: `builders.build_generate_image`, `parsing.extract_image_media_id` / `extract_image_url`, `client.submit_image`, `adapter.generate_image_via_api`. Capture hook mirrored into `image_worker.py` (same env gate, same JSONL output).
+
 ## BEFORE enabling — confirm the unknowns (doc-grounded discipline)
 
 Three things are NOT yet confirmed for this account and are marked `NEEDS_CAPTURE`
