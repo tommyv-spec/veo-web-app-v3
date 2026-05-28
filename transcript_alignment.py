@@ -123,6 +123,29 @@ def _ensure_aligner():
         bundle = MMS_FA
         model = bundle.get_model(with_star=False).to("cpu")
         model.eval()
+        # v773.10.2 — dynamic int8 quantization on Linear layers.
+        # MMS-300M loads as ~1.18 GB FP32; on Render's 2 GB standard plan
+        # this OOM-kills the worker once the base FastAPI app overhead
+        # (~600-800 MB) is layered on top. Dynamic quantization rewrites
+        # only the Linear (and LSTM) submodules to int8 at inference time,
+        # leaving the convolutional feature extractor and inputs in FP32 —
+        # so model weights drop ~70% (~1.18 GB → ~350 MB) with no API
+        # change and no input-dtype handling required. Wav2Vec2's
+        # TransformerEncoder is overwhelmingly Linear, so the saving is
+        # close to the theoretical max.
+        try:
+            model = torch.quantization.quantize_dynamic(
+                model, {torch.nn.Linear}, dtype=torch.qint8,
+            )
+        except Exception as _qe:
+            # Fall back to unquantized model if quantization unavailable
+            # (e.g. torch built without quantization). Logs the reason so
+            # operator can size up the Render plan if this path fires.
+            print(
+                f"[Align/v773.10.2] dynamic-int8 quantization failed: {_qe!r} — "
+                f"falling back to FP32 (high memory)",
+                flush=True,
+            )
         _ALIGNER = {
             "bundle": bundle,
             "model": model,
