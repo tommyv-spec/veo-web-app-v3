@@ -76,6 +76,12 @@ services:
       # Python settings
       - key: PYTHONUNBUFFERED
         value: "1"
+
+      # v773 — forced-alignment pipeline (MMS_FA + silero-VAD + distil-large-v3)
+      # 1 = route detect_speech_segments_whisper to transcript_alignment module
+      # 0 / unset = legacy V708/V731 Whisper-tiny fuzzy-match path
+      - key: ALIGN_ENABLED
+        value: "1"
       
       # Job workers (parallel video generation)
       # Keep at 2 to avoid Veo API rate limits
