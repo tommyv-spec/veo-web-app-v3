@@ -315,11 +315,23 @@ def _whisper_anchor_trim(
     language: str = "English",
 ):
     import tempfile, re as _re
-    HEAD_PAD = 0.15
-    TAIL_PAD = 0.20
+    # v773.10.7 — generous padding because Whisper-tiny word timestamps
+    # are systematically biased:
+    #   start_timestamp is ~0.10-0.20 s LATER than real start (Whisper VAD
+    #     skips initial onset consonants)
+    #   end_timestamp is ~0.20-0.40 s EARLIER than real end (Whisper closes
+    #     on the silence inside a syllable's tail)
+    # Safer to over-include than to cut.
+    HEAD_PAD = 0.30
+    TAIL_PAD = 0.45
     FUZZ_THRESHOLD = 78         # rapidfuzz.fuzz.ratio cut-off (0-100)
     PHONETIC_FALLBACK_MIN = 5   # script word length to attempt phonetic match
-    MIN_KEEP_FRACTION = 0.30    # if kept < 30 % of audio, distrust + fallback
+    MIN_KEEP_FRACTION = 0.30    # if kept < 30 % of audio, widen to first/last Whisper word
+    # Position weighting tolerance: head anchor can land anywhere in first
+    # POSITION_WINDOW of the clip; tail anchor anywhere in last POSITION_WINDOW.
+    # 0.70 (was 0.50) is more permissive — handles Veo TTS clips with a long
+    # intro breath before the first script word.
+    POSITION_WINDOW = 0.70
 
     info = ffprobe_json(video_path)
     total_duration = get_duration(info)
@@ -439,14 +451,16 @@ def _whisper_anchor_trim(
                     return _ww, 70  # phonetic match worth ~70 confidence
         return _best, _best_score
 
-    audio_mid = total_duration / 2.0
+    head_cutoff = total_duration * POSITION_WINDOW
+    tail_cutoff = total_duration * (1.0 - POSITION_WINDOW)
 
     # === Start anchor: search first 5 script words for one that lands in
-    # the FIRST HALF of audio. Position-weighting drops false positives.
+    # the first POSITION_WINDOW (70 %) of audio. Drops false positives where
+    # a script word matches a Whisper word late in the clip.
     start_anchor = None
     start_score = 0
     start_src_word = None
-    head_pool = [w for w in whisper_words if w["start"] <= audio_mid]
+    head_pool = [w for w in whisper_words if w["start"] <= head_cutoff]
     for _sw in script_tokens[:5]:
         _w, _s = _best_match(_sw, head_pool)
         if _w and _s >= FUZZ_THRESHOLD - 8:  # softer threshold for phonetic
@@ -458,7 +472,7 @@ def _whisper_anchor_trim(
     end_anchor = None
     end_score = 0
     end_src_word = None
-    tail_pool = [w for w in whisper_words if w["end"] >= audio_mid]
+    tail_pool = [w for w in whisper_words if w["end"] >= tail_cutoff]
     for _sw in reversed(script_tokens[-5:]):
         _w, _s = _best_match(_sw, tail_pool)
         if _w and _s >= FUZZ_THRESHOLD - 8:
