@@ -1777,53 +1777,67 @@
         /* ===== END v769 ROW LAYOUT POLISH ===== */
 
         /* ======================================================================
-           v770 — AGGRESSIVE OVERRIDE + DEPLOY MARKER
+           v771 — REPLACES v770. Flex column with debug bgs.
            ----------------------------------------------------------------------
-           v769 didn't take effect for operator. Three possible reasons:
-              (a) CSS specificity loss to base rules
-              (b) browser cache serving pre-v769 CSS
-              (c) my selectors don't match the actual rendered DOM
-           v770 addresses all three:
-              1. VISIBLE DEPLOY MARKER — magenta 3px top border on every
-                 expanded-mode card. If operator sees it, v770 IS live and
-                 any remaining layout issue is a real CSS bug to fix. If
-                 operator does NOT see it, cache is the problem; cache-bust
-                 with ?v=770 in the URL or full DevTools cache disable.
-              2. !important on every action-bar layout property so no base
-                 rule can compete on specificity.
-              3. Restructure: use CSS grid on .clip-content with explicit
-                 named areas. Action bar gets its own grid-area row at the
-                 bottom with explicit width 100% and centered flex so it
-                 CANNOT collapse into a narrow right-edge stack.
+           v770 used display:grid !important on .clip-content. Operator
+           confirmed magenta border visible (= v770 deployed) but content
+           panel still entirely BLANK with "#1" label visible only at far
+           right edge. Grid layout broke the content children's
+           positioning somehow.
+           v771 reverts to simple flex-column (the v769 baseline) but with:
+             - !important on EVERY layout property to defeat any
+               specificity conflict
+             - VISIBLE debug background colors on .clip-content (subtle
+               indigo tint) AND .clip-actions-expanded (subtle yellow
+               tint) so the operator can SEE the panels even when
+               children are invisible — confirms whether the issue is
+               (a) panels not rendering or (b) panels rendering but
+               children invisible
+             - flex: 1 1 0 + min-width: 0 explicit (overriding any
+               competing rules) to guarantee .clip-content gets the
+               correct width
+             - explicit white text + accent-bordered card styling on
+               .clip-text so it's clearly readable
+             - explicit min-width: 90px + padding 9px 18px on action
+               buttons so they cannot collapse into a narrow stack
            ====================================================================== */
 
-        /* (1) DEPLOY MARKER — magenta 3px top border on every expanded card */
+        /* Keep magenta deploy marker for verification — confirm v771 live */
         .clips-grid.expanded-mode .clip-card {
             border-top: 3px solid #ff00ff !important;
+            background: var(--bg-elevated) !important;
         }
-
-        /* (2) Explicit grid layout on non-paired .clip-content. Three rows:
-           header / text / actions. Action bar always at the bottom, full
-           width, centered flex. Prevents any flex-distribution collapse. */
+        /* Content panel — explicit flex column + visible debug bg + force
+           width allocation so it can't collapse */
         .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content {
-            display: grid !important;
-            grid-template-rows: auto 1fr auto !important;
-            grid-template-columns: 1fr !important;
-            gap: 12px !important;
+            flex: 1 1 0 !important;
+            min-width: 0 !important;
+            width: auto !important;
+            display: flex !important;
+            flex-direction: column !important;
             padding: 16px 20px !important;
+            gap: 10px !important;
             overflow: hidden !important;
+            background: rgba(99, 102, 241, 0.08) !important;
+            color: var(--text-primary) !important;
         }
         .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-header {
-            grid-row: 1 !important;
-            align-self: start !important;
+            flex: 0 0 auto !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            gap: 10px !important;
+            color: var(--text-primary) !important;
+            font-size: 14px !important;
+            margin-bottom: 0 !important;
         }
         .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-frames {
-            grid-row: 1 !important;
-            justify-self: end !important;
-            align-self: start !important;
+            flex: 0 0 auto !important;
+            font-size: 11px !important;
+            color: var(--text-muted) !important;
         }
         .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-text {
-            grid-row: 2 !important;
+            flex: 1 1 auto !important;
             min-height: 0 !important;
             overflow-y: auto !important;
             display: block !important;
@@ -1832,9 +1846,9 @@
             color: var(--text-primary) !important;
             font-size: 14px !important;
             line-height: 1.55 !important;
-            background: rgba(255, 255, 255, 0.04) !important;
+            background: rgba(0, 0, 0, 0.35) !important;
             border-left: 3px solid var(--accent) !important;
-            padding: 12px 14px !important;
+            padding: 12px 16px !important;
             border-radius: 0 8px 8px 0 !important;
             margin: 0 !important;
         }
@@ -1842,14 +1856,15 @@
             display: none !important;
         }
         .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-actions-expanded {
-            grid-row: 3 !important;
+            flex: 0 0 auto !important;
             display: flex !important;
             flex-direction: row !important;
             align-items: center !important;
             justify-content: center !important;
-            width: 100% !important;
             padding: 12px 0 4px !important;
             border-top: 1px solid var(--border) !important;
+            width: 100% !important;
+            background: rgba(255, 200, 0, 0.06) !important;
         }
         .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-actions-expanded > * {
             display: flex !important;
@@ -1869,14 +1884,12 @@
             font-size: 14px !important;
             font-weight: 600 !important;
         }
-        /* Inline-styled centered text spans inside the action bar (the
-           "Click a variant to select & approve" hint) stay centered */
         .clips-grid.expanded-mode .clip-card:not(.clip-paired) .clip-content > .clip-actions-expanded span {
             font-size: 12px !important;
             color: var(--text-muted) !important;
             white-space: nowrap !important;
         }
-        /* ===== END v770 ===== */
+        /* ===== END v771 ===== */
 
         .variant-group-header { padding: 8px 12px 4px; font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-top: 1px solid var(--border); margin-top: 4px; }
         .variant-group-header:first-child { border-top: none; margin-top: 0; }
