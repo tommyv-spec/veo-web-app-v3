@@ -4742,6 +4742,28 @@ def export_final_video(
                         stats["v708_audit_heard_words"] = sum_heard
                         stats["v708_audit_error"] = None
                         stats["v708_per_clip_audit"] = per_clip_audit
+                        # v773 — log summary works for both legacy + aligned audit shapes
+                        for _i, _a in enumerate(per_clip_audit or []):
+                            if "backend" in _a:
+                                # New shape (v773 forced-alignment)
+                                print(
+                                    f"[ExportAudit/v773] clip={_i} "
+                                    f"backend={_a.get('backend','?')} "
+                                    f"script={_a.get('script_words',0)}w "
+                                    f"aligned={_a.get('aligned_words',0)}w "
+                                    f"low_conf={_a.get('low_confidence_words',[])} "
+                                    f"trim_ratio={_a.get('trim_ratio',1.0):.2f}",
+                                    flush=True,
+                                )
+                            else:
+                                # Legacy V708 shape
+                                print(
+                                    f"[ExportAudit/v708] clip={_i} "
+                                    f"trust={_a.get('trust',0):.2f} "
+                                    f"matched={_a.get('matched',0)} "
+                                    f"missing={_a.get('missing',[])}",
+                                    flush=True,
+                                )
                         print(
                             f"[v709-AUDIT] schema=v709.2 per-clip aggregate: "
                             f"clips={len(per_clip_audit)} "
