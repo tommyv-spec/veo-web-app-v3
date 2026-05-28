@@ -608,40 +608,41 @@ def detect_speech_segments_whisper(
                     _reason.append(
                         f"trust={_best_trust:.2f}<{V708_TRUST_MIN_FOR_TRIM:.2f}"
                     )
-                # v731: classify hard vs soft failsafe by trust floor.
+                # v731 (deprecated by v709.3): pre-v709.3 had a 2-tier
+                # failsafe — HARD (no-trim) vs SOFT (trim with all-words
+                # anchors). v709.3 collapses both to no-trim. Reason: real
+                # export (job e13ef262 2026-05-28) showed SOFT failsafe was
+                # dropping COMMON opening words (`do, not, drink, pomegranate,
+                # juice` on clip 1; `never` on clip 3) because Whisper-tiny
+                # silently omitted those words from `all_words` entirely
+                # (not mis-transcribed — simply absent). Trim with all-words
+                # anchors then had no anchor for the start of the line and
+                # cut ~2s of leading audio. v731's premise (rare-vocab words
+                # carry a mis-transcribed timestamp) held for `laureth`-class
+                # cases but fails for common-vocab Veo TTS misses where
+                # Whisper just doesn't emit a token. Losing real words is
+                # worse than keeping breath/uh filler. v709.3: any failsafe
+                # = full-clip retain. Track which kind for audit signal.
                 if _best_trust < V731_TRIM_TRUST_FLOOR:
-                    print(
-                        f"[WhisperVAD/v708] FAILSAFE-HARD: {', '.join(_reason)} "
-                        f"(trust={_best_trust:.2f}<{V731_TRIM_TRUST_FLOOR:.2f}) → "
-                        f"no-trim, keep full clip {total_duration:.3f}s",
-                        flush=True,
-                    )
-                    if v709_audit_sink is not None:
-                        v709_audit_sink["failsafe"] = "HARD"
-                    if _model_owned_here:
-                        try:
-                            del model
-                            import gc as _gc2
-                            _gc2.collect()
-                        except Exception:
-                            pass
-                    return [(0.0, total_duration)]
+                    _fs_kind = "HARD"
                 else:
-                    _v731_soft_failsafe = True
-                    if v709_audit_sink is not None:
-                        v709_audit_sink["failsafe"] = "SOFT"
-                    print(
-                        f"[WhisperVAD/v731] FAILSAFE-SOFT: {', '.join(_reason)} "
-                        f"(trust={_best_trust:.2f}≥{V731_TRIM_TRUST_FLOOR:.2f}) → "
-                        f"trim with all-words anchors ({len(all_words)} words) "
-                        f"to preserve rare-vocab audio + drop filler",
-                        flush=True,
-                    )
-                    # Promote raw all_words to speech anchors. Mis-transcribed
-                    # rare vocabulary (e.g. 'laureth' heard as 'loreth') still
-                    # carries a timestamp here, so its audio survives the
-                    # trim. Filler outside any Whisper word remains droppable.
-                    speech_words = all_words
+                    _fs_kind = "SOFT"
+                print(
+                    f"[WhisperVAD/v709.3] FAILSAFE-{_fs_kind}: {', '.join(_reason)} "
+                    f"(trust={_best_trust:.2f}) → no-trim, keep full clip "
+                    f"{total_duration:.3f}s",
+                    flush=True,
+                )
+                if v709_audit_sink is not None:
+                    v709_audit_sink["failsafe"] = _fs_kind
+                if _model_owned_here:
+                    try:
+                        del model
+                        import gc as _gc2
+                        _gc2.collect()
+                    except Exception:
+                        pass
+                return [(0.0, total_duration)]
 
             if not all_words:
                 print("[WhisperVAD] No words detected — returning full video")
