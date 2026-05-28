@@ -1,0 +1,15 @@
+{
+  "script": "the saffron stained the milk a deep golden hue",
+  "spoken_words": [
+    "the",
+    "saffron",
+    "the",
+    "milk",
+    "a",
+    "deep",
+    "golden",
+    "hue"
+  ],
+  "drop_word_idx": 2,
+  "insert_filler_after_idx": null
+}
