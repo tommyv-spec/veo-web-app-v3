@@ -1299,11 +1299,17 @@
            min so 1920px fits ~5 per row, 1280px fits ~3 per row. B-roll
            still readable at ~280-380px wide; voice inset shrinks
            proportionally (120px column, max-height 180px). */
-        /* v767 — bigger expanded cards (~560px min) so 2-3 per row at 1920px
-           viewport. Each clip card now wide enough that ALL its variants fit
-           on ONE horizontal flex row (see .variants-grid override below)
-           rather than wrapping into multiple rows of the 4-per-row grid. */
-        .clips-grid.expanded-mode { grid-template-columns: repeat(auto-fill, minmax(560px, 1fr)); gap: 16px; }
+        /* v767 (superseded by v768 row layout): bigger expanded cards
+           ~560px min so 2-3 per row at 1920px. Kept here for history only —
+           v768 below replaces the grid with a flex column (ONE clip per row,
+           ~30vh tall) per operator request 2026-05-28. */
+        /* v768 — operator wants the expanded review surface (their primary
+           approve/reject UI) as ONE clip per row, full width, ~30vh tall.
+           Switching from grid (auto-fill 560px) to flex column achieves the
+           one-per-row stack. Card layout inside each row is handled by the
+           v768 block lower in this stylesheet (.clip-card flex-row + height
+           clamp + variant aspect-ratio sizing). */
+        .clips-grid.expanded-mode { display: flex; flex-direction: column; grid-template-columns: none; gap: 12px; }
         .clip-card.clip-paired { grid-column: span 2; }
         .clips-grid.expanded-mode .clip-card.clip-paired { grid-column: span 1; }
         /* Dual-view: collapsed shown by default, expanded hidden */
@@ -1460,6 +1466,176 @@
             font-size: 12px;
             margin-bottom: 4px;
         }
+        /* ======================================================================
+           v768 ROW LAYOUT — primary review/approve surface, 2026-05-28
+           ----------------------------------------------------------------------
+           Operator-driven: in expanded mode, render ONE clip per row, full
+           width, ~30vh tall. Replaces v767's 2-3-per-row grid because the
+           operator uses this surface to review + approve clips and wanted to
+           see every clip immediately without horizontal scanning.
+
+           Card shape inside each row:
+             [ video panel ........ ][ content panel: header / script / actions ]
+
+           Card height: clamp(280px, 30vh, 460px). 30vh per ask. Floor stops
+           cramping on short laptops (1366x768 etc.); ceiling stops giant
+           gaps on 4K monitors. At 1920x1080 = 324px which fits ~3 variant
+           tiles of 9:16 aspect-ratio side by side + content panel on right.
+
+           Paired (v698A) clips: same row shape via CSS grid-template-areas
+           inside .clip-content — videos cell on left spans all rows;
+           header / text / shortcuts stack on the right. No DOM restructure.
+
+           All overrides scoped to .clips-grid.expanded-mode so collapsed
+           mode is unaffected.
+           ====================================================================== */
+
+        /* Card = flex-row strip, fixed height */
+        .clips-grid.expanded-mode .clip-card {
+            display: flex;
+            flex-direction: row;
+            align-items: stretch;
+            height: clamp(280px, 30vh, 460px);
+            overflow: hidden;
+        }
+        /* Card hover lift looked weird at full row width — disable */
+        .clips-grid.expanded-mode .clip-card:hover { transform: none; }
+
+        /* Non-paired: video panel on the left, content panel on the right */
+        .clips-grid.expanded-mode .clip-video-expanded {
+            flex: 0 1 auto;
+            height: 100%;
+            align-items: stretch;
+            overflow-y: hidden;
+        }
+        /* Variant tiles size by ROW HEIGHT now (was width via v767's flex:1
+           1 0 + min-width:150px). aspect-ratio 9/16 keeps tiles tall +
+           narrow; horizontal scroll on the parent handles overflow. */
+        .clips-grid.expanded-mode .clip-video-expanded .variant-card {
+            flex: 0 0 auto;
+            height: 100%;
+            aspect-ratio: 9 / 16;
+            min-width: 0;
+        }
+        .clips-grid.expanded-mode .clip-video-expanded .variant-card video {
+            aspect-ratio: auto;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .clips-grid.expanded-mode .clip-content {
+            flex: 1 1 0;
+            min-width: 0;
+            padding: 14px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            overflow-y: auto;
+        }
+        .clips-grid.expanded-mode .clip-content > .clip-text {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+        }
+
+        /* ---- Paired (v698A) clips inside row layout ---- */
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-content {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            grid-template-rows: auto 1fr auto;
+            grid-template-areas:
+                "videos header"
+                "videos text"
+                "videos shortcuts";
+            align-items: start;
+            column-gap: 16px;
+            row-gap: 6px;
+            padding: 14px 16px;
+            height: 100%;
+            overflow: hidden;
+            gap: 0;
+        }
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-header { grid-area: header; align-self: start; }
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-text {
+            grid-area: text;
+            align-self: stretch;
+            overflow-y: auto;
+            margin-top: 0 !important;
+            min-height: 0;
+        }
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-shortcuts {
+            grid-area: shortcuts;
+            align-self: end;
+            margin-top: 0 !important;
+        }
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-grid {
+            grid-area: videos;
+            display: flex;
+            flex-direction: row;
+            gap: 12px;
+            height: 100%;
+            align-items: stretch;
+            grid-template-columns: none;
+        }
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side {
+            height: 100%;
+            flex: 0 0 auto;
+            max-width: none;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            min-width: 0;
+        }
+        /* Voice side: drop v767's inset framing (bg/border/padding/max-width)
+           in row mode — the dim filter + relocated badge already mark it as
+           the throwaway audio twin. Inset framing competed for too much
+           horizontal space at row height. */
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side[data-side="voice"] {
+            margin-top: 0;
+            padding: 0;
+            background: transparent;
+            border: none;
+        }
+        /* Move "AUDIO" badge from top-overhang (designed for the v767 inset)
+           to bottom-overlay on the voice video itself. Smaller wording so it
+           fits a ~170px-wide tile. */
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side[data-side="voice"]::before {
+            top: auto;
+            bottom: 6px;
+            left: 50%;
+            right: auto;
+            transform: translateX(-50%);
+            content: "🎙️ AUDIO";
+            font-size: 8px;
+            padding: 2px 6px;
+            white-space: nowrap;
+        }
+        /* Hide both inline "🎬 b-roll" / "🎙️ voice" labels above each paired-
+           side video in row mode — they're redundant with the AUDIO badge
+           overlay on voice + the dim/no-dim visual distinction between the
+           two sides. */
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side > div:first-child {
+            display: none !important;
+        }
+        /* Paired side video sizing: side has explicit height (100% of row).
+           .clip-video uses aspect-ratio + flex to compute a 9:16 box from
+           that height; existing base CSS (width/height 100% object-fit) on
+           the inner video fills it. v767's voice max-height: 260px override
+           is invalidated here so voice scales with the row instead of
+           capping. */
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-video {
+            aspect-ratio: 9 / 16;
+            height: auto;
+            flex: 1 1 0;
+            min-height: 0;
+            max-height: 100%;
+        }
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side video {
+            max-height: 100%;
+            max-width: 100%;
+        }
+        /* ===== END v768 ROW LAYOUT ===== */
+
         .variant-group-header { padding: 8px 12px 4px; font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-top: 1px solid var(--border); margin-top: 4px; }
         .variant-group-header:first-child { border-top: none; margin-top: 0; }
         .variant-group-count { font-weight: 400; font-size: 11px; opacity: 0.6; text-transform: none; letter-spacing: 0; }
