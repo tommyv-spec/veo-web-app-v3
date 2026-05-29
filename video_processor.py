@@ -309,6 +309,20 @@ def _ensure_whisper_base():
     return _WHISPER_BASE_MODEL
 
 
+# v773.10.14 — silero-VAD singleton for speech-boundary extension on top
+# of Whisper anchors. ~2 MB ONNX model, loaded once per process.
+_SILERO_VAD_MODEL = None
+
+
+def _ensure_silero_vad():
+    """Lazy-load silero-VAD v5 ONNX model. Cached for the process lifetime."""
+    global _SILERO_VAD_MODEL
+    if _SILERO_VAD_MODEL is None:
+        from silero_vad import load_silero_vad
+        _SILERO_VAD_MODEL = load_silero_vad(onnx=True)
+    return _SILERO_VAD_MODEL
+
+
 # v773.10.12 — aeneas DTW fallback removed: aeneas 1.7.3.0 (2017) uses
 # numpy.distutils which numpy 2.x deleted, so the wheel build fails on
 # modern Python. Quality upgrade is now carried entirely by the
@@ -558,6 +572,59 @@ def _whisper_anchor_trim(
             flush=True,
         )
         return [(0.0, total_duration)]
+
+    # v773.10.14 — silero-VAD safety-net: extend the keep window to encompass
+    # the actual speech regions that overlap our Whisper anchor window. Silero
+    # detects speech vs non-speech independently of any transcription, so it
+    # catches audible script words that Whisper-base missed at the boundaries.
+    # Only EXTENDS the window (never shrinks it) — same over-include bias.
+    try:
+        import tempfile as _tf
+        import os as _os3
+        with _tf.NamedTemporaryFile(suffix=".wav", delete=False) as _vt:
+            _vad_audio_path = _vt.name
+        _vc = [FFMPEG_BIN, "-y", "-i", str(video_path), "-ar", "16000",
+               "-ac", "1", "-f", "wav", _vad_audio_path]
+        _vc_code, _, _ = run(_vc)
+        if _vc_code == 0:
+            try:
+                from silero_vad import get_speech_timestamps as _gst
+                import torchaudio as _ta
+                _vad_model = _ensure_silero_vad()
+                _wav, _sr = _ta.load(_vad_audio_path)
+                if _wav.shape[0] > 1:
+                    _wav = _wav.mean(dim=0, keepdim=True)
+                _ts = _gst(
+                    _wav.squeeze(0), _vad_model,
+                    sampling_rate=16000,
+                    min_silence_duration_ms=400,
+                    speech_pad_ms=int(_FRAME_PAD * 1000),
+                )
+                _orig_start, _orig_end = keep_start, keep_end
+                for _t in _ts:
+                    _ss = _t["start"] / 16000.0
+                    _se = _t["end"] / 16000.0
+                    # Overlap test: silero region intersects current keep window
+                    if _se >= keep_start and _ss <= keep_end:
+                        if _ss < keep_start:
+                            keep_start = max(0.0, _ss - _FRAME_PAD)
+                        if _se > keep_end:
+                            keep_end = min(total_duration, _se + _FRAME_PAD)
+                if keep_start != _orig_start or keep_end != _orig_end:
+                    print(
+                        f"[WhisperAnchor] silero-VAD extended: "
+                        f"[{_orig_start:.2f}, {_orig_end:.2f}] → "
+                        f"[{keep_start:.2f}, {keep_end:.2f}]",
+                        flush=True,
+                    )
+            finally:
+                try:
+                    _os3.unlink(_vad_audio_path)
+                except Exception:
+                    pass
+    except Exception as _ve:
+        print(f"[WhisperAnchor] silero extension skipped: {_ve!r}", flush=True)
+
     print(
         f"[WhisperAnchor] anchors "
         f"start={start_src_word!r}→'{start_anchor['text']}'@{start_anchor['start']:.2f}s "
