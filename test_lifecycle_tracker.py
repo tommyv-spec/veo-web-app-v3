@@ -148,3 +148,39 @@ def test_apply_lifecycle_change_clears_lifecycle_via_explicit_none():
     assert job.lifecycle_stage is None
     # Timestamps are intentionally preserved for audit purposes.
     assert job.export_at == datetime(2026, 5, 29)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: compute_stuck_days pure-helper tests
+# Same importlib pattern as Task 3 — load from code/lifecycle.py directly.
+# ---------------------------------------------------------------------------
+compute_stuck_days = _LIFECYCLE_MOD.compute_stuck_days
+
+
+def test_compute_stuck_days_none_when_no_lifecycle():
+    job = _stub_job(lifecycle_stage=None)
+    assert compute_stuck_days(job, now=datetime(2026, 5, 29)) is None
+
+
+def test_compute_stuck_days_zero_on_same_day():
+    now = datetime(2026, 5, 29, 14, 0, 0)
+    job = _stub_job(
+        lifecycle_stage="awaiting_export",
+        export_at=datetime(2026, 5, 29, 10, 0, 0),
+    )
+    assert compute_stuck_days(job, now=now) == 0
+
+
+def test_compute_stuck_days_counts_full_days():
+    job = _stub_job(
+        lifecycle_stage="awaiting_finishing",
+        finishing_at=datetime(2026, 5, 25, 10, 0, 0),
+    )
+    now = datetime(2026, 5, 29, 11, 0, 0)
+    assert compute_stuck_days(job, now=now) == 4
+
+
+def test_compute_stuck_days_none_when_stage_timestamp_missing():
+    """Defensive: corrupt state where stage is set but timestamp is null."""
+    job = _stub_job(lifecycle_stage="awaiting_export", export_at=None)
+    assert compute_stuck_days(job, now=datetime(2026, 5, 29)) is None

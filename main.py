@@ -147,7 +147,7 @@ from models import (
     init_db, get_db_session, Job, Clip, JobLog, BlacklistEntry,
     get_job_logs_since, add_job_log, User, UserAPIKey, UserWorkerToken
 )
-from lifecycle import apply_lifecycle_change, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
+from lifecycle import apply_lifecycle_change, compute_stuck_days, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
 from worker import worker, WORKER_VERSION
 from error_handler import ErrorCode
 

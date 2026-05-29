@@ -49,3 +49,20 @@ def apply_lifecycle_change(job, stage, notes, now, clear=False):
 
     if notes is not None:
         job.notes = notes
+
+
+def compute_stuck_days(job, now):
+    """How many full days the Job has sat in its current lifecycle stage.
+
+    Returns None when the Job has no lifecycle stage or when the current
+    stage's entry timestamp is missing (defensive).
+    """
+    if not job.lifecycle_stage:
+        return None
+    ts_field = _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD.get(job.lifecycle_stage)
+    if ts_field is None:
+        return None
+    ts = getattr(job, ts_field, None)
+    if ts is None:
+        return None
+    return (now - ts).days
