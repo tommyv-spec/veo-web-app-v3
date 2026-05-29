@@ -3504,9 +3504,12 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const bl = {'flow':'FLOW','api':'API','prompt_only':'PROMPT','import':'ASSEMBLE'};
           const bn = bl[j.backend] || j.backend || 'API';
           const safeId = escapeHtml(j.id);
-          const thumb = j.first_frame_url
-            ? `<img class="job-thumb" loading="lazy" decoding="async" src="${escapeHtml(j.first_frame_url)}" alt="" onerror="this.outerHTML='<div class=\\'job-thumb-placeholder\\'>🎬</div>'">`
-            : `<div class="job-thumb-placeholder">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`;
+          // Skip live thumbnails in the lifecycle list — each one is an R2
+          // cold-cache miss (~500ms server-side) and 327+ rows hammer the
+          // worker. Operator sees the thumb when they click a row (details
+          // panel renders it via the existing get-job + clip flow).
+          // data-src kept so we can lazy-swap later if needed.
+          const thumb = `<div class="job-thumb-placeholder" data-src="${escapeHtml(j.first_frame_url || '')}">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`;
           const dlg = j.first_dialogue ? `<div class="job-dialogue">${escapeHtml(j.first_dialogue)}</div>` : '';
           const exportBadge = j.has_export ? '<span class="badge badge-export">🎬</span>' : '';
           const voiceBadge = j.has_voice_clone ? '<span class="badge badge-voice">🎤</span>' : '';
