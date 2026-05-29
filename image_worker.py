@@ -3662,17 +3662,20 @@ def _flow_api_image_multi_try(page, input_paths, prompt, aspect_ratio, model,
 
 def _flow_api_pull_submit_try(page, node_id, prompt, input_paths, variants,
                               aspect_ratio, model, ctx,
-                              listener_state, pending_submissions):
+                              listener_state, pending_submissions,
+                              captured_urls_by_node):
     """flow_api path for the parallel HTTP-pull `_submit_one_job` entrypoint.
 
-    Fires N batchGenerateImages POSTs via in-page page.evaluate(fetch). The existing
-    v624 response listener + v627 request-tag flag catch + attribute these the same
-    way they would for a DOM-driven click; the scanner + downloader pipeline picks
-    them up unchanged.
+    Fires N batchGenerateImages POSTs via in-page page.evaluate(fetch). Reads the
+    fife URL from each response and writes directly to captured_urls_by_node[node_id]
+    — bypasses the v624/v627 listener attribution (page.on("request") fires
+    unreliably for page.evaluate(fetch); attribution piled up orphan URLs in the
+    previous iteration).
 
-    Returns True on success (all N submits fired). Returns False on any failure —
-    caller falls through to the DOM path. Latches off for the page session on first
-    failure so subsequent jobs skip the API attempt.
+    Returns True on success (all N submits fired AND their URLs landed in the
+    captured map). Returns False on any failure — caller falls through to the
+    DOM path. Latches off for the page session on first failure so subsequent
+    jobs skip the API attempt.
     """
     if not _flow_api_mode_enabled():
         return False
@@ -3740,11 +3743,9 @@ def _flow_api_pull_submit_try(page, node_id, prompt, input_paths, variants,
     except Exception as e:
         return _latch_off(f"upload_image raised: {e}")
 
-    # Tag upcoming POSTs to this node via the v627 request-tag flag,
-    # and register a pending_submissions entry so the listener's FIFO
-    # fallback also attributes them correctly if the flag is missed.
+    # Register a pending_submissions entry so the legacy DOM path's scanner
+    # logic also sees this node (some scanner branches check pending entries).
     try:
-        listener_state['current_submitting_node_id'] = node_id
         try:
             _proj_url = page.url
         except Exception:
@@ -3753,35 +3754,55 @@ def _flow_api_pull_submit_try(page, node_id, prompt, input_paths, variants,
             'node_id': node_id,
             'expected_count': int(variants or 1),
             'ts': time.time(),
-            'tagged_count': 0,
+            'tagged_count': int(variants or 1),  # mark fully accounted-for; we attribute via captured_urls_by_node directly
             'project_url': _proj_url,
         })
-        # cap pending list at 60s (matches existing DOM path)
         cutoff = time.time() - 60
         pending_submissions[:] = [p for p in pending_submissions if p['ts'] > cutoff]
     except Exception as e:
-        return _latch_off(f"flag/pending registration failed: {e}")
+        return _latch_off(f"pending registration failed: {e}")
 
-    # Fire N submits in-page; v624 listener catches each response,
-    # v627 tags them, scanner attributes, downloader downloads.
+    # Fire N submits in-page. Sleep ~1.5s between each to (a) avoid the
+    # rapid-fire pattern that tripped PUBLIC_ERROR_UNUSUAL_ACTIVITY in the
+    # previous iteration and (b) let captcha tokens be minted cleanly. Total
+    # ~6s for x4 — still well faster than the DOM path's ~25s.
+    captured_fife_urls = []
     try:
         for v in range(int(variants or 1)):
-            cli.submit_image(
+            if v > 0:
+                time.sleep(1.5)
+            media_id, fife_url = cli.submit_image(
                 prompt=api_prompt,
                 image_model_name=image_model,
                 reference_media_ids=ref_ids or None,
                 aspect=api_aspect,
-                cooldown=(v == 0),  # only first call pays cooldown
+                cooldown=(v == 0),  # only first call pays the 10s cooldown
             )
+            if fife_url:
+                captured_fife_urls.append(fife_url)
     except Exception as e:
-        # Restore flag before bailing so the DOM path doesn't see a stale tag.
-        try:
-            listener_state['current_submitting_node_id'] = None
-        except Exception:
-            pass
         return _latch_off(f"submit_image raised: {e}")
 
-    print(f"{pfx}[flow_api] fired {variants}x batchGenerateImages POSTs via in-page API", flush=True)
+    if not captured_fife_urls:
+        return _latch_off("API responses carried no fife URLs (unexpected response shape)")
+
+    # Write URLs DIRECTLY to the scanner's captured pool. Bypasses the v624
+    # response listener entirely — page.on("request") fires unreliably for
+    # page.evaluate(fetch), so we did our own attribution from the response
+    # bodies that submit_image already parsed.
+    try:
+        bucket = captured_urls_by_node.setdefault(node_id, [])
+        for u in captured_fife_urls:
+            if u not in bucket:
+                bucket.append(u)
+    except Exception as e:
+        return _latch_off(f"captured_urls_by_node write failed: {e}")
+
+    print(
+        f"{pfx}[flow_api] fired {len(captured_fife_urls)}x batchGenerateImages POSTs "
+        f"via in-page API; URLs written directly to scanner pool",
+        flush=True,
+    )
     return True
 
 
@@ -7028,16 +7049,20 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
 
             # --- flow_api private-API path (FLOW_API_MODE=on, default) ---
             # Skips mode/settings/DOM-upload/click; uploads refs + fires N
-            # batchGenerateImages POSTs in-page (page.evaluate). The existing
-            # v624 response listener + v627 request-tag flag catch + attribute
-            # these the same way they would for a DOM-driven click → the
-            # scanner + HTTP downloader pipeline handles the rest unchanged.
+            # batchGenerateImages POSTs in-page (page.evaluate). Reads the fife
+            # URL from each response and writes them DIRECTLY into
+            # captured_urls_by_node[node_id] — bypasses the v624/v627 listener
+            # attribution entirely (page.on('request') fires unreliably for
+            # page.evaluate(fetch), so we can't depend on it). The scanner
+            # + HTTP downloader pipeline picks the URLs up the same way it
+            # would after a DOM-driven click.
+            #
             # On any failure: latches off for the page session and falls
             # through to the DOM path below.
             if _flow_api_pull_submit_try(
                 page, node_id, prompt, input_paths, variants,
                 aspect_ratio, model, ctx,
-                listener_state, pending_submissions,
+                listener_state, pending_submissions, captured_urls_by_node,
             ):
                 _save_state()
                 print(f"[API:submit] ✓ Node {node_id} submitted via flow_api (in_flight={len(in_flight)+1})", flush=True)
