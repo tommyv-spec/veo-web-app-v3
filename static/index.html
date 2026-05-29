@@ -3655,10 +3655,18 @@ Example: A realistic vertical video of a professional presenter speaking directl
         });
 
         document.getElementById("jobsList").addEventListener("click", async (ev) => {
-          const t = ev.target.closest("button, .lc-row") || ev.target;
-          if (t.matches(".lc-advance[data-next]")) {
+          // Match against the click TARGET's ancestors directly. closest() walks
+          // up from ev.target, so even clicking the emoji inside a button finds
+          // the right ancestor.
+          const advanceBtn = ev.target.closest(".lc-advance[data-next]");
+          const archiveBtn = ev.target.closest(".lc-archive[data-action='archive']");
+          const notesBtn   = ev.target.closest(".lc-notes[data-action='notes']");
+          const row        = ev.target.closest(".lc-row");
+
+          if (advanceBtn) {
             ev.stopPropagation();
-            const id = t.dataset.id, next = t.dataset.next;
+            const id = advanceBtn.dataset.id;
+            const next = advanceBtn.dataset.next;
             const res = await fetch(`/api/jobs/${id}/lifecycle`, {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
@@ -3668,12 +3676,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if (res.ok) refreshLifecycle({ force: true });
             return;
           }
-          if (t.matches(".lc-archive[data-action='archive']")) {
+          if (archiveBtn) {
             ev.stopPropagation();
-            const id = t.dataset.id;
-            const row = t.closest(".lc-row");
-            const willArchive = !(row && row.closest("details#lc-archived"));
-            // Toggle: if we're in the archived view, unarchive; otherwise archive.
+            const id = archiveBtn.dataset.id;
+            // Toggle archive depending on which chip is active.
             const archived = !document.querySelector(".lifecycle-chips .chip-active[data-stage='archived']");
             const res = await fetch(`/api/jobs/${id}/archive`, {
               method: "PATCH",
@@ -3684,16 +3690,13 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if (res.ok) refreshLifecycle({ force: true });
             return;
           }
-          if (t.matches(".lc-notes[data-action='notes']")) {
+          if (notesBtn) {
             ev.stopPropagation();
-            if (typeof openNotesPopover === "function") {
-              openNotesPopover(t.closest(".lc-row"));
-            }
+            if (typeof openNotesPopover === "function") openNotesPopover(row);
             return;
           }
-          // Click anywhere else on the row → open job details.
-          const row = ev.target.closest(".lc-row");
-          if (row && !ev.target.closest("button") && typeof selectJob === "function") {
+          // Click anywhere else on the row → open the job details panel.
+          if (row && typeof selectJob === "function") {
             selectJob(row.dataset.id);
           }
         });
