@@ -240,3 +240,67 @@ def test_job_response_includes_lifecycle_fields():
     }
     missing = expected_new - fields
     assert not missing, f"JobResponse missing fields: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Task 6: apply_jobs_filters pure-helper tests
+# ---------------------------------------------------------------------------
+
+apply_jobs_filters = _LIFECYCLE_MOD.apply_jobs_filters
+
+
+class _FakeQuery:
+    """Records every .filter() call for assertion."""
+    def __init__(self):
+        self.filter_calls = []
+
+    def filter(self, *args, **kwargs):
+        self.filter_calls.append((args, kwargs))
+        return self
+
+    def order_by(self, *a, **k):
+        return self
+
+    def offset(self, *a, **k):
+        return self
+
+    def limit(self, *a, **k):
+        return self
+
+    def all(self):
+        return []
+
+
+def test_list_jobs_lifecycle_filter_calls_match():
+    """Applying lifecycle filter chains an extra .filter() call."""
+    import os
+    os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+    fq = _FakeQuery()
+    apply_jobs_filters(
+        fq,
+        user_id="user-123",
+        status=None,
+        since_days=0,
+        lifecycle="awaiting_export",
+        archived=False,
+    )
+    # 3 filter calls: user_id, lifecycle=awaiting_export, archived=False.
+    # (status + since_days are skipped because they are falsy / zero.)
+    assert len(fq.filter_calls) == 3
+
+
+def test_list_jobs_archived_only():
+    """Archived-only filter chains exactly 2 .filter() calls."""
+    import os
+    os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+    fq = _FakeQuery()
+    apply_jobs_filters(
+        fq,
+        user_id="user-123",
+        status=None,
+        since_days=0,
+        lifecycle=None,
+        archived=True,
+    )
+    # 2 filter calls: user_id, archived=True.
+    assert len(fq.filter_calls) == 2

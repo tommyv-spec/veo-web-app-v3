@@ -147,7 +147,7 @@ from models import (
     init_db, get_db_session, Job, Clip, JobLog, BlacklistEntry,
     get_job_logs_since, add_job_log, User, UserAPIKey, UserWorkerToken
 )
-from lifecycle import apply_lifecycle_change, compute_stuck_days, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
+from lifecycle import apply_lifecycle_change, compute_stuck_days, apply_jobs_filters, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
 from worker import worker, WORKER_VERSION
 from error_handler import ErrorCode
 
@@ -2996,6 +2996,8 @@ def _build_job_response(job, first_dialogue=None, first_frame_url=None):
 async def list_jobs(
     request: Request,
     status: Optional[str] = None,
+    lifecycle: Optional[str] = None,
+    archived: bool = False,
     limit: int = Query(default=50, le=2000),
     offset: int = 0,
     since_days: int = Query(default=3, ge=0, le=3650),
@@ -3012,17 +3014,20 @@ async def list_jobs(
     surface older rows that the prior cap was hiding. The frontend scales
     limit alongside the window (3d → 50, 14d → 300, 90d → 1000, all → 2000)
     so payload size stays bounded.
+
+    lifecycle — filter by lifecycle_stage value; "any" = has any stage;
+    "null" = no stage assigned.
+    archived — when True, return only archived jobs.
     """
-    query = db.query(Job).filter(
-        Job.user_id == current_user.id
+    query = db.query(Job)
+    query = apply_jobs_filters(
+        query,
+        user_id=current_user.id,
+        status=status,
+        since_days=since_days,
+        lifecycle=lifecycle,
+        archived=archived,
     )
-
-    if status:
-        query = query.filter(Job.status == status)
-
-    if since_days > 0:
-        cutoff = datetime.utcnow() - timedelta(days=since_days)
-        query = query.filter(Job.created_at >= cutoff)
 
     jobs = query.order_by(Job.created_at.desc()).offset(offset).limit(limit).all()
     

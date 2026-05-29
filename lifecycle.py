@@ -66,3 +66,38 @@ def compute_stuck_days(job, now):
     if ts is None:
         return None
     return (now - ts).days
+
+
+def apply_jobs_filters(query, user_id, status, since_days, lifecycle, archived):
+    """Apply standard Jobs-list filters to a SQLAlchemy query. Returns query.
+
+    Test-friendly: _FakeQuery in tests counts .filter() calls without needing
+    real SQLAlchemy column expressions. Real callers pass a db.query(Job) and
+    the expressions evaluate normally.
+
+    Filter logic:
+    - user_id: always applied (1 filter call).
+    - status: applied when truthy (1 filter call).
+    - since_days: applied when > 0 (1 filter call).
+    - lifecycle "any": jobs with any stage set (1 filter call).
+    - lifecycle "null": jobs with no stage (1 filter call).
+    - lifecycle <value>: exact stage match (1 filter call).
+    - archived: always applied (1 filter call).
+    """
+    from datetime import datetime, timedelta
+    from models import Job
+
+    query = query.filter(Job.user_id == user_id)
+    if status:
+        query = query.filter(Job.status == status)
+    if since_days and since_days > 0:
+        cutoff = datetime.utcnow() - timedelta(days=since_days)
+        query = query.filter(Job.created_at >= cutoff)
+    if lifecycle == "any":
+        query = query.filter(Job.lifecycle_stage.isnot(None))
+    elif lifecycle == "null":
+        query = query.filter(Job.lifecycle_stage.is_(None))
+    elif lifecycle:
+        query = query.filter(Job.lifecycle_stage == lifecycle)
+    query = query.filter(Job.archived == bool(archived))
+    return query
