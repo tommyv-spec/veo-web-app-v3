@@ -94,6 +94,41 @@ def _maybe_auto_enter_lifecycle(job, now):
             job.approval_at = now
 
 
+def derive_effective_stage(job, approved_count):
+    """Live-derive the effective lifecycle_stage from underlying job state.
+
+    Manual terminal stages stick:
+      - PUBLISHED stays PUBLISHED.
+      - If stored stage is AWAITING_FINISHING and has_export → keep (operator
+        may have manually advanced past auto-derive).
+
+    Auto-derivation:
+      - status != "completed" → None (still rendering).
+      - has_export=True → AWAITING_FINISHING (export-final enforces all
+        clips approved + stitched).
+      - approvable clips all approved (approved_count >= total - failed -
+        skipped) → AWAITING_EXPORT (operator clicks Export Final next).
+      - else → AWAITING_APPROVAL (some clips still pending review).
+    """
+    stored = job.lifecycle_stage
+    if stored == LifecycleStage.PUBLISHED.value:
+        return LifecycleStage.PUBLISHED.value
+    if job.status != "completed":
+        return None
+    if job.has_export:
+        if stored in (LifecycleStage.AWAITING_FINISHING.value,
+                      LifecycleStage.PUBLISHED.value):
+            return stored
+        return LifecycleStage.AWAITING_FINISHING.value
+    total = (job.total_clips or 0)
+    failed = (job.failed_clips or 0)
+    skipped = (job.skipped_clips or 0)
+    approvable = total - failed - skipped
+    if approvable > 0 and approved_count >= approvable:
+        return LifecycleStage.AWAITING_EXPORT.value
+    return LifecycleStage.AWAITING_APPROVAL.value
+
+
 def apply_jobs_filters(query, user_id, status, since_days, lifecycle, archived):
     """Apply standard Jobs-list filters to a SQLAlchemy query. Returns query.
 

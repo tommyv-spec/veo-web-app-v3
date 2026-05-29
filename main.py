@@ -147,7 +147,7 @@ from models import (
     init_db, get_db_session, Job, Clip, JobLog, BlacklistEntry,
     get_job_logs_since, add_job_log, User, UserAPIKey, UserWorkerToken
 )
-from lifecycle import apply_lifecycle_change, compute_stuck_days, apply_jobs_filters, _maybe_auto_enter_lifecycle, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
+from lifecycle import apply_lifecycle_change, compute_stuck_days, apply_jobs_filters, _maybe_auto_enter_lifecycle, derive_effective_stage, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
 from worker import worker, WORKER_VERSION
 from error_handler import ErrorCode
 
@@ -2972,8 +2972,29 @@ async def _setup_job_background(
     finally:
         db.close()
 
-def _build_job_response(job, first_dialogue=None, first_frame_url=None):
-    """Shared JobResponse serializer. Used by list_jobs, get_job, patch_lifecycle, patch_archive."""
+def _build_job_response(job, first_dialogue=None, first_frame_url=None, approved_clips=0):
+    """Shared JobResponse serializer. Used by list_jobs, get_job, patch_lifecycle, patch_archive.
+
+    The returned `lifecycle_stage` is the EFFECTIVE stage derived from has_export
+    + approved_clips count (see lifecycle.derive_effective_stage). Manual
+    terminal stages (PUBLISHED, AWAITING_FINISHING post-export) stick.
+    `approved_clips` MUST be passed by the caller — either from a batch
+    GROUP BY query in list_jobs or via .count() in get_job.
+    """
+    effective_stage = derive_effective_stage(job, approved_clips)
+    # Pick the most relevant timestamp for stuck_days based on derived stage.
+    stuck_now = datetime.utcnow()
+    if effective_stage:
+        ts_field_map = {
+            "awaiting_approval":  job.approval_at or job.completed_at,
+            "awaiting_export":    job.export_at or job.approval_at or job.completed_at,
+            "awaiting_finishing": job.finishing_at or job.export_at or job.approval_at or job.completed_at,
+            "published":          job.published_at or job.finishing_at or job.completed_at,
+        }
+        ts = ts_field_map.get(effective_stage)
+        stuck_days = (stuck_now - ts).days if ts else None
+    else:
+        stuck_days = None
     return JobResponse(
         id=job.id,
         status=job.status,
@@ -2990,14 +3011,15 @@ def _build_job_response(job, first_dialogue=None, first_frame_url=None):
         first_frame_url=first_frame_url,
         has_export=bool(getattr(job, 'has_export', False)),
         has_voice_clone=bool(getattr(job, 'has_voice_clone', False)),
-        lifecycle_stage=job.lifecycle_stage,
+        lifecycle_stage=effective_stage,
         approval_at=job.approval_at.isoformat() if job.approval_at else None,
         export_at=job.export_at.isoformat() if job.export_at else None,
         finishing_at=job.finishing_at.isoformat() if job.finishing_at else None,
         published_at=job.published_at.isoformat() if job.published_at else None,
         notes=job.notes,
         archived=bool(getattr(job, 'archived', False)),
-        stuck_days=compute_stuck_days(job, datetime.utcnow()),
+        stuck_days=stuck_days,
+        approved_clips=approved_clips,
     )
 
 
@@ -3072,20 +3094,30 @@ async def list_jobs(
     )
 
     jobs = query.order_by(Job.created_at.desc()).offset(offset).limit(limit).all()
-    
+
     # Batch-fetch first clip (clip_index=0) for each job to get dialogue + frame
     job_ids = [j.id for j in jobs]
     first_clips = {}
+    approved_counts = {}
     if job_ids:
-        from sqlalchemy import and_
+        from sqlalchemy import and_, func
         clips = db.query(Clip).filter(
             and_(Clip.job_id.in_(job_ids), Clip.clip_index == 0)
         ).all()
         for c in clips:
             first_clips[c.job_id] = c
-    
+        # v776.2: batch-fetch per-job approved-clip counts so the lifecycle
+        # serializer can live-derive the effective stage.
+        rows = (
+            db.query(Clip.job_id, func.count(Clip.id))
+            .filter(and_(Clip.job_id.in_(job_ids), Clip.approval_status == "approved"))
+            .group_by(Clip.job_id)
+            .all()
+        )
+        approved_counts = {jid: n for jid, n in rows}
+
     base_url = str(request.base_url).rstrip('/')
-    
+
     result = []
     for j in jobs:
         first_clip = first_clips.get(j.id)
@@ -3096,9 +3128,14 @@ async def list_jobs(
             if first_clip.start_frame:
                 fname = first_clip.start_frame.split('/')[-1]
                 first_frame_url = f"{base_url}/api/jobs/{j.id}/images/{fname}"
-        
-        result.append(_build_job_response(j, first_dialogue=first_dialogue, first_frame_url=first_frame_url))
-    
+
+        result.append(_build_job_response(
+            j,
+            first_dialogue=first_dialogue,
+            first_frame_url=first_frame_url,
+            approved_clips=approved_counts.get(j.id, 0),
+        ))
+
     return result
 
 
@@ -3131,16 +3168,23 @@ def get_user_clip(db: DBSession, clip_id: int, user: User) -> Clip:
     return clip
 
 
+def _count_approved_clips(db, job_id: str) -> int:
+    """Single-query approved-clip count for one job. Used by get_job and the
+    PATCH endpoints so the derived lifecycle_stage is accurate per request."""
+    return db.query(Clip).filter(
+        Clip.job_id == job_id, Clip.approval_status == "approved"
+    ).count()
+
+
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
 async def get_job(
-    job_id: str, 
+    job_id: str,
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
     """Get job details"""
     job = get_user_job(db, job_id, current_user)
-    
-    return _build_job_response(job)
+    return _build_job_response(job, approved_clips=_count_approved_clips(db, job_id))
 
 
 @app.get("/api/jobs/{job_id}/config")
@@ -3429,7 +3473,7 @@ async def patch_job_lifecycle(
     job.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(job)
-    return _build_job_response(job)
+    return _build_job_response(job, approved_clips=_count_approved_clips(db, job_id))
 
 
 @app.patch("/api/jobs/{job_id}/archive", response_model=JobResponse)
@@ -3445,7 +3489,7 @@ async def patch_job_archive(
     job.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(job)
-    return _build_job_response(job)
+    return _build_job_response(job, approved_clips=_count_approved_clips(db, job_id))
 
 
 @app.post("/api/jobs/{job_id}/cancel")

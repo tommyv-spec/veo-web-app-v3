@@ -1289,17 +1289,23 @@
         }
         #jobsList details { margin: 6px 0; }
         #jobsList details > summary { cursor: pointer; padding: 6px 0; font-weight: 600; }
-        #jobsList .lc-rows { padding-left: 12px; }
-        #jobsList .lc-row {
-          display: flex; align-items: center; gap: 8px;
-          padding: 6px 8px; border-bottom: 1px solid var(--border);
+        #jobsList .lc-rows { padding: 4px 0; display: flex; flex-direction: column; gap: 6px; }
+        /* .lc-row inherits .job-item styles (thumb / badges / progress). Lifecycle action row sits below. */
+        #jobsList .lc-row .lc-actions {
+          display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+          margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border-subtle);
         }
-        #jobsList .lc-row .title { flex: 1; }
-        #jobsList .lc-row .stuck { color: #c33; font-size: 11px; }
-        #jobsList .lc-row .stuck.warn { color: #c33; font-weight: 600; }
-        #jobsList .lc-row .notes-btn { background: none; border: none; cursor: pointer; opacity: 0.5; }
-        #jobsList .lc-row .notes-btn.has-notes { opacity: 1; color: var(--accent); }
-        #jobsList .lc-row button.advance { font-size: 12px; padding: 3px 8px; }
+        #jobsList .lc-row .lc-stuck { color: #c33; font-size: 11px; margin-right: auto; }
+        #jobsList .lc-row .lc-stuck.warn { font-weight: 600; }
+        #jobsList .lc-row .lc-action {
+          background: var(--bg-input); border: 1px solid var(--border-subtle);
+          color: var(--text); font-size: 11px; padding: 4px 8px; border-radius: 4px;
+          cursor: pointer; line-height: 1;
+        }
+        #jobsList .lc-row .lc-action:hover { border-color: var(--accent); }
+        #jobsList .lc-row .lc-notes { opacity: 0.6; }
+        #jobsList .lc-row .lc-notes.has-notes { opacity: 1; color: var(--accent); border-color: var(--accent); }
+        #jobsList .lc-row .lc-advance { background: rgba(99,102,241,0.15); border-color: var(--accent); color: var(--accent); }
         @media (max-width: 768px) {
           .lifecycle-chips { overflow-x: auto; flex-wrap: nowrap; }
           .lifecycle-chips .chip { white-space: nowrap; }
@@ -3487,24 +3493,63 @@ Example: A realistic vertical video of a professional presenter speaking directl
           return await res.json();
         }
 
-        function renderLifecycleRow(job) {
-          const slug = (job.first_dialogue || job.id || "").toString();
-          const stuck = job.stuck_days;
+        // Reuse the existing job-item template (thumb + badges + dialogue +
+        // progress bar). Add a lifecycle action row below it (notes / advance
+        // / archive). Click anywhere on the row that's NOT a button opens
+        // the job-details panel (handled by the delegated click listener).
+        function renderJobItemForLifecycle(j) {
+          const bl = {'flow':'FLOW','api':'API','prompt_only':'PROMPT','import':'ASSEMBLE'};
+          const bn = bl[j.backend] || j.backend || 'API';
+          const safeId = escapeHtml(j.id);
+          const thumb = j.first_frame_url
+            ? `<img class="job-thumb" src="${escapeHtml(j.first_frame_url)}" alt="" onerror="this.outerHTML='<div class=\\'job-thumb-placeholder\\'>🎬</div>'">`
+            : `<div class="job-thumb-placeholder">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`;
+          const dlg = j.first_dialogue ? `<div class="job-dialogue">${escapeHtml(j.first_dialogue)}</div>` : '';
+          const exportBadge = j.has_export ? '<span class="badge badge-export">🎬</span>' : '';
+          const voiceBadge = j.has_voice_clone ? '<span class="badge badge-voice">🎤</span>' : '';
+          const total = j.total_clips || 0;
+          const failed = j.failed_clips || 0;
+          const skipped = j.skipped_clips || 0;
+          const approvable = Math.max(0, total - failed - skipped);
+          const approved = j.approved_clips || 0;
+          // Approval progress badge — show only when status=completed and stage
+          // is awaiting_approval (the meaningful pre-export window).
+          const approvalBadge = (j.status === 'completed' && j.lifecycle_stage === 'awaiting_approval' && approvable > 0)
+            ? `<span class="badge" style="background:rgba(245,158,11,0.15);color:#f59e0b;">${approved}/${approvable} approved</span>`
+            : '';
+          // Lifecycle action row.
+          const stuck = j.stuck_days;
           const stuckStr = (stuck != null && stuck > 0)
-            ? `<span class="stuck${stuck > 3 ? " warn" : ""}">stuck ${stuck}d</span>` : "";
-          const ns = nextStage(job.lifecycle_stage);
-          const safeId = escapeHtml(job.id);
-          const advanceBtn = ns
-            ? `<button class="advance" data-id="${safeId}" data-next="${ns}">→ ${STAGE_LABEL[ns].replace("Awaiting ", "")}</button>` : "";
-          const notesClass = job.notes ? "notes-btn has-notes" : "notes-btn";
-          return `
-            <div class="lc-row" data-id="${safeId}">
-              <span class="title">${escapeHtml(shortenSlug(slug))}</span>
+            ? `<span class="lc-stuck${stuck > 3 ? " warn" : ""}">stuck ${stuck}d</span>` : "";
+          const ns = nextStage(j.lifecycle_stage);
+          const exportLabel = (j.lifecycle_stage === 'awaiting_approval' && approved < approvable) ? null : ns;
+          const advanceBtn = exportLabel
+            ? `<button class="lc-action lc-advance" data-id="${safeId}" data-next="${exportLabel}" title="Advance to ${STAGE_LABEL[exportLabel]}">→ ${STAGE_LABEL[exportLabel].replace("Awaiting ","")}</button>` : "";
+          const notesClass = j.notes ? "lc-action lc-notes has-notes" : "lc-action lc-notes";
+          const archiveLabel = j.archived ? '📤 Unarchive' : '📦';
+          return `<div class="job-item lc-row" data-id="${safeId}" data-job-id="${safeId}">
+            <div class="job-body">${thumb}<div class="job-meta">
+              <div class="job-badges">
+                <span class="badge badge-${escapeHtml(j.status)}">${escapeHtml(j.status)}</span>
+                <span class="badge-backend badge-backend-${escapeHtml(j.backend||'api')}">${escapeHtml(bn)}</span>
+                ${exportBadge}${voiceBadge}${approvalBadge}
+                <span class="job-id">${safeId.slice(0,8)}</span>
+              </div>${dlg}
+            </div></div>
+            <div class="progress-bar" style="margin-top:8px"><div class="progress-fill" style="width:${j.progress_percent}%"></div></div>
+            <div class="progress-text"><span>${j.progress_percent.toFixed(0)}%</span><span>${j.completed_clips}/${j.total_clips}</span></div>
+            <div class="lc-actions">
               ${stuckStr}
-              <button class="${notesClass}" data-action="notes" title="Notes">📝</button>
+              <button class="${notesClass}" data-action="notes" data-id="${safeId}" title="Notes">📝</button>
               ${advanceBtn}
-              <button class="advance" data-action="archive" data-id="${safeId}" title="Archive">📦</button>
-            </div>`;
+              <button class="lc-action lc-archive" data-action="archive" data-id="${safeId}" title="${j.archived ? 'Unarchive' : 'Archive'}">${archiveLabel}</button>
+            </div>
+          </div>`;
+        }
+
+        function renderLifecycleRow(job) {
+          // Back-compat alias — kept in case other code references it.
+          return renderJobItemForLifecycle(job);
         }
 
         function renderLifecycle(jobs, { archived = false } = {}) {
@@ -3555,8 +3600,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
         });
 
         document.getElementById("jobsList").addEventListener("click", async (ev) => {
-          const t = ev.target;
-          if (t.matches(".advance[data-next]")) {
+          const t = ev.target.closest("button, .lc-row") || ev.target;
+          if (t.matches(".lc-advance[data-next]")) {
+            ev.stopPropagation();
             const id = t.dataset.id, next = t.dataset.next;
             const res = await fetch(`/api/jobs/${id}/lifecycle`, {
               method: "PATCH",
@@ -3565,24 +3611,35 @@ Example: A realistic vertical video of a professional presenter speaking directl
               body: JSON.stringify({ stage: next }),
             });
             if (res.ok) refreshLifecycle();
-          } else if (t.matches(".advance[data-action='archive']")) {
+            return;
+          }
+          if (t.matches(".lc-archive[data-action='archive']")) {
+            ev.stopPropagation();
             const id = t.dataset.id;
+            const row = t.closest(".lc-row");
+            const willArchive = !(row && row.closest("details#lc-archived"));
+            // Toggle: if we're in the archived view, unarchive; otherwise archive.
+            const archived = !document.querySelector(".lifecycle-chips .chip-active[data-stage='archived']");
             const res = await fetch(`/api/jobs/${id}/archive`, {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
               credentials: "include",
-              body: JSON.stringify({ archived: true }),
+              body: JSON.stringify({ archived }),
             });
             if (res.ok) refreshLifecycle();
-          } else if (t.matches(".notes-btn[data-action='notes']")) {
+            return;
+          }
+          if (t.matches(".lc-notes[data-action='notes']")) {
+            ev.stopPropagation();
             if (typeof openNotesPopover === "function") {
               openNotesPopover(t.closest(".lc-row"));
             }
-          } else {
-            const row = t.closest(".lc-row");
-            if (row && !t.closest("button") && typeof selectJob === "function") {
-              selectJob(row.dataset.id);
-            }
+            return;
+          }
+          // Click anywhere else on the row → open job details.
+          const row = ev.target.closest(".lc-row");
+          if (row && !ev.target.closest("button") && typeof selectJob === "function") {
+            selectJob(row.dataset.id);
           }
         });
 

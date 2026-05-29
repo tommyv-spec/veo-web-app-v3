@@ -21,6 +21,9 @@ class JobResponse(BaseModel):
     has_export: bool = False
     has_voice_clone: bool = False
     # === Post-render lifecycle tracker (2026-05-29) ===
+    # `lifecycle_stage` is the EFFECTIVE stage (derived from has_export +
+    # approval counts, see _build_job_response). Manual overrides
+    # (awaiting_finishing past export, published) stick.
     lifecycle_stage: Optional[str] = None
     approval_at: Optional[str] = None
     export_at: Optional[str] = None
@@ -29,3 +32,4 @@ class JobResponse(BaseModel):
     notes: Optional[str] = None
     archived: bool = False
     stuck_days: Optional[int] = None
+    approved_clips: int = 0
