@@ -3696,6 +3696,26 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
         print(f"{pfx}[flow_api] disabling API path for this page session: {reason}", flush=True)
         return False
 
+    def _fall_back_one(reason: str):
+        """Soft fall-back: this clip goes to DOM, but the API path stays armed
+        for the NEXT clip. Use for transient errors (HTTP 5xx, network, single
+        captcha mint hiccup) where the path itself is fine and a retry next
+        job is reasonable."""
+        print(f"{pfx}[flow_api] falling back to DOM for this clip (transient): {reason}", flush=True)
+        return False
+
+    def _is_transient(reason: str) -> bool:
+        r = (reason or "").upper()
+        for needle in (
+            " 500", " 502", " 503", " 504",
+            "INTERNAL", "UNAVAILABLE", "DEADLINE", "TIMEOUT",
+            "FETCH FAILED", "EVALUATE FAILED",
+            "CAPTCHA MINT FAILED",
+        ):
+            if needle in r:
+                return True
+        return False
+
     project_id = ""
     try:
         m = re.search(r"/project/([0-9a-fA-F-]{36})", page.url or "")
@@ -3742,7 +3762,10 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
         if ref_ids:
             print(f"{pfx}[flow_api] uploaded {len(ref_ids)} ref(s) via API", flush=True)
     except Exception as e:
-        return _latch_off(f"upload_image raised: {e}")
+        reason = f"upload_image raised: {e}"
+        if _is_transient(reason):
+            return _fall_back_one(reason)
+        return _latch_off(reason)
 
     # Register a pending_submissions entry so the legacy DOM path's scanner
     # logic also sees this node (some scanner branches check pending entries).
@@ -3782,7 +3805,10 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
             if fife_url:
                 captured_fife_urls.append(fife_url)
     except Exception as e:
-        return _latch_off(f"submit_image raised: {e}")
+        reason = f"submit_image raised: {e}"
+        if _is_transient(reason):
+            return _fall_back_one(reason)
+        return _latch_off(reason)
 
     if not captured_fife_urls:
         return _latch_off("API responses carried no fife URLs (unexpected response shape)")
