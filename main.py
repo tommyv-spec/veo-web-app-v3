@@ -3375,8 +3375,24 @@ async def delete_job(
     # Delete database records
     db.delete(job)
     db.commit()
-    
+
     return {"status": "deleted", "job_id": job_id}
+
+
+class UpdateLifecycleRequest(BaseModel):
+    """PATCH /api/jobs/{id}/lifecycle body.
+
+    All fields optional. Sending only `notes` updates notes without changing
+    stage. Sending `stage=None` with `clear=True` removes the Job from the
+    tracker (rare; used for test renders).
+    """
+    stage: Optional[str] = None
+    notes: Optional[str] = None
+    clear: bool = False
+
+
+class UpdateArchiveRequest(BaseModel):
+    archived: bool
 
 
 @app.patch("/api/jobs/{job_id}/lifecycle", response_model=JobResponse)
@@ -4279,22 +4295,6 @@ async def replace_clip_image(
 # ─────────────────────────────────────────────────────────────────────────────
 
 import re as _re_v735
-
-
-class UpdateLifecycleRequest(BaseModel):
-    """PATCH /api/jobs/{id}/lifecycle body.
-
-    All fields optional. Sending only `notes` updates notes without changing
-    stage. Sending `stage=None` with `clear=True` removes the Job from the
-    tracker (rare; used for test renders).
-    """
-    stage: Optional[str] = None
-    notes: Optional[str] = None
-    clear: bool = False
-
-
-class UpdateArchiveRequest(BaseModel):
-    archived: bool
 
 
 class UpdateClipRequest(BaseModel):
