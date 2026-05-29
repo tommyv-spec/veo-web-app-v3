@@ -3660,10 +3660,11 @@ def _flow_api_image_multi_try(page, input_paths, prompt, aspect_ratio, model,
     return saved
 
 
-def _flow_api_pull_submit_try(page, node_id, prompt, input_paths, variants,
+def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, variants,
                               aspect_ratio, model, ctx,
                               listener_state, pending_submissions,
-                              captured_urls_by_node):
+                              captured_urls_by_node,
+                              in_flight, out_dir, input_items, original_job):
     """flow_api path for the parallel HTTP-pull `_submit_one_job` entrypoint.
 
     Fires N batchGenerateImages POSTs via in-page page.evaluate(fetch). Reads the
@@ -3798,9 +3799,33 @@ def _flow_api_pull_submit_try(page, node_id, prompt, input_paths, variants,
     except Exception as e:
         return _latch_off(f"captured_urls_by_node write failed: {e}")
 
+    # Register an InFlightJob so the scanner tracks completion + the platform
+    # eventually receives a "done" status. Without this, _submit_one_job's
+    # return-True is meaningless to the scanner pipeline — the server times
+    # out the claim and re-issues the job (the symptom on f879c59).
+    try:
+        try:
+            prompt_key = _derive_prompt_key(prompt)
+        except Exception:
+            prompt_key = prompt[:80]
+        in_flight[node_id] = InFlightJob(
+            node_id=node_id,
+            node_name=node_name,
+            prompt=prompt,
+            prompt_key=prompt_key,
+            variants=int(variants or 1),
+            output_dir=out_dir,
+            input_items=input_items,
+            baseline_urls=set(),  # API path: no DOM baseline needed
+            tile_ids=[],          # API path: no tile-id capture (attribution by URL pool)
+            original_job=original_job,
+        )
+    except Exception as e:
+        return _latch_off(f"InFlightJob registration failed: {e}")
+
     print(
         f"{pfx}[flow_api] fired {len(captured_fife_urls)}x batchGenerateImages POSTs "
-        f"via in-page API; URLs written directly to scanner pool",
+        f"via in-page API; URLs written to scanner pool + InFlightJob registered",
         flush=True,
     )
     return True
@@ -7060,12 +7085,13 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             # On any failure: latches off for the page session and falls
             # through to the DOM path below.
             if _flow_api_pull_submit_try(
-                page, node_id, prompt, input_paths, variants,
+                page, node_id, node_name, prompt, input_paths, variants,
                 aspect_ratio, model, ctx,
                 listener_state, pending_submissions, captured_urls_by_node,
+                in_flight, out_dir, input_items, job,
             ):
                 _save_state()
-                print(f"[API:submit] ✓ Node {node_id} submitted via flow_api (in_flight={len(in_flight)+1})", flush=True)
+                print(f"[API:submit] ✓ Node {node_id} submitted via flow_api (in_flight={len([j for j in in_flight.values() if j.status=='submitted'])})", flush=True)
                 return True
 
             if not select_image_mode(page, context=ctx):
