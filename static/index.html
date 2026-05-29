@@ -3504,12 +3504,14 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const bl = {'flow':'FLOW','api':'API','prompt_only':'PROMPT','import':'ASSEMBLE'};
           const bn = bl[j.backend] || j.backend || 'API';
           const safeId = escapeHtml(j.id);
-          // Skip live thumbnails in the lifecycle list — each one is an R2
-          // cold-cache miss (~500ms server-side) and 327+ rows hammer the
-          // worker. Operator sees the thumb when they click a row (details
-          // panel renders it via the existing get-job + clip flow).
-          // data-src kept so we can lazy-swap later if needed.
-          const thumb = `<div class="job-thumb-placeholder" data-src="${escapeHtml(j.first_frame_url || '')}">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`;
+          // Thumbnail strategy: emit placeholder + data-src. IntersectionObserver
+          // (registered after renderLifecycleSection) swaps placeholder for real
+          // <img> only when row enters viewport. Browser's native loading="lazy"
+          // was too eager — prefetched ~80 thumbs above viewport, hammering R2
+          // cold-cache. IO swap fetches ~5-10 actually visible thumbs.
+          const thumb = j.first_frame_url
+            ? `<div class="job-thumb-placeholder lc-thumb-pending" data-src="${escapeHtml(j.first_frame_url)}">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`
+            : `<div class="job-thumb-placeholder">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`;
           const dlg = j.first_dialogue ? `<div class="job-dialogue">${escapeHtml(j.first_dialogue)}</div>` : '';
           const exportBadge = j.has_export ? '<span class="badge badge-export">🎬</span>' : '';
           const voiceBadge = j.has_voice_clone ? '<span class="badge badge-voice">🎤</span>' : '';
@@ -3611,6 +3613,39 @@ Example: A realistic vertical video of a professional presenter speaking directl
             ? stageJobs.map(renderLifecycleRow).join("")
             : `<div class="empty" style="padding:6px;color:#888;">none</div>`;
           delete rowsEl.dataset.lazyPending;
+          // Hook IntersectionObserver onto the freshly-rendered placeholders.
+          observeLifecycleThumbs(rowsEl);
+        }
+
+        // Lazy-swap thumbnails via IntersectionObserver. Each placeholder
+        // becomes an <img> only when scrolled into viewport. rootMargin
+        // pre-fetches a small buffer so scroll feels seamless.
+        let _lifecycleThumbObserver = null;
+        function _getLifecycleThumbObserver() {
+          if (_lifecycleThumbObserver) return _lifecycleThumbObserver;
+          if (typeof IntersectionObserver !== "function") return null;
+          _lifecycleThumbObserver = new IntersectionObserver((entries, obs) => {
+            for (const e of entries) {
+              if (!e.isIntersecting) continue;
+              const el = e.target;
+              const src = el.dataset.src;
+              if (!src) { obs.unobserve(el); continue; }
+              const img = new Image();
+              img.className = "job-thumb";
+              img.decoding = "async";
+              img.alt = "";
+              img.onload = () => { if (el.parentNode) el.parentNode.replaceChild(img, el); };
+              img.onerror = () => { el.classList.remove("lc-thumb-pending"); };
+              img.src = src;
+              obs.unobserve(el);
+            }
+          }, { rootMargin: "200px 0px", threshold: 0.01 });
+          return _lifecycleThumbObserver;
+        }
+        function observeLifecycleThumbs(container) {
+          const obs = _getLifecycleThumbObserver();
+          if (!obs) return;  // SSR / very old browser fallback — just leave placeholders
+          container.querySelectorAll(".lc-thumb-pending[data-src]").forEach(el => obs.observe(el));
         }
 
         document.querySelectorAll("#jobsList details").forEach(d => {
