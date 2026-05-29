@@ -3705,12 +3705,21 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
         return False
 
     def _is_transient(reason: str) -> bool:
+        """True for failures that should fall back THIS clip but leave the API
+        path armed for the NEXT clip — i.e. server-side hiccups OR per-prompt
+        rejections (unsafe content, quota) that don't reflect a structural
+        problem with this page session."""
         r = (reason or "").upper()
         for needle in (
+            # transient server / network
             " 500", " 502", " 503", " 504",
             "INTERNAL", "UNAVAILABLE", "DEADLINE", "TIMEOUT",
             "FETCH FAILED", "EVALUATE FAILED",
             "CAPTCHA MINT FAILED",
+            # per-prompt rejections (not structural)
+            "UNSAFE_GENERATION",      # content policy — specific to this prompt
+            "USER_QUOTA_REACHED",     # daily credits exhausted (other accounts/days fine)
+            "MODEL_ACCESS_DENIED",    # tier mismatch — caller should downgrade model
         ):
             if needle in r:
                 return True
