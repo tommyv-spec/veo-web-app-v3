@@ -3597,6 +3597,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
           fetch(`/api/jobs/${_popoverJobId}`, { credentials: "include" })
             .then(r => r.ok ? r.json() : null)
             .then(j => { text.value = (j && j.notes) || ""; });
+          popover.style.right = "";
+          popover.style.bottom = "";
+          popover.style.width = "280px";
+          popover.style.borderRadius = "6px";
           const rect = rowEl.getBoundingClientRect();
           popover.style.left = Math.min(rect.left + window.scrollX, window.innerWidth - 300) + "px";
           popover.style.top = (rect.bottom + window.scrollY + 4) + "px";
@@ -3618,18 +3622,25 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
 
         document.getElementById("lifecycleNotesCancel").addEventListener("click", closeNotesPopover);
-        document.getElementById("lifecycleNotesSave").addEventListener("click", async () => {
+        document.getElementById("lifecycleNotesSave").addEventListener("click", async (ev) => {
           if (!_popoverJobId) return;
-          const notes = document.getElementById("lifecycleNotesText").value;
-          const res = await fetch(`/api/jobs/${_popoverJobId}/lifecycle`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({ notes }),
-          });
-          if (res.ok) {
-            closeNotesPopover();
-            refreshLifecycle();
+          const saveBtn = ev.currentTarget;
+          if (saveBtn.disabled) return;
+          saveBtn.disabled = true;
+          try {
+            const notes = document.getElementById("lifecycleNotesText").value;
+            const res = await fetch(`/api/jobs/${_popoverJobId}/lifecycle`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ notes }),
+            });
+            if (res.ok) {
+              closeNotesPopover();
+              refreshLifecycle();
+            }
+          } finally {
+            saveBtn.disabled = false;
           }
         });
 
