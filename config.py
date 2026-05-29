@@ -143,10 +143,10 @@ class LifecycleStage(str, Enum):
     overflow menu. See docs/superpowers/specs/2026-05-29-video-lifecycle-
     tracker-design.md §3.
     """
-    AWAITING_APPROVAL  = "awaiting_approval"
-    AWAITING_EXPORT    = "awaiting_export"
+    AWAITING_APPROVAL = "awaiting_approval"
+    AWAITING_EXPORT = "awaiting_export"
     AWAITING_FINISHING = "awaiting_finishing"
-    PUBLISHED          = "published"
+    PUBLISHED = "published"
 
 
 class ErrorCode(str, Enum):
