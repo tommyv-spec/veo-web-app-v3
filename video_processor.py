@@ -454,6 +454,16 @@ def _whisper_anchor_trim(
         print("[WhisperAnchor] no whisper words — keeping full clip (no trim)", flush=True)
         return [(0.0, total_duration)]
 
+    # v773.10.15 — dump Whisper transcription per clip so operator can
+    # see what the model actually heard vs the script. Each entry is
+    # "word@start" rounded to 2 decimals. Plus the joined plain text
+    # on a second line for quick reading.
+    _ww_compact = " ".join(f"{w['text']}@{w['start']:.2f}" for w in whisper_words)
+    _ww_text = " ".join(w["text"] for w in whisper_words)
+    print(f"[WhisperAnchor] heard ({len(whisper_words)}w): {_ww_text}", flush=True)
+    print(f"[WhisperAnchor] timings: {_ww_compact}", flush=True)
+    print(f"[WhisperAnchor] script  : {' '.join(script_tokens)}", flush=True)
+
     # Lazy-import rapidfuzz + metaphone (deps added in v773.10.6)
     try:
         from rapidfuzz import fuzz as _fuzz
