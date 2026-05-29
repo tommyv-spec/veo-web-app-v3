@@ -758,7 +758,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
     # Routes that don't require authentication
     PUBLIC_ROUTES = {
         "/login", "/auth/login", "/auth/google/callback",
-        "/auth/me", "/api/health", "/favicon.ico"
+        "/auth/me", "/api/health", "/favicon.ico",
+        # v773.11.1 (2026-05-29): PostHog analytics bootstrap endpoints.
+        # /api/posthog-config returns only the PUBLIC PostHog project key
+        # (designed for browser exposure), and we want anonymous visitors
+        # tracked too (otherwise login-page sessions never get a distinct_id).
+        # /api/me returns {authenticated: false} for unauthed callers by
+        # design, so exposing it to anon traffic just lets the bootstrap
+        # decide whether to call posthog.identify() — no PII leaks.
+        "/api/posthog-config", "/api/me",
     }
     PUBLIC_PREFIXES = {"/static/", "/auth/", "/api/local-worker/", "/api/user-worker/", "/api/images/worker/"}
     
