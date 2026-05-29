@@ -147,7 +147,7 @@ from models import (
     init_db, get_db_session, Job, Clip, JobLog, BlacklistEntry,
     get_job_logs_since, add_job_log, User, UserAPIKey, UserWorkerToken
 )
-from lifecycle import apply_lifecycle_change, compute_stuck_days, apply_jobs_filters, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
+from lifecycle import apply_lifecycle_change, compute_stuck_days, apply_jobs_filters, _maybe_auto_enter_lifecycle, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
 from worker import worker, WORKER_VERSION
 from error_handler import ErrorCode
 
@@ -970,6 +970,7 @@ async def backfill_export_voice_badges(
                 has_exp = any(f.startswith("final_") or f.startswith("export_") for f in filenames)
                 if has_exp:
                     job.has_export = True
+                    _maybe_auto_enter_lifecycle(job, now=datetime.utcnow())
                     export_count += 1
             
             if not getattr(job, 'has_voice_clone', False):
@@ -8145,8 +8146,9 @@ async def export_final_video(
         if job.backend != 'import':
             audio_info = await _extract_and_upload_audio(output_path, job_id, output_filename)
 
-        # Mark job as exported
+        # Mark job as exported (v776: also enter post-render lifecycle).
         job.has_export = True
+        _maybe_auto_enter_lifecycle(job, now=datetime.utcnow())
         db.commit()
 
         return {

@@ -68,6 +68,21 @@ def compute_stuck_days(job, now):
     return (now - ts).days
 
 
+def _maybe_auto_enter_lifecycle(job, now):
+    """Idempotent T1 trigger — moves a freshly-completed+exported Job into
+    awaiting_approval. Safe to call from multiple code paths.
+    """
+    if job.lifecycle_stage:
+        return
+    if job.status != "completed":
+        return
+    if not job.has_export:
+        return
+    job.lifecycle_stage = LifecycleStage.AWAITING_APPROVAL.value
+    if job.approval_at is None:
+        job.approval_at = now
+
+
 def apply_jobs_filters(query, user_id, status, since_days, lifecycle, archived):
     """Apply standard Jobs-list filters to a SQLAlchemy query. Returns query.
 

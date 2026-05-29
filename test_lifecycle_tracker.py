@@ -304,3 +304,66 @@ def test_list_jobs_archived_only():
     )
     # 2 filter calls: user_id, archived=True.
     assert len(fq.filter_calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 9: _maybe_auto_enter_lifecycle pure-helper tests
+# ---------------------------------------------------------------------------
+
+def test_auto_enter_lifecycle_on_completion():
+    """When trigger fires on a completed+exported job with no lifecycle, set awaiting_approval."""
+    fn = _LIFECYCLE_MOD._maybe_auto_enter_lifecycle
+
+    now = datetime(2026, 5, 29, 12, 0, 0)
+    job = _stub_job()
+    job.status = "completed"
+    job.has_export = True
+
+    fn(job, now=now)
+
+    assert job.lifecycle_stage == "awaiting_approval"
+    assert job.approval_at == now
+
+
+def test_auto_enter_lifecycle_skips_when_already_set():
+    """Idempotent: do not overwrite an existing lifecycle_stage."""
+    fn = _LIFECYCLE_MOD._maybe_auto_enter_lifecycle
+
+    earlier = datetime(2026, 5, 20, 10, 0, 0)
+    later = datetime(2026, 5, 29, 12, 0, 0)
+    job = _stub_job(
+        lifecycle_stage="awaiting_export",
+        approval_at=earlier,
+        export_at=earlier,
+    )
+    job.status = "completed"
+    job.has_export = True
+
+    fn(job, now=later)
+
+    assert job.lifecycle_stage == "awaiting_export"
+    assert job.approval_at == earlier
+
+
+def test_auto_enter_lifecycle_skips_when_not_completed():
+    fn = _LIFECYCLE_MOD._maybe_auto_enter_lifecycle
+
+    job = _stub_job()
+    job.status = "running"
+    job.has_export = True
+
+    fn(job, now=datetime(2026, 5, 29))
+
+    assert job.lifecycle_stage is None
+
+
+def test_auto_enter_lifecycle_skips_when_no_export():
+    fn = _LIFECYCLE_MOD._maybe_auto_enter_lifecycle
+
+    job = _stub_job()
+    job.status = "completed"
+    job.has_export = False
+
+    fn(job, now=datetime(2026, 5, 29))
+
+    assert job.lifecycle_stage is None
