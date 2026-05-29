@@ -3374,6 +3374,22 @@ async def patch_job_lifecycle(
     return _build_job_response(job)
 
 
+@app.patch("/api/jobs/{job_id}/archive", response_model=JobResponse)
+async def patch_job_archive(
+    job_id: str,
+    req: UpdateArchiveRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Toggle the archived flag on a Job. Orthogonal to lifecycle stage."""
+    job = get_user_job(db, job_id, current_user)
+    job.archived = bool(req.archived)
+    job.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(job)
+    return _build_job_response(job)
+
+
 @app.post("/api/jobs/{job_id}/cancel")
 async def cancel_job(
     job_id: str, 
@@ -4241,6 +4257,10 @@ class UpdateLifecycleRequest(BaseModel):
     stage: Optional[str] = None
     notes: Optional[str] = None
     clear: bool = False
+
+
+class UpdateArchiveRequest(BaseModel):
+    archived: bool
 
 
 class UpdateClipRequest(BaseModel):
