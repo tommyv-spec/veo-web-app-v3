@@ -135,6 +135,20 @@ class ApprovalStatus(str, Enum):
     MAX_ATTEMPTS = "max_attempts"      # Hit 3 attempts, needs support contact
 
 
+class LifecycleStage(str, Enum):
+    """Post-render video lifecycle. NULL on Job means pre-completion.
+
+    Auto-entered when Job reaches status=COMPLETED + has_export=True.
+    Operator advances forward via dashboard button; can move back via
+    overflow menu. See docs/superpowers/specs/2026-05-29-video-lifecycle-
+    tracker-design.md §3.
+    """
+    AWAITING_APPROVAL  = "awaiting_approval"
+    AWAITING_EXPORT    = "awaiting_export"
+    AWAITING_FINISHING = "awaiting_finishing"
+    PUBLISHED          = "published"
+
+
 class ErrorCode(str, Enum):
     # API Errors
     RATE_LIMIT = "RATE_LIMIT_429"
