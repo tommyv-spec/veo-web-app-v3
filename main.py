@@ -3345,6 +3345,35 @@ async def delete_job(
     return {"status": "deleted", "job_id": job_id}
 
 
+@app.patch("/api/jobs/{job_id}/lifecycle", response_model=JobResponse)
+async def patch_job_lifecycle(
+    job_id: str,
+    req: UpdateLifecycleRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Advance, move-back, or annotate a Job's post-render lifecycle stage.
+
+    See docs/superpowers/specs/2026-05-29-video-lifecycle-tracker-design.md §6.1.
+    """
+    job = get_user_job(db, job_id, current_user)
+    try:
+        apply_lifecycle_change(
+            job,
+            stage=req.stage,
+            notes=req.notes,
+            now=datetime.utcnow(),
+            clear=req.clear,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    job.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(job)
+    return _build_job_response(job)
+
+
 @app.post("/api/jobs/{job_id}/cancel")
 async def cancel_job(
     job_id: str, 
@@ -4200,6 +4229,18 @@ async def replace_clip_image(
 # ─────────────────────────────────────────────────────────────────────────────
 
 import re as _re_v735
+
+
+class UpdateLifecycleRequest(BaseModel):
+    """PATCH /api/jobs/{id}/lifecycle body.
+
+    All fields optional. Sending only `notes` updates notes without changing
+    stage. Sending `stage=None` with `clear=True` removes the Job from the
+    tracker (rare; used for test renders).
+    """
+    stage: Optional[str] = None
+    notes: Optional[str] = None
+    clear: bool = False
 
 
 class UpdateClipRequest(BaseModel):
