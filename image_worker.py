@@ -3137,8 +3137,22 @@ def _fa_error_reason(result):
     if isinstance(data, dict) and data.get("error"):
         err = data["error"]
         if isinstance(err, dict):
-            return str(err.get("message") or err.get("status") or err)
-        return str(err)
+            parts = []
+            msg = err.get("message")
+            if msg:
+                parts.append(str(msg))
+            st = err.get("status")
+            if st:
+                parts.append(f"status={st}")
+            code = err.get("code")
+            if code is not None:
+                parts.append(f"code={code}")
+            # surface field-level details (Google APIs nest these in details[])
+            for d in (err.get("details") or [])[:3]:
+                if isinstance(d, dict):
+                    parts.append(json.dumps(d)[:300])
+            return " | ".join(parts) or str(err)[:300]
+        return str(err)[:300]
     status = result.get("status")
     if isinstance(status, int) and status >= 400:
         return f"HTTP {status}: {str(result.get('text') or '')[:300]}"
@@ -3173,14 +3187,19 @@ def _fa_build_url(endpoint_key, **fmt):
     return f"{_FA_GOOGLE_FLOW_API}{path}{sep}key={_FA_GOOGLE_API_KEY}"
 
 
-def _fa_client_context(project_id, tier="PAYGATE_TIER_TWO"):
-    return {
+def _fa_client_context(project_id, tier=None):
+    # HAR-confirmed 2026-05-28: this account's batchGenerateImages calls send
+    # userPaygateTier=null. Default None (-> JSON null). FlowKit's TIER_TWO default
+    # caused "Request contains an invalid argument" on accounts where the tier
+    # doesn't match — Flow validates the tier server-side.
+    cc = {
         "projectId": str(project_id or ""),
         "recaptchaContext": {"applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB", "token": ""},
         "sessionId": f";{int(time.time() * 1000)}",
         "tool": "PINHOLE",
         "userPaygateTier": tier,
     }
+    return cc
 
 
 def _fa_build_upload_image(image_b64, project_id="", file_name="image.jpg", mime="image/jpeg"):
@@ -3369,7 +3388,7 @@ def _fa_mint_or_empty(page, action):
 
 # ─── Sync client (minimal: upload + image submit) ────────
 class _FaClient:
-    def __init__(self, page, project_id="", tier="PAYGATE_TIER_TWO"):
+    def __init__(self, page, project_id="", tier=None):
         self.page = page
         self.project_id = project_id
         self.tier = tier
