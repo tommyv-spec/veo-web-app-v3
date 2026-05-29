@@ -31,7 +31,7 @@ def apply_lifecycle_change(job, stage, notes, now, clear=False):
         - If stage is set, validates against LifecycleStage. On first entry to
           a stage (existing timestamp is None), records `now`. Re-entry to a
           previously visited stage preserves the original timestamp (COALESCE).
-        - Notes are merge-updated only when `notes is not None`.
+        - Notes are overwritten only when `notes is not None`. Pass "" to clear.
         - Stage timestamps are NEVER cleared (they form an audit trail).
 
     Raises:
