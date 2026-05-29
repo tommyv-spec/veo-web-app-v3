@@ -3072,6 +3072,353 @@ def _flow_api_capture_path():
     )
 
 
+# ============================================================
+# FLOW_API INLINE (self-contained — worker is downloaded as a single file)
+# ============================================================
+# Mirrors flow_api/ in the repo, inlined here so the standalone-file worker
+# doesn't need the flow_api/ package alongside. Source-of-truth lives at
+# code/flow_api/; this block is its compiled-in copy. Keep in sync when the
+# private API shape changes (HAR-confirmed 2026-05-28 for image side).
+
+_FA_GOOGLE_FLOW_API = "https://aisandbox-pa.googleapis.com"
+_FA_GOOGLE_API_KEY = os.environ.get("FLOW_API_KEY", "AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY")
+_FA_RECAPTCHA_SITE_KEY = os.environ.get("FLOW_RECAPTCHA_SITE_KEY", "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV")
+_FA_ENDPOINTS = {
+    "generate_images": "/v1/projects/{project_id}/flowMedia:batchGenerateImages",
+    "upload_image": "/v1/flow/uploadImage",
+    "get_media": "/v1/media/{media_id}",
+}
+_FA_CAPTCHA_IMAGE = "IMAGE_GENERATION"
+_FA_CAPTCHA_VIDEO = "VIDEO_GENERATION"
+_FA_DEFAULT_IMAGE_ASPECT = "IMAGE_ASPECT_RATIO_PORTRAIT"
+_FA_API_COOLDOWN = int(os.environ.get("FLOW_API_COOLDOWN", "10"))
+_FA_CAPTCHA_MAX_RETRIES = int(os.environ.get("FLOW_API_CAPTCHA_RETRIES", "10"))
+_FA_IMAGE_MODELS = {
+    "Nano Banana 2": "NARWHAL",
+    "Nano Banana Pro": "GEM_PIX_2",
+}
+_FA_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+_FA_UUID_IN_URL_RE = re.compile(r"/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", re.I)
+
+
+class _FaError(Exception):
+    pass
+
+
+def _fa_is_uuid(value):
+    return bool(value) and bool(_FA_UUID_RE.match(value))
+
+
+def _fa_uuid_from_url(url):
+    m = _FA_UUID_IN_URL_RE.search(url or "")
+    return m.group(1) if m else ""
+
+
+def _fa_is_error(result):
+    if not isinstance(result, dict):
+        return True
+    if result.get("error"):
+        return True
+    status = result.get("status")
+    if isinstance(status, int) and status >= 400:
+        return True
+    data = result.get("data")
+    if isinstance(data, dict) and data.get("error"):
+        return True
+    return False
+
+
+def _fa_error_reason(result):
+    if not isinstance(result, dict):
+        return "non-dict result"
+    if result.get("error"):
+        return str(result["error"])
+    data = result.get("data")
+    if isinstance(data, dict) and data.get("error"):
+        err = data["error"]
+        if isinstance(err, dict):
+            return str(err.get("message") or err.get("status") or err)
+        return str(err)
+    status = result.get("status")
+    if isinstance(status, int) and status >= 400:
+        return f"HTTP {status}: {str(result.get('text') or '')[:300]}"
+    return ""
+
+
+def _fa_extract_image_media_id(result):
+    data = result.get("data", result) if isinstance(result, dict) else {}
+    if not isinstance(data, dict):
+        return ""
+    media = data.get("media") or []
+    if not media or not isinstance(media[0], dict):
+        return ""
+    item = media[0]
+    name = item.get("name", "")
+    if _fa_is_uuid(name):
+        return name
+    gen = (item.get("image") or {}).get("generatedImage") or {}
+    val = gen.get("mediaId", "")
+    if _fa_is_uuid(val):
+        return val
+    for f in ("fifeUrl", "imageUri"):
+        got = _fa_uuid_from_url(gen.get(f, ""))
+        if got:
+            return got
+    return ""
+
+
+def _fa_build_url(endpoint_key, **fmt):
+    path = _FA_ENDPOINTS[endpoint_key].format(**fmt)
+    sep = "&" if "?" in path else "?"
+    return f"{_FA_GOOGLE_FLOW_API}{path}{sep}key={_FA_GOOGLE_API_KEY}"
+
+
+def _fa_client_context(project_id, tier="PAYGATE_TIER_TWO"):
+    return {
+        "projectId": str(project_id or ""),
+        "recaptchaContext": {"applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB", "token": ""},
+        "sessionId": f";{int(time.time() * 1000)}",
+        "tool": "PINHOLE",
+        "userPaygateTier": tier,
+    }
+
+
+def _fa_build_upload_image(image_b64, project_id="", file_name="image.jpg", mime="image/jpeg"):
+    return {
+        "clientContext": {"projectId": str(project_id or ""), "tool": "PINHOLE"},
+        "fileName": file_name,
+        "imageBytes": image_b64,
+        "isHidden": False,
+        "isUserUploaded": True,
+        "mimeType": mime,
+    }
+
+
+def _fa_build_generate_image(prompt, project_id, image_model_name, aspect=None,
+                             seed=None, reference_media_ids=None, base_image_media_id="",
+                             tier="PAYGATE_TIER_TWO"):
+    aspect = aspect or _FA_DEFAULT_IMAGE_ASPECT
+    seed_val = seed if seed is not None else (int(time.time() * 1000) % 1000000)
+    request_item = {
+        "imageAspectRatio": aspect,
+        "imageModelName": image_model_name,
+        "seed": seed_val,
+        "structuredPrompt": {"parts": [{"text": prompt}]},
+    }
+    image_inputs = []
+    if base_image_media_id:
+        image_inputs.append({"name": base_image_media_id, "imageInputType": "IMAGE_INPUT_TYPE_BASE_IMAGE"})
+    if reference_media_ids:
+        for mid in reference_media_ids:
+            image_inputs.append({"name": mid, "imageInputType": "IMAGE_INPUT_TYPE_REFERENCE"})
+    if image_inputs:
+        request_item["imageInputs"] = image_inputs
+    body = {
+        "clientContext": _fa_client_context(project_id, tier),
+        "requests": [request_item],
+    }
+    if image_inputs:
+        import uuid as _uuid
+        body["mediaGenerationContext"] = {"batchId": f"{_uuid.uuid4()}"}
+        body["useNewMedia"] = True
+    return body
+
+
+def _fa_inject_captcha_token(body, token):
+    cc = body.get("clientContext")
+    if isinstance(cc, dict) and isinstance(cc.get("recaptchaContext"), dict):
+        cc["recaptchaContext"]["token"] = token
+    for req in body.get("requests", []) or []:
+        rcc = req.get("clientContext") if isinstance(req, dict) else None
+        if isinstance(rcc, dict) and isinstance(rcc.get("recaptchaContext"), dict):
+            rcc["recaptchaContext"]["token"] = token
+    return body
+
+
+# ─── In-page primitives (sync Patchright) ────────────────
+class _FaTokenStore:
+    def __init__(self):
+        self.token = ""
+        self.captured_at = 0.0
+
+    def set(self, t):
+        self.token = t
+        self.captured_at = time.time()
+
+    @property
+    def age_s(self):
+        return time.time() - self.captured_at if self.captured_at else 1e9
+
+
+def _fa_install_token_capture(page):
+    store = _FaTokenStore()
+
+    def _on_request(req):
+        try:
+            auth = (req.headers or {}).get("authorization", "")
+            if auth.startswith("Bearer ya29."):
+                tok = auth[len("Bearer "):].strip()
+                if tok and tok != store.token:
+                    store.set(tok)
+        except Exception:
+            pass
+
+    try:
+        page.on("request", _on_request)
+    except Exception:
+        pass
+    return store
+
+
+def _fa_wait_for_token(store, timeout=30.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if store.token and store.age_s < 3000:
+            return store.token
+        time.sleep(0.5)
+    return store.token
+
+
+_FA_CAPTCHA_JS = """
+async ([siteKey, action]) => {
+  function waitG(t) {
+    return new Promise((res, rej) => {
+      const s = Date.now();
+      const c = () => {
+        if (window.grecaptcha && window.grecaptcha.enterprise && window.grecaptcha.enterprise.execute) return res();
+        if (Date.now() - s > t) return rej(new Error('grecaptcha not available'));
+        setTimeout(c, 200);
+      };
+      c();
+    });
+  }
+  await waitG(10000);
+  return await window.grecaptcha.enterprise.execute(siteKey, { action });
+}
+"""
+
+_FA_FETCH_JS = """
+async ([url, method, headers, bodyStr]) => {
+  const opts = { method, headers, credentials: 'include' };
+  if (bodyStr !== null) opts.body = bodyStr;
+  let status = 0, ok = false, text = '';
+  try {
+    const r = await fetch(url, opts);
+    status = r.status; ok = r.ok;
+    text = await r.text();
+  } catch (e) {
+    return { status: 0, ok: false, data: null, text: 'fetch failed: ' + (e && e.message) };
+  }
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+  return { status, ok, data, text: data ? '' : (text || '').slice(0, 2000) };
+}
+"""
+
+
+def _fa_mint_captcha(page, action):
+    return page.evaluate(_FA_CAPTCHA_JS, [_FA_RECAPTCHA_SITE_KEY, action])
+
+
+def _fa_api_fetch(page, url, method, token, body_obj=None, extra_headers=None):
+    headers = {"authorization": f"Bearer {token}"}
+    if body_obj is not None:
+        headers["content-type"] = "application/json"
+    if extra_headers:
+        headers.update(extra_headers)
+    body_str = json.dumps(body_obj) if body_obj is not None else None
+    try:
+        return page.evaluate(_FA_FETCH_JS, [url, method, headers, body_str])
+    except Exception as e:
+        return {"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
+
+
+def _fa_mint_or_empty(page, action):
+    try:
+        return _fa_mint_captcha(page, action)
+    except Exception:
+        return ""
+
+
+# ─── Sync client (minimal: upload + image submit) ────────
+class _FaClient:
+    def __init__(self, page, project_id="", tier="PAYGATE_TIER_TWO"):
+        self.page = page
+        self.project_id = project_id
+        self.tier = tier
+        self._token_store = _fa_install_token_capture(page)
+        self._last_call = 0.0
+
+    def _cooldown(self):
+        elapsed = time.monotonic() - self._last_call
+        if elapsed < _FA_API_COOLDOWN:
+            time.sleep(_FA_API_COOLDOWN - elapsed)
+        self._last_call = time.monotonic()
+
+    def _token(self):
+        tok = _fa_wait_for_token(self._token_store, timeout=30)
+        if not tok:
+            raise _FaError("no bearer token captured (open/refresh a logged-in Flow tab)")
+        return tok
+
+    def upload_image(self, image_bytes, file_name="ref.jpg", mime_type="image/jpeg"):
+        import base64
+        self._cooldown()
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        body = _fa_build_upload_image(b64, self.project_id, file_name, mime_type)
+        url = _fa_build_url("upload_image")
+        res = _fa_api_fetch(self.page, url, "POST", self._token(), body)
+        if _fa_is_error(res):
+            raise _FaError(f"uploadImage failed: {_fa_error_reason(res)}")
+        data = res.get("data") or {}
+        media_id = (data.get("media") or {}).get("name", "")
+        if not _fa_is_uuid(media_id):
+            raise _FaError(f"uploadImage returned non-UUID: {media_id[:40]}")
+        return media_id
+
+    def submit_image(self, prompt, image_model_name, reference_media_ids=None,
+                     base_image_media_id="", aspect=None, seed=None, cooldown=True):
+        if not image_model_name:
+            raise _FaError("no imageModelName")
+        body = _fa_build_generate_image(
+            prompt=prompt, project_id=self.project_id, image_model_name=image_model_name,
+            aspect=aspect, seed=seed, reference_media_ids=reference_media_ids,
+            base_image_media_id=base_image_media_id, tier=self.tier,
+        )
+        url = _fa_build_url("generate_images", project_id=self.project_id)
+        last = {}
+        for attempt in range(_FA_CAPTCHA_MAX_RETRIES):
+            if cooldown:
+                self._cooldown()
+            token = _fa_mint_or_empty(self.page, _FA_CAPTCHA_IMAGE)
+            if not token:
+                last = {"error": "captcha mint failed"}
+                continue
+            _fa_inject_captcha_token(body, token)
+            res = _fa_api_fetch(self.page, url, "POST", self._token(), body)
+            if not _fa_is_error(res):
+                media_id = _fa_extract_image_media_id(res)
+                if not media_id:
+                    raise _FaError(f"submit no media_id: {_fa_error_reason(res) or (res.get('text','') or '')[:200]}")
+                gen = ((res.get("data") or {}).get("media", [{}])[0].get("image") or {}).get("generatedImage") or {}
+                return media_id, gen.get("fifeUrl", gen.get("imageUri", ""))
+            reason = _fa_error_reason(res).lower()
+            last = res
+            if "captcha" in reason or "recaptcha" in reason:
+                continue
+            break
+        raise _FaError(f"submit_image failed: {_fa_error_reason(last) or 'unknown'}")
+
+
+def _fa_resolve_image_model_name(label):
+    return _FA_IMAGE_MODELS.get(label, "")
+
+
+# ============================================================
+# END FLOW_API INLINE
+# ============================================================
+
+
 _IMG_API_ASPECT_MAP = {
     "9:16": "IMAGE_ASPECT_RATIO_PORTRAIT",
     "16:9": "IMAGE_ASPECT_RATIO_LANDSCAPE",
@@ -3115,11 +3462,6 @@ def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_p
             pass
         print(f"[flow_api] disabling API path for this page session: {reason}", flush=True)
         return False
-    try:
-        from flow_api.adapter import generate_image_via_api
-    except Exception as e:
-        return _latch_off(f"flow_api module not available: {e}")
-
     project_id = ""
     try:
         m = re.search(r"/project/([0-9a-fA-F-]{36})", page.url or "")
@@ -3131,6 +3473,9 @@ def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_p
 
     api_aspect = _IMG_API_ASPECT_MAP.get(aspect_ratio, "IMAGE_ASPECT_RATIO_PORTRAIT")
     model_label = _IMG_API_MODEL_MAP.get((model or "").lower(), "Nano Banana 2")
+    image_model = _fa_resolve_image_model_name(model_label)
+    if not image_model:
+        return _latch_off(f"no imageModelName for '{model_label}'")
 
     ref_bytes_list = []
     for p in (input_paths or []):
@@ -3141,18 +3486,20 @@ def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_p
             return _latch_off(f"failed to read input {p}: {e}")
 
     try:
-        result = generate_image_via_api(
-            page,
+        cli = _FaClient(page, project_id=project_id)
+        ref_ids = []
+        for i, b in enumerate(ref_bytes_list):
+            ref_ids.append(cli.upload_image(b, file_name=f"ref_{i}.jpg"))
+        media_id, url = cli.submit_image(
             prompt=prompt,
-            model_name=model_label,
-            project_id=project_id,
-            reference_image_bytes_list=(ref_bytes_list or None),
+            image_model_name=image_model,
+            reference_media_ids=ref_ids or None,
             aspect=api_aspect,
         )
+        result = {"media_id": media_id, "url": url}
     except Exception as e:
         return _latch_off(f"api path raised: {e}")
 
-    url = (result or {}).get("url") or ""
     if not url:
         return _latch_off("api success but no URL")
 
@@ -3197,11 +3544,6 @@ def _flow_api_image_multi_try(page, input_paths, prompt, aspect_ratio, model,
         print(f"{pfx}[flow_api] disabling API path for this page session: {reason}", flush=True)
         return []
 
-    try:
-        from flow_api.adapter import generate_image_variants_via_api
-    except Exception as e:
-        return _latch_off(f"flow_api module not available: {e}")
-
     project_id = ""
     try:
         m = re.search(r"/project/([0-9a-fA-F-]{36})", page.url or "")
@@ -3213,6 +3555,9 @@ def _flow_api_image_multi_try(page, input_paths, prompt, aspect_ratio, model,
 
     api_aspect = _IMG_API_ASPECT_MAP.get(aspect_ratio, "IMAGE_ASPECT_RATIO_PORTRAIT")
     model_label = _IMG_API_MODEL_MAP.get((model or "").lower(), "Nano Banana 2")
+    image_model = _fa_resolve_image_model_name(model_label)
+    if not image_model:
+        return _latch_off(f"no imageModelName for '{model_label}'")
 
     # v703 manifest is normally prepended after Step 3 (upload). The API path
     # uploads via uploadImage instead and skips that DOM step, so we still want
@@ -3232,15 +3577,20 @@ def _flow_api_image_multi_try(page, input_paths, prompt, aspect_ratio, model,
             return _latch_off(f"failed to read input {p}: {e}")
 
     try:
-        results = generate_image_variants_via_api(
-            page,
-            prompt=api_prompt,
-            count=int(variants or 1),
-            model_name=model_label,
-            project_id=project_id,
-            reference_image_bytes_list=(ref_bytes_list or None),
-            aspect=api_aspect,
-        )
+        cli = _FaClient(page, project_id=project_id)
+        ref_ids = []
+        for i, b in enumerate(ref_bytes_list):
+            ref_ids.append(cli.upload_image(b, file_name=f"ref_{i}.jpg"))
+        results = []
+        for v in range(int(variants or 1)):
+            mid, mu = cli.submit_image(
+                prompt=api_prompt,
+                image_model_name=image_model,
+                reference_media_ids=ref_ids or None,
+                aspect=api_aspect,
+                cooldown=(v == 0),
+            )
+            results.append({"media_id": mid, "url": mu})
     except Exception as e:
         return _latch_off(f"api path raised: {e}")
 
@@ -3296,12 +3646,6 @@ def _flow_api_pull_submit_try(page, node_id, prompt, input_paths, variants,
         print(f"{pfx}[flow_api] disabling API path for this page session: {reason}", flush=True)
         return False
 
-    try:
-        from flow_api.client import FlowApiClient, FlowApiError
-        from flow_api import config as _fa_cfg
-    except Exception as e:
-        return _latch_off(f"flow_api module not available: {e}")
-
     project_id = ""
     try:
         m = re.search(r"/project/([0-9a-fA-F-]{36})", page.url or "")
@@ -3313,7 +3657,7 @@ def _flow_api_pull_submit_try(page, node_id, prompt, input_paths, variants,
 
     api_aspect = _IMG_API_ASPECT_MAP.get(aspect_ratio, "IMAGE_ASPECT_RATIO_PORTRAIT")
     model_label = _IMG_API_MODEL_MAP.get((model or "").lower(), "Nano Banana 2")
-    image_model = _fa_cfg.resolve_image_model_name(model_label)
+    image_model = _fa_resolve_image_model_name(model_label)
     if not image_model:
         return _latch_off(f"no imageModelName for '{model_label}'")
 
@@ -3338,7 +3682,7 @@ def _flow_api_pull_submit_try(page, node_id, prompt, input_paths, variants,
         except Exception as e:
             return _latch_off(f"failed to read ref {p}: {e}")
 
-    cli = FlowApiClient(page, project_id=project_id)
+    cli = _FaClient(page, project_id=project_id)
 
     # Upload references via private API. uploadImage has no captcha.
     try:
