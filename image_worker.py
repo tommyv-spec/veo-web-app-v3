@@ -3250,24 +3250,51 @@ class _FaTokenStore:
         return time.time() - self.captured_at if self.captured_at else 1e9
 
 
-def _fa_install_token_capture(page):
-    store = _FaTokenStore()
+# Module-level singleton — the listener attached at worker startup writes here;
+# every _FaClient reads from the same store. Critical: listener attaches BEFORE
+# the page makes its first authenticated request to Flow (which happens during
+# the initial "Navigating to Flow" step), so we don't miss the token by attaching
+# too late.
+_FA_TOKEN_STORE = _FaTokenStore()
+
+
+def _fa_attach_global_token_listener(page):
+    """Attach the request-sniff listener once per page, bound to the GLOBAL store.
+    Idempotent. Called at worker startup (right after Browser launched)."""
+    if page is None:
+        return _FA_TOKEN_STORE
+    try:
+        if getattr(page, "_fa_token_listener_installed", False):
+            return _FA_TOKEN_STORE
+    except Exception:
+        return _FA_TOKEN_STORE
 
     def _on_request(req):
         try:
             auth = (req.headers or {}).get("authorization", "")
             if auth.startswith("Bearer ya29."):
                 tok = auth[len("Bearer "):].strip()
-                if tok and tok != store.token:
-                    store.set(tok)
+                if tok and tok != _FA_TOKEN_STORE.token:
+                    _FA_TOKEN_STORE.set(tok)
         except Exception:
             pass
 
     try:
         page.on("request", _on_request)
-    except Exception:
-        pass
-    return store
+        try:
+            page._fa_token_listener_installed = True
+        except Exception:
+            pass
+        print("[flow_api] global token-capture listener attached", flush=True)
+    except Exception as e:
+        print(f"[flow_api] failed to attach global token listener: {e}", flush=True)
+    return _FA_TOKEN_STORE
+
+
+def _fa_install_token_capture(page):
+    """Compatibility shim: returns the shared global store. Ensures the listener
+    is attached if it wasn't already."""
+    return _fa_attach_global_token_listener(page)
 
 
 def _fa_wait_for_token(store, timeout=30.0):
@@ -8105,6 +8132,12 @@ def launch_browser(session_folder=SESSION_FOLDER):
     page = browser.pages[0] if browser.pages else browser.new_page()
     _stash_profile_on_page(page, session_folder)  # v486
     print("[IMAGE] ✓ Browser launched", flush=True)
+
+    # flow_api: attach the bearer-token sniff listener BEFORE any navigation to
+    # Flow happens. The page's initial auth-bearing requests (project navigate,
+    # login check, settings hydrate) fire shortly after launch; if the listener
+    # isn't attached yet they go uncaptured and _FaClient sees an empty store.
+    _fa_attach_global_token_listener(page)
 
     # v457: minimize the Chrome window immediately so it doesn't steal
     # focus when launched. The window stays running in the taskbar and
