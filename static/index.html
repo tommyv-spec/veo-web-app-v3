@@ -3477,7 +3477,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         function lifecycleSectionState(stage) {
           const v = localStorage.getItem("lc_open_" + stage);
-          if (v === null) return stage !== "published";
+          // Default: only awaiting_approval open. Operator expands others on
+          // demand. Combined with lazy section render and img loading="lazy"
+          // this keeps initial paint cheap on huge job lists (>500 jobs).
+          if (v === null) return stage === "awaiting_approval";
           return v === "1";
         }
 
@@ -3502,7 +3505,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const bn = bl[j.backend] || j.backend || 'API';
           const safeId = escapeHtml(j.id);
           const thumb = j.first_frame_url
-            ? `<img class="job-thumb" src="${escapeHtml(j.first_frame_url)}" alt="" onerror="this.outerHTML='<div class=\\'job-thumb-placeholder\\'>🎬</div>'">`
+            ? `<img class="job-thumb" loading="lazy" decoding="async" src="${escapeHtml(j.first_frame_url)}" alt="" onerror="this.outerHTML='<div class=\\'job-thumb-placeholder\\'>🎬</div>'">`
             : `<div class="job-thumb-placeholder">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`;
           const dlg = j.first_dialogue ? `<div class="job-dialogue">${escapeHtml(j.first_dialogue)}</div>` : '';
           const exportBadge = j.has_export ? '<span class="badge badge-export">🎬</span>' : '';
