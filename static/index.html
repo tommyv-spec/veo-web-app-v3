@@ -3552,32 +3552,72 @@ Example: A realistic vertical video of a professional presenter speaking directl
           return renderJobItemForLifecycle(job);
         }
 
+        // Cache the last-fetched jobs by stage so collapsed sections can render
+        // lazily on first expand (cheap DOM avoidance for sections with hundreds
+        // of rows).
+        const _lifecycleJobsByStage = { awaiting_approval: [], awaiting_export: [], awaiting_finishing: [], published: [] };
+
         function renderLifecycle(jobs, { archived = false } = {}) {
           const tracked = jobs.filter(j => j.lifecycle_stage);
           const counts = { awaiting_approval: 0, awaiting_export: 0, awaiting_finishing: 0, published: 0 };
+          // Group + sort once.
+          for (const k of LIFECYCLE_STAGES) _lifecycleJobsByStage[k] = [];
           for (const j of tracked) {
-            if (counts[j.lifecycle_stage] != null) counts[j.lifecycle_stage]++;
+            if (counts[j.lifecycle_stage] != null) {
+              counts[j.lifecycle_stage]++;
+              _lifecycleJobsByStage[j.lifecycle_stage].push(j);
+            }
           }
+          for (const k of LIFECYCLE_STAGES) {
+            _lifecycleJobsByStage[k].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+          }
+          // Update chip counts.
           for (const s of LIFECYCLE_STAGES) {
             const el = document.querySelector(`.chip-count[data-count="${s}"]`);
             if (el) el.textContent = counts[s];
           }
+          // For each section: set count + restore open state. ONLY render rows
+          // for currently-open sections; closed sections get a sentinel that
+          // the toggle listener swaps to real rows on expand. Order matters —
+          // set .open BEFORE checking detailsEl.open.
           for (const stage of LIFECYCLE_STAGES) {
             const detailsEl = document.getElementById("lc-" + stage);
             if (!detailsEl) continue;
             const rowsEl = detailsEl.querySelector(".lc-rows");
             const countEl = detailsEl.querySelector(".lc-count");
-            const stageJobs = tracked
-              .filter(j => j.lifecycle_stage === stage)
-              .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
-            rowsEl.innerHTML = stageJobs.map(renderLifecycleRow).join("") || `<div class="empty" style="padding:6px;color:#888;">none</div>`;
-            countEl.textContent = stageJobs.length;
+            countEl.textContent = _lifecycleJobsByStage[stage].length;
             detailsEl.open = lifecycleSectionState(stage);
+            if (detailsEl.open) {
+              renderLifecycleSection(stage);
+            } else {
+              rowsEl.dataset.lazyPending = "1";
+              rowsEl.innerHTML = "";
+            }
           }
         }
 
+        function renderLifecycleSection(stage) {
+          const detailsEl = document.getElementById("lc-" + stage);
+          if (!detailsEl) return;
+          const rowsEl = detailsEl.querySelector(".lc-rows");
+          const stageJobs = _lifecycleJobsByStage[stage] || [];
+          rowsEl.innerHTML = stageJobs.length
+            ? stageJobs.map(renderLifecycleRow).join("")
+            : `<div class="empty" style="padding:6px;color:#888;">none</div>`;
+          delete rowsEl.dataset.lazyPending;
+        }
+
         document.querySelectorAll("#jobsList details").forEach(d => {
-          d.addEventListener("toggle", () => persistSectionState(d.id.replace(/^lc-/, ""), d.open));
+          d.addEventListener("toggle", () => {
+            const stage = d.id.replace(/^lc-/, "");
+            persistSectionState(stage, d.open);
+            if (d.open) {
+              const rowsEl = d.querySelector(".lc-rows");
+              if (rowsEl && rowsEl.dataset.lazyPending === "1") {
+                renderLifecycleSection(stage);
+              }
+            }
+          });
         });
 
         function applySectionVisibility(stage) {
@@ -3625,7 +3665,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
               credentials: "include",
               body: JSON.stringify({ stage: next }),
             });
-            if (res.ok) refreshLifecycle();
+            if (res.ok) refreshLifecycle({ force: true });
             return;
           }
           if (t.matches(".lc-archive[data-action='archive']")) {
@@ -3641,7 +3681,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
               credentials: "include",
               body: JSON.stringify({ archived }),
             });
-            if (res.ok) refreshLifecycle();
+            if (res.ok) refreshLifecycle({ force: true });
             return;
           }
           if (t.matches(".lc-notes[data-action='notes']")) {
@@ -3658,14 +3698,39 @@ Example: A realistic vertical video of a professional presenter speaking directl
           }
         });
 
-        async function refreshLifecycle() {
+        let _lifecycleInFlight = null;
+        let _lifecycleLastFetch = 0;
+        let _lifecycleLastJobs = null;
+        let _lifecycleLastArchived = false;
+        const LIFECYCLE_REFRESH_THROTTLE_MS = 5000;
+
+        async function refreshLifecycle({ force = false } = {}) {
           const active = document.querySelector(".lifecycle-chips .chip-active");
-          const archived = active && active.dataset.stage === "archived";
-          const jobs = await fetchJobsForLifecycle({ archived });
-          renderLifecycle(jobs, { archived });
+          const archived = !!(active && active.dataset.stage === "archived");
+          const now = Date.now();
+          // If a fetch is already running, await it.
+          if (_lifecycleInFlight) return _lifecycleInFlight;
+          // Throttle: if we have recent data for the same view, reuse it.
+          if (!force && _lifecycleLastJobs && _lifecycleLastArchived === archived
+              && (now - _lifecycleLastFetch) < LIFECYCLE_REFRESH_THROTTLE_MS) {
+            renderLifecycle(_lifecycleLastJobs, { archived });
+            return;
+          }
+          _lifecycleInFlight = (async () => {
+            try {
+              const jobs = await fetchJobsForLifecycle({ archived });
+              _lifecycleLastJobs = jobs;
+              _lifecycleLastArchived = archived;
+              _lifecycleLastFetch = Date.now();
+              renderLifecycle(jobs, { archived });
+            } finally {
+              _lifecycleInFlight = null;
+            }
+          })();
+          return _lifecycleInFlight;
         }
 
-        window.addEventListener("DOMContentLoaded", refreshLifecycle);
+        window.addEventListener("DOMContentLoaded", () => refreshLifecycle({ force: true }));
 
         let _popoverJobId = null;
 
@@ -3717,7 +3782,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             });
             if (res.ok) {
               closeNotesPopover();
-              refreshLifecycle();
+              refreshLifecycle({ force: true });
             }
           } finally {
             saveBtn.disabled = false;
