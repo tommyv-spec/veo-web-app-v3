@@ -310,8 +310,10 @@ def test_list_jobs_archived_only():
 # Task 9: _maybe_auto_enter_lifecycle pure-helper tests
 # ---------------------------------------------------------------------------
 
-def test_auto_enter_lifecycle_on_completion():
-    """When trigger fires on a completed+exported job with no lifecycle, set awaiting_approval."""
+def test_auto_enter_lifecycle_with_has_export_lands_in_finishing():
+    """has_export=True implies approval+export already done (export-final enforces
+    all-clips-approved). Trigger lands the job in awaiting_finishing + backfills
+    approval_at + export_at + finishing_at to `now`."""
     fn = _LIFECYCLE_MOD._maybe_auto_enter_lifecycle
 
     now = datetime(2026, 5, 29, 12, 0, 0)
@@ -321,8 +323,10 @@ def test_auto_enter_lifecycle_on_completion():
 
     fn(job, now=now)
 
-    assert job.lifecycle_stage == "awaiting_approval"
+    assert job.lifecycle_stage == "awaiting_finishing"
     assert job.approval_at == now
+    assert job.export_at == now
+    assert job.finishing_at == now
 
 
 def test_auto_enter_lifecycle_skips_when_already_set():
@@ -357,13 +361,19 @@ def test_auto_enter_lifecycle_skips_when_not_completed():
     assert job.lifecycle_stage is None
 
 
-def test_auto_enter_lifecycle_skips_when_no_export():
+def test_auto_enter_lifecycle_without_has_export_lands_in_approval():
+    """Completed but no export yet → awaiting_approval. Only approval_at is set;
+    export_at and finishing_at stay None."""
     fn = _LIFECYCLE_MOD._maybe_auto_enter_lifecycle
 
+    now = datetime(2026, 5, 29, 12, 0, 0)
     job = _stub_job()
     job.status = "completed"
     job.has_export = False
 
-    fn(job, now=datetime(2026, 5, 29))
+    fn(job, now=now)
 
-    assert job.lifecycle_stage is None
+    assert job.lifecycle_stage == "awaiting_approval"
+    assert job.approval_at == now
+    assert job.export_at is None
+    assert job.finishing_at is None

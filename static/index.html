@@ -3578,6 +3578,11 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if (typeof openNotesPopover === "function") {
               openNotesPopover(t.closest(".lc-row"));
             }
+          } else {
+            const row = t.closest(".lc-row");
+            if (row && !t.closest("button") && typeof selectJob === "function") {
+              selectJob(row.dataset.id);
+            }
           }
         });
 

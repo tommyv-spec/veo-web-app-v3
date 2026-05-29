@@ -814,10 +814,15 @@ def _run_migrations_postgresql(engine):
 
     # v776: one-shot backfill — move already-completed jobs into the tracker.
     # Idempotent via the `lifecycle_stage IS NULL` guard.
+    # has_export=True implies all-clips-approved + export-final ran, so those
+    # jobs skip approval+export and land in awaiting_finishing (first manual
+    # stage: captions/touches in CapCut).
     backfill_sql = """
         UPDATE jobs
-        SET lifecycle_stage = 'awaiting_approval',
-            approval_at     = COALESCE(completed_at, NOW())
+        SET lifecycle_stage = 'awaiting_finishing',
+            approval_at     = COALESCE(completed_at, NOW()),
+            export_at       = COALESCE(completed_at, NOW()),
+            finishing_at    = COALESCE(completed_at, NOW())
         WHERE status = 'completed'
           AND has_export = TRUE
           AND lifecycle_stage IS NULL
@@ -826,9 +831,29 @@ def _run_migrations_postgresql(engine):
         try:
             result = conn.execute(text(backfill_sql))
             conn.commit()
-            print(f"[Migration] PostgreSQL: lifecycle backfill moved {result.rowcount} jobs to awaiting_approval", flush=True)
+            print(f"[Migration] PostgreSQL: lifecycle backfill moved {result.rowcount} jobs to awaiting_finishing", flush=True)
         except Exception as e:
             print(f"[Migration] PostgreSQL skipped lifecycle backfill: {e}", flush=True)
+
+    # v776.1: one-shot reclassify — jobs sitting in awaiting_approval with
+    # has_export=True were misclassified by the original backfill. Advance
+    # them to awaiting_finishing. Idempotent (second run finds 0 matching rows).
+    reclassify_sql = """
+        UPDATE jobs
+        SET lifecycle_stage = 'awaiting_finishing',
+            export_at       = COALESCE(export_at, approval_at, completed_at, NOW()),
+            finishing_at    = COALESCE(finishing_at, approval_at, completed_at, NOW())
+        WHERE status = 'completed'
+          AND has_export = TRUE
+          AND lifecycle_stage = 'awaiting_approval'
+    """
+    with engine.connect() as conn:
+        try:
+            result = conn.execute(text(reclassify_sql))
+            conn.commit()
+            print(f"[Migration] PostgreSQL: v776.1 reclassify moved {result.rowcount} jobs to awaiting_finishing", flush=True)
+        except Exception as e:
+            print(f"[Migration] PostgreSQL skipped v776.1 reclassify: {e}", flush=True)
 
     return engine
 

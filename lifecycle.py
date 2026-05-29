@@ -69,18 +69,29 @@ def compute_stuck_days(job, now):
 
 
 def _maybe_auto_enter_lifecycle(job, now):
-    """Idempotent T1 trigger — moves a freshly-completed+exported Job into
-    awaiting_approval. Safe to call from multiple code paths.
+    """Idempotent T1 trigger — moves a freshly-completed Job into the lifecycle.
+
+    has_export=True implies all clips approved + export-final ran (the export
+    endpoint enforces that). Such jobs skip approval+export stages and land
+    directly in awaiting_finishing (the first manual stage — captions/touches
+    in CapCut). Jobs without has_export sit in awaiting_approval.
     """
     if job.lifecycle_stage:
         return
     if job.status != "completed":
         return
-    if not job.has_export:
-        return
-    job.lifecycle_stage = LifecycleStage.AWAITING_APPROVAL.value
-    if job.approval_at is None:
-        job.approval_at = now
+    if job.has_export:
+        job.lifecycle_stage = LifecycleStage.AWAITING_FINISHING.value
+        if job.approval_at is None:
+            job.approval_at = now
+        if job.export_at is None:
+            job.export_at = now
+        if job.finishing_at is None:
+            job.finishing_at = now
+    else:
+        job.lifecycle_stage = LifecycleStage.AWAITING_APPROVAL.value
+        if job.approval_at is None:
+            job.approval_at = now
 
 
 def apply_jobs_filters(query, user_id, status, since_days, lifecycle, archived):
