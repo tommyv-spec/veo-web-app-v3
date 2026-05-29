@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KavenoBuilder</title>
+    <!-- v773.11.0: product analytics bootstrap (PostHog autocapture + replay).
+         No-ops when POSTHOG_KEY env unset. See static/posthog-bootstrap.js. -->
+    <script src="/static/posthog-bootstrap.js" defer></script>
     <link rel="icon" type="image/png" href="/static/favicon.png">
     <link rel="apple-touch-icon" href="/static/favicon.png">
     <!-- Prefetch tutorial iframe content so first-visit users don't wait

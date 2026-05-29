@@ -107,6 +107,18 @@ services:
       # Keep at 2 to avoid Veo API rate limits
       - key: MAX_JOB_WORKERS
         value: "5"
+
+      # v773.11.0 — PostHog product analytics (autocapture + session replay).
+      # POSTHOG_KEY = PUBLIC project API key (phc_...). Designed for browser
+      # exposure; safe to expose via /api/posthog-config. Unset = analytics
+      # bootstrap no-ops, so leaving this blank disables tracking cleanly.
+      # POSTHOG_HOST = ingestion endpoint. Default is the US cloud; set to
+      # https://eu.i.posthog.com for the EU region. Personal API keys for
+      # querying live elsewhere (not needed by the running service).
+      - key: POSTHOG_KEY
+        sync: false  # Set in dashboard
+      - key: POSTHOG_HOST
+        value: "https://us.i.posthog.com"
     
     # Persistent disk for job data. Highly recommended: survives restarts
     # and redeploys, so /app/data/images/ doesn't need to be re-fetched

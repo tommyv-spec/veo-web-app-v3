@@ -2993,6 +2993,39 @@ def _build_job_response(job, first_dialogue=None, first_frame_url=None):
     )
 
 
+# =============================================================================
+# Product analytics (PostHog) — config + identity endpoints
+# =============================================================================
+# v773.11.0 (2026-05-29): added PostHog integration for product analytics.
+# - GET /api/posthog-config: public endpoint, returns project key + host so
+#   the static HTML bootstrap can init PostHog. Key is the PUBLIC project
+#   API key (designed for client-side use). Returns {enabled: false} when
+#   POSTHOG_KEY env is unset so the bootstrap script no-ops gracefully.
+# - GET /api/me: returns the current user's id + email so the bootstrap can
+#   call posthog.identify(). Always 200; returns {authenticated: false}
+#   when no session cookie present (lets the bootstrap stay anon-tracking).
+@app.get("/api/posthog-config")
+async def posthog_config():
+    key = os.environ.get("POSTHOG_KEY", "").strip()
+    host = os.environ.get("POSTHOG_HOST", "https://us.i.posthog.com").strip()
+    if not key:
+        return {"enabled": False}
+    return {"enabled": True, "key": key, "host": host}
+
+
+@app.get("/api/me")
+async def whoami(
+    current_user: Optional[User] = Depends(get_optional_user),
+):
+    if current_user is None:
+        return {"authenticated": False}
+    return {
+        "authenticated": True,
+        "id": current_user.id,
+        "email": current_user.email,
+    }
+
+
 @app.get("/api/jobs", response_model=List[JobResponse])
 async def list_jobs(
     request: Request,
