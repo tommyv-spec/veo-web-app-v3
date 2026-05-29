@@ -599,13 +599,20 @@ def _whisper_anchor_trim(
         if _vc_code == 0:
             try:
                 from silero_vad import get_speech_timestamps as _gst
-                import torchaudio as _ta
+                # v773.10.16 — load WAV via soundfile, not torchaudio.load:
+                # torchaudio 2.11 routes through a separate `torchcodec`
+                # package that isn't installed, raising ImportError on every
+                # clip. soundfile is already in requirements.txt and reads
+                # PCM WAV natively. Returns float32 1-D numpy → torch.from_numpy.
+                import soundfile as _sf
+                import torch as _torch
                 _vad_model = _ensure_silero_vad()
-                _wav, _sr = _ta.load(_vad_audio_path)
-                if _wav.shape[0] > 1:
-                    _wav = _wav.mean(dim=0, keepdim=True)
+                _data, _sr = _sf.read(_vad_audio_path, dtype="float32", always_2d=False)
+                if _data.ndim > 1:
+                    _data = _data.mean(axis=1)
+                _wav = _torch.from_numpy(_data)
                 _ts = _gst(
-                    _wav.squeeze(0), _vad_model,
+                    _wav, _vad_model,
                     sampling_rate=16000,
                     min_silence_duration_ms=400,
                     speech_pad_ms=int(_FRAME_PAD * 1000),
