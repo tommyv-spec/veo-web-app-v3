@@ -3483,16 +3483,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const stuckStr = (stuck != null && stuck > 0)
             ? `<span class="stuck${stuck > 3 ? " warn" : ""}">stuck ${stuck}d</span>` : "";
           const ns = nextStage(job.lifecycle_stage);
+          const safeId = escapeHtml(job.id);
           const advanceBtn = ns
-            ? `<button class="advance" data-id="${job.id}" data-next="${ns}">→ ${STAGE_LABEL[ns].replace("Awaiting ", "")}</button>` : "";
+            ? `<button class="advance" data-id="${safeId}" data-next="${ns}">→ ${STAGE_LABEL[ns].replace("Awaiting ", "")}</button>` : "";
           const notesClass = job.notes ? "notes-btn has-notes" : "notes-btn";
           return `
-            <div class="lc-row" data-id="${job.id}">
-              <span class="title">${shortenSlug(slug)}</span>
+            <div class="lc-row" data-id="${safeId}">
+              <span class="title">${escapeHtml(shortenSlug(slug))}</span>
               ${stuckStr}
               <button class="${notesClass}" data-action="notes" title="Notes">📝</button>
               ${advanceBtn}
-              <button class="advance" data-action="archive" data-id="${job.id}" title="Archive">📦</button>
+              <button class="advance" data-action="archive" data-id="${safeId}" title="Archive">📦</button>
             </div>`;
         }
 
