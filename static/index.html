@@ -3580,11 +3580,26 @@ Example: A realistic vertical video of a professional presenter speaking directl
           d.addEventListener("toggle", () => persistSectionState(d.id.replace(/^lc-/, ""), d.open));
         });
 
+        function applySectionVisibility(stage) {
+          // stage: "all" / "archived" / one of LIFECYCLE_STAGES — hide non-target
+          // <details> sections. archived chip swaps the data source (separate
+          // fetch); sections still show grouped by lifecycle_stage but only the
+          // ones with archived jobs will have rows.
+          const showAll = stage === "all" || stage === "archived";
+          for (const s of LIFECYCLE_STAGES) {
+            const el = document.getElementById("lc-" + s);
+            if (!el) continue;
+            el.style.display = (showAll || stage === s) ? "" : "none";
+            if (!showAll && stage === s) el.open = true;
+          }
+        }
+
         document.querySelectorAll(".lifecycle-chips .chip").forEach(c => {
           c.addEventListener("click", async () => {
             document.querySelectorAll(".lifecycle-chips .chip").forEach(x => x.classList.remove("chip-active"));
             c.classList.add("chip-active");
             const stage = c.dataset.stage;
+            applySectionVisibility(stage);
             if (stage === "archived") {
               const jobs = await fetchJobsForLifecycle({ archived: true });
               renderLifecycle(jobs, { archived: true });
@@ -3593,7 +3608,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
               renderLifecycle(jobs);
               if (stage !== "all") {
                 const el = document.getElementById("lc-" + stage);
-                if (el) { el.open = true; el.scrollIntoView({ behavior: "smooth", block: "start" }); }
+                if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
               }
             }
           });
