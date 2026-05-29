@@ -3391,7 +3391,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
             div.textContent = text;
             return div.innerHTML;
         }
-        
+
+        // === Post-render lifecycle (2026-05-29) ===
+        function shortenSlug(slug) {
+          if (!slug) return "(untitled)";
+          return slug
+            .replace(/^nuri-korella-/, "")
+            .replace(/^(ed|fiber|mens|male-vitality|puffy-face|testosterone)-/, "")
+            .replace(/-v(\d+)$/, " · v$1")
+            .replace(/-/g, " · ");
+        }
+
         async function revalidateKey(keyId) {
             try {
                 const res = await fetch(`/api/user/keys/${keyId}/revalidate`, { method: 'POST' });
