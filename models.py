@@ -208,6 +208,17 @@ class Job(Base):
     # delete the DB row.
     abort_requested = Column(Boolean, default=False, nullable=True)
     
+    # === Post-render lifecycle tracker (2026-05-29) ===
+    # See docs/superpowers/specs/2026-05-29-video-lifecycle-tracker-design.md.
+    # NULL while Job is pre-completion. Auto-entered on COMPLETED + has_export.
+    lifecycle_stage = Column(String(32), nullable=True, default=None)
+    approval_at = Column(DateTime, nullable=True)
+    export_at = Column(DateTime, nullable=True)
+    finishing_at = Column(DateTime, nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    notes = Column(Text, nullable=True)
+    archived = Column(Boolean, nullable=False, default=False)
+
     # Relationships
     user = relationship("User", back_populates="jobs")
     clips = relationship("Clip", back_populates="job", cascade="all, delete-orphan")
@@ -763,6 +774,14 @@ def _run_migrations_postgresql(engine):
         ("jobs", "abort_requested", "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS abort_requested BOOLEAN DEFAULT FALSE"),
         # v759: per-user image worker scoping
         ("image_worker_heartbeats", "user_id", "ALTER TABLE image_worker_heartbeats ADD COLUMN IF NOT EXISTS user_id TEXT"),
+        # Post-render lifecycle tracker (2026-05-29)
+        ("jobs", "lifecycle_stage", "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lifecycle_stage VARCHAR(32)"),
+        ("jobs", "approval_at",     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS approval_at TIMESTAMP"),
+        ("jobs", "export_at",       "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS export_at TIMESTAMP"),
+        ("jobs", "finishing_at",    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS finishing_at TIMESTAMP"),
+        ("jobs", "published_at",    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS published_at TIMESTAMP"),
+        ("jobs", "notes",           "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS notes TEXT"),
+        ("jobs", "archived",        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE"),
     ]
 
     with engine.connect() as conn:
@@ -782,6 +801,7 @@ def _run_migrations_postgresql(engine):
     index_migrations = [
         "CREATE INDEX IF NOT EXISTS ix_jobs_user_created ON jobs (user_id, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS ix_clips_job_status ON clips (job_id, status)",
+        "CREATE INDEX IF NOT EXISTS ix_jobs_user_lifecycle ON jobs (user_id, lifecycle_stage, archived)",
     ]
     with engine.connect() as conn:
         for sql in index_migrations:
@@ -791,6 +811,24 @@ def _run_migrations_postgresql(engine):
                 print(f"[Migration] PostgreSQL: ensured index — {sql}", flush=True)
             except Exception as e:
                 print(f"[Migration] PostgreSQL skipped index: {e}", flush=True)
+
+    # v776: one-shot backfill — move already-completed jobs into the tracker.
+    # Idempotent via the `lifecycle_stage IS NULL` guard.
+    backfill_sql = """
+        UPDATE jobs
+        SET lifecycle_stage = 'awaiting_approval',
+            approval_at     = COALESCE(completed_at, NOW())
+        WHERE status = 'completed'
+          AND has_export = TRUE
+          AND lifecycle_stage IS NULL
+    """
+    with engine.connect() as conn:
+        try:
+            result = conn.execute(text(backfill_sql))
+            conn.commit()
+            print(f"[Migration] PostgreSQL: lifecycle backfill moved {result.rowcount} jobs to awaiting_approval", flush=True)
+        except Exception as e:
+            print(f"[Migration] PostgreSQL skipped lifecycle backfill: {e}", flush=True)
 
     return engine
 
@@ -826,8 +864,16 @@ def _run_migrations_sqlite(engine):
         ("jobs", "abort_requested", "ALTER TABLE jobs ADD COLUMN abort_requested INTEGER DEFAULT 0"),
         # v759: per-user image worker scoping
         ("image_worker_heartbeats", "user_id", "ALTER TABLE image_worker_heartbeats ADD COLUMN user_id TEXT"),
+        # Post-render lifecycle tracker (2026-05-29)
+        ("jobs", "lifecycle_stage", "ALTER TABLE jobs ADD COLUMN lifecycle_stage TEXT"),
+        ("jobs", "approval_at",     "ALTER TABLE jobs ADD COLUMN approval_at DATETIME"),
+        ("jobs", "export_at",       "ALTER TABLE jobs ADD COLUMN export_at DATETIME"),
+        ("jobs", "finishing_at",    "ALTER TABLE jobs ADD COLUMN finishing_at DATETIME"),
+        ("jobs", "published_at",    "ALTER TABLE jobs ADD COLUMN published_at DATETIME"),
+        ("jobs", "notes",           "ALTER TABLE jobs ADD COLUMN notes TEXT"),
+        ("jobs", "archived",        "ALTER TABLE jobs ADD COLUMN archived INTEGER DEFAULT 0"),
     ]
-    
+
     with engine.connect() as conn:
         for table, column, sql in migrations:
             try:
@@ -874,6 +920,30 @@ def _run_migrations_sqlite(engine):
                 print(f"[Migration] SQLite: ensured index — {sql}", flush=True)
             except Exception as e:
                 print(f"[Migration] SQLite skipped index: {e}", flush=True)
+
+    # v776: lifecycle index + one-shot backfill (SQLite).
+    with engine.connect() as conn:
+        try:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_jobs_user_lifecycle "
+                "ON jobs (user_id, lifecycle_stage, archived)"
+            ))
+            conn.commit()
+        except Exception as e:
+            print(f"[Migration] SQLite skipped lifecycle index: {e}", flush=True)
+        try:
+            result = conn.execute(text(
+                "UPDATE jobs "
+                "SET lifecycle_stage = 'awaiting_approval', "
+                "    approval_at     = COALESCE(completed_at, CURRENT_TIMESTAMP) "
+                "WHERE status = 'completed' "
+                "  AND has_export = 1 "
+                "  AND lifecycle_stage IS NULL"
+            ))
+            conn.commit()
+            print(f"[Migration] SQLite: lifecycle backfill moved {result.rowcount} jobs to awaiting_approval", flush=True)
+        except Exception as e:
+            print(f"[Migration] SQLite skipped lifecycle backfill: {e}", flush=True)
 
 
 @contextmanager

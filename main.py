@@ -147,6 +147,7 @@ from models import (
     init_db, get_db_session, Job, Clip, JobLog, BlacklistEntry,
     get_job_logs_since, add_job_log, User, UserAPIKey, UserWorkerToken
 )
+from lifecycle import apply_lifecycle_change, compute_stuck_days, apply_jobs_filters, _maybe_auto_enter_lifecycle, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
 from worker import worker, WORKER_VERSION
 from error_handler import ErrorCode
 
@@ -306,22 +307,9 @@ class CreateJobRequest(BaseModel):
     image_batch_id: Optional[str] = None
 
 
-class JobResponse(BaseModel):
-    id: str
-    status: str
-    progress_percent: float
-    total_clips: int
-    completed_clips: int
-    failed_clips: int
-    skipped_clips: int
-    created_at: Optional[str]
-    started_at: Optional[str]
-    completed_at: Optional[str]
-    backend: Optional[str] = None
-    first_dialogue: Optional[str] = None
-    first_frame_url: Optional[str] = None
-    has_export: bool = False
-    has_voice_clone: bool = False
+# JobResponse is defined in job_response.py so tests can import it without
+# loading the full FastAPI application (which has startup side effects).
+from job_response import JobResponse  # noqa: E402
 
 
 class ClipResponse(BaseModel):
@@ -982,6 +970,7 @@ async def backfill_export_voice_badges(
                 has_exp = any(f.startswith("final_") or f.startswith("export_") for f in filenames)
                 if has_exp:
                     job.has_export = True
+                    _maybe_auto_enter_lifecycle(job, now=datetime.utcnow())
                     export_count += 1
             
             if not getattr(job, 'has_voice_clone', False):
@@ -2141,6 +2130,14 @@ async def _create_job_impl(
         backend=job.backend,
         first_dialogue=dialogue_list[0].get('text', '')[:80] if dialogue_list else None,
         first_frame_url=None,
+        lifecycle_stage=job.lifecycle_stage,
+        approval_at=job.approval_at.isoformat() if job.approval_at else None,
+        export_at=job.export_at.isoformat() if job.export_at else None,
+        finishing_at=job.finishing_at.isoformat() if job.finishing_at else None,
+        published_at=job.published_at.isoformat() if job.published_at else None,
+        notes=job.notes,
+        archived=bool(getattr(job, 'archived', False)),
+        stuck_days=compute_stuck_days(job, datetime.utcnow()),
     )
     
     # Spawn background task for frame upload + prompt generation
@@ -2967,10 +2964,74 @@ async def _setup_job_background(
     finally:
         db.close()
 
+def _build_job_response(job, first_dialogue=None, first_frame_url=None):
+    """Shared JobResponse serializer. Used by list_jobs, get_job, patch_lifecycle, patch_archive."""
+    return JobResponse(
+        id=job.id,
+        status=job.status,
+        progress_percent=job.progress_percent,
+        total_clips=job.total_clips,
+        completed_clips=job.completed_clips,
+        failed_clips=job.failed_clips,
+        skipped_clips=job.skipped_clips,
+        created_at=job.created_at.isoformat() if job.created_at else None,
+        started_at=job.started_at.isoformat() if job.started_at else None,
+        completed_at=job.completed_at.isoformat() if job.completed_at else None,
+        backend=job.backend,
+        first_dialogue=first_dialogue,
+        first_frame_url=first_frame_url,
+        has_export=bool(getattr(job, 'has_export', False)),
+        has_voice_clone=bool(getattr(job, 'has_voice_clone', False)),
+        lifecycle_stage=job.lifecycle_stage,
+        approval_at=job.approval_at.isoformat() if job.approval_at else None,
+        export_at=job.export_at.isoformat() if job.export_at else None,
+        finishing_at=job.finishing_at.isoformat() if job.finishing_at else None,
+        published_at=job.published_at.isoformat() if job.published_at else None,
+        notes=job.notes,
+        archived=bool(getattr(job, 'archived', False)),
+        stuck_days=compute_stuck_days(job, datetime.utcnow()),
+    )
+
+
+# =============================================================================
+# Product analytics (PostHog) — config + identity endpoints
+# =============================================================================
+# v773.11.0 (2026-05-29): added PostHog integration for product analytics.
+# - GET /api/posthog-config: public endpoint, returns project key + host so
+#   the static HTML bootstrap can init PostHog. Key is the PUBLIC project
+#   API key (designed for client-side use). Returns {enabled: false} when
+#   POSTHOG_KEY env is unset so the bootstrap script no-ops gracefully.
+# - GET /api/me: returns the current user's id + email so the bootstrap can
+#   call posthog.identify(). Always 200; returns {authenticated: false}
+#   when no session cookie present (lets the bootstrap stay anon-tracking).
+@app.get("/api/posthog-config")
+async def posthog_config():
+    key = os.environ.get("POSTHOG_KEY", "").strip()
+    host = os.environ.get("POSTHOG_HOST", "https://us.i.posthog.com").strip()
+    if not key:
+        return {"enabled": False}
+    return {"enabled": True, "key": key, "host": host}
+
+
+@app.get("/api/me")
+async def whoami(
+    current_user: Optional[User] = Depends(get_optional_user),
+):
+    if current_user is None:
+        return {"authenticated": False}
+    return {
+        "authenticated": True,
+        "id": current_user.id,
+        "email": current_user.email,
+    }
+
+
 @app.get("/api/jobs", response_model=List[JobResponse])
 async def list_jobs(
     request: Request,
     status: Optional[str] = None,
+    lifecycle: Optional[str] = None,
+    archived: bool = False,
     limit: int = Query(default=50, le=2000),
     offset: int = 0,
     since_days: int = Query(default=3, ge=0, le=3650),
@@ -2987,17 +3048,20 @@ async def list_jobs(
     surface older rows that the prior cap was hiding. The frontend scales
     limit alongside the window (3d → 50, 14d → 300, 90d → 1000, all → 2000)
     so payload size stays bounded.
+
+    lifecycle — filter by lifecycle_stage value; "any" = has any stage;
+    "null" = no stage assigned.
+    archived — when True, return only archived jobs.
     """
-    query = db.query(Job).filter(
-        Job.user_id == current_user.id
+    query = db.query(Job)
+    query = apply_jobs_filters(
+        query,
+        user_id=current_user.id,
+        status=status,
+        since_days=since_days,
+        lifecycle=lifecycle,
+        archived=archived,
     )
-
-    if status:
-        query = query.filter(Job.status == status)
-
-    if since_days > 0:
-        cutoff = datetime.utcnow() - timedelta(days=since_days)
-        query = query.filter(Job.created_at >= cutoff)
 
     jobs = query.order_by(Job.created_at.desc()).offset(offset).limit(limit).all()
     
@@ -3025,23 +3089,7 @@ async def list_jobs(
                 fname = first_clip.start_frame.split('/')[-1]
                 first_frame_url = f"{base_url}/api/jobs/{j.id}/images/{fname}"
         
-        result.append(JobResponse(
-            id=j.id,
-            status=j.status,
-            progress_percent=j.progress_percent,
-            total_clips=j.total_clips,
-            completed_clips=j.completed_clips,
-            failed_clips=j.failed_clips,
-            skipped_clips=j.skipped_clips,
-            created_at=j.created_at.isoformat() if j.created_at else None,
-            started_at=j.started_at.isoformat() if j.started_at else None,
-            completed_at=j.completed_at.isoformat() if j.completed_at else None,
-            backend=j.backend,
-            first_dialogue=first_dialogue,
-            first_frame_url=first_frame_url,
-            has_export=bool(getattr(j, 'has_export', False)),
-            has_voice_clone=bool(getattr(j, 'has_voice_clone', False)),
-        ))
+        result.append(_build_job_response(j, first_dialogue=first_dialogue, first_frame_url=first_frame_url))
     
     return result
 
@@ -3084,19 +3132,7 @@ async def get_job(
     """Get job details"""
     job = get_user_job(db, job_id, current_user)
     
-    return JobResponse(
-        id=job.id,
-        status=job.status,
-        progress_percent=job.progress_percent,
-        total_clips=job.total_clips,
-        completed_clips=job.completed_clips,
-        failed_clips=job.failed_clips,
-        skipped_clips=job.skipped_clips,
-        created_at=job.created_at.isoformat() if job.created_at else None,
-        started_at=job.started_at.isoformat() if job.started_at else None,
-        completed_at=job.completed_at.isoformat() if job.completed_at else None,
-        backend=job.backend,
-    )
+    return _build_job_response(job)
 
 
 @app.get("/api/jobs/{job_id}/config")
@@ -3341,6 +3377,51 @@ async def delete_job(
     db.commit()
     
     return {"status": "deleted", "job_id": job_id}
+
+
+@app.patch("/api/jobs/{job_id}/lifecycle", response_model=JobResponse)
+async def patch_job_lifecycle(
+    job_id: str,
+    req: UpdateLifecycleRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Advance, move-back, or annotate a Job's post-render lifecycle stage.
+
+    See docs/superpowers/specs/2026-05-29-video-lifecycle-tracker-design.md §6.1.
+    """
+    job = get_user_job(db, job_id, current_user)
+    try:
+        apply_lifecycle_change(
+            job,
+            stage=req.stage,
+            notes=req.notes,
+            now=datetime.utcnow(),
+            clear=req.clear,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    job.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(job)
+    return _build_job_response(job)
+
+
+@app.patch("/api/jobs/{job_id}/archive", response_model=JobResponse)
+async def patch_job_archive(
+    job_id: str,
+    req: UpdateArchiveRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Toggle the archived flag on a Job. Orthogonal to lifecycle stage."""
+    job = get_user_job(db, job_id, current_user)
+    job.archived = bool(req.archived)
+    job.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(job)
+    return _build_job_response(job)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -4198,6 +4279,22 @@ async def replace_clip_image(
 # ─────────────────────────────────────────────────────────────────────────────
 
 import re as _re_v735
+
+
+class UpdateLifecycleRequest(BaseModel):
+    """PATCH /api/jobs/{id}/lifecycle body.
+
+    All fields optional. Sending only `notes` updates notes without changing
+    stage. Sending `stage=None` with `clear=True` removes the Job from the
+    tracker (rare; used for test renders).
+    """
+    stage: Optional[str] = None
+    notes: Optional[str] = None
+    clear: bool = False
+
+
+class UpdateArchiveRequest(BaseModel):
+    archived: bool
 
 
 class UpdateClipRequest(BaseModel):
@@ -8082,8 +8179,9 @@ async def export_final_video(
         if job.backend != 'import':
             audio_info = await _extract_and_upload_audio(output_path, job_id, output_filename)
 
-        # Mark job as exported
+        # Mark job as exported (v776: also enter post-render lifecycle).
         job.has_export = True
+        _maybe_auto_enter_lifecycle(job, now=datetime.utcnow())
         db.commit()
 
         return {

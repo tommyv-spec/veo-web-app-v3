@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KavenoBuilder</title>
+    <!-- v773.11.0: product analytics bootstrap (PostHog autocapture + replay).
+         No-ops when POSTHOG_KEY env unset. See static/posthog-bootstrap.js. -->
+    <script src="/static/posthog-bootstrap.js" defer></script>
     <link rel="icon" type="image/png" href="/static/favicon.png">
     <link rel="apple-touch-icon" href="/static/favicon.png">
     <!-- Prefetch tutorial iframe content so first-visit users don't wait
@@ -1271,7 +1274,37 @@
         .badge-export { font-size: 9px; padding: 1px 6px; border-radius: 4px; background: rgba(16,185,129,0.18); color: #6ee7b7; }
         .badge-voice { font-size: 9px; padding: 1px 6px; border-radius: 4px; background: rgba(168,85,247,0.18); color: #c084fc; }
         .job-dialogue { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
-        
+
+        /* === Lifecycle dashboard (2026-05-29) === */
+        .lifecycle-chips .chip {
+          padding: 4px 10px; border-radius: 14px; border: 1px solid var(--border);
+          background: var(--bg-soft); color: var(--text); font-size: 13px;
+          cursor: pointer;
+        }
+        .lifecycle-chips .chip-active { background: var(--accent); color: #fff; }
+        .lifecycle-chips .chip-count {
+          display: inline-block; min-width: 16px; padding: 0 5px;
+          background: rgba(255,255,255,0.2); border-radius: 8px; margin-left: 4px;
+          font-size: 11px; text-align: center;
+        }
+        #jobsList details { margin: 6px 0; }
+        #jobsList details > summary { cursor: pointer; padding: 6px 0; font-weight: 600; }
+        #jobsList .lc-rows { padding-left: 12px; }
+        #jobsList .lc-row {
+          display: flex; align-items: center; gap: 8px;
+          padding: 6px 8px; border-bottom: 1px solid var(--border);
+        }
+        #jobsList .lc-row .title { flex: 1; }
+        #jobsList .lc-row .stuck { color: #c33; font-size: 11px; }
+        #jobsList .lc-row .stuck.warn { color: #c33; font-weight: 600; }
+        #jobsList .lc-row .notes-btn { background: none; border: none; cursor: pointer; opacity: 0.5; }
+        #jobsList .lc-row .notes-btn.has-notes { opacity: 1; color: var(--accent); }
+        #jobsList .lc-row button.advance { font-size: 12px; padding: 3px 8px; }
+        @media (max-width: 768px) {
+          .lifecycle-chips { overflow-x: auto; flex-wrap: nowrap; }
+          .lifecycle-chips .chip { white-space: nowrap; }
+        }
+
         .progress-bar { height: 4px; background: var(--bg-input); border-radius: 2px; overflow: hidden; }
         .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width 0.3s ease; }
         .progress-text { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); margin-top: 6px; }
@@ -2260,6 +2293,13 @@
     </style>
 </head>
 <body>
+    <div id="lifecycleNotesPopover" style="display:none;position:absolute;z-index:1000;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;box-shadow:0 4px 16px rgba(0,0,0,0.2);width:280px;">
+      <textarea id="lifecycleNotesText" rows="4" style="width:100%;font-family:inherit;padding:6px;box-sizing:border-box;"></textarea>
+      <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:8px;">
+        <button id="lifecycleNotesCancel" class="btn btn-secondary btn-sm">Cancel</button>
+        <button id="lifecycleNotesSave" class="btn btn-primary btn-sm">Save</button>
+      </div>
+    </div>
     <!-- Hidden 1x1 transparent image for drag preview -->
     <!-- v509: ingredient-name suggestions for parent-slot role inputs -->
     <datalist id="imgIngredientNameSuggestions">
@@ -2874,7 +2914,20 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 
                 <div class="card" id="jobsCard" style="display:none;">
                     <div class="card-title">📋 Jobs</div>
-                    <div class="jobs-list" id="jobsList"><div class="empty"><h3>No jobs yet</h3></div></div>
+                    <div class="lifecycle-chips" id="lifecycleChips" style="display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;">
+                        <button class="chip chip-active" data-stage="all">All</button>
+                        <button class="chip" data-stage="awaiting_approval">Approval <span class="chip-count" data-count="awaiting_approval">0</span></button>
+                        <button class="chip" data-stage="awaiting_export">Export <span class="chip-count" data-count="awaiting_export">0</span></button>
+                        <button class="chip" data-stage="awaiting_finishing">Finishing <span class="chip-count" data-count="awaiting_finishing">0</span></button>
+                        <button class="chip" data-stage="published">Published <span class="chip-count" data-count="published">0</span></button>
+                        <button class="chip" data-stage="archived">Archive</button>
+                    </div>
+                    <div class="jobs-list" id="jobsList">
+                        <details id="lc-awaiting_approval" open><summary>Awaiting approval (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
+                        <details id="lc-awaiting_export" open><summary>Awaiting export (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
+                        <details id="lc-awaiting_finishing" open><summary>Awaiting finishing (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
+                        <details id="lc-published"><summary>Published (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
+                    </div>
                 </div>
             </div>
             
@@ -3391,7 +3444,217 @@ Example: A realistic vertical video of a professional presenter speaking directl
             div.textContent = text;
             return div.innerHTML;
         }
-        
+
+        // === Post-render lifecycle (2026-05-29) ===
+        function shortenSlug(slug) {
+          if (!slug) return "(untitled)";
+          return slug
+            .replace(/^nuri-korella-/, "")
+            .replace(/^(ed|fiber|mens|male-vitality|puffy-face|testosterone)-/, "")
+            .replace(/-v(\d+)$/, " · v$1")
+            .replace(/-/g, " · ");
+        }
+
+        // === Lifecycle dashboard renderer (2026-05-29) ===
+        const LIFECYCLE_STAGES = ["awaiting_approval", "awaiting_export", "awaiting_finishing", "published"];
+        const STAGE_LABEL = {
+          awaiting_approval: "Awaiting approval",
+          awaiting_export: "Awaiting export",
+          awaiting_finishing: "Awaiting finishing",
+          published: "Published",
+        };
+
+        function nextStage(stage) {
+          const i = LIFECYCLE_STAGES.indexOf(stage);
+          return (i >= 0 && i < LIFECYCLE_STAGES.length - 1) ? LIFECYCLE_STAGES[i + 1] : null;
+        }
+
+        function lifecycleSectionState(stage) {
+          const v = localStorage.getItem("lc_open_" + stage);
+          if (v === null) return stage !== "published";
+          return v === "1";
+        }
+
+        function persistSectionState(stage, isOpen) {
+          localStorage.setItem("lc_open_" + stage, isOpen ? "1" : "0");
+        }
+
+        async function fetchJobsForLifecycle({ archived = false } = {}) {
+          const q = new URLSearchParams({ since_days: "0", limit: "2000" });
+          if (archived) q.set("archived", "true");
+          const res = await fetch("/api/jobs?" + q.toString(), { credentials: "include" });
+          if (!res.ok) return [];
+          return await res.json();
+        }
+
+        function renderLifecycleRow(job) {
+          const slug = (job.first_dialogue || job.id || "").toString();
+          const stuck = job.stuck_days;
+          const stuckStr = (stuck != null && stuck > 0)
+            ? `<span class="stuck${stuck > 3 ? " warn" : ""}">stuck ${stuck}d</span>` : "";
+          const ns = nextStage(job.lifecycle_stage);
+          const safeId = escapeHtml(job.id);
+          const advanceBtn = ns
+            ? `<button class="advance" data-id="${safeId}" data-next="${ns}">→ ${STAGE_LABEL[ns].replace("Awaiting ", "")}</button>` : "";
+          const notesClass = job.notes ? "notes-btn has-notes" : "notes-btn";
+          return `
+            <div class="lc-row" data-id="${safeId}">
+              <span class="title">${escapeHtml(shortenSlug(slug))}</span>
+              ${stuckStr}
+              <button class="${notesClass}" data-action="notes" title="Notes">📝</button>
+              ${advanceBtn}
+              <button class="advance" data-action="archive" data-id="${safeId}" title="Archive">📦</button>
+            </div>`;
+        }
+
+        function renderLifecycle(jobs, { archived = false } = {}) {
+          const tracked = jobs.filter(j => j.lifecycle_stage);
+          const counts = { awaiting_approval: 0, awaiting_export: 0, awaiting_finishing: 0, published: 0 };
+          for (const j of tracked) {
+            if (counts[j.lifecycle_stage] != null) counts[j.lifecycle_stage]++;
+          }
+          for (const s of LIFECYCLE_STAGES) {
+            const el = document.querySelector(`.chip-count[data-count="${s}"]`);
+            if (el) el.textContent = counts[s];
+          }
+          for (const stage of LIFECYCLE_STAGES) {
+            const detailsEl = document.getElementById("lc-" + stage);
+            if (!detailsEl) continue;
+            const rowsEl = detailsEl.querySelector(".lc-rows");
+            const countEl = detailsEl.querySelector(".lc-count");
+            const stageJobs = tracked
+              .filter(j => j.lifecycle_stage === stage)
+              .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+            rowsEl.innerHTML = stageJobs.map(renderLifecycleRow).join("") || `<div class="empty" style="padding:6px;color:#888;">none</div>`;
+            countEl.textContent = stageJobs.length;
+            detailsEl.open = lifecycleSectionState(stage);
+          }
+        }
+
+        document.querySelectorAll("#jobsList details").forEach(d => {
+          d.addEventListener("toggle", () => persistSectionState(d.id.replace(/^lc-/, ""), d.open));
+        });
+
+        document.querySelectorAll(".lifecycle-chips .chip").forEach(c => {
+          c.addEventListener("click", async () => {
+            document.querySelectorAll(".lifecycle-chips .chip").forEach(x => x.classList.remove("chip-active"));
+            c.classList.add("chip-active");
+            const stage = c.dataset.stage;
+            if (stage === "archived") {
+              const jobs = await fetchJobsForLifecycle({ archived: true });
+              renderLifecycle(jobs, { archived: true });
+            } else {
+              const jobs = await fetchJobsForLifecycle();
+              renderLifecycle(jobs);
+              if (stage !== "all") {
+                const el = document.getElementById("lc-" + stage);
+                if (el) { el.open = true; el.scrollIntoView({ behavior: "smooth", block: "start" }); }
+              }
+            }
+          });
+        });
+
+        document.getElementById("jobsList").addEventListener("click", async (ev) => {
+          const t = ev.target;
+          if (t.matches(".advance[data-next]")) {
+            const id = t.dataset.id, next = t.dataset.next;
+            const res = await fetch(`/api/jobs/${id}/lifecycle`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ stage: next }),
+            });
+            if (res.ok) refreshLifecycle();
+          } else if (t.matches(".advance[data-action='archive']")) {
+            const id = t.dataset.id;
+            const res = await fetch(`/api/jobs/${id}/archive`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ archived: true }),
+            });
+            if (res.ok) refreshLifecycle();
+          } else if (t.matches(".notes-btn[data-action='notes']")) {
+            if (typeof openNotesPopover === "function") {
+              openNotesPopover(t.closest(".lc-row"));
+            }
+          }
+        });
+
+        async function refreshLifecycle() {
+          const active = document.querySelector(".lifecycle-chips .chip-active");
+          const archived = active && active.dataset.stage === "archived";
+          const jobs = await fetchJobsForLifecycle({ archived });
+          renderLifecycle(jobs, { archived });
+        }
+
+        window.addEventListener("DOMContentLoaded", refreshLifecycle);
+
+        let _popoverJobId = null;
+
+        function openNotesPopover(rowEl) {
+          if (!rowEl) return;
+          const popover = document.getElementById("lifecycleNotesPopover");
+          const text = document.getElementById("lifecycleNotesText");
+          _popoverJobId = rowEl.dataset.id;
+          fetch(`/api/jobs/${_popoverJobId}`, { credentials: "include" })
+            .then(r => r.ok ? r.json() : null)
+            .then(j => { text.value = (j && j.notes) || ""; });
+          popover.style.right = "";
+          popover.style.bottom = "";
+          popover.style.width = "280px";
+          popover.style.borderRadius = "6px";
+          const rect = rowEl.getBoundingClientRect();
+          popover.style.left = Math.min(rect.left + window.scrollX, window.innerWidth - 300) + "px";
+          popover.style.top = (rect.bottom + window.scrollY + 4) + "px";
+          popover.style.display = "block";
+          if (window.innerWidth < 768) {
+            popover.style.left = "0";
+            popover.style.right = "0";
+            popover.style.top = "auto";
+            popover.style.bottom = "0";
+            popover.style.width = "100%";
+            popover.style.borderRadius = "12px 12px 0 0";
+          }
+          text.focus();
+        }
+
+        function closeNotesPopover() {
+          document.getElementById("lifecycleNotesPopover").style.display = "none";
+          _popoverJobId = null;
+        }
+
+        document.getElementById("lifecycleNotesCancel").addEventListener("click", closeNotesPopover);
+        document.getElementById("lifecycleNotesSave").addEventListener("click", async (ev) => {
+          if (!_popoverJobId) return;
+          const saveBtn = ev.currentTarget;
+          if (saveBtn.disabled) return;
+          saveBtn.disabled = true;
+          try {
+            const notes = document.getElementById("lifecycleNotesText").value;
+            const res = await fetch(`/api/jobs/${_popoverJobId}/lifecycle`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ notes }),
+            });
+            if (res.ok) {
+              closeNotesPopover();
+              refreshLifecycle();
+            }
+          } finally {
+            saveBtn.disabled = false;
+          }
+        });
+
+        document.addEventListener("click", (ev) => {
+          const popover = document.getElementById("lifecycleNotesPopover");
+          if (popover.style.display !== "block") return;
+          if (popover.contains(ev.target)) return;
+          if (ev.target.matches(".notes-btn")) return;
+          closeNotesPopover();
+        });
+
         async function revalidateKey(keyId) {
             try {
                 const res = await fetch(`/api/user/keys/${keyId}/revalidate`, { method: 'POST' });
@@ -7609,6 +7872,16 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
         async function refreshJobs(){try{const r=await fetch(`${API}/jobs?${_jobsQuery()}`);const jobs=await r.json();if(jobs.length>0){hasJobs=true;setActiveState();}await refreshJobsList();}catch(e){}}
         async function refreshJobsList(){
+            // === Lifecycle dashboard takeover (2026-05-29) ===
+            // The new sectioned-list + chip-row UI owns #jobsList. When the new
+            // DOM is present (detected by .lifecycle-chips sibling), delegate to
+            // refreshLifecycle and skip the old innerHTML clobber.
+            if (document.getElementById('lifecycleChips')) {
+                if (typeof refreshLifecycle === 'function') {
+                    try { await refreshLifecycle(); } catch(e) { console.warn('[refreshLifecycle] failed:', e); }
+                }
+                return;
+            }
             try{const r=await fetch(`${API}/jobs?${_jobsQuery()}`);const jobs=await r.json();const c=document.getElementById('jobsList');
             if(!jobs.length){
                 // v726 — if filter is active and result empty, offer to widen.
