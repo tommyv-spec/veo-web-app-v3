@@ -57,3 +57,94 @@ def test_job_has_lifecycle_columns():
     }
     missing = expected - cols
     assert not missing, f"Missing columns on Job: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Task 3: apply_lifecycle_change pure-helper tests
+# Option B: load code/lifecycle.py via importlib (avoids FastAPI side effects).
+# ---------------------------------------------------------------------------
+_LIFECYCLE_SPEC = importlib.util.spec_from_file_location(
+    "lifecycle",
+    pathlib.Path(__file__).parent / "lifecycle.py",
+)
+_LIFECYCLE_MOD = importlib.util.module_from_spec(_LIFECYCLE_SPEC)
+_LIFECYCLE_SPEC.loader.exec_module(_LIFECYCLE_MOD)
+
+apply_lifecycle_change = _LIFECYCLE_MOD.apply_lifecycle_change
+
+
+from datetime import datetime
+from types import SimpleNamespace
+
+
+def _stub_job(**overrides):
+    """Minimal duck-typed Job stand-in (no DB) for pure-helper tests."""
+    base = dict(
+        lifecycle_stage=None,
+        approval_at=None,
+        export_at=None,
+        finishing_at=None,
+        published_at=None,
+        notes=None,
+        archived=False,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_apply_lifecycle_change_sets_first_entry_timestamp():
+    job = _stub_job()
+    now = datetime(2026, 5, 29, 10, 0, 0)
+    apply_lifecycle_change(job, stage="awaiting_export", notes=None, now=now)
+
+    assert job.lifecycle_stage == "awaiting_export"
+    assert job.export_at == now
+    assert job.approval_at is None  # only the target stage's timestamp is set
+
+
+def test_apply_lifecycle_change_preserves_existing_timestamp_on_reentry():
+    first = datetime(2026, 5, 29, 10, 0, 0)
+    later = datetime(2026, 5, 30, 12, 0, 0)
+
+    job = _stub_job(lifecycle_stage="awaiting_export", export_at=first)
+    apply_lifecycle_change(job, stage="awaiting_approval", notes=None, now=later)
+    apply_lifecycle_change(job, stage="awaiting_export", notes=None, now=later)
+
+    # COALESCE behavior — re-entering a stage does NOT overwrite the original.
+    assert job.export_at == first
+    assert job.approval_at == later  # was None, now set
+
+
+def test_apply_lifecycle_change_merges_notes():
+    now = datetime(2026, 5, 29, 10, 0, 0)
+    job = _stub_job(lifecycle_stage="awaiting_approval", notes="initial")
+    apply_lifecycle_change(job, stage=None, notes="updated", now=now)
+
+    assert job.notes == "updated"
+    assert job.lifecycle_stage == "awaiting_approval"  # stage unchanged
+
+
+def test_apply_lifecycle_change_clears_notes_explicitly():
+    now = datetime(2026, 5, 29, 10, 0, 0)
+    job = _stub_job(notes="prior note")
+    apply_lifecycle_change(job, stage=None, notes="", now=now)
+
+    assert job.notes == ""  # empty string is an intentional clear
+
+
+def test_apply_lifecycle_change_rejects_invalid_stage():
+    import pytest
+
+    job = _stub_job()
+    with pytest.raises(ValueError, match="invalid lifecycle stage"):
+        apply_lifecycle_change(job, stage="not_a_stage", notes=None, now=datetime.utcnow())
+
+
+def test_apply_lifecycle_change_clears_lifecycle_via_explicit_none():
+    """Passing stage=None with the sentinel clear=True empties lifecycle."""
+    job = _stub_job(lifecycle_stage="awaiting_export", export_at=datetime(2026, 5, 29))
+    apply_lifecycle_change(job, stage=None, notes=None, now=datetime.utcnow(), clear=True)
+
+    assert job.lifecycle_stage is None
+    # Timestamps are intentionally preserved for audit purposes.
+    assert job.export_at == datetime(2026, 5, 29)
