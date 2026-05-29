@@ -2290,6 +2290,13 @@
     </style>
 </head>
 <body>
+    <div id="lifecycleNotesPopover" style="display:none;position:absolute;z-index:1000;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;box-shadow:0 4px 16px rgba(0,0,0,0.2);width:280px;">
+      <textarea id="lifecycleNotesText" rows="4" style="width:100%;font-family:inherit;padding:6px;box-sizing:border-box;"></textarea>
+      <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:8px;">
+        <button id="lifecycleNotesCancel" class="btn btn-secondary btn-sm">Cancel</button>
+        <button id="lifecycleNotesSave" class="btn btn-primary btn-sm">Save</button>
+      </div>
+    </div>
     <!-- Hidden 1x1 transparent image for drag preview -->
     <!-- v509: ingredient-name suggestions for parent-slot role inputs -->
     <datalist id="imgIngredientNameSuggestions">
@@ -3579,6 +3586,60 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
 
         window.addEventListener("DOMContentLoaded", refreshLifecycle);
+
+        let _popoverJobId = null;
+
+        function openNotesPopover(rowEl) {
+          if (!rowEl) return;
+          const popover = document.getElementById("lifecycleNotesPopover");
+          const text = document.getElementById("lifecycleNotesText");
+          _popoverJobId = rowEl.dataset.id;
+          fetch(`/api/jobs/${_popoverJobId}`, { credentials: "include" })
+            .then(r => r.ok ? r.json() : null)
+            .then(j => { text.value = (j && j.notes) || ""; });
+          const rect = rowEl.getBoundingClientRect();
+          popover.style.left = Math.min(rect.left + window.scrollX, window.innerWidth - 300) + "px";
+          popover.style.top = (rect.bottom + window.scrollY + 4) + "px";
+          popover.style.display = "block";
+          if (window.innerWidth < 768) {
+            popover.style.left = "0";
+            popover.style.right = "0";
+            popover.style.top = "auto";
+            popover.style.bottom = "0";
+            popover.style.width = "100%";
+            popover.style.borderRadius = "12px 12px 0 0";
+          }
+          text.focus();
+        }
+
+        function closeNotesPopover() {
+          document.getElementById("lifecycleNotesPopover").style.display = "none";
+          _popoverJobId = null;
+        }
+
+        document.getElementById("lifecycleNotesCancel").addEventListener("click", closeNotesPopover);
+        document.getElementById("lifecycleNotesSave").addEventListener("click", async () => {
+          if (!_popoverJobId) return;
+          const notes = document.getElementById("lifecycleNotesText").value;
+          const res = await fetch(`/api/jobs/${_popoverJobId}/lifecycle`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ notes }),
+          });
+          if (res.ok) {
+            closeNotesPopover();
+            refreshLifecycle();
+          }
+        });
+
+        document.addEventListener("click", (ev) => {
+          const popover = document.getElementById("lifecycleNotesPopover");
+          if (popover.style.display !== "block") return;
+          if (popover.contains(ev.target)) return;
+          if (ev.target.matches(".notes-btn")) return;
+          closeNotesPopover();
+        });
 
         async function revalidateKey(keyId) {
             try {
