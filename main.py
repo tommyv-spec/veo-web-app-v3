@@ -307,22 +307,9 @@ class CreateJobRequest(BaseModel):
     image_batch_id: Optional[str] = None
 
 
-class JobResponse(BaseModel):
-    id: str
-    status: str
-    progress_percent: float
-    total_clips: int
-    completed_clips: int
-    failed_clips: int
-    skipped_clips: int
-    created_at: Optional[str]
-    started_at: Optional[str]
-    completed_at: Optional[str]
-    backend: Optional[str] = None
-    first_dialogue: Optional[str] = None
-    first_frame_url: Optional[str] = None
-    has_export: bool = False
-    has_voice_clone: bool = False
+# JobResponse is defined in job_response.py so tests can import it without
+# loading the full FastAPI application (which has startup side effects).
+from job_response import JobResponse  # noqa: E402
 
 
 class ClipResponse(BaseModel):
@@ -2142,6 +2129,14 @@ async def _create_job_impl(
         backend=job.backend,
         first_dialogue=dialogue_list[0].get('text', '')[:80] if dialogue_list else None,
         first_frame_url=None,
+        lifecycle_stage=job.lifecycle_stage,
+        approval_at=job.approval_at.isoformat() if job.approval_at else None,
+        export_at=job.export_at.isoformat() if job.export_at else None,
+        finishing_at=job.finishing_at.isoformat() if job.finishing_at else None,
+        published_at=job.published_at.isoformat() if job.published_at else None,
+        notes=job.notes,
+        archived=bool(getattr(job, 'archived', False)),
+        stuck_days=compute_stuck_days(job, datetime.utcnow()),
     )
     
     # Spawn background task for frame upload + prompt generation
@@ -2968,6 +2963,35 @@ async def _setup_job_background(
     finally:
         db.close()
 
+def _build_job_response(job, first_dialogue=None, first_frame_url=None):
+    """Shared JobResponse serializer. Used by list_jobs, get_job, patch_lifecycle, patch_archive."""
+    return JobResponse(
+        id=job.id,
+        status=job.status,
+        progress_percent=job.progress_percent,
+        total_clips=job.total_clips,
+        completed_clips=job.completed_clips,
+        failed_clips=job.failed_clips,
+        skipped_clips=job.skipped_clips,
+        created_at=job.created_at.isoformat() if job.created_at else None,
+        started_at=job.started_at.isoformat() if job.started_at else None,
+        completed_at=job.completed_at.isoformat() if job.completed_at else None,
+        backend=job.backend,
+        first_dialogue=first_dialogue,
+        first_frame_url=first_frame_url,
+        has_export=bool(getattr(job, 'has_export', False)),
+        has_voice_clone=bool(getattr(job, 'has_voice_clone', False)),
+        lifecycle_stage=job.lifecycle_stage,
+        approval_at=job.approval_at.isoformat() if job.approval_at else None,
+        export_at=job.export_at.isoformat() if job.export_at else None,
+        finishing_at=job.finishing_at.isoformat() if job.finishing_at else None,
+        published_at=job.published_at.isoformat() if job.published_at else None,
+        notes=job.notes,
+        archived=bool(getattr(job, 'archived', False)),
+        stuck_days=compute_stuck_days(job, datetime.utcnow()),
+    )
+
+
 @app.get("/api/jobs", response_model=List[JobResponse])
 async def list_jobs(
     request: Request,
@@ -3026,23 +3050,7 @@ async def list_jobs(
                 fname = first_clip.start_frame.split('/')[-1]
                 first_frame_url = f"{base_url}/api/jobs/{j.id}/images/{fname}"
         
-        result.append(JobResponse(
-            id=j.id,
-            status=j.status,
-            progress_percent=j.progress_percent,
-            total_clips=j.total_clips,
-            completed_clips=j.completed_clips,
-            failed_clips=j.failed_clips,
-            skipped_clips=j.skipped_clips,
-            created_at=j.created_at.isoformat() if j.created_at else None,
-            started_at=j.started_at.isoformat() if j.started_at else None,
-            completed_at=j.completed_at.isoformat() if j.completed_at else None,
-            backend=j.backend,
-            first_dialogue=first_dialogue,
-            first_frame_url=first_frame_url,
-            has_export=bool(getattr(j, 'has_export', False)),
-            has_voice_clone=bool(getattr(j, 'has_voice_clone', False)),
-        ))
+        result.append(_build_job_response(j, first_dialogue=first_dialogue, first_frame_url=first_frame_url))
     
     return result
 
@@ -3085,19 +3093,7 @@ async def get_job(
     """Get job details"""
     job = get_user_job(db, job_id, current_user)
     
-    return JobResponse(
-        id=job.id,
-        status=job.status,
-        progress_percent=job.progress_percent,
-        total_clips=job.total_clips,
-        completed_clips=job.completed_clips,
-        failed_clips=job.failed_clips,
-        skipped_clips=job.skipped_clips,
-        created_at=job.created_at.isoformat() if job.created_at else None,
-        started_at=job.started_at.isoformat() if job.started_at else None,
-        completed_at=job.completed_at.isoformat() if job.completed_at else None,
-        backend=job.backend,
-    )
+    return _build_job_response(job)
 
 
 @app.get("/api/jobs/{job_id}/config")

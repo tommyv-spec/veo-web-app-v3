@@ -184,3 +184,59 @@ def test_compute_stuck_days_none_when_stage_timestamp_missing():
     """Defensive: corrupt state where stage is set but timestamp is null."""
     job = _stub_job(lifecycle_stage="awaiting_export", export_at=None)
     assert compute_stuck_days(job, now=datetime(2026, 5, 29)) is None
+
+
+# ---------------------------------------------------------------------------
+# Task 5: JobResponse pydantic model includes all 8 lifecycle fields
+# ---------------------------------------------------------------------------
+def test_job_response_includes_lifecycle_fields():
+    """The JobResponse pydantic model must expose all 8 lifecycle fields."""
+    import importlib.util, pathlib, sys, os
+
+    os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+    os.environ.setdefault("SECRET_KEY", "test-secret")
+    os.environ.setdefault("R2_BUCKET_NAME", "test-bucket")
+    os.environ.setdefault("R2_ACCOUNT_ID", "test-account")
+    os.environ.setdefault("R2_ACCESS_KEY_ID", "test-key")
+    os.environ.setdefault("R2_SECRET_ACCESS_KEY", "test-secret-key")
+    os.environ.setdefault("R2_PUBLIC_URL", "https://example.com")
+
+    code_dir = str(pathlib.Path(__file__).parent)
+    inserted = code_dir not in sys.path
+    if inserted:
+        sys.path.insert(0, code_dir)
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "main_for_jobresponse",
+            pathlib.Path(__file__).parent / "main.py",
+        )
+        main = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(main)
+        fields = set(main.JobResponse.model_fields.keys())
+    except Exception as exc:
+        # If main.py is too heavy to load (FastAPI side effects, missing env),
+        # fall back to importing JobResponse from job_response.py.
+        import importlib as _il
+        _jr_spec = _il.util.spec_from_file_location(
+            "job_response",
+            pathlib.Path(__file__).parent / "job_response.py",
+        )
+        _jr_mod = _il.util.module_from_spec(_jr_spec)
+        _jr_spec.loader.exec_module(_jr_mod)
+        fields = set(_jr_mod.JobResponse.model_fields.keys())
+    finally:
+        if inserted and code_dir in sys.path:
+            sys.path.remove(code_dir)
+
+    expected_new = {
+        "lifecycle_stage",
+        "approval_at",
+        "export_at",
+        "finishing_at",
+        "published_at",
+        "notes",
+        "archived",
+        "stuck_days",
+    }
+    missing = expected_new - fields
+    assert not missing, f"JobResponse missing fields: {missing}"
