@@ -112,18 +112,42 @@
             padding: 0 !important;
             border-right: 1px solid var(--border-color);
             height: 100% !important;
-            overflow-y: auto;
+            overflow: hidden !important;
         }
         .app-container.state-review .config-panel > *:not(#jobsCard) { display: none !important; }
         .app-container.state-review .results-panel {
-            display: block; padding: 24px; height: 100%; overflow-y: auto;
+            display: block; padding: 16px 24px; height: 100%; overflow-y: auto;
         }
         .app-container.state-review #jobsCard {
-            display: block !important;
+            display: flex !important;
+            flex-direction: column;
             border: none !important;
             height: 100%;
-            overflow-y: auto;
             margin: 0;
+            padding: 0 !important;
+            overflow: hidden;
+        }
+        /* In Review mode the sidebar shows ONE filtered list — chip row +
+           search bar from Browse aren't useful here. Hide them so the sidebar
+           is dense + dedicated. The kanban scrollable area gets full height. */
+        .app-container.state-review #lifecycleChips,
+        .app-container.state-review #lifecycleSearchBar { display: none !important; }
+        .app-container.state-review #jobsCard .card-title {
+            padding: 10px 12px;
+            margin: 0;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 13px;
+        }
+        .app-container.state-review #jobsList {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 8px;
+            height: auto !important;
+            max-height: none !important;
+        }
+        .app-container.state-review .lc-review-sidebar-rows {
+            display: flex; flex-direction: column; gap: 6px;
         }
 
         /* Mobile fallback: kanban → single column with stage tabs. */
@@ -4126,17 +4150,38 @@ Example: A realistic vertical video of a professional presenter speaking directl
         // In Review mode, render a compact filtered list inside #jobsList so the
         // operator can bounce between jobs in the same stage without leaving the
         // Review panel. Stage = chip-active when entering Review (or "all").
-        function renderReviewSidebar(stage) {
+        // Remember which stage filter to use when re-rendering the sidebar
+        // after a deferred fetch lands. Cleared on leaving Review mode.
+        let _reviewSidebarStage = null;
+
+        async function renderReviewSidebar(stage) {
           const jobsListEl = document.getElementById("jobsList");
           if (!jobsListEl) return;
+          _reviewSidebarStage = stage;
+          jobsListEl.classList.add("lc-review-mode");
+          // If we haven't fetched jobs yet (e.g. direct URL load on
+          // ?mode=review&job=X), trigger a fetch first so the sidebar is
+          // populated. Until data arrives, show a small placeholder so the
+          // operator knows it's loading.
+          if (!_lifecycleLastJobs) {
+            jobsListEl.innerHTML = `<div class="empty" style="padding:12px;color:#888;font-size:12px;">Loading…</div>`;
+            try {
+              const jobs = await fetchJobsForLifecycle({ archived: false });
+              _lifecycleLastJobs = jobs;
+              _lifecycleLastFetch = Date.now();
+              _lifecycleLastArchived = false;
+            } catch (e) {
+              jobsListEl.innerHTML = `<div class="empty" style="padding:12px;color:#c33;font-size:12px;">Failed to load jobs.</div>`;
+              return;
+            }
+          }
           const all = _lifecycleLastJobs || [];
           const jobs = (stage === "all" || !stage)
             ? all
             : all.filter(j => _effectiveStageForRow(j) === stage);
-          jobsListEl.classList.add("lc-review-mode");
-          jobsListEl.innerHTML = `<div class="lc-review-sidebar-rows">${
-            jobs.map(j => renderJobCard(j, { compact: true })).join("")
-          }</div>`;
+          jobsListEl.innerHTML = jobs.length
+            ? `<div class="lc-review-sidebar-rows">${jobs.map(j => renderJobCard(j, { compact: true })).join("")}</div>`
+            : `<div class="empty" style="padding:12px;color:#888;font-size:12px;">No jobs in this stage.</div>`;
           observeLifecycleThumbs(jobsListEl);
         }
 
@@ -4144,6 +4189,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const jobsListEl = document.getElementById("jobsList");
           if (!jobsListEl || !_kanbanOriginalHTML) return;
           if (!jobsListEl.classList.contains("lc-review-mode")) return;
+          _reviewSidebarStage = null;
           jobsListEl.classList.remove("lc-review-mode");
           jobsListEl.innerHTML = _kanbanOriginalHTML;
           // Re-wire sort listeners (lost when innerHTML replaced).
