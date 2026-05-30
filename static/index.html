@@ -1352,6 +1352,16 @@
           background: rgba(255,255,255,0.2); border-radius: 8px; margin-left: 4px;
           font-size: 11px; text-align: center;
         }
+        .app-breadcrumb {
+            display: flex; align-items: center; gap: 8px;
+            color: var(--text-muted); font-size: 13px;
+        }
+        .app-breadcrumb a {
+            color: var(--text-muted); text-decoration: none;
+            border-bottom: 1px dotted var(--text-muted);
+        }
+        .app-breadcrumb a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+        .app-breadcrumb span { color: var(--text); font-weight: 600; }
         #jobsList details { margin: 6px 0; }
         #jobsList details > summary { cursor: pointer; padding: 6px 0; font-weight: 600; }
         #jobsList .lc-rows { padding: 4px 0; display: flex; flex-direction: column; gap: 6px; }
@@ -2479,6 +2489,7 @@
                 <div class="logo-icon">🎬</div>
                 <h1>KavenoBuilder</h1>
             </div>
+            <div id="appBreadcrumb" class="app-breadcrumb"><span>Browse</span></div>
             <div class="header-actions">
                 <button class="btn btn-tutorial btn-sm" onclick="window.open('/static/how-it-works.html','_blank')" title="Quick overview of how the platform works">&#9889; Quick Guide</button>
                 <button class="btn btn-tutorial btn-sm" onclick="openTutorial()" title="How to use this platform">📖 Tutorial</button>
@@ -4076,6 +4087,100 @@ Example: A realistic vertical video of a professional presenter speaking directl
             });
           });
         })();
+
+        // ============================================================
+        // Mode router: drives state-create / state-browse / state-review
+        // off the URL ?mode=&stage=&job=&q=. history.pushState on transitions,
+        // popstate listener restores state.
+        // ============================================================
+        const MODE_VALUES = ["create", "browse", "review"];
+        const DEFAULT_MODE = "browse";
+
+        function parseModeFromURL() {
+          const p = new URLSearchParams(window.location.search);
+          const mode = MODE_VALUES.includes(p.get("mode")) ? p.get("mode") : DEFAULT_MODE;
+          const stage = p.get("stage") || "all";
+          const job = p.get("job") || null;
+          const q = p.get("q") || "";
+          return { mode, stage, job, q };
+        }
+
+        function setAppMode({ mode, stage = "all", job = null, push = true }) {
+          const container = document.getElementById("appContainer");
+          if (!container) return;
+          container.classList.remove("state-initial", "state-active", "state-create", "state-browse", "state-review");
+          container.classList.add("state-" + mode);
+
+          updateBreadcrumb({ mode, stage, job });
+
+          document.querySelectorAll(".lifecycle-chips .chip").forEach(c =>
+            c.classList.toggle("chip-active", c.dataset.stage === (stage === "all" ? "all" : stage))
+          );
+
+          if (mode === "browse") {
+            applyChipColumnVisibility(stage);
+          }
+
+          if (mode === "review" && job) {
+            if (typeof selectJob === "function") selectJob(job);
+            if (typeof renderReviewSidebar === "function") renderReviewSidebar(stage);
+          }
+
+          if (push) {
+            const url = new URL(window.location.href);
+            url.searchParams.set("mode", mode);
+            if (stage && stage !== "all") url.searchParams.set("stage", stage); else url.searchParams.delete("stage");
+            if (job) url.searchParams.set("job", job); else url.searchParams.delete("job");
+            window.history.pushState({ mode, stage, job }, "", url.toString());
+          }
+        }
+
+        function updateBreadcrumb({ mode, stage, job }) {
+          let bc = document.getElementById("appBreadcrumb");
+          if (!bc) return;
+          if (mode === "create") {
+            bc.innerHTML = `<a href="#" data-bc="browse">Browse</a> &rsaquo; <span>New Job</span>`;
+          } else if (mode === "review") {
+            const j = (_lifecycleLastJobs || []).find(x => x.id === job);
+            const slug = j ? shortenSlug(j.first_dialogue || j.id) : (job || "");
+            bc.innerHTML = `<a href="#" data-bc="browse">Browse</a> &rsaquo; <span>Review: ${escapeHtml(slug)}</span>`;
+          } else {
+            bc.innerHTML = `<span>Browse</span>`;
+          }
+        }
+
+        function applyChipColumnVisibility(stage) {
+          const kanban = document.querySelector(".lc-kanban");
+          if (!kanban) return;
+          if (stage === "all" || !stage) {
+            kanban.classList.remove("lc-single-column");
+            kanban.querySelectorAll(".lc-column").forEach(c => c.classList.remove("lc-column-active"));
+          } else {
+            kanban.classList.add("lc-single-column");
+            kanban.querySelectorAll(".lc-column").forEach(c => {
+              c.classList.toggle("lc-column-active", c.dataset.stage === stage);
+            });
+          }
+        }
+
+        document.addEventListener("click", (ev) => {
+          const bcLink = ev.target.closest("[data-bc]");
+          if (!bcLink) return;
+          ev.preventDefault();
+          if (bcLink.dataset.bc === "browse") {
+            setAppMode({ mode: "browse", stage: parseModeFromURL().stage });
+          }
+        });
+
+        window.addEventListener("popstate", () => {
+          const { mode, stage, job } = parseModeFromURL();
+          setAppMode({ mode, stage, job, push: false });
+        });
+
+        // Initial-mode application moved to Task 12's DOMContentLoaded
+        // (which also handles the zero-jobs → Create fallback). For now
+        // we just register the popstate listener; first paint stays
+        // driven by the existing refreshLifecycle DOMContentLoaded.
 
         window.addEventListener("DOMContentLoaded", () => refreshLifecycle({ force: true }));
 
