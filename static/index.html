@@ -3725,19 +3725,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
         // progress bar). Add a lifecycle action row below it (notes / advance
         // / archive). Click anywhere on the row that's NOT a button opens
         // the job-details panel (handled by the delegated click listener).
-        function renderJobItemForLifecycle(j) {
+        // Card renderer used by both kanban columns and Review-mode sidebar.
+        // Pass {compact: true} for the sidebar variant.
+        function renderJobCard(j, { compact = false } = {}) {
           const bl = {'flow':'FLOW','api':'API','prompt_only':'PROMPT','import':'ASSEMBLE'};
           const bn = bl[j.backend] || j.backend || 'API';
           const safeId = escapeHtml(j.id);
-          // Thumbnail strategy: emit placeholder + data-src. IntersectionObserver
-          // (registered after renderLifecycleSection) swaps placeholder for real
-          // <img> only when row enters viewport. Browser's native loading="lazy"
-          // was too eager — prefetched ~80 thumbs above viewport, hammering R2
-          // cold-cache. IO swap fetches ~5-10 actually visible thumbs.
           const thumb = j.first_frame_url
             ? `<div class="job-thumb-placeholder lc-thumb-pending" data-src="${escapeHtml(j.first_frame_url)}">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`
             : `<div class="job-thumb-placeholder">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`;
-          const dlg = j.first_dialogue ? `<div class="job-dialogue">${escapeHtml(j.first_dialogue)}</div>` : '';
+          const slug = (j.first_dialogue || j.id || "").toString();
+          const dlg = j.first_dialogue ? `<div class="lc-card-dialogue">${escapeHtml(j.first_dialogue)}</div>` : '';
           const exportBadge = j.has_export ? '<span class="badge badge-export">🎬</span>' : '';
           const voiceBadge = j.has_voice_clone ? '<span class="badge badge-voice">🎤</span>' : '';
           const total = j.total_clips || 0;
@@ -3745,12 +3743,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const skipped = j.skipped_clips || 0;
           const approvable = Math.max(0, total - failed - skipped);
           const approved = j.approved_clips || 0;
-          // Approval progress badge — show only when status=completed and stage
-          // is awaiting_approval (the meaningful pre-export window).
           const approvalBadge = (j.status === 'completed' && j.lifecycle_stage === 'awaiting_approval' && approvable > 0)
-            ? `<span class="badge" style="background:rgba(245,158,11,0.15);color:#f59e0b;">${approved}/${approvable} approved</span>`
-            : '';
-          // Lifecycle action row.
+            ? `<span class="badge" style="background:rgba(245,158,11,0.15);color:#f59e0b;">${approved}/${approvable} ok</span>` : '';
           const stuck = j.stuck_days;
           const stuckStr = (stuck != null && stuck > 0)
             ? `<span class="lc-stuck${stuck > 3 ? " warn" : ""}">stuck ${stuck}d</span>` : "";
@@ -3759,19 +3753,21 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const advanceBtn = exportLabel
             ? `<button class="lc-action lc-advance" data-id="${safeId}" data-next="${exportLabel}" title="Advance to ${STAGE_LABEL[exportLabel]}">→ ${STAGE_LABEL[exportLabel].replace("Awaiting ","")}</button>` : "";
           const notesClass = j.notes ? "lc-action lc-notes has-notes" : "lc-action lc-notes";
-          const archiveLabel = j.archived ? '📤 Unarchive' : '📦';
-          return `<div class="job-item lc-row" data-id="${safeId}" data-job-id="${safeId}">
-            <div class="job-body">${thumb}<div class="job-meta">
-              <div class="job-badges">
+          const archiveLabel = j.archived ? '📤' : '📦';
+          const progress = `<div class="lc-card-progress"><div class="progress-bar"><div class="progress-fill" style="width:${j.progress_percent||0}%"></div></div><div class="progress-text"><span>${(j.progress_percent||0).toFixed(0)}%</span><span>${j.completed_clips||0}/${j.total_clips||0}</span></div></div>`;
+          const variant = compact ? 'lc-card compact' : 'lc-card';
+          return `<div class="${variant}" data-id="${safeId}" data-job-id="${safeId}">
+            <div class="lc-card-body">${thumb}<div class="lc-card-meta">
+              <div class="lc-card-badges">
                 <span class="badge badge-${escapeHtml(j.status)}">${escapeHtml(j.status)}</span>
                 <span class="badge-backend badge-backend-${escapeHtml(j.backend||'api')}">${escapeHtml(bn)}</span>
                 ${exportBadge}${voiceBadge}${approvalBadge}
-                <span class="job-id">${safeId.slice(0,8)}</span>
-              </div>${dlg}
+              </div>
+              <div class="lc-card-title">${escapeHtml(shortenSlug(slug))}</div>
+              ${dlg}
             </div></div>
-            <div class="progress-bar" style="margin-top:8px"><div class="progress-fill" style="width:${j.progress_percent}%"></div></div>
-            <div class="progress-text"><span>${j.progress_percent.toFixed(0)}%</span><span>${j.completed_clips}/${j.total_clips}</span></div>
-            <div class="lc-actions">
+            ${progress}
+            <div class="lc-card-actions">
               ${stuckStr}
               <button class="${notesClass}" data-action="notes" data-id="${safeId}" title="Notes">📝</button>
               ${advanceBtn}
@@ -3780,10 +3776,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
           </div>`;
         }
 
-        function renderLifecycleRow(job) {
-          // Back-compat alias — kept in case other code references it.
-          return renderJobItemForLifecycle(job);
-        }
+        // Back-compat aliases used elsewhere in the codebase.
+        function renderLifecycleRow(job) { return renderJobCard(job); }
+        function renderJobItemForLifecycle(j) { return renderJobCard(j); }
 
         // Cache the last-fetched jobs by stage so collapsed sections can render
         // lazily on first expand (cheap DOM avoidance for sections with hundreds
@@ -3799,11 +3794,18 @@ Example: A realistic vertical video of a professional presenter speaking directl
           return null;
         }
 
+        // Per-column pagination state. Maps stage -> N visible cards.
+        const _lifecycleVisibleCounts = { generating: 20, awaiting_approval: 20, awaiting_export: 20, awaiting_finishing: 20, published: 20 };
+        const LC_PAGE_SIZE = 20;
+
         function renderLifecycle(jobs, { archived = false } = {}) {
+          // Apply current search filter (Task 6 will wire the input listener).
+          const q = (document.getElementById("lifecycleSearch")?.value || "").trim().toLowerCase();
+          const filtered = q ? filterJobsBySearch(jobs, q) : jobs;
+          // Bucket + sort.
           const counts = { generating: 0, awaiting_approval: 0, awaiting_export: 0, awaiting_finishing: 0, published: 0 };
-          // Group + sort once.
           for (const k of LIFECYCLE_STAGES) _lifecycleJobsByStage[k] = [];
-          for (const j of jobs) {
+          for (const j of filtered) {
             const s = _effectiveStageForRow(j);
             if (s != null && _lifecycleJobsByStage[s]) {
               _lifecycleJobsByStage[s].push(j);
@@ -3811,44 +3813,66 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
           }
           for (const k of LIFECYCLE_STAGES) {
-            _lifecycleJobsByStage[k].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+            const sortKey = localStorage.getItem("lc_sort_" + k) || "newest";
+            _lifecycleJobsByStage[k] = sortJobs(_lifecycleJobsByStage[k], sortKey);
           }
-          // Update chip counts.
           for (const s of LIFECYCLE_STAGES) {
             const el = document.querySelector(`.chip-count[data-count="${s}"]`);
             if (el) el.textContent = counts[s];
           }
-          // For each section: set count + restore open state. ONLY render rows
-          // for currently-open sections; closed sections get a sentinel that
-          // the toggle listener swaps to real rows on expand. Order matters —
-          // set .open BEFORE checking detailsEl.open.
           for (const stage of LIFECYCLE_STAGES) {
-            const detailsEl = document.getElementById("lc-" + stage);
-            if (!detailsEl) continue;
-            const rowsEl = detailsEl.querySelector(".lc-rows");
-            const countEl = detailsEl.querySelector(".lc-count");
-            countEl.textContent = _lifecycleJobsByStage[stage].length;
-            detailsEl.open = lifecycleSectionState(stage);
-            if (detailsEl.open) {
-              renderLifecycleSection(stage);
-            } else {
-              rowsEl.dataset.lazyPending = "1";
-              rowsEl.innerHTML = "";
-            }
+            const countEl = document.querySelector(`#lc-${stage} .lc-count`);
+            if (countEl) countEl.textContent = counts[stage];
+            const sortEl = document.querySelector(`.lc-sort[data-stage="${stage}"]`);
+            if (sortEl) sortEl.value = localStorage.getItem("lc_sort_" + stage) || "newest";
+            renderLifecycleSection(stage);
           }
         }
 
         function renderLifecycleSection(stage) {
-          const detailsEl = document.getElementById("lc-" + stage);
-          if (!detailsEl) return;
-          const rowsEl = detailsEl.querySelector(".lc-rows");
-          const stageJobs = _lifecycleJobsByStage[stage] || [];
-          rowsEl.innerHTML = stageJobs.length
-            ? stageJobs.map(renderLifecycleRow).join("")
-            : `<div class="empty" style="padding:6px;color:#888;">none</div>`;
+          const columnEl = document.getElementById("lc-" + stage);
+          if (!columnEl) return;
+          const rowsEl = columnEl.querySelector(".lc-rows");
+          const loadMoreEl = columnEl.querySelector(".lc-load-more");
+          const allJobs = _lifecycleJobsByStage[stage] || [];
+          const visible = _lifecycleVisibleCounts[stage] || LC_PAGE_SIZE;
+          const slice = allJobs.slice(0, visible);
+          rowsEl.innerHTML = slice.length
+            ? slice.map(j => renderJobCard(j)).join("")
+            : `<div class="empty" style="padding:8px;color:#888;font-size:11px;">none</div>`;
           delete rowsEl.dataset.lazyPending;
-          // Hook IntersectionObserver onto the freshly-rendered placeholders.
+          if (allJobs.length > visible) {
+            loadMoreEl.style.display = "";
+            loadMoreEl.textContent = `Load ${Math.min(LC_PAGE_SIZE, allJobs.length - visible)} more (${allJobs.length - visible} remaining)`;
+          } else {
+            loadMoreEl.style.display = "none";
+          }
           observeLifecycleThumbs(rowsEl);
+        }
+
+        function filterJobsBySearch(jobs, q) {
+          const needle = q.toLowerCase();
+          return jobs.filter(j => {
+            const hay = [
+              shortenSlug(j.first_dialogue || j.id || ""),
+              j.first_dialogue || "",
+              j.notes || "",
+              j.id || "",
+            ].join(" ").toLowerCase();
+            return hay.includes(needle);
+          });
+        }
+
+        function sortJobs(jobs, key) {
+          const arr = jobs.slice();
+          if (key === "newest") {
+            arr.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+          } else if (key === "oldest") {
+            arr.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+          } else if (key === "stuck") {
+            arr.sort((a, b) => (b.stuck_days || 0) - (a.stuck_days || 0));
+          }
+          return arr;
         }
 
         // Lazy-swap thumbnails via IntersectionObserver. Each placeholder
