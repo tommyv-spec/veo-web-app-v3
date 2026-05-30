@@ -1475,6 +1475,14 @@
         .lc-card.compact .lc-card-dialogue,
         .lc-card.compact .lc-card-progress,
         .lc-card.compact .lc-card-actions { display: none; }
+        .lc-sidebar-toggle {
+            background: transparent; border: none; color: var(--text-muted);
+            cursor: pointer; font-size: 14px; margin-right: 6px;
+        }
+        .state-review.review-sidebar-collapsed #lcSidebarToggle::before { content: "▸▸"; }
+        .state-review.review-sidebar-collapsed #jobsCard .card-title :not(.lc-sidebar-toggle) { display: none; }
+        .state-review.review-sidebar-collapsed #jobsCard .lc-rows,
+        .state-review.review-sidebar-collapsed #jobsCard .lc-review-sidebar-rows { display: none; }
         .progress-bar { height: 4px; background: var(--bg-input); border-radius: 2px; overflow: hidden; }
         .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width 0.3s ease; }
         .progress-text { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); margin-top: 6px; }
@@ -3084,7 +3092,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 </div>
                 
                 <div class="card" id="jobsCard" style="display:none;">
-                    <div class="card-title">📋 Jobs</div>
+                    <div class="card-title">
+                        <button class="lc-sidebar-toggle" id="lcSidebarToggle" title="Collapse">◂◂</button>
+                        📋 Jobs
+                    </div>
                     <div class="lifecycle-chips" id="lifecycleChips" style="display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;">
                         <button class="chip chip-active" data-stage="all">All</button>
                         <button class="chip" data-stage="generating">Generating <span class="chip-count" data-count="generating">0</span></button>
@@ -4021,6 +4032,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
         let _lifecycleLastFetch = 0;
         let _lifecycleLastJobs = null;
         let _lifecycleLastArchived = false;
+        let _kanbanOriginalHTML = null;
         const LIFECYCLE_REFRESH_THROTTLE_MS = 5000;
 
         async function refreshLifecycle({ force = false } = {}) {
@@ -4086,6 +4098,42 @@ Example: A realistic vertical video of a professional presenter speaking directl
         })();
 
         // ============================================================
+        // In Review mode, render a compact filtered list inside #jobsList so the
+        // operator can bounce between jobs in the same stage without leaving the
+        // Review panel. Stage = chip-active when entering Review (or "all").
+        function renderReviewSidebar(stage) {
+          const jobsListEl = document.getElementById("jobsList");
+          if (!jobsListEl) return;
+          const all = _lifecycleLastJobs || [];
+          const jobs = (stage === "all" || !stage)
+            ? all
+            : all.filter(j => _effectiveStageForRow(j) === stage);
+          jobsListEl.classList.add("lc-review-mode");
+          jobsListEl.innerHTML = `<div class="lc-review-sidebar-rows">${
+            jobs.map(j => renderJobCard(j, { compact: true })).join("")
+          }</div>`;
+          observeLifecycleThumbs(jobsListEl);
+        }
+
+        function restoreKanbanDOM() {
+          const jobsListEl = document.getElementById("jobsList");
+          if (!jobsListEl || !_kanbanOriginalHTML) return;
+          if (!jobsListEl.classList.contains("lc-review-mode")) return;
+          jobsListEl.classList.remove("lc-review-mode");
+          jobsListEl.innerHTML = _kanbanOriginalHTML;
+          // Re-wire sort listeners (lost when innerHTML replaced).
+          document.querySelectorAll(".lc-sort[data-stage]").forEach(sel => {
+            sel.addEventListener("change", () => {
+              const stage = sel.dataset.stage;
+              localStorage.setItem("lc_sort_" + stage, sel.value);
+              _lifecycleJobsByStage[stage] = sortJobs(_lifecycleJobsByStage[stage], sel.value);
+              _lifecycleVisibleCounts[stage] = LC_PAGE_SIZE;
+              renderLifecycleSection(stage);
+            });
+          });
+          if (_lifecycleLastJobs) renderLifecycle(_lifecycleLastJobs, { archived: _lifecycleLastArchived });
+        }
+
         // Mode router: drives state-create / state-browse / state-review
         // off the URL ?mode=&stage=&job=&q=. history.pushState on transitions,
         // popstate listener restores state.
@@ -4107,6 +4155,11 @@ Example: A realistic vertical video of a professional presenter speaking directl
           if (!container) return;
           container.classList.remove("state-initial", "state-active", "state-create", "state-browse", "state-review");
           container.classList.add("state-" + mode);
+
+          // Returning to Browse rebuilds the kanban DOM (Review mode replaced it).
+          if (mode === "browse") {
+            restoreKanbanDOM();
+          }
 
           updateBreadcrumb({ mode, stage, job });
 
@@ -4179,7 +4232,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
         // we just register the popstate listener; first paint stays
         // driven by the existing refreshLifecycle DOMContentLoaded.
 
-        window.addEventListener("DOMContentLoaded", () => refreshLifecycle({ force: true }));
+        window.addEventListener("DOMContentLoaded", () => {
+          _kanbanOriginalHTML = document.getElementById("jobsList")?.innerHTML || null;
+          refreshLifecycle({ force: true });
+        });
 
         let _popoverJobId = null;
 
@@ -4245,6 +4301,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
           if (ev.target.matches(".notes-btn")) return;
           closeNotesPopover();
         });
+
+        document.getElementById("lcSidebarToggle")?.addEventListener("click", () => {
+          const c = document.getElementById("appContainer");
+          c.classList.toggle("review-sidebar-collapsed");
+          localStorage.setItem("lc_review_sidebar", c.classList.contains("review-sidebar-collapsed") ? "0" : "1");
+        });
+        if (localStorage.getItem("lc_review_sidebar") === "0") {
+          document.getElementById("appContainer")?.classList.add("review-sidebar-collapsed");
+        }
 
         async function revalidateKey(keyId) {
             try {
