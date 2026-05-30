@@ -4641,12 +4641,19 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if(!c.classList.contains('state-active')){ c.classList.remove('state-initial'); c.classList.add('state-active'); }
             const jc=document.getElementById('jobsCard'); if(jc) jc.style.removeProperty('display');
         }
-        function collapseResults(){ 
-            const c=document.getElementById('appContainer'); 
-            c.classList.remove('state-active'); 
-            c.classList.add('state-initial'); 
+        function collapseResults(){
+            const c=document.getElementById('appContainer');
             selectedJobId=null;
-            document.querySelectorAll('.job-item').forEach(el=>el.classList.remove('selected'));
+            document.querySelectorAll('.job-item, .lc-card').forEach(el=>el.classList.remove('selected'));
+            // 3-mode router (2026-05-30): if any mode class is active, route
+            // close → Browse mode (rebuilds kanban via restoreKanbanDOM).
+            if (typeof setAppMode === "function" && (c.classList.contains('state-create') || c.classList.contains('state-browse') || c.classList.contains('state-review'))) {
+                const stage = (typeof parseModeFromURL === "function") ? parseModeFromURL().stage : "all";
+                setAppMode({ mode: "browse", stage });
+                return;
+            }
+            c.classList.remove('state-active');
+            c.classList.add('state-initial');
         }
         
         function newJob(){
