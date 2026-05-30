@@ -2494,7 +2494,7 @@
                 <button class="btn btn-tutorial btn-sm" onclick="window.open('/static/how-it-works.html','_blank')" title="Quick overview of how the platform works">&#9889; Quick Guide</button>
                 <button class="btn btn-tutorial btn-sm" onclick="openTutorial()" title="How to use this platform">📖 Tutorial</button>
                 <button class="btn btn-secondary btn-sm" onclick="window.open('/static/my-worker.html?v=214', '_blank')" title="Set up your Flow worker">🖥️ My Worker</button>
-                <button class="btn btn-secondary btn-sm btn-new-job" onclick="newJob()">➕ New Job</button>
+                <button class="btn btn-secondary btn-sm btn-new-job" onclick="setAppMode({mode:'create'})">➕ New Job</button>
                 <button class="btn btn-secondary btn-sm" onclick="openAssembleModal()" title="Upload clips + script → auto-order → export">📦 Assemble</button>
                 <button class="btn btn-secondary btn-sm" onclick="refreshJobs()">🔄 Refresh</button>
                 
@@ -3946,20 +3946,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         document.querySelectorAll(".lifecycle-chips .chip").forEach(c => {
           c.addEventListener("click", async () => {
-            document.querySelectorAll(".lifecycle-chips .chip").forEach(x => x.classList.remove("chip-active"));
-            c.classList.add("chip-active");
             const stage = c.dataset.stage;
-            applySectionVisibility(stage);
             if (stage === "archived") {
+              setAppMode({ mode: "browse", stage: "archived" });
               const jobs = await fetchJobsForLifecycle({ archived: true });
               renderLifecycle(jobs, { archived: true });
             } else {
+              setAppMode({ mode: "browse", stage: stage || "all" });
               const jobs = await fetchJobsForLifecycle();
               renderLifecycle(jobs);
-              if (stage !== "all") {
-                const el = document.getElementById("lc-" + stage);
-                if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-              }
             }
           });
         });
@@ -4014,9 +4009,11 @@ Example: A realistic vertical video of a professional presenter speaking directl
             renderLifecycleSection(stage);
             return;
           }
-          // Click anywhere else on the row → open the job details panel.
-          if (row && typeof selectJob === "function") {
-            selectJob(row.dataset.id);
+          // Card click → Review mode for that job (preserves the active chip).
+          if (row) {
+            const activeChip = document.querySelector(".lifecycle-chips .chip-active");
+            const stage = activeChip?.dataset.stage || parseModeFromURL().stage || "all";
+            setAppMode({ mode: "review", stage, job: row.dataset.id });
           }
         });
 
@@ -4450,6 +4447,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
         
         function newJob(){
+            if (typeof setAppMode === "function") setAppMode({ mode: "create" });
             collapseResults();
             // Clear form for new job
             uploadJobId=null;uploadedImages=[];uploadedFilesData=[];
