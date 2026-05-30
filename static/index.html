@@ -3994,6 +3994,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if (typeof openNotesPopover === "function") openNotesPopover(row);
             return;
           }
+          // Load-more button — expand visible slice for that column.
+          const loadMoreBtn = ev.target.closest(".lc-load-more[data-stage]");
+          if (loadMoreBtn) {
+            ev.stopPropagation();
+            const stage = loadMoreBtn.dataset.stage;
+            _lifecycleVisibleCounts[stage] = (_lifecycleVisibleCounts[stage] || LC_PAGE_SIZE) + LC_PAGE_SIZE;
+            renderLifecycleSection(stage);
+            return;
+          }
           // Click anywhere else on the row → open the job details panel.
           if (row && typeof selectJob === "function") {
             selectJob(row.dataset.id);
@@ -4031,6 +4040,42 @@ Example: A realistic vertical video of a professional presenter speaking directl
           })();
           return _lifecycleInFlight;
         }
+
+        // Live search — re-render in place from already-loaded data. No fetch.
+        (function wireLifecycleSearch() {
+          const inp = document.getElementById("lifecycleSearch");
+          if (!inp) return;
+          let _timer = null;
+          inp.addEventListener("input", () => {
+            clearTimeout(_timer);
+            _timer = setTimeout(() => {
+              if (_lifecycleLastJobs) {
+                renderLifecycle(_lifecycleLastJobs, { archived: _lifecycleLastArchived });
+              }
+              const url = new URL(window.location.href);
+              if (inp.value) url.searchParams.set("q", inp.value);
+              else url.searchParams.delete("q");
+              window.history.replaceState({}, "", url.toString());
+            }, 120);
+          });
+          inp.addEventListener("keydown", (ev) => {
+            if (ev.key === "Escape") { inp.value = ""; inp.dispatchEvent(new Event("input")); ev.stopPropagation(); }
+          });
+          const params = new URLSearchParams(window.location.search);
+          if (params.get("q")) inp.value = params.get("q");
+        })();
+
+        (function wireLifecycleSort() {
+          document.querySelectorAll(".lc-sort[data-stage]").forEach(sel => {
+            sel.addEventListener("change", () => {
+              const stage = sel.dataset.stage;
+              localStorage.setItem("lc_sort_" + stage, sel.value);
+              _lifecycleJobsByStage[stage] = sortJobs(_lifecycleJobsByStage[stage], sel.value);
+              _lifecycleVisibleCounts[stage] = LC_PAGE_SIZE;
+              renderLifecycleSection(stage);
+            });
+          });
+        })();
 
         window.addEventListener("DOMContentLoaded", () => refreshLifecycle({ force: true }));
 
