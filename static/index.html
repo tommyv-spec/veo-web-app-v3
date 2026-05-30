@@ -2922,6 +2922,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     <div class="card-title">📋 Jobs</div>
                     <div class="lifecycle-chips" id="lifecycleChips" style="display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;">
                         <button class="chip chip-active" data-stage="all">All</button>
+                        <button class="chip" data-stage="generating">Generating <span class="chip-count" data-count="generating">0</span></button>
                         <button class="chip" data-stage="awaiting_approval">Approval <span class="chip-count" data-count="awaiting_approval">0</span></button>
                         <button class="chip" data-stage="awaiting_export">Export <span class="chip-count" data-count="awaiting_export">0</span></button>
                         <button class="chip" data-stage="awaiting_finishing">Finishing <span class="chip-count" data-count="awaiting_finishing">0</span></button>
@@ -2929,6 +2930,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         <button class="chip" data-stage="archived">Archive</button>
                     </div>
                     <div class="jobs-list" id="jobsList">
+                        <details id="lc-generating" open><summary>Generating (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
                         <details id="lc-awaiting_approval" open><summary>Awaiting approval (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
                         <details id="lc-awaiting_export" open><summary>Awaiting export (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
                         <details id="lc-awaiting_finishing" open><summary>Awaiting finishing (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
@@ -3462,25 +3464,31 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
 
         // === Lifecycle dashboard renderer (2026-05-29) ===
-        const LIFECYCLE_STAGES = ["awaiting_approval", "awaiting_export", "awaiting_finishing", "published"];
+        // "generating" is synthetic: non-completed jobs (status pending/
+        // preparing/running/paused) bucket into it client-side so the
+        // operator sees new jobs immediately. NOT a stored lifecycle_stage.
+        const LIFECYCLE_STAGES = ["generating", "awaiting_approval", "awaiting_export", "awaiting_finishing", "published"];
         const STAGE_LABEL = {
+          generating: "Generating",
           awaiting_approval: "Awaiting approval",
           awaiting_export: "Awaiting export",
           awaiting_finishing: "Awaiting finishing",
           published: "Published",
         };
+        // Forward advance limited to real stages.
+        const ADVANCEABLE_STAGES = ["awaiting_approval", "awaiting_export", "awaiting_finishing", "published"];
 
         function nextStage(stage) {
-          const i = LIFECYCLE_STAGES.indexOf(stage);
-          return (i >= 0 && i < LIFECYCLE_STAGES.length - 1) ? LIFECYCLE_STAGES[i + 1] : null;
+          const i = ADVANCEABLE_STAGES.indexOf(stage);
+          return (i >= 0 && i < ADVANCEABLE_STAGES.length - 1) ? ADVANCEABLE_STAGES[i + 1] : null;
         }
 
         function lifecycleSectionState(stage) {
           const v = localStorage.getItem("lc_open_" + stage);
-          // Default: only awaiting_approval open. Operator expands others on
-          // demand. Combined with lazy section render and img loading="lazy"
-          // this keeps initial paint cheap on huge job lists (>500 jobs).
-          if (v === null) return stage === "awaiting_approval";
+          // Default: only Generating + Approval open. Operator expands others
+          // on demand. Combined with lazy section render + IntersectionObserver
+          // thumbnail swap, the initial paint stays cheap on big lists.
+          if (v === null) return stage === "generating" || stage === "awaiting_approval";
           return v === "1";
         }
 
@@ -3563,17 +3571,26 @@ Example: A realistic vertical video of a professional presenter speaking directl
         // Cache the last-fetched jobs by stage so collapsed sections can render
         // lazily on first expand (cheap DOM avoidance for sections with hundreds
         // of rows).
-        const _lifecycleJobsByStage = { awaiting_approval: [], awaiting_export: [], awaiting_finishing: [], published: [] };
+        const _lifecycleJobsByStage = { generating: [], awaiting_approval: [], awaiting_export: [], awaiting_finishing: [], published: [] };
+
+        function _effectiveStageForRow(j) {
+          // Group by stage. Non-completed jobs (status pending/preparing/
+          // running/paused) bucket into "generating" so operator sees jobs
+          // as soon as they're created.
+          if (j.lifecycle_stage) return j.lifecycle_stage;
+          if (j.status && j.status !== "completed") return "generating";
+          return null;
+        }
 
         function renderLifecycle(jobs, { archived = false } = {}) {
-          const tracked = jobs.filter(j => j.lifecycle_stage);
-          const counts = { awaiting_approval: 0, awaiting_export: 0, awaiting_finishing: 0, published: 0 };
+          const counts = { generating: 0, awaiting_approval: 0, awaiting_export: 0, awaiting_finishing: 0, published: 0 };
           // Group + sort once.
           for (const k of LIFECYCLE_STAGES) _lifecycleJobsByStage[k] = [];
-          for (const j of tracked) {
-            if (counts[j.lifecycle_stage] != null) {
-              counts[j.lifecycle_stage]++;
-              _lifecycleJobsByStage[j.lifecycle_stage].push(j);
+          for (const j of jobs) {
+            const s = _effectiveStageForRow(j);
+            if (s != null && _lifecycleJobsByStage[s]) {
+              _lifecycleJobsByStage[s].push(j);
+              counts[s]++;
             }
           }
           for (const k of LIFECYCLE_STAGES) {
