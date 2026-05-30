@@ -889,7 +889,9 @@
         .logo h1 { font-size: 18px; font-weight: 600; }
         .header-actions { display: flex; gap: 12px; align-items: center; }
         .btn-new-job { display: none; }
-        .state-active .btn-new-job { display: inline-flex; }
+        .state-active .btn-new-job,
+        .state-browse .btn-new-job,
+        .state-review .btn-new-job { display: inline-flex; }
         
         /* User menu styles */
         .user-menu { position: relative; }
@@ -1414,7 +1416,11 @@
         .lc-kanban {
             display: grid; gap: 12px;
             grid-template-columns: repeat(5, minmax(220px, 1fr));
+            /* Override legacy .jobs-list max-height: 280px which clamped the
+               kanban to a small slice. The kanban now fills available height. */
+            max-height: none !important;
             height: calc(100% - 88px);
+            min-height: 0;
         }
         .lc-kanban .lc-column {
             display: flex; flex-direction: column;
