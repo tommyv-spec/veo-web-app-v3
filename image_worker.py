@@ -3720,10 +3720,26 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
             "UNSAFE_GENERATION",      # content policy — specific to this prompt
             "USER_QUOTA_REACHED",     # daily credits exhausted (other accounts/days fine)
             "MODEL_ACCESS_DENIED",    # tier mismatch — caller should downgrade model
+            # auth token rotation — page re-auths naturally, next clip gets fresh token
+            " 401", "UNAUTHENTICATED",
+            "OAUTH 2 ACCESS TOKEN",
+            "AUTHENTICATION CREDENTIALS",
         ):
             if needle in r:
                 return True
         return False
+
+    def _maybe_invalidate_token(reason: str):
+        """If the failure is a stale-bearer 401, wipe the cached token so the next
+        wait_for_token blocks until a freshly-sniffed one arrives."""
+        r = (reason or "").upper()
+        if " 401" in r or "UNAUTHENTICATED" in r or "OAUTH 2 ACCESS TOKEN" in r:
+            try:
+                _FA_TOKEN_STORE.token = ""
+                _FA_TOKEN_STORE.captured_at = 0.0
+                print(f"{pfx}[flow_api] cleared stale bearer; next API call will wait for a fresh one", flush=True)
+            except Exception:
+                pass
 
     project_id = ""
     try:
@@ -3772,6 +3788,7 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
             print(f"{pfx}[flow_api] uploaded {len(ref_ids)} ref(s) via API", flush=True)
     except Exception as e:
         reason = f"upload_image raised: {e}"
+        _maybe_invalidate_token(reason)
         if _is_transient(reason):
             return _fall_back_one(reason)
         return _latch_off(reason)
@@ -3815,6 +3832,7 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
                 captured_fife_urls.append(fife_url)
     except Exception as e:
         reason = f"submit_image raised: {e}"
+        _maybe_invalidate_token(reason)
         if _is_transient(reason):
             return _fall_back_one(reason)
         return _latch_off(reason)
