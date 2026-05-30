@@ -4227,13 +4227,70 @@ Example: A realistic vertical video of a professional presenter speaking directl
           setAppMode({ mode, stage, job, push: false });
         });
 
-        // Initial-mode application moved to Task 12's DOMContentLoaded
-        // (which also handles the zero-jobs → Create fallback). For now
-        // we just register the popstate listener; first paint stays
-        // driven by the existing refreshLifecycle DOMContentLoaded.
+        // Keyboard shortcuts. Ignore when an input/textarea has focus.
+        document.addEventListener("keydown", (ev) => {
+          const target = ev.target;
+          const isText = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+          if (isText && ev.key !== "Escape") return;
+          if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+          if (ev.key === "n" || ev.key === "N") {
+            ev.preventDefault();
+            setAppMode({ mode: "create" });
+            return;
+          }
+          if (ev.key === "b" || ev.key === "B") {
+            ev.preventDefault();
+            setAppMode({ mode: "browse", stage: parseModeFromURL().stage });
+            return;
+          }
+          if (ev.key === "Escape") {
+            const { mode } = parseModeFromURL();
+            if (mode !== "browse") {
+              ev.preventDefault();
+              setAppMode({ mode: "browse", stage: parseModeFromURL().stage });
+            }
+            return;
+          }
+          if (ev.key === "/") {
+            ev.preventDefault();
+            document.getElementById("lifecycleSearch")?.focus();
+            return;
+          }
+          const chipMap = { "1": "generating", "2": "awaiting_approval", "3": "awaiting_export", "4": "awaiting_finishing", "5": "published" };
+          if (chipMap[ev.key]) {
+            ev.preventDefault();
+            setAppMode({ mode: "browse", stage: chipMap[ev.key] });
+            return;
+          }
+        });
 
-        window.addEventListener("DOMContentLoaded", () => {
+        window.addEventListener("DOMContentLoaded", async () => {
           _kanbanOriginalHTML = document.getElementById("jobsList")?.innerHTML || null;
+          const params = parseModeFromURL();
+          if (params.q) {
+            const inp = document.getElementById("lifecycleSearch");
+            if (inp) inp.value = params.q;
+          }
+          const explicitMode = new URLSearchParams(window.location.search).get("mode");
+          if (!explicitMode) {
+            // No ?mode= in URL — fetch once to decide default mode.
+            try {
+              const jobs = await fetchJobsForLifecycle();
+              _lifecycleLastJobs = jobs;
+              _lifecycleLastFetch = Date.now();
+              _lifecycleLastArchived = false;
+              if (!jobs || jobs.length === 0) {
+                setAppMode({ mode: "create", push: false });
+                return;
+              }
+              setAppMode({ mode: params.mode, stage: params.stage, job: params.job, push: false });
+              renderLifecycle(jobs);
+              return;
+            } catch (e) {
+              console.warn("[lifecycle] initial fetch failed:", e);
+            }
+          }
+          setAppMode({ mode: params.mode, stage: params.stage, job: params.job, push: false });
           refreshLifecycle({ force: true });
         });
 
