@@ -75,9 +75,19 @@
             height: calc(100vh - 64px - 42px);
             overflow: hidden;
         }
-        .app-container.state-browse .config-panel,
-        .app-container.state-browse .results-panel,
-        .app-container.state-browse #createCard { display: none !important; }
+        /* #jobsCard is nested inside .config-panel — keep parent visible,
+           hide all OTHER children of config-panel. Hide results-panel entirely. */
+        .app-container.state-browse .results-panel { display: none !important; }
+        .app-container.state-browse .config-panel {
+            display: block !important;
+            width: 100% !important;
+            max-width: none !important;
+            border-right: none !important;
+            padding: 0 !important;
+            height: 100% !important;
+            overflow: hidden !important;
+        }
+        .app-container.state-browse .config-panel > *:not(#jobsCard) { display: none !important; }
         .app-container.state-browse #jobsCard {
             display: block !important;
             height: 100%;
@@ -95,13 +105,22 @@
         .app-container.state-review.review-sidebar-collapsed .main-content {
             grid-template-columns: 36px 1fr;
         }
-        .app-container.state-review .config-panel { display: none !important; }
+        /* Review mode: config-panel stays mounted as parent for #jobsCard,
+           but its other children (create form) are hidden. */
+        .app-container.state-review .config-panel {
+            display: block !important;
+            padding: 0 !important;
+            border-right: 1px solid var(--border-color);
+            height: 100% !important;
+            overflow-y: auto;
+        }
+        .app-container.state-review .config-panel > *:not(#jobsCard) { display: none !important; }
         .app-container.state-review .results-panel {
             display: block; padding: 24px; height: 100%; overflow-y: auto;
         }
         .app-container.state-review #jobsCard {
             display: block !important;
-            border-right: 1px solid var(--border-color);
+            border: none !important;
             height: 100%;
             overflow-y: auto;
             margin: 0;
