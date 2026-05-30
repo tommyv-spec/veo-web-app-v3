@@ -7865,14 +7865,38 @@ async def export_final_video(
                         broll_dialogue_lines.append(line)
 
                     # Extract master audio from the freshly-written speaker MP4.
+                    # v773.10.18 — when a global speed pass will be applied to
+                    # the speaker output later in this function, PRE-APPLY the
+                    # same atempo to the master audio we extract for the b-roll
+                    # pipeline. Otherwise the b-roll renders against a
+                    # 61.16 s audio while the final speaker file is 55.60 s,
+                    # leaving the b-roll the wrong length AND out of sync at
+                    # every clip boundary. atempo here matches the speed pass
+                    # below (line ~8121) exactly: same value, audio-only path.
                     broll_temp_dir = Path(_tmp.mkdtemp(prefix="v698a_broll_"))
                     speaker_master_audio = broll_temp_dir / "speaker_master.mp3"
                     import subprocess as _sp
-                    _audio_cmd = [
-                        "ffmpeg", "-y", "-i", str(output_path),
-                        "-vn", "-acodec", "libmp3lame", "-q:a", "2",
-                        str(speaker_master_audio),
-                    ]
+                    _broll_speed = 1.0
+                    if (
+                        settings.playback_speed
+                        and settings.playback_speed > 1.01
+                        and not settings.master_audio_filename
+                    ):
+                        _broll_speed = round(float(settings.playback_speed), 3)
+                    if _broll_speed > 1.01:
+                        _audio_cmd = [
+                            "ffmpeg", "-y", "-i", str(output_path),
+                            "-vn",
+                            "-filter:a", f"atempo={_broll_speed:.6f}",
+                            "-acodec", "libmp3lame", "-q:a", "2",
+                            str(speaker_master_audio),
+                        ]
+                    else:
+                        _audio_cmd = [
+                            "ffmpeg", "-y", "-i", str(output_path),
+                            "-vn", "-acodec", "libmp3lame", "-q:a", "2",
+                            str(speaker_master_audio),
+                        ]
                     _audio_res = await asyncio.to_thread(
                         _sp.run, _audio_cmd, capture_output=True, text=True,
                     )
@@ -7950,9 +7974,21 @@ async def export_final_video(
                         if not _all_mapped:
                             _pre_targets = None
                         else:
+                            # v773.10.18 — scale targets to post-speed timeline
+                            # so each b-roll slot matches what the speaker will
+                            # be after its atempo pass. With _broll_speed=1.1,
+                            # a 7.73 s slot becomes 7.03 s and the b-roll clip
+                            # gets compressed correspondingly (~1.14× total).
+                            if _broll_speed > 1.01:
+                                _inv = 1.0 / _broll_speed
+                                for _t in _pre_targets:
+                                    _t["start"] = _t["start"] * _inv
+                                    _t["end"] = _t["end"] * _inv
+                                    _t["target_duration"] = _t["end"] - _t["start"]
                             print(
                                 f"[Export/v698A/broll] v701zd pre-computed targets built "
-                                f"from speaker per-clip durations ({len(_pre_targets)} clips)",
+                                f"from speaker per-clip durations ({len(_pre_targets)} clips, "
+                                f"scaled by 1/{_broll_speed:.3f} for post-speed master)",
                                 flush=True,
                             )
 
