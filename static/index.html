@@ -54,7 +54,72 @@
             .app-container.state-active .config-panel { height: auto; border-right: none; border-bottom: 1px solid var(--border-color); }
             .app-container.state-active .results-panel { height: auto; }
         }
-        
+
+        /* === 3-mode dashboard layout (2026-05-30) === */
+        /* Create mode: full-width form, no jobs/review panels. */
+        .app-container.state-create .main-content {
+            display: flex; justify-content: center; align-items: flex-start;
+            padding: 24px; flex: 1;
+        }
+        .app-container.state-create .config-panel {
+            width: 100%; max-width: 1400px;
+        }
+        .app-container.state-create .results-panel,
+        .app-container.state-create #jobsCard { display: none !important; }
+
+        /* Browse mode: full-width kanban; create form + review panel hidden. */
+        .app-container.state-browse .main-content {
+            display: block;
+            padding: 16px 24px;
+            flex: 1;
+            height: calc(100vh - 64px - 42px);
+            overflow: hidden;
+        }
+        .app-container.state-browse .config-panel,
+        .app-container.state-browse .results-panel,
+        .app-container.state-browse #createCard { display: none !important; }
+        .app-container.state-browse #jobsCard {
+            display: block !important;
+            height: 100%;
+            margin: 0;
+        }
+
+        /* Review mode: jobs sidebar (jobsCard) on the left, review panel on right. */
+        .app-container.state-review .main-content {
+            display: grid;
+            grid-template-columns: 260px 1fr;
+            gap: 0;
+            flex: 1;
+            height: calc(100vh - 64px - 42px);
+        }
+        .app-container.state-review.review-sidebar-collapsed .main-content {
+            grid-template-columns: 36px 1fr;
+        }
+        .app-container.state-review .config-panel { display: none !important; }
+        .app-container.state-review .results-panel {
+            display: block; padding: 24px; height: 100%; overflow-y: auto;
+        }
+        .app-container.state-review #jobsCard {
+            display: block !important;
+            border-right: 1px solid var(--border-color);
+            height: 100%;
+            overflow-y: auto;
+            margin: 0;
+        }
+
+        /* Mobile fallback: kanban → single column with stage tabs. */
+        @media (max-width: 768px) {
+            .app-container.state-browse .lifecycle-chips { overflow-x: auto; flex-wrap: nowrap; }
+            .app-container.state-browse .lc-kanban { grid-template-columns: 1fr !important; }
+            .app-container.state-browse .lc-column:not(.lc-column-active) { display: none; }
+            .app-container.state-review .main-content { grid-template-columns: 1fr; }
+            .app-container.state-review #jobsCard { display: none !important; }
+            .app-container.state-review.review-sidebar-open #jobsCard {
+                display: block !important; position: fixed; top: 64px; left: 0; bottom: 0;
+                width: 280px; z-index: 100; background: var(--bg);
+            }
+        }
+
         /* Vertical stack layout for config-panel */
         .config-panel { display: flex; flex-direction: column; gap: 16px; }
         
@@ -1287,6 +1352,16 @@
           background: rgba(255,255,255,0.2); border-radius: 8px; margin-left: 4px;
           font-size: 11px; text-align: center;
         }
+        .app-breadcrumb {
+            display: flex; align-items: center; gap: 8px;
+            color: var(--text-muted); font-size: 13px;
+        }
+        .app-breadcrumb a {
+            color: var(--text-muted); text-decoration: none;
+            border-bottom: 1px dotted var(--text-muted);
+        }
+        .app-breadcrumb a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+        .app-breadcrumb span { color: var(--text); font-weight: 600; }
         #jobsList details { margin: 6px 0; }
         #jobsList details > summary { cursor: pointer; padding: 6px 0; font-weight: 600; }
         #jobsList .lc-rows { padding: 4px 0; display: flex; flex-direction: column; gap: 6px; }
@@ -1311,6 +1386,103 @@
           .lifecycle-chips .chip { white-space: nowrap; }
         }
 
+        .lc-search-bar { padding: 8px 0; }
+        .lc-search-bar input {
+            width: 100%; padding: 8px 12px; background: var(--bg-input);
+            border: 1px solid var(--border-subtle); border-radius: 6px;
+            color: var(--text); font-size: 13px;
+        }
+        .lc-kanban {
+            display: grid; gap: 12px;
+            grid-template-columns: repeat(5, minmax(220px, 1fr));
+            height: calc(100% - 88px);
+        }
+        .lc-kanban .lc-column {
+            display: flex; flex-direction: column;
+            background: var(--bg-elevated); border-radius: 8px;
+            min-height: 0;
+            overflow: hidden;
+        }
+        .lc-column-header {
+            display: flex; align-items: center; gap: 8px;
+            padding: 10px 12px; border-bottom: 1px solid var(--border-subtle);
+            font-weight: 600; font-size: 13px;
+        }
+        .lc-column-header .lc-count {
+            background: var(--bg-input); padding: 2px 8px; border-radius: 10px;
+            font-size: 11px; min-width: 24px; text-align: center;
+        }
+        .lc-column-header .lc-sort {
+            margin-left: auto; background: var(--bg-input); color: var(--text);
+            border: 1px solid var(--border-subtle); border-radius: 4px;
+            font-size: 11px; padding: 2px 6px;
+        }
+        .lc-column .lc-rows {
+            flex: 1; overflow-y: auto; padding: 8px;
+            display: flex; flex-direction: column; gap: 8px;
+        }
+        .lc-column .lc-load-more {
+            margin: 8px 12px; padding: 6px;
+            background: var(--bg-input); border: 1px solid var(--border-subtle);
+            color: var(--text); border-radius: 4px; cursor: pointer; font-size: 12px;
+        }
+        .lc-column .lc-load-more:hover { border-color: var(--accent); }
+        .lc-kanban.lc-single-column { grid-template-columns: 1fr; }
+        .lc-kanban.lc-single-column .lc-column { display: none; }
+        .lc-kanban.lc-single-column .lc-column.lc-column-active { display: flex; }
+        .lc-card {
+            background: var(--bg); border: 1px solid var(--border-subtle);
+            border-radius: 6px; padding: 8px; cursor: pointer;
+            display: flex; flex-direction: column; gap: 6px;
+            transition: border-color 0.15s;
+        }
+        .lc-card:hover { border-color: var(--accent); }
+        .lc-card.selected { border-color: var(--accent); background: rgba(99,102,241,0.08); }
+        .lc-card-body { display: flex; gap: 8px; align-items: flex-start; }
+        .lc-card-meta { flex: 1; min-width: 0; }
+        .lc-card-badges {
+            display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+            font-size: 10px;
+        }
+        .lc-card-title {
+            font-size: 12px; font-weight: 600;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            margin-top: 4px;
+        }
+        .lc-card-dialogue {
+            font-size: 11px; color: var(--text-muted); margin-top: 2px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .lc-card-progress { display: flex; flex-direction: column; gap: 2px; }
+        .lc-card-progress .progress-bar { height: 4px; background: var(--bg-input); border-radius: 2px; overflow: hidden; }
+        .lc-card-progress .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+        .lc-card-progress .progress-text { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); }
+        .lc-card-actions {
+            display: flex; gap: 4px; flex-wrap: wrap;
+            padding-top: 6px; border-top: 1px dashed var(--border-subtle);
+        }
+        .lc-card-actions .lc-action {
+            background: var(--bg-input); border: 1px solid var(--border-subtle);
+            color: var(--text); font-size: 10px; padding: 3px 6px; border-radius: 3px;
+            cursor: pointer;
+        }
+        .lc-card-actions .lc-action:hover { border-color: var(--accent); }
+        .lc-card-actions .lc-action.lc-advance {
+            background: rgba(99,102,241,0.15); color: var(--accent); border-color: var(--accent);
+        }
+        .lc-card-actions .lc-notes.has-notes { color: var(--accent); border-color: var(--accent); }
+        .lc-card-actions .lc-stuck { margin-right: auto; font-size: 10px; color: #c33; }
+        .lc-card.compact .lc-card-dialogue,
+        .lc-card.compact .lc-card-progress,
+        .lc-card.compact .lc-card-actions { display: none; }
+        .lc-sidebar-toggle {
+            background: transparent; border: none; color: var(--text-muted);
+            cursor: pointer; font-size: 14px; margin-right: 6px;
+        }
+        .state-review.review-sidebar-collapsed #lcSidebarToggle::before { content: "▸▸"; }
+        .state-review.review-sidebar-collapsed #jobsCard .card-title :not(.lc-sidebar-toggle) { display: none; }
+        .state-review.review-sidebar-collapsed #jobsCard .lc-rows,
+        .state-review.review-sidebar-collapsed #jobsCard .lc-review-sidebar-rows { display: none; }
         .progress-bar { height: 4px; background: var(--bg-input); border-radius: 2px; overflow: hidden; }
         .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width 0.3s ease; }
         .progress-text { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); margin-top: 6px; }
@@ -2325,11 +2497,12 @@
                 <div class="logo-icon">🎬</div>
                 <h1>KavenoBuilder</h1>
             </div>
+            <div id="appBreadcrumb" class="app-breadcrumb"><span>Browse</span></div>
             <div class="header-actions">
                 <button class="btn btn-tutorial btn-sm" onclick="window.open('/static/how-it-works.html','_blank')" title="Quick overview of how the platform works">&#9889; Quick Guide</button>
                 <button class="btn btn-tutorial btn-sm" onclick="openTutorial()" title="How to use this platform">📖 Tutorial</button>
                 <button class="btn btn-secondary btn-sm" onclick="window.open('/static/my-worker.html?v=214', '_blank')" title="Set up your Flow worker">🖥️ My Worker</button>
-                <button class="btn btn-secondary btn-sm btn-new-job" onclick="newJob()">➕ New Job</button>
+                <button class="btn btn-secondary btn-sm btn-new-job" onclick="setAppMode({mode:'create'})">➕ New Job</button>
                 <button class="btn btn-secondary btn-sm" onclick="openAssembleModal()" title="Upload clips + script → auto-order → export">📦 Assemble</button>
                 <button class="btn btn-secondary btn-sm" onclick="refreshJobs()">🔄 Refresh</button>
                 
@@ -2919,7 +3092,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 </div>
                 
                 <div class="card" id="jobsCard" style="display:none;">
-                    <div class="card-title">📋 Jobs</div>
+                    <div class="card-title">
+                        <button class="lc-sidebar-toggle" id="lcSidebarToggle" title="Collapse">◂◂</button>
+                        📋 Jobs
+                    </div>
                     <div class="lifecycle-chips" id="lifecycleChips" style="display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;">
                         <button class="chip chip-active" data-stage="all">All</button>
                         <button class="chip" data-stage="generating">Generating <span class="chip-count" data-count="generating">0</span></button>
@@ -2929,12 +3105,75 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         <button class="chip" data-stage="published">Published <span class="chip-count" data-count="published">0</span></button>
                         <button class="chip" data-stage="archived">Archive</button>
                     </div>
-                    <div class="jobs-list" id="jobsList">
-                        <details id="lc-generating" open><summary>Generating (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
-                        <details id="lc-awaiting_approval" open><summary>Awaiting approval (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
-                        <details id="lc-awaiting_export" open><summary>Awaiting export (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
-                        <details id="lc-awaiting_finishing" open><summary>Awaiting finishing (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
-                        <details id="lc-published"><summary>Published (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
+                    <div class="lc-search-bar" id="lifecycleSearchBar">
+                        <input type="text" id="lifecycleSearch" placeholder="🔍  Search slug or dialogue…" autocomplete="off">
+                    </div>
+                    <div class="jobs-list lc-kanban" id="jobsList">
+                        <div class="lc-column" id="lc-generating" data-stage="generating">
+                            <div class="lc-column-header">
+                                <span class="lc-column-title">Generating</span>
+                                <span class="lc-count">0</span>
+                                <select class="lc-sort" data-stage="generating">
+                                    <option value="newest">Newest</option>
+                                    <option value="oldest">Oldest</option>
+                                    <option value="stuck">Stuck longest</option>
+                                </select>
+                            </div>
+                            <div class="lc-rows"></div>
+                            <button class="lc-load-more" data-stage="generating" style="display:none">Load 20 more</button>
+                        </div>
+                        <div class="lc-column" id="lc-awaiting_approval" data-stage="awaiting_approval">
+                            <div class="lc-column-header">
+                                <span class="lc-column-title">Awaiting approval</span>
+                                <span class="lc-count">0</span>
+                                <select class="lc-sort" data-stage="awaiting_approval">
+                                    <option value="newest">Newest</option>
+                                    <option value="oldest">Oldest</option>
+                                    <option value="stuck">Stuck longest</option>
+                                </select>
+                            </div>
+                            <div class="lc-rows"></div>
+                            <button class="lc-load-more" data-stage="awaiting_approval" style="display:none">Load 20 more</button>
+                        </div>
+                        <div class="lc-column" id="lc-awaiting_export" data-stage="awaiting_export">
+                            <div class="lc-column-header">
+                                <span class="lc-column-title">Awaiting export</span>
+                                <span class="lc-count">0</span>
+                                <select class="lc-sort" data-stage="awaiting_export">
+                                    <option value="newest">Newest</option>
+                                    <option value="oldest">Oldest</option>
+                                    <option value="stuck">Stuck longest</option>
+                                </select>
+                            </div>
+                            <div class="lc-rows"></div>
+                            <button class="lc-load-more" data-stage="awaiting_export" style="display:none">Load 20 more</button>
+                        </div>
+                        <div class="lc-column" id="lc-awaiting_finishing" data-stage="awaiting_finishing">
+                            <div class="lc-column-header">
+                                <span class="lc-column-title">Awaiting finishing</span>
+                                <span class="lc-count">0</span>
+                                <select class="lc-sort" data-stage="awaiting_finishing">
+                                    <option value="newest">Newest</option>
+                                    <option value="oldest">Oldest</option>
+                                    <option value="stuck">Stuck longest</option>
+                                </select>
+                            </div>
+                            <div class="lc-rows"></div>
+                            <button class="lc-load-more" data-stage="awaiting_finishing" style="display:none">Load 20 more</button>
+                        </div>
+                        <div class="lc-column" id="lc-published" data-stage="published">
+                            <div class="lc-column-header">
+                                <span class="lc-column-title">Published</span>
+                                <span class="lc-count">0</span>
+                                <select class="lc-sort" data-stage="published">
+                                    <option value="newest">Newest</option>
+                                    <option value="oldest">Oldest</option>
+                                    <option value="stuck">Stuck longest</option>
+                                </select>
+                            </div>
+                            <div class="lc-rows"></div>
+                            <button class="lc-load-more" data-stage="published" style="display:none">Load 20 more</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -3508,19 +3747,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
         // progress bar). Add a lifecycle action row below it (notes / advance
         // / archive). Click anywhere on the row that's NOT a button opens
         // the job-details panel (handled by the delegated click listener).
-        function renderJobItemForLifecycle(j) {
+        // Card renderer used by both kanban columns and Review-mode sidebar.
+        // Pass {compact: true} for the sidebar variant.
+        function renderJobCard(j, { compact = false } = {}) {
           const bl = {'flow':'FLOW','api':'API','prompt_only':'PROMPT','import':'ASSEMBLE'};
           const bn = bl[j.backend] || j.backend || 'API';
           const safeId = escapeHtml(j.id);
-          // Thumbnail strategy: emit placeholder + data-src. IntersectionObserver
-          // (registered after renderLifecycleSection) swaps placeholder for real
-          // <img> only when row enters viewport. Browser's native loading="lazy"
-          // was too eager — prefetched ~80 thumbs above viewport, hammering R2
-          // cold-cache. IO swap fetches ~5-10 actually visible thumbs.
           const thumb = j.first_frame_url
             ? `<div class="job-thumb-placeholder lc-thumb-pending" data-src="${escapeHtml(j.first_frame_url)}">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`
             : `<div class="job-thumb-placeholder">${j.backend==='prompt_only'?'📝':j.backend==='import'?'📦':'🎬'}</div>`;
-          const dlg = j.first_dialogue ? `<div class="job-dialogue">${escapeHtml(j.first_dialogue)}</div>` : '';
+          const slug = (j.first_dialogue || j.id || "").toString();
+          const dlg = j.first_dialogue ? `<div class="lc-card-dialogue">${escapeHtml(j.first_dialogue)}</div>` : '';
           const exportBadge = j.has_export ? '<span class="badge badge-export">🎬</span>' : '';
           const voiceBadge = j.has_voice_clone ? '<span class="badge badge-voice">🎤</span>' : '';
           const total = j.total_clips || 0;
@@ -3528,12 +3765,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const skipped = j.skipped_clips || 0;
           const approvable = Math.max(0, total - failed - skipped);
           const approved = j.approved_clips || 0;
-          // Approval progress badge — show only when status=completed and stage
-          // is awaiting_approval (the meaningful pre-export window).
           const approvalBadge = (j.status === 'completed' && j.lifecycle_stage === 'awaiting_approval' && approvable > 0)
-            ? `<span class="badge" style="background:rgba(245,158,11,0.15);color:#f59e0b;">${approved}/${approvable} approved</span>`
-            : '';
-          // Lifecycle action row.
+            ? `<span class="badge" style="background:rgba(245,158,11,0.15);color:#f59e0b;">${approved}/${approvable} ok</span>` : '';
           const stuck = j.stuck_days;
           const stuckStr = (stuck != null && stuck > 0)
             ? `<span class="lc-stuck${stuck > 3 ? " warn" : ""}">stuck ${stuck}d</span>` : "";
@@ -3542,19 +3775,21 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const advanceBtn = exportLabel
             ? `<button class="lc-action lc-advance" data-id="${safeId}" data-next="${exportLabel}" title="Advance to ${STAGE_LABEL[exportLabel]}">→ ${STAGE_LABEL[exportLabel].replace("Awaiting ","")}</button>` : "";
           const notesClass = j.notes ? "lc-action lc-notes has-notes" : "lc-action lc-notes";
-          const archiveLabel = j.archived ? '📤 Unarchive' : '📦';
-          return `<div class="job-item lc-row" data-id="${safeId}" data-job-id="${safeId}">
-            <div class="job-body">${thumb}<div class="job-meta">
-              <div class="job-badges">
+          const archiveLabel = j.archived ? '📤' : '📦';
+          const progress = `<div class="lc-card-progress"><div class="progress-bar"><div class="progress-fill" style="width:${j.progress_percent||0}%"></div></div><div class="progress-text"><span>${(j.progress_percent||0).toFixed(0)}%</span><span>${j.completed_clips||0}/${j.total_clips||0}</span></div></div>`;
+          const variant = compact ? 'lc-card compact' : 'lc-card';
+          return `<div class="${variant}" data-id="${safeId}" data-job-id="${safeId}">
+            <div class="lc-card-body">${thumb}<div class="lc-card-meta">
+              <div class="lc-card-badges">
                 <span class="badge badge-${escapeHtml(j.status)}">${escapeHtml(j.status)}</span>
                 <span class="badge-backend badge-backend-${escapeHtml(j.backend||'api')}">${escapeHtml(bn)}</span>
                 ${exportBadge}${voiceBadge}${approvalBadge}
-                <span class="job-id">${safeId.slice(0,8)}</span>
-              </div>${dlg}
+              </div>
+              <div class="lc-card-title">${escapeHtml(shortenSlug(slug))}</div>
+              ${dlg}
             </div></div>
-            <div class="progress-bar" style="margin-top:8px"><div class="progress-fill" style="width:${j.progress_percent}%"></div></div>
-            <div class="progress-text"><span>${j.progress_percent.toFixed(0)}%</span><span>${j.completed_clips}/${j.total_clips}</span></div>
-            <div class="lc-actions">
+            ${progress}
+            <div class="lc-card-actions">
               ${stuckStr}
               <button class="${notesClass}" data-action="notes" data-id="${safeId}" title="Notes">📝</button>
               ${advanceBtn}
@@ -3563,10 +3798,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
           </div>`;
         }
 
-        function renderLifecycleRow(job) {
-          // Back-compat alias — kept in case other code references it.
-          return renderJobItemForLifecycle(job);
-        }
+        // Back-compat aliases used elsewhere in the codebase.
+        function renderLifecycleRow(job) { return renderJobCard(job); }
+        function renderJobItemForLifecycle(j) { return renderJobCard(j); }
 
         // Cache the last-fetched jobs by stage so collapsed sections can render
         // lazily on first expand (cheap DOM avoidance for sections with hundreds
@@ -3582,11 +3816,18 @@ Example: A realistic vertical video of a professional presenter speaking directl
           return null;
         }
 
+        // Per-column pagination state. Maps stage -> N visible cards.
+        const _lifecycleVisibleCounts = { generating: 20, awaiting_approval: 20, awaiting_export: 20, awaiting_finishing: 20, published: 20 };
+        const LC_PAGE_SIZE = 20;
+
         function renderLifecycle(jobs, { archived = false } = {}) {
+          // Apply current search filter (Task 6 will wire the input listener).
+          const q = (document.getElementById("lifecycleSearch")?.value || "").trim().toLowerCase();
+          const filtered = q ? filterJobsBySearch(jobs, q) : jobs;
+          // Bucket + sort.
           const counts = { generating: 0, awaiting_approval: 0, awaiting_export: 0, awaiting_finishing: 0, published: 0 };
-          // Group + sort once.
           for (const k of LIFECYCLE_STAGES) _lifecycleJobsByStage[k] = [];
-          for (const j of jobs) {
+          for (const j of filtered) {
             const s = _effectiveStageForRow(j);
             if (s != null && _lifecycleJobsByStage[s]) {
               _lifecycleJobsByStage[s].push(j);
@@ -3594,44 +3835,66 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
           }
           for (const k of LIFECYCLE_STAGES) {
-            _lifecycleJobsByStage[k].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+            const sortKey = localStorage.getItem("lc_sort_" + k) || "newest";
+            _lifecycleJobsByStage[k] = sortJobs(_lifecycleJobsByStage[k], sortKey);
           }
-          // Update chip counts.
           for (const s of LIFECYCLE_STAGES) {
             const el = document.querySelector(`.chip-count[data-count="${s}"]`);
             if (el) el.textContent = counts[s];
           }
-          // For each section: set count + restore open state. ONLY render rows
-          // for currently-open sections; closed sections get a sentinel that
-          // the toggle listener swaps to real rows on expand. Order matters —
-          // set .open BEFORE checking detailsEl.open.
           for (const stage of LIFECYCLE_STAGES) {
-            const detailsEl = document.getElementById("lc-" + stage);
-            if (!detailsEl) continue;
-            const rowsEl = detailsEl.querySelector(".lc-rows");
-            const countEl = detailsEl.querySelector(".lc-count");
-            countEl.textContent = _lifecycleJobsByStage[stage].length;
-            detailsEl.open = lifecycleSectionState(stage);
-            if (detailsEl.open) {
-              renderLifecycleSection(stage);
-            } else {
-              rowsEl.dataset.lazyPending = "1";
-              rowsEl.innerHTML = "";
-            }
+            const countEl = document.querySelector(`#lc-${stage} .lc-count`);
+            if (countEl) countEl.textContent = counts[stage];
+            const sortEl = document.querySelector(`.lc-sort[data-stage="${stage}"]`);
+            if (sortEl) sortEl.value = localStorage.getItem("lc_sort_" + stage) || "newest";
+            renderLifecycleSection(stage);
           }
         }
 
         function renderLifecycleSection(stage) {
-          const detailsEl = document.getElementById("lc-" + stage);
-          if (!detailsEl) return;
-          const rowsEl = detailsEl.querySelector(".lc-rows");
-          const stageJobs = _lifecycleJobsByStage[stage] || [];
-          rowsEl.innerHTML = stageJobs.length
-            ? stageJobs.map(renderLifecycleRow).join("")
-            : `<div class="empty" style="padding:6px;color:#888;">none</div>`;
+          const columnEl = document.getElementById("lc-" + stage);
+          if (!columnEl) return;
+          const rowsEl = columnEl.querySelector(".lc-rows");
+          const loadMoreEl = columnEl.querySelector(".lc-load-more");
+          const allJobs = _lifecycleJobsByStage[stage] || [];
+          const visible = _lifecycleVisibleCounts[stage] || LC_PAGE_SIZE;
+          const slice = allJobs.slice(0, visible);
+          rowsEl.innerHTML = slice.length
+            ? slice.map(j => renderJobCard(j)).join("")
+            : `<div class="empty" style="padding:8px;color:#888;font-size:11px;">none</div>`;
           delete rowsEl.dataset.lazyPending;
-          // Hook IntersectionObserver onto the freshly-rendered placeholders.
+          if (allJobs.length > visible) {
+            loadMoreEl.style.display = "";
+            loadMoreEl.textContent = `Load ${Math.min(LC_PAGE_SIZE, allJobs.length - visible)} more (${allJobs.length - visible} remaining)`;
+          } else {
+            loadMoreEl.style.display = "none";
+          }
           observeLifecycleThumbs(rowsEl);
+        }
+
+        function filterJobsBySearch(jobs, q) {
+          const needle = q.toLowerCase();
+          return jobs.filter(j => {
+            const hay = [
+              shortenSlug(j.first_dialogue || j.id || ""),
+              j.first_dialogue || "",
+              j.notes || "",
+              j.id || "",
+            ].join(" ").toLowerCase();
+            return hay.includes(needle);
+          });
+        }
+
+        function sortJobs(jobs, key) {
+          const arr = jobs.slice();
+          if (key === "newest") {
+            arr.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+          } else if (key === "oldest") {
+            arr.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+          } else if (key === "stuck") {
+            arr.sort((a, b) => (b.stuck_days || 0) - (a.stuck_days || 0));
+          }
+          return arr;
         }
 
         // Lazy-swap thumbnails via IntersectionObserver. Each placeholder
@@ -3694,20 +3957,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         document.querySelectorAll(".lifecycle-chips .chip").forEach(c => {
           c.addEventListener("click", async () => {
-            document.querySelectorAll(".lifecycle-chips .chip").forEach(x => x.classList.remove("chip-active"));
-            c.classList.add("chip-active");
             const stage = c.dataset.stage;
-            applySectionVisibility(stage);
             if (stage === "archived") {
+              setAppMode({ mode: "browse", stage: "archived" });
               const jobs = await fetchJobsForLifecycle({ archived: true });
               renderLifecycle(jobs, { archived: true });
             } else {
+              setAppMode({ mode: "browse", stage: stage || "all" });
               const jobs = await fetchJobsForLifecycle();
               renderLifecycle(jobs);
-              if (stage !== "all") {
-                const el = document.getElementById("lc-" + stage);
-                if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-              }
             }
           });
         });
@@ -3719,7 +3977,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const advanceBtn = ev.target.closest(".lc-advance[data-next]");
           const archiveBtn = ev.target.closest(".lc-archive[data-action='archive']");
           const notesBtn   = ev.target.closest(".lc-notes[data-action='notes']");
-          const row        = ev.target.closest(".lc-row");
+          const row        = ev.target.closest(".lc-card");
 
           if (advanceBtn) {
             ev.stopPropagation();
@@ -3753,9 +4011,20 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if (typeof openNotesPopover === "function") openNotesPopover(row);
             return;
           }
-          // Click anywhere else on the row → open the job details panel.
-          if (row && typeof selectJob === "function") {
-            selectJob(row.dataset.id);
+          // Load-more button — expand visible slice for that column.
+          const loadMoreBtn = ev.target.closest(".lc-load-more[data-stage]");
+          if (loadMoreBtn) {
+            ev.stopPropagation();
+            const stage = loadMoreBtn.dataset.stage;
+            _lifecycleVisibleCounts[stage] = (_lifecycleVisibleCounts[stage] || LC_PAGE_SIZE) + LC_PAGE_SIZE;
+            renderLifecycleSection(stage);
+            return;
+          }
+          // Card click → Review mode for that job (preserves the active chip).
+          if (row) {
+            const activeChip = document.querySelector(".lifecycle-chips .chip-active");
+            const stage = activeChip?.dataset.stage || parseModeFromURL().stage || "all";
+            setAppMode({ mode: "review", stage, job: row.dataset.id });
           }
         });
 
@@ -3763,6 +4032,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
         let _lifecycleLastFetch = 0;
         let _lifecycleLastJobs = null;
         let _lifecycleLastArchived = false;
+        let _kanbanOriginalHTML = null;
         const LIFECYCLE_REFRESH_THROTTLE_MS = 5000;
 
         async function refreshLifecycle({ force = false } = {}) {
@@ -3791,7 +4061,238 @@ Example: A realistic vertical video of a professional presenter speaking directl
           return _lifecycleInFlight;
         }
 
-        window.addEventListener("DOMContentLoaded", () => refreshLifecycle({ force: true }));
+        // Live search — re-render in place from already-loaded data. No fetch.
+        (function wireLifecycleSearch() {
+          const inp = document.getElementById("lifecycleSearch");
+          if (!inp) return;
+          let _timer = null;
+          inp.addEventListener("input", () => {
+            clearTimeout(_timer);
+            _timer = setTimeout(() => {
+              if (_lifecycleLastJobs) {
+                renderLifecycle(_lifecycleLastJobs, { archived: _lifecycleLastArchived });
+              }
+              const url = new URL(window.location.href);
+              if (inp.value) url.searchParams.set("q", inp.value);
+              else url.searchParams.delete("q");
+              window.history.replaceState({}, "", url.toString());
+            }, 120);
+          });
+          inp.addEventListener("keydown", (ev) => {
+            if (ev.key === "Escape") { inp.value = ""; inp.dispatchEvent(new Event("input")); ev.stopPropagation(); }
+          });
+          const params = new URLSearchParams(window.location.search);
+          if (params.get("q")) inp.value = params.get("q");
+        })();
+
+        (function wireLifecycleSort() {
+          document.querySelectorAll(".lc-sort[data-stage]").forEach(sel => {
+            sel.addEventListener("change", () => {
+              const stage = sel.dataset.stage;
+              localStorage.setItem("lc_sort_" + stage, sel.value);
+              _lifecycleJobsByStage[stage] = sortJobs(_lifecycleJobsByStage[stage], sel.value);
+              _lifecycleVisibleCounts[stage] = LC_PAGE_SIZE;
+              renderLifecycleSection(stage);
+            });
+          });
+        })();
+
+        // ============================================================
+        // In Review mode, render a compact filtered list inside #jobsList so the
+        // operator can bounce between jobs in the same stage without leaving the
+        // Review panel. Stage = chip-active when entering Review (or "all").
+        function renderReviewSidebar(stage) {
+          const jobsListEl = document.getElementById("jobsList");
+          if (!jobsListEl) return;
+          const all = _lifecycleLastJobs || [];
+          const jobs = (stage === "all" || !stage)
+            ? all
+            : all.filter(j => _effectiveStageForRow(j) === stage);
+          jobsListEl.classList.add("lc-review-mode");
+          jobsListEl.innerHTML = `<div class="lc-review-sidebar-rows">${
+            jobs.map(j => renderJobCard(j, { compact: true })).join("")
+          }</div>`;
+          observeLifecycleThumbs(jobsListEl);
+        }
+
+        function restoreKanbanDOM() {
+          const jobsListEl = document.getElementById("jobsList");
+          if (!jobsListEl || !_kanbanOriginalHTML) return;
+          if (!jobsListEl.classList.contains("lc-review-mode")) return;
+          jobsListEl.classList.remove("lc-review-mode");
+          jobsListEl.innerHTML = _kanbanOriginalHTML;
+          // Re-wire sort listeners (lost when innerHTML replaced).
+          document.querySelectorAll(".lc-sort[data-stage]").forEach(sel => {
+            sel.addEventListener("change", () => {
+              const stage = sel.dataset.stage;
+              localStorage.setItem("lc_sort_" + stage, sel.value);
+              _lifecycleJobsByStage[stage] = sortJobs(_lifecycleJobsByStage[stage], sel.value);
+              _lifecycleVisibleCounts[stage] = LC_PAGE_SIZE;
+              renderLifecycleSection(stage);
+            });
+          });
+          if (_lifecycleLastJobs) renderLifecycle(_lifecycleLastJobs, { archived: _lifecycleLastArchived });
+        }
+
+        // Mode router: drives state-create / state-browse / state-review
+        // off the URL ?mode=&stage=&job=&q=. history.pushState on transitions,
+        // popstate listener restores state.
+        // ============================================================
+        const MODE_VALUES = ["create", "browse", "review"];
+        const DEFAULT_MODE = "browse";
+
+        function parseModeFromURL() {
+          const p = new URLSearchParams(window.location.search);
+          const mode = MODE_VALUES.includes(p.get("mode")) ? p.get("mode") : DEFAULT_MODE;
+          const stage = p.get("stage") || "all";
+          const job = p.get("job") || null;
+          const q = p.get("q") || "";
+          return { mode, stage, job, q };
+        }
+
+        function setAppMode({ mode, stage = "all", job = null, push = true }) {
+          const container = document.getElementById("appContainer");
+          if (!container) return;
+          container.classList.remove("state-initial", "state-active", "state-create", "state-browse", "state-review");
+          container.classList.add("state-" + mode);
+
+          // Returning to Browse rebuilds the kanban DOM (Review mode replaced it).
+          if (mode === "browse") {
+            restoreKanbanDOM();
+          }
+
+          updateBreadcrumb({ mode, stage, job });
+
+          document.querySelectorAll(".lifecycle-chips .chip").forEach(c =>
+            c.classList.toggle("chip-active", c.dataset.stage === (stage === "all" ? "all" : stage))
+          );
+
+          if (mode === "browse") {
+            applyChipColumnVisibility(stage);
+          }
+
+          if (mode === "review" && job) {
+            if (typeof selectJob === "function") selectJob(job);
+            if (typeof renderReviewSidebar === "function") renderReviewSidebar(stage);
+          }
+
+          if (push) {
+            const url = new URL(window.location.href);
+            url.searchParams.set("mode", mode);
+            if (stage && stage !== "all") url.searchParams.set("stage", stage); else url.searchParams.delete("stage");
+            if (job) url.searchParams.set("job", job); else url.searchParams.delete("job");
+            window.history.pushState({ mode, stage, job }, "", url.toString());
+          }
+        }
+
+        function updateBreadcrumb({ mode, stage, job }) {
+          let bc = document.getElementById("appBreadcrumb");
+          if (!bc) return;
+          if (mode === "create") {
+            bc.innerHTML = `<a href="#" data-bc="browse">Browse</a> &rsaquo; <span>New Job</span>`;
+          } else if (mode === "review") {
+            const j = (_lifecycleLastJobs || []).find(x => x.id === job);
+            const slug = j ? shortenSlug(j.first_dialogue || j.id) : (job || "");
+            bc.innerHTML = `<a href="#" data-bc="browse">Browse</a> &rsaquo; <span>Review: ${escapeHtml(slug)}</span>`;
+          } else {
+            bc.innerHTML = `<span>Browse</span>`;
+          }
+        }
+
+        function applyChipColumnVisibility(stage) {
+          const kanban = document.querySelector(".lc-kanban");
+          if (!kanban) return;
+          if (stage === "all" || !stage) {
+            kanban.classList.remove("lc-single-column");
+            kanban.querySelectorAll(".lc-column").forEach(c => c.classList.remove("lc-column-active"));
+          } else {
+            kanban.classList.add("lc-single-column");
+            kanban.querySelectorAll(".lc-column").forEach(c => {
+              c.classList.toggle("lc-column-active", c.dataset.stage === stage);
+            });
+          }
+        }
+
+        document.addEventListener("click", (ev) => {
+          const bcLink = ev.target.closest("[data-bc]");
+          if (!bcLink) return;
+          ev.preventDefault();
+          if (bcLink.dataset.bc === "browse") {
+            setAppMode({ mode: "browse", stage: parseModeFromURL().stage });
+          }
+        });
+
+        window.addEventListener("popstate", () => {
+          const { mode, stage, job } = parseModeFromURL();
+          setAppMode({ mode, stage, job, push: false });
+        });
+
+        // Keyboard shortcuts. Ignore when an input/textarea has focus.
+        document.addEventListener("keydown", (ev) => {
+          const target = ev.target;
+          const isText = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+          if (isText && ev.key !== "Escape") return;
+          if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+          if (ev.key === "n" || ev.key === "N") {
+            ev.preventDefault();
+            setAppMode({ mode: "create" });
+            return;
+          }
+          if (ev.key === "b" || ev.key === "B") {
+            ev.preventDefault();
+            setAppMode({ mode: "browse", stage: parseModeFromURL().stage });
+            return;
+          }
+          if (ev.key === "Escape") {
+            const { mode } = parseModeFromURL();
+            if (mode !== "browse") {
+              ev.preventDefault();
+              setAppMode({ mode: "browse", stage: parseModeFromURL().stage });
+            }
+            return;
+          }
+          if (ev.key === "/") {
+            ev.preventDefault();
+            document.getElementById("lifecycleSearch")?.focus();
+            return;
+          }
+          const chipMap = { "1": "generating", "2": "awaiting_approval", "3": "awaiting_export", "4": "awaiting_finishing", "5": "published" };
+          if (chipMap[ev.key]) {
+            ev.preventDefault();
+            setAppMode({ mode: "browse", stage: chipMap[ev.key] });
+            return;
+          }
+        });
+
+        window.addEventListener("DOMContentLoaded", async () => {
+          _kanbanOriginalHTML = document.getElementById("jobsList")?.innerHTML || null;
+          const params = parseModeFromURL();
+          if (params.q) {
+            const inp = document.getElementById("lifecycleSearch");
+            if (inp) inp.value = params.q;
+          }
+          const explicitMode = new URLSearchParams(window.location.search).get("mode");
+          if (!explicitMode) {
+            // No ?mode= in URL — fetch once to decide default mode.
+            try {
+              const jobs = await fetchJobsForLifecycle();
+              _lifecycleLastJobs = jobs;
+              _lifecycleLastFetch = Date.now();
+              _lifecycleLastArchived = false;
+              if (!jobs || jobs.length === 0) {
+                setAppMode({ mode: "create", push: false });
+                return;
+              }
+              setAppMode({ mode: params.mode, stage: params.stage, job: params.job, push: false });
+              renderLifecycle(jobs);
+              return;
+            } catch (e) {
+              console.warn("[lifecycle] initial fetch failed:", e);
+            }
+          }
+          setAppMode({ mode: params.mode, stage: params.stage, job: params.job, push: false });
+          refreshLifecycle({ force: true });
+        });
 
         let _popoverJobId = null;
 
@@ -3857,6 +4358,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
           if (ev.target.matches(".notes-btn")) return;
           closeNotesPopover();
         });
+
+        document.getElementById("lcSidebarToggle")?.addEventListener("click", () => {
+          const c = document.getElementById("appContainer");
+          c.classList.toggle("review-sidebar-collapsed");
+          localStorage.setItem("lc_review_sidebar", c.classList.contains("review-sidebar-collapsed") ? "0" : "1");
+        });
+        if (localStorage.getItem("lc_review_sidebar") === "0") {
+          document.getElementById("appContainer")?.classList.add("review-sidebar-collapsed");
+        }
 
         async function revalidateKey(keyId) {
             try {
@@ -4059,6 +4569,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
         
         function newJob(){
+            if (typeof setAppMode === "function") setAppMode({ mode: "create" });
             collapseResults();
             // Clear form for new job
             uploadJobId=null;uploadedImages=[];uploadedFilesData=[];
