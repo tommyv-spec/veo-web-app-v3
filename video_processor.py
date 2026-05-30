@@ -4318,10 +4318,23 @@ def export_with_master_audio(
             )
         master_words = None
         targets = list(pre_computed_targets)
-        master_duration = max((t.get("end", 0.0) for t in targets), default=0.0)
+        # v773.10.17 — master_duration must reflect the ACTUAL master audio
+        # length, not just the last target's end. When the speaker pipeline
+        # has unpaired tail clips (no b-roll partner), the pre_computed_targets
+        # cover only the b-roll-bearing positions; the trailing unpaired
+        # speaker time must be rendered as black so the b-roll video stays
+        # the same length as the speaker master audio.
+        _targets_end = max((t.get("end", 0.0) for t in targets), default=0.0)
+        try:
+            _audio_info = ffprobe_json(master_audio_path)
+            _audio_dur = get_duration(_audio_info)
+        except Exception:
+            _audio_dur = 0.0
+        master_duration = max(_targets_end, _audio_dur)
         print(
             f"[MasterAlign] v701zd pre-computed targets (skip Whisper master): "
-            f"master_duration={master_duration:.2f}s, {len(targets)} clips",
+            f"targets_end={_targets_end:.2f}s audio_dur={_audio_dur:.2f}s "
+            f"→ master_duration={master_duration:.2f}s, {len(targets)} clips",
             flush=True,
         )
         for _i, _t in enumerate(targets):
