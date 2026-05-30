@@ -1376,6 +1376,95 @@
           .lifecycle-chips .chip { white-space: nowrap; }
         }
 
+        .lc-search-bar { padding: 8px 0; }
+        .lc-search-bar input {
+            width: 100%; padding: 8px 12px; background: var(--bg-input);
+            border: 1px solid var(--border-subtle); border-radius: 6px;
+            color: var(--text); font-size: 13px;
+        }
+        .lc-kanban {
+            display: grid; gap: 12px;
+            grid-template-columns: repeat(5, minmax(220px, 1fr));
+            height: calc(100% - 88px);
+        }
+        .lc-kanban .lc-column {
+            display: flex; flex-direction: column;
+            background: var(--bg-elevated); border-radius: 8px;
+            min-height: 0;
+            overflow: hidden;
+        }
+        .lc-column-header {
+            display: flex; align-items: center; gap: 8px;
+            padding: 10px 12px; border-bottom: 1px solid var(--border-subtle);
+            font-weight: 600; font-size: 13px;
+        }
+        .lc-column-header .lc-count {
+            background: var(--bg-input); padding: 2px 8px; border-radius: 10px;
+            font-size: 11px; min-width: 24px; text-align: center;
+        }
+        .lc-column-header .lc-sort {
+            margin-left: auto; background: var(--bg-input); color: var(--text);
+            border: 1px solid var(--border-subtle); border-radius: 4px;
+            font-size: 11px; padding: 2px 6px;
+        }
+        .lc-column .lc-rows {
+            flex: 1; overflow-y: auto; padding: 8px;
+            display: flex; flex-direction: column; gap: 8px;
+        }
+        .lc-column .lc-load-more {
+            margin: 8px 12px; padding: 6px;
+            background: var(--bg-input); border: 1px solid var(--border-subtle);
+            color: var(--text); border-radius: 4px; cursor: pointer; font-size: 12px;
+        }
+        .lc-column .lc-load-more:hover { border-color: var(--accent); }
+        .lc-kanban.lc-single-column { grid-template-columns: 1fr; }
+        .lc-kanban.lc-single-column .lc-column { display: none; }
+        .lc-kanban.lc-single-column .lc-column.lc-column-active { display: flex; }
+        .lc-card {
+            background: var(--bg); border: 1px solid var(--border-subtle);
+            border-radius: 6px; padding: 8px; cursor: pointer;
+            display: flex; flex-direction: column; gap: 6px;
+            transition: border-color 0.15s;
+        }
+        .lc-card:hover { border-color: var(--accent); }
+        .lc-card.selected { border-color: var(--accent); background: rgba(99,102,241,0.08); }
+        .lc-card-body { display: flex; gap: 8px; align-items: flex-start; }
+        .lc-card-meta { flex: 1; min-width: 0; }
+        .lc-card-badges {
+            display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+            font-size: 10px;
+        }
+        .lc-card-title {
+            font-size: 12px; font-weight: 600;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            margin-top: 4px;
+        }
+        .lc-card-dialogue {
+            font-size: 11px; color: var(--text-muted); margin-top: 2px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .lc-card-progress { display: flex; flex-direction: column; gap: 2px; }
+        .lc-card-progress .progress-bar { height: 4px; background: var(--bg-input); border-radius: 2px; overflow: hidden; }
+        .lc-card-progress .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+        .lc-card-progress .progress-text { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); }
+        .lc-card-actions {
+            display: flex; gap: 4px; flex-wrap: wrap;
+            padding-top: 6px; border-top: 1px dashed var(--border-subtle);
+        }
+        .lc-card-actions .lc-action {
+            background: var(--bg-input); border: 1px solid var(--border-subtle);
+            color: var(--text); font-size: 10px; padding: 3px 6px; border-radius: 3px;
+            cursor: pointer;
+        }
+        .lc-card-actions .lc-action:hover { border-color: var(--accent); }
+        .lc-card-actions .lc-action.lc-advance {
+            background: rgba(99,102,241,0.15); color: var(--accent); border-color: var(--accent);
+        }
+        .lc-card-actions .lc-notes.has-notes { color: var(--accent); border-color: var(--accent); }
+        .lc-card-actions .lc-stuck { margin-right: auto; font-size: 10px; color: #c33; }
+        .lc-card.compact .lc-card-dialogue,
+        .lc-card.compact .lc-card-progress,
+        .lc-card.compact .lc-card-actions { display: none; }
         .progress-bar { height: 4px; background: var(--bg-input); border-radius: 2px; overflow: hidden; }
         .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width 0.3s ease; }
         .progress-text { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); margin-top: 6px; }
@@ -2994,12 +3083,75 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         <button class="chip" data-stage="published">Published <span class="chip-count" data-count="published">0</span></button>
                         <button class="chip" data-stage="archived">Archive</button>
                     </div>
-                    <div class="jobs-list" id="jobsList">
-                        <details id="lc-generating" open><summary>Generating (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
-                        <details id="lc-awaiting_approval" open><summary>Awaiting approval (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
-                        <details id="lc-awaiting_export" open><summary>Awaiting export (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
-                        <details id="lc-awaiting_finishing" open><summary>Awaiting finishing (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
-                        <details id="lc-published"><summary>Published (<span class="lc-count">0</span>)</summary><div class="lc-rows"></div></details>
+                    <div class="lc-search-bar" id="lifecycleSearchBar">
+                        <input type="text" id="lifecycleSearch" placeholder="🔍  Search slug or dialogue…" autocomplete="off">
+                    </div>
+                    <div class="jobs-list lc-kanban" id="jobsList">
+                        <div class="lc-column" id="lc-generating" data-stage="generating">
+                            <div class="lc-column-header">
+                                <span class="lc-column-title">Generating</span>
+                                <span class="lc-count">0</span>
+                                <select class="lc-sort" data-stage="generating">
+                                    <option value="newest">Newest</option>
+                                    <option value="oldest">Oldest</option>
+                                    <option value="stuck">Stuck longest</option>
+                                </select>
+                            </div>
+                            <div class="lc-rows"></div>
+                            <button class="lc-load-more" data-stage="generating" style="display:none">Load 20 more</button>
+                        </div>
+                        <div class="lc-column" id="lc-awaiting_approval" data-stage="awaiting_approval">
+                            <div class="lc-column-header">
+                                <span class="lc-column-title">Awaiting approval</span>
+                                <span class="lc-count">0</span>
+                                <select class="lc-sort" data-stage="awaiting_approval">
+                                    <option value="newest">Newest</option>
+                                    <option value="oldest">Oldest</option>
+                                    <option value="stuck">Stuck longest</option>
+                                </select>
+                            </div>
+                            <div class="lc-rows"></div>
+                            <button class="lc-load-more" data-stage="awaiting_approval" style="display:none">Load 20 more</button>
+                        </div>
+                        <div class="lc-column" id="lc-awaiting_export" data-stage="awaiting_export">
+                            <div class="lc-column-header">
+                                <span class="lc-column-title">Awaiting export</span>
+                                <span class="lc-count">0</span>
+                                <select class="lc-sort" data-stage="awaiting_export">
+                                    <option value="newest">Newest</option>
+                                    <option value="oldest">Oldest</option>
+                                    <option value="stuck">Stuck longest</option>
+                                </select>
+                            </div>
+                            <div class="lc-rows"></div>
+                            <button class="lc-load-more" data-stage="awaiting_export" style="display:none">Load 20 more</button>
+                        </div>
+                        <div class="lc-column" id="lc-awaiting_finishing" data-stage="awaiting_finishing">
+                            <div class="lc-column-header">
+                                <span class="lc-column-title">Awaiting finishing</span>
+                                <span class="lc-count">0</span>
+                                <select class="lc-sort" data-stage="awaiting_finishing">
+                                    <option value="newest">Newest</option>
+                                    <option value="oldest">Oldest</option>
+                                    <option value="stuck">Stuck longest</option>
+                                </select>
+                            </div>
+                            <div class="lc-rows"></div>
+                            <button class="lc-load-more" data-stage="awaiting_finishing" style="display:none">Load 20 more</button>
+                        </div>
+                        <div class="lc-column" id="lc-published" data-stage="published">
+                            <div class="lc-column-header">
+                                <span class="lc-column-title">Published</span>
+                                <span class="lc-count">0</span>
+                                <select class="lc-sort" data-stage="published">
+                                    <option value="newest">Newest</option>
+                                    <option value="oldest">Oldest</option>
+                                    <option value="stuck">Stuck longest</option>
+                                </select>
+                            </div>
+                            <div class="lc-rows"></div>
+                            <button class="lc-load-more" data-stage="published" style="display:none">Load 20 more</button>
+                        </div>
                     </div>
                 </div>
             </div>
