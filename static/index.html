@@ -54,7 +54,72 @@
             .app-container.state-active .config-panel { height: auto; border-right: none; border-bottom: 1px solid var(--border-color); }
             .app-container.state-active .results-panel { height: auto; }
         }
-        
+
+        /* === 3-mode dashboard layout (2026-05-30) === */
+        /* Create mode: full-width form, no jobs/review panels. */
+        .app-container.state-create .main-content {
+            display: flex; justify-content: center; align-items: flex-start;
+            padding: 24px; flex: 1;
+        }
+        .app-container.state-create .config-panel {
+            width: 100%; max-width: 1400px;
+        }
+        .app-container.state-create .results-panel,
+        .app-container.state-create #jobsCard { display: none !important; }
+
+        /* Browse mode: full-width kanban; create form + review panel hidden. */
+        .app-container.state-browse .main-content {
+            display: block;
+            padding: 16px 24px;
+            flex: 1;
+            height: calc(100vh - 64px - 42px);
+            overflow: hidden;
+        }
+        .app-container.state-browse .config-panel,
+        .app-container.state-browse .results-panel,
+        .app-container.state-browse #createCard { display: none !important; }
+        .app-container.state-browse #jobsCard {
+            display: block !important;
+            height: 100%;
+            margin: 0;
+        }
+
+        /* Review mode: jobs sidebar (jobsCard) on the left, review panel on right. */
+        .app-container.state-review .main-content {
+            display: grid;
+            grid-template-columns: 260px 1fr;
+            gap: 0;
+            flex: 1;
+            height: calc(100vh - 64px - 42px);
+        }
+        .app-container.state-review.review-sidebar-collapsed .main-content {
+            grid-template-columns: 36px 1fr;
+        }
+        .app-container.state-review .config-panel { display: none !important; }
+        .app-container.state-review .results-panel {
+            display: block; padding: 24px; height: 100%; overflow-y: auto;
+        }
+        .app-container.state-review #jobsCard {
+            display: block !important;
+            border-right: 1px solid var(--border-color);
+            height: 100%;
+            overflow-y: auto;
+            margin: 0;
+        }
+
+        /* Mobile fallback: kanban → single column with stage tabs. */
+        @media (max-width: 768px) {
+            .app-container.state-browse .lifecycle-chips { overflow-x: auto; flex-wrap: nowrap; }
+            .app-container.state-browse .lc-kanban { grid-template-columns: 1fr !important; }
+            .app-container.state-browse .lc-column:not(.lc-column-active) { display: none; }
+            .app-container.state-review .main-content { grid-template-columns: 1fr; }
+            .app-container.state-review #jobsCard { display: none !important; }
+            .app-container.state-review.review-sidebar-open #jobsCard {
+                display: block !important; position: fixed; top: 64px; left: 0; bottom: 0;
+                width: 280px; z-index: 100; background: var(--bg);
+            }
+        }
+
         /* Vertical stack layout for config-panel */
         .config-panel { display: flex; flex-direction: column; gap: 16px; }
         
