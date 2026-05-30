@@ -3110,7 +3110,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     <button class="btn btn-secondary btn-start" id="promptOnlyBtn" onclick="createJob(true)" title="Generate prompts only — no video generation">📝 Prompts Only</button>
                 </div>
                 
-                <div class="card" id="jobsCard" style="display:none;">
+                <div class="card" id="jobsCard">
                     <div class="card-title">
                         <button class="lc-sidebar-toggle" id="lcSidebarToggle" title="Collapse">◂◂</button>
                         📋 Jobs
@@ -4578,7 +4578,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
             'ALL_IMAGES_BLACKLISTED',    // worker — every attached image rejected
         ]);
         
-        function setActiveState(){ const c=document.getElementById('appContainer'); if(!c.classList.contains('state-active')){ c.classList.remove('state-initial'); c.classList.add('state-active'); } document.getElementById('jobsCard').style.display='block'; }
+        function setActiveState(){
+            const c=document.getElementById('appContainer');
+            // 3-mode router (2026-05-30) owns state-create/state-browse/state-review.
+            // No-op if a mode class is already present so legacy callers
+            // (refreshJobs / selectJob) don't clobber the router's state.
+            if (c.classList.contains('state-create') || c.classList.contains('state-browse') || c.classList.contains('state-review')) {
+                return;
+            }
+            if(!c.classList.contains('state-active')){ c.classList.remove('state-initial'); c.classList.add('state-active'); }
+            const jc=document.getElementById('jobsCard'); if(jc) jc.style.removeProperty('display');
+        }
         function collapseResults(){ 
             const c=document.getElementById('appContainer'); 
             c.classList.remove('state-active'); 
