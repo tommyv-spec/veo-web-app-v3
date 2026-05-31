@@ -495,18 +495,12 @@ def _fa_init_project_best_effort(page, project_id, context=""):
         f"{_FA_GOOGLE_FLOW_API}/v1/credits?key={_FA_GOOGLE_API_KEY}",
         "GET", _bearer(),
     ))
-    best_effort("agentInfo agentToggleState=ENABLED", lambda: _fa_api_fetch(
-        page,
-        f"{_FA_GOOGLE_FLOW_API}/v1/projects/{project_id}/agentInfo?key={_FA_GOOGLE_API_KEY}",
-        "PATCH", _bearer(),
-        {"agentToggleState": "AGENT_TOGGLE_STATE_ENABLED"},
-    ))
-    best_effort("flowCreationAgent.sessions POST", lambda: _fa_api_fetch(
-        page,
-        f"{_FA_GOOGLE_FLOW_API}/v1/flowCreationAgent/sessions?key={_FA_GOOGLE_API_KEY}",
-        "POST", _bearer(),
-        {"projectId": f"projects/{project_id}"},
-    ))
+    # DO NOT fire any agent-related calls (operator: "the agent button SHOULD BE off").
+    # The HAR captured a session where the user had Agent ON. PATCHing
+    # agentToggleState=ENABLED + POSTing flowCreationAgent.sessions switches
+    # the project page to the Agent landing UI ("Start creating or drop media"
+    # + prompt box) — no toolbar, no settings button, no variant selector.
+    # DOM-click "New project" leaves Agent OFF; we match that by skipping these.
 
 
 def _fa_try_create_new_project_api(page, context=""):
