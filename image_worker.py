@@ -3639,13 +3639,12 @@ def _fa_init_project_best_effort(page, project_id, context=""):
         "POST", _bearer(),
         {"projectId": f"projects/{project_id}"},
     ))
-    # 8. agentInfo PATCH — chatPanelOpen
-    best_effort("agentInfo chatPanelOpen=true", lambda: _fa_api_fetch(
-        page,
-        f"{_FA_GOOGLE_FLOW_API}/v1/projects/{project_id}/agentInfo?key={_FA_GOOGLE_API_KEY}",
-        "PATCH", _bearer(),
-        {"chatPanelOpen": True},
-    ))
+    # NOTE: HAR also showed PATCH agentInfo chatPanelOpen=true — that's a
+    # user-interaction event (operator opening the chat panel), NOT default
+    # project-create state. Forcing it on changes the toolbar layout and can
+    # shift downstream DOM lookups (settings button, variant counter). The
+    # DOM-click "New project" flow leaves chatPanelOpen at its default; we
+    # match that here by SKIPPING the chatPanelOpen PATCH.
 
 
 # ============================================================
