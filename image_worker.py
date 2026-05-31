@@ -3683,12 +3683,17 @@ def _fa_init_project_best_effort(page, project_id, context=""):
         f"{_FA_GOOGLE_FLOW_API}/v1/credits?key={_FA_GOOGLE_API_KEY}",
         "GET", _bearer(),
     ))
-    # DO NOT fire any agent-related calls (operator: "the agent button SHOULD BE off").
-    # The HAR captured a session where the user had Agent ON. PATCHing
-    # agentToggleState=ENABLED + POSTing flowCreationAgent.sessions switches
-    # the project page to the Agent landing UI ("Start creating or drop media"
-    # + prompt box) — no toolbar, no settings button, no variant selector.
-    # DOM-click "New project" leaves Agent OFF; we match that by skipping these.
+    # Explicitly DISABLE Agent (operator: "agent button SHOULD BE off").
+    # HAR full toggle cycle: PATCH=ENABLED, chatPanelOpen=true, sessions POST,
+    # chatPanelOpen=false, PATCH=DISABLED — operator turned Agent OFF at the
+    # end. Fire the FINAL state directly. Without this, Flow may default to
+    # Agent ON on fresh projects and show the agent landing UI.
+    best_effort("agentInfo agentToggleState=DISABLED", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1/projects/{project_id}/agentInfo?key={_FA_GOOGLE_API_KEY}",
+        "PATCH", _bearer(),
+        {"agentToggleState": "AGENT_TOGGLE_STATE_DISABLED"},
+    ))
 
 
 # ============================================================
