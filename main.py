@@ -3020,6 +3020,7 @@ def _build_job_response(job, first_dialogue=None, first_frame_url=None, approved
         archived=bool(getattr(job, 'archived', False)),
         stuck_days=stuck_days,
         approved_clips=approved_clips,
+        instagram_url=getattr(job, 'instagram_url', None),
     )
 
 
@@ -3445,6 +3446,269 @@ class UpdateLifecycleRequest(BaseModel):
 
 class UpdateArchiveRequest(BaseModel):
     archived: bool
+
+
+# === Instagram monitor (2026-05-31) ===
+from encryption import encrypt as _enc_encrypt, decrypt as _enc_decrypt
+from instagram_client import (
+    resolve_user_id as _ig_resolve_user_id,
+    fetch_recent_clips as _ig_fetch_recent_clips,
+    HikerAPIError,
+)
+import instagram_match as _ig_match
+
+
+class CreateInstagramAccountRequest(BaseModel):
+    handle: str
+    api_key: str
+
+
+class MatchInstagramVideoRequest(BaseModel):
+    job_id: str
+
+
+def _get_user_ig_account(db: DBSession, account_id: int, user: User):
+    from models import InstagramAccount
+    acc = db.query(InstagramAccount).filter_by(id=account_id).first()
+    if not acc:
+        raise HTTPException(status_code=404, detail="Instagram account not found")
+    if acc.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return acc
+
+
+def _job_full_dialogue(db: DBSession, job_id: str) -> str:
+    """Concat all clip dialogue_text for a Job, in clip_index order."""
+    rows = (
+        db.query(Clip.dialogue_text)
+        .filter(Clip.job_id == job_id)
+        .order_by(Clip.clip_index.asc())
+        .all()
+    )
+    return " ".join((r[0] or "") for r in rows).strip()
+
+
+@app.post("/api/instagram/accounts")
+async def create_instagram_account(
+    req: CreateInstagramAccountRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    from models import InstagramAccount
+    handle = (req.handle or "").strip().lstrip("@").lower()
+    if not handle or not all(c.isalnum() or c in "._" for c in handle):
+        raise HTTPException(400, detail="Invalid handle")
+    existing = db.query(InstagramAccount).filter_by(user_id=current_user.id, handle=handle).first()
+    if existing:
+        raise HTTPException(409, detail="Handle already linked")
+    acc = InstagramAccount(
+        user_id=current_user.id,
+        handle=handle,
+        api_key_encrypted=_enc_encrypt(req.api_key.strip()),
+    )
+    db.add(acc)
+    db.commit()
+    db.refresh(acc)
+    return acc.to_dict()
+
+
+@app.get("/api/instagram/accounts")
+async def list_instagram_accounts(
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    from models import InstagramAccount, InstagramVideo
+    rows = db.query(InstagramAccount).filter_by(user_id=current_user.id).order_by(InstagramAccount.added_at.desc()).all()
+    out = []
+    for acc in rows:
+        video_count = db.query(InstagramVideo).filter_by(account_id=acc.id).count()
+        matched_count = db.query(InstagramVideo).filter(
+            InstagramVideo.account_id == acc.id,
+            InstagramVideo.matched_job_id.isnot(None),
+        ).count()
+        d = acc.to_dict()
+        d["video_count"] = video_count
+        d["matched_count"] = matched_count
+        out.append(d)
+    return out
+
+
+@app.delete("/api/instagram/accounts/{account_id}")
+async def delete_instagram_account(
+    account_id: int,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    acc = _get_user_ig_account(db, account_id, current_user)
+    db.delete(acc)
+    db.commit()
+    return {"deleted": account_id}
+
+
+@app.post("/api/instagram/accounts/{account_id}/sync")
+async def sync_instagram_account(
+    account_id: int,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    from models import InstagramAccount, InstagramVideo
+    acc = _get_user_ig_account(db, account_id, current_user)
+    api_key = _enc_decrypt(acc.api_key_encrypted)
+    try:
+        if not acc.ig_user_id:
+            acc.ig_user_id = _ig_resolve_user_id(acc.handle, api_key)
+        clips = _ig_fetch_recent_clips(acc.ig_user_id, api_key, limit=20)
+    except HikerAPIError as he:
+        raise HTTPException(status_code=502, detail=str(he))
+    added = 0
+    for c in clips:
+        if not c.get("shortcode"):
+            continue
+        existing = db.query(InstagramVideo).filter_by(account_id=acc.id, shortcode=c["shortcode"]).first()
+        if existing:
+            existing.views = c.get("views") or 0
+            existing.likes = c.get("likes") or 0
+            existing.comments = c.get("comments") or 0
+            continue
+        v = InstagramVideo(
+            account_id=acc.id,
+            shortcode=c["shortcode"],
+            url=c.get("url") or f"https://www.instagram.com/reel/{c['shortcode']}/",
+            thumb_url=c.get("thumb_url"),
+            caption=c.get("caption"),
+            views=c.get("views") or 0,
+            likes=c.get("likes") or 0,
+            comments=c.get("comments") or 0,
+            posted_at=c.get("posted_at"),
+        )
+        db.add(v)
+        added += 1
+    acc.last_synced_at = datetime.utcnow()
+    db.commit()
+    total = db.query(InstagramVideo).filter_by(account_id=acc.id).count()
+    return {"added": added, "total": total}
+
+
+@app.get("/api/instagram/accounts/{account_id}/videos")
+async def list_instagram_videos(
+    account_id: int,
+    matched: Optional[bool] = None,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    from models import InstagramVideo
+    _get_user_ig_account(db, account_id, current_user)
+    q = db.query(InstagramVideo).filter_by(account_id=account_id)
+    if matched is True:
+        q = q.filter(InstagramVideo.matched_job_id.isnot(None))
+    elif matched is False:
+        q = q.filter(InstagramVideo.matched_job_id.is_(None))
+    videos = q.order_by(InstagramVideo.posted_at.desc().nullslast()).all()
+    return [v.to_dict() for v in videos]
+
+
+@app.post("/api/instagram/videos/{video_id}/transcribe")
+async def retry_transcribe_video(
+    video_id: int,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    from models import InstagramVideo, InstagramAccount
+    v = db.query(InstagramVideo).filter_by(id=video_id).first()
+    if not v:
+        raise HTTPException(404, detail="video not found")
+    acc = db.query(InstagramAccount).filter_by(id=v.account_id).first()
+    if not acc or acc.user_id != current_user.id:
+        raise HTTPException(403, detail="access denied")
+    v.transcription_status = "pending"
+    v.transcription_error = None
+    db.commit()
+    return {"status": "pending"}
+
+
+@app.get("/api/instagram/videos/{video_id}/suggestions")
+async def suggest_matches(
+    video_id: int,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    from models import InstagramVideo, InstagramAccount, Job
+    v = db.query(InstagramVideo).filter_by(id=video_id).first()
+    if not v:
+        raise HTTPException(404, detail="video not found")
+    acc = db.query(InstagramAccount).filter_by(id=v.account_id).first()
+    if not acc or acc.user_id != current_user.id:
+        raise HTTPException(403, detail="access denied")
+    if not v.transcription or v.transcription_status != "done":
+        return []
+    candidates = (
+        db.query(Job)
+        .filter(
+            Job.user_id == current_user.id,
+            Job.lifecycle_stage == "awaiting_finishing",
+            Job.instagram_video_id.is_(None),
+        )
+        .all()
+    )
+    full_dialogue = lambda j: _job_full_dialogue(db, j.id)
+    top = _ig_match.best_matches(v, candidates, full_dialogue=full_dialogue, k=5, min_score=0.7)
+    for entry in top:
+        clip = db.query(Clip).filter(Clip.job_id == entry["job_id"], Clip.clip_index == 0).first()
+        entry["slug"] = (clip.dialogue_text or "")[:80] if clip and clip.dialogue_text else entry["job_id"][:8]
+    return top
+
+
+@app.post("/api/instagram/videos/{video_id}/match")
+async def match_video(
+    video_id: int,
+    req: MatchInstagramVideoRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    from models import InstagramVideo, InstagramAccount, Job
+    v = db.query(InstagramVideo).filter_by(id=video_id).first()
+    if not v:
+        raise HTTPException(404, detail="video not found")
+    acc = db.query(InstagramAccount).filter_by(id=v.account_id).first()
+    if not acc or acc.user_id != current_user.id:
+        raise HTTPException(403, detail="access denied")
+    job = db.query(Job).filter_by(id=req.job_id).first()
+    if not job or job.user_id != current_user.id:
+        raise HTTPException(404, detail="job not found")
+    v.matched_job_id = job.id
+    v.matched_at = datetime.utcnow()
+    job.instagram_url = v.url
+    job.instagram_video_id = v.id
+    job.lifecycle_stage = "published"
+    if job.published_at is None:
+        job.published_at = datetime.utcnow()
+    db.commit()
+    return _build_job_response(job, approved_clips=_count_approved_clips(db, job.id))
+
+
+@app.delete("/api/instagram/videos/{video_id}/match")
+async def unmatch_video(
+    video_id: int,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    from models import InstagramVideo, InstagramAccount, Job
+    v = db.query(InstagramVideo).filter_by(id=video_id).first()
+    if not v:
+        raise HTTPException(404, detail="video not found")
+    acc = db.query(InstagramAccount).filter_by(id=v.account_id).first()
+    if not acc or acc.user_id != current_user.id:
+        raise HTTPException(403, detail="access denied")
+    matched_job_id = v.matched_job_id
+    v.matched_job_id = None
+    v.matched_at = None
+    if matched_job_id:
+        job = db.query(Job).filter_by(id=matched_job_id).first()
+        if job:
+            job.instagram_url = None
+            job.instagram_video_id = None
+    db.commit()
+    return {"unmatched": video_id}
 
 
 @app.patch("/api/jobs/{job_id}/lifecycle", response_model=JobResponse)
