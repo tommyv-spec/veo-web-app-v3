@@ -147,7 +147,40 @@
             max-height: none !important;
         }
         .app-container.state-review .lc-review-sidebar-rows {
-            display: flex; flex-direction: column; gap: 6px;
+            display: flex; flex-direction: column; gap: 4px;
+        }
+        /* Dense compact card for review sidebar: single horizontal row,
+           thumb left, title + badges stacked tight right. Padding minimal. */
+        .app-container.state-review .lc-card.compact {
+            padding: 6px 8px;
+            gap: 0;
+            border-radius: 4px;
+        }
+        .app-container.state-review .lc-card.compact .lc-card-body {
+            gap: 8px;
+            align-items: center;
+        }
+        .app-container.state-review .lc-card.compact .job-thumb-placeholder,
+        .app-container.state-review .lc-card.compact .job-thumb {
+            width: 32px; height: 32px;
+            font-size: 14px;
+        }
+        .app-container.state-review .lc-card.compact .lc-card-meta {
+            display: flex; flex-direction: column; gap: 2px;
+            min-width: 0;
+        }
+        .app-container.state-review .lc-card.compact .lc-card-title {
+            margin-top: 0; font-size: 11px;
+        }
+        .app-container.state-review .lc-card.compact .lc-card-badges {
+            gap: 3px; font-size: 9px;
+        }
+        .app-container.state-review .lc-card.compact .lc-card-badges .badge {
+            padding: 1px 4px; font-size: 9px;
+        }
+        /* Narrower sidebar — denser footprint. */
+        .app-container.state-review .main-content {
+            grid-template-columns: 220px 1fr;
         }
 
         /* Mobile fallback: kanban → single column with stage tabs. */
