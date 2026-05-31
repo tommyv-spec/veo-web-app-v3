@@ -309,6 +309,308 @@ def _submit_buffer_key(account_label):
     return f"tid:{threading.get_ident()}"
 
 
+# ============================================================
+# FLOW_API INLINE — project creation via private API (video worker)
+# ============================================================
+# Mirror of image_worker.py's FA block; minimal subset needed for createProject
+# + best-effort init. HAR-confirmed shapes (2026-05-30). Source-of-truth lives
+# at code/flow_api/; this is its compiled-in copy for the single-file worker.
+
+_FA_GOOGLE_FLOW_API = "https://aisandbox-pa.googleapis.com"
+_FA_GOOGLE_API_KEY = os.environ.get("FLOW_API_KEY", "AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY")
+
+
+def _fa_mode_enabled():
+    """Default ON. FLOW_API_MODE=off to disable."""
+    return os.environ.get("FLOW_API_MODE", "on").strip().lower() not in ("off", "0", "false", "no")
+
+
+class _FaTokenStore:
+    def __init__(self):
+        self.token = ""
+        self.captured_at = 0.0
+
+    def set(self, t):
+        self.token = t
+        self.captured_at = time.time()
+
+
+_FA_TOKEN_STORE = _FaTokenStore()
+
+
+def _fa_attach_token_listener(page):
+    """Idempotent — attaches a request listener that sniffs Bearer ya29.* tokens.
+    Best to call at page-init, but lazy-attach also works for tRPC project create
+    (which uses cookies, not Bearer)."""
+    if page is None:
+        return
+    try:
+        if getattr(page, "_fa_token_listener_installed", False):
+            return
+    except Exception:
+        return
+
+    def _on_request(req):
+        try:
+            auth = (req.headers or {}).get("authorization", "")
+            if auth.startswith("Bearer ya29."):
+                tok = auth[len("Bearer "):].strip()
+                if tok and tok != _FA_TOKEN_STORE.token:
+                    _FA_TOKEN_STORE.set(tok)
+        except Exception:
+            pass
+
+    try:
+        page.on("request", _on_request)
+        try:
+            page._fa_token_listener_installed = True
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+_FA_TRPC_FETCH_JS = """
+async ([url, method, bodyStr]) => {
+  const opts = { method, headers: {'content-type': 'application/json', 'accept': '*/*'}, credentials: 'include' };
+  if (bodyStr !== null) opts.body = bodyStr;
+  let status = 0, ok = false, text = '';
+  try {
+    const r = await fetch(url, opts);
+    status = r.status; ok = r.ok;
+    text = await r.text();
+  } catch (e) {
+    return { status: 0, ok: false, data: null, text: 'fetch failed: ' + (e && e.message) };
+  }
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+  return { status, ok, data, text: data ? '' : (text || '').slice(0, 2000) };
+}
+"""
+
+_FA_API_FETCH_JS = """
+async ([url, method, headers, bodyStr]) => {
+  const opts = { method, headers, credentials: 'include' };
+  if (bodyStr !== null) opts.body = bodyStr;
+  let status = 0, ok = false, text = '';
+  try {
+    const r = await fetch(url, opts);
+    status = r.status; ok = r.ok;
+    text = await r.text();
+  } catch (e) {
+    return { status: 0, ok: false, data: null, text: 'fetch failed: ' + (e && e.message) };
+  }
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+  return { status, ok, data, text: data ? '' : (text || '').slice(0, 2000) };
+}
+"""
+
+
+def _fa_trpc_fetch(page, url, method, body_obj=None):
+    body_str = json.dumps(body_obj) if body_obj is not None else None
+    try:
+        return page.evaluate(_FA_TRPC_FETCH_JS, [url, method, body_str])
+    except Exception as e:
+        return {"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
+
+
+def _fa_api_fetch(page, url, method, token, body_obj=None):
+    headers = {}
+    if token:
+        headers["authorization"] = f"Bearer {token}"
+    if body_obj is not None:
+        headers["content-type"] = "application/json"
+    body_str = json.dumps(body_obj) if body_obj is not None else None
+    try:
+        return page.evaluate(_FA_API_FETCH_JS, [url, method, headers, body_str])
+    except Exception as e:
+        return {"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
+
+
+def _fa_is_error(result):
+    if not isinstance(result, dict):
+        return True
+    if result.get("error"):
+        return True
+    s = result.get("status")
+    if isinstance(s, int) and s >= 400:
+        return True
+    d = result.get("data")
+    if isinstance(d, dict) and d.get("error"):
+        return True
+    return False
+
+
+def _fa_error_reason(result):
+    if not isinstance(result, dict):
+        return "non-dict result"
+    if result.get("error"):
+        return str(result["error"])[:300]
+    d = result.get("data")
+    if isinstance(d, dict) and d.get("error"):
+        err = d["error"]
+        if isinstance(err, dict):
+            return str(err.get("message") or err.get("status") or err)[:300]
+        return str(err)[:300]
+    s = result.get("status")
+    if isinstance(s, int) and s >= 400:
+        return f"HTTP {s}: {str(result.get('text') or '')[:200]}"
+    return ""
+
+
+def _fa_init_project_best_effort(page, project_id, context=""):
+    """Fire post-createProject init calls best-effort. Every call wrapped;
+    failures logged but never raised. Operator: sometimes needed, sometimes not."""
+    pfx = f"[{context}] " if context else ""
+
+    def best_effort(label, fn):
+        try:
+            res = fn()
+            if isinstance(res, dict) and _fa_is_error(res):
+                print(f"{pfx}[flow_api] init '{label}' non-blocking: {_fa_error_reason(res)}", flush=True)
+        except Exception as e:
+            print(f"{pfx}[flow_api] init '{label}' raised (non-blocking): {e}", flush=True)
+
+    def _bearer():
+        return _FA_TOKEN_STORE.token or ""
+
+    best_effort("projectInitialData", lambda: _fa_trpc_fetch(
+        page, "https://labs.google/fx/api/trpc/flow.projectInitialData", "GET"
+    ))
+    best_effort("fetchUserRecommendations", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1:fetchUserRecommendations?key={_FA_GOOGLE_API_KEY}",
+        "POST", _bearer(),
+        {"onramp": [
+            "FLOW_UPGRADE_BANNER", "FLOW_UPGRADE_BUTTON",
+            "FLOW_MANAGE_AI_CREDITS", "FLOW_VIDEO_TOOLTIP_UPSELL",
+            "FLOW_MODEL_UPGRADE", "FLOW_MANAGE_MEMBERSHIP",
+        ]},
+    ))
+    best_effort("credits", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1/credits?key={_FA_GOOGLE_API_KEY}",
+        "GET", _bearer(),
+    ))
+    best_effort("flowCreationAgent.sessions GET", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1/flowCreationAgent/sessions?key={_FA_GOOGLE_API_KEY}",
+        "GET", _bearer(),
+    ))
+    best_effort("agentInfo agentToggleState=ENABLED", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1/projects/{project_id}/agentInfo?key={_FA_GOOGLE_API_KEY}",
+        "PATCH", _bearer(),
+        {"agentToggleState": "AGENT_TOGGLE_STATE_ENABLED"},
+    ))
+    best_effort("flowCreationAgent.sessions POST", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1/flowCreationAgent/sessions?key={_FA_GOOGLE_API_KEY}",
+        "POST", _bearer(),
+        {"projectId": f"projects/{project_id}"},
+    ))
+    best_effort("agentInfo chatPanelOpen=true", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1/projects/{project_id}/agentInfo?key={_FA_GOOGLE_API_KEY}",
+        "PATCH", _bearer(),
+        {"chatPanelOpen": True},
+    ))
+
+
+def _fa_try_create_new_project_api(page, context=""):
+    """Try API project create. Returns full project URL on success, None on failure.
+    HAR-confirmed sequence (2026-05-30):
+      1. POST trpc/project.createProject {projectTitle, toolName:PINHOLE} → projectId
+      2. page.goto /project/{pid}
+      3. Best-effort init (fire-and-forget)
+    """
+    pfx = f"[{context}] " if context else ""
+    if not _fa_mode_enabled():
+        return None
+
+    # Lazy-attach token listener (idempotent). tRPC works without bearer (cookies)
+    # but init calls benefit from a captured token.
+    _fa_attach_token_listener(page)
+
+    try:
+        from datetime import datetime as _dt
+        title = _dt.now().strftime("%b %d, %I:%M %p").lstrip("0")
+    except Exception:
+        title = "Auto Project"
+
+    try:
+        res = _fa_trpc_fetch(
+            page,
+            "https://labs.google/fx/api/trpc/project.createProject",
+            "POST",
+            {"json": {"projectTitle": title, "toolName": "PINHOLE"}},
+        )
+    except Exception as e:
+        print(f"{pfx}[flow_api] createProject raised: {e} — DOM fallback", flush=True)
+        return None
+
+    if _fa_is_error(res):
+        print(f"{pfx}[flow_api] createProject failed: {_fa_error_reason(res)} — DOM fallback", flush=True)
+        return None
+
+    pid = ""
+    try:
+        d = res.get("data") or {}
+        pid = (
+            d.get("result", {}).get("data", {}).get("json", {}).get("result", {}).get("projectId") or ""
+        )
+    except Exception:
+        pid = ""
+    if not pid:
+        print(f"{pfx}[flow_api] createProject returned no projectId — DOM fallback", flush=True)
+        return None
+
+    project_url = f"https://labs.google/fx/tools/flow/project/{pid}"
+    try:
+        page.goto(project_url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            actual = page.url or project_url
+            if "/project/" in actual:
+                project_url = actual
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"{pfx}[flow_api] nav to {project_url} failed: {e} — DOM fallback", flush=True)
+        return None
+
+    print(f"{pfx}[flow_api] ✓ Created project via API: {project_url}", flush=True)
+    _fa_init_project_best_effort(page, pid, context=context)
+    return project_url
+
+
+def _fa_or_dom_new_project_click(page, dom_label="New project button", context=""):
+    """Try API project-create; on success returns True (page is now on /project/{pid}).
+    On failure performs the existing DOM 'New project' click + returns False.
+
+    Wrap-and-replace for the many `human_click_element(page, "button:has-text('New project')...", LABEL)`
+    sites in the video worker. Same end state for both paths.
+    """
+    if _fa_try_create_new_project_api(page, context=context):
+        return True
+    # Fallback: existing DOM click
+    try:
+        human_click_element(
+            page,
+            "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0",
+            dom_label,
+        )
+    except Exception as e:
+        print(f"[{context}] [flow_api] DOM fallback click raised: {e}", flush=True)
+        raise
+    return False
+
+
+# ============================================================
+# END FLOW_API INLINE (project creation block)
+# ============================================================
+
+
 def _flow_api_capture_enabled():
     """True when the operator set FLOW_API_CAPTURE=1 (read-only traffic capture for
     the flow_api private-API rebuild). Off by default — captures nothing, changes
@@ -8358,7 +8660,7 @@ def _create_retry_project_for_clip(page, clip_data, max_retries=2):
             
             # Click "New project" button
             dismiss_create_with_flow(page, "RetryProject")
-            human_click_element(page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", "[RetryProject] New project button")
+            _fa_or_dom_new_project_click(page, "[RetryProject] New project button", context="RetryProject")
             human_delay(2, 3)  # Match main flow post-click wait
             
             # Wait for project URL
@@ -10211,7 +10513,7 @@ class DownloadHelper:
             
             # Click "New project" button
             dismiss_create_with_flow(self.page, f"{self.account_name}-RETRY")
-            human_click_element(self.page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", f"[{self.account_name}-RETRY] New project button")
+            _fa_or_dom_new_project_click(self.page, f"[{self.account_name}-RETRY] New project button", context=f"{self.account_name}-RETRY")
             human_delay(2, 3)  # Match main flow post-click wait
             
             # Wait for project URL (match main flow: wait_for_url + fallback poll)
@@ -10694,7 +10996,7 @@ class DownloadHelper:
             
             # Create new project
             dismiss_create_with_flow(self.page, self.account_name)
-            human_click_element(self.page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", f"[{self.account_name}] New project button")
+            _fa_or_dom_new_project_click(self.page, f"[{self.account_name}] New project button", context=self.account_name)
             human_delay(2, 3)  # Match main flow post-click wait
             
             try:
@@ -13350,7 +13652,7 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
             ensure_logged_into_flow(page, "REDO")
             check_and_dismiss_popup(page)
             dismiss_create_with_flow(page, "REDO")
-            human_click_element(page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", "New project button")
+            _fa_or_dom_new_project_click(page, "New project button")
             human_delay(2, 3)
             try:
                 page.wait_for_url("**/project/**", timeout=30000)
@@ -13734,7 +14036,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         human_delay(0.5, 1)
         
         dismiss_create_with_flow(page, account_name)
-        human_click_element(page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", "New project button")
+        _fa_or_dom_new_project_click(page, "New project button")
         human_delay(2, 3)
         
         try:
@@ -13821,7 +14123,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
             human_delay(0.5, 1)
             
             dismiss_create_with_flow(page, account_name)
-            human_click_element(page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", "New project button")
+            _fa_or_dom_new_project_click(page, "New project button")
             human_delay(2, 3)
             
             try:
@@ -14687,7 +14989,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                     human_delay(0.5, 1)
                     
                     dismiss_create_with_flow(page, account_name)
-                    human_click_element(page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", "New project (retry)")
+                    _fa_or_dom_new_project_click(page, "New project (retry)", context="retry")
                     human_delay(2, 3)
                     
                     try:
@@ -15240,7 +15542,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         
         # [4/10] Click "New project" button
         dismiss_create_with_flow(page, "SUBMIT")
-        human_click_element(page, "button:has-text('New project'), button:has-text('Nuovo progetto'), button:has-text('Nuevo proyecto'), button:has-text('Nouveau projet'), button:has-text('Neues Projekt'), button:has(i:text('add_2')), button.sc-a38764c7-0", "New project button")
+        _fa_or_dom_new_project_click(page, "New project button")
         human_delay(2, 3)  # [project creation] wait like test_human_like.py
         
         # Wait for URL to contain /project/
