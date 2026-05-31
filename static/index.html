@@ -1521,6 +1521,26 @@
         .lc-kanban.lc-single-column { grid-template-columns: 1fr; }
         .lc-kanban.lc-single-column .lc-column { display: none; }
         .lc-kanban.lc-single-column .lc-column.lc-column-active { display: flex; }
+        #instagramPanel { padding: 12px; height: calc(100% - 60px); overflow-y: auto; }
+        #instagramPanel .ig-panel-toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+        #igAddAccountForm { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+        #igAddAccountForm input { flex: 1; min-width: 140px; padding: 6px 10px; background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: 4px; color: var(--text); font-size: 12px; }
+        .ig-account-block { background: var(--bg-elevated); border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+        .ig-account-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+        .ig-account-handle { font-weight: 600; font-size: 14px; }
+        .ig-account-meta { color: var(--text-muted); font-size: 11px; margin-right: auto; }
+        .ig-videos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+        .ig-video-card { background: var(--bg); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 6px; }
+        .ig-video-card img { width: 100%; aspect-ratio: 9/16; object-fit: cover; border-radius: 3px; background: var(--bg-input); }
+        .ig-video-caption { font-size: 10px; color: var(--text-muted); margin: 4px 0; line-height: 1.3; max-height: 26px; overflow: hidden; }
+        .ig-video-meta { font-size: 10px; color: var(--text-muted); display: flex; justify-content: space-between; }
+        .ig-video-match-btn, .ig-video-status { font-size: 10px; padding: 2px 6px; border-radius: 3px; margin-top: 4px; display: inline-block; }
+        .ig-video-match-btn { background: var(--accent); color: #fff; cursor: pointer; border: none; }
+        .ig-video-status.matched { background: rgba(16,185,129,0.2); color: #10b981; }
+        .ig-video-status.pending { background: rgba(245,158,11,0.2); color: #f59e0b; }
+        .ig-video-status.failed { background: rgba(239,68,68,0.2); color: #ef4444; }
+        .ig-suggestion-row { padding: 4px 8px; cursor: pointer; border-bottom: 1px solid var(--border-subtle); font-size: 11px; }
+        .ig-suggestion-row:hover { background: rgba(99,102,241,0.1); }
         .lc-card {
             background: var(--bg); border: 1px solid var(--border-subtle);
             border-radius: 6px; padding: 8px; cursor: pointer;
@@ -3194,6 +3214,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         <button class="chip" data-stage="awaiting_export">Export <span class="chip-count" data-count="awaiting_export">0</span></button>
                         <button class="chip" data-stage="awaiting_finishing">Finishing <span class="chip-count" data-count="awaiting_finishing">0</span></button>
                         <button class="chip" data-stage="published">Published <span class="chip-count" data-count="published">0</span></button>
+                        <button class="chip" data-stage="instagram">Instagram <span class="chip-count" data-count="instagram">0</span></button>
                         <button class="chip" data-stage="archived">Archive</button>
                     </div>
                     <div class="lc-search-bar" id="lifecycleSearchBar">
@@ -3265,6 +3286,18 @@ Example: A realistic vertical video of a professional presenter speaking directl
                             <div class="lc-rows"></div>
                             <button class="lc-load-more" data-stage="published" style="display:none">Load 20 more</button>
                         </div>
+                    </div>
+                    <div id="instagramPanel" style="display:none;">
+                        <div class="ig-panel-toolbar">
+                            <button class="btn btn-secondary btn-sm" id="igAddAccountBtn">+ Add account</button>
+                        </div>
+                        <div id="igAddAccountForm" style="display:none;">
+                            <input type="text" id="igNewHandle" placeholder="@handle">
+                            <input type="password" id="igNewApiKey" placeholder="HikerAPI key">
+                            <button class="btn btn-primary btn-sm" id="igSaveAccountBtn">Save</button>
+                            <button class="btn btn-secondary btn-sm" id="igCancelAccountBtn">Cancel</button>
+                        </div>
+                        <div id="igAccountsList"></div>
                     </div>
                 </div>
             </div>
@@ -4050,6 +4083,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
         document.querySelectorAll(".lifecycle-chips .chip").forEach(c => {
           c.addEventListener("click", async () => {
             const stage = c.dataset.stage;
+            if (stage === "instagram") {
+              document.getElementById("jobsList").style.display = "none";
+              document.getElementById("instagramPanel").style.display = "block";
+              if (typeof refreshInstagramPanel === "function") refreshInstagramPanel();
+              return;
+            }
+            // Re-show kanban when switching to any non-instagram stage.
+            document.getElementById("jobsList").style.display = "";
+            document.getElementById("instagramPanel").style.display = "none";
             if (stage === "archived") {
               setAppMode({ mode: "browse", stage: "archived" });
               const jobs = await fetchJobsForLifecycle({ archived: true });
@@ -4152,6 +4194,120 @@ Example: A realistic vertical video of a professional presenter speaking directl
           })();
           return _lifecycleInFlight;
         }
+
+        // === Instagram monitor (2026-05-31) ===
+        async function igFetchAccounts() {
+          const r = await fetch("/api/instagram/accounts", { credentials: "include" });
+          return r.ok ? r.json() : [];
+        }
+        async function igAddAccount(handle, apiKey) {
+          const r = await fetch("/api/instagram/accounts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ handle, api_key: apiKey }),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            throw new Error(err.detail || ("HTTP " + r.status));
+          }
+          return r.json();
+        }
+        async function igDeleteAccount(id) {
+          await fetch(`/api/instagram/accounts/${id}`, { method: "DELETE", credentials: "include" });
+        }
+        async function igSync(id) {
+          const r = await fetch(`/api/instagram/accounts/${id}/sync`, { method: "POST", credentials: "include" });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            alert("Sync failed: " + (err.detail || r.status));
+          }
+          return r.ok;
+        }
+        async function igListVideos(accountId) {
+          const r = await fetch(`/api/instagram/accounts/${accountId}/videos`, { credentials: "include" });
+          return r.ok ? r.json() : [];
+        }
+
+        function igRenderAccountBlock(acc, videos) {
+          const lastSync = acc.last_synced_at ? new Date(acc.last_synced_at).toLocaleString() : "never";
+          const vCards = videos.map(v => igRenderVideoCard(v)).join("");
+          return `<div class="ig-account-block" data-account-id="${acc.id}">
+            <div class="ig-account-header">
+              <span class="ig-account-handle">@${escapeHtml(acc.handle)}</span>
+              <span class="ig-account-meta">${acc.video_count || 0} videos · last sync ${lastSync}</span>
+              <button class="btn btn-secondary btn-sm ig-sync-btn" data-id="${acc.id}">Sync</button>
+              <button class="btn btn-danger btn-sm ig-delete-btn" data-id="${acc.id}">✕</button>
+            </div>
+            <div class="ig-videos-grid">${vCards || '<div class="empty" style="padding:8px;color:#888;font-size:11px;">No videos yet — click Sync.</div>'}</div>
+          </div>`;
+        }
+
+        function igRenderVideoCard(v) {
+          // Defined fully in Task 13 — placeholder here.
+          return `<div class="ig-video-card" data-id="${v.id}"><div style="font-size:10px;color:#888;">${escapeHtml(v.shortcode || '')}</div></div>`;
+        }
+
+        async function refreshInstagramPanel() {
+          const list = document.getElementById("igAccountsList");
+          if (!list) return;
+          list.innerHTML = `<div style="padding:8px;color:#888;font-size:11px;">Loading…</div>`;
+          try {
+            const accounts = await igFetchAccounts();
+            if (!accounts.length) {
+              list.innerHTML = `<div style="padding:8px;color:#888;font-size:12px;">No Instagram accounts yet. Click <b>+ Add account</b> above.</div>`;
+              return;
+            }
+            const blocks = await Promise.all(accounts.map(async a => {
+              const vids = await igListVideos(a.id);
+              return igRenderAccountBlock(a, vids);
+            }));
+            list.innerHTML = blocks.join("");
+          } catch (e) {
+            list.innerHTML = `<div style="padding:8px;color:#c33;font-size:11px;">Failed to load.</div>`;
+          }
+        }
+
+        document.getElementById("igAddAccountBtn")?.addEventListener("click", () => {
+          document.getElementById("igAddAccountForm").style.display = "flex";
+          document.getElementById("igNewHandle").focus();
+        });
+        document.getElementById("igCancelAccountBtn")?.addEventListener("click", () => {
+          document.getElementById("igAddAccountForm").style.display = "none";
+          document.getElementById("igNewHandle").value = "";
+          document.getElementById("igNewApiKey").value = "";
+        });
+        document.getElementById("igSaveAccountBtn")?.addEventListener("click", async () => {
+          const handle = document.getElementById("igNewHandle").value.trim();
+          const apiKey = document.getElementById("igNewApiKey").value.trim();
+          if (!handle || !apiKey) { alert("Handle + API key required"); return; }
+          try {
+            await igAddAccount(handle, apiKey);
+            document.getElementById("igAddAccountForm").style.display = "none";
+            document.getElementById("igNewHandle").value = "";
+            document.getElementById("igNewApiKey").value = "";
+            refreshInstagramPanel();
+          } catch (e) {
+            alert("Add failed: " + e.message);
+          }
+        });
+
+        document.getElementById("igAccountsList")?.addEventListener("click", async (ev) => {
+          const syncBtn = ev.target.closest(".ig-sync-btn[data-id]");
+          if (syncBtn) {
+            syncBtn.disabled = true;
+            syncBtn.textContent = "Syncing…";
+            await igSync(parseInt(syncBtn.dataset.id));
+            await refreshInstagramPanel();
+            return;
+          }
+          const delBtn = ev.target.closest(".ig-delete-btn[data-id]");
+          if (delBtn) {
+            if (!confirm("Remove this Instagram account? Its videos will be deleted.")) return;
+            await igDeleteAccount(parseInt(delBtn.dataset.id));
+            refreshInstagramPanel();
+          }
+        });
 
         // Live search — re-render in place from already-loaded data. No fetch.
         (function wireLifecycleSearch() {
