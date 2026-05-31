@@ -3561,6 +3561,17 @@ def _fa_try_create_new_project_api(page, context=""):
         print(f"{pfx}[flow_api] navigation to {project_url} failed: {e} — falling back to DOM click", flush=True)
         return None
 
+    # Wait for the project SPA to hydrate before returning. domcontentloaded
+    # fires before React renders the toolbar; without this probe downstream DOM
+    # lookups race against hydration. Best-effort: continue on timeout.
+    try:
+        hydration_loc = page.locator(
+            "button[aria-haspopup='dialog']:has(i:text('add_2'))"
+        ).first
+        hydration_loc.wait_for(state="visible", timeout=15000)
+    except Exception:
+        print(f"{pfx}[flow_api] project page hydration probe timed out (15s) — continuing", flush=True)
+
     print(f"{pfx}[flow_api] ✓ Created project via API: {project_url}", flush=True)
 
     # Best-effort init — fire each, log on failure, never block.
