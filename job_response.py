@@ -33,3 +33,4 @@ class JobResponse(BaseModel):
     archived: bool = False
     stuck_days: Optional[int] = None
     approved_clips: int = 0
+    instagram_url: Optional[str] = None
