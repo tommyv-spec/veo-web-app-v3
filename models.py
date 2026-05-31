@@ -8,8 +8,8 @@ import json
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Text, DateTime, 
-    Boolean, Float, ForeignKey, Enum as SQLEnum, JSON, event
+    create_engine, Column, Integer, String, Text, DateTime,
+    Boolean, Float, ForeignKey, Enum as SQLEnum, JSON, event, Index
 )
 from sqlalchemy.exc import OperationalError as SQLAOperationalError
 from sqlalchemy.ext.declarative import declarative_base
@@ -46,7 +46,10 @@ class User(Base):
     sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
     api_keys = relationship("UserAPIKey", back_populates="user", cascade="all, delete-orphan")
     worker_tokens = relationship("UserWorkerToken", back_populates="user", cascade="all, delete-orphan")
-    
+    instagram_accounts = relationship(
+        "InstagramAccount", back_populates="user", cascade="all, delete-orphan"
+    )
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
@@ -218,6 +221,10 @@ class Job(Base):
     published_at = Column(DateTime, nullable=True)
     notes = Column(Text, nullable=True)
     archived = Column(Boolean, nullable=False, default=False)
+
+    # === Instagram link (2026-05-31) ===
+    instagram_url       = Column(String(500), nullable=True)
+    instagram_video_id  = Column(Integer, ForeignKey("instagram_videos.id"), nullable=True)
 
     # Relationships
     user = relationship("User", back_populates="jobs")
@@ -507,6 +514,81 @@ class GenerationLog(Base):
     generated_at = Column(DateTime, default=datetime.utcnow)
 
 
+class InstagramAccount(Base):
+    """An IG handle the operator monitors. One operator may have many."""
+    __tablename__ = "instagram_accounts"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    user_id           = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    handle            = Column(String(64), nullable=False)
+    ig_user_id        = Column(String(32), nullable=True)
+    api_key_encrypted = Column(Text, nullable=False)
+    last_synced_at    = Column(DateTime, nullable=True)
+    added_at          = Column(DateTime, default=datetime.utcnow)
+
+    user   = relationship("User", back_populates="instagram_accounts")
+    videos = relationship(
+        "InstagramVideo", back_populates="account", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_instagram_accounts_user_handle", "user_id", "handle", unique=True),
+    )
+
+    def to_dict(self, include_counts=False):
+        return {
+            "id": self.id,
+            "handle": self.handle,
+            "ig_user_id": self.ig_user_id,
+            "last_synced_at": self.last_synced_at.isoformat() if self.last_synced_at else None,
+            "added_at": self.added_at.isoformat() if self.added_at else None,
+        }
+
+
+class InstagramVideo(Base):
+    """A reel pulled from an InstagramAccount."""
+    __tablename__ = "instagram_videos"
+
+    id              = Column(Integer, primary_key=True, autoincrement=True)
+    account_id      = Column(Integer, ForeignKey("instagram_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    shortcode       = Column(String(32), nullable=False)
+    url             = Column(String(500), nullable=False)
+    thumb_url       = Column(String(500), nullable=True)
+    caption         = Column(Text, nullable=True)
+    views           = Column(Integer, default=0)
+    likes           = Column(Integer, default=0)
+    comments        = Column(Integer, default=0)
+    posted_at       = Column(DateTime, nullable=True, index=True)
+    transcription   = Column(Text, nullable=True)
+    transcription_status = Column(String(16), default="pending")
+    transcription_error  = Column(Text, nullable=True)
+    matched_job_id  = Column(String(36), ForeignKey("jobs.id"), nullable=True, index=True)
+    matched_at      = Column(DateTime, nullable=True)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+
+    account     = relationship("InstagramAccount", back_populates="videos")
+    matched_job = relationship("Job", foreign_keys=[matched_job_id])
+
+    __table_args__ = (
+        Index("ix_instagram_videos_account_shortcode", "account_id", "shortcode", unique=True),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "shortcode": self.shortcode,
+            "url": self.url,
+            "thumb_url": self.thumb_url,
+            "caption": self.caption,
+            "views": self.views,
+            "likes": self.likes,
+            "comments": self.comments,
+            "posted_at": self.posted_at.isoformat() if self.posted_at else None,
+            "transcription_status": self.transcription_status,
+            "matched_job_id": self.matched_job_id,
+        }
+
+
 # Database setup
 engine = None
 SessionLocal = None
@@ -782,6 +864,8 @@ def _run_migrations_postgresql(engine):
         ("jobs", "published_at",    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS published_at TIMESTAMP"),
         ("jobs", "notes",           "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS notes TEXT"),
         ("jobs", "archived",        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE"),
+        ("jobs", "instagram_url",      "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS instagram_url VARCHAR(500)"),
+        ("jobs", "instagram_video_id", "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS instagram_video_id INTEGER"),
     ]
 
     with engine.connect() as conn:
@@ -802,6 +886,7 @@ def _run_migrations_postgresql(engine):
         "CREATE INDEX IF NOT EXISTS ix_jobs_user_created ON jobs (user_id, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS ix_clips_job_status ON clips (job_id, status)",
         "CREATE INDEX IF NOT EXISTS ix_jobs_user_lifecycle ON jobs (user_id, lifecycle_stage, archived)",
+        "CREATE INDEX IF NOT EXISTS ix_jobs_instagram_video_id ON jobs (instagram_video_id)",
     ]
     with engine.connect() as conn:
         for sql in index_migrations:
@@ -897,6 +982,8 @@ def _run_migrations_sqlite(engine):
         ("jobs", "published_at",    "ALTER TABLE jobs ADD COLUMN published_at DATETIME"),
         ("jobs", "notes",           "ALTER TABLE jobs ADD COLUMN notes TEXT"),
         ("jobs", "archived",        "ALTER TABLE jobs ADD COLUMN archived INTEGER DEFAULT 0"),
+        ("jobs", "instagram_url",      "ALTER TABLE jobs ADD COLUMN instagram_url TEXT"),
+        ("jobs", "instagram_video_id", "ALTER TABLE jobs ADD COLUMN instagram_video_id INTEGER"),
     ]
 
     with engine.connect() as conn:
