@@ -675,6 +675,14 @@ class JobWorker:
                     except Exception:
                         pass
                 
+                # Instagram transcription pass (one pending item per tick)
+                try:
+                    from instagram_transcribe import process_instagram_transcriptions
+                    with get_db() as ig_db:
+                        process_instagram_transcriptions(ig_db, max_per_tick=1)
+                except Exception as ig_exc:
+                    print(f"[worker] instagram transcription pass error: {ig_exc}", flush=True)
+
                 time.sleep(app_config.worker_poll_interval)
             except Exception as e:
                 print(f"[Worker] Error in job processor: {e}")
