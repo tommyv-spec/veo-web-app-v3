@@ -3460,6 +3460,183 @@ def _fa_resolve_image_model_name(label):
     return _FA_IMAGE_MODELS.get(label, "")
 
 
+# ─── tRPC fetch (labs.google host, session-cookie auth, no Bearer) ───
+_FA_TRPC_FETCH_JS = """
+async ([url, method, bodyStr]) => {
+  const opts = { method, headers: {'content-type': 'application/json', 'accept': '*/*'}, credentials: 'include' };
+  if (bodyStr !== null) opts.body = bodyStr;
+  let status = 0, ok = false, text = '';
+  try {
+    const r = await fetch(url, opts);
+    status = r.status; ok = r.ok;
+    text = await r.text();
+  } catch (e) {
+    return { status: 0, ok: false, data: null, text: 'fetch failed: ' + (e && e.message) };
+  }
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+  return { status, ok, data, text: data ? '' : (text || '').slice(0, 2000) };
+}
+"""
+
+
+def _fa_trpc_fetch(page, url, method, body_obj=None):
+    body_str = json.dumps(body_obj) if body_obj is not None else None
+    try:
+        return page.evaluate(_FA_TRPC_FETCH_JS, [url, method, body_str])
+    except Exception as e:
+        return {"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
+
+
+def _fa_try_create_new_project_api(page, context=""):
+    """Try to create a Flow project via the private tRPC API + fire best-effort
+    init calls. Returns the full project URL on success, None on failure (caller
+    falls back to the existing DOM 'New project' click).
+
+    Sequence (HAR-confirmed 2026-05-30):
+      1. POST https://labs.google/fx/api/trpc/project.createProject
+         body: {"json":{"projectTitle":"<auto>","toolName":"PINHOLE"}}
+         → result.data.json.result.projectId
+      2. page.goto /project/{pid} so URL-based logic sees the project
+      3. Fire 6 best-effort init calls (recommendations, credits, agent state, etc.)
+         — each wrapped; failures logged but never block.
+    """
+    pfx = f"[{context}] " if context else ""
+    if not _flow_api_mode_enabled():
+        return None
+    try:
+        if getattr(page, "_flow_api_disabled_this_session", False):
+            return None
+    except Exception:
+        pass
+
+    try:
+        title = datetime.now().strftime("%b %d, %I:%M %p").lstrip("0")
+    except Exception:
+        title = "Auto Project"
+
+    try:
+        res = _fa_trpc_fetch(
+            page,
+            "https://labs.google/fx/api/trpc/project.createProject",
+            "POST",
+            {"json": {"projectTitle": title, "toolName": "PINHOLE"}},
+        )
+    except Exception as e:
+        print(f"{pfx}[flow_api] createProject raised: {e} — falling back to DOM click", flush=True)
+        return None
+
+    if _fa_is_error(res):
+        print(f"{pfx}[flow_api] createProject failed: {_fa_error_reason(res)} — falling back to DOM click", flush=True)
+        return None
+
+    pid = ""
+    try:
+        data = res.get("data") or {}
+        pid = (
+            data.get("result", {})
+                .get("data", {})
+                .get("json", {})
+                .get("result", {})
+                .get("projectId") or ""
+        )
+    except Exception:
+        pid = ""
+    if not pid:
+        print(f"{pfx}[flow_api] createProject returned no projectId — falling back to DOM click", flush=True)
+        return None
+
+    # Navigate to /project/{pid} so existing URL-based logic + the v624 listener
+    # filter see the right project.
+    project_url = f"https://labs.google/fx/tools/flow/project/{pid}"
+    try:
+        page.goto(project_url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            actual = page.url or project_url
+            if "/project/" in actual:
+                project_url = actual
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"{pfx}[flow_api] navigation to {project_url} failed: {e} — falling back to DOM click", flush=True)
+        return None
+
+    print(f"{pfx}[flow_api] ✓ Created project via API: {project_url}", flush=True)
+
+    # Best-effort init — fire each, log on failure, never block.
+    _fa_init_project_best_effort(page, pid, context=context)
+    return project_url
+
+
+def _fa_init_project_best_effort(page, project_id, context=""):
+    """Fire the post-createProject init calls. Every call wrapped; failures
+    logged but never raised. Sometimes Flow needs them, sometimes not — we
+    fire them all and continue regardless of any individual result."""
+    pfx = f"[{context}] " if context else ""
+
+    def best_effort(label, fn):
+        try:
+            res = fn()
+            if isinstance(res, dict) and _fa_is_error(res):
+                print(f"{pfx}[flow_api] init '{label}' non-blocking error: {_fa_error_reason(res)}", flush=True)
+        except Exception as e:
+            print(f"{pfx}[flow_api] init '{label}' raised (non-blocking): {e}", flush=True)
+
+    # Token may be stale or missing for these aisandbox calls — that's OK, they're
+    # best-effort. If unauthorized, just log and move on.
+    def _bearer():
+        return _FA_TOKEN_STORE.token or ""
+
+    # 2. flow.projectInitialData (tRPC, cookies)
+    best_effort("projectInitialData", lambda: _fa_trpc_fetch(
+        page, "https://labs.google/fx/api/trpc/flow.projectInitialData", "GET"
+    ))
+    # 3. fetchUserRecommendations
+    best_effort("fetchUserRecommendations", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1:fetchUserRecommendations?key={_FA_GOOGLE_API_KEY}",
+        "POST", _bearer(),
+        {"onramp": [
+            "FLOW_UPGRADE_BANNER", "FLOW_UPGRADE_BUTTON",
+            "FLOW_MANAGE_AI_CREDITS", "FLOW_VIDEO_TOOLTIP_UPSELL",
+            "FLOW_MODEL_UPGRADE", "FLOW_MANAGE_MEMBERSHIP",
+        ]},
+    ))
+    # 4. credits
+    best_effort("credits", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1/credits?key={_FA_GOOGLE_API_KEY}",
+        "GET", _bearer(),
+    ))
+    # 5. flowCreationAgent sessions GET
+    best_effort("flowCreationAgent.sessions GET", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1/flowCreationAgent/sessions?key={_FA_GOOGLE_API_KEY}",
+        "GET", _bearer(),
+    ))
+    # 6. agentInfo PATCH — enable agent toggle
+    best_effort("agentInfo agentToggleState=ENABLED", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1/projects/{project_id}/agentInfo?key={_FA_GOOGLE_API_KEY}",
+        "PATCH", _bearer(),
+        {"agentToggleState": "AGENT_TOGGLE_STATE_ENABLED"},
+    ))
+    # 7. flowCreationAgent sessions POST — open agent session for this project
+    best_effort("flowCreationAgent.sessions POST", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1/flowCreationAgent/sessions?key={_FA_GOOGLE_API_KEY}",
+        "POST", _bearer(),
+        {"projectId": f"projects/{project_id}"},
+    ))
+    # 8. agentInfo PATCH — chatPanelOpen
+    best_effort("agentInfo chatPanelOpen=true", lambda: _fa_api_fetch(
+        page,
+        f"{_FA_GOOGLE_FLOW_API}/v1/projects/{project_id}/agentInfo?key={_FA_GOOGLE_API_KEY}",
+        "PATCH", _bearer(),
+        {"chatPanelOpen": True},
+    ))
+
+
 # ============================================================
 # END FLOW_API INLINE
 # ============================================================
@@ -6947,7 +7124,13 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     _save_state()
 
         if need_new:
-            project_url = create_new_flow_project(page, context=context)
+            # Try the flow_api private-API project creation first (HAR-confirmed:
+            # trpc/project.createProject + best-effort init). Saves the DOM "New
+            # project" click dance + the home-page navigation that precedes it.
+            # On any failure, falls back to the DOM path below unchanged.
+            project_url = _fa_try_create_new_project_api(page, context=context)
+            if not project_url:
+                project_url = create_new_flow_project(page, context=context)
             if not project_url:
                 raise RuntimeError("Could not create Flow project for this job")
             project_state["current_project_url"] = project_url
