@@ -553,7 +553,7 @@ class InstagramVideo(Base):
     account_id      = Column(Integer, ForeignKey("instagram_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
     shortcode       = Column(String(32), nullable=False)
     url             = Column(String(500), nullable=False)
-    thumb_url       = Column(String(500), nullable=True)
+    thumb_url       = Column(Text, nullable=True)
     caption         = Column(Text, nullable=True)
     views           = Column(Integer, default=0)
     likes           = Column(Integer, default=0)
@@ -896,6 +896,20 @@ def _run_migrations_postgresql(engine):
                 print(f"[Migration] PostgreSQL: ensured index — {sql}", flush=True)
             except Exception as e:
                 print(f"[Migration] PostgreSQL skipped index: {e}", flush=True)
+
+    # 2026-05-31: Instagram CDN thumb URLs are ~800 chars; widen the column.
+    # Safe to run repeatedly — no-op if already TEXT.
+    alter_migrations = [
+        "ALTER TABLE instagram_videos ALTER COLUMN thumb_url TYPE TEXT",
+    ]
+    with engine.connect() as conn:
+        for sql in alter_migrations:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+                print(f"[Migration] PostgreSQL: ALTER ok — {sql}", flush=True)
+            except Exception as e:
+                print(f"[Migration] PostgreSQL skipped ALTER: {e}", flush=True)
 
     # v776: one-shot backfill — move already-completed jobs into the tracker.
     # Idempotent via the `lifecycle_stage IS NULL` guard.
