@@ -18017,6 +18017,15 @@ class AccountWorker(threading.Thread):
 
             print(f"[{self.name}] ✓ Browser started", flush=True)
 
+            # flow_api: attach bearer-sniff listener at startup so window.__faSniff
+            # is populated for console-debug snippets even before any project
+            # create. Idempotent — no-op if already installed.
+            try:
+                _fa_attach_token_listener(self.page)
+                print(f"[{self.name}] [flow_api] global token-capture listener attached", flush=True)
+            except Exception as e:
+                print(f"[{self.name}] [flow_api] listener attach failed: {e}", flush=True)
+
             # v457: minimize Chrome immediately so it doesn't steal focus
             # during the 10-20s warmup. Also attach a navigation handler
             # so every subsequent page.goto() re-minimizes (unless login
@@ -20483,7 +20492,16 @@ def main_multi_coordinator(accounts):
         
         page = browser.pages[0] if browser.pages else browser.new_page()
         print(f"[{acc_name}] ✓ Browser started")
-        
+
+        # flow_api: attach bearer-sniff listener at startup so window.__faSniff
+        # populates for console-debug + the API project-create path works
+        # without waiting for first create. Idempotent.
+        try:
+            _fa_attach_token_listener(page)
+            print(f"[{acc_name}] [flow_api] global token-capture listener attached", flush=True)
+        except Exception as e:
+            print(f"[{acc_name}] [flow_api] listener attach failed: {e}", flush=True)
+
         chrome_warmup(page)
         
         print(f"[{acc_name}] Navigating to Flow...")
