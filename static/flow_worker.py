@@ -357,6 +357,16 @@ def _fa_attach_token_listener(page):
                 tok = auth[len("Bearer "):].strip()
                 if tok and tok != _FA_TOKEN_STORE.token:
                     _FA_TOKEN_STORE.set(tok)
+                    # Inject into page for operator-side console debugging.
+                    # Operator's console snippets can now read window.__faSniff.bearer
+                    # directly — no manual copy from Network tab needed.
+                    try:
+                        page.evaluate(
+                            "(t) => { window.__faSniff = window.__faSniff || {}; window.__faSniff.bearer = t; }",
+                            tok,
+                        )
+                    except Exception:
+                        pass
         except Exception:
             pass
 
