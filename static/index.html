@@ -147,40 +147,49 @@
             max-height: none !important;
         }
         .app-container.state-review .lc-review-sidebar-rows {
-            display: flex; flex-direction: column; gap: 4px;
+            display: flex; flex-direction: column; gap: 6px;
         }
-        /* Dense compact card for review sidebar: single horizontal row,
-           thumb left, title + badges stacked tight right. Padding minimal. */
+        /* Visual organization: stage-colored left edge accent + clear title
+           hierarchy + status dot instead of full badge clutter. */
         .app-container.state-review .lc-card.compact {
-            padding: 6px 8px;
-            gap: 0;
+            position: relative;
+            padding: 8px 10px 8px 14px;  /* extra left padding for stage edge */
             border-radius: 4px;
+            border-left: 3px solid var(--border-subtle);  /* default */
         }
+        .app-container.state-review .lc-card.compact[data-stage="generating"] { border-left-color: #8b5cf6; }
+        .app-container.state-review .lc-card.compact[data-stage="awaiting_approval"] { border-left-color: #f59e0b; }
+        .app-container.state-review .lc-card.compact[data-stage="awaiting_export"] { border-left-color: #06b6d4; }
+        .app-container.state-review .lc-card.compact[data-stage="awaiting_finishing"] { border-left-color: #10b981; }
+        .app-container.state-review .lc-card.compact[data-stage="published"] { border-left-color: #6366f1; }
         .app-container.state-review .lc-card.compact .lc-card-body {
-            gap: 8px;
+            gap: 10px;
             align-items: center;
         }
         .app-container.state-review .lc-card.compact .job-thumb-placeholder,
         .app-container.state-review .lc-card.compact .job-thumb {
-            width: 32px; height: 32px;
-            font-size: 14px;
+            width: 40px; height: 40px;
+            border-radius: 4px;
+            flex-shrink: 0;
         }
         .app-container.state-review .lc-card.compact .lc-card-meta {
-            display: flex; flex-direction: column; gap: 2px;
+            display: flex; flex-direction: column; gap: 3px;
             min-width: 0;
         }
         .app-container.state-review .lc-card.compact .lc-card-title {
-            margin-top: 0; font-size: 11px;
+            margin-top: 0; font-size: 12px; font-weight: 600;
+            color: var(--text);
         }
+        /* Sidebar shows only the status badge — backend hidden to declutter. */
+        .app-container.state-review .lc-card.compact .lc-card-badges .badge-backend { display: none; }
         .app-container.state-review .lc-card.compact .lc-card-badges {
-            gap: 3px; font-size: 9px;
+            gap: 4px; font-size: 9px;
+            color: var(--text-muted);
         }
-        .app-container.state-review .lc-card.compact .lc-card-badges .badge {
-            padding: 1px 4px; font-size: 9px;
-        }
-        /* Narrower sidebar — denser footprint. */
-        .app-container.state-review .main-content {
-            grid-template-columns: 220px 1fr;
+        /* Highlight currently-selected job. */
+        .app-container.state-review .lc-card.compact.selected {
+            background: rgba(99,102,241,0.12);
+            border-left-width: 4px;
         }
 
         /* Mobile fallback: kanban → single column with stage tabs. */
@@ -3860,7 +3869,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const archiveLabel = j.archived ? '📤' : '📦';
           const progress = `<div class="lc-card-progress"><div class="progress-bar"><div class="progress-fill" style="width:${j.progress_percent||0}%"></div></div><div class="progress-text"><span>${(j.progress_percent||0).toFixed(0)}%</span><span>${j.completed_clips||0}/${j.total_clips||0}</span></div></div>`;
           const variant = compact ? 'lc-card compact' : 'lc-card';
-          return `<div class="${variant}" data-id="${safeId}" data-job-id="${safeId}">
+          const stageAttr = j.lifecycle_stage ? ` data-stage="${escapeHtml(j.lifecycle_stage)}"` : '';
+          return `<div class="${variant}" data-id="${safeId}" data-job-id="${safeId}"${stageAttr}>
             <div class="lc-card-body">${thumb}<div class="lc-card-meta">
               <div class="lc-card-badges">
                 <span class="badge badge-${escapeHtml(j.status)}">${escapeHtml(j.status)}</span>
