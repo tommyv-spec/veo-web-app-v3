@@ -4781,17 +4781,21 @@ Example: A realistic vertical video of a professional presenter speaking directl
         function getSelectedAspect(){ const a=document.querySelector('#aspectSeg button.active'); return a?a.dataset.value:'9:16'; }
         function selectResSeg(el){ document.querySelectorAll('#resSeg button').forEach(b=>b.classList.remove('active')); el.classList.add('active'); }
 
-        function selectBackend(el){ 
-            document.querySelectorAll('#backendToggle button').forEach(b=>b.classList.remove('active')); 
+        function selectBackend(el){
+            document.querySelectorAll('#backendToggle button').forEach(b=>b.classList.remove('active'));
             el.classList.add('active');
             const val = el.dataset.value;
             document.getElementById('backendHintFlow').style.display = val === 'flow' ? 'block' : 'none';
             document.getElementById('backendHintAPI').style.display = val === 'api' ? 'block' : 'none';
             if(typeof obAdvance==='function') obAdvance();
+            // v773.11.2: PostHog event — backend selector (Auto / API Keys / Flow).
+            window.track && window.track('backend_changed', { backend: val });
         }
         function selectFlowVariants(el){
             document.querySelectorAll('#flowVariantsSeg button').forEach(b=>b.classList.remove('active'));
             el.classList.add('active');
+            // v773.11.2: PostHog event — flow variants-per-clip count.
+            window.track && window.track('flow_variants_changed', { variants: parseInt(el.dataset.value, 10) });
         }
         function getFlowVariantsCount(){
             const a=document.querySelector('#flowVariantsSeg button.active');
@@ -8202,6 +8206,16 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const linesList = document.getElementById('dialogueInput').value.trim().split('\n').filter(l=>l.trim());
                 const numClips = linesList.length;
                 const language = document.getElementById('language').value;
+                // v773.11.2 (2026-05-31): PostHog funnel event — Generate / Prompts-Only click.
+                window.track && window.track('job_submitted', {
+                    prompt_only: !!promptOnly,
+                    num_images: numImages,
+                    num_clips: numClips,
+                    language: language,
+                    backend: document.querySelector('#backendToggle button.active')?.dataset.value || null,
+                    veo_model: document.getElementById('veoModel')?.value || null,
+                    flow_variants: parseInt(document.querySelector('#flowVariantsSeg button.active')?.dataset.value || '2', 10),
+                });
                 
                 // Validate line durations BEFORE sending (just log, don't block)
                 const validation = validateLineDurations(linesList, language, 6.5);
@@ -11188,9 +11202,16 @@ Example: A realistic vertical video of a professional presenter speaking directl
             const clipId=redoClip,clipIdx=redoClipIndex;
             const reason=document.getElementById('redoReason')?.value||'';
             const newDialogue=document.getElementById('redoDialogue')?.value||'';
-            
+
             // Check if dialogue changed
             const dialogueChanged = newDialogue !== redoOriginalDialogue;
+            // v773.11.2: PostHog event — clip-redo submit (operator iterating on a clip).
+            window.track && window.track('clip_redo_submitted', {
+                clip_id: clipId,
+                clip_idx: clipIdx,
+                dialogue_changed: dialogueChanged,
+                reason_len: reason.length,
+            });
             
             if(clipIdx!==null)markClipRegenerating(clipIdx);
             closeModal();
@@ -11375,6 +11396,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
             const btn = event && event.currentTarget;
             const originalLabel = btn ? btn.textContent : null;
             if (btn) { btn.disabled = true; btn.textContent = '⏳ Retrying…'; }
+            // v773.11.2: PostHog event — bulk retry of stuck clips on a job.
+            window.track && window.track('clip_retry_stuck', { job_id: jobId });
             try {
                 const r = await fetch(`${API}/jobs/${jobId}/retry-stuck`, { method: 'POST' });
                 if (!r.ok) {
@@ -11682,7 +11705,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 alert('Export already in progress');
                 return;
             }
-            
+            // v773.11.2: PostHog event — Export Final clicked (operator reaches the export step).
+            window.track && window.track('video_export_started', { job_id: jobId });
+
             // Fire and forget: warm up voice clone server while user configures export
             fetch(`${API}/voice-clone-warmup`, { method: 'POST' }).catch(() => {});
             
@@ -15226,6 +15251,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         function switchMainTab(tab) {
             imgState.currentTab = tab;
+            // v773.11.2: PostHog event — Videos tab vs Images tab.
+            window.track && window.track('tab_switched', { tab: tab });
             const container = document.getElementById('appContainer');
             container.classList.remove('tab-videos', 'tab-images');
             container.classList.add('tab-' + tab);
@@ -16115,6 +16142,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
         function imgToggleWorkerReset(checked) {
             if (!window.imgWorkerSetupState) window.imgWorkerSetupState = {};
             imgWorkerSetupState.reset = !!checked;
+            // v773.11.2: PostHog event — worker-reset checkbox state change (real
+            // boolean value, not just a click — autocapture can't observe this).
+            window.track && window.track('worker_reset_toggled', { checked: !!checked });
             // No re-render needed — the checkbox state is already reflected
             // in the DOM. imgDownloadInstaller reads from state on click.
         }
@@ -17467,6 +17497,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     .filter(s => s.parent_node_id)
                     .map(s => ({ parent_node_id: s.parent_node_id, role: s.role || null, slot_order: s.slot_order })),
             };
+            // v773.11.2: PostHog event — image-job Create + Generate click.
+            window.track && window.track('image_job_generated', {
+                model: payload.model,
+                n_variants: payload.n_variants,
+                aspect_ratio: payload.aspect_ratio,
+                resolution: payload.resolution,
+                prompt_len: prompt.length,
+                parents_count: payload.parents.length,
+            });
             btn.disabled = true;
             btn.textContent = 'Creating...';
             try {
@@ -19076,6 +19115,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
 
         async function imgGenerate(nodeId) {
+            // v773.11.2: PostHog event — single-node Generate (existing queued node).
+            window.track && window.track('image_node_generated', { node_id: nodeId });
             try {
                 const res = await fetch(`/api/images/nodes/${nodeId}/generate`, { method: 'POST' });
                 if (!res.ok) {
@@ -19090,6 +19131,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         async function imgRegenerate(nodeId) {
             if (!confirm('Regenerate this node? The current variants will be deleted.')) return;
+            // v773.11.2: PostHog event — node regenerate (destructive — current variants deleted).
+            window.track && window.track('image_node_regenerated', { node_id: nodeId });
             try {
                 const res = await fetch(`/api/images/nodes/${nodeId}/regenerate`, { method: 'POST' });
                 if (!res.ok) {
