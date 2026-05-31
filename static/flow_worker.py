@@ -475,9 +475,11 @@ def _fa_init_project_best_effort(page, project_id, context=""):
     def _bearer():
         return _FA_TOKEN_STORE.token or ""
 
-    best_effort("projectInitialData", lambda: _fa_trpc_fetch(
-        page, "https://labs.google/fx/api/trpc/flow.projectInitialData", "GET"
-    ))
+    # Minimal best-effort set. The HAR's projectInitialData (tRPC GET) and
+    # flowCreationAgent.sessions GET both return 400 BAD_REQUEST when called
+    # without specific body/query shape — they're triggered by SPA internals
+    # in response to navigation, not by us. Dropping them. Also dropped
+    # PATCH chatPanelOpen=true (user-interaction event, not default state).
     best_effort("fetchUserRecommendations", lambda: _fa_api_fetch(
         page,
         f"{_FA_GOOGLE_FLOW_API}/v1:fetchUserRecommendations?key={_FA_GOOGLE_API_KEY}",
@@ -493,11 +495,6 @@ def _fa_init_project_best_effort(page, project_id, context=""):
         f"{_FA_GOOGLE_FLOW_API}/v1/credits?key={_FA_GOOGLE_API_KEY}",
         "GET", _bearer(),
     ))
-    best_effort("flowCreationAgent.sessions GET", lambda: _fa_api_fetch(
-        page,
-        f"{_FA_GOOGLE_FLOW_API}/v1/flowCreationAgent/sessions?key={_FA_GOOGLE_API_KEY}",
-        "GET", _bearer(),
-    ))
     best_effort("agentInfo agentToggleState=ENABLED", lambda: _fa_api_fetch(
         page,
         f"{_FA_GOOGLE_FLOW_API}/v1/projects/{project_id}/agentInfo?key={_FA_GOOGLE_API_KEY}",
@@ -510,12 +507,6 @@ def _fa_init_project_best_effort(page, project_id, context=""):
         "POST", _bearer(),
         {"projectId": f"projects/{project_id}"},
     ))
-    # NOTE: HAR also showed PATCH agentInfo chatPanelOpen=true — that's a
-    # user-interaction event (operator opening the chat panel), NOT default
-    # project-create state. Forcing it on changes the toolbar layout and can
-    # shift downstream DOM lookups (settings button, variant counter). The
-    # DOM-click "New project" flow leaves chatPanelOpen at its default; we
-    # match that here by SKIPPING the chatPanelOpen PATCH.
 
 
 def _fa_try_create_new_project_api(page, context=""):
@@ -566,38 +557,103 @@ def _fa_try_create_new_project_api(page, context=""):
         print(f"{pfx}[flow_api] createProject returned no projectId — DOM fallback", flush=True)
         return None
 
-    project_url = f"https://labs.google/fx/tools/flow/project/{pid}"
-    try:
-        page.goto(project_url, wait_until="domcontentloaded", timeout=30000)
+    # Navigate via SPA (preserves React state — matches DOM "New project" click).
+    # Falls back to full page.goto only if SPA nav fails.
+    project_url = _fa_spa_navigate_to_project(page, pid, context=context)
+    if not project_url:
+        # SPA-nav failed — fall back to full page.goto.
+        project_url = f"https://labs.google/fx/tools/flow/project/{pid}"
         try:
-            actual = page.url or project_url
-            if "/project/" in actual:
-                project_url = actual
-        except Exception:
-            pass
-    except Exception as e:
-        print(f"{pfx}[flow_api] nav to {project_url} failed: {e} — DOM fallback", flush=True)
-        return None
+            page.goto(project_url, wait_until="domcontentloaded", timeout=30000)
+            try:
+                actual = page.url or project_url
+                if "/project/" in actual:
+                    project_url = actual
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"{pfx}[flow_api] nav to {project_url} failed: {e} — DOM fallback", flush=True)
+            return None
 
-    # Wait for the project SPA to hydrate before returning. Matches existing
-    # _ensure_project_ready DOM pattern — goto fires domcontentloaded before
-    # React renders the toolbar; without this, downstream DOM lookups (settings
-    # button, variant counter) race against hydration and intermittently miss.
-    # Best-effort: if no element becomes visible in 15s, log + continue anyway.
+    # Wait for the project SPA to hydrate. Match existing post-click pattern —
+    # wait up to 20s for the toolbar's mode-selector button (default = "Text to
+    # Video" or "Frames to Video"). Best-effort: log + continue on timeout.
     try:
         hydration_loc = page.locator(
-            "button[aria-haspopup='dialog']:has(i:text('add_2')), "
-            "button:has(i:text('settings')), "
+            "button:has-text('Text to Video'), "
             "button:has-text('Frames to Video'), "
-            "button:has-text('Text to Video')"
+            "button[aria-haspopup='dialog'], "
+            "button:has(i:text('settings'))"
         ).first
-        hydration_loc.wait_for(state="visible", timeout=15000)
+        hydration_loc.wait_for(state="visible", timeout=20000)
     except Exception:
-        print(f"{pfx}[flow_api] project page hydration probe timed out (15s) — continuing", flush=True)
+        print(f"{pfx}[flow_api] project page hydration probe timed out (20s) — continuing", flush=True)
 
     print(f"{pfx}[flow_api] ✓ Created project via API: {project_url}", flush=True)
     _fa_init_project_best_effort(page, pid, context=context)
     return project_url
+
+
+def _fa_spa_navigate_to_project(page, pid, context=""):
+    """Navigate the SPA to /project/{pid} without a full page reload.
+    Matches what a DOM "New project" click does (React state persists, hydration
+    is fast). Returns the actual project URL on success, None on failure.
+
+    Tries Next.js router.push() first, then history.pushState + popstate.
+    """
+    pfx = f"[{context}] " if context else ""
+    target_path = f"/fx/tools/flow/project/{pid}"
+
+    # Approach 1: Next.js router.push (preserves all SPA state).
+    try:
+        result = page.evaluate(
+            """
+            (target) => {
+              try {
+                // Next.js 13+ App Router
+                if (window.next && window.next.router && typeof window.next.router.push === 'function') {
+                  window.next.router.push(target);
+                  return 'next_router';
+                }
+              } catch (e) {}
+              return null;
+            }
+            """,
+            target_path,
+        )
+        if result == "next_router":
+            # Wait for URL change.
+            for _ in range(20):
+                time.sleep(0.5)
+                cur = page.url or ""
+                if pid in cur:
+                    print(f"{pfx}[flow_api] SPA-nav via next.router.push", flush=True)
+                    return cur
+    except Exception:
+        pass
+
+    # Approach 2: history.pushState + popstate.
+    try:
+        page.evaluate(
+            """
+            (target) => {
+              window.history.pushState({}, '', target);
+              window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+            }
+            """,
+            target_path,
+        )
+        # Give React up to 4s to react to popstate.
+        for _ in range(8):
+            time.sleep(0.5)
+            cur = page.url or ""
+            if pid in cur:
+                print(f"{pfx}[flow_api] SPA-nav via history.pushState", flush=True)
+                return cur
+    except Exception:
+        pass
+
+    return None
 
 
 def _fa_or_dom_new_project_click(page, dom_label="New project button", context=""):
