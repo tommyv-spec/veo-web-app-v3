@@ -469,6 +469,102 @@ def _fa_error_reason(result):
     return ""
 
 
+_FA_EXPERIMENT_IDS = (
+    "106070990,106131447,105993823,106238955,105798603,106225453,106259075,"
+    "106184493,106151974,105484652,106210719,106243706,106256669,1706538,"
+    "106104244,106262194,106001691,105928947,106077941,106281924,119157485,"
+    "105746691,1714253,106210711,106297879,106210380,106210378"
+)
+_FA_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+
+
+def _fa_session_id():
+    return f";{int(time.time() * 1000)}"
+
+
+def _fa_now_iso():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}Z"
+
+
+def _fa_url_encode(s):
+    """URL-encode a string (sync wrapper)."""
+    from urllib.parse import quote
+    return quote(s, safe='')
+
+
+def _fa_replay_har_pre_create(page, context=""):
+    """Fire the 4 pre-createProject calls from HAR (telemetry + migration checks).
+    All best-effort, in order, no drops."""
+    pfx = f"[{context}] " if context else ""
+    bearer = _FA_TOKEN_STORE.token or ""
+    sess_id = _fa_session_id()
+    now_iso = _fa_now_iso()
+
+    def be(label, fn):
+        try:
+            res = fn()
+            if isinstance(res, dict) and res.get('status', 200) >= 400:
+                pass
+        except Exception as e:
+            print(f"{pfx}[flow_api] pre '{label}' raised (non-blocking): {e}", flush=True)
+
+    # 1. tRPC fetchMigrationStatus(IMAGE_FX)
+    be("fetchMigrationStatus(IMAGE_FX)", lambda: _fa_trpc_fetch(
+        page,
+        "https://labs.google/fx/api/trpc/general.fetchMigrationStatus?input=" +
+        _fa_url_encode('{"json":{"tool":"IMAGE_FX"}}'),
+        "GET",
+    ))
+    # 2. tRPC fetchMigrationStatus(BACKBONE)
+    be("fetchMigrationStatus(BACKBONE)", lambda: _fa_trpc_fetch(
+        page,
+        "https://labs.google/fx/api/trpc/general.fetchMigrationStatus?input=" +
+        _fa_url_encode('{"json":{"tool":"BACKBONE"}}'),
+        "GET",
+    ))
+    # 3. aisandbox batchLogFrontendEvents — PINHOLE_CREATE_NEW_PROJECT
+    be("batchLogFrontendEvents PINHOLE_CREATE_NEW_PROJECT", lambda: _fa_api_fetch(
+        page,
+        "https://aisandbox-pa.googleapis.com/v1/flow:batchLogFrontendEvents",
+        "POST", bearer,
+        {"events": [{
+            "eventType": "PINHOLE_CREATE_NEW_PROJECT",
+            "metadata": {
+                "sessionId": sess_id,
+                "createTime": now_iso,
+                "additionalParams": {
+                    "TOOL_NAME": {"@type": "type.googleapis.com/google.protobuf.StringValue", "value": "PINHOLE"},
+                    "G1_PAYGATE_TIER": {"@type": "type.googleapis.com/google.protobuf.StringValue", "value": "PAYGATE_TIER_TIER1P5"},
+                    "PINHOLE_PROMPT_BOX_MODE": {"@type": "type.googleapis.com/google.protobuf.StringValue", "value": "TEXT_TO_IMAGE"},
+                    "USER_AGENT": {"@type": "type.googleapis.com/google.protobuf.StringValue", "value": _FA_USER_AGENT},
+                    "IS_DESKTOP": {"@type": "type.googleapis.com/google.protobuf.StringValue", "value": "true"},
+                },
+                "experimentIds": _FA_EXPERIMENT_IDS,
+            }
+        }]},
+    ))
+    # 4. tRPC submitBatchLog — PINHOLE_CREATE_NEW_PROJECT
+    be("submitBatchLog PINHOLE_CREATE_NEW_PROJECT", lambda: _fa_trpc_fetch(
+        page,
+        "https://labs.google/fx/api/trpc/general.submitBatchLog",
+        "POST",
+        {"json": {"appEvents": [{
+            "event": "PINHOLE_CREATE_NEW_PROJECT",
+            "eventMetadata": {"sessionId": sess_id},
+            "eventProperties": [
+                {"key": "TOOL_NAME", "stringValue": "PINHOLE"},
+                {"key": "G1_PAYGATE_TIER", "stringValue": "PAYGATE_TIER_TIER1P5"},
+                {"key": "PINHOLE_PROMPT_BOX_MODE", "stringValue": "TEXT_TO_IMAGE"},
+                {"key": "USER_AGENT", "stringValue": _FA_USER_AGENT},
+                {"key": "IS_DESKTOP", "booleanValue": True},
+            ],
+            "activeExperiments": [],
+            "eventTime": now_iso,
+        }]}},
+    ))
+
+
 def _fa_init_project_best_effort(page, project_id, context=""):
     """Fire post-createProject init calls best-effort. Every call wrapped;
     failures logged but never raised. Operator: sometimes needed, sometimes not."""
@@ -485,36 +581,137 @@ def _fa_init_project_best_effort(page, project_id, context=""):
     def _bearer():
         return _FA_TOKEN_STORE.token or ""
 
-    # Minimal best-effort set. The HAR's projectInitialData (tRPC GET) and
-    # flowCreationAgent.sessions GET both return 400 BAD_REQUEST when called
-    # without specific body/query shape — they're triggered by SPA internals
-    # in response to navigation, not by us. Dropping them. Also dropped
-    # PATCH chatPanelOpen=true (user-interaction event, not default state).
+    # Full HAR replay — 17 post-createProject calls in EXACT HAR order.
+    # Every call best-effort (fire-and-forget); failures logged but never block.
+    # End state matches HAR: chatPanelOpen=false + agentToggleState=DISABLED.
+    sess_id = _fa_session_id()
+    now_iso = _fa_now_iso()
+    project_url = f"https://labs.google/fx/tools/flow/project/{project_id}"
+    AISBX = "https://aisandbox-pa.googleapis.com"
+    TRPC = "https://labs.google/fx/api/trpc"
+
+    # 6. tRPC flow.projectInitialData
+    best_effort("projectInitialData", lambda: _fa_trpc_fetch(
+        page,
+        f"{TRPC}/flow.projectInitialData?input=" +
+        _fa_url_encode(json.dumps({"json": {"projectId": project_id}})),
+        "GET",
+    ))
+    # 7. aisandbox batchLogFrontendEvents — PAGE_VIEW
+    best_effort("batchLogFrontendEvents PAGE_VIEW", lambda: _fa_api_fetch(
+        page, f"{AISBX}/v1/flow:batchLogFrontendEvents", "POST", _bearer(),
+        {"events": [{
+            "eventType": "PAGE_VIEW",
+            "metadata": {
+                "sessionId": sess_id,
+                "createTime": now_iso,
+                "additionalParams": {
+                    "URL": {"@type": "type.googleapis.com/google.protobuf.StringValue", "value": project_url},
+                    "USER_AGENT": {"@type": "type.googleapis.com/google.protobuf.StringValue", "value": _FA_USER_AGENT},
+                    "IS_DESKTOP": {"@type": "type.googleapis.com/google.protobuf.StringValue", "value": "true"},
+                },
+                "experimentIds": _FA_EXPERIMENT_IDS,
+            }
+        }]},
+    ))
+    # 8. tRPC submitBatchLog — PAGE_VIEW
+    best_effort("submitBatchLog PAGE_VIEW", lambda: _fa_trpc_fetch(
+        page, f"{TRPC}/general.submitBatchLog", "POST",
+        {"json": {"appEvents": [{
+            "event": "PAGE_VIEW",
+            "eventProperties": [
+                {"key": "URL", "stringValue": project_url},
+                {"key": "USER_AGENT", "stringValue": _FA_USER_AGENT},
+                {"key": "IS_DESKTOP", "booleanValue": True},
+            ],
+            "activeExperiments": [],
+            "eventMetadata": {"sessionId": sess_id},
+            "eventTime": now_iso,
+        }]}},
+    ))
+    # 9. fetchUserRecommendations
+    onramp_body = {"onramp": ["FLOW_UPGRADE_BANNER", "FLOW_UPGRADE_BUTTON",
+                              "FLOW_MANAGE_AI_CREDITS", "FLOW_VIDEO_TOOLTIP_UPSELL",
+                              "FLOW_MODEL_UPGRADE", "FLOW_MANAGE_MEMBERSHIP"]}
     best_effort("fetchUserRecommendations", lambda: _fa_api_fetch(
-        page,
-        f"{_FA_GOOGLE_FLOW_API}/v1:fetchUserRecommendations?key={_FA_GOOGLE_API_KEY}",
-        "POST", _bearer(),
-        {"onramp": [
-            "FLOW_UPGRADE_BANNER", "FLOW_UPGRADE_BUTTON",
-            "FLOW_MANAGE_AI_CREDITS", "FLOW_VIDEO_TOOLTIP_UPSELL",
-            "FLOW_MODEL_UPGRADE", "FLOW_MANAGE_MEMBERSHIP",
-        ]},
+        page, f"{AISBX}/v1:fetchUserRecommendations", "POST", _bearer(), onramp_body,
     ))
+    # 10. credits
     best_effort("credits", lambda: _fa_api_fetch(
-        page,
-        f"{_FA_GOOGLE_FLOW_API}/v1/credits?key={_FA_GOOGLE_API_KEY}",
-        "GET", _bearer(),
+        page, f"{AISBX}/v1/credits?key={_FA_GOOGLE_API_KEY}", "GET", _bearer(),
     ))
-    # Explicitly DISABLE Agent (operator: "agent button SHOULD BE off").
-    # The HAR shows a full toggle cycle: PATCH=ENABLED, chatPanelOpen=true,
-    # sessions POST, chatPanelOpen=false, PATCH=DISABLED. Operator turned Agent
-    # OFF at the end. We fire the FINAL state directly. Without this PATCH,
-    # Flow may default to Agent ON on fresh projects and show the agent
-    # landing UI ("Start creating or drop media") instead of the generation
-    # toolbar.
-    best_effort("agentInfo agentToggleState=DISABLED", lambda: _fa_api_fetch(
+    # 11. flowCreationAgent.sessions GET (with projectId query)
+    best_effort("flowCreationAgent.sessions GET", lambda: _fa_api_fetch(
+        page, f"{AISBX}/v1/flowCreationAgent/sessions?projectId={project_id}", "GET", _bearer(),
+    ))
+    # 12. tRPC fetchUserPreferences
+    best_effort("fetchUserPreferences", lambda: _fa_trpc_fetch(
         page,
-        f"{_FA_GOOGLE_FLOW_API}/v1/projects/{project_id}/agentInfo?key={_FA_GOOGLE_API_KEY}",
+        f"{TRPC}/general.fetchUserPreferences?input=" +
+        _fa_url_encode('{"json":null,"meta":{"values":["undefined"]}}'),
+        "GET",
+    ))
+    # 13. tRPC videoFx.getUserSettings
+    best_effort("videoFx.getUserSettings", lambda: _fa_trpc_fetch(
+        page,
+        f"{TRPC}/videoFx.getUserSettings?input=" +
+        _fa_url_encode('{"json":null,"meta":{"values":["undefined"]}}'),
+        "GET",
+    ))
+    # 14. PATCH agentInfo agent_toggle_state=ENABLED (HAR initial — even though
+    # we end DISABLED, the HAR fires this first; replicate verbatim).
+    best_effort("agentInfo agent_toggle_state=ENABLED", lambda: _fa_api_fetch(
+        page,
+        f"{AISBX}/v1/projects/{project_id}/agentInfo?updateMask=agent_toggle_state",
+        "PATCH", _bearer(),
+        {"agentToggleState": "AGENT_TOGGLE_STATE_ENABLED"},
+    ))
+    # 15. fetchUserRecommendations (duplicate per HAR)
+    best_effort("fetchUserRecommendations#2", lambda: _fa_api_fetch(
+        page, f"{AISBX}/v1:fetchUserRecommendations", "POST", _bearer(), onramp_body,
+    ))
+    # 16. tRPC fetchUserAcknowledgement
+    best_effort("fetchUserAcknowledgement", lambda: _fa_trpc_fetch(
+        page,
+        f"{TRPC}/general.fetchUserAcknowledgement?input=" +
+        _fa_url_encode('{"json":{"acknowledgementVersion":"FLOW_IMAGE_UPLOAD_TOS"}}'),
+        "GET",
+    ))
+    # 17. /v1/flowAgent/applets
+    best_effort("flowAgent.applets", lambda: _fa_api_fetch(
+        page, f"{AISBX}/v1/flowAgent/applets", "GET", _bearer(),
+    ))
+    # 18. /v1/flowAgent/savedSharedApplets
+    best_effort("flowAgent.savedSharedApplets", lambda: _fa_api_fetch(
+        page, f"{AISBX}/v1/flowAgent/savedSharedApplets", "GET", _bearer(),
+    ))
+    # 19. PATCH agentInfo chat_panel_open=true
+    best_effort("agentInfo chat_panel_open=true", lambda: _fa_api_fetch(
+        page,
+        f"{AISBX}/v1/projects/{project_id}/agentInfo?updateMask=chat_panel_open",
+        "PATCH", _bearer(),
+        {"chatPanelOpen": True},
+    ))
+    # 20. POST flowCreationAgent/sessions
+    best_effort("flowCreationAgent.sessions POST", lambda: _fa_api_fetch(
+        page, f"{AISBX}/v1/flowCreationAgent/sessions", "POST", _bearer(),
+        {"projectId": f"projects/{project_id}"},
+    ))
+    # 21. GET flowCreationAgent/sessions
+    best_effort("flowCreationAgent.sessions GET#2", lambda: _fa_api_fetch(
+        page, f"{AISBX}/v1/flowCreationAgent/sessions?projectId={project_id}", "GET", _bearer(),
+    ))
+    # 22. PATCH agentInfo chat_panel_open=false
+    best_effort("agentInfo chat_panel_open=false", lambda: _fa_api_fetch(
+        page,
+        f"{AISBX}/v1/projects/{project_id}/agentInfo?updateMask=chat_panel_open",
+        "PATCH", _bearer(),
+        {"chatPanelOpen": False},
+    ))
+    # 23. PATCH agentInfo agent_toggle_state=DISABLED (final state — Agent OFF)
+    best_effort("agentInfo agent_toggle_state=DISABLED", lambda: _fa_api_fetch(
+        page,
+        f"{AISBX}/v1/projects/{project_id}/agentInfo?updateMask=agent_toggle_state",
         "PATCH", _bearer(),
         {"agentToggleState": "AGENT_TOGGLE_STATE_DISABLED"},
     ))
@@ -540,6 +737,13 @@ def _fa_try_create_new_project_api(page, context=""):
         title = _dt.now().strftime("%b %d, %I:%M %p").lstrip("0")
     except Exception:
         title = "Auto Project"
+
+    # Pre-create telemetry replay (HAR steps 1-4): fetchMigrationStatus x2 +
+    # PINHOLE_CREATE_NEW_PROJECT batchLog + submitBatchLog. Best-effort.
+    try:
+        _fa_replay_har_pre_create(page, context=context)
+    except Exception:
+        pass
 
     try:
         res = _fa_trpc_fetch(
