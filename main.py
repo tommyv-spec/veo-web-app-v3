@@ -6524,7 +6524,28 @@ async def list_outputs(
             print(f"[Outputs] R2 list error: {e}", flush=True)
     
     videos.sort(key=lambda x: x.get("clip_index") or 0 if approved_only else x["filename"])
-    
+
+    # Self-heal has_export: a job whose R2 outputs already contain a final
+    # export (final_export_ / final_broll_ / export_) WAS exported, even if
+    # the flag was never set — pre-v776 exports (the setter didn't exist
+    # yet) and voice-swap-only b-roll paths (set has_voice_clone, not
+    # has_export). Without this such jobs sit forever at awaiting_export
+    # (derive_effective_stage gates the finishing transition on has_export)
+    # and get excluded from the IG-match candidate pool. Setting the flag +
+    # advancing the stage the moment the job is viewed repairs it with no
+    # manual backfill. Guarded so it only fires when a final export exists.
+    if job and not getattr(job, 'has_export', False):
+        _has_final_export = any(
+            (v.get("filename") or "").startswith(("final_export_", "final_broll_", "export_"))
+            for v in videos
+        )
+        if _has_final_export:
+            job.has_export = True
+            _maybe_auto_enter_lifecycle(job, now=datetime.utcnow())
+            db.commit()
+            print(f"[Outputs] self-heal: job={job_id[:8]} has a final export "
+                  f"→ has_export=True, lifecycle_stage={job.lifecycle_stage}", flush=True)
+
     return {"job_id": job_id, "videos": videos, "count": len(videos)}
 
 
