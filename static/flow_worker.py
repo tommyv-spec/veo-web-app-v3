@@ -951,12 +951,32 @@ def _install_flow_api_capture(page):
         return
     out_path = _flow_api_capture_path()
     _watch = (
+        # video generation
         "batchAsyncGenerateVideoStartImage",
         "batchAsyncGenerateVideoStartAndEndImage",
         "batchAsyncGenerateVideoReferenceImages",
         "batchAsyncGenerateVideo",   # catch Omni / any other submit variant
-        "uploadImage",
         "batchCheckAsyncVideoGenerationStatus",
+        # image generation (Nano Banana) — flow_worker also handles image jobs
+        "flowMedia:batchGenerateImages",
+        "batchGenerateImages",
+        "upsampleImage",
+        # shared
+        "uploadImage",
+        # post-create init / state (so we see EVERY call the page makes)
+        "agentInfo",
+        "flowCreationAgent",
+        "flowAgent",
+        "fetchUserRecommendations",
+        "/v1/credits",
+        "fetchUserPreferences",
+        "videoFx.getUserSettings",
+        "fetchUserAcknowledgement",
+        "projectInitialData",
+        "createProject",
+        "fetchMigrationStatus",
+        "batchLogFrontendEvents",
+        "submitBatchLog",
     )
 
     def _on_request(req):
