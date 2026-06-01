@@ -3273,23 +3273,26 @@ def _normalize_speaker_mode(raw: Optional[str]) -> Optional[str]:
         if classified:
             return classified
 
-    # v757.1 — embedded-keyword scan. Speaker bullets sometimes carry a
+    # v757.1 — per-token classify. Speaker bullets sometimes carry a
     # parenthetical annotation AFTER the mode token, e.g.
     #   "voiceover (Nuri, off-camera)"  or
     #   "the husband on-camera (lip-sync, restored Day-X frame)".
     # The last-token check above fails on these (last token is "off-camera)"
     # / "frame)"), so the raw multi-word value fell through to the return
     # below and OVERFLOWED the speaker_mode VARCHAR(20) column at insert
-    # (psycopg2 StringDataRightTruncation). Scan the flattened full string
-    # for an embedded canonical keyword; first match wins by priority
-    # voiceover > on-camera > silent. Avoids the short "vo" token to not
-    # false-match a character name.
-    if "voiceover" in full_flat or "narration" in full_flat or "narrated" in full_flat:
-        return "voiceover"
-    if "oncamera" in full_flat or "lipsync" in full_flat:
-        return "on-camera"
-    if "silent" in full_flat or "nodialogue" in full_flat or "nospeech" in full_flat:
-        return "silent"
+    # (psycopg2 StringDataRightTruncation). Classify EVERY whitespace token
+    # (each token flattened + run through _classify exactly), then pick by
+    # canonical priority voiceover > on-camera > silent > auto. Per-token —
+    # NOT substring over the concatenated blob — so a character name can't
+    # accidentally embed a keyword and mis-classify the mode.
+    found = set()
+    for tok in s.split():
+        c = _classify(_flat(tok))
+        if c:
+            found.add(c)
+    for mode in ("voiceover", "on-camera", "silent", "auto"):
+        if mode in found:
+            return mode
 
     # Unrecognized — return the raw lowercased value, but CLAMP to the
     # speaker_mode column width so a malformed bullet surfaces in error
