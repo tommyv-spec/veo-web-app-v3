@@ -85,12 +85,32 @@ _CLIP_HEADER_RE = re.compile(
 
 # Field labels — bold ** wrapping is required to match the rest of the
 # scene-table convention.
+#
+# v757 (NEW 2026-06-01): the "prompt" word is now OPTIONAL so the parser also
+# reads the decode-style short labels `**Text:**` / `**Negative:**` (alongside
+# the canonical v750 `**Text prompt:**` / `**Negative prompt:**`). The decode
+# pipeline + 6 recent D1-DX builds emit the short labels with all three fields
+# (`**Text:** ... **Voice:** ... **Negative:** ...`) inline on ONE physical line
+# per clip. Pre-v757 the strict `Text\s+prompt` requirement missed `**Text:**`
+# → text_prompt None → bare-fence fallback → no fence (prose) → clip skipped →
+# empty prompts_by_key → veo_prompt_override null on every line → batch overview
+# showed 0 Veo prompts AND Veo fell back to auto-build, ignoring the operator's
+# verbatim prompt. See observation 9848.
 _TEXT_PROMPT_LABEL_RE = re.compile(
-    r"\*\*Text\s+prompt\s*:\*\*",
+    r"\*\*Text(?:\s+prompt)?\s*:\*\*",
     re.IGNORECASE,
 )
 _NEGATIVE_PROMPT_LABEL_RE = re.compile(
-    r"\*\*Negative\s+prompt\s*:\*\*",
+    r"\*\*Negative(?:\s+prompt)?\s*:\*\*",
+    re.IGNORECASE,
+)
+# v757 — decode-style 3-field format puts `**Voice:**` (the spoken-line /
+# voice-profile sub-section) BETWEEN Text and Negative, inline on the same
+# physical line. The Voice content MUST stay folded INTO the text prompt body
+# (Veo needs the spoken line in the prompt), so `**Voice:**` is NOT a body
+# boundary — only the Negative label / a frame label / the next clip header is.
+_VOICE_LABEL_RE = re.compile(
+    r"\*\*Voice\s*:\*\*",
     re.IGNORECASE,
 )
 
@@ -177,34 +197,54 @@ def _extract_fenced_content(block: str, label_re: re.Pattern) -> Optional[str]:
 # v750.1 adds unfenced fallback: after the label, capture content until
 # the NEXT bolded label (`**X prompt:**` / `**Start frame:**` / etc.) or the
 # next `### Clip` header or end of block — strip outer whitespace.
-_NEXT_BOLD_LABEL_RE = re.compile(
-    r"^\s*\*\*[A-Za-z][A-Za-z _-]*:\s*\*\*",
-    re.MULTILINE,
-)
 _NEXT_CLIP_HEADER_RE = re.compile(
     r"^###\s+Clip\s+\d+(?:\.\d+)?\b",
     re.MULTILINE,
 )
 
+# v757 — body boundary for the UNFENCED **Text** body. Stops at the Negative
+# label (canonical `**Negative prompt:**` OR decode-style `**Negative:**`),
+# at a Start/End frame label, or the next clip header. Searched WITHOUT a
+# line anchor so it catches the decode-style format where `**Negative:**`
+# sits mid-line on the same physical line as `**Text:**`. Deliberately does
+# NOT include `**Voice:**` — voice/dialogue folds into the text prompt body.
+_TEXT_BODY_BOUNDARY_RE = re.compile(
+    r"\*\*Negative(?:\s+prompt)?\s*:\*\*"
+    r"|\*\*(?:Start|End)\s+frame\s*:\*\*"
+    r"|^###\s+Clip\s+\d+(?:\.\d+)?\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 
-def _extract_unfenced_content(block: str, label_re: re.Pattern) -> Optional[str]:
+
+def _extract_unfenced_content(
+    block: str,
+    label_re: re.Pattern,
+    boundary_re: Optional[re.Pattern] = None,
+) -> Optional[str]:
     """Find a `**Label:**` marker and capture the UNFENCED prose body that
-    follows until the next bolded label / next clip header / end of block.
-    Returns None if the label is absent or the captured body is empty.
+    follows until the first `boundary_re` hit / next clip header / end of
+    block. Returns None if the label is absent or the captured body is empty.
 
     v750.1: complements `_extract_fenced_content` for operators who emit
     v750 Clip blocks with bolded field labels but multi-paragraph prose
     bodies NOT wrapped in triple-backtick fences.
+
+    v757: `boundary_re` is now explicit so the **Text** body can swallow the
+    inline `**Voice:**` sub-section (decode-style 3-field format) and stop
+    only at `**Negative:**` / frame label / next clip. Defaults to the next
+    clip header alone (used for the **Negative** body, which runs to the
+    next clip).
     """
     label_m = label_re.search(block)
     if not label_m:
         return None
     after_label = block[label_m.end():]
-    # Find boundary: next bolded label OR next ### Clip header.
+    # Find boundary: caller-supplied boundary OR next ### Clip header.
     boundaries = []
-    nb = _NEXT_BOLD_LABEL_RE.search(after_label)
-    if nb is not None:
-        boundaries.append(nb.start())
+    if boundary_re is not None:
+        bm = boundary_re.search(after_label)
+        if bm is not None:
+            boundaries.append(bm.start())
     nc = _NEXT_CLIP_HEADER_RE.search(after_label)
     if nc is not None:
         boundaries.append(nc.start())
@@ -219,15 +259,23 @@ def _extract_unfenced_content(block: str, label_re: re.Pattern) -> Optional[str]
     return body
 
 
-def _extract_prompt_content(block: str, label_re: re.Pattern) -> Optional[str]:
+def _extract_prompt_content(
+    block: str,
+    label_re: re.Pattern,
+    boundary_re: Optional[re.Pattern] = None,
+) -> Optional[str]:
     """v750.1: try fenced extraction first; fall back to unfenced prose.
     Returns None if the label is absent OR both fenced + unfenced
     extraction yield empty content.
+
+    v757: `boundary_re` is threaded to the unfenced fallback so the text
+    body stops at the right place (Negative label) for the decode-style
+    single-line `**Text:** ... **Voice:** ... **Negative:** ...` format.
     """
     fenced = _extract_fenced_content(block, label_re)
     if fenced is not None:
         return fenced
-    return _extract_unfenced_content(block, label_re)
+    return _extract_unfenced_content(block, label_re, boundary_re)
 
 
 # --- Public API ------------------------------------------------------------
@@ -269,10 +317,14 @@ def parse_veo_prompts_block(md_text: str) -> Dict[Tuple[int, int], Dict[str, Opt
         # negative_prompt → veo_prompt_override null on every line →
         # build_prompt auto-construction fires + ignores operator's v750
         # verbatim prompts.
-        text_prompt = _extract_prompt_content(block, _TEXT_PROMPT_LABEL_RE)
+        text_prompt = _extract_prompt_content(
+            block, _TEXT_PROMPT_LABEL_RE, _TEXT_BODY_BOUNDARY_RE
+        )
         negative_prompt: Optional[str]
         if text_prompt is not None:
-            # Labeled format — read negative from its own fenced OR unfenced body.
+            # Labeled format — read negative from its own fenced OR unfenced
+            # body. The negative body runs to the next clip header (default
+            # boundary), so no explicit boundary_re needed.
             negative_prompt = _extract_prompt_content(block, _NEGATIVE_PROMPT_LABEL_RE)
         else:
             # Bare-fence format — first fence in block is the whole prompt.
