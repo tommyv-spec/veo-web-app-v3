@@ -102,7 +102,13 @@
         }
         .app-container.state-browse #jobsCard > .jobs-list.lc-kanban {
             min-height: 0;
-            height: auto !important;
+            /* height:100% inside a grid item = fill the assigned grid row track
+               (minmax(0, 1fr) on row 4 of #jobsCard's grid). Previously this was
+               height:auto !important, which made the kanban shrink to content
+               and ignore the 1fr allocation → columns got <100px, .lc-rows
+               could not scroll. Also overrides the legacy .lc-kanban base rule's
+               calc(100% - 88px) which was a pre-grid-era hack. */
+            height: 100% !important;
             max-height: none !important;
             overflow: hidden !important;      /* kill .jobs-list { overflow-y: auto } leak — columns inside scroll */
         }
