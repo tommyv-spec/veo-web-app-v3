@@ -8,6 +8,18 @@
          No-ops when POSTHOG_KEY env unset. See static/posthog-bootstrap.js. -->
     <script src="/static/posthog-bootstrap.js" defer></script>
     <link rel="icon" type="image/png" href="/static/favicon.png">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <meta name="theme-color" content="#7b7bff">
+    <meta name="mobile-web-app-capable" content="yes">
+    <script>
+      // Register service worker (required for PWA install + persistent File
+      // System Access permissions across browser sessions).
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').catch(() => {});
+        });
+      }
+    </script>
     <link rel="apple-touch-icon" href="/static/favicon.png">
     <!-- Prefetch tutorial iframe content so first-visit users don't wait
          on a fresh fetch when the overlay opens. Low priority, runs during
@@ -3344,10 +3356,13 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         <div id="igAccountsList"></div>
                     </div>
                     <div id="localPanel" style="display:none; padding:12px; height:calc(100% - 60px); overflow-y:auto;">
-                        <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
+                        <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap;">
                             <button class="btn btn-secondary btn-sm" id="localPickFolderBtn">📁 Pick local folder</button>
                             <button class="btn btn-secondary btn-sm" id="localUnpickBtn" style="display:none;">Stop watching</button>
                             <span id="localFolderStatus" style="font-size:11px;color:#888;"></span>
+                        </div>
+                        <div id="localPwaHint" style="display:none;font-size:11px;color:#fc8;background:#332;padding:8px 10px;border-radius:4px;margin-bottom:10px;">
+                            <strong>Tip:</strong> install Kaveno as an app (Chrome address bar → install icon) to make folder permission persist across sessions. Otherwise re-click <strong>Pick folder</strong> once each session.
                         </div>
                         <p style="font-size:11px;color:#888;margin:0 0 10px 0;">
                             Pick a local folder. While this tab is open we poll every ~30s, find new
@@ -4451,13 +4466,20 @@ Example: A realistic vertical video of a professional presenter speaking directl
           return LOCAL_VIDEO_EXTS.some(ext => n.endsWith(ext));
         }
 
-        async function _verifyDirPermission(handle) {
+        async function _verifyDirPermission(handle, interactive = true) {
           if (!handle) return false;
           if (typeof handle.queryPermission !== "function") return true;
           let p = await handle.queryPermission({ mode: "read" });
           if (p === "granted") return true;
+          if (!interactive) return false;
           p = await handle.requestPermission({ mode: "read" });
           return p === "granted";
+        }
+        function _localIsInstalledPWA() {
+          // standalone display-mode = installed app. Chrome 121+ persists
+          // File System Access permissions only in this mode.
+          return window.matchMedia("(display-mode: standalone)").matches
+            || window.navigator.standalone === true;
         }
 
         async function localPickFolder() {
@@ -4590,10 +4612,32 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const list = document.getElementById("localVideosList");
           const statusEl = document.getElementById("localFolderStatus");
           const unpickBtn = document.getElementById("localUnpickBtn");
+          const pwaHint = document.getElementById("localPwaHint");
+
+          // Show install-as-PWA hint when running in browser tab (non-PWA).
+          if (pwaHint) {
+            pwaHint.style.display = _localIsInstalledPWA() ? "none" : "";
+          }
+
+          // Silent re-grant attempt: if a handle is stored AND permission
+          // already granted (PWA persisted OR within-session), restart
+          // polling automatically — no click required.
+          if (_localDirHandle && !_localPollTimer) {
+            const granted = await _verifyDirPermission(_localDirHandle, false);
+            if (granted) {
+              await localStartPolling();
+            }
+          }
+
           if (statusEl) {
-            if (_localDirHandle) {
-              statusEl.innerHTML = `watching <strong>${escapeHtml(_localDirHandle.name)}</strong> — polling every ${Math.round(LOCAL_POLL_INTERVAL_MS / 1000)}s`;
+            if (_localDirHandle && _localPollTimer) {
+              const persists = _localIsInstalledPWA() ? " (persists across sessions)" : "";
+              statusEl.innerHTML = `watching <strong>${escapeHtml(_localDirHandle.name)}</strong> — polling every ${Math.round(LOCAL_POLL_INTERVAL_MS / 1000)}s${persists}`;
               statusEl.style.color = "#9b9";
+              if (unpickBtn) unpickBtn.style.display = "";
+            } else if (_localDirHandle) {
+              statusEl.innerHTML = `folder remembered: <strong>${escapeHtml(_localDirHandle.name)}</strong> — click <strong>Pick local folder</strong> to grant permission this session`;
+              statusEl.style.color = "#fc8";
               if (unpickBtn) unpickBtn.style.display = "";
             } else {
               statusEl.innerHTML = "no folder picked";

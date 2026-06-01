@@ -1,0 +1,14 @@
+{
+  "name": "KavenoBuilder",
+  "short_name": "Kaveno",
+  "description": "Veo video pipeline + local folder watcher",
+  "start_url": "/?mode=browse",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0f0f1a",
+  "theme_color": "#7b7bff",
+  "icons": [
+    { "src": "/static/favicon.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/static/favicon.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

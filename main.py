@@ -848,6 +848,30 @@ static_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 
+# === PWA install support (2026-06-02) ===
+# Serve sw.js + manifest.webmanifest at ROOT path so the service worker
+# scope covers the whole site. PWA install enables persistent File System
+# Access folder permissions (Chrome 121+).
+@app.get("/sw.js", include_in_schema=False)
+def serve_service_worker():
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        str(static_dir / "sw.js"),
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/manifest.webmanifest", include_in_schema=False)
+def serve_pwa_manifest():
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        str(static_dir / "manifest.webmanifest"),
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 # ============ Version Endpoint (for deployment verification) ============
 
 @app.get("/api/version")
