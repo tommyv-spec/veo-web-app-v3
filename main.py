@@ -3478,24 +3478,30 @@ def _get_user_ig_account(db: DBSession, account_id: int, user: User):
 
 
 def _job_full_dialogue(db: DBSession, job_id: str) -> str:
-    """Concat all clip dialogue_text for a Job, in clip_index order.
+    """Concat each clip's SPOKEN line for a Job, in clip_index order.
 
-    v698A b-roll voiceover scenes produce TWO Clip rows per spoken line
-    (visual_pair + audio_pair, both with the same `dialogue_text`). The
-    audio_pair row is the silent audio twin (clip_index = visual + 100000)
-    and is purely a render artifact — including it here double-counts the
-    line and inflates the denominator of SequenceMatcher.ratio, capping
-    b-roll-heavy videos near ~0.67 vs IG transcripts. Filter audio_pair
-    so each spoken line appears once and in natural scene order.
+    v698A b-roll voiceover scenes store the spoken words by clip_role
+    (canonical rule at the broll export, ~L8095):
+      - single      → spoken text in dialogue_text
+      - visual_pair → spoken text in voiceover_line (dialogue_text is the
+                      EMPTY on-camera text — nobody speaks on camera)
+      - audio_pair  → silent render twin; dialogue_text duplicates the
+                      sibling's voiceover_line (clip_index = visual+100000)
+
+    So reconstruct with COALESCE(voiceover_line, dialogue_text) and keep
+    audio_pair excluded. Reading dialogue_text alone rebuilt near-EMPTY
+    text for b-roll-heavy jobs (visual_pair dialogue_text is blank),
+    making IG-transcript matches near-random and surfacing wildly wrong
+    suggestions. Excluding audio_pair avoids double-counting each line.
     """
     rows = (
-        db.query(Clip.dialogue_text)
+        db.query(Clip.dialogue_text, Clip.voiceover_line)
         .filter(Clip.job_id == job_id)
         .filter((Clip.clip_role == None) | (Clip.clip_role != 'audio_pair'))  # noqa: E711
         .order_by(Clip.clip_index.asc())
         .all()
     )
-    return " ".join((r[0] or "") for r in rows).strip()
+    return " ".join(((vo or dt) or "").strip() for dt, vo in rows).strip()
 
 
 @app.post("/api/instagram/accounts")

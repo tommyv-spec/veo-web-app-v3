@@ -133,19 +133,21 @@ def _maybe_auto_match(video, account, db: Session) -> None:
             return
 
         def _full_dialogue(job):
-            # v698A: filter out audio_pair clips — they're the silent audio
-            # twin (clip_index = visual + 100000) and carry a duplicate of
-            # the visual_pair's dialogue_text. Including them doubles the
-            # spoken-line content and caps b-roll-heavy match ratios near
-            # ~0.67 (just under the 0.70 auto-match floor).
+            # v698A: spoken words live by clip_role (canonical rule at broll
+            # export ~main.py:8095): single → dialogue_text, visual_pair →
+            # voiceover_line (dialogue_text is the EMPTY on-camera text),
+            # audio_pair → silent twin duplicating voiceover_line. Use
+            # COALESCE(voiceover_line, dialogue_text) and exclude audio_pair.
+            # Reading dialogue_text alone rebuilt near-empty text for b-roll
+            # jobs (blank visual_pair dialogue_text) → near-random matches.
             rows = (
-                db.query(Clip.dialogue_text)
+                db.query(Clip.dialogue_text, Clip.voiceover_line)
                 .filter(Clip.job_id == job.id)
                 .filter((Clip.clip_role == None) | (Clip.clip_role != 'audio_pair'))  # noqa: E711
                 .order_by(Clip.clip_index.asc())
                 .all()
             )
-            return " ".join((r[0] or "") for r in rows).strip()
+            return " ".join(((vo or dt) or "").strip() for dt, vo in rows).strip()
 
         top = _ig_match.best_matches(
             video, candidates, full_dialogue=_full_dialogue, k=1, min_score=_AUTO_MATCH_THRESHOLD,
