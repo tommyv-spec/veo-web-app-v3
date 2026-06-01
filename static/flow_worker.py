@@ -3957,27 +3957,44 @@ def _swap_model_for_policy(current_model):
 GEN_POLICY_ERROR_CODE = "GENERATION_POLICY"
 _POLICY_GEN_ATTEMPTS = {}   # clip_id -> generation-policy blocks seen this run
 _POLICY_GEN_LOCK = threading.Lock()
+# v772 — DB-persisted generation_attempt at which we stop retrying a policy-
+# blocked clip and mark it terminal. Survives worker restarts + dispatch
+# re-queues (unlike the in-memory _POLICY_GEN_ATTEMPTS counter).
+POLICY_FAIL_ATTEMPT = 3
 
 
-def policy_gen_next_action(clip_id, current_model):
+def policy_gen_next_action(clip_id, current_model, generation_attempt=1):
     """Decide what to do on a generation-policy block for this clip.
     Returns (action, message): action is 'retry_swap' | 'fail'.
 
     v763 — policy sequence is SWITCH-MODEL → mark-policy. We do NOT retry the
-    SAME model: a content-policy block is the same content + same prompt, so
-    the same model just re-blocks (wasted redo that looks stuck). So:
-      block 1 -> switch model (Omni<->Veo Fast), redo once with the new model
-      block 2 -> give up, mark GENERATION_POLICY in the UI.
-    On 'retry_swap' the swapped model is recorded in _POLICY_SWAP_DONE so the
-    redo picks it up."""
+    SAME model: a content-policy block is the same content + same prompt, so the
+    same model just re-blocks. block 1 -> switch model (Omni<->Veo Fast); a
+    later block -> give up, mark GENERATION_POLICY in the UI.
+
+    v772 — DURABLE termination. Pre-v772 the retry-vs-fail decision used ONLY
+    the in-memory _POLICY_GEN_ATTEMPTS counter, which resets on every worker
+    restart AND every 180s dispatch-stuck re-queue → the clip never reached
+    strike 2 → infinite retry_swap loop (operator saw clips stuck on policy
+    forever). Now the terminal fail is reached via PERSISTENT signals that do
+    NOT reset, so the clip is guaranteed to terminate after one swap:
+      1. already on the swapped fallback model (Omni→Veo done) and STILL blocked
+         => both models tried => fail.
+      2. generation_attempt (DB-persisted) >= POLICY_FAIL_ATTEMPT => give up.
+      3. in-memory n >= 2 (fast path within one process) => fail.
+    Only when ALL are below threshold AND still on the primary Omni model do we
+    swap once. _model_known guards is_omni('') (empty page._veo_model) from
+    being misread as 'already swapped' (which would fail on the FIRST block)."""
+    _model_known = bool(current_model)
+    _already_swapped = _model_known and not is_omni(current_model)
     with _POLICY_GEN_LOCK:
         n = _POLICY_GEN_ATTEMPTS.get(clip_id, 0) + 1
         _POLICY_GEN_ATTEMPTS[clip_id] = n
-    if n == 1:
-        swap = _swap_model_for_policy(current_model)
-        _POLICY_SWAP_DONE[clip_id] = swap
-        return ('retry_swap', f"Policy block — switching model to {swap}")
-    return ('fail', "⚠️ Generation blocked by Flow content policy (also failed after switching the model) — change the prompt.")
+    if _already_swapped or (generation_attempt or 1) >= POLICY_FAIL_ATTEMPT or n >= 2:
+        return ('fail', "⚠️ Generation blocked by Flow content policy (also failed after switching the model) — change the prompt.")
+    swap = _swap_model_for_policy(current_model)
+    _POLICY_SWAP_DONE[clip_id] = swap
+    return ('retry_swap', f"Policy block — switching model to {swap}")
 
 
 def fail_clip_general_policy(clip_id, message):
@@ -4024,7 +4041,8 @@ def tile_text_is_prominent(page, data_index):
         return False
 
 
-def route_generation_policy(clip_id, current_model, is_prominent, account_name=""):
+def route_generation_policy(clip_id, current_model, is_prominent, account_name="",
+                            generation_attempt=1):
     """Route a generation-time Flow policy block to the right recovery UI.
 
     is_prominent True  -> image-attributable: report_policy_violation stamps
@@ -4034,6 +4052,9 @@ def route_generation_policy(clip_id, current_model, is_prominent, account_name="
     is_prominent False -> delegate to policy_gen_next_action: swap model once,
                           then GENERATION_POLICY 'change the prompt'.
                           Returns ('retry_swap'|'fail', msg).
+
+    v772 — generation_attempt (DB-persisted) is forwarded so the durable
+    terminal-fail backstop works across worker restarts / dispatch re-queues.
     """
     prefix = f"[{account_name}] " if account_name else ""
     if is_prominent:
@@ -4047,7 +4068,7 @@ def route_generation_policy(clip_id, current_model, is_prominent, account_name="
         print(f"{prefix}[policy] prominent-people block on clip {clip_id} "
               f"→ replace-image card (no model swap)", flush=True)
         return ('fail_prominent', 'prominent-people — replace-image card shown')
-    return policy_gen_next_action(clip_id, current_model)
+    return policy_gen_next_action(clip_id, current_model, generation_attempt=generation_attempt)
 
 
 def clear_flow_site_data(page, label=""):
@@ -5414,7 +5435,7 @@ class HumanPacer:
                                         # image"). So fail with a try-a-different-PROMPT message
                                         # and KEEP the image; do NOT render the replace-image card.
                                         _is_prom = tile_text_is_prominent(page, _pi)
-                                        _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, self.account_name)
+                                        _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, self.account_name, generation_attempt=_clip_obj.get('generation_attempt', 1))
                                         if _pa == 'fail_prominent':
                                             print(f"[{self.account_name}] [PolicyScan] 🖼 Clip {_fail_ci+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
                                             clip_log(clip_id, _fail_ci, "FAILED", "prominent-people policy — replace-image card")
@@ -14348,7 +14369,7 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                         # try-a-different-PROMPT message; keep the image.
                         # REDO runs in a fresh project — the retried tile sits at data-index 0.
                         _is_prom = tile_text_is_prominent(page, 0)
-                        _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom)
+                        _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=clip.get('generation_attempt', 1))
                         if _pa == 'fail_prominent':
                             print(f"[REDO] 🖼 Clip {clip_index+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
                         elif _pa == 'fail':
@@ -17432,7 +17453,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     if not _df_clip:
                         continue
                     _is_prom = _dfc in _prom_killed
-                    _pa, _pmsg = route_generation_policy(_df_clip['id'], getattr(page, "_veo_model", ""), _is_prom)
+                    _pa, _pmsg = route_generation_policy(_df_clip['id'], getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_df_clip.get('generation_attempt', 1))
                     if _pa == 'fail_prominent':
                         print(f"[Flow] 🖼 clip {_dfc+1} prominent-people block — replace-image card shown (no model swap); job continues", flush=True)
                         clip_log(_df_clip['id'], _dfc, "FAILED", "prominent-people policy — replace-image card")
@@ -17929,7 +17950,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                         # caught there → "different image"). Fail with a
                                         # try-a-different-PROMPT message; keep the image.
                                         _is_prom = tile_text_is_prominent(page, _pi)
-                                        _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom)
+                                        _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_clip_obj.get('generation_attempt', 1))
                                         if _pa == 'fail_prominent':
                                             permanently_failed_clips.add(_fail_ci)
                                             _pending_left.discard(_fail_ci)
@@ -19717,7 +19738,14 @@ def main_multi_account(accounts_override=None):
                 # us a clip we supposedly dispatched more than this many
                 # seconds ago, our original dispatch was lost (thread died,
                 # golden restore wiped the queue, etc.). Re-dispatch.
-                STUCK_REDO_SECS = 180.0
+                # v772 — was 180s, but a real redo cycle (HAR replay + nav +
+                # Radix hydration waits + gallery upload + generate + 50s gen
+                # wait + tile scans) routinely runs 5-9 min. At 180s the
+                # dispatcher assumed the dispatch was "lost" and re-dispatched a
+                # still-running redo every 3 min → duplicate redos + churn that
+                # never let a clip reach its terminal policy fail. 600s exceeds a
+                # normal redo so only a genuinely-lost dispatch re-queues.
+                STUCK_REDO_SECS = 600.0
                 _now = time.time()
                 for c in redo_clips:
                     # Use (clip_id, attempt) as key so the same clip can be retried
