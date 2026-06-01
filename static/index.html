@@ -89,9 +89,25 @@
         }
         .app-container.state-browse .config-panel > *:not(#jobsCard) { display: none !important; }
         .app-container.state-browse #jobsCard {
-            display: block !important;
+            display: flex !important;
+            flex-direction: column;
             height: 100%;
             margin: 0;
+            overflow: hidden;
+            min-height: 0;
+        }
+        /* Header band (title + chip filter + search/banner) is shrink-to-content +
+           sticky-by-virtue-of-not-scrolling. Only the kanban below scrolls (per
+           column). */
+        .app-container.state-browse #jobsCard > .card-title,
+        .app-container.state-browse #jobsCard > .lifecycle-chips,
+        .app-container.state-browse #jobsCard > .lc-search-bar {
+            flex: 0 0 auto;
+        }
+        .app-container.state-browse #jobsCard > .jobs-list.lc-kanban {
+            flex: 1 1 auto;
+            min-height: 0;
+            height: auto !important;
         }
 
         /* Review mode: jobs sidebar (jobsCard) on the left, review panel on right. */
