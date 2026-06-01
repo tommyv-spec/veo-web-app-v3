@@ -3691,9 +3691,12 @@ async def suggest_matches(
         .all()
     )
     full_dialogue = lambda j: _job_full_dialogue(db, j.id)
-    # 0.35 covers the realistic Whisper-vs-dialogue range (different
-    # punctuation, dropped words, transcription noise).
-    top = _ig_match.best_matches(v, candidates, full_dialogue=full_dialogue, k=5, min_score=0.35)
+    # min_score=0.0: return top 5 regardless of score. UI displays the
+    # percentage so operator can pick even low-confidence matches.
+    # Auto-match floor (IG_AUTO_MATCH_THRESHOLD, default 0.70) stays
+    # higher so nothing gets silently linked. Empty response = no
+    # candidates in pool (every awaiting_finishing job already matched).
+    top = _ig_match.best_matches(v, candidates, full_dialogue=full_dialogue, k=5, min_score=0.0)
     for entry in top:
         clip = db.query(Clip).filter(Clip.job_id == entry["job_id"], Clip.clip_index == 0).first()
         entry["slug"] = (clip.dialogue_text or "")[:80] if clip and clip.dialogue_text else entry["job_id"][:8]

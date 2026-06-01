@@ -4424,7 +4424,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             const r = await fetch(`/api/instagram/videos/${videoId}/suggestions`, { credentials: "include" });
             const suggestions = r.ok ? await r.json() : [];
             if (!suggestions.length) {
-              alert("No candidate jobs above 0.7 similarity yet.");
+              alert("No awaiting_finishing jobs left to match against. Either every candidate is already linked to another IG video, or you don't have any in that stage yet.");
               return;
             }
             const existing = document.querySelector(".ig-suggestion-popover");
