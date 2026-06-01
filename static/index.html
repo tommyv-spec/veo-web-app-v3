@@ -1500,6 +1500,13 @@
         .lc-kanban {
             display: grid; gap: 12px;
             grid-template-columns: repeat(5, minmax(220px, 1fr));
+            /* CRITICAL: row must be bounded so .lc-column gets a fixed height —
+               otherwise grid-auto-rows: auto lets the row grow to content
+               (tallest column wins), .lc-column has no height bound, and
+               .lc-rows { flex: 1; overflow-y: auto } never has a parent to
+               clip against → no per-column scroll. minmax(0, 1fr) fills the
+               kanban's allocated height + lets it shrink. */
+            grid-template-rows: minmax(0, 1fr);
             /* Override legacy .jobs-list max-height: 280px which clamped the
                kanban to a small slice. The kanban now fills available height. */
             max-height: none !important;
