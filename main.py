@@ -1216,6 +1216,34 @@ async def auth_callback(request: Request, db: DBSession = Depends(get_db_session
         return RedirectResponse(url="/login?error=Authentication failed", status_code=302)
 
 
+@app.get("/auth/google/drive/connect")
+async def auth_google_drive_connect(request: Request, current_user: User = Depends(get_current_user)):
+    """Initiate Google Drive OAuth (separate consent from login — drive.readonly scope)."""
+    from drive_auth import handle_drive_connect
+    return await handle_drive_connect(request)
+
+
+@app.get("/auth/google/drive/callback")
+async def auth_google_drive_callback(
+    request: Request,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Callback for Drive OAuth — captures refresh_token + creates DriveAccount."""
+    from drive_auth import handle_drive_callback
+    try:
+        await handle_drive_callback(request, current_user, db)
+    except HTTPException as e:
+        return HTMLResponse(
+            f"<html><body style='font-family:sans-serif;padding:40px;'>Drive connect failed: {e.detail}<br><a href='/'>back</a></body></html>",
+            status_code=e.status_code,
+        )
+    # Redirect back to Browse mode, drive panel.
+    return HTMLResponse(
+        "<html><script>window.location.href='/?mode=browse&drive=connected';</script></html>"
+    )
+
+
 @app.get("/auth/me")
 async def auth_me(request: Request, db: DBSession = Depends(get_db_session)):
     """Get current authenticated user info"""
@@ -3808,6 +3836,145 @@ async def unmatch_video(
             job.instagram_video_id = None
     db.commit()
     return {"unmatched": video_id}
+
+
+# ============================================================================
+# Google Drive folder watcher (2026-06-01)
+# Operator drops the final-cut video into a watched Drive folder. Backend
+# polls, transcribes, matches against awaiting_finishing jobs, advances
+# matched jobs to `published` with published_via='drive_watch'. Later when
+# IG sync sees the actual reel, it back-fills instagram_url on the
+# already-published job (per IG candidate-filter widening, Slice 3).
+# ============================================================================
+
+class SetDriveFolderRequest(BaseModel):
+    folder_id: str
+    folder_name: Optional[str] = None
+
+
+@app.get("/api/drive/accounts")
+async def list_drive_accounts(
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    from models import DriveAccount
+    accs = (
+        db.query(DriveAccount)
+        .filter(DriveAccount.user_id == current_user.id)
+        .order_by(DriveAccount.added_at.desc())
+        .all()
+    )
+    return [a.to_dict() for a in accs]
+
+
+@app.delete("/api/drive/accounts/{account_id}")
+async def delete_drive_account(
+    account_id: int,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    from models import DriveAccount
+    acc = db.query(DriveAccount).filter_by(id=account_id).first()
+    if not acc:
+        raise HTTPException(404, detail="drive account not found")
+    if acc.user_id != current_user.id:
+        raise HTTPException(403, detail="access denied")
+    db.delete(acc)
+    db.commit()
+    return {"deleted": account_id}
+
+
+@app.post("/api/drive/accounts/{account_id}/folder")
+async def set_drive_folder(
+    account_id: int,
+    req: SetDriveFolderRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Set the Drive folder to watch on this DriveAccount."""
+    from models import DriveAccount
+    acc = db.query(DriveAccount).filter_by(id=account_id).first()
+    if not acc:
+        raise HTTPException(404, detail="drive account not found")
+    if acc.user_id != current_user.id:
+        raise HTTPException(403, detail="access denied")
+    folder_id = (req.folder_id or "").strip()
+    if not folder_id:
+        raise HTTPException(400, detail="folder_id required")
+    acc.folder_id = folder_id
+    acc.folder_name = (req.folder_name or "").strip() or None
+    db.commit()
+    db.refresh(acc)
+    return acc.to_dict()
+
+
+@app.get("/api/drive/accounts/{account_id}/videos")
+async def list_drive_videos(
+    account_id: int,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    from models import DriveAccount, DriveVideo
+    acc = db.query(DriveAccount).filter_by(id=account_id).first()
+    if not acc:
+        raise HTTPException(404, detail="drive account not found")
+    if acc.user_id != current_user.id:
+        raise HTTPException(403, detail="access denied")
+    vids = (
+        db.query(DriveVideo)
+        .filter(DriveVideo.account_id == account_id)
+        .order_by(DriveVideo.posted_at.desc().nullslast(), DriveVideo.created_at.desc())
+        .all()
+    )
+    return [v.to_dict() for v in vids]
+
+
+@app.get("/api/drive/accounts/{account_id}/folders")
+async def list_drive_folders(
+    account_id: int,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """List folders the connected Drive can see — for the picker UI."""
+    from models import DriveAccount
+    from encryption import decrypt as _decrypt
+    from drive_client import list_top_level_folders, DriveError
+    acc = db.query(DriveAccount).filter_by(id=account_id).first()
+    if not acc:
+        raise HTTPException(404, detail="drive account not found")
+    if acc.user_id != current_user.id:
+        raise HTTPException(403, detail="access denied")
+    try:
+        refresh_token = _decrypt(acc.refresh_token_encrypted)
+        folders = list_top_level_folders(refresh_token)
+    except DriveError as e:
+        raise HTTPException(500, detail=f"drive list error: {e}")
+    return folders
+
+
+@app.post("/api/drive/accounts/{account_id}/sync")
+async def sync_drive_account(
+    account_id: int,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Manual sync trigger — lists new files in the watched folder + queues
+    transcription rows. Worker tick picks them up one-per-cycle afterwards."""
+    from models import DriveAccount
+    from drive_transcribe import sync_drive_folder
+    from drive_client import DriveError
+    acc = db.query(DriveAccount).filter_by(id=account_id).first()
+    if not acc:
+        raise HTTPException(404, detail="drive account not found")
+    if acc.user_id != current_user.id:
+        raise HTTPException(403, detail="access denied")
+    if not acc.folder_id:
+        raise HTTPException(400, detail="set a folder first")
+    try:
+        n = sync_drive_folder(acc, db)
+    except DriveError as e:
+        raise HTTPException(502, detail=f"drive sync error: {e}")
+    return {"queued": n}
 
 
 @app.patch("/api/jobs/{job_id}/lifecycle", response_model=JobResponse)

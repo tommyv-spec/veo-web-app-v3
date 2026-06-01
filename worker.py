@@ -683,6 +683,14 @@ class JobWorker:
                 except Exception as ig_exc:
                     print(f"[worker] instagram transcription pass error: {ig_exc}", flush=True)
 
+                # Drive folder watcher pass (sync + transcribe, one pending per tick)
+                try:
+                    from drive_transcribe import process_drive_transcriptions
+                    with get_db() as drv_db:
+                        process_drive_transcriptions(drv_db, max_per_tick=1)
+                except Exception as drv_exc:
+                    print(f"[worker] drive transcription pass error: {drv_exc}", flush=True)
+
                 time.sleep(app_config.worker_poll_interval)
             except Exception as e:
                 print(f"[Worker] Error in job processor: {e}")

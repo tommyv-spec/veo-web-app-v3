@@ -34,3 +34,4 @@ class JobResponse(BaseModel):
     stuck_days: Optional[int] = None
     approved_clips: int = 0
     instagram_url: Optional[str] = None
+    published_via: Optional[str] = None

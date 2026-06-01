@@ -49,6 +49,9 @@ class User(Base):
     instagram_accounts = relationship(
         "InstagramAccount", back_populates="user", cascade="all, delete-orphan"
     )
+    drive_accounts = relationship(
+        "DriveAccount", back_populates="user", cascade="all, delete-orphan"
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -226,6 +229,15 @@ class Job(Base):
     instagram_url       = Column(String(500), nullable=True)
     instagram_video_id  = Column(Integer, ForeignKey("instagram_videos.id"), nullable=True)
 
+    # === How the job reached `published` lifecycle stage (2026-06-01) ===
+    # 'drive_watch' = Google Drive folder watcher matched a local final-cut
+    #   file against this job's dialogue (advanced before IG post lands).
+    # 'ig_match'    = Instagram sync transcribed a posted reel and matched
+    #   it against this job's dialogue (the only path pre-Drive feature).
+    # 'manual'      = operator clicked the Published advance button.
+    # NULL          = legacy / pre-feature jobs.
+    published_via = Column(String(20), nullable=True)
+
     # Relationships
     user = relationship("User", back_populates="jobs")
     clips = relationship("Clip", back_populates="job", cascade="all, delete-orphan")
@@ -257,6 +269,8 @@ class Job(Base):
             "flow_project_url": self.flow_project_url,
             # Lineup override
             "has_lineup_override": getattr(self, 'clip_order_json', None) is not None,
+            # Drive-watch lifecycle path (2026-06-01)
+            "published_via": getattr(self, "published_via", None),
         }
 
 
@@ -592,6 +606,89 @@ class InstagramVideo(Base):
         }
 
 
+class DriveAccount(Base):
+    """A Google Drive folder the operator watches. One per user typically;
+    schema allows multiple for future multi-folder support.
+
+    Drive folder = where the operator drops the final-cut mp4 right before
+    posting to Instagram. The watcher polls this folder, transcribes new
+    files, and matches them against awaiting_finishing jobs (advancing
+    matched jobs to `published` with published_via='drive_watch'). Later
+    when the IG sync flow processes the actual reel, it back-fills the
+    instagram_url / instagram_video_id on the already-published job.
+    """
+    __tablename__ = "drive_accounts"
+
+    id                       = Column(Integer, primary_key=True, autoincrement=True)
+    user_id                  = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    # Google identity for display + token-scope diagnostics.
+    google_email             = Column(String(255), nullable=True)
+    refresh_token_encrypted  = Column(Text, nullable=False)
+    # Folder being watched. ID is stable across renames; name kept for UI.
+    folder_id                = Column(String(100), nullable=True)
+    folder_name              = Column(String(255), nullable=True)
+    last_synced_at           = Column(DateTime, nullable=True)
+    added_at                 = Column(DateTime, default=datetime.utcnow)
+
+    user   = relationship("User", back_populates="drive_accounts")
+    videos = relationship(
+        "DriveVideo", back_populates="account", cascade="all, delete-orphan"
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "google_email": self.google_email,
+            "folder_id": self.folder_id,
+            "folder_name": self.folder_name,
+            "last_synced_at": self.last_synced_at.isoformat() if self.last_synced_at else None,
+            "added_at": self.added_at.isoformat() if self.added_at else None,
+        }
+
+
+class DriveVideo(Base):
+    """A video file pulled from a watched Drive folder."""
+    __tablename__ = "drive_videos"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    account_id           = Column(Integer, ForeignKey("drive_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Drive's stable file ID. Unique per file even if renamed.
+    drive_file_id        = Column(String(100), nullable=False)
+    name                 = Column(String(500), nullable=False)
+    mime_type            = Column(String(100), nullable=True)
+    size_bytes           = Column(Integer, nullable=True)
+    # Drive's modifiedTime — proxy for "when did operator drop this".
+    posted_at            = Column(DateTime, nullable=True, index=True)
+    transcription        = Column(Text, nullable=True)
+    transcription_status = Column(String(16), default="pending")
+    transcription_error  = Column(Text, nullable=True)
+    match_score          = Column(Float, nullable=True)
+    matched_job_id       = Column(String(36), ForeignKey("jobs.id"), nullable=True, index=True)
+    matched_at           = Column(DateTime, nullable=True)
+    created_at           = Column(DateTime, default=datetime.utcnow)
+
+    account     = relationship("DriveAccount", back_populates="videos")
+    matched_job = relationship("Job", foreign_keys=[matched_job_id])
+
+    __table_args__ = (
+        Index("ix_drive_videos_account_file", "account_id", "drive_file_id", unique=True),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "drive_file_id": self.drive_file_id,
+            "name": self.name,
+            "mime_type": self.mime_type,
+            "size_bytes": self.size_bytes,
+            "posted_at": self.posted_at.isoformat() if self.posted_at else None,
+            "transcription_status": self.transcription_status,
+            "transcription_error": self.transcription_error,
+            "match_score": self.match_score,
+            "matched_job_id": self.matched_job_id,
+        }
+
+
 # Database setup
 engine = None
 SessionLocal = None
@@ -869,6 +966,8 @@ def _run_migrations_postgresql(engine):
         ("jobs", "archived",        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE"),
         ("jobs", "instagram_url",      "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS instagram_url VARCHAR(500)"),
         ("jobs", "instagram_video_id", "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS instagram_video_id INTEGER"),
+        # 2026-06-01: drive-watch lifecycle path
+        ("jobs", "published_via",      "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS published_via VARCHAR(20)"),
     ]
 
     with engine.connect() as conn:
@@ -1003,6 +1102,8 @@ def _run_migrations_sqlite(engine):
         ("jobs", "instagram_url",      "ALTER TABLE jobs ADD COLUMN instagram_url TEXT"),
         ("jobs", "instagram_video_id", "ALTER TABLE jobs ADD COLUMN instagram_video_id INTEGER"),
         ("instagram_videos", "video_url", "ALTER TABLE instagram_videos ADD COLUMN video_url TEXT"),
+        # 2026-06-01: drive-watch lifecycle path
+        ("jobs", "published_via",      "ALTER TABLE jobs ADD COLUMN published_via TEXT"),
     ]
 
     with engine.connect() as conn:
