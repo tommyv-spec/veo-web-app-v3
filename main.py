@@ -6988,8 +6988,11 @@ async def _assemble_job_background(job_id: str, clip_files: list, script_lines: 
                 clip_start = first_n_words(t['text'], MATCH_WORDS)
                 for li, line in enumerate(script_lines):
                     line_start = first_n_words(line, MATCH_WORDS)
-                    start_score = difflib.SequenceMatcher(None, clip_start, line_start).ratio()
-                    full_score = difflib.SequenceMatcher(None, normalize_text(t['text']), normalize_text(line)).ratio()
+                    start_score = difflib.SequenceMatcher(None, clip_start, line_start, autojunk=False).ratio()
+                    # autojunk=False: full lines can exceed 200 chars (b-roll
+                    # voiceover), where difflib junks common chars and tanks
+                    # the ratio. Same root cause as instagram_match score().
+                    full_score = difflib.SequenceMatcher(None, normalize_text(t['text']), normalize_text(line), autojunk=False).ratio()
                     combined = start_score * 0.8 + full_score * 0.2
                     scores.append((combined, t['index'], li))
             
@@ -7223,7 +7226,10 @@ async def attach_clips_to_job(
             for t in transcriptions:
                 if t['index'] in used_clips:
                     continue
-                score = difflib.SequenceMatcher(None, dial.lower(), t['text'].lower()).ratio()
+                # autojunk=False: dial / clip text can exceed 200 chars on
+                # b-roll voiceover lines, where difflib junks common chars and
+                # tanks the ratio. Same root cause as instagram_match score().
+                score = difflib.SequenceMatcher(None, dial.lower(), t['text'].lower(), autojunk=False).ratio()
                 if score > best_score:
                     best_score = score
                     best_ci = t['index']
