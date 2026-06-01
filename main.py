@@ -3952,6 +3952,86 @@ async def list_drive_folders(
     return folders
 
 
+# ============================================================================
+# Local folder watcher (2026-06-02)
+# Browser uses File System Access API (showDirectoryPicker) → JS polls the
+# picked folder → uploads new .mp4/.mov/.webm files via multipart POST →
+# backend ffmpeg + faster-whisper + match → advance to published with
+# published_via='local_watch'. Per-user, no operator approval needed.
+# ============================================================================
+
+@app.get("/api/local-videos")
+async def list_local_videos(
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    from models import LocalVideo
+    vids = (
+        db.query(LocalVideo)
+        .filter(LocalVideo.user_id == current_user.id)
+        .order_by(LocalVideo.created_at.desc())
+        .limit(200)
+        .all()
+    )
+    return [v.to_dict() for v in vids]
+
+
+@app.post("/api/local-videos/upload")
+async def upload_local_video(
+    file: UploadFile = File(...),
+    file_hash: str = Form(...),
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Multipart endpoint for the browser watcher.
+
+    file:      the video bytes (frontend reads with FileReader → Blob).
+    file_hash: SHA-256 hex computed in the browser before upload — used for
+               idempotent dedup. Re-uploading the same file is a no-op that
+               returns the existing row.
+    """
+    from models import LocalVideo
+    from local_transcribe import transcribe_local
+
+    file_name = (file.filename or "(unnamed)")[:500]
+    file_hash = (file_hash or "").strip().lower()
+    if len(file_hash) != 64 or not all(c in "0123456789abcdef" for c in file_hash):
+        raise HTTPException(400, detail="file_hash must be a 64-char SHA-256 hex string")
+
+    # Idempotency: re-uploads of the same hash for the same user reuse the
+    # existing row + skip re-processing.
+    existing = (
+        db.query(LocalVideo)
+        .filter_by(user_id=current_user.id, file_hash=file_hash)
+        .first()
+    )
+    if existing:
+        return existing.to_dict()
+
+    blob = await file.read()
+    if not blob or len(blob) < 1024:
+        raise HTTPException(400, detail=f"file too small ({len(blob)}B)")
+    if len(blob) > 500 * 1024 * 1024:
+        raise HTTPException(413, detail="file > 500MB")
+
+    v = LocalVideo(
+        user_id=current_user.id,
+        file_hash=file_hash,
+        file_name=file_name,
+        size_bytes=len(blob),
+        transcription_status="pending",
+    )
+    db.add(v)
+    db.commit()
+    db.refresh(v)
+
+    # Synchronous transcribe — short enough for the request lifetime (Render
+    # has a 60s+ HTTP timeout; ffmpeg + whisper on a 30s reel is ~10-20s).
+    transcribe_local(v, blob, db)
+    db.refresh(v)
+    return v.to_dict()
+
+
 @app.post("/api/drive/accounts/{account_id}/sync")
 async def sync_drive_account(
     account_id: int,

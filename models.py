@@ -689,6 +689,53 @@ class DriveVideo(Base):
         }
 
 
+class LocalVideo(Base):
+    """A video file uploaded from a user's local watched folder.
+
+    Browser-based watcher uses the File System Access API:
+    showDirectoryPicker() → polls directory → for each new file, POSTs
+    multipart upload to /api/local-videos/upload. We dedup by file_hash
+    (SHA-256 of the file bytes) so re-uploading the same file is idempotent.
+
+    On match, advances the matched Job to lifecycle_stage='published' with
+    published_via='local_watch' (parallel to drive_watch / ig_match paths).
+    """
+    __tablename__ = "local_videos"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    user_id              = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    # SHA-256 of file bytes, hex. 64-char unique-per-user idempotency key.
+    file_hash            = Column(String(64), nullable=False)
+    file_name            = Column(String(500), nullable=False)
+    size_bytes           = Column(Integer, nullable=True)
+    transcription        = Column(Text, nullable=True)
+    transcription_status = Column(String(16), default="pending")
+    transcription_error  = Column(Text, nullable=True)
+    match_score          = Column(Float, nullable=True)
+    matched_job_id       = Column(String(36), ForeignKey("jobs.id"), nullable=True, index=True)
+    matched_at           = Column(DateTime, nullable=True)
+    created_at           = Column(DateTime, default=datetime.utcnow)
+
+    matched_job = relationship("Job", foreign_keys=[matched_job_id])
+
+    __table_args__ = (
+        Index("ix_local_videos_user_hash", "user_id", "file_hash", unique=True),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "file_hash": self.file_hash,
+            "file_name": self.file_name,
+            "size_bytes": self.size_bytes,
+            "transcription_status": self.transcription_status,
+            "transcription_error": self.transcription_error,
+            "match_score": self.match_score,
+            "matched_job_id": self.matched_job_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 # Database setup
 engine = None
 SessionLocal = None

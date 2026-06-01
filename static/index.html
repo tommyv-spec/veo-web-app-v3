@@ -3254,7 +3254,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         <button class="chip" data-stage="awaiting_finishing">Finishing <span class="chip-count" data-count="awaiting_finishing">0</span></button>
                         <button class="chip" data-stage="published">Published <span class="chip-count" data-count="published">0</span></button>
                         <button class="chip" data-stage="instagram">Instagram <span class="chip-count" data-count="instagram">0</span></button>
-                        <button class="chip" data-stage="drive">Drive <span class="chip-count" data-count="drive">0</span></button>
+                        <button class="chip" data-stage="local">Local folder <span class="chip-count" data-count="local">0</span></button>
                         <button class="chip" data-stage="archived">Archive</button>
                     </div>
                     <div class="lc-search-bar" id="lifecycleSearchBar">
@@ -3343,16 +3343,21 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         </div>
                         <div id="igAccountsList"></div>
                     </div>
-                    <div id="drivePanel" style="display:none; padding:12px; height:calc(100% - 60px); overflow-y:auto;">
-                        <div style="display:flex;gap:8px;margin-bottom:12px;">
-                            <button class="btn btn-secondary btn-sm" id="driveConnectBtn">+ Connect Google Drive</button>
+                    <div id="localPanel" style="display:none; padding:12px; height:calc(100% - 60px); overflow-y:auto;">
+                        <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
+                            <button class="btn btn-secondary btn-sm" id="localPickFolderBtn">📁 Pick local folder</button>
+                            <button class="btn btn-secondary btn-sm" id="localUnpickBtn" style="display:none;">Stop watching</button>
+                            <span id="localFolderStatus" style="font-size:11px;color:#888;"></span>
                         </div>
                         <p style="font-size:11px;color:#888;margin:0 0 10px 0;">
-                            Drop your final-cut MP4s into the watched folder. We poll every ~30s, transcribe new files,
-                            and auto-match against jobs in <strong>Finishing</strong>. Matched jobs move to <strong>Published</strong>
-                            before the Instagram sync runs — when the reel posts, the IG URL fills in automatically.
+                            Pick a local folder. While this tab is open we poll every ~30s, find new
+                            <strong>.mp4 / .mov / .webm</strong> files, upload them and auto-match against jobs in
+                            <strong>Finishing</strong>. Matched jobs move to <strong>Published</strong> before the Instagram
+                            sync runs — when the reel posts the IG URL fills in automatically.
+                            <br><br>
+                            <span style="color:#999;">Browser support: Chrome / Edge / Opera. Firefox / Safari can't watch folders.</span>
                         </p>
-                        <div id="driveAccountsList"></div>
+                        <div id="localVideosList"></div>
                     </div>
                 </div>
             </div>
@@ -4186,17 +4191,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
               if (typeof refreshInstagramPanel === "function") refreshInstagramPanel();
               return;
             }
-            if (stage === "drive") {
+            if (stage === "local") {
               document.getElementById("jobsList").style.display = "none";
               document.getElementById("instagramPanel").style.display = "none";
-              const dp = document.getElementById("drivePanel"); if (dp) dp.style.display = "block";
-              if (typeof refreshDrivePanel === "function") refreshDrivePanel();
+              const lp = document.getElementById("localPanel"); if (lp) lp.style.display = "block";
+              if (typeof refreshLocalPanel === "function") refreshLocalPanel();
               return;
             }
-            // Re-show kanban when switching to any non-instagram/drive stage.
+            // Re-show kanban when switching to any non-instagram/local stage.
             document.getElementById("jobsList").style.display = "";
             document.getElementById("instagramPanel").style.display = "none";
-            { const dp = document.getElementById("drivePanel"); if (dp) dp.style.display = "none"; }
+            { const lp = document.getElementById("localPanel"); if (lp) lp.style.display = "none"; }
             if (stage === "archived") {
               setAppMode({ mode: "browse", stage: "archived" });
               const jobs = await fetchJobsForLifecycle({ archived: true });
@@ -4381,7 +4386,264 @@ Example: A realistic vertical video of a professional presenter speaking directl
           </div>`;
         }
 
-        // === Google Drive folder watcher (2026-06-01) ===
+        // ====================================================================
+        // Local-folder watcher (2026-06-02) — File System Access API.
+        // Browser polls a user-picked folder, uploads new .mp4/.mov/.webm
+        // files to /api/local-videos/upload (multipart). Backend transcribes
+        // + matches + advances jobs.
+        // ====================================================================
+        const LOCAL_VIDEO_EXTS = [".mp4", ".mov", ".webm"];
+        const LOCAL_POLL_INTERVAL_MS = 30000;
+        const LOCAL_IDB_DB = "kavenoLocalWatcher";
+        const LOCAL_IDB_STORE = "handles";
+        const LOCAL_IDB_KEY = "watched";
+
+        let _localDirHandle = null;
+        let _localSeenHashes = new Set();
+        let _localPollTimer = null;
+        let _localPollInFlight = false;
+
+        function _idbOpen() {
+          return new Promise((resolve, reject) => {
+            const req = indexedDB.open(LOCAL_IDB_DB, 1);
+            req.onupgradeneeded = () => req.result.createObjectStore(LOCAL_IDB_STORE);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+          });
+        }
+        async function _idbGet(key) {
+          const db = await _idbOpen();
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction(LOCAL_IDB_STORE, "readonly");
+            const r = tx.objectStore(LOCAL_IDB_STORE).get(key);
+            r.onsuccess = () => resolve(r.result);
+            r.onerror = () => reject(r.error);
+          });
+        }
+        async function _idbSet(key, value) {
+          const db = await _idbOpen();
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction(LOCAL_IDB_STORE, "readwrite");
+            tx.objectStore(LOCAL_IDB_STORE).put(value, key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+          });
+        }
+        async function _idbDelete(key) {
+          const db = await _idbOpen();
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction(LOCAL_IDB_STORE, "readwrite");
+            tx.objectStore(LOCAL_IDB_STORE).delete(key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+          });
+        }
+
+        async function _sha256Hex(arrayBuffer) {
+          const hashBuf = await crypto.subtle.digest("SHA-256", arrayBuffer);
+          return Array.from(new Uint8Array(hashBuf))
+            .map(b => b.toString(16).padStart(2, "0"))
+            .join("");
+        }
+
+        function _localIsVideo(name) {
+          const n = (name || "").toLowerCase();
+          return LOCAL_VIDEO_EXTS.some(ext => n.endsWith(ext));
+        }
+
+        async function _verifyDirPermission(handle) {
+          if (!handle) return false;
+          if (typeof handle.queryPermission !== "function") return true;
+          let p = await handle.queryPermission({ mode: "read" });
+          if (p === "granted") return true;
+          p = await handle.requestPermission({ mode: "read" });
+          return p === "granted";
+        }
+
+        async function localPickFolder() {
+          if (typeof window.showDirectoryPicker !== "function") {
+            alert("Your browser doesn't support local folder watching. Use Chrome, Edge, or Opera.");
+            return;
+          }
+          try {
+            const handle = await window.showDirectoryPicker({ id: "kavenoWatch", mode: "read" });
+            _localDirHandle = handle;
+            await _idbSet(LOCAL_IDB_KEY, handle);
+            await localStartPolling();
+            await refreshLocalPanel();
+          } catch (e) {
+            if (e && e.name !== "AbortError") {
+              alert("Pick folder failed: " + e.message);
+            }
+          }
+        }
+
+        async function localUnpickFolder() {
+          if (_localPollTimer) { clearInterval(_localPollTimer); _localPollTimer = null; }
+          _localDirHandle = null;
+          await _idbDelete(LOCAL_IDB_KEY);
+          await refreshLocalPanel();
+        }
+
+        async function _refreshSeenHashesFromServer() {
+          // Server is the source of truth for "already processed". Pull the
+          // list + populate the local seen-set so we skip re-uploading on
+          // each session.
+          try {
+            const r = await fetch("/api/local-videos", { credentials: "include" });
+            if (!r.ok) return;
+            const arr = await r.json();
+            _localSeenHashes = new Set(arr.map(v => v.file_hash));
+          } catch (e) { /* no-op */ }
+        }
+
+        async function _uploadLocalFile(fileHandle) {
+          let file;
+          try { file = await fileHandle.getFile(); }
+          catch (e) { console.warn("[local] getFile failed:", e); return null; }
+          if (!file || file.size < 1024) return null;
+          if (file.size > 500 * 1024 * 1024) {
+            console.warn(`[local] skipping ${file.name}: >500MB`);
+            return null;
+          }
+          const buf = await file.arrayBuffer();
+          const hash = await _sha256Hex(buf);
+          if (_localSeenHashes.has(hash)) return null;
+
+          const fd = new FormData();
+          fd.append("file", new Blob([buf], { type: file.type || "video/mp4" }), file.name);
+          fd.append("file_hash", hash);
+          try {
+            const r = await fetch("/api/local-videos/upload", {
+              method: "POST", credentials: "include", body: fd,
+            });
+            if (r.ok) {
+              const data = await r.json();
+              _localSeenHashes.add(hash);
+              return data;
+            }
+            console.warn("[local] upload failed:", r.status, await r.text());
+          } catch (e) {
+            console.warn("[local] upload exception:", e);
+          }
+          return null;
+        }
+
+        async function _scanAndUpload() {
+          if (_localPollInFlight) return;
+          if (!_localDirHandle) return;
+          const ok = await _verifyDirPermission(_localDirHandle);
+          if (!ok) {
+            console.warn("[local] folder permission lost");
+            return;
+          }
+          _localPollInFlight = true;
+          try {
+            const newOnes = [];
+            for await (const entry of _localDirHandle.values()) {
+              if (entry.kind !== "file") continue;
+              if (!_localIsVideo(entry.name)) continue;
+              const result = await _uploadLocalFile(entry);
+              if (result) newOnes.push(result);
+            }
+            if (newOnes.length) {
+              await refreshLocalPanel();
+              // Refresh kanban too — published count may have changed.
+              if (typeof refreshLifecycle === "function") {
+                refreshLifecycle({ force: true });
+              }
+            }
+          } finally {
+            _localPollInFlight = false;
+          }
+        }
+
+        async function localStartPolling() {
+          if (_localPollTimer) clearInterval(_localPollTimer);
+          await _refreshSeenHashesFromServer();
+          // First scan immediately, then on interval.
+          _scanAndUpload();
+          _localPollTimer = setInterval(_scanAndUpload, LOCAL_POLL_INTERVAL_MS);
+        }
+
+        function _localVideoCard(v) {
+          const name = escapeHtml((v.file_name || "(unnamed)").slice(0, 80));
+          let status;
+          if (v.matched_job_id) {
+            const pct = v.match_score != null ? ` (${Math.round(v.match_score * 100)}%)` : "";
+            status = `<a class="ig-video-status matched" href="?mode=review&job=${encodeURIComponent(v.matched_job_id)}">MATCH${pct} ↔ open</a>`;
+          } else if (v.transcription_status === "pending" || v.transcription_status === "running") {
+            status = `<span class="ig-video-status pending">${escapeHtml(v.transcription_status)}…</span>`;
+          } else if (v.transcription_status === "failed") {
+            const errFull = v.transcription_error || "(no error message stored)";
+            status = `<span class="ig-video-status" style="background:#5c1f1f;color:#ff8888;" title="${escapeHtml(errFull)}">failed</span>`;
+          } else {
+            status = `<span class="ig-video-status" style="background:#333;color:#888;">done — no match</span>`;
+          }
+          return `<div class="ig-video-card">
+            <div style="font-size:11px;line-height:1.3;color:#ccc;padding:6px 8px;background:#1a1a25;border-radius:3px;margin-bottom:4px;">${name}</div>
+            ${status}
+          </div>`;
+        }
+
+        async function refreshLocalPanel() {
+          const list = document.getElementById("localVideosList");
+          const statusEl = document.getElementById("localFolderStatus");
+          const unpickBtn = document.getElementById("localUnpickBtn");
+          if (statusEl) {
+            if (_localDirHandle) {
+              statusEl.innerHTML = `watching <strong>${escapeHtml(_localDirHandle.name)}</strong> — polling every ${Math.round(LOCAL_POLL_INTERVAL_MS / 1000)}s`;
+              statusEl.style.color = "#9b9";
+              if (unpickBtn) unpickBtn.style.display = "";
+            } else {
+              statusEl.innerHTML = "no folder picked";
+              statusEl.style.color = "#888";
+              if (unpickBtn) unpickBtn.style.display = "none";
+            }
+          }
+          if (!list) return;
+          list.innerHTML = `<div style="padding:8px;color:#888;font-size:11px;">Loading…</div>`;
+          try {
+            const r = await fetch("/api/local-videos", { credentials: "include" });
+            const arr = r.ok ? await r.json() : [];
+            if (!arr.length) {
+              list.innerHTML = `<div style="padding:8px;color:#888;font-size:12px;">No files processed yet. ${_localDirHandle ? "Drop a video into the watched folder." : "Pick a folder above to start."}</div>`;
+              return;
+            }
+            list.innerHTML = `<div class="ig-videos-grid">${arr.map(_localVideoCard).join("")}</div>`;
+          } catch (e) {
+            list.innerHTML = `<div style="padding:8px;color:#c33;font-size:11px;">Failed to load: ${escapeHtml(String(e))}</div>`;
+          }
+        }
+
+        // Restore previously-picked folder on app load (permission re-grant
+        // is per-session per browser security — user has to click once).
+        (async function _localRestoreHandle() {
+          try {
+            const handle = await _idbGet(LOCAL_IDB_KEY);
+            if (!handle) return;
+            _localDirHandle = handle;
+            // Don't auto-start polling — wait until user clicks the Local
+            // chip OR explicitly re-grants permission, so we don't spam
+            // permission prompts on every page load.
+          } catch (e) { /* no-op */ }
+        })();
+
+        document.getElementById("localPickFolderBtn")?.addEventListener("click", async () => {
+          // If we have a stored handle, try re-grant first (one click instead of file-picker).
+          if (_localDirHandle) {
+            const ok = await _verifyDirPermission(_localDirHandle);
+            if (ok) {
+              await localStartPolling();
+              await refreshLocalPanel();
+              return;
+            }
+          }
+          localPickFolder();
+        });
+        document.getElementById("localUnpickBtn")?.addEventListener("click", localUnpickFolder);
+
+        // === Google Drive folder watcher (2026-06-01, DORMANT — code kept in case we switch back) ===
         async function driveFetchAccounts() {
           const r = await fetch("/api/drive/accounts", { credentials: "include" });
           return r.ok ? r.json() : [];
