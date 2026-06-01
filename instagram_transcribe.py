@@ -133,9 +133,15 @@ def _maybe_auto_match(video, account, db: Session) -> None:
             return
 
         def _full_dialogue(job):
+            # v698A: filter out audio_pair clips — they're the silent audio
+            # twin (clip_index = visual + 100000) and carry a duplicate of
+            # the visual_pair's dialogue_text. Including them doubles the
+            # spoken-line content and caps b-roll-heavy match ratios near
+            # ~0.67 (just under the 0.70 auto-match floor).
             rows = (
                 db.query(Clip.dialogue_text)
                 .filter(Clip.job_id == job.id)
+                .filter((Clip.clip_role == None) | (Clip.clip_role != 'audio_pair'))  # noqa: E711
                 .order_by(Clip.clip_index.asc())
                 .all()
             )

@@ -3478,10 +3478,20 @@ def _get_user_ig_account(db: DBSession, account_id: int, user: User):
 
 
 def _job_full_dialogue(db: DBSession, job_id: str) -> str:
-    """Concat all clip dialogue_text for a Job, in clip_index order."""
+    """Concat all clip dialogue_text for a Job, in clip_index order.
+
+    v698A b-roll voiceover scenes produce TWO Clip rows per spoken line
+    (visual_pair + audio_pair, both with the same `dialogue_text`). The
+    audio_pair row is the silent audio twin (clip_index = visual + 100000)
+    and is purely a render artifact — including it here double-counts the
+    line and inflates the denominator of SequenceMatcher.ratio, capping
+    b-roll-heavy videos near ~0.67 vs IG transcripts. Filter audio_pair
+    so each spoken line appears once and in natural scene order.
+    """
     rows = (
         db.query(Clip.dialogue_text)
         .filter(Clip.job_id == job_id)
+        .filter((Clip.clip_role == None) | (Clip.clip_role != 'audio_pair'))  # noqa: E711
         .order_by(Clip.clip_index.asc())
         .all()
     )
