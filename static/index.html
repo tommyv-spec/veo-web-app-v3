@@ -3254,6 +3254,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         <button class="chip" data-stage="awaiting_finishing">Finishing <span class="chip-count" data-count="awaiting_finishing">0</span></button>
                         <button class="chip" data-stage="published">Published <span class="chip-count" data-count="published">0</span></button>
                         <button class="chip" data-stage="instagram">Instagram <span class="chip-count" data-count="instagram">0</span></button>
+                        <button class="chip" data-stage="drive">Drive <span class="chip-count" data-count="drive">0</span></button>
                         <button class="chip" data-stage="archived">Archive</button>
                     </div>
                     <div class="lc-search-bar" id="lifecycleSearchBar">
@@ -3341,6 +3342,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
                             <button class="btn btn-secondary btn-sm" id="igCancelAccountBtn">Cancel</button>
                         </div>
                         <div id="igAccountsList"></div>
+                    </div>
+                    <div id="drivePanel" style="display:none; padding:12px; height:calc(100% - 60px); overflow-y:auto;">
+                        <div style="display:flex;gap:8px;margin-bottom:12px;">
+                            <button class="btn btn-secondary btn-sm" id="driveConnectBtn">+ Connect Google Drive</button>
+                        </div>
+                        <p style="font-size:11px;color:#888;margin:0 0 10px 0;">
+                            Drop your final-cut MP4s into the watched folder. We poll every ~30s, transcribe new files,
+                            and auto-match against jobs in <strong>Finishing</strong>. Matched jobs move to <strong>Published</strong>
+                            before the Instagram sync runs — when the reel posts, the IG URL fills in automatically.
+                        </p>
+                        <div id="driveAccountsList"></div>
                     </div>
                 </div>
             </div>
@@ -4170,12 +4182,21 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if (stage === "instagram") {
               document.getElementById("jobsList").style.display = "none";
               document.getElementById("instagramPanel").style.display = "block";
+              const dp = document.getElementById("drivePanel"); if (dp) dp.style.display = "none";
               if (typeof refreshInstagramPanel === "function") refreshInstagramPanel();
               return;
             }
-            // Re-show kanban when switching to any non-instagram stage.
+            if (stage === "drive") {
+              document.getElementById("jobsList").style.display = "none";
+              document.getElementById("instagramPanel").style.display = "none";
+              const dp = document.getElementById("drivePanel"); if (dp) dp.style.display = "block";
+              if (typeof refreshDrivePanel === "function") refreshDrivePanel();
+              return;
+            }
+            // Re-show kanban when switching to any non-instagram/drive stage.
             document.getElementById("jobsList").style.display = "";
             document.getElementById("instagramPanel").style.display = "none";
+            { const dp = document.getElementById("drivePanel"); if (dp) dp.style.display = "none"; }
             if (stage === "archived") {
               setAppMode({ mode: "browse", stage: "archived" });
               const jobs = await fetchJobsForLifecycle({ archived: true });
@@ -4359,6 +4380,160 @@ Example: A realistic vertical video of a professional presenter speaking directl
             ${status}
           </div>`;
         }
+
+        // === Google Drive folder watcher (2026-06-01) ===
+        async function driveFetchAccounts() {
+          const r = await fetch("/api/drive/accounts", { credentials: "include" });
+          return r.ok ? r.json() : [];
+        }
+        async function driveListVideos(accountId) {
+          const r = await fetch(`/api/drive/accounts/${accountId}/videos`, { credentials: "include" });
+          return r.ok ? r.json() : [];
+        }
+        async function driveListFolders(accountId) {
+          const r = await fetch(`/api/drive/accounts/${accountId}/folders`, { credentials: "include" });
+          return r.ok ? r.json() : [];
+        }
+        async function driveSetFolder(accountId, folderId, folderName) {
+          const r = await fetch(`/api/drive/accounts/${accountId}/folder`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ folder_id: folderId, folder_name: folderName || null }),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            throw new Error(err.detail || ("HTTP " + r.status));
+          }
+          return r.json();
+        }
+        async function driveSync(accountId) {
+          const r = await fetch(`/api/drive/accounts/${accountId}/sync`, { method: "POST", credentials: "include" });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            alert("Drive sync failed: " + (err.detail || r.status));
+          }
+          return r.ok ? r.json() : null;
+        }
+        async function driveDeleteAccount(accountId) {
+          await fetch(`/api/drive/accounts/${accountId}`, { method: "DELETE", credentials: "include" });
+        }
+
+        function driveRenderVideoCard(v) {
+          const safeId = escapeHtml(String(v.id));
+          const name = escapeHtml((v.name || "(unnamed)").slice(0, 60));
+          let status;
+          if (v.matched_job_id) {
+            const pct = v.match_score != null ? ` (${Math.round(v.match_score * 100)}%)` : "";
+            status = `<a class="ig-video-status matched" href="?mode=review&job=${encodeURIComponent(v.matched_job_id)}">MATCH${pct} ↔ open</a>`;
+          } else if (v.transcription_status === "pending" || v.transcription_status === "running") {
+            status = `<span class="ig-video-status pending">${escapeHtml(v.transcription_status)}…</span>`;
+          } else if (v.transcription_status === "skipped") {
+            status = `<span class="ig-video-status" style="background:#333;color:#888;">skipped</span>`;
+          } else if (v.transcription_status === "failed") {
+            const errFull = v.transcription_error || "(no error message stored)";
+            status = `<span class="ig-video-status" style="background:#5c1f1f;color:#ff8888;" title="${escapeHtml(errFull)}">failed</span>`;
+          } else {
+            status = `<span class="ig-video-status" style="background:#333;color:#888;">done — no match</span>`;
+          }
+          return `<div class="ig-video-card" data-id="${safeId}">
+            <div style="font-size:11px;line-height:1.3;color:#ccc;padding:6px 8px;background:#1a1a25;border-radius:3px;margin-bottom:4px;">${name}</div>
+            ${status}
+          </div>`;
+        }
+
+        function driveRenderAccountBlock(acc, videos) {
+          const lastSync = acc.last_synced_at ? new Date(acc.last_synced_at).toLocaleString() : "never";
+          const folderLine = acc.folder_id
+            ? `<span style="color:#9b9;">folder: ${escapeHtml(acc.folder_name || acc.folder_id)}</span>`
+            : `<span style="color:#c33;">no folder set</span>`;
+          const vCards = videos.map(v => driveRenderVideoCard(v)).join("");
+          return `<div class="ig-account-block" data-account-id="${acc.id}">
+            <div class="ig-account-header">
+              <span class="ig-account-handle">${escapeHtml(acc.google_email || "drive")}</span>
+              <span class="ig-account-meta">${videos.length} videos · last sync ${lastSync} · ${folderLine}</span>
+              <button class="btn btn-secondary btn-sm drive-pick-folder-btn" data-id="${acc.id}">Pick folder</button>
+              <button class="btn btn-secondary btn-sm drive-sync-btn" data-id="${acc.id}" ${acc.folder_id ? "" : "disabled"}>Sync</button>
+              <button class="btn btn-danger btn-sm drive-delete-btn" data-id="${acc.id}">✕</button>
+            </div>
+            <div class="ig-videos-grid">${vCards || '<div class="empty" style="padding:8px;color:#888;font-size:11px;">No videos yet — pick a folder + click Sync.</div>'}</div>
+          </div>`;
+        }
+
+        async function refreshDrivePanel() {
+          const list = document.getElementById("driveAccountsList");
+          if (!list) return;
+          list.innerHTML = `<div style="padding:8px;color:#888;font-size:11px;">Loading…</div>`;
+          try {
+            const accounts = await driveFetchAccounts();
+            if (!accounts.length) {
+              list.innerHTML = `<div style="padding:8px;color:#888;font-size:12px;">No Drive connected yet. Click <b>+ Connect Google Drive</b> above to authorize the watcher.</div>`;
+              return;
+            }
+            const blocks = await Promise.all(accounts.map(async a => {
+              const vids = await driveListVideos(a.id);
+              return driveRenderAccountBlock(a, vids);
+            }));
+            list.innerHTML = blocks.join("");
+          } catch (e) {
+            list.innerHTML = `<div style="padding:8px;color:#c33;font-size:11px;">Failed to load: ${escapeHtml(String(e))}</div>`;
+          }
+        }
+
+        // Click handlers — connect / pick folder / sync / delete.
+        document.getElementById("driveConnectBtn")?.addEventListener("click", () => {
+          window.location.href = "/auth/google/drive/connect";
+        });
+        document.getElementById("driveAccountsList")?.addEventListener("click", async (ev) => {
+          const pickBtn = ev.target.closest(".drive-pick-folder-btn[data-id]");
+          if (pickBtn) {
+            const id = parseInt(pickBtn.dataset.id);
+            pickBtn.disabled = true;
+            pickBtn.textContent = "Loading…";
+            try {
+              const folders = await driveListFolders(id);
+              if (!folders.length) {
+                alert("No folders found on this Drive.");
+                return;
+              }
+              const opts = folders.map((f, i) => `${i + 1}. ${f.name}`).join("\n");
+              const choice = prompt(`Pick a folder to watch (1-${folders.length}):\n\n${opts}`);
+              const idx = parseInt(choice) - 1;
+              if (Number.isInteger(idx) && idx >= 0 && idx < folders.length) {
+                const f = folders[idx];
+                await driveSetFolder(id, f.id, f.name);
+                await refreshDrivePanel();
+              }
+            } catch (e) {
+              alert("Pick folder failed: " + e.message);
+            } finally {
+              pickBtn.disabled = false;
+              pickBtn.textContent = "Pick folder";
+            }
+            return;
+          }
+          const syncBtn = ev.target.closest(".drive-sync-btn[data-id]");
+          if (syncBtn) {
+            const id = parseInt(syncBtn.dataset.id);
+            syncBtn.disabled = true;
+            syncBtn.textContent = "Syncing…";
+            try {
+              const r = await driveSync(id);
+              if (r) console.log(`[drive] queued ${r.queued} files`);
+              await refreshDrivePanel();
+            } finally {
+              syncBtn.disabled = false;
+              syncBtn.textContent = "Sync";
+            }
+            return;
+          }
+          const delBtn = ev.target.closest(".drive-delete-btn[data-id]");
+          if (delBtn) {
+            if (!confirm("Disconnect this Drive account? Its tracked files will be removed.")) return;
+            await driveDeleteAccount(parseInt(delBtn.dataset.id));
+            refreshDrivePanel();
+          }
+        });
 
         async function refreshInstagramPanel() {
           const list = document.getElementById("igAccountsList");
@@ -4695,6 +4870,24 @@ Example: A realistic vertical video of a professional presenter speaking directl
           const { mode, stage, job } = parseModeFromURL();
           setAppMode({ mode, stage, job, push: false });
         });
+
+        // After Google Drive OAuth callback we redirect back with ?drive=connected.
+        // Click the Drive chip + open the panel so user sees their connected
+        // account immediately + the "Pick folder" CTA.
+        (function autoOpenDrivePanelAfterConnect() {
+          try {
+            const url = new URL(window.location.href);
+            if (url.searchParams.get("drive") === "connected") {
+              const driveChip = document.querySelector('.lifecycle-chips .chip[data-stage="drive"]');
+              if (driveChip) {
+                driveChip.click();
+              }
+              // Clean the URL param.
+              url.searchParams.delete("drive");
+              window.history.replaceState({}, "", url.toString());
+            }
+          } catch (e) { /* no-op */ }
+        })();
 
         // Keyboard shortcuts. Ignore when an input/textarea has focus.
         document.addEventListener("keydown", (ev) => {
