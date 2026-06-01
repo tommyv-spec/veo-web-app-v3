@@ -3224,6 +3224,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     </div>
                     <div class="lc-search-bar" id="lifecycleSearchBar">
                         <input type="text" id="lifecycleSearch" placeholder="🔍  Search slug or dialogue…" autocomplete="off">
+                        <div id="lcHideOldBanner" style="display:none;font-size:11px;color:#888;margin-top:6px;padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:4px;">
+                            <span id="lcHideOldText">0 old jobs hidden (Generating / Approval / Export / Finishing &gt; 30 days)</span>
+                            <button id="lcHideOldToggle" class="btn btn-secondary btn-sm" style="margin-left:8px;padding:2px 8px;font-size:11px;">Show all</button>
+                        </div>
                     </div>
                     <div class="jobs-list lc-kanban" id="jobsList">
                         <div class="lc-column" id="lc-generating" data-stage="generating">
@@ -3950,6 +3954,25 @@ Example: A realistic vertical video of a professional presenter speaking directl
         const _lifecycleVisibleCounts = { generating: 20, awaiting_approval: 20, awaiting_export: 20, awaiting_finishing: 20, published: 20 };
         const LC_PAGE_SIZE = 20;
 
+        // Hide-old toggle (2026-06-01): kanban accumulates pollution from
+        // test-run jobs in Generating/Approval/Export/Finishing. Default
+        // hides jobs > 30 days old in those four stages. Published column
+        // ALWAYS shows everything regardless of age — operator wants full
+        // shipped-video history.
+        const LC_HIDE_OLD_DAYS = 30;
+        const LC_HIDE_OLD_STAGES = new Set([
+          "generating", "awaiting_approval", "awaiting_export", "awaiting_finishing",
+        ]);
+        if (window._lcHideOld === undefined) {
+          window._lcHideOld = (localStorage.getItem("lc_hide_old") ?? "1") === "1";
+        }
+        function _lcIsOld(j) {
+          if (!j.created_at) return false;
+          const t = new Date(j.created_at).getTime();
+          if (!isFinite(t)) return false;
+          return (Date.now() - t) > LC_HIDE_OLD_DAYS * 86400000;
+        }
+
         function renderLifecycle(jobs, { archived = false } = {}) {
           // Apply current search filter (Task 6 will wire the input listener).
           const q = (document.getElementById("lifecycleSearch")?.value || "").trim().toLowerCase();
@@ -3957,11 +3980,33 @@ Example: A realistic vertical video of a professional presenter speaking directl
           // Bucket + sort.
           const counts = { generating: 0, awaiting_approval: 0, awaiting_export: 0, awaiting_finishing: 0, published: 0 };
           for (const k of LIFECYCLE_STAGES) _lifecycleJobsByStage[k] = [];
+          let _lcHiddenOldCount = 0;
           for (const j of filtered) {
             const s = _effectiveStageForRow(j);
             if (s != null && _lifecycleJobsByStage[s]) {
+              if (window._lcHideOld && LC_HIDE_OLD_STAGES.has(s) && _lcIsOld(j)) {
+                _lcHiddenOldCount++;
+                continue;
+              }
               _lifecycleJobsByStage[s].push(j);
               counts[s]++;
+            }
+          }
+          // Banner: surface what's hidden so jobs never silently vanish.
+          const bannerEl = document.getElementById("lcHideOldBanner");
+          const bannerTxtEl = document.getElementById("lcHideOldText");
+          const bannerBtnEl = document.getElementById("lcHideOldToggle");
+          if (bannerEl) {
+            if (window._lcHideOld && _lcHiddenOldCount > 0) {
+              bannerEl.style.display = "";
+              if (bannerTxtEl) bannerTxtEl.textContent = `${_lcHiddenOldCount} old job${_lcHiddenOldCount === 1 ? "" : "s"} hidden (Generating / Approval / Export / Finishing > ${LC_HIDE_OLD_DAYS} days)`;
+              if (bannerBtnEl) bannerBtnEl.textContent = "Show all";
+            } else if (!window._lcHideOld) {
+              bannerEl.style.display = "";
+              if (bannerTxtEl) bannerTxtEl.textContent = `Showing all jobs (including > ${LC_HIDE_OLD_DAYS} days old)`;
+              if (bannerBtnEl) bannerBtnEl.textContent = "Hide old";
+            } else {
+              bannerEl.style.display = "none";
             }
           }
           for (const k of LIFECYCLE_STAGES) {
@@ -4415,6 +4460,19 @@ Example: A realistic vertical video of a professional presenter speaking directl
             refreshInstagramPanel();
           }
         });
+
+        // Hide-old toggle — flip + re-render from cached data (no fetch).
+        (function wireLcHideOldToggle() {
+          const btn = document.getElementById("lcHideOldToggle");
+          if (!btn) return;
+          btn.addEventListener("click", () => {
+            window._lcHideOld = !window._lcHideOld;
+            try { localStorage.setItem("lc_hide_old", window._lcHideOld ? "1" : "0"); } catch (e) {}
+            if (_lifecycleLastJobs) {
+              renderLifecycle(_lifecycleLastJobs, { archived: _lifecycleLastArchived });
+            }
+          });
+        })();
 
         // Live search — re-render in place from already-loaded data. No fetch.
         (function wireLifecycleSearch() {
