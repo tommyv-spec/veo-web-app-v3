@@ -30,15 +30,22 @@ def _model():
 
 
 def _earliest_awaiting_finishing_approval(db: Session, user_id: str) -> Optional[datetime]:
-    """Earliest approval_at across this user's awaiting_finishing Jobs.
-    IG videos posted before this time cannot possibly match any candidate."""
+    """Earliest approval_at across this user's COMPLETED, unlinked Jobs.
+    IG videos posted before this time cannot possibly match any candidate.
+
+    Mirrors the matcher candidate pool (status=='completed' + unlinked) —
+    NOT lifecycle_stage, which is derived live + persisted lazily and would
+    skip-transcribe videos whose source job is stuck at awaiting_export.
+    Returns None (cutoff disabled) if the earliest job has no approval_at,
+    which safely transcribes everything rather than wrongly skipping."""
     from models import Job
     row = (
         db.query(Job.approval_at)
         .filter(
             Job.user_id == user_id,
-            Job.lifecycle_stage == "awaiting_finishing",
+            Job.status == "completed",
             Job.instagram_video_id.is_(None),
+            Job.archived == False,  # noqa: E712
         )
         .order_by(Job.approval_at.asc())
         .first()
@@ -119,12 +126,17 @@ def _maybe_auto_match(video, account, db: Session) -> None:
         import instagram_match as _ig_match
         if not video.transcription:
             return
+        # Candidate pool = any COMPLETED, unlinked, non-archived job. Not
+        # gated on lifecycle_stage — that column is derived live + persisted
+        # lazily, so exported b-roll/twin jobs stuck at awaiting_export get
+        # silently dropped. status=='completed' is the durable signal.
         candidates = (
             db.query(Job)
             .filter(
                 Job.user_id == account.user_id,
-                Job.lifecycle_stage == "awaiting_finishing",
+                Job.status == "completed",
                 Job.instagram_video_id.is_(None),
+                Job.archived == False,  # noqa: E712
             )
             .all()
         )

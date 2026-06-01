@@ -3687,12 +3687,21 @@ async def suggest_matches(
         raise HTTPException(403, detail="access denied")
     if not v.transcription or v.transcription_status != "done":
         return []
+    # Candidate pool = any COMPLETED, unlinked, non-archived job. Do NOT
+    # gate on lifecycle_stage: a posted IG video's source job is always
+    # fully rendered + exported, but the stored lifecycle_stage column is
+    # derived live and persisted lazily — b-roll/twin jobs routinely sit
+    # at awaiting_export with a stale stored stage, so a stage filter
+    # silently drops the correct job and suggestions land far off.
+    # status=='completed' + instagram_video_id IS NULL is the durable
+    # signal that survives every stage-progression quirk.
     candidates = (
         db.query(Job)
         .filter(
             Job.user_id == current_user.id,
-            Job.lifecycle_stage == "awaiting_finishing",
+            Job.status == "completed",
             Job.instagram_video_id.is_(None),
+            Job.archived == False,  # noqa: E712
         )
         .all()
     )
