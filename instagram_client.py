@@ -111,8 +111,11 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
             return out[:limit]
         if not next_cursor or not items:
             break
-        if next_cursor == prev_cursor or added == 0:
-            print(f"[ig-client] v2 clips pagination stalled — stopping", flush=True)
+        # Stall only on cursor-repeat (true loop). new=0 can be valid: v1
+        # already grabbed the recent batch so v2 page 0 dupes — but the
+        # cursor still advances to the next chunk of older items.
+        if next_cursor == cursor:
+            print(f"[ig-client] v2 clips pagination stalled (cursor unchanged) — stopping", flush=True)
             break
         prev_cursor = cursor
         cursor = next_cursor
@@ -164,8 +167,8 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
             return out[:limit]
         if not next_cursor or not items:
             break
-        if next_cursor == prev_cursor or added == 0:
-            print(f"[ig-client] v2 medias pagination stalled — stopping", flush=True)
+        if next_cursor == cursor:
+            print(f"[ig-client] v2 medias pagination stalled (cursor unchanged) — stopping", flush=True)
             break
         prev_cursor = cursor
         cursor = next_cursor
