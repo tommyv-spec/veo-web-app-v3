@@ -88,26 +88,21 @@
             overflow: hidden !important;
         }
         .app-container.state-browse .config-panel > *:not(#jobsCard) { display: none !important; }
+        /* Grid layout = deterministic remaining-height allocation. Three auto
+           rows (title / chips / search+banner) shrink to content; the 4th row
+           (kanban) takes 1fr — fills whatever's left. min-height:0 on the kanban
+           cell allows children to scroll instead of pushing it taller. */
         .app-container.state-browse #jobsCard {
-            display: flex !important;
-            flex-direction: column;
+            display: grid !important;
+            grid-template-rows: auto auto auto minmax(0, 1fr);
             height: 100%;
             margin: 0;
             overflow: hidden;
             min-height: 0;
         }
-        /* Header band (title + chip filter + search/banner) is shrink-to-content +
-           sticky-by-virtue-of-not-scrolling. Only the kanban below scrolls (per
-           column). */
-        .app-container.state-browse #jobsCard > .card-title,
-        .app-container.state-browse #jobsCard > .lifecycle-chips,
-        .app-container.state-browse #jobsCard > .lc-search-bar {
-            flex: 0 0 auto;
-        }
         .app-container.state-browse #jobsCard > .jobs-list.lc-kanban {
-            flex: 1 1 0;
             min-height: 0;
-            height: 0 !important;             /* canonical flex-fill: let flex distribute, not calc(100% - 88px) */
+            height: auto !important;
             max-height: none !important;
             overflow: hidden !important;      /* kill .jobs-list { overflow-y: auto } leak — columns inside scroll */
         }
