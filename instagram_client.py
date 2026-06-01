@@ -77,14 +77,14 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
     if limit and len(out) >= limit:
         return out[:limit]
 
-    # Pass A-2 — v2 clips with real pagination via end_cursor.
+    # Pass A-2 — v2 clips with real pagination via page_id.
     pages = 0
     cursor = None
     prev_cursor = None
     while pages < max_pages:
         params = {"user_id": ig_user_id}
         if cursor:
-            params["end_cursor"] = cursor
+            params["page_id"] = cursor
         try:
             data = _get("/v2/user/clips", params, api_key)
         except HikerAPIError as e:
@@ -130,14 +130,14 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
     if limit and len(out) >= limit:
         return out[:limit]
 
-    # Pass B-2 — v2 medias with end_cursor pagination for historical reach.
+    # Pass B-2 — v2 medias with page_id pagination for historical reach.
     pages = 0
     cursor = None
     prev_cursor = None
     while pages < max_pages:
         params = {"user_id": ig_user_id}
         if cursor:
-            params["end_cursor"] = cursor
+            params["page_id"] = cursor
         try:
             data = _get("/v2/user/medias", params, api_key)
         except HikerAPIError as e:
@@ -174,28 +174,38 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
 
 
 def _extract_items_and_cursor(data):
-    """HikerAPI chunk responses come in several shapes. Returns (items, next_cursor)."""
+    """HikerAPI responses come in several shapes. Returns (items, next_cursor).
+
+    Known shapes:
+    - v1 chunk: [[items], cursor] OR {items: [...], ...}
+    - v2 paginated: {next_page_id: "...", response: {items: [...]}} —
+      Instagram-private-API style with items nested under `response`.
+    """
     items: list = []
     cursor = None
     if isinstance(data, list):
-        # [items, cursor] form (the form HikerAPI's reference script handles).
         if len(data) > 0 and isinstance(data[0], list):
             items = data[0]
             if len(data) > 1 and data[1]:
-                # Cursor may be str / int / dict — coerce to truthy str.
                 c = data[1]
                 cursor = str(c) if isinstance(c, (str, int)) else None
         else:
             items = data
     elif isinstance(data, dict):
-        # Item array under common keys.
-        for ikey in ("items", "data", "medias", "videos", "clips"):
-            v = data.get(ikey)
-            if isinstance(v, list):
-                items = v
-                break
-        # Cursor — try every plausible key, including anything with "cursor"/"max"/"next" in the name.
-        for k in ("next_max_id", "next_cursor", "max_id", "end_cursor", "next_min_id", "next_page", "page_token", "next_page_token"):
+        # v2 endpoints wrap data inside `response`. Recurse into it for items.
+        if isinstance(data.get("response"), (dict, list)):
+            inner_items, _inner_cursor = _extract_items_and_cursor(data["response"])
+            if inner_items:
+                items = inner_items
+        # Top-level item arrays under common keys.
+        if not items:
+            for ikey in ("items", "data", "medias", "videos", "clips"):
+                v = data.get(ikey)
+                if isinstance(v, list):
+                    items = v
+                    break
+        # Cursor — try every plausible key.
+        for k in ("next_page_id", "next_max_id", "next_cursor", "max_id", "end_cursor", "next_min_id", "next_page", "page_token", "next_page_token"):
             v = data.get(k)
             if v:
                 cursor = str(v)
@@ -203,7 +213,7 @@ def _extract_items_and_cursor(data):
         if not cursor:
             for k in data.keys():
                 lk = k.lower()
-                if ("cursor" in lk or "max_id" in lk or "next" in lk) and data[k]:
+                if ("cursor" in lk or "max_id" in lk or "next" in lk or "page_id" in lk) and data[k]:
                     v = data[k]
                     if isinstance(v, (str, int)):
                         cursor = str(v)
