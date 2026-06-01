@@ -106,7 +106,7 @@ def _download_and_extract_audio(direct_video_url: str, work_dir: str) -> tuple:
     return (wav, None)
 
 
-_AUTO_MATCH_THRESHOLD = float(os.environ.get("IG_AUTO_MATCH_THRESHOLD", "0.85"))
+_AUTO_MATCH_THRESHOLD = float(os.environ.get("IG_AUTO_MATCH_THRESHOLD", "0.70"))
 
 
 def _maybe_auto_match(video, account, db: Session) -> None:

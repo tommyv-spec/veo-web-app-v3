@@ -39,33 +39,75 @@ def resolve_user_id(handle: str, api_key: str) -> str:
 
 
 def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages: int = 50) -> List[Dict]:
-    """Returns recent reels for the given user, paginating chunks until
-    cursor exhausts OR limit reached OR max_pages hit (safety stop).
+    """Returns recent videos for the given user across BOTH the reels chunk
+    AND the general media chunk (deduped by shortcode), paginating cursors
+    until exhausted OR limit/max_pages reached.
 
-    limit=0 (default) means "all reels, no cap". max_pages caps the safety
-    bound at ~50 pages (1000+ reels), preventing runaway loops on bugged
-    pagination.
+    limit=0 (default) means "all videos, no cap".
 
     Each dict: shortcode, url, thumb_url, video_url, caption, views, likes, comments, posted_at.
     """
+    seen = set()
     out: List[Dict] = []
-    cursor = None
+
+    def _ingest(items):
+        for it in items:
+            if not _looks_like_video(it):
+                continue
+            sc = it.get("code") or it.get("shortcode")
+            if not sc or sc in seen:
+                continue
+            seen.add(sc)
+            out.append(_clip_to_dict(it))
+
+    # Pass A — reels-only endpoint.
     pages = 0
+    cursor = None
     while pages < max_pages:
         params = {"user_id": ig_user_id, "max_amount": 50}
         if cursor:
             params["max_id"] = cursor
-        data = _get("/v1/user/clips/chunk", params, api_key)
+        try:
+            data = _get("/v1/user/clips/chunk", params, api_key)
+        except HikerAPIError as e:
+            print(f"[ig-client] user_clips_chunk page {pages} failed: {e}", flush=True)
+            break
         items, next_cursor = _extract_items_and_cursor(data)
-        for it in items:
-            if _looks_like_video(it):
-                out.append(_clip_to_dict(it))
-                if limit and len(out) >= limit:
-                    return out[:limit]
+        before = len(out)
+        _ingest(items)
+        added = len(out) - before
+        print(f"[ig-client] clips/chunk page={pages} items={len(items)} new={added} cursor={'yes' if next_cursor else 'no'}", flush=True)
         pages += 1
+        if limit and len(out) >= limit:
+            return out[:limit]
         if not next_cursor or not items:
             break
         cursor = next_cursor
+
+    # Pass B — general media endpoint (catches videos not surfaced as reels).
+    pages = 0
+    cursor = None
+    while pages < max_pages:
+        params = {"user_id": ig_user_id, "max_amount": 50}
+        if cursor:
+            params["max_id"] = cursor
+        try:
+            data = _get("/v1/user/medias/chunk", params, api_key)
+        except HikerAPIError as e:
+            print(f"[ig-client] user_medias_chunk page {pages} failed: {e}", flush=True)
+            break
+        items, next_cursor = _extract_items_and_cursor(data)
+        before = len(out)
+        _ingest(items)
+        added = len(out) - before
+        print(f"[ig-client] medias/chunk page={pages} items={len(items)} new={added} cursor={'yes' if next_cursor else 'no'}", flush=True)
+        pages += 1
+        if limit and len(out) >= limit:
+            return out[:limit]
+        if not next_cursor or not items:
+            break
+        cursor = next_cursor
+
     return out
 
 
