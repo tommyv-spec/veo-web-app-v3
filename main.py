@@ -3633,6 +3633,29 @@ async def retry_transcribe_video(
     return {"status": "pending"}
 
 
+@app.post("/api/instagram/accounts/{account_id}/retry-failed")
+async def retry_failed_for_account(
+    account_id: int,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Reset every `failed` video on this account back to `pending` so the
+    worker picks them up on the next tick."""
+    from models import InstagramVideo
+    _get_user_ig_account(db, account_id, current_user)
+    rows = db.query(InstagramVideo).filter(
+        InstagramVideo.account_id == account_id,
+        InstagramVideo.transcription_status == "failed",
+    ).all()
+    n = 0
+    for v in rows:
+        v.transcription_status = "pending"
+        v.transcription_error = None
+        n += 1
+    db.commit()
+    return {"requeued": n}
+
+
 @app.get("/api/instagram/videos/{video_id}/suggestions")
 async def suggest_matches(
     video_id: int,

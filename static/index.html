@@ -4242,6 +4242,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
               <span class="ig-account-handle">@${escapeHtml(acc.handle)}</span>
               <span class="ig-account-meta">${acc.video_count || 0} videos · last sync ${lastSync}</span>
               <button class="btn btn-secondary btn-sm ig-sync-btn" data-id="${acc.id}">Sync</button>
+              <button class="btn btn-secondary btn-sm ig-retry-failed-btn" data-id="${acc.id}" title="Re-queue every failed video for transcription">Retry failed</button>
               <button class="btn btn-danger btn-sm ig-delete-btn" data-id="${acc.id}">✕</button>
             </div>
             <div class="ig-videos-grid">${vCards || '<div class="empty" style="padding:8px;color:#888;font-size:11px;">No videos yet — click Sync.</div>'}</div>
@@ -4331,6 +4332,18 @@ Example: A realistic vertical video of a professional presenter speaking directl
             syncBtn.textContent = "Syncing…";
             await igSync(parseInt(syncBtn.dataset.id));
             await refreshInstagramPanel();
+            return;
+          }
+          const retryAllBtn = ev.target.closest(".ig-retry-failed-btn[data-id]");
+          if (retryAllBtn) {
+            retryAllBtn.disabled = true;
+            retryAllBtn.textContent = "Requeueing…";
+            const r = await fetch(`/api/instagram/accounts/${retryAllBtn.dataset.id}/retry-failed`, {
+              method: "POST", credentials: "include",
+            });
+            const data = r.ok ? await r.json() : null;
+            await refreshInstagramPanel();
+            if (data) console.log(`[ig] requeued ${data.requeued} failed videos`);
             return;
           }
           const delBtn = ev.target.closest(".ig-delete-btn[data-id]");
