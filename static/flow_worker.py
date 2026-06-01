@@ -566,9 +566,12 @@ def _fa_replay_har_pre_create(page, context=""):
 
 
 def _fa_init_project_best_effort(page, project_id, context=""):
-    """Fire post-createProject init calls best-effort. Every call wrapped;
-    failures logged but never raised. Operator: sometimes needed, sometimes not."""
+    """Fire post-createProject init calls best-effort. After PATCHes, page.reload()
+    so React re-renders UI in the new state (PATCHes alone update backend but
+    React store stays stale → UI keeps stale layout)."""
     pfx = f"[{context}] " if context else ""
+    print(f"{pfx}[flow_api] HAR replay START project={project_id[:8]}", flush=True)
+    _replay_t0 = time.time()
 
     def best_effort(label, fn):
         try:
@@ -715,6 +718,25 @@ def _fa_init_project_best_effort(page, project_id, context=""):
         "PATCH", _bearer(),
         {"agentToggleState": "AGENT_TOGGLE_STATE_DISABLED"},
     ))
+
+    elapsed = time.time() - _replay_t0
+    print(f"{pfx}[flow_api] HAR replay END project={project_id[:8]} ({elapsed:.1f}s)", flush=True)
+
+    # CRITICAL: PATCHes update backend but React's local store stays stale.
+    # Reload the page so the SPA re-fetches project state from server and
+    # re-renders UI in the new Agent-OFF layout. Without this, page keeps
+    # showing the "Start creating or drop media" agent landing and no
+    # settings button.
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=30000)
+        print(f"{pfx}[flow_api] page.reload() done — UI should reflect Agent-OFF", flush=True)
+        # Brief wait for SPA hydration after reload
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            time.sleep(2)
+    except Exception as e:
+        print(f"{pfx}[flow_api] page.reload() failed (non-blocking): {e}", flush=True)
 
 
 def _fa_try_create_new_project_api(page, context=""):

@@ -3747,8 +3747,11 @@ def _fa_replay_har_pre_create(page, context=""):
 def _fa_init_project_best_effort(page, project_id, context=""):
     """Full HAR replay — 17 post-createProject calls in EXACT HAR order.
     Every call best-effort; failures logged but never block.
-    End state matches HAR: chatPanelOpen=false + agentToggleState=DISABLED."""
+    After PATCHes, page.reload() so React re-fetches state + re-renders UI
+    (PATCHes alone update backend but React store stays stale)."""
     pfx = f"[{context}] " if context else ""
+    print(f"{pfx}[flow_api] HAR replay START project={project_id[:8]}", flush=True)
+    _replay_t0 = time.time()
 
     def best_effort(label, fn):
         try:
@@ -3872,6 +3875,22 @@ def _fa_init_project_best_effort(page, project_id, context=""):
         "PATCH", _bearer(),
         {"agentToggleState": "AGENT_TOGGLE_STATE_DISABLED"},
     ))
+
+    elapsed = time.time() - _replay_t0
+    print(f"{pfx}[flow_api] HAR replay END project={project_id[:8]} ({elapsed:.1f}s)", flush=True)
+
+    # Reload to force React to re-fetch project state + re-render UI in
+    # Agent-OFF layout. Without this, PATCHes update backend but React's
+    # local store keeps showing stale Agent-ON layout.
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=30000)
+        print(f"{pfx}[flow_api] page.reload() done — UI should reflect Agent-OFF", flush=True)
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            time.sleep(2)
+    except Exception as e:
+        print(f"{pfx}[flow_api] page.reload() failed (non-blocking): {e}", flush=True)
 
 
 # ============================================================
