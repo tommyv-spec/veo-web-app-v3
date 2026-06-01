@@ -4703,7 +4703,167 @@ def download_all_generated_images(page, output_dir, variants=1, context="", skip
 
 
 
+# v771 — "unusual activity" refresh-and-resume, ported from the video worker
+# (flow_worker.py clear_flow_site_data + v758.21). On Flow's "We noticed some
+# unusual activity" block: surgically delete labs.google cookies + cache (keep
+# Google SSO auth + app route in localStorage), reload so Flow re-signs-in, then
+# retry the current image. Bounded + cooldown-deduped: an unbounded refresh loop
+# on a genuinely-flagged account worsens throttling (flow-worker-throttle-redo-
+# dynamics), so after IMG_UNUSUAL_MAX_STRIKES recoveries we stop and surface an
+# actionable error instead of hammering Google.
+IMG_UNUSUAL_COOLDOWN = 30        # s — skip a redundant recovery within this window
+IMG_UNUSUAL_MAX_STRIKES = 3      # per (worker,label) before giving up
+_IMG_UNUSUAL_LAST = {}           # label -> last recovery epoch
+_IMG_UNUSUAL_STRIKES = {}        # label -> cumulative recoveries
+_IMG_UNUSUAL_LOCK = threading.Lock()
+
+
+def clear_flow_site_data(page, label=""):
+    """Clear labs.google COOKIES + CACHE while PRESERVING localStorage /
+    sessionStorage / IndexedDB (keeps the SPA route so reload lands back on the
+    project, not the marketing page). The block is cookie-keyed; Google SSO auth
+    cookies are never touched, so reload re-signs-in. Ported verbatim from
+    flow_worker.clear_flow_site_data (v758.23). Returns True if cookie clear ran."""
+    prefix = f"[{label}] " if label else ""
+    ok = False
+    try:
+        ctx = page.context
+        cdp = ctx.new_cdp_session(page)
+        all_c = cdp.send("Network.getCookies").get("cookies", [])
+        removed = 0
+        for c in all_c:
+            dom = c.get("domain") or ""
+            if "labs.google" in dom:
+                try:
+                    cdp.send("Network.deleteCookies", {
+                        "name": c.get("name", ""),
+                        "domain": dom,
+                        "path": c.get("path", "/"),
+                    })
+                    removed += 1
+                except Exception:
+                    pass
+        try:
+            cdp.detach()
+        except Exception:
+            pass
+        print(f"{prefix}🧹 cookies: removed {removed} labs.google (Google SSO auth untouched)", flush=True)
+        ok = True
+    except Exception as e:
+        print(f"{prefix}⚠ cookie clear failed: {e}", flush=True)
+    try:
+        if "labs.google" in (page.url or ""):
+            page.evaluate("""async () => {
+                try {
+                    if (window.caches) {
+                        const ks = await caches.keys();
+                        await Promise.all(ks.map(k => caches.delete(k)));
+                    }
+                } catch (e) {}
+            }""")
+            print(f"{prefix}🧹 cacheStorage cleared (localStorage/sessionStorage/IndexedDB preserved)", flush=True)
+    except Exception as e:
+        print(f"{prefix}⚠ storage clear failed (non-fatal): {e}", flush=True)
+    try:
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Storage.clearDataForOrigin", {
+            "origin": "https://labs.google",
+            "storageTypes": "cache_storage,service_workers,file_systems,shader_cache",
+        })
+        try:
+            cdp.detach()
+        except Exception:
+            pass
+        print(f"{prefix}🧹 labs.google cache/service-worker storage cleared via CDP", flush=True)
+    except Exception as e:
+        print(f"{prefix}⚠ CDP origin clear failed (non-fatal): {e}", flush=True)
+    return ok
+
+
+def page_shows_unusual_activity(page):
+    """True if the Flow page currently shows the 'unusual activity' block."""
+    try:
+        return bool(page.evaluate("""() => {
+            const t = ((document.body && document.body.textContent) || '').toLowerCase();
+            return t.includes('unusual activity') || t.includes('we noticed some unusual');
+        }"""))
+    except Exception:
+        return False
+
+
+def recover_unusual_activity(page, label=""):
+    """Clear labs.google cookies+cache and reload so Flow re-signs-in. Cooldown-
+    deduped + strike-capped. Returns True if the caller should retry the image,
+    False if the strike cap is hit (caller should bail with an actionable error)."""
+    prefix = f"[{label}] " if label else ""
+    now = time.time()
+    with _IMG_UNUSUAL_LOCK:
+        last = _IMG_UNUSUAL_LAST.get(label, 0)
+        if now - last < IMG_UNUSUAL_COOLDOWN:
+            print(f"{prefix}↩ unusual-activity recovery within {IMG_UNUSUAL_COOLDOWN}s cooldown — pausing before retry", flush=True)
+            _within_cooldown = True
+        else:
+            _within_cooldown = False
+            _IMG_UNUSUAL_STRIKES[label] = _IMG_UNUSUAL_STRIKES.get(label, 0) + 1
+            _IMG_UNUSUAL_LAST[label] = now
+        strikes = _IMG_UNUSUAL_STRIKES.get(label, 0)
+    if _within_cooldown:
+        time.sleep(5)
+        return True
+    if strikes > IMG_UNUSUAL_MAX_STRIKES:
+        print(f"{prefix}⛔ unusual-activity persists after {IMG_UNUSUAL_MAX_STRIKES} recoveries — giving up (account likely flagged; retry later)", flush=True)
+        return False
+    print(f"{prefix}🔥 unusual-activity detected — clearing labs.google cookies + reloading (recovery {strikes}/{IMG_UNUSUAL_MAX_STRIKES})", flush=True)
+    try:
+        clear_flow_site_data(page, label=label)
+    except Exception as e:
+        print(f"{prefix}⚠ site-data clear failed: {e}", flush=True)
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=30000)
+        time.sleep(3)
+        print(f"{prefix}✓ page reloaded after unusual-activity clear — resuming", flush=True)
+    except Exception as e:
+        print(f"{prefix}⚠ reload after clear failed: {e}", flush=True)
+    return True
+
+
+def reset_unusual_activity_strikes(label=""):
+    """Clear the strike counter after a clean success so a later independent
+    block starts fresh (doesn't inherit old strikes)."""
+    with _IMG_UNUSUAL_LOCK:
+        _IMG_UNUSUAL_STRIKES.pop(label, None)
+
+
 def process_image_job_multi(page, input_paths, prompt, output_dir,
+                             variants=1, aspect_ratio="16:9", resolution="1K",
+                             model="nano_banana_2", context="",
+                             already_uploaded=None):
+    """v771 — bounded unusual-activity retry wrapper around
+    _process_image_job_multi_once. On a failed attempt, if the Flow page shows
+    the 'unusual activity' block (or the error mentions it), clear cookies +
+    reload and retry the SAME image from the top ('restart from where we were').
+    Non-unusual failures return unchanged. Strike-capped to avoid throttle churn."""
+    for _ua_attempt in range(IMG_UNUSUAL_MAX_STRIKES + 1):
+        ok, paths, err = _process_image_job_multi_once(
+            page, input_paths, prompt, output_dir,
+            variants=variants, aspect_ratio=aspect_ratio, resolution=resolution,
+            model=model, context=context, already_uploaded=already_uploaded,
+        )
+        if ok:
+            reset_unusual_activity_strikes(label=context)
+            return ok, paths, err
+        _is_unusual = page_shows_unusual_activity(page) or (
+            isinstance(err, str) and 'unusual' in err.lower()
+        )
+        if not _is_unusual:
+            return ok, paths, err
+        print(f"[{context}] ⚠ image generation hit 'unusual activity' — attempting refresh-and-resume", flush=True)
+        if not recover_unusual_activity(page, label=context):
+            return False, [], "unusual activity — account blocked after repeated recoveries, retry later"
+    return False, [], "unusual activity persisted after recovery retries"
+
+
+def _process_image_job_multi_once(page, input_paths, prompt, output_dir,
                              variants=1, aspect_ratio="16:9", resolution="1K",
                              model="nano_banana_2", context="",
                              already_uploaded=None):
