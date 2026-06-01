@@ -55,7 +55,8 @@ def _fetch_fresh_video_url(video, account) -> Optional[str]:
         api_key = _enc_decrypt(account.api_key_encrypted)
         if not account.ig_user_id:
             return None
-        clips = fetch_recent_clips(account.ig_user_id, api_key, limit=20)
+        # Pull a generous window; older reels may need many pages.
+        clips = fetch_recent_clips(account.ig_user_id, api_key, limit=200, max_pages=10)
         for c in clips:
             if c.get("shortcode") == video.shortcode:
                 return c.get("video_url")

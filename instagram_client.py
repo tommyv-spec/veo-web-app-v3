@@ -38,28 +38,67 @@ def resolve_user_id(handle: str, api_key: str) -> str:
     return str(pk)
 
 
-def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 20) -> List[Dict]:
-    """Returns up to `limit` recent reels for the given user. 1 API call.
+def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages: int = 50) -> List[Dict]:
+    """Returns recent reels for the given user, paginating chunks until
+    cursor exhausts OR limit reached OR max_pages hit (safety stop).
 
-    Each dict has: shortcode, url, thumb_url, caption, views, likes, comments, posted_at (datetime).
+    limit=0 (default) means "all reels, no cap". max_pages caps the safety
+    bound at ~50 pages (1000+ reels), preventing runaway loops on bugged
+    pagination.
+
+    Each dict: shortcode, url, thumb_url, video_url, caption, views, likes, comments, posted_at.
     """
-    data = _get("/v1/user/clips/chunk", {"user_id": ig_user_id, "max_amount": limit}, api_key)
-    items = _extract_items(data)
-    return [_clip_to_dict(it) for it in items[:limit] if _looks_like_video(it)]
+    out: List[Dict] = []
+    cursor = None
+    pages = 0
+    while pages < max_pages:
+        params = {"user_id": ig_user_id, "max_amount": 50}
+        if cursor:
+            params["max_id"] = cursor
+        data = _get("/v1/user/clips/chunk", params, api_key)
+        items, next_cursor = _extract_items_and_cursor(data)
+        for it in items:
+            if _looks_like_video(it):
+                out.append(_clip_to_dict(it))
+                if limit and len(out) >= limit:
+                    return out[:limit]
+        pages += 1
+        if not next_cursor or not items:
+            break
+        cursor = next_cursor
+    return out
+
+
+def _extract_items_and_cursor(data):
+    """HikerAPI chunk responses come in a few shapes. Returns (items, next_cursor)."""
+    items: list = []
+    cursor = None
+    if isinstance(data, list):
+        # [items, cursor] form
+        if len(data) > 0 and isinstance(data[0], list):
+            items = data[0]
+            if len(data) > 1 and isinstance(data[1], (str, int)):
+                cursor = str(data[1]) or None
+        else:
+            items = data
+    elif isinstance(data, dict):
+        if isinstance(data.get("items"), list):
+            items = data["items"]
+        elif isinstance(data.get("data"), list):
+            items = data["data"]
+        # Cursor candidates across HikerAPI variants.
+        for k in ("next_max_id", "next_cursor", "max_id", "next_min_id", "end_cursor"):
+            v = data.get(k)
+            if v:
+                cursor = str(v)
+                break
+    return items, cursor
 
 
 def _extract_items(data) -> list:
-    """HikerAPI returns either [items, cursor] or {items, next_*}."""
-    if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
-        return data[0]
-    if isinstance(data, dict):
-        if isinstance(data.get("items"), list):
-            return data["items"]
-        if isinstance(data.get("data"), list):
-            return data["data"]
-    if isinstance(data, list):
-        return data
-    return []
+    """Back-compat wrapper for code paths that only need items."""
+    items, _ = _extract_items_and_cursor(data)
+    return items
 
 
 def _looks_like_video(media: dict) -> bool:

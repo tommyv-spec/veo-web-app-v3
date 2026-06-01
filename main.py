@@ -3557,7 +3557,8 @@ async def sync_instagram_account(
     try:
         if not acc.ig_user_id:
             acc.ig_user_id = _ig_resolve_user_id(acc.handle, api_key)
-        clips = _ig_fetch_recent_clips(acc.ig_user_id, api_key, limit=20)
+        # limit=0 → fetch all reels via cursor pagination (max 50 pages).
+        clips = _ig_fetch_recent_clips(acc.ig_user_id, api_key, limit=0)
     except HikerAPIError as he:
         raise HTTPException(status_code=502, detail=str(he))
     added = 0
