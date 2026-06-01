@@ -943,21 +943,47 @@ async def fix_orphaned_clips(
 
 @app.post("/api/admin/backfill-badges")
 async def backfill_export_voice_badges(
+    job_id: Optional[str] = None,
+    limit: int = Query(default=150, ge=1, le=1000),
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Backfill has_export/has_voice_clone flags by scanning R2 outputs for each job."""
+    """Backfill has_export/has_voice_clone flags by scanning R2 outputs.
+
+    Scanning EVERY job with a synchronous R2 list each timed out the
+    gateway (502) once the account accumulated 1000+ jobs. Two guards:
+      - job_id=<id> scans exactly one job (instant; use to unstick a
+        specific clip).
+      - otherwise only jobs MISSING a flag are queried (already-flagged
+        jobs need no R2 call) and the set is capped at `limit`, newest
+        first, so the request stays well under the gateway timeout.
+    """
     from backends.storage import is_storage_configured, get_storage
-    
+
     if not is_storage_configured():
         return {"error": "Storage not configured"}
-    
+
     storage = get_storage()
-    jobs = db.query(Job).filter(
-        Job.user_id == current_user.id,
-        Job.status.in_(['completed', 'processing']),
-    ).all()
-    
+    if job_id:
+        jobs = db.query(Job).filter(
+            Job.user_id == current_user.id,
+            Job.id == job_id,
+        ).all()
+    else:
+        # Only jobs still missing a flag need an R2 scan. Cap + newest-first
+        # keeps the synchronous R2 listing bounded (no 502 on large accounts).
+        jobs = (
+            db.query(Job)
+            .filter(
+                Job.user_id == current_user.id,
+                Job.status.in_(['completed', 'processing']),
+                (Job.has_export == False) | (Job.has_voice_clone == False),  # noqa: E712
+            )
+            .order_by(Job.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+
     export_count = 0
     voice_count = 0
     for job in jobs:
