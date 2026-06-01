@@ -36,7 +36,14 @@ def score(ig_transcript: str, job_dialogue: str) -> float:
     b = _normalize(job_dialogue)
     if not a or not b:
         return 0.0
-    base = difflib.SequenceMatcher(None, a, b).ratio()
+    # autojunk=False is REQUIRED: difflib's autojunk heuristic treats any
+    # element appearing in >1% of a sequence >=200 chars as "junk" and skips
+    # it. On char-level strings that junks common letters (e/t/a/o/space),
+    # which only happens on LONG strings — i.e. b-roll voiceover scripts.
+    # Result: correct b-roll matches lost ~13 pts (0.96 -> 0.83) and capped
+    # near ~0.67, dropping below the 0.70 floor. Short on-camera-line jobs
+    # (<200 chars) never tripped it, so the bug looked "b-roll only".
+    base = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
     boost = _phrase_boost(a, b)
     return min(1.0, base + boost)
 
