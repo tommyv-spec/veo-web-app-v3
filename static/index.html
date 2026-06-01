@@ -4262,7 +4262,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
           } else if (v.transcription_status === "skipped") {
             status = `<span class="ig-video-status" style="background:#333;color:#888;">skipped</span>`;
           } else if (v.transcription_status === "failed") {
-            status = `<span class="ig-video-status failed">failed</span> <button class="ig-retry-btn" data-id="${safeId}">retry</button>`;
+            const errTitle = v.transcription_error ? escapeHtml(v.transcription_error) : "(no error message stored)";
+            status = `<span class="ig-video-status failed" title="${errTitle}">failed</span> <button class="ig-retry-btn" data-id="${safeId}" title="${errTitle}">retry</button>`;
           } else if (v.transcription_status === "done") {
             status = `<button class="ig-video-match-btn ig-match-btn" data-id="${safeId}">Match?</button>`;
           } else {

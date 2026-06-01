@@ -64,36 +64,45 @@ def _fetch_fresh_video_url(video, account) -> Optional[str]:
     return None
 
 
-def _download_and_extract_audio(direct_video_url: str, work_dir: str) -> Optional[str]:
+def _download_and_extract_audio(direct_video_url: str, work_dir: str) -> tuple:
     """Downloads the direct video URL + extracts mono 16k WAV.
 
     direct_video_url MUST be a fully-signed HikerAPI/fbcdn URL (not the
-    /reel/ permalink — that requires auth). Returns wav path or None."""
+    /reel/ permalink — that requires auth). Returns (wav_path, error_msg)
+    where wav_path is None on failure and error_msg explains why."""
     if not direct_video_url:
-        return None
+        return (None, "no video_url in DB")
     mp4 = os.path.join(work_dir, "ig_video.mp4")
     try:
         with requests.get(direct_video_url, stream=True, timeout=60) as r:
             if r.status_code != 200:
-                return None
+                return (None, f"download HTTP {r.status_code}")
+            ctype = r.headers.get("content-type", "")
             with open(mp4, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 64):
                     if chunk:
                         f.write(chunk)
-    except Exception:
-        return None
+        size = os.path.getsize(mp4) if os.path.exists(mp4) else 0
+        print(f"[ig-transcribe] downloaded {size}B content-type={ctype}", flush=True)
+    except Exception as e:
+        return (None, f"download exception: {type(e).__name__}: {str(e)[:120]}")
     if not os.path.exists(mp4) or os.path.getsize(mp4) < 1024:
-        return None
+        return (None, f"downloaded file too small ({os.path.getsize(mp4) if os.path.exists(mp4) else 0}B)")
     wav = os.path.join(work_dir, "ig_audio.wav")
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["ffmpeg", "-y", "-i", mp4, "-vn", "-ac", "1", "-ar", "16000", wav],
-            check=True, timeout=30,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False, timeout=30,
+            capture_output=True, text=True,
         )
-    except Exception:
-        return None
-    return wav
+        if result.returncode != 0:
+            stderr_tail = (result.stderr or "")[-300:]
+            return (None, f"ffmpeg rc={result.returncode}: {stderr_tail}")
+    except FileNotFoundError:
+        return (None, "ffmpeg binary not found on PATH")
+    except Exception as e:
+        return (None, f"ffmpeg exception: {type(e).__name__}: {str(e)[:120]}")
+    return (wav, None)
 
 
 def _transcribe_audio(wav_path: str) -> str:
@@ -121,22 +130,30 @@ def transcribe_one(video, db: Session) -> None:
             db.commit()
             return
         with tempfile.TemporaryDirectory() as tmp:
-            # Try stored video_url first. If missing/expired, re-fetch.
             wav = None
+            err = "no video_url in DB"
             if video.video_url:
-                wav = _download_and_extract_audio(video.video_url, tmp)
+                print(f"[ig-transcribe] shortcode={video.shortcode} attempt stored URL", flush=True)
+                wav, err = _download_and_extract_audio(video.video_url, tmp)
             if not wav:
+                print(f"[ig-transcribe] shortcode={video.shortcode} stored URL failed ({err}) — refetching", flush=True)
                 fresh = _fetch_fresh_video_url(video, account)
                 if fresh:
                     video.video_url = fresh
                     db.commit()
-                    wav = _download_and_extract_audio(fresh, tmp)
+                    wav, err = _download_and_extract_audio(fresh, tmp)
+                    if not wav:
+                        print(f"[ig-transcribe] shortcode={video.shortcode} fresh URL also failed ({err})", flush=True)
+                else:
+                    err = (err or "") + " (HikerAPI refetch returned no URL)"
             if not wav:
                 video.transcription_status = "failed"
-                video.transcription_error = "no usable video_url (download failed; fresh fetch also failed)"
+                video.transcription_error = (err or "unknown")[:500]
                 db.commit()
                 return
+            print(f"[ig-transcribe] shortcode={video.shortcode} starting Whisper", flush=True)
             text = _transcribe_audio(wav)
+            print(f"[ig-transcribe] shortcode={video.shortcode} Whisper done ({len(text)}c)", flush=True)
         video.transcription = text
         video.transcription_status = "done"
         video.transcription_error = None

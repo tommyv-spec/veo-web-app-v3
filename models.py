@@ -587,6 +587,7 @@ class InstagramVideo(Base):
             "comments": self.comments,
             "posted_at": self.posted_at.isoformat() if self.posted_at else None,
             "transcription_status": self.transcription_status,
+            "transcription_error": self.transcription_error,
             "matched_job_id": self.matched_job_id,
         }
 
