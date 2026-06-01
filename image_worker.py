@@ -4853,7 +4853,7 @@ def process_image_job_multi(page, input_paths, prompt, output_dir,
             reset_unusual_activity_strikes(label=context)
             return ok, paths, err
         _is_unusual = page_shows_unusual_activity(page) or (
-            isinstance(err, str) and 'unusual' in err.lower()
+            isinstance(err, str) and 'unusual activity' in err.lower()
         )
         if not _is_unusual:
             return ok, paths, err
