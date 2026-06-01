@@ -105,6 +105,64 @@ def _download_and_extract_audio(direct_video_url: str, work_dir: str) -> tuple:
     return (wav, None)
 
 
+_AUTO_MATCH_THRESHOLD = float(os.environ.get("IG_AUTO_MATCH_THRESHOLD", "0.85"))
+
+
+def _maybe_auto_match(video, account, db: Session) -> None:
+    """After transcription, score against awaiting_finishing jobs. If the
+    top candidate is >= IG_AUTO_MATCH_THRESHOLD (default 0.85), link + advance
+    the matched job to published. Lower-confidence matches stay surfaced in
+    the manual `/suggestions` UI for operator confirmation."""
+    try:
+        from models import Job, Clip
+        import instagram_match as _ig_match
+        if not video.transcription:
+            return
+        candidates = (
+            db.query(Job)
+            .filter(
+                Job.user_id == account.user_id,
+                Job.lifecycle_stage == "awaiting_finishing",
+                Job.instagram_video_id.is_(None),
+            )
+            .all()
+        )
+        if not candidates:
+            print(f"[ig-transcribe] shortcode={video.shortcode} no awaiting_finishing candidates", flush=True)
+            return
+
+        def _full_dialogue(job):
+            rows = (
+                db.query(Clip.dialogue_text)
+                .filter(Clip.job_id == job.id)
+                .order_by(Clip.clip_index.asc())
+                .all()
+            )
+            return " ".join((r[0] or "") for r in rows).strip()
+
+        top = _ig_match.best_matches(
+            video, candidates, full_dialogue=_full_dialogue, k=1, min_score=_AUTO_MATCH_THRESHOLD,
+        )
+        if not top:
+            print(f"[ig-transcribe] shortcode={video.shortcode} no candidate >= {_AUTO_MATCH_THRESHOLD}", flush=True)
+            return
+        match = top[0]
+        job = db.query(Job).filter_by(id=match["job_id"]).first()
+        if not job:
+            return
+        video.matched_job_id = job.id
+        video.matched_at = datetime.utcnow()
+        job.instagram_url = video.url
+        job.instagram_video_id = video.id
+        job.lifecycle_stage = "published"
+        if job.published_at is None:
+            job.published_at = datetime.utcnow()
+        db.commit()
+        print(f"[ig-transcribe] AUTO-MATCH shortcode={video.shortcode} -> job={job.id[:8]} score={match['score']}", flush=True)
+    except Exception as exc:
+        print(f"[ig-transcribe] auto-match error on shortcode={video.shortcode}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
+
+
 def _transcribe_audio(wav_path: str) -> str:
     segments, _info = _model().transcribe(wav_path, language=None, beam_size=1)
     return " ".join(seg.text.strip() for seg in segments).strip()
@@ -158,6 +216,11 @@ def transcribe_one(video, db: Session) -> None:
         video.transcription_status = "done"
         video.transcription_error = None
         db.commit()
+        # Auto-match: if top candidate >= 0.85, link + advance to published
+        # without operator click. Lower-confidence matches still surface in
+        # the suggestions popover for manual confirmation.
+        _maybe_auto_match(video, account, db)
+        return
     except Exception as exc:
         video.transcription_status = "failed"
         video.transcription_error = str(exc)[:500]
