@@ -64,7 +64,7 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
     pages = 0
     cursor = None
     while pages < max_pages:
-        params = {"user_id": ig_user_id, "max_amount": 50}
+        params = {"user_id": ig_user_id}
         if cursor:
             params["max_id"] = cursor
         try:
@@ -72,6 +72,20 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
         except HikerAPIError as e:
             print(f"[ig-client] user_clips_chunk page {pages} failed: {e}", flush=True)
             break
+        # One-shot raw shape dump on page 0 of first sync — tells us
+        # exactly what keys HikerAPI returns so cursor parsing matches.
+        if pages == 0:
+            try:
+                import json as _json
+                if isinstance(data, dict):
+                    shape = sorted(list(data.keys()))[:20]
+                elif isinstance(data, list):
+                    shape = ["LIST", f"len={len(data)}", f"[0]={'list' if data and isinstance(data[0], list) else type(data[0]).__name__ if data else 'empty'}", f"[1]={type(data[1]).__name__ if len(data) > 1 else 'absent'}"]
+                else:
+                    shape = [type(data).__name__]
+                print(f"[ig-client] FIRST RESPONSE SHAPE clips/chunk: {shape}", flush=True)
+            except Exception:
+                pass
         items, next_cursor = _extract_items_and_cursor(data)
         before = len(out)
         _ingest(items)
@@ -88,7 +102,7 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
     pages = 0
     cursor = None
     while pages < max_pages:
-        params = {"user_id": ig_user_id, "max_amount": 50}
+        params = {"user_id": ig_user_id}
         if cursor:
             params["max_id"] = cursor
         try:
@@ -96,6 +110,17 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
         except HikerAPIError as e:
             print(f"[ig-client] user_medias_chunk page {pages} failed: {e}", flush=True)
             break
+        if pages == 0:
+            try:
+                if isinstance(data, dict):
+                    shape = sorted(list(data.keys()))[:20]
+                elif isinstance(data, list):
+                    shape = ["LIST", f"len={len(data)}", f"[0]={'list' if data and isinstance(data[0], list) else type(data[0]).__name__ if data else 'empty'}", f"[1]={type(data[1]).__name__ if len(data) > 1 else 'absent'}"]
+                else:
+                    shape = [type(data).__name__]
+                print(f"[ig-client] FIRST RESPONSE SHAPE medias/chunk: {shape}", flush=True)
+            except Exception:
+                pass
         items, next_cursor = _extract_items_and_cursor(data)
         before = len(out)
         _ingest(items)
@@ -112,28 +137,40 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
 
 
 def _extract_items_and_cursor(data):
-    """HikerAPI chunk responses come in a few shapes. Returns (items, next_cursor)."""
+    """HikerAPI chunk responses come in several shapes. Returns (items, next_cursor)."""
     items: list = []
     cursor = None
     if isinstance(data, list):
-        # [items, cursor] form
+        # [items, cursor] form (the form HikerAPI's reference script handles).
         if len(data) > 0 and isinstance(data[0], list):
             items = data[0]
-            if len(data) > 1 and isinstance(data[1], (str, int)):
-                cursor = str(data[1]) or None
+            if len(data) > 1 and data[1]:
+                # Cursor may be str / int / dict — coerce to truthy str.
+                c = data[1]
+                cursor = str(c) if isinstance(c, (str, int)) else None
         else:
             items = data
     elif isinstance(data, dict):
-        if isinstance(data.get("items"), list):
-            items = data["items"]
-        elif isinstance(data.get("data"), list):
-            items = data["data"]
-        # Cursor candidates across HikerAPI variants.
-        for k in ("next_max_id", "next_cursor", "max_id", "next_min_id", "end_cursor"):
+        # Item array under common keys.
+        for ikey in ("items", "data", "medias", "videos", "clips"):
+            v = data.get(ikey)
+            if isinstance(v, list):
+                items = v
+                break
+        # Cursor — try every plausible key, including anything with "cursor"/"max"/"next" in the name.
+        for k in ("next_max_id", "next_cursor", "max_id", "end_cursor", "next_min_id", "next_page", "page_token", "next_page_token"):
             v = data.get(k)
             if v:
                 cursor = str(v)
                 break
+        if not cursor:
+            for k in data.keys():
+                lk = k.lower()
+                if ("cursor" in lk or "max_id" in lk or "next" in lk) and data[k]:
+                    v = data[k]
+                    if isinstance(v, (str, int)):
+                        cursor = str(v)
+                        break
     return items, cursor
 
 
