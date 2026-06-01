@@ -39,6 +39,14 @@
         body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg-primary); color: var(--text-primary); min-height: 100vh; line-height: 1.5; }
         
         .app-container { min-height: 100vh; display: flex; flex-direction: column; transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1); }
+        /* Browse mode: lock .app-container to exactly viewport height + clip.
+           Default .app-container { min-height: 100vh } lets children push it
+           taller, which makes <body> scroll (no overflow rule there) and drags
+           the top "KavenoBuilder" header + tab strip up with the kanban. With
+           height:100vh + overflow:hidden the chrome stays put and only the
+           per-column .lc-rows can scroll. */
+        html:has(.app-container.state-browse), body:has(.app-container.state-browse) { overflow: hidden; height: 100vh; }
+        .app-container.state-browse { height: 100vh !important; max-height: 100vh; min-height: 0; overflow: hidden; }
         .app-container.state-initial .main-content { display: flex; justify-content: center; align-items: flex-start; padding: 40px 24px; flex: 1; }
         .app-container.state-initial .config-panel { width: 90%; max-width: 1400px; animation: fadeInUp 0.5s ease-out; }
         .app-container.state-initial .results-panel { display: none; }
