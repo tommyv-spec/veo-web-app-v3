@@ -3697,6 +3697,19 @@ async def suggest_matches(
         .all()
     )
     full_dialogue = lambda j: _job_full_dialogue(db, j.id)
+    # TEMP DIAGNOSTIC (ig-suggest): dump the exact two strings being
+    # compared so we can see WHY suggestions land far off. Remove once
+    # the b-roll match root cause is confirmed from operator logs.
+    _t = v.transcription or ""
+    print(f"[ig-suggest] video={video_id} transcript_status={v.transcription_status} "
+          f"transcript_len={len(_t)} transcript_head={_t[:200]!r}", flush=True)
+    print(f"[ig-suggest] candidate_pool={len(candidates)} "
+          f"(awaiting_finishing + unlinked)", flush=True)
+    for _j in candidates:
+        _dlg = full_dialogue(_j)
+        _s = _ig_match.score(_t, _dlg)
+        print(f"[ig-suggest]   job={_j.id[:8]} score={_s:.4f} "
+              f"dlg_len={len(_dlg)} dlg_head={_dlg[:160]!r}", flush=True)
     # min_score=0.0: return top 5 regardless of score. UI displays the
     # percentage so operator can pick even low-confidence matches.
     # Auto-match floor (IG_AUTO_MATCH_THRESHOLD, default 0.70) stays
