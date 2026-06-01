@@ -13868,6 +13868,19 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
         page.goto(project_url, timeout=60000)
         page.wait_for_load_state("domcontentloaded", timeout=30000)
 
+        # Re-run the post-create init sequence so the existing project lands
+        # in the correct state (Agent OFF + toolbar visible). Without this,
+        # projects created in older sessions stay in Agent-ON state and the
+        # worker can't find the settings button. Best-effort.
+        if _fa_mode_enabled():
+            try:
+                m = __import__('re').search(r"/project/([0-9a-fA-F-]{36})", project_url or "")
+                if m:
+                    _redo_pid = m.group(1)
+                    _fa_init_project_best_effort(page, _redo_pid, context="REDO")
+            except Exception:
+                pass
+
         # v660 — improved access-denied detection.
         # Pre-v660: 3s sleep + ONE querySelector('h3,h2,h1') + first
         # <button> check. Two failure modes:
