@@ -81,6 +81,12 @@ def _clip_to_dict(m: dict) -> dict:
             thumb_url = candidates[0].get("url")
     if not thumb_url:
         thumb_url = m.get("thumbnail_url")
+    # Direct video URL — HikerAPI returns this so we don't need yt-dlp.
+    video_url = m.get("video_url")
+    if not video_url:
+        vv = m.get("video_versions") or []
+        if isinstance(vv, list) and vv:
+            video_url = vv[0].get("url") if isinstance(vv[0], dict) else None
     ts = m.get("taken_at") or m.get("posted_at")
     posted_at = None
     if isinstance(ts, (int, float)):
@@ -89,6 +95,7 @@ def _clip_to_dict(m: dict) -> dict:
         "shortcode": shortcode,
         "url": f"https://www.instagram.com/reel/{shortcode}/" if shortcode else None,
         "thumb_url": thumb_url,
+        "video_url": video_url,
         "caption": caption[:1000],
         "views": int(m.get("play_count") or m.get("video_view_count") or 0),
         "likes": int(m.get("like_count") or 0),

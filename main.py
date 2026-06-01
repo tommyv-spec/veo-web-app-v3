@@ -3569,12 +3569,18 @@ async def sync_instagram_account(
             existing.views = c.get("views") or 0
             existing.likes = c.get("likes") or 0
             existing.comments = c.get("comments") or 0
+            # Refresh signed URLs (they expire) so retries can re-download.
+            if c.get("video_url"):
+                existing.video_url = c.get("video_url")
+            if c.get("thumb_url"):
+                existing.thumb_url = c.get("thumb_url")
             continue
         v = InstagramVideo(
             account_id=acc.id,
             shortcode=c["shortcode"],
             url=c.get("url") or f"https://www.instagram.com/reel/{c['shortcode']}/",
             thumb_url=c.get("thumb_url"),
+            video_url=c.get("video_url"),
             caption=c.get("caption"),
             views=c.get("views") or 0,
             likes=c.get("likes") or 0,

@@ -1,14 +1,19 @@
 """Background transcription pass for pending InstagramVideo rows.
 
 Run inside the existing worker loop (`code/worker.py`). Picks pending
-videos one at a time, downloads via yt-dlp, extracts audio via ffmpeg,
-transcribes via faster-whisper (int8 CPU), writes the transcript back.
+videos one at a time, downloads the direct HikerAPI video_url via
+requests (no yt-dlp — auth-free signed URLs), extracts audio via
+ffmpeg, transcribes via faster-whisper (int8 CPU), writes back.
+
+If the stored video_url is missing or expired (HikerAPI URLs are signed
+and time-limited), re-fetches a fresh URL via HikerAPI before failing.
 """
 import os
 import subprocess
 import tempfile
 from datetime import datetime
 from typing import Optional
+import requests
 from sqlalchemy.orm import Session
 
 # Cached model instance. Loaded once per process.
@@ -41,15 +46,43 @@ def _earliest_awaiting_finishing_approval(db: Session, user_id: str) -> Optional
     return row[0] if row and row[0] else None
 
 
-def _download_and_extract_audio(reel_url: str, work_dir: str) -> Optional[str]:
-    """Returns path to a 16kHz mono WAV, or None on failure."""
+def _fetch_fresh_video_url(video, account) -> Optional[str]:
+    """Re-pull the clip from HikerAPI to get a non-expired video_url.
+    Costs 1 HikerAPI call ($0.001). Used as fallback when stored URL 403s."""
+    try:
+        from encryption import decrypt as _enc_decrypt
+        from instagram_client import fetch_recent_clips
+        api_key = _enc_decrypt(account.api_key_encrypted)
+        if not account.ig_user_id:
+            return None
+        clips = fetch_recent_clips(account.ig_user_id, api_key, limit=20)
+        for c in clips:
+            if c.get("shortcode") == video.shortcode:
+                return c.get("video_url")
+    except Exception:
+        return None
+    return None
+
+
+def _download_and_extract_audio(direct_video_url: str, work_dir: str) -> Optional[str]:
+    """Downloads the direct video URL + extracts mono 16k WAV.
+
+    direct_video_url MUST be a fully-signed HikerAPI/fbcdn URL (not the
+    /reel/ permalink — that requires auth). Returns wav path or None."""
+    if not direct_video_url:
+        return None
     mp4 = os.path.join(work_dir, "ig_video.mp4")
     try:
-        subprocess.run(
-            ["yt-dlp", "-q", "-f", "mp4/best", "-o", mp4, reel_url],
-            check=True, timeout=60,
-        )
+        with requests.get(direct_video_url, stream=True, timeout=60) as r:
+            if r.status_code != 200:
+                return None
+            with open(mp4, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 64):
+                    if chunk:
+                        f.write(chunk)
     except Exception:
+        return None
+    if not os.path.exists(mp4) or os.path.getsize(mp4) < 1024:
         return None
     wav = os.path.join(work_dir, "ig_audio.wav")
     try:
@@ -88,10 +121,19 @@ def transcribe_one(video, db: Session) -> None:
             db.commit()
             return
         with tempfile.TemporaryDirectory() as tmp:
-            wav = _download_and_extract_audio(video.url, tmp)
+            # Try stored video_url first. If missing/expired, re-fetch.
+            wav = None
+            if video.video_url:
+                wav = _download_and_extract_audio(video.video_url, tmp)
+            if not wav:
+                fresh = _fetch_fresh_video_url(video, account)
+                if fresh:
+                    video.video_url = fresh
+                    db.commit()
+                    wav = _download_and_extract_audio(fresh, tmp)
             if not wav:
                 video.transcription_status = "failed"
-                video.transcription_error = "download or audio-extract failed"
+                video.transcription_error = "no usable video_url (download failed; fresh fetch also failed)"
                 db.commit()
                 return
             text = _transcribe_audio(wav)

@@ -554,6 +554,7 @@ class InstagramVideo(Base):
     shortcode       = Column(String(32), nullable=False)
     url             = Column(String(500), nullable=False)
     thumb_url       = Column(Text, nullable=True)
+    video_url       = Column(Text, nullable=True)
     caption         = Column(Text, nullable=True)
     views           = Column(Integer, default=0)
     likes           = Column(Integer, default=0)
@@ -579,6 +580,7 @@ class InstagramVideo(Base):
             "shortcode": self.shortcode,
             "url": self.url,
             "thumb_url": self.thumb_url,
+            "video_url": self.video_url,
             "caption": self.caption,
             "views": self.views,
             "likes": self.likes,
@@ -901,6 +903,7 @@ def _run_migrations_postgresql(engine):
     # Safe to run repeatedly — no-op if already TEXT.
     alter_migrations = [
         "ALTER TABLE instagram_videos ALTER COLUMN thumb_url TYPE TEXT",
+        "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS video_url TEXT",
     ]
     with engine.connect() as conn:
         for sql in alter_migrations:
@@ -998,6 +1001,7 @@ def _run_migrations_sqlite(engine):
         ("jobs", "archived",        "ALTER TABLE jobs ADD COLUMN archived INTEGER DEFAULT 0"),
         ("jobs", "instagram_url",      "ALTER TABLE jobs ADD COLUMN instagram_url TEXT"),
         ("jobs", "instagram_video_id", "ALTER TABLE jobs ADD COLUMN instagram_video_id INTEGER"),
+        ("instagram_videos", "video_url", "ALTER TABLE instagram_videos ADD COLUMN video_url TEXT"),
     ]
 
     with engine.connect() as conn:
