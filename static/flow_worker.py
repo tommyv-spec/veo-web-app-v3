@@ -1023,6 +1023,67 @@ def _install_flow_api_capture(page):
         print(f"[flow-api-capture] failed to install: {e}", flush=True)
 
 
+# v770 — every Flow submit endpoint in the batchAsyncGenerateVideo family
+# shares the substring 'batchAsyncGenerateVideo':
+#   batchAsyncGenerateVideoStartImage        (Veo i2v, start frame)
+#   batchAsyncGenerateVideoStartAndEndImage  (Veo i2v, start+end)
+#   batchAsyncGenerateVideoReferenceImages   (Omni r2v, abra_r2v_8s)
+#   batchAsyncGenerateVideo / ...Text        (Omni / t2v, abra_t2v_8s)
+# The status-poll endpoint 'batchCheckAsyncVideoGenerationStatus' does NOT
+# contain it (different word order: AsyncVideoGeneration vs AsyncGenerateVideo),
+# so this single substring matches all submits and no status polls. Pre-v770
+# the binding filter only matched 'batchAsyncGenerateVideoStartImage', so Omni
+# jobs (ReferenceImages / Text) never bound → 100% tile-position fallback →
+# v681d dedup DROP + v738 "no URL" stuck-redo. See _SUBMIT_BIND_URL_SUBSTR.
+_SUBMIT_BIND_URL_SUBSTR = 'batchAsyncGenerateVideo'
+
+
+def _extract_media_bindings(data):
+    """v770 — pull (media_id, batch_id, workflow_name) tuples from a Flow
+    submit response, tolerant to endpoint-specific JSON shape.
+
+    Primary path: workflows[].metadata.primaryMediaId — the StartImage shape
+    the worker has always parsed; returned verbatim so StartImage jobs are
+    unchanged (no regression).
+
+    Fallback: if the primary path yields nothing, recursively find every
+    'primaryMediaId' key at any depth. Omni's ReferenceImages / Text responses
+    may nest the same field under a different parent. Only the literal
+    'primaryMediaId' key is matched, so reference-image / unrelated ids are
+    never grabbed. Returns [] if no primaryMediaId exists anywhere.
+    """
+    out = []
+    seen = set()
+    for w in (data.get('workflows') or []) if isinstance(data, dict) else []:
+        if not isinstance(w, dict):
+            continue
+        meta = w.get('metadata') or {}
+        mid = (meta.get('primaryMediaId') or '').lower() if isinstance(meta, dict) else ''
+        if mid and mid not in seen:
+            seen.add(mid)
+            out.append({'media_id': mid, 'batch_id': meta.get('batchId'),
+                        'workflow_name': w.get('name')})
+    if out:
+        return out
+    # Shape-tolerant fallback — only fires when the primary path found nothing.
+    def _walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == 'primaryMediaId' and isinstance(v, str) and v:
+                    m = v.lower()
+                    if m not in seen:
+                        seen.add(m)
+                        out.append({'media_id': m, 'batch_id': node.get('batchId'),
+                                    'workflow_name': node.get('name')})
+                else:
+                    _walk(v)
+        elif isinstance(node, list):
+            for it in node:
+                _walk(it)
+    _walk(data)
+    return out
+
+
 def _install_submit_response_listener(page, account_label=""):
     """v700 — install a one-shot Playwright `response` handler on `page`
     that captures `batchAsyncGenerateVideoStartImage` 200 responses into
@@ -1041,7 +1102,7 @@ def _install_submit_response_listener(page, account_label=""):
     def _on_response(resp):
         try:
             url = resp.url
-            if 'batchAsyncGenerateVideoStartImage' not in url:
+            if _SUBMIT_BIND_URL_SUBSTR not in url:
                 # v729 diagnostic — capture responses that LOOK like the Flow
                 # generate API but miss the strict filter. Catches endpoint
                 # renames. Logs once per page to limit noise.
@@ -1083,10 +1144,17 @@ def _install_submit_response_listener(page, account_label=""):
                 if len(buf) > 32:
                     del buf[:-32]
             # v729 diagnostic — confirm strict-match capture fired.
+            # v770 — also report endpoint tail + how many primaryMediaIds the
+            # shape-tolerant extractor pulled, so an Omni (ReferenceImages/Text)
+            # run shows binding now works (n_media>0) instead of silently
+            # falling back to tile-position attribution.
             try:
+                _ep = url.rsplit('/', 1)[-1].split('?', 1)[0]
+                _n_wf = len((data or {}).get('workflows') or [])
+                _n_media = len(_extract_media_bindings(data or {}))
                 print(
                     f"[v729-diag] strict-match response captured buf_key={buf_key} "
-                    f"workflows={len((data or {}).get('workflows') or [])}",
+                    f"endpoint={_ep} workflows={_n_wf} media_ids_extracted={_n_media}",
                     flush=True,
                 )
             except Exception:
@@ -1105,9 +1173,8 @@ def _install_submit_response_listener(page, account_label=""):
                     if _now <= pending['expires_at']:
                         _bound_now = []
                         with _PRIMARY_MEDIA_LOCK:
-                            for w in (data.get('workflows') or []):
-                                meta = (w.get('metadata') or {}) if isinstance(w, dict) else {}
-                                mid = (meta.get('primaryMediaId') or '').lower()
+                            for _b in _extract_media_bindings(data):  # v770 shape-tolerant
+                                mid = _b['media_id']
                                 if not mid:
                                     continue
                                 # Don't overwrite a fresher binding from a newer click.
@@ -1118,8 +1185,8 @@ def _install_submit_response_listener(page, account_label=""):
                                     'job_id': pending['job_id'],
                                     'clip_index': pending['clip_index'],
                                     'clip_id': pending['clip_id'],
-                                    'batch_id': meta.get('batchId'),
-                                    'workflow_id': (w.get('name') if isinstance(w, dict) else None),
+                                    'batch_id': _b['batch_id'],
+                                    'workflow_id': _b['workflow_name'],
                                     'submit_time': _now,
                                     'account': pending.get('account_label', ''),
                                 }
@@ -1273,17 +1340,16 @@ def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
                         discarded_stale += 1
                         continue
                     data = e.get('data') or {}
-                    for w in (data.get('workflows') or []):
-                        meta = (w.get('metadata') or {}) if isinstance(w, dict) else {}
-                        media_id = (meta.get('primaryMediaId') or '').lower()
+                    for _b in _extract_media_bindings(data):  # v770 shape-tolerant
+                        media_id = _b['media_id']
                         if not media_id:
                             continue
                         _PRIMARY_MEDIA_BINDINGS[media_id] = {
                             'job_id': job_id,
                             'clip_index': clip_index,
                             'clip_id': clip_id,
-                            'batch_id': meta.get('batchId'),
-                            'workflow_id': (w.get('name') if isinstance(w, dict) else None),
+                            'batch_id': _b['batch_id'],
+                            'workflow_id': _b['workflow_name'],
                             'submit_time': cap_at or time.time(),
                             'account': account_label,
                         }
