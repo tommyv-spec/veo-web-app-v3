@@ -60,55 +60,88 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
             seen.add(sc)
             out.append(_clip_to_dict(it))
 
-    # Pass A — reels-only endpoint.
+    # Pass A — v1 reels chunk (cheap, returns ~12 most recent).
+    # NOTE: HikerAPI v1 chunk endpoints do NOT actually paginate — each call
+    # returns the same first page regardless of cursor. We hit it ONCE for
+    # the recent items, then fall through to v2 (which supports proper
+    # cursor pagination) for historical reach.
+    try:
+        data = _get("/v1/user/clips/chunk", {"user_id": ig_user_id}, api_key)
+        items, _cur = _extract_items_and_cursor(data)
+        before = len(out)
+        _ingest(items)
+        added = len(out) - before
+        print(f"[ig-client] v1 clips/chunk items={len(items)} new={added}", flush=True)
+    except HikerAPIError as e:
+        print(f"[ig-client] v1 clips/chunk failed: {e}", flush=True)
+    if limit and len(out) >= limit:
+        return out[:limit]
+
+    # Pass A-2 — v2 clips with real pagination via end_cursor.
     pages = 0
     cursor = None
+    prev_cursor = None
     while pages < max_pages:
         params = {"user_id": ig_user_id}
         if cursor:
-            params["max_id"] = cursor
+            params["end_cursor"] = cursor
         try:
-            data = _get("/v1/user/clips/chunk", params, api_key)
+            data = _get("/v2/user/clips", params, api_key)
         except HikerAPIError as e:
-            print(f"[ig-client] user_clips_chunk page {pages} failed: {e}", flush=True)
+            print(f"[ig-client] v2 clips page {pages} failed: {e}", flush=True)
             break
-        # One-shot raw shape dump on page 0 of first sync — tells us
-        # exactly what keys HikerAPI returns so cursor parsing matches.
         if pages == 0:
             try:
-                import json as _json
                 if isinstance(data, dict):
                     shape = sorted(list(data.keys()))[:20]
                 elif isinstance(data, list):
                     shape = ["LIST", f"len={len(data)}", f"[0]={'list' if data and isinstance(data[0], list) else type(data[0]).__name__ if data else 'empty'}", f"[1]={type(data[1]).__name__ if len(data) > 1 else 'absent'}"]
                 else:
                     shape = [type(data).__name__]
-                print(f"[ig-client] FIRST RESPONSE SHAPE clips/chunk: {shape}", flush=True)
+                print(f"[ig-client] FIRST RESPONSE SHAPE v2 clips: {shape}", flush=True)
             except Exception:
                 pass
         items, next_cursor = _extract_items_and_cursor(data)
         before = len(out)
         _ingest(items)
         added = len(out) - before
-        print(f"[ig-client] clips/chunk page={pages} items={len(items)} new={added} cursor={'yes' if next_cursor else 'no'}", flush=True)
+        print(f"[ig-client] v2 clips page={pages} items={len(items)} new={added} cursor={'yes' if next_cursor else 'no'}", flush=True)
         pages += 1
         if limit and len(out) >= limit:
             return out[:limit]
         if not next_cursor or not items:
             break
+        if next_cursor == prev_cursor or added == 0:
+            print(f"[ig-client] v2 clips pagination stalled — stopping", flush=True)
+            break
+        prev_cursor = cursor
         cursor = next_cursor
 
-    # Pass B — general media endpoint (catches videos not surfaced as reels).
+    # Pass B-1 — v1 medias chunk (recent feed, also non-reel video posts).
+    try:
+        data = _get("/v1/user/medias/chunk", {"user_id": ig_user_id}, api_key)
+        items, _cur = _extract_items_and_cursor(data)
+        before = len(out)
+        _ingest(items)
+        added = len(out) - before
+        print(f"[ig-client] v1 medias/chunk items={len(items)} new={added}", flush=True)
+    except HikerAPIError as e:
+        print(f"[ig-client] v1 medias/chunk failed: {e}", flush=True)
+    if limit and len(out) >= limit:
+        return out[:limit]
+
+    # Pass B-2 — v2 medias with end_cursor pagination for historical reach.
     pages = 0
     cursor = None
+    prev_cursor = None
     while pages < max_pages:
         params = {"user_id": ig_user_id}
         if cursor:
-            params["max_id"] = cursor
+            params["end_cursor"] = cursor
         try:
-            data = _get("/v1/user/medias/chunk", params, api_key)
+            data = _get("/v2/user/medias", params, api_key)
         except HikerAPIError as e:
-            print(f"[ig-client] user_medias_chunk page {pages} failed: {e}", flush=True)
+            print(f"[ig-client] v2 medias page {pages} failed: {e}", flush=True)
             break
         if pages == 0:
             try:
@@ -118,19 +151,23 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
                     shape = ["LIST", f"len={len(data)}", f"[0]={'list' if data and isinstance(data[0], list) else type(data[0]).__name__ if data else 'empty'}", f"[1]={type(data[1]).__name__ if len(data) > 1 else 'absent'}"]
                 else:
                     shape = [type(data).__name__]
-                print(f"[ig-client] FIRST RESPONSE SHAPE medias/chunk: {shape}", flush=True)
+                print(f"[ig-client] FIRST RESPONSE SHAPE v2 medias: {shape}", flush=True)
             except Exception:
                 pass
         items, next_cursor = _extract_items_and_cursor(data)
         before = len(out)
         _ingest(items)
         added = len(out) - before
-        print(f"[ig-client] medias/chunk page={pages} items={len(items)} new={added} cursor={'yes' if next_cursor else 'no'}", flush=True)
+        print(f"[ig-client] v2 medias page={pages} items={len(items)} new={added} cursor={'yes' if next_cursor else 'no'}", flush=True)
         pages += 1
         if limit and len(out) >= limit:
             return out[:limit]
         if not next_cursor or not items:
             break
+        if next_cursor == prev_cursor or added == 0:
+            print(f"[ig-client] v2 medias pagination stalled — stopping", flush=True)
+            break
+        prev_cursor = cursor
         cursor = next_cursor
 
     return out
