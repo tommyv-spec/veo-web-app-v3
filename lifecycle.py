@@ -75,12 +75,23 @@ def _maybe_auto_enter_lifecycle(job, now):
     endpoint enforces that). Such jobs skip approval+export stages and land
     directly in awaiting_finishing (the first manual stage — captions/touches
     in CapCut). Jobs without has_export sit in awaiting_approval.
+
+    A job that is exported can NEVER be awaiting_export. has_export may flip
+    True AFTER a stage was already set (late export-final, or the R2
+    badge-backfill repairing pre-v776 jobs), so we must ADVANCE a job that
+    is still parked at a pre-finishing stage (null / awaiting_approval /
+    awaiting_export) — not bail out just because some stage exists. Only
+    the manual/terminal stages (awaiting_finishing, published) stick.
     """
-    if job.lifecycle_stage:
-        return
     if job.status != "completed":
         return
+    stored = job.lifecycle_stage
+    if stored in (LifecycleStage.AWAITING_FINISHING.value,
+                  LifecycleStage.PUBLISHED.value):
+        return  # manual/terminal — never auto-override
     if job.has_export:
+        # Exported => approval + export already done; advance to finishing
+        # even if the job was sitting at awaiting_approval / awaiting_export.
         job.lifecycle_stage = LifecycleStage.AWAITING_FINISHING.value
         if job.approval_at is None:
             job.approval_at = now
@@ -88,7 +99,8 @@ def _maybe_auto_enter_lifecycle(job, now):
             job.export_at = now
         if job.finishing_at is None:
             job.finishing_at = now
-    else:
+    elif stored is None:
+        # Not exported yet, no stage set — first entry is awaiting_approval.
         job.lifecycle_stage = LifecycleStage.AWAITING_APPROVAL.value
         if job.approval_at is None:
             job.approval_at = now

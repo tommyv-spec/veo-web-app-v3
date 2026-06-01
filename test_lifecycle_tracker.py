@@ -329,8 +329,11 @@ def test_auto_enter_lifecycle_with_has_export_lands_in_finishing():
     assert job.finishing_at == now
 
 
-def test_auto_enter_lifecycle_skips_when_already_set():
-    """Idempotent: do not overwrite an existing lifecycle_stage."""
+def test_auto_enter_lifecycle_advances_exported_job_from_awaiting_export():
+    """An exported job can NEVER stay at awaiting_export. has_export may flip
+    True after the stage was set (late export-final / R2 badge backfill), so
+    a job parked at a pre-finishing stage must ADVANCE to awaiting_finishing.
+    Existing timestamps are preserved; only missing ones backfill to `now`."""
     fn = _LIFECYCLE_MOD._maybe_auto_enter_lifecycle
 
     earlier = datetime(2026, 5, 20, 10, 0, 0)
@@ -345,8 +348,34 @@ def test_auto_enter_lifecycle_skips_when_already_set():
 
     fn(job, now=later)
 
-    assert job.lifecycle_stage == "awaiting_export"
-    assert job.approval_at == earlier
+    assert job.lifecycle_stage == "awaiting_finishing"
+    assert job.approval_at == earlier  # preserved
+    assert job.export_at == earlier    # preserved
+    assert job.finishing_at == later   # backfilled
+
+
+def test_auto_enter_lifecycle_terminal_stages_stick():
+    """Manual/terminal stages are never auto-overridden."""
+    fn = _LIFECYCLE_MOD._maybe_auto_enter_lifecycle
+
+    for terminal in ("awaiting_finishing", "published"):
+        job = _stub_job(lifecycle_stage=terminal)
+        job.status = "completed"
+        job.has_export = True
+        fn(job, now=datetime(2026, 5, 29, 12, 0, 0))
+        assert job.lifecycle_stage == terminal
+
+
+def test_auto_enter_lifecycle_non_exported_keeps_existing_stage():
+    """A non-exported job already in approval is left untouched (no downgrade,
+    no spurious advance)."""
+    fn = _LIFECYCLE_MOD._maybe_auto_enter_lifecycle
+
+    job = _stub_job(lifecycle_stage="awaiting_approval")
+    job.status = "completed"
+    job.has_export = False
+    fn(job, now=datetime(2026, 5, 29, 12, 0, 0))
+    assert job.lifecycle_stage == "awaiting_approval"
 
 
 def test_auto_enter_lifecycle_skips_when_not_completed():
