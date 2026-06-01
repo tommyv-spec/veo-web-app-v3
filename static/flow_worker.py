@@ -921,10 +921,10 @@ def _fa_or_dom_new_project_click(page, dom_label="New project button", context="
 
 
 def _flow_api_capture_enabled():
-    """True when the operator set FLOW_API_CAPTURE=1 (read-only traffic capture for
-    the flow_api private-API rebuild). Off by default — captures nothing, changes
-    nothing about generation."""
-    return os.environ.get("FLOW_API_CAPTURE", "").strip().lower() in ("1", "true", "yes", "on")
+    """Default ON — continuous read-only network capture (stdout + JSONL) so we
+    always know which Flow private API calls the worker hits. Kill-switch:
+    FLOW_API_CAPTURE=off (or 0/false/no)."""
+    return os.environ.get("FLOW_API_CAPTURE", "on").strip().lower() not in ("off", "0", "false", "no")
 
 
 def _flow_api_capture_path():
@@ -3911,6 +3911,59 @@ def fail_clip_general_policy(clip_id, message):
     _POLICY_SWAP_DONE.pop(clip_id, None)
 
 
+# v769 — split generation-time policy blocks into TWO kinds, treated differently:
+#   1. "prominent people" block ("...violate our policies about generating
+#      prominent people") = an IMAGE problem (a flagged face). Switching the Veo
+#      model can't fix a face, so we skip the model swap and surface the
+#      replace-image card immediately via report_policy_violation (which stamps
+#      CONTENT_POLICY_VIOLATION = image-attributable). User changes the image.
+#   2. any OTHER policy text = a PROMPT/generation problem. Unchanged behavior:
+#      swap model once, then mark GENERATION_POLICY → "change the prompt".
+# Pre-v769 both kinds landed in GENERATION_POLICY, so a prominent-people block
+# (Nuri face read as a prominent person) got "change the prompt" with NO way to
+# swap the image in the UI.
+def tile_text_is_prominent(page, data_index):
+    """Re-read a failed tile's text and report whether it carries the Flow
+    'prominent people' policy wording. Returns False on any error / missing
+    tile so callers fall back to the normal generation-policy path."""
+    if page is None or data_index is None or data_index < 0:
+        return False
+    try:
+        return bool(page.evaluate("""(idx) => {
+            const c = document.querySelector('[data-index="' + idx + '"]');
+            if (!c) return false;
+            return (c.textContent || '').toLowerCase().includes('prominent');
+        }""", data_index))
+    except Exception:
+        return False
+
+
+def route_generation_policy(clip_id, current_model, is_prominent, account_name=""):
+    """Route a generation-time Flow policy block to the right recovery UI.
+
+    is_prominent True  -> image-attributable: report_policy_violation stamps
+                          CONTENT_POLICY_VIOLATION so the frontend shows the
+                          replace-image card. NO model swap (a flagged face is
+                          not fixed by Veo<->Omni). Returns ('fail_prominent', msg).
+    is_prominent False -> delegate to policy_gen_next_action: swap model once,
+                          then GENERATION_POLICY 'change the prompt'.
+                          Returns ('retry_swap'|'fail', msg).
+    """
+    prefix = f"[{account_name}] " if account_name else ""
+    if is_prominent:
+        report_policy_violation(
+            clip_id,
+            rejected_image_key=None,
+            detail=("⚠️ Flow flagged a prominent person. Upload a different "
+                    "face image to retry (switching the model won't fix a "
+                    "flagged face)."),
+        )
+        print(f"{prefix}[policy] prominent-people block on clip {clip_id} "
+              f"→ replace-image card (no model swap)", flush=True)
+        return ('fail_prominent', 'prominent-people — replace-image card shown')
+    return policy_gen_next_action(clip_id, current_model)
+
+
 def clear_flow_site_data(page, label=""):
     """Clear the labs.google COOKIES + CACHE layers to lift the "unusual
     activity" block, while PRESERVING localStorage / sessionStorage / IndexedDB.
@@ -4849,6 +4902,9 @@ class HumanPacer:
         # generation-policy path (retry same → swap → mark GENERATION_POLICY) instead
         # of the generic hard-failure auto-redo. Reset per wait call.
         self._last_policy_killed = set()
+        # v769 — subset of _last_policy_killed whose tile text mentions
+        # "prominent people" (image problem → replace-image card, not prompt).
+        self._last_policy_prominent = set()
         delay = self._calculate_delay(clip_number, total_clips)
         is_break = self.clips_this_session >= self._next_break_at
         if is_break:
@@ -5003,17 +5059,25 @@ class HumanPacer:
                                             # is a post-generation policy block, not a Flow hiccup.
                                             # Tag it so the caller routes it to the v759 policy path.
                                             try:
-                                                _is_policy_kill = page.evaluate(f"""() => {{
+                                                # v769 — capture BOTH the generic
+                                                # policy flag AND whether it's the
+                                                # "prominent people" (image) kind.
+                                                _pk = page.evaluate(f"""() => {{
                                                     const c = document.querySelector('[data-index="{_data_idx}"]');
-                                                    if (!c) return false;
+                                                    if (!c) return {{policy:false, prominent:false}};
                                                     const t = (c.textContent || '').toLowerCase();
-                                                    return t.includes('violate') && t.includes('policies');
+                                                    return {{policy: t.includes('violate') && t.includes('policies'), prominent: t.includes('prominent')}};
                                                 }}""")
+                                                _is_policy_kill = bool(_pk and _pk.get('policy'))
+                                                _is_prom_kill = bool(_pk and _pk.get('prominent'))
                                             except Exception:
                                                 _is_policy_kill = False
+                                                _is_prom_kill = False
                                             if _is_policy_kill:
                                                 self._last_policy_killed.add(_ci)
-                                                print(f"[{self.account_name}] ⚠ clip {_ci+1} hard failure carries content-policy text ('violate...policies') — routing to policy handling", flush=True)
+                                                if _is_prom_kill:
+                                                    self._last_policy_prominent.add(_ci)
+                                                print(f"[{self.account_name}] ⚠ clip {_ci+1} hard failure carries content-policy text ('violate...policies'{', prominent-people' if _is_prom_kill else ''}) — routing to policy handling", flush=True)
                                             delayed_failures.append(_ci)
                                             _dl_checked.add(_ci)
                                     elif _fail_info == 'soft':
@@ -5263,8 +5327,12 @@ class HumanPacer:
                                         # PROMINENT_PEOPLE path handles bad images → "different
                                         # image"). So fail with a try-a-different-PROMPT message
                                         # and KEEP the image; do NOT render the replace-image card.
-                                        _pa, _pmsg = policy_gen_next_action(clip_id, getattr(page, "_veo_model", ""))
-                                        if _pa == 'fail':
+                                        _is_prom = tile_text_is_prominent(page, _pi)
+                                        _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, self.account_name)
+                                        if _pa == 'fail_prominent':
+                                            print(f"[{self.account_name}] [PolicyScan] 🖼 Clip {_fail_ci+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
+                                            clip_log(clip_id, _fail_ci, "FAILED", "prominent-people policy — replace-image card")
+                                        elif _pa == 'fail':
                                             fail_clip_general_policy(clip_id, _pmsg)
                                             print(f"[{self.account_name}] [PolicyScan] ❌ Clip {_fail_ci+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
                                             clip_log(clip_id, _fail_ci, "FAILED", "generation policy (blocked on both models)")
@@ -14192,8 +14260,12 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                         # violate our policies"), NOT an image rejection — bad images
                         # are caught at uploadImage (→ "different image"). Fail with a
                         # try-a-different-PROMPT message; keep the image.
-                        _pa, _pmsg = policy_gen_next_action(clip_id, getattr(page, "_veo_model", ""))
-                        if _pa == 'fail':
+                        # REDO runs in a fresh project — the retried tile sits at data-index 0.
+                        _is_prom = tile_text_is_prominent(page, 0)
+                        _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom)
+                        if _pa == 'fail_prominent':
+                            print(f"[REDO] 🖼 Clip {clip_index+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
+                        elif _pa == 'fail':
                             print(f"[REDO] ❌ Clip {clip_index+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
                             fail_clip_general_policy(clip_id, _pmsg)
                         else:
@@ -17268,12 +17340,17 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # project + swapped model) handles it; v764 keeps this account from
                 # re-submitting it. Only a GENUINE hard failure (no policy text)
                 # means Flow may be broken → then we abort + golden restore.
+                _prom_killed = getattr(_pacer, '_last_policy_prominent', set())
                 for _dfc in _policy_fails:
                     _df_clip = next((c for c in clips if c.get('clip_index') == _dfc), None)
                     if not _df_clip:
                         continue
-                    _pa, _pmsg = policy_gen_next_action(_df_clip['id'], getattr(page, "_veo_model", ""))
-                    if _pa == 'fail':
+                    _is_prom = _dfc in _prom_killed
+                    _pa, _pmsg = route_generation_policy(_df_clip['id'], getattr(page, "_veo_model", ""), _is_prom)
+                    if _pa == 'fail_prominent':
+                        print(f"[Flow] 🖼 clip {_dfc+1} prominent-people block — replace-image card shown (no model swap); job continues", flush=True)
+                        clip_log(_df_clip['id'], _dfc, "FAILED", "prominent-people policy — replace-image card")
+                    elif _pa == 'fail':
                         fail_clip_general_policy(_df_clip['id'], _pmsg)
                         print(f"[Flow] ❌ clip {_dfc+1} content-policy killed, both models tried — failed (general policy error); job continues", flush=True)
                         clip_log(_df_clip['id'], _dfc, "FAILED", "content policy (blocked on both models)")
@@ -17765,8 +17842,13 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                         # image already passed uploadImage (bad images are
                                         # caught there → "different image"). Fail with a
                                         # try-a-different-PROMPT message; keep the image.
-                                        _pa, _pmsg = policy_gen_next_action(clip_id, getattr(page, "_veo_model", ""))
-                                        if _pa == 'fail':
+                                        _is_prom = tile_text_is_prominent(page, _pi)
+                                        _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom)
+                                        if _pa == 'fail_prominent':
+                                            permanently_failed_clips.add(_fail_ci)
+                                            _pending_left.discard(_fail_ci)
+                                            print(f"[Flow] [PolicyScan] 🖼 Clip {_fail_ci+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
+                                        elif _pa == 'fail':
                                             fail_clip_general_policy(clip_id, _pmsg)
                                             permanently_failed_clips.add(_fail_ci)
                                             _pending_left.discard(_fail_ci)

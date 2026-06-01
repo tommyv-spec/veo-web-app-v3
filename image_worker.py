@@ -3062,7 +3062,9 @@ def interactive_mode(page):
 # ============================================================
 
 def _flow_api_capture_enabled():
-    return os.environ.get("FLOW_API_CAPTURE", "").strip().lower() in ("1", "true", "yes", "on")
+    """Default ON — continuous read-only network capture (stdout + JSONL).
+    Kill-switch: FLOW_API_CAPTURE=off (or 0/false/no)."""
+    return os.environ.get("FLOW_API_CAPTURE", "on").strip().lower() not in ("off", "0", "false", "no")
 
 
 def _flow_api_capture_path():
