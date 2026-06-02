@@ -1915,7 +1915,7 @@
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-content {
             display: grid;
             grid-template-columns: auto 1fr;
-            grid-template-rows: auto 1fr auto;
+            grid-template-rows: auto auto 1fr; /* v774 — header+text shrink to content; spare space falls BELOW the action bar so buttons sit right under the script (were shoved to card bottom by the old 1fr text row) */
             grid-template-areas:
                 "videos header"
                 "videos text"
@@ -1931,15 +1931,18 @@
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-header { grid-area: header; align-self: start; }
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-text {
             grid-area: text;
-            align-self: stretch;
+            align-self: start;
             overflow-y: auto;
             margin-top: 0 !important;
             min-height: 0;
+            max-height: 220px; /* v774 — long scripts scroll instead of pushing the button bar off-screen */
         }
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-shortcuts {
             grid-area: shortcuts;
-            align-self: end;
-            margin-top: 0 !important;
+            align-self: start; /* v774 — sit directly under the script, not pinned to the card bottom */
+            margin-top: 10px !important;
+            padding-top: 10px;
+            border-top: 1px solid var(--border);
         }
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-grid {
             grid-area: videos;
@@ -2034,6 +2037,69 @@
             height: 100%;
             width: 100%;
             object-fit: cover;
+        }
+        /* ======================================================================
+           v774 — TWIN CLARITY (operator 2026-06-02: "no clear which one is the
+           main ad and which is the voice clip" + "i don't see the buttons").
+           Two tiles looked identical after v768/v773 hid the inline labels.
+           Add an always-on overlay badge + colored outline per side so the
+           MAIN (b-roll, ships in the final video) reads green and the throwaway
+           VOICE twin (audio-only) reads indigo. Badges overlay the video so
+           they cost no tile height. Pairs with the grid-row fix above that
+           pulls the action bar back into view.
+           ====================================================================== */
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side[data-side="video"] {
+            position: relative;
+        }
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side[data-side="video"]::after {
+            content: "\25B6 MAIN \00B7 IN FINAL";
+            position: absolute;
+            top: 6px;
+            left: 6px;
+            z-index: 3;
+            background: rgba(34, 197, 94, 0.94);
+            color: #fff;
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            padding: 3px 7px;
+            border-radius: 5px;
+            white-space: nowrap;
+            pointer-events: none;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+        }
+        /* Voice badge: relocate to top-left + clearer wording (overrides the
+           v768 bottom-center "AUDIO" placement at the same selector). */
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side[data-side="voice"]::before {
+            content: "\1F399 VOICE \00B7 AUDIO ONLY";
+            top: 6px;
+            bottom: auto;
+            left: 6px;
+            right: auto;
+            transform: none;
+            z-index: 3;
+            background: rgba(99, 102, 241, 0.95);
+            color: #fff;
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            padding: 3px 7px;
+            border-radius: 5px;
+            white-space: nowrap;
+        }
+        /* Color-code the tiles so the distinction reads at a glance even before
+           the badge text registers. */
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side[data-side="video"] .clip-video {
+            outline: 2px solid rgba(34, 197, 94, 0.55);
+            outline-offset: -2px;
+            border-radius: 8px;
+        }
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side[data-side="voice"] .clip-video {
+            outline: 2px solid rgba(99, 102, 241, 0.45);
+            outline-offset: -2px;
+            border-radius: 8px;
         }
         /* ===== END v768 ROW LAYOUT ===== */
 
