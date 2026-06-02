@@ -2023,11 +2023,22 @@
            tiles) guarantees no internal letterbox either. */
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-video {
             aspect-ratio: 9 / 16;
-            height: 100%;
+            height: auto;       /* v775 — was 100%; shrink so the variant pager + per-side actions below have room (were clipped) */
             width: auto;
-            flex: 0 0 auto;
+            flex: 1 1 auto;     /* v775 — basis:auto (NOT 1 1 0, which caused the v768.1 0-collapse) so video fills leftover height without vanishing */
             min-height: 0;
             max-height: 100%;
+        }
+        /* v775 — keep the per-side variant pager (◀ 1.1/2 ▶) + approve/redo
+           bar at natural height + always visible below the (now shrunk) video.
+           This is the row the operator pages takes with. */
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .variant-nav,
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-actions {
+            flex: 0 0 auto;
+        }
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .variant-nav {
+            border-radius: 6px;
+            margin-top: 2px;
         }
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .video-container {
             height: 100%;
