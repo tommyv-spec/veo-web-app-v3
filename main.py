@@ -12902,6 +12902,13 @@ async def user_worker_get_clip_approval_status(
         "output_url": selected_video_url or clip.output_url,
         "has_video": clip.status == "completed" or bool(versions),
         "status": clip.status,
+        # v773 — surface error_code so the worker's pre-redo guard
+        # (flow_worker process_redo_clip) can SKIP clips preemptively marked
+        # CONTENT_POLICY_VIOLATION (prominent-people → awaiting user image
+        # replacement). The local-worker endpoint already returns this; the
+        # user-worker copy was missing it, so in USER MODE the guard was blind
+        # and auto-redid flagged clips (with a wrong model swap). Mirror it.
+        "error_code": clip.error_code,
     }
 
 
