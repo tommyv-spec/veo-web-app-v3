@@ -2033,7 +2033,8 @@
            bar at natural height + always visible below the (now shrunk) video.
            This is the row the operator pages takes with. */
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .variant-nav,
-        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-actions {
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-actions,
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-upload-own {
             flex: 0 0 auto;
         }
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .variant-nav {
@@ -11027,7 +11028,17 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 acts = `<div style="text-align:center;color:var(--text-muted);font-size:10px;">—</div>`;
             }
 
-            return `<div class="clip-video">${vid}</div>${variantNav}${acts}`;
+            // v776 — upload-your-own-clip control per paired side (was missing
+            // for twin clips entirely; non-paired clips have had it via
+            // uploadVideoCtl). Lets the operator drop in their own take for
+            // either the b-roll (ships in final) or the voice twin. Reuses the
+            // existing uploadClipVideo() endpoint. Per-side clip.id => unique
+            // input id, no collision with the non-paired path.
+            const uploadOwnCtl = clip.id
+                ? `<input type="file" id="uploadVideoInput_${clip.id}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clip.id}, '${jid}', this.files[0])"><button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clip.id}').click()" title="upload your own video for this ${sideLabel}">📤 my clip</button>`
+                : '';
+
+            return `<div class="clip-video">${vid}</div>${variantNav}${acts}<div class="clip-upload-own" style="margin-top:4px;text-align:center;">${uploadOwnCtl}</div>`;
         }
 
         // v700c — render a paired clip card (b-roll + audio twin side-by-side).
