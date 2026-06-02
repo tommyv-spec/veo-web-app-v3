@@ -21649,6 +21649,12 @@ def _kling_drain_loop():
 if __name__ == "__main__":
     import sys
     import argparse
+    # v772 — build banner so the operator can confirm which flow_worker build a
+    # RUNNING worker actually downloaded. The worker only re-downloads
+    # flow_worker.py on PROCESS launch (the .bat Invoke-WebRequest); a golden
+    # restore relaunches the browser, NOT the process, so it does NOT pick up a
+    # new deploy. Bump this string on any behavior-affecting worker change.
+    print("[Init] ===== flow_worker build: v772 (durable policy termination + 600s redo-stuck) =====", flush=True)
     # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
     try:
         import threading as _kthread
