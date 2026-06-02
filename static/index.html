@@ -12003,6 +12003,12 @@ Example: A realistic vertical video of a professional presenter speaking directl
             } catch(e) { console.debug('[v767] playWithAudio error', e); }
         }
         function stopWithAudio(v) {
+            // v778 — same expanded-mode guard as playWithAudio. Without it,
+            // hovering a paired voice clip in COLLAPSED mode left it muted=true
+            // on mouse-leave (playWithAudio is guarded + never unmutes there),
+            // so the native controls play with no sound. In collapsed mode the
+            // <video controls> manages its own playback; don't touch it.
+            if (!document.querySelector('.clips-grid.expanded-mode')) return;
             try { v.pause(); v.currentTime = 0; v.muted = true; } catch(_) {}
         }
         function toggleVariantsExpanded() {
