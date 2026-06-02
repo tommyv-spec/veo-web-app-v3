@@ -1956,6 +1956,7 @@
             max-width: none;
             display: flex;
             flex-direction: column;
+            align-items: center; /* v773 — center the 9:16 box; stop column-stretch widening it past the video (black-bar source) */
             gap: 4px;
             min-width: 0;
         }
@@ -2004,23 +2005,35 @@
            ratio so the box is correctly sized regardless of flex-basis
            interactions. v767's voice max-height: 260px override is
            invalidated so voice scales with the row instead of capping. */
+        /* v773 — EQUAL TIGHT TWINS (operator-approved 2026-06-02). v768.1 used
+           `aspect-ratio:auto; flex:1 1 0; width:auto` which, inside the column-
+           flex side with align-items:stretch, let .clip-video grow WIDER than
+           the 9:16 video. .clip-video carries the base `background:#000`, so the
+           centered portrait video showed big black side-bars + the over-wide
+           videos cell pushed the content panel (text + approve/redo) off the
+           right edge of the card.
+           Fix: pin an explicit 9:16 box sized by HEIGHT. height:100% is DEFINITE
+           (the v768.1 0-collapse came from height:auto + flex-basis:0, not from
+           aspect-ratio itself) so aspect-ratio:9/16 resolves width = h*9/16 — the
+           box is exactly the video, no stretch, no black bars. Both sides share
+           this rule → equal twins. object-fit:cover (matches non-paired variant
+           tiles) guarantees no internal letterbox either. */
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-video {
-            aspect-ratio: auto;
-            flex: 1 1 0;
-            min-height: 0;
+            aspect-ratio: 9 / 16;
+            height: 100%;
             width: auto;
+            flex: 0 0 auto;
+            min-height: 0;
             max-height: 100%;
         }
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .video-container {
             height: 100%;
-            width: auto;
+            width: 100%;
         }
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side video {
             height: 100%;
-            width: auto;
-            max-height: 100%;
-            max-width: 100%;
-            object-fit: contain;
+            width: 100%;
+            object-fit: cover;
         }
         /* ===== END v768 ROW LAYOUT ===== */
 
