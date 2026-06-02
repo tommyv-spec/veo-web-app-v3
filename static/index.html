@@ -11038,7 +11038,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 ? `<input type="file" id="uploadVideoInput_${clip.id}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clip.id}, '${jid}', this.files[0])"><button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clip.id}').click()" title="upload your own video for this ${sideLabel}">📤 my clip</button>`
                 : '';
 
-            return `<div class="clip-video">${vid}</div>${variantNav}${acts}<div class="clip-upload-own" style="margin-top:4px;text-align:center;">${uploadOwnCtl}</div>`;
+            // v777 — per-side copy-prompt button. Each twin side has its OWN
+            // prompt (b-roll = video prompt, voice = audio prompt); the old
+            // single header 📋 only ever copied the b-roll side. Wire each side
+            // to copyPrompt(its own clip.id).
+            const copyPromptCtl = clip.id
+                ? `<button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;" onclick="event.stopPropagation();copyPrompt(${clip.id})" title="copy the ${sideLabel} prompt">📋 ${sideLabel} prompt</button>`
+                : '';
+
+            return `<div class="clip-video">${vid}</div>${variantNav}${acts}<div class="clip-upload-own" style="margin-top:4px;display:flex;gap:6px;justify-content:center;flex-wrap:wrap;">${copyPromptCtl}${uploadOwnCtl}</div>`;
         }
 
         // v700c — render a paired clip card (b-roll + audio twin side-by-side).
@@ -11095,7 +11103,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         <span class="clip-idx">#${c.clip_index+1}</span>
                         <span class="badge badge-${pairStatusClass}">${pairStatusLabel}</span>
                         <span class="badge" style="background:rgba(99,102,241,0.18);color:#818cf8;font-size:10px;font-weight:600;padding:2px 6px;border-radius:8px;margin-left:4px;" title="this clip has a b-roll video paired with a voiceover audio twin">🎙️ paired</span>
-                        ${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}
+                        <!-- v777: header 📋 removed; each twin side now has its own copy-prompt button (b-roll prompt / voice prompt) -->
                     </div>
                     <div class="clip-paired-grid">
                         <div class="clip-paired-side" data-side="video" style="display:flex;flex-direction:column;gap:4px;">
