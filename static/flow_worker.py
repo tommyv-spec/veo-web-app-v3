@@ -1104,6 +1104,33 @@ def _extract_media_bindings(data):
     return out
 
 
+def bound_media_ids_for_clip(job_id, clip_index):
+    """v774 — every primaryMediaId bound (v700/v770) to (job_id, clip_index).
+    Lowercase (the binding stores them lowercased). Used to recover a clip from
+    its real rendered video instead of trusting the drifting DOM data-index tile
+    (which causes FALSE hard/content-policy failures on clips that succeeded)."""
+    with _PRIMARY_MEDIA_LOCK:
+        return [mid for mid, b in _PRIMARY_MEDIA_BINDINGS.items()
+                if mid and b.get('job_id') == job_id and b.get('clip_index') == clip_index]
+
+
+def captured_urls_for_clip(job_id, clip_index, captured_media_urls):
+    """v774 — resolve a clip's bound mediaIds to the getMediaUrlRedirect URLs the
+    network listener already captured (captured_media_urls: uuid -> redirect URL;
+    same uuid as primaryMediaId). Non-empty result = the clip's video ACTUALLY
+    rendered, regardless of where its tile sits in the DOM. [] if nothing
+    bound/captured. Case-insensitive (bound ids are lowercased)."""
+    if not captured_media_urls:
+        return []
+    _lc = {str(k).lower(): v for k, v in captured_media_urls.items()}
+    out = []
+    for mid in bound_media_ids_for_clip(job_id, clip_index):
+        u = _lc.get(mid)
+        if u and u not in out:
+            out.append(u)
+    return out
+
+
 def _install_submit_response_listener(page, account_label=""):
     """v700 — install a one-shot Playwright `response` handler on `page`
     that captures `batchAsyncGenerateVideoStartImage` 200 responses into
@@ -5001,7 +5028,7 @@ class HumanPacer:
                            failure_monitor=None, job_id=None,
                            clip_submit_times=None, clips=None,
                            http_dl_queue=None, temp_dir=None,
-                           already_enqueued=None):
+                           already_enqueued=None, captured_media_urls=None):
         self.clips_this_session += 1
         delayed_failures = []
         # v762 — clip_indices whose hard-failure tile carries the Flow content-policy
@@ -5160,33 +5187,49 @@ class HumanPacer:
                                             print(f"[{self.account_name}] clip {_ci+1}: a variant is still rendering after a partial fail — re-checking next cycle (not a hard failure)", flush=True)
                                             # leave un-checked so the normal URL poll picks it up
                                         else:
-                                            print(f"[{self.account_name}] ⚠ HARD FAILURE: clip {_ci+1} failed after generating (refresh button + no video after re-verify) — aborting job", flush=True)
-                                            # v762 — was this a CONTENT-POLICY kill? A tile that
-                                            # generated then died carrying "...violate our policies"
-                                            # is a post-generation policy block, not a Flow hiccup.
-                                            # Tag it so the caller routes it to the v759 policy path.
-                                            try:
-                                                # v769 — capture BOTH the generic
-                                                # policy flag AND whether it's the
-                                                # "prominent people" (image) kind.
-                                                _pk = page.evaluate(f"""() => {{
-                                                    const c = document.querySelector('[data-index="{_data_idx}"]');
-                                                    if (!c) return {{policy:false, prominent:false}};
-                                                    const t = (c.textContent || '').toLowerCase();
-                                                    return {{policy: t.includes('violate') && t.includes('policies'), prominent: t.includes('prominent')}};
-                                                }}""")
-                                                _is_policy_kill = bool(_pk and _pk.get('policy'))
-                                                _is_prom_kill = bool(_pk and _pk.get('prominent'))
-                                            except Exception:
-                                                _is_policy_kill = False
-                                                _is_prom_kill = False
-                                            if _is_policy_kill:
-                                                self._last_policy_killed.add(_ci)
-                                                if _is_prom_kill:
-                                                    self._last_policy_prominent.add(_ci)
-                                                print(f"[{self.account_name}] ⚠ clip {_ci+1} hard failure carries content-policy text ('violate...policies'{', prominent-people' if _is_prom_kill else ''}) — routing to policy handling", flush=True)
-                                            delayed_failures.append(_ci)
-                                            _dl_checked.add(_ci)
+                                            # v774 — FALSE-FAILURE guard. The re-verify above
+                                            # trusts data-index, which drifts to a sibling tile.
+                                            # Before declaring a hard/policy failure, check the
+                                            # clip's BOUND mediaId: if its video actually rendered
+                                            # (the media listener captured its getMediaUrlRedirect),
+                                            # this is NOT a failure — the re-verify just read the
+                                            # wrong tile. Recover via the real URL instead of
+                                            # marking a good clip failed (operator: clips were
+                                            # created in the UI yet marked content-policy-failed).
+                                            _v774_urls = captured_urls_for_clip(job_id, _ci, captured_media_urls)
+                                            if _v774_urls and http_dl_queue is not None:
+                                                http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                                    'clip_id': _clip_obj['id'], 'urls': _v774_urls, 'temp_dir': temp_dir})
+                                                print(f"[{self.account_name}] ✓ clip {_ci+1} recovered via bound mediaId — false hard-failure averted (data-index re-verify read the wrong tile) → HTTP worker", flush=True)
+                                                _dl_checked.add(_ci)
+                                            else:
+                                                print(f"[{self.account_name}] ⚠ HARD FAILURE: clip {_ci+1} failed after generating (refresh button + no video after re-verify) — aborting job", flush=True)
+                                                # v762 — was this a CONTENT-POLICY kill? A tile that
+                                                # generated then died carrying "...violate our policies"
+                                                # is a post-generation policy block, not a Flow hiccup.
+                                                # Tag it so the caller routes it to the v759 policy path.
+                                                try:
+                                                    # v769 — capture BOTH the generic
+                                                    # policy flag AND whether it's the
+                                                    # "prominent people" (image) kind.
+                                                    _pk = page.evaluate(f"""() => {{
+                                                        const c = document.querySelector('[data-index="{_data_idx}"]');
+                                                        if (!c) return {{policy:false, prominent:false}};
+                                                        const t = (c.textContent || '').toLowerCase();
+                                                        return {{policy: t.includes('violate') && t.includes('policies'), prominent: t.includes('prominent')}};
+                                                    }}""")
+                                                    _is_policy_kill = bool(_pk and _pk.get('policy'))
+                                                    _is_prom_kill = bool(_pk and _pk.get('prominent'))
+                                                except Exception:
+                                                    _is_policy_kill = False
+                                                    _is_prom_kill = False
+                                                if _is_policy_kill:
+                                                    self._last_policy_killed.add(_ci)
+                                                    if _is_prom_kill:
+                                                        self._last_policy_prominent.add(_ci)
+                                                    print(f"[{self.account_name}] ⚠ clip {_ci+1} hard failure carries content-policy text ('violate...policies'{', prominent-people' if _is_prom_kill else ''}) — routing to policy handling", flush=True)
+                                                delayed_failures.append(_ci)
+                                                _dl_checked.add(_ci)
                                     elif _fail_info == 'soft':
                                         # Transient failure — retry in-place via Reuse Prompt.
                                         # v663: data-index lookup (was: dialogue match).
@@ -17447,6 +17490,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 clip_submit_times=clip_submit_times, clips=clips,
                 http_dl_queue=http_dl_queue, temp_dir=temp_dir, job_id=job_id,
                 already_enqueued=http_enqueued_clips,
+                captured_media_urls=captured_media_urls,  # v774 false-failure guard
             )
             # Hard failure detected (e.g. clip reached 99% then Flow killed it)
             # Abort job — submitting more clips to a broken Flow is pointless
@@ -21670,7 +21714,7 @@ if __name__ == "__main__":
     # flow_worker.py on PROCESS launch (the .bat Invoke-WebRequest); a golden
     # restore relaunches the browser, NOT the process, so it does NOT pick up a
     # new deploy. Bump this string on any behavior-affecting worker change.
-    print("[Init] ===== flow_worker build: v772 (durable policy termination + 600s redo-stuck) =====", flush=True)
+    print("[Init] ===== flow_worker build: v774 (bound-mediaId false-failure guard + durable policy) =====", flush=True)
     # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
     try:
         import threading as _kthread
