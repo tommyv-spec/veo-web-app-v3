@@ -5971,8 +5971,16 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                     "Veo 3.1 - Fast": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Fast'))"],
                     "Veo 3.1 - Quality": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Quality'))",
                                           "[role='menuitem']:has-text('Quality')"],
+                    # v781: Flow dropped "[Lower Priority]" on some account tiers
+                    # (Ultra). Others (Tier1.5) still show both "Veo 3.1 - Lite"
+                    # AND "Veo 3.1 - Lite [Lower Priority]". When target is the
+                    # bracket variant: prefer bracket selector, fall back to
+                    # plain "Veo 3.1 - Lite" if bracket option not present. Plain
+                    # "Veo 3.1 - Lite" target stays exact-match (no fallback to
+                    # bracket — operator intent preserved when bracket exists).
                     "Veo 3.1 - Lite [Lower Priority]": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Lite [Lower Priority]'))",
-                                                        "[role='menuitem']:has-text('Lower Priority')"],
+                                                        "[role='menuitem']:has-text('Lower Priority')",
+                                                        "[role='menuitem']:has(span:text-is('Veo 3.1 - Lite'))"],
                 }
                 # Scope to the open settings dropdown when present; match by model text.
                 dropdown_scope = "[role='menu'][data-state='open'] "
@@ -5992,7 +6000,9 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                 elif target == "Veo 3.1 - Fast":
                     already = "fast" in model_text and "lower priority" not in model_text
                 elif target == "Veo 3.1 - Lite [Lower Priority]":
-                    already = "lite" in model_text and "lower priority" in model_text
+                    # v781: accept either bracket variant OR plain Lite as
+                    # satisfying this target (account may not expose bracket).
+                    already = "lite" in model_text
                 elif target == "Veo 3.1 - Quality":
                     already = "quality" in model_text
                 elif target == "Omni Flash":
@@ -7359,8 +7369,11 @@ def ensure_lower_priority_model(page, label=""):
         "Veo 3.1 - Fast": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Fast'))"],
         "Veo 3.1 - Quality": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Quality'))",
                               "[role='menuitem']:has-text('Quality')"],
+        # v781: bracket variant may be absent on some account tiers (Ultra) —
+        # fall back to plain "Veo 3.1 - Lite" when bracket option not present.
         "Veo 3.1 - Lite [Lower Priority]": ["[role='menuitem']:has(span:text-is('Veo 3.1 - Lite [Lower Priority]'))",
-                                            "[role='menuitem']:has-text('Lower Priority')"],
+                                            "[role='menuitem']:has-text('Lower Priority')",
+                                            "[role='menuitem']:has(span:text-is('Veo 3.1 - Lite'))"],
     }
 
     try:
@@ -7385,7 +7398,9 @@ def ensure_lower_priority_model(page, label=""):
         elif target == "Veo 3.1 - Fast":
             already = "fast" in model_text and "lower priority" not in model_text
         elif target == "Veo 3.1 - Lite [Lower Priority]":
-            already = "lite" in model_text and "lower priority" in model_text
+            # v781: accept either bracket variant OR plain Lite as satisfying
+            # this target (account may not expose bracket).
+            already = "lite" in model_text
         elif target == "Veo 3.1 - Quality":
             already = "quality" in model_text
         elif target == "Omni Flash":
