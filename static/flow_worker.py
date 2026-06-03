@@ -12647,6 +12647,20 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
                 frames_busy_flag.clear()
         
         if not upload_ok:
+            if rejected_which in ('start_glitch', 'end_glitch'):
+                # v775 — frame ATTACH glitch (gallery-select failed; the image
+                # itself uploaded 200/policy-OK). NOT a policy reject. Do NOT
+                # blacklist + substitute a different image — that renders the WRONG
+                # frame (operator: clip 7 b-roll used image_00 instead of its
+                # intended frame). Redo the clip so it retries the SAME image in a
+                # fresh project (cleaner gallery), never a substitute.
+                print(f"{context}[Flow] ⚠ clip {clip_index+1} frame attach glitched ({rejected_which}, not policy) — redoing with SAME image (no substitute)", flush=True)
+                try:
+                    update_clip_status(clip['id'], 'flow_redo_queued', error_message="Frame attach glitch — retrying same image (no substitution)")
+                except Exception:
+                    pass
+                permanently_failed_clips.add(clip_index)
+                return (False, start_frame, end_frame, start_frame_key, end_frame_key)
             if rejected_which == 'extra':
                 # One of the batch-uploaded images was rejected by Flow policy.
                 # We can't determine which one, so fail the job with a clear message.
@@ -12742,6 +12756,16 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
             if frames_busy_flag is not None:
                 frames_busy_flag.clear()
         if not upload_ok:
+            if rejected_which in ('start_glitch', 'end_glitch'):
+                # v775 — see other caller: attach glitch, not policy. Redo the
+                # clip with the SAME image; never blacklist + substitute.
+                print(f"{context}[Flow] ⚠ clip {clip_index+1} frame attach glitched ({rejected_which}, not policy) — redoing with SAME image (no substitute)", flush=True)
+                try:
+                    update_clip_status(clip['id'], 'flow_redo_queued', error_message="Frame attach glitch — retrying same image (no substitution)")
+                except Exception:
+                    pass
+                permanently_failed_clips.add(clip_index)
+                return (False, start_frame, end_frame, start_frame_key, end_frame_key)
             if rejected_which == 'extra':
                 print(f"{context}[Flow] ❌ Image rejected by Flow policy during batch upload — failing job", flush=True)
                 update_job_status(job_id, 'failed', '⚠️ One of your images was rejected by Flow content policy. Please remove or replace the flagged image and try again.')
@@ -13149,13 +13173,13 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
                                            btn_getter=lambda: page.locator(frame_selector).first)
                 if result == 'rejected': return (False, 'start')
                 if result == 'extra_rejected': return (False, 'extra')
-                if result == 'failed':   return (False, 'start')
+                if result == 'failed':   return (False, 'start_glitch')
         else:
             result = _upload_one_frame("START", start_image, _start_hash, _start_basename,
                                        btn_getter=lambda: page.locator(frame_selector).first)
             if result == 'rejected': return (False, 'start')
             if result == 'extra_rejected': return (False, 'extra')
-            if result == 'failed':   return (False, 'start')
+            if result == 'failed':   return (False, 'start_glitch')
 
         time.sleep(random.uniform(1.0, 2.5))
         human_look_around(page)
@@ -13215,12 +13239,12 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
                 result = _upload_one_frame("END", end_image, _end_hash, _end_basename,
                                            btn_getter=lambda: page.locator(frame_selector).first)
                 if result == 'rejected': return (False, 'end')
-                if result == 'failed':   return (False, 'end')
+                if result == 'failed':   return (False, 'end_glitch')
         else:
             result = _upload_one_frame("END", end_image, _end_hash, _end_basename,
                                        btn_getter=lambda: page.locator(frame_selector).first)
             if result == 'rejected': return (False, 'end')
-            if result == 'failed':   return (False, 'end')
+            if result == 'failed':   return (False, 'end_glitch')
 
         time.sleep(random.uniform(0.5, 1.5))
         # Cache by R2 key for precise lookup
@@ -21801,7 +21825,7 @@ if __name__ == "__main__":
     # flow_worker.py on PROCESS launch (the .bat Invoke-WebRequest); a golden
     # restore relaunches the browser, NOT the process, so it does NOT pick up a
     # new deploy. Bump this string on any behavior-affecting worker change.
-    print("[Init] ===== flow_worker build: v774c (bound-mediaId guard: between-clip + ghost + post-job + PolicyScan) =====", flush=True)
+    print("[Init] ===== flow_worker build: v775 (frame-attach glitch redoes same image, never substitutes) =====", flush=True)
     # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
     try:
         import threading as _kthread
