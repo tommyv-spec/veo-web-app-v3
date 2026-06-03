@@ -15486,6 +15486,11 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
             except Exception as _ge:
                 print(f"[{account_name}] ⚠ Ghost check error for clip {clip_index+1}: {_ge}", flush=True)
 
+        if _is_ghost and bound_media_ids_for_clip(job_id, clip_index):
+            # v774b — see parallel-mode note: bound mediaId means the submit
+            # landed; the tile just drifted off data-index=0. Not a real ghost.
+            print(f"[{account_name}] clip {clip_index+1} flagged ghost but has a bound mediaId — submit landed; NOT redoing, leaving for post-job (v774b)", flush=True)
+            _is_ghost = False
         if _is_ghost:
             print(f"[{account_name}] Ghost clip {clip_index+1} — queuing for redo resubmission", flush=True)
             update_clip_status(clip['id'], 'flow_redo_queued', error_message="Ghost submission — Generate click had no effect")
@@ -17219,6 +17224,14 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             except Exception as _ge:
                 print(f"[Flow] ⚠ Ghost check error for clip {clip_index+1}: {_ge}", flush=True)
         
+        if _is_ghost and bound_media_ids_for_clip(job_id, clip_index):
+            # v774b — flagged ghost (no tile at data-index=0) BUT the submit
+            # response bound a primaryMediaId → the submit LANDED; the tile just
+            # drifted off data-index=0. NOT a real ghost (a true ghost = Generate
+            # had no effect = no bound mediaId). Don't redo — leave it tracked so
+            # the post-job poll/download recovers the real render via its mediaId.
+            print(f"[Flow] clip {clip_index+1} flagged ghost but has a bound mediaId — submit landed (tile drifted off data-index=0); NOT redoing, leaving for post-job (v774b)", flush=True)
+            _is_ghost = False
         if _is_ghost:
             # Submission silently failed — queue for immediate redo pickup
             print(f"[Flow] Ghost clip {clip_index+1} — queuing for redo resubmission", flush=True)
@@ -18101,11 +18114,26 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                 print(f"[Flow] ✓ Post-job: clip {_ci+1} → HTTP worker ({_elapsed}s)", flush=True)
 
                             elif _tile_fail_type == 'hard':
-                                # Flow killed this clip — don't retry, queue for redo immediately
-                                print(f"[Flow] ⚠ Post-job: clip {_ci+1} HARD FAILURE (refresh button) — queuing for redo", flush=True)
-                                update_clip_status(_clip_obj['id'], 'flow_redo_queued',
-                                    error_message="Flow delayed failure — clip generated then killed by Flow")
-                                _pending_left.discard(_ci)
+                                # v774b — before trusting the data-index 'hard'
+                                # verdict, check the clip's BOUND mediaId: if its
+                                # video actually rendered (captured), this is a
+                                # FALSE failure (the tile check read the wrong
+                                # tile) → recover instead of redoing. A genuinely
+                                # killed/policy clip has NO captured video → falls
+                                # through to the redo below (unchanged).
+                                _v774b = captured_urls_for_clip(job_id, _ci, captured_media_urls)
+                                if _v774b and http_dl_queue is not None:
+                                    http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                        'clip_id': _clip_obj['id'], 'urls': _v774b, 'temp_dir': temp_dir})
+                                    http_enqueued_clips.add(_ci)
+                                    _pending_left.discard(_ci)
+                                    print(f"[Flow] ✓ Post-job: clip {_ci+1} recovered via bound mediaId — false hard-failure averted → HTTP worker (v774b)", flush=True)
+                                else:
+                                    # Flow killed this clip — don't retry, queue for redo immediately
+                                    print(f"[Flow] ⚠ Post-job: clip {_ci+1} HARD FAILURE (refresh button) — queuing for redo", flush=True)
+                                    update_clip_status(_clip_obj['id'], 'flow_redo_queued',
+                                        error_message="Flow delayed failure — clip generated then killed by Flow")
+                                    _pending_left.discard(_ci)
 
                             elif _tile_fail_type == 'soft':
                                 print(f"[Flow] ⚠ Post-job: clip {_ci+1} tile failed — retrying in-place...", flush=True)
@@ -21735,7 +21763,7 @@ if __name__ == "__main__":
     # flow_worker.py on PROCESS launch (the .bat Invoke-WebRequest); a golden
     # restore relaunches the browser, NOT the process, so it does NOT pick up a
     # new deploy. Bump this string on any behavior-affecting worker change.
-    print("[Init] ===== flow_worker build: v774 (bound-mediaId false-failure guard + durable policy) =====", flush=True)
+    print("[Init] ===== flow_worker build: v774b (bound-mediaId guard: between-clip + ghost + post-job) =====", flush=True)
     # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
     try:
         import threading as _kthread
