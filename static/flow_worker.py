@@ -13316,16 +13316,19 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                             it.scroll_into_view_if_needed(timeout=2000)
                             time.sleep(0.3)
                             human_click_element(page, it, f"[Gallery] first '{_alt}'")
-                            if _omni:
-                                # 1st click selects, 2nd adds it — but only if the
-                                # thumbnail is still there (1st click often adds it
-                                # + closes the dialog). Quick check, no 10s wait.
-                                time.sleep(0.4)
-                                try:
-                                    if it.is_visible(timeout=1500):
-                                        human_click_element(page, it, f"[Gallery] first '{_alt}' (2nd → into prompt)")
-                                except Exception:
-                                    pass
+                            # v781 (2026-06-03): new Flow UI requires 2 clicks
+                            # for Frames-tab too (1st = select in gallery, 2nd =
+                            # commit to prompt mediaId). Old code gated this on
+                            # _omni — Frames clips never got the commit click →
+                            # mediaId never bound → submission body missing
+                            # startImage. is_visible check short-circuits if 1
+                            # click already closed dialog (old behavior).
+                            time.sleep(0.4)
+                            try:
+                                if it.is_visible(timeout=1500):
+                                    human_click_element(page, it, f"[Gallery] first '{_alt}' (2nd → into prompt)")
+                            except Exception:
+                                pass
                             print(f"[Gallery] ✓ Clicked first gallery item '{_alt}' (blind reuse after restore)", flush=True)
                             clicked = True
                             break
@@ -13383,18 +13386,21 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                                 continue
                             human_click_element(page, it, f"[Gallery] {filename} #{j+1}")
                             print(f"[Gallery] clicked '{filename}' instance {j+1}/{n} (sel={sel}{label})", flush=True)
-                            if _omni:
-                                # Ingredients: a 2nd click adds the selected image
-                                # to the prompt — but the 1st click often adds it
-                                # directly and closes the dialog. Only click again
-                                # if the thumbnail is STILL there; if it vanished it
-                                # was already added. Quick check, no 10s wait.
-                                time.sleep(0.4)
-                                try:
-                                    if it.is_visible(timeout=1500):
-                                        human_click_element(page, it, f"[Gallery] {filename} #{j+1} (2nd → into prompt)")
-                                except Exception:
-                                    pass
+                            # v781 (2026-06-03): new Flow UI requires 2 clicks
+                            # for Frames-tab too (1st = select, 2nd = commit to
+                            # prompt mediaId). Old code gated this on _omni —
+                            # Frames clips never committed → mediaId unbound →
+                            # body missing startImage/referenceImages. Bug
+                            # masked because gallery-fallback worker still saw
+                            # frame button count drop (false-positive bind).
+                            # is_visible check protects old Omni path: if 1
+                            # click already closed dialog, no 2nd click.
+                            time.sleep(0.4)
+                            try:
+                                if it.is_visible(timeout=1500):
+                                    human_click_element(page, it, f"[Gallery] {filename} #{j+1} (2nd → into prompt)")
+                            except Exception:
+                                pass
                         except Exception:
                             continue
                         if _confirm_bind():
