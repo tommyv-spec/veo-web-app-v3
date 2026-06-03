@@ -3263,7 +3263,23 @@ async def get_job(
 ):
     """Get job details"""
     job = get_user_job(db, job_id, current_user)
-    return _build_job_response(job, approved_clips=_count_approved_clips(db, job_id))
+    resp = _build_job_response(job, approved_clips=_count_approved_clips(db, job_id))
+    # v780 — surface the source image batch (if this video job was promoted from
+    # an image job) so the UI can offer a "go to image job" button. Single-job
+    # GET only — kept out of the shared serializer to avoid an N+1 in list_jobs.
+    try:
+        from image_platform import ImageJobBatch
+        _b = (
+            db.query(ImageJobBatch.id)
+            .filter(ImageJobBatch.promoted_video_job_id == job_id)
+            .first()
+        )
+        if _b:
+            resp.source_image_batch_id = _b[0]
+            print(f"[v780] job {job_id[:8]} promoted from image batch {str(_b[0])[:8]} (Image-job button shown)", flush=True)
+    except Exception as _e:
+        print(f"[v780] source_image_batch_id lookup skipped (non-fatal): {_e}", flush=True)
+    return resp
 
 
 @app.get("/api/jobs/{job_id}/config")

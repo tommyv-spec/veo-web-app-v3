@@ -35,3 +35,7 @@ class JobResponse(BaseModel):
     approved_clips: int = 0
     instagram_url: Optional[str] = None
     published_via: Optional[str] = None
+    # v780 — set on single-job GET only: the ImageJobBatch this video job was
+    # promoted from (ImageJobBatch.promoted_video_job_id == job.id), so the UI
+    # can offer a "go to image job" button. None for jobs not from an image job.
+    source_image_batch_id: Optional[str] = None
