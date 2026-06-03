@@ -12654,7 +12654,20 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
                 # frame (operator: clip 7 b-roll used image_00 instead of its
                 # intended frame). Redo the clip so it retries the SAME image in a
                 # fresh project (cleaner gallery), never a substitute.
-                print(f"{context}[Flow] ⚠ clip {clip_index+1} frame attach glitched ({rejected_which}, not policy) — redoing with SAME image (no substitute)", flush=True)
+                # v775.1 — cap the glitch-redo loop (reuse the auto-redo counter)
+                # so a persistently-glitching attach can't churn until the 30-min
+                # zombie timeout. Fresh-project redo usually clears it; cap is the
+                # backstop.
+                _gc = register_auto_redo_cycle(clip['id'])
+                if auto_redo_exhausted(_gc):
+                    print(f"{context}[Flow] ⛔ clip {clip_index+1} frame attach glitched {_gc}x — marking failed (cap {MAX_AUTO_REDO_CYCLES}), not re-queuing", flush=True)
+                    try:
+                        update_clip_status(clip['id'], 'failed', error_message="Frame kept failing to attach (gallery glitch) after retries — click Retry to try again.")
+                    except Exception:
+                        pass
+                    permanently_failed_clips.add(clip_index)
+                    return (False, start_frame, end_frame, start_frame_key, end_frame_key)
+                print(f"{context}[Flow] ⚠ clip {clip_index+1} frame attach glitched ({rejected_which}, not policy) — redoing with SAME image (no substitute) [{_gc}/{MAX_AUTO_REDO_CYCLES}]", flush=True)
                 try:
                     update_clip_status(clip['id'], 'flow_redo_queued', error_message="Frame attach glitch — retrying same image (no substitution)")
                 except Exception:
@@ -12759,7 +12772,17 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
             if rejected_which in ('start_glitch', 'end_glitch'):
                 # v775 — see other caller: attach glitch, not policy. Redo the
                 # clip with the SAME image; never blacklist + substitute.
-                print(f"{context}[Flow] ⚠ clip {clip_index+1} frame attach glitched ({rejected_which}, not policy) — redoing with SAME image (no substitute)", flush=True)
+                # v775.1 — capped (auto-redo counter) so it can't churn forever.
+                _gc = register_auto_redo_cycle(clip['id'])
+                if auto_redo_exhausted(_gc):
+                    print(f"{context}[Flow] ⛔ clip {clip_index+1} frame attach glitched {_gc}x — marking failed (cap {MAX_AUTO_REDO_CYCLES}), not re-queuing", flush=True)
+                    try:
+                        update_clip_status(clip['id'], 'failed', error_message="Frame kept failing to attach (gallery glitch) after retries — click Retry to try again.")
+                    except Exception:
+                        pass
+                    permanently_failed_clips.add(clip_index)
+                    return (False, start_frame, end_frame, start_frame_key, end_frame_key)
+                print(f"{context}[Flow] ⚠ clip {clip_index+1} frame attach glitched ({rejected_which}, not policy) — redoing with SAME image (no substitute) [{_gc}/{MAX_AUTO_REDO_CYCLES}]", flush=True)
                 try:
                     update_clip_status(clip['id'], 'flow_redo_queued', error_message="Frame attach glitch — retrying same image (no substitution)")
                 except Exception:
@@ -21825,7 +21848,7 @@ if __name__ == "__main__":
     # flow_worker.py on PROCESS launch (the .bat Invoke-WebRequest); a golden
     # restore relaunches the browser, NOT the process, so it does NOT pick up a
     # new deploy. Bump this string on any behavior-affecting worker change.
-    print("[Init] ===== flow_worker build: v775 (frame-attach glitch redoes same image, never substitutes) =====", flush=True)
+    print("[Init] ===== flow_worker build: v775.1 (frame-attach glitch redoes same image, capped) =====", flush=True)
     # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
     try:
         import threading as _kthread
