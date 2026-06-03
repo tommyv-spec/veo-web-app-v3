@@ -10836,11 +10836,28 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
             else if(canReview&&clipId)acts=`<div class="clip-actions"><button class="btn btn-approve" onclick="approve(${clipId})">✓</button><button class="btn btn-reject" onclick="confirmDelete(${clipId},${c.clip_index})">🗑</button><button class="btn btn-redo" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})" ${c.attempts_remaining<=0?'disabled':''}>↻${c.attempts_remaining}</button></div>`;
             // Frame info display
+            // v779 — show the actual start (and end, if any) frame image as a
+            // thumbnail + download button, right above the prompt/dialogue. Was
+            // just a truncated R2-key string ("jobs/57410fb...") which was
+            // useless. start_frame is an R2 key (jobs/<jid>/frames/image_NN.png);
+            // serve via /api/jobs/{jid}/images/{basename} (same path the policy-
+            // reject preview uses).
             let frameInfo='';
             if(c.start_frame){
-                const startName=c.start_frame.length>15?c.start_frame.substring(0,12)+'...':c.start_frame;
-                const endName=c.end_frame?(c.end_frame.length>15?c.end_frame.substring(0,12)+'...':c.end_frame):'';
-                frameInfo=`<div class="clip-frames" title="Start: ${c.start_frame}${c.end_frame?' → End: '+c.end_frame:''}"><span class="frame-icon">🖼</span><span class="frame-names">${startName}${endName?' → '+endName:''}</span></div>`;
+                const _frameThumb=(key,label)=>{
+                    const bn=(key||'').split('/').pop();
+                    if(!bn) return '';
+                    const url=`${API}/jobs/${jid}/images/${encodeURIComponent(bn)}`;
+                    return `<div style="display:flex;flex-direction:column;align-items:center;gap:3px;">`
+                        + `<a href="${url}" target="_blank" title="open ${label} frame full size"><img src="${url}" alt="${label} frame" loading="lazy" style="width:54px;height:54px;object-fit:cover;border-radius:6px;border:1px solid var(--border-color);cursor:pointer" onerror="this.style.display='none'"></a>`
+                        + `<button class="btn btn-secondary btn-sm" style="padding:1px 6px;font-size:9px;" onclick="event.stopPropagation();downloadClip('${url}','clip_${c.clip_index+1}_${label}.png')" title="download ${label} frame">📥 ${label}</button>`
+                        + `</div>`;
+                };
+                const _start=_frameThumb(c.start_frame,'start');
+                const _end=c.end_frame?_frameThumb(c.end_frame,'end'):'';
+                if(_start||_end){
+                    frameInfo=`<div class="clip-frames" style="display:flex;gap:10px;justify-content:center;align-items:flex-start;margin:6px 0;">${_start}${_end}</div>`;
+                }
             }
             // DUAL VIEW: render both collapsed and expanded views, CSS toggles visibility
             let expandedVid = '';
