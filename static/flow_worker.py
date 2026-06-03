@@ -5974,6 +5974,14 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                             continue
                     if not sel_found:
                         print(f"{prefix}⚠ Model option not found for '{target}'", flush=True)
+                        try:
+                            visible = page.evaluate("""() => {
+                                const items = document.querySelectorAll('[role=\"menuitem\"]');
+                                return Array.from(items).map(el => (el.innerText || '').trim()).filter(Boolean);
+                            }""")
+                            print(f"{prefix}[model-dump] visible menuitems: {visible}", flush=True)
+                        except Exception as _diag_e:
+                            print(f"{prefix}[model-dump] failed: {_diag_e}", flush=True)
                         page.keyboard.press("Escape")
                         time.sleep(0.3)
                     else:
@@ -7363,6 +7371,14 @@ def ensure_lower_priority_model(page, label=""):
                 continue
         if not selected:
             print(f"{prefix}⚠ Could not find model option for '{target}'", flush=True)
+            try:
+                visible = page.evaluate("""() => {
+                    const items = document.querySelectorAll('[role=\"menuitem\"]');
+                    return Array.from(items).map(el => (el.innerText || '').trim()).filter(Boolean);
+                }""")
+                print(f"{prefix}[model-dump] visible menuitems: {visible}", flush=True)
+            except Exception as _diag_e:
+                print(f"{prefix}[model-dump] failed: {_diag_e}", flush=True)
 
         # Close dropdown
         try:
