@@ -18074,6 +18074,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                             http_enqueued_clips.add(_fail_ci)
                                             _pending_left.discard(_fail_ci)
                                             print(f"[Flow] [PolicyScan] ✓ Clip {_fail_ci+1} recovered via bound mediaId — false policy-block averted → HTTP worker (v774c)", flush=True)
+                                            clip_log(clip_id, _fail_ci, "COMPLETED", "recovered via mediaId (false policy)")
                                         else:
                                             # v758.16: a persistent "violate our policies"
                                             # generation failure is a PROMPT policy block — the
