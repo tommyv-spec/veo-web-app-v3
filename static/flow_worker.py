@@ -5471,25 +5471,38 @@ class HumanPacer:
                                 if _clip_obj:
                                     clip_id = _clip_obj.get('id')
                                     if clip_id:
-                                        # v758.14: "This generation might violate our policies"
-                                        # is a PROMPT/generation policy block, NOT an image
-                                        # rejection — the image is fine (the uploadImage
-                                        # PROMINENT_PEOPLE path handles bad images → "different
-                                        # image"). So fail with a try-a-different-PROMPT message
-                                        # and KEEP the image; do NOT render the replace-image card.
-                                        _is_prom = tile_text_is_prominent(page, _pi)
-                                        _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, self.account_name, generation_attempt=_clip_obj.get('generation_attempt', 1))
-                                        if _pa == 'fail_prominent':
-                                            print(f"[{self.account_name}] [PolicyScan] 🖼 Clip {_fail_ci+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
-                                            clip_log(clip_id, _fail_ci, "FAILED", "prominent-people policy — replace-image card")
-                                        elif _pa == 'fail':
-                                            fail_clip_general_policy(clip_id, _pmsg)
-                                            print(f"[{self.account_name}] [PolicyScan] ❌ Clip {_fail_ci+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
-                                            clip_log(clip_id, _fail_ci, "FAILED", "generation policy (blocked on both models)")
+                                        # v774c — false-policy guard: if the clip's video
+                                        # actually rendered (captured), the PolicyScan tile read
+                                        # was a data-index misread of a sibling's policy tile.
+                                        # Recover instead of policy-failing. A genuine policy
+                                        # block never renders a video → no captured URL → falls
+                                        # through to the policy routing below (unchanged).
+                                        _v774c = captured_urls_for_clip(job_id, _fail_ci, captured_media_urls)
+                                        if _v774c and http_dl_queue is not None:
+                                            http_dl_queue.put({'job_id': job_id, 'clip_index': _fail_ci,
+                                                'clip_id': clip_id, 'urls': _v774c, 'temp_dir': temp_dir})
+                                            print(f"[{self.account_name}] [PolicyScan] ✓ Clip {_fail_ci+1} recovered via bound mediaId — false policy-block averted → HTTP worker (v774c)", flush=True)
+                                            clip_log(clip_id, _fail_ci, "COMPLETED", "recovered via mediaId (false policy)")
                                         else:
-                                            update_clip_status(clip_id, 'flow_redo_queued', error_message=_pmsg)
-                                            print(f"[{self.account_name}] [PolicyScan] 🔀 Clip {_fail_ci+1} policy-blocked — {_pa} + requeuing redo", flush=True)
-                                            clip_log(clip_id, _fail_ci, "REDO", f"generation policy, {_pa}")
+                                            # v758.14: "This generation might violate our policies"
+                                            # is a PROMPT/generation policy block, NOT an image
+                                            # rejection — the image is fine (the uploadImage
+                                            # PROMINENT_PEOPLE path handles bad images → "different
+                                            # image"). So fail with a try-a-different-PROMPT message
+                                            # and KEEP the image; do NOT render the replace-image card.
+                                            _is_prom = tile_text_is_prominent(page, _pi)
+                                            _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, self.account_name, generation_attempt=_clip_obj.get('generation_attempt', 1))
+                                            if _pa == 'fail_prominent':
+                                                print(f"[{self.account_name}] [PolicyScan] 🖼 Clip {_fail_ci+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
+                                                clip_log(clip_id, _fail_ci, "FAILED", "prominent-people policy — replace-image card")
+                                            elif _pa == 'fail':
+                                                fail_clip_general_policy(clip_id, _pmsg)
+                                                print(f"[{self.account_name}] [PolicyScan] ❌ Clip {_fail_ci+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
+                                                clip_log(clip_id, _fail_ci, "FAILED", "generation policy (blocked on both models)")
+                                            else:
+                                                update_clip_status(clip_id, 'flow_redo_queued', error_message=_pmsg)
+                                                print(f"[{self.account_name}] [PolicyScan] 🔀 Clip {_fail_ci+1} policy-blocked — {_pa} + requeuing redo", flush=True)
+                                                clip_log(clip_id, _fail_ci, "REDO", f"generation policy, {_pa}")
                 except Exception:
                     pass
             gap = random.uniform(2, 6)
@@ -17546,6 +17559,18 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     _df_clip = next((c for c in clips if c.get('clip_index') == _dfc), None)
                     if not _df_clip:
                         continue
+                    # v774c — false-policy guard: if the clip's video actually
+                    # rendered (captured), the "violate policies" tile was a
+                    # data-index misread of a sibling's policy tile → recover
+                    # instead of policy-failing. Genuine policy blocks render no
+                    # video → no captured URL → falls through unchanged.
+                    _v774c = captured_urls_for_clip(job_id, _dfc, captured_media_urls)
+                    if _v774c and http_dl_queue is not None:
+                        http_dl_queue.put({'job_id': job_id, 'clip_index': _dfc,
+                            'clip_id': _df_clip['id'], 'urls': _v774c, 'temp_dir': temp_dir})
+                        print(f"[Flow] ✓ clip {_dfc+1} recovered via bound mediaId — false policy-block averted → HTTP worker (v774c)", flush=True)
+                        clip_log(_df_clip['id'], _dfc, "COMPLETED", "recovered via mediaId (false policy)")
+                        continue
                     _is_prom = _dfc in _prom_killed
                     _pa, _pmsg = route_generation_policy(_df_clip['id'], getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_df_clip.get('generation_attempt', 1))
                     if _pa == 'fail_prominent':
@@ -18038,26 +18063,38 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                 if _clip_obj:
                                     clip_id = _clip_obj.get('id')
                                     if clip_id:
-                                        # v758.16: a persistent "violate our policies"
-                                        # generation failure is a PROMPT policy block — the
-                                        # image already passed uploadImage (bad images are
-                                        # caught there → "different image"). Fail with a
-                                        # try-a-different-PROMPT message; keep the image.
-                                        _is_prom = tile_text_is_prominent(page, _pi)
-                                        _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_clip_obj.get('generation_attempt', 1))
-                                        if _pa == 'fail_prominent':
-                                            permanently_failed_clips.add(_fail_ci)
+                                        # v774c — false-policy guard: rendered video (captured)
+                                        # means the persistent policy tile was a data-index
+                                        # misread → recover. Genuine policy blocks render no
+                                        # video → no captured URL → fall through unchanged.
+                                        _v774c = captured_urls_for_clip(job_id, _fail_ci, captured_media_urls)
+                                        if _v774c and http_dl_queue is not None:
+                                            http_dl_queue.put({'job_id': job_id, 'clip_index': _fail_ci,
+                                                'clip_id': clip_id, 'urls': _v774c, 'temp_dir': temp_dir})
+                                            http_enqueued_clips.add(_fail_ci)
                                             _pending_left.discard(_fail_ci)
-                                            print(f"[Flow] [PolicyScan] 🖼 Clip {_fail_ci+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
-                                        elif _pa == 'fail':
-                                            fail_clip_general_policy(clip_id, _pmsg)
-                                            permanently_failed_clips.add(_fail_ci)
-                                            _pending_left.discard(_fail_ci)
-                                            print(f"[Flow] [PolicyScan] ❌ Clip {_fail_ci+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
+                                            print(f"[Flow] [PolicyScan] ✓ Clip {_fail_ci+1} recovered via bound mediaId — false policy-block averted → HTTP worker (v774c)", flush=True)
                                         else:
-                                            update_clip_status(clip_id, 'flow_redo_queued', error_message=_pmsg)
-                                            _pending_left.discard(_fail_ci)
-                                            print(f"[Flow] [PolicyScan] 🔀 Clip {_fail_ci+1} policy-blocked — {_pa} + requeuing redo", flush=True)
+                                            # v758.16: a persistent "violate our policies"
+                                            # generation failure is a PROMPT policy block — the
+                                            # image already passed uploadImage (bad images are
+                                            # caught there → "different image"). Fail with a
+                                            # try-a-different-PROMPT message; keep the image.
+                                            _is_prom = tile_text_is_prominent(page, _pi)
+                                            _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_clip_obj.get('generation_attempt', 1))
+                                            if _pa == 'fail_prominent':
+                                                permanently_failed_clips.add(_fail_ci)
+                                                _pending_left.discard(_fail_ci)
+                                                print(f"[Flow] [PolicyScan] 🖼 Clip {_fail_ci+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
+                                            elif _pa == 'fail':
+                                                fail_clip_general_policy(clip_id, _pmsg)
+                                                permanently_failed_clips.add(_fail_ci)
+                                                _pending_left.discard(_fail_ci)
+                                                print(f"[Flow] [PolicyScan] ❌ Clip {_fail_ci+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
+                                            else:
+                                                update_clip_status(clip_id, 'flow_redo_queued', error_message=_pmsg)
+                                                _pending_left.discard(_fail_ci)
+                                                print(f"[Flow] [PolicyScan] 🔀 Clip {_fail_ci+1} policy-blocked — {_pa} + requeuing redo", flush=True)
 
                     for _ci in sorted(list(_pending_left)):
                         if _ci in http_enqueued_clips:
@@ -21763,7 +21800,7 @@ if __name__ == "__main__":
     # flow_worker.py on PROCESS launch (the .bat Invoke-WebRequest); a golden
     # restore relaunches the browser, NOT the process, so it does NOT pick up a
     # new deploy. Bump this string on any behavior-affecting worker change.
-    print("[Init] ===== flow_worker build: v774b (bound-mediaId guard: between-clip + ghost + post-job) =====", flush=True)
+    print("[Init] ===== flow_worker build: v774c (bound-mediaId guard: between-clip + ghost + post-job + PolicyScan) =====", flush=True)
     # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
     try:
         import threading as _kthread
