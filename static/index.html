@@ -10861,7 +10861,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if(redoQueued){status='redo queued';badgeClass='redo_queued';}else if(generating){status='generating';badgeClass='running';}else if(skipped){status='skipped';badgeClass='skipped';}else if(failed){status='failed';badgeClass='failed';}else if(approved){status='approved';badgeClass='approved';}else if(rejected){status='rejected';badgeClass='rejected';}else if(waitingApproval){status='waiting approval';badgeClass='waiting_approval';}else if(preparing){status='preparing';badgeClass='preparing';}else if(pending && isContinueWaiting){status='waiting for #'+c.clip_index;badgeClass='waiting_approval';}else if(pending){status='pending';badgeClass='running';}else if(c.status==='completed'){status=c.approval_status||'pending_review';badgeClass=status;}
             let acts='';const clipId=c.id||0;
             // Upload-your-own-video control (every clip card). Adds a new variant via /upload-variant.
-            const uploadVideoCtl=clipId?`<input type="file" id="uploadVideoInput_${clipId}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clipId}, '${jid}', this.files[0])"><button class="btn btn-upload btn-sm" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clipId}').click()" title="upload your own video for this clip">📤 upload</button>`:'';
+            const uploadVideoCtl=clipId?`<input type="file" id="uploadVideoInput_${clipId}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clipId}, '${jid}', this.files[0])"><button class="btn btn-upload btn-sm" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clipId}').click()" title="upload your own video for this clip">⬆️ upload</button>`:'';
             // Small cancel button for any active/pending clip
             const cancelBtn = clipId ? `<button class="btn btn-secondary btn-sm" style="padding:1px 5px;font-size:9px;margin-left:6px;opacity:0.7" onclick="event.stopPropagation();cancelClip(${clipId},${c.clip_index})" title="Skip this clip">✕</button>` : '';
             if(isRegenerating){
@@ -10933,7 +10933,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     const url=`${API}/jobs/${jid}/images/${encodeURIComponent(bn)}`;
                     return `<div style="display:flex;flex-direction:column;align-items:center;gap:3px;">`
                         + `<a href="${url}" target="_blank" title="open ${label} frame full size"><img src="${url}" alt="${label} frame" loading="lazy" style="width:54px;height:54px;object-fit:cover;border-radius:6px;border:1px solid var(--border-color);cursor:pointer" onerror="this.style.display='none'"></a>`
-                        + `<button class="btn btn-dl btn-sm" style="padding:1px 6px;font-size:9px;" onclick="event.stopPropagation();downloadClip('${url}','clip_${c.clip_index+1}_${label}.png')" title="download ${label} frame">📥 ${label}</button>`
+                        + `<button class="btn btn-dl btn-sm" style="padding:1px 6px;font-size:9px;" onclick="event.stopPropagation();downloadClip('${url}','clip_${c.clip_index+1}_${label}.png')" title="download ${label} frame">⬇️ ${label}</button>`
                         + `</div>`;
                 };
                 const _start=_frameThumb(c.start_frame,'start');
@@ -11136,7 +11136,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // input id, no collision with the non-paired path.
             // v782 — function-coded (purple) upload button, short label.
             const uploadOwnCtl = clip.id
-                ? `<input type="file" id="uploadVideoInput_${clip.id}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clip.id}, '${jid}', this.files[0])"><button class="btn btn-upload btn-sm" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clip.id}').click()" title="upload your own video for this ${sideLabel}">📤 upload</button>`
+                ? `<input type="file" id="uploadVideoInput_${clip.id}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clip.id}, '${jid}', this.files[0])"><button class="btn btn-upload btn-sm" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clip.id}').click()" title="upload your own video for this ${sideLabel}">⬆️ upload</button>`
                 : '';
 
             // v782 — copy-prompt = ghost button (low emphasis utility).
@@ -11153,7 +11153,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const url=`${API}/jobs/${jid}/images/${encodeURIComponent(bn)}`;
                 return `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;">`
                     + `<a href="${url}" target="_blank" title="open ${sideLabel} ${label} frame full size"><img src="${url}" alt="${label} frame" loading="lazy" style="width:40px;height:40px;object-fit:cover;border-radius:5px;border:1px solid var(--border-color);cursor:pointer" onerror="this.style.display='none'"></a>`
-                    + `<button class="btn btn-dl btn-sm" onclick="event.stopPropagation();downloadClip('${url}','${sideLabel}_${label}.png')" title="download ${sideLabel} ${label} frame">📥 ${label}</button>`
+                    + `<button class="btn btn-dl btn-sm" onclick="event.stopPropagation();downloadClip('${url}','${sideLabel}_${label}.png')" title="download ${sideLabel} ${label} frame">⬇️ ${label}</button>`
                     + `</div>`;
             };
             const _fStart=clip.start_frame?_frameDl(clip.start_frame,'start'):'';
