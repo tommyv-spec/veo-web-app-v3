@@ -2034,6 +2034,7 @@
            This is the row the operator pages takes with. */
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .variant-nav,
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-actions,
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-paired-frames,
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-upload-own {
             flex: 0 0 auto;
         }
@@ -11063,7 +11064,26 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 ? `<button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;" onclick="event.stopPropagation();copyPrompt(${clip.id})" title="copy the ${sideLabel} prompt">📋 ${sideLabel} prompt</button>`
                 : '';
 
-            return `<div class="clip-video">${vid}</div>${variantNav}${acts}<div class="clip-upload-own" style="margin-top:4px;display:flex;gap:6px;justify-content:center;flex-wrap:wrap;">${copyPromptCtl}${uploadOwnCtl}</div>`;
+            // v781 — per-side frame thumbnail + download (same as the non-paired
+            // v779 frameInfo, which twin clips never had). Each side has its own
+            // start/end frame (b-roll = its start frame; voice = the voiceover
+            // anchor image). R2 key -> /api/jobs/{jid}/images/{basename}.
+            const _frameDl=(key,label)=>{
+                const bn=(key||'').split('/').pop();
+                if(!bn) return '';
+                const url=`${API}/jobs/${jid}/images/${encodeURIComponent(bn)}`;
+                return `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;">`
+                    + `<a href="${url}" target="_blank" title="open ${sideLabel} ${label} frame full size"><img src="${url}" alt="${label} frame" loading="lazy" style="width:40px;height:40px;object-fit:cover;border-radius:5px;border:1px solid var(--border-color);cursor:pointer" onerror="this.style.display='none'"></a>`
+                    + `<button class="btn btn-secondary btn-sm" style="padding:1px 5px;font-size:9px;" onclick="event.stopPropagation();downloadClip('${url}','${sideLabel}_${label}.png')" title="download ${sideLabel} ${label} frame">📥 ${label}</button>`
+                    + `</div>`;
+            };
+            const _fStart=clip.start_frame?_frameDl(clip.start_frame,'start'):'';
+            const _fEnd=clip.end_frame?_frameDl(clip.end_frame,'end'):'';
+            const framesCtl=(_fStart||_fEnd)
+                ? `<div class="clip-paired-frames" style="margin-top:4px;display:flex;gap:8px;justify-content:center;align-items:flex-start;flex-wrap:wrap;">${_fStart}${_fEnd}</div>`
+                : '';
+
+            return `<div class="clip-video">${vid}</div>${variantNav}${acts}${framesCtl}<div class="clip-upload-own" style="margin-top:4px;display:flex;gap:6px;justify-content:center;flex-wrap:wrap;">${copyPromptCtl}${uploadOwnCtl}</div>`;
         }
 
         // v700c — render a paired clip card (b-roll + audio twin side-by-side).
