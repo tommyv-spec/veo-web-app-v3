@@ -3064,7 +3064,7 @@ def apply_vad(
         "-filter_complex", filter_complex,
         "-map", "[outv]",
         "-map", "[outa]",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
         "-pix_fmt", "yuv420p",
         "-threads", "1",
         "-c:a", "aac", "-b:a", "128k",
@@ -3167,7 +3167,7 @@ def trim_video(
     """Trim frames from start and end of video.
     
     Always re-encodes to ensure frame-accurate cutting.
-    Uses ultrafast preset and memory-optimized settings for Render.
+    Uses veryfast preset (crf18) and memory-optimized settings for Render.
     """
     print(f"[VideoProcessor] trim_video: {src} -> {out}")
     print(f"[VideoProcessor]   frames_start={frames_start}, frames_end={frames_end}")
@@ -3204,7 +3204,7 @@ def trim_video(
         "-i", str(src),
         "-ss", f"{cut_start_seconds:.6f}",   # output seek — after -i — frame-accurate
         "-t", f"{target_duration:.6f}",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
         "-pix_fmt", "yuv420p",
         "-threads", "1",
         "-c:a", "aac", "-b:a", "128k",
@@ -3213,7 +3213,7 @@ def trim_video(
         str(out)
     ]
     
-    print(f"[VideoProcessor]   Running ffmpeg (ultrafast, low memory)...")
+    print(f"[VideoProcessor]   Running ffmpeg (veryfast crf18, low memory)...")
     code, _, err = run(cmd)
     if code != 0:
         print(f"[VideoProcessor]   ERROR: {err}")
@@ -3364,7 +3364,7 @@ def swap_audio_with_speed_match(
             f"[0:v]tpad=stop_mode=clone:stop_duration={gap:.6f},setpts=PTS-STARTPTS,fps=24,format=yuv420p[v];"
             f"[1:a]aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a]",
             "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
             "-shortest",
@@ -3381,7 +3381,7 @@ def swap_audio_with_speed_match(
             f"[0:v]setpts=PTS/{speed:.6f},setpts=PTS-STARTPTS,fps=24,format=yuv420p[v];"
             f"[1:a]aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a]",
             "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
             "-shortest",
@@ -3398,7 +3398,7 @@ def swap_audio_with_speed_match(
             f"[0:v]setpts=PTS/{speed:.6f},setpts=PTS-STARTPTS,fps=24,format=yuv420p[v];"
             f"[1:a]aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a]",
             "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
             "-movflags", "+faststart",
@@ -3459,7 +3459,7 @@ def concat_videos(files: List[Path], output: Path) -> None:
     # concat filter binds [N:a:0] before running, so a single missing audio
     # stream rejects the entire 8-input graph.
     #
-    # Pass 1: normalize EACH input to a common spec (720x1280, 24fps, yuv420p,
+    # Pass 1: normalize EACH input to a common spec (1080x1920, 24fps, yuv420p,
     #   48kHz stereo h264+aac). Injects anullsrc when source has no audio so
     #   every normalized file has both streams. Single-input ffmpeg = simple,
     #   predictable, can't fail in cross-input ways.
@@ -3490,14 +3490,14 @@ def concat_videos(files: List[Path], output: Path) -> None:
                     FFMPEG_BIN, "-y",
                     "-i", str(f),
                     "-vf",
-                    "scale=720:1280:force_original_aspect_ratio=decrease,"
-                    "pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+                    "scale=1080:1920:force_original_aspect_ratio=decrease,"
+                    "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,"
                     "fps=24,format=yuv420p",
                     "-af",
                     "aresample=async=1:first_pts=0,"
                     "aformat=sample_fmts=fltp:sample_rates=48000:"
                     "channel_layouts=stereo",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                     "-pix_fmt", "yuv420p",
                     "-threads", "1",
                     "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
@@ -3514,12 +3514,12 @@ def concat_videos(files: List[Path], output: Path) -> None:
                     "-f", "lavfi", "-i",
                     "anullsrc=channel_layout=stereo:sample_rate=48000",
                     "-vf",
-                    "scale=720:1280:force_original_aspect_ratio=decrease,"
-                    "pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+                    "scale=1080:1920:force_original_aspect_ratio=decrease,"
+                    "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,"
                     "fps=24,format=yuv420p",
                     "-map", "0:v:0", "-map", "1:a:0",
                     "-shortest",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                     "-pix_fmt", "yuv420p",
                     "-threads", "1",
                     "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
@@ -3576,6 +3576,23 @@ def concat_videos(files: List[Path], output: Path) -> None:
             raise RuntimeError(
                 f"v692e concat failed: {err_tail[-300:]}"
             )
+        # v782 diagnostic — confirm final export resolution after the 1080p
+        # normalize bump. Remove once operator-side evidence lands that
+        # uploaded HD clips export at 1080x1920 (not the old 720x1280).
+        try:
+            _oi = ffprobe_json(output)
+            _vw = _vh = None
+            for _s in _oi.get("streams", []):
+                if _s.get("codec_type") == "video":
+                    _vw, _vh = _s.get("width"), _s.get("height")
+                    break
+            print(
+                f"[VideoProcessor/v782] concat_videos export resolution="
+                f"{_vw}x{_vh} (target 1080x1920, normalize crf18/veryfast)",
+                flush=True,
+            )
+        except Exception as _e:
+            print(f"[VideoProcessor/v782] resolution probe failed: {_e}", flush=True)
         print(f"[VideoProcessor]   concat_videos completed")
 
 
@@ -3664,7 +3681,7 @@ def concat_videos_with_transitions(
                 # braces — costs nothing and makes the pipeline robust
                 # to upstream changes.
                 "-r", "24", "-vsync", "cfr",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                 "-pix_fmt", "yuv420p", "-threads", "1",
             ])
             if has_audio:
@@ -4129,7 +4146,7 @@ def process_clip_for_alignment(
             # long. Forcing CFR + explicit framerate makes the encoded
             # stream's internal timing match the container duration.
             "-r", "24", "-vsync", "cfr",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p",
             "-t", f"{target_duration:.6f}",
             str(output_path)
@@ -4143,7 +4160,7 @@ def process_clip_for_alignment(
             "-an",  # strip audio
             # v560: same CFR fix as above
             "-r", "24", "-vsync", "cfr",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p",
             "-t", f"{target_duration:.6f}",
             str(output_path)
@@ -4160,7 +4177,7 @@ def process_clip_for_alignment(
             FFMPEG_BIN, "-y", "-i", str(clip_path),
             "-vf", "reverse",
             "-an",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p",
             str(reversed_path)
         ]
@@ -4176,7 +4193,7 @@ def process_clip_for_alignment(
                 "-an",
                 # v560: CFR fix — same reason as the speedup path above
                 "-r", "24", "-vsync", "cfr",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                 "-pix_fmt", "yuv420p",
                 "-t", f"{target_duration:.6f}",
                 str(output_path)
@@ -4207,7 +4224,7 @@ def process_clip_for_alignment(
             FFMPEG_BIN, "-y",
             "-f", "concat", "-safe", "0", "-i", str(concat_list),
             "-an",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p",
             str(looped_path)
         ]
@@ -4220,7 +4237,7 @@ def process_clip_for_alignment(
             FFMPEG_BIN, "-y", "-i", str(looped_path),
             "-t", f"{target_duration:.6f}",
             "-an",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p",
             str(output_path)
         ]
@@ -4251,7 +4268,7 @@ def _generate_black_video(output_path: Path, duration: float, width: int, height
         FFMPEG_BIN, "-y",
         "-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r={fps:.2f}:d={duration:.6f}",
         "-an",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
         "-pix_fmt", "yuv420p",
         "-t", f"{duration:.6f}",
         str(output_path)
