@@ -4072,6 +4072,53 @@ async def upload_local_video(
     return v.to_dict()
 
 
+@app.delete("/api/local-videos/by-hash/{file_hash}")
+async def delete_local_video_by_hash(
+    file_hash: str,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Called by the browser watcher when a file vanishes from the watched
+    folder. If the LocalVideo had matched a Job and that Job's `published`
+    state was set BY this local match (published_via='local_watch') AND
+    no IG video has been linked yet (instagram_video_id IS NULL), revert
+    the Job back to `awaiting_finishing` so it re-enters the match pool.
+
+    Safety rails — do NOT revert when:
+      - IG already linked the reel (instagram_video_id IS NOT NULL).
+        The published state is genuinely correct, locally-deleted final-cut
+        doesn't undo that.
+      - published_via != 'local_watch' (something else published it).
+    """
+    from models import LocalVideo, Job
+    file_hash = (file_hash or "").strip().lower()
+    if len(file_hash) != 64 or not all(c in "0123456789abcdef" for c in file_hash):
+        raise HTTPException(400, detail="file_hash must be a 64-char SHA-256 hex string")
+    v = (
+        db.query(LocalVideo)
+        .filter_by(user_id=current_user.id, file_hash=file_hash)
+        .first()
+    )
+    if not v:
+        raise HTTPException(404, detail="local video not found")
+
+    reverted_job_id = None
+    if v.matched_job_id:
+        job = db.query(Job).filter_by(id=v.matched_job_id).first()
+        if (
+            job
+            and job.instagram_video_id is None
+            and (job.published_via or "") == "local_watch"
+        ):
+            job.lifecycle_stage = "awaiting_finishing"
+            job.published_via = None
+            job.published_at = None
+            reverted_job_id = job.id
+    db.delete(v)
+    db.commit()
+    return {"deleted_hash": file_hash, "reverted_job_id": reverted_job_id}
+
+
 @app.post("/api/drive/accounts/{account_id}/sync")
 async def sync_drive_account(
     account_id: int,

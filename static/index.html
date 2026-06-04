@@ -4654,17 +4654,80 @@ Example: A realistic vertical video of a professional presenter speaking directl
           _localPollInFlight = true;
           try {
             const newOnes = [];
+            // Track every video hash present in folder THIS scan. Used for
+            // delete-detection: hash in _localSeenHashes but missing from
+            // currentScanHashes after the loop = file was deleted by user.
+            const currentScanHashes = new Set();
+            let fileCount = 0;
             for await (const entry of _localDirHandle.values()) {
               if (entry.kind !== "file") continue;
               if (!_localIsVideo(entry.name)) continue;
-              const result = await _uploadLocalFile(entry);
-              if (result) newOnes.push(result);
+              fileCount++;
+              // Read + hash every present file (need every hash for diff,
+              // not just unseen ones).
+              let file;
+              try { file = await entry.getFile(); }
+              catch (e) { console.warn("[local] getFile failed:", e); continue; }
+              if (!file || file.size < 1024) continue;
+              if (file.size > 500 * 1024 * 1024) continue;
+              const buf = await file.arrayBuffer();
+              const hash = await _sha256Hex(buf);
+              currentScanHashes.add(hash);
+              if (_localSeenHashes.has(hash)) continue;
+              // New file → upload.
+              const fd = new FormData();
+              fd.append("file", new Blob([buf], { type: file.type || "video/mp4" }), file.name);
+              fd.append("file_hash", hash);
+              try {
+                const r = await fetch("/api/local-videos/upload", {
+                  method: "POST", credentials: "include", body: fd,
+                });
+                if (r.ok) {
+                  const data = await r.json();
+                  _localSeenHashes.add(hash);
+                  newOnes.push(data);
+                } else {
+                  console.warn("[local] upload failed:", r.status, await r.text());
+                }
+              } catch (e) {
+                console.warn("[local] upload exception:", e);
+              }
             }
-            if (newOnes.length) {
+
+            // Delete-detection pass. Guard against bulk-unmatch on a 0-file
+            // scan when seen-set is non-empty — likely a permission / mount
+            // blip, not the user emptying the folder in one tick.
+            const deletedJobIds = [];
+            if (fileCount > 0 || _localSeenHashes.size === 0) {
+              for (const seenHash of Array.from(_localSeenHashes)) {
+                if (currentScanHashes.has(seenHash)) continue;
+                try {
+                  const r = await fetch(`/api/local-videos/by-hash/${seenHash}`, {
+                    method: "DELETE", credentials: "include",
+                  });
+                  if (r.ok) {
+                    const data = await r.json().catch(() => ({}));
+                    _localSeenHashes.delete(seenHash);
+                    if (data.reverted_job_id) deletedJobIds.push(data.reverted_job_id);
+                  } else if (r.status === 404) {
+                    _localSeenHashes.delete(seenHash);
+                  }
+                } catch (e) {
+                  console.warn("[local] delete exception:", e);
+                }
+              }
+            } else {
+              console.warn(`[local] scan returned 0 files but seen-set has ${_localSeenHashes.size} — skipping delete pass (likely permission blip)`);
+            }
+
+            if (newOnes.length || deletedJobIds.length) {
               await refreshLocalPanel();
-              // Refresh kanban too — published count may have changed.
+              // Kanban — published count changed (additions OR reverts).
               if (typeof refreshLifecycle === "function") {
                 refreshLifecycle({ force: true });
+              }
+              if (deletedJobIds.length) {
+                console.log(`[local] reverted ${deletedJobIds.length} job(s) to awaiting_finishing (files deleted from folder)`);
               }
             }
           } finally {
