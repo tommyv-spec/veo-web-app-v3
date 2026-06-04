@@ -3469,6 +3469,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     <div id="localPanel" style="display:none; padding:12px; height:calc(100% - 60px); overflow-y:auto;">
                         <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap;">
                             <button class="btn btn-secondary btn-sm" id="localPickFolderBtn">📁 Pick local folder</button>
+                            <button class="btn btn-secondary btn-sm" id="localForceRescanBtn" title="Run a scan now (detect deletes + new files)">🔄 Force rescan</button>
                             <button class="btn btn-secondary btn-sm" id="localUnpickBtn" style="display:none;">Stop watching</button>
                             <span id="localFolderStatus" style="font-size:11px;color:#888;"></span>
                         </div>
@@ -4764,6 +4765,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         function _localVideoCard(v) {
           const name = escapeHtml((v.file_name || "(unnamed)").slice(0, 80));
+          const hash = escapeHtml(v.file_hash || "");
           let status;
           if (v.matched_job_id) {
             const pct = v.match_score != null ? ` (${Math.round(v.match_score * 100)}%)` : "";
@@ -4776,9 +4778,13 @@ Example: A realistic vertical video of a professional presenter speaking directl
           } else {
             status = `<span class="ig-video-status" style="background:#333;color:#888;">done — no match</span>`;
           }
-          return `<div class="ig-video-card">
-            <div style="font-size:11px;line-height:1.3;color:#ccc;padding:6px 8px;background:#1a1a25;border-radius:3px;margin-bottom:4px;">${name}</div>
+          // Manual ✕ — instant delete (revert Job if local_watch). Escape hatch
+          // for when polling isn't running (no PWA + session permission lost).
+          const delBtn = `<button class="local-card-del-btn" data-hash="${hash}" title="Remove + revert match" style="position:absolute;top:4px;right:4px;background:#5c1f1f;color:#ff8888;border:none;border-radius:3px;width:18px;height:18px;font-size:10px;line-height:1;cursor:pointer;">✕</button>`;
+          return `<div class="ig-video-card" style="position:relative;">
+            <div style="font-size:11px;line-height:1.3;color:#ccc;padding:6px 24px 6px 8px;background:#1a1a25;border-radius:3px;margin-bottom:4px;">${name}</div>
             ${status}
+            ${delBtn}
           </div>`;
         }
 
@@ -4860,6 +4866,74 @@ Example: A realistic vertical video of a professional presenter speaking directl
           localPickFolder();
         });
         document.getElementById("localUnpickBtn")?.addEventListener("click", localUnpickFolder);
+
+        // Manual ✕ on each processed-file card → DELETE by hash.
+        // Works regardless of polling state — escape hatch when permission's
+        // gone or PWA isn't installed.
+        document.getElementById("localVideosList")?.addEventListener("click", async (ev) => {
+          const btn = ev.target.closest(".local-card-del-btn[data-hash]");
+          if (!btn) return;
+          ev.preventDefault();
+          const hash = btn.dataset.hash;
+          if (!hash) return;
+          btn.disabled = true;
+          btn.textContent = "…";
+          try {
+            const r = await fetch(`/api/local-videos/by-hash/${hash}`, {
+              method: "DELETE", credentials: "include",
+            });
+            if (r.ok) {
+              const data = await r.json().catch(() => ({}));
+              // Drop from seen-set so re-adding the file later triggers a fresh upload.
+              _localSeenHashes.delete(hash);
+              await refreshLocalPanel();
+              if (typeof refreshLifecycle === "function") {
+                refreshLifecycle({ force: true });
+              }
+              if (data.reverted_job_id) {
+                console.log(`[local] manual delete reverted job ${data.reverted_job_id}`);
+              }
+            } else {
+              alert(`Delete failed: HTTP ${r.status}`);
+              btn.disabled = false;
+              btn.textContent = "✕";
+            }
+          } catch (e) {
+            alert("Delete exception: " + e.message);
+            btn.disabled = false;
+            btn.textContent = "✕";
+          }
+        });
+
+        // Force-rescan button (manual trigger for `_scanAndUpload`).
+        document.getElementById("localForceRescanBtn")?.addEventListener("click", async () => {
+          const btn = document.getElementById("localForceRescanBtn");
+          if (!_localDirHandle) {
+            alert("Pick a folder first.");
+            return;
+          }
+          btn.disabled = true;
+          btn.textContent = "Scanning…";
+          try {
+            // Ensure permission + scan now. If not granted, will prompt.
+            const ok = await _verifyDirPermission(_localDirHandle);
+            if (!ok) {
+              alert("Folder permission denied.");
+              return;
+            }
+            // Ensure seen-set is fresh before diffing.
+            await _refreshSeenHashesFromServer();
+            await _scanAndUpload();
+            // Restart timer if not running.
+            if (!_localPollTimer) {
+              _localPollTimer = setInterval(_scanAndUpload, LOCAL_POLL_INTERVAL_MS);
+            }
+            await refreshLocalPanel();
+          } finally {
+            btn.disabled = false;
+            btn.textContent = "🔄 Force rescan";
+          }
+        });
 
         // === Google Drive folder watcher (2026-06-01, DORMANT — code kept in case we switch back) ===
         async function driveFetchAccounts() {
