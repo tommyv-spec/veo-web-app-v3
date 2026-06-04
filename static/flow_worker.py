@@ -3940,6 +3940,13 @@ MAX_UNUSUAL_GOLDEN_RESTORES = 4  # per job, then fail instead of restoring again
 _UNUSUAL_GOLDEN_RESTORES = {}    # job_id -> int (cumulative golden restores)
 _UNUSUAL_GR_LOCK = threading.Lock()
 
+# v779 — account-worker supervisor: how many times run() restarts a crashed
+# _run_once() before giving up. A single transient (goto timeout on a network
+# blip, browser death, lock race) must NEVER permanently kill an account thread;
+# the supervisor tears down + restarts the whole worker lifecycle fresh. Bounded
+# so a genuinely-dead account (bad proxy, no internet) doesn't spin forever.
+MAX_WORKER_RESTARTS = 6
+
 
 def register_auto_redo_cycle(clip_id):
     """Record one delayed-hard-failure cycle for this clip and return the new
@@ -18579,9 +18586,57 @@ class AccountWorker(threading.Thread):
         self.shutdown_event.set()
     
     def run(self):
-        """Main worker loop"""
+        """v779 — SUPERVISOR. The real fix for account threads dying on a single
+        transient (goto timeout on a network blip, browser death, user_data_dir
+        lock race). Previously run() was one linear pass: all of startup
+        (launch -> goto -> login -> golden -> http-worker) sat OUTSIDE any
+        recovery, and only the job-loop body had a try/except — so ANY throw in
+        startup, or a throw inside the job-loop's own except handler (e.g. a
+        failed in-place relaunch), escaped run() and killed the thread forever.
+
+        Now run() just supervises: it calls _run_once() (the entire former body)
+        and, on any unhandled crash, tears the browser down and restarts the
+        whole lifecycle fresh — new Playwright + new launch + golden restore —
+        which recovers from essentially every transient. A CLEAN return from
+        _run_once() (graceful shutdown, or a permanent stop like NotUltra) does
+        NOT restart. Bounded by MAX_WORKER_RESTARTS so a genuinely-dead account
+        doesn't spin forever."""
+        restarts = 0
+        while not self.shutdown_event.is_set():
+            try:
+                self._run_once()
+                return  # clean exit — shutdown requested or account permanently stopped
+            except Exception as e:
+                restarts += 1
+                if restarts > MAX_WORKER_RESTARTS:
+                    print(f"[{self.name}] ❌ CRITICAL: worker crashed {restarts}× "
+                          f"({type(e).__name__}: {e}) — giving up. Restart the worker "
+                          f"process to recover this account; other accounts keep running.", flush=True)
+                    return
+                _delay = min(15 * restarts, 90)
+                print(f"[{self.name}] ⚠ worker crashed ({type(e).__name__}: {e}) — "
+                      f"restarting full lifecycle in {_delay}s [{restarts}/{MAX_WORKER_RESTARTS}]", flush=True)
+                # Best-effort teardown so the restart's fresh launch isn't blocked by
+                # a half-dead browser still holding the user_data_dir lock.
+                try:
+                    if getattr(self, 'browser', None):
+                        self.browser.close()
+                except Exception:
+                    pass
+                try:
+                    kill_chrome_using_profile(self.session_folder, label=self.name)
+                except Exception:
+                    pass
+                # Force a fresh golden restore on the next _run_once (clean slate).
+                self.golden_restored = False
+                self.shutdown_event.wait(_delay)
+        return
+
+    def _run_once(self):
+        """One full worker lifecycle: startup + main job loop. Supervised by
+        run() — raise to trigger a full restart, return for a permanent stop."""
         print(f"[{self.name}] Starting browser...", flush=True)
-        
+
         with sync_playwright() as p:
             self._playwright = p  # Save for auto-reset
             # Build launch args - match test_human_like.py which keeps working
@@ -19182,19 +19237,21 @@ class AccountWorker(threading.Thread):
                                         pass
                                 print(f"[{self.name}] ↩ Will self-resume job after restore", flush=True)
                             except Exception as _relaunch_err:
-                                # v778 — relaunch exhausted all retries. Do NOT let this
-                                # escape (that killed the thread silently pre-v778). Log
-                                # loudly + break the run loop cleanly. Other account
-                                # threads are independent and keep working.
-                                print(f"[{self.name}] ❌ CRITICAL: submit browser failed to relaunch after golden restore "
-                                      f"({_relaunch_err}) — this account thread is stopping. Other accounts unaffected. "
-                                      f"Restart the worker to recover this account.", flush=True)
+                                # v779 — in-place relaunch failed. Escalate to the run()
+                                # supervisor by raising: it restarts the WHOLE lifecycle
+                                # fresh (new Playwright + launch + golden restore), which
+                                # recovers far better than the in-place relaunch that just
+                                # failed. (Pre-v779 this broke the loop and left the account
+                                # permanently down; pre-v778 it escaped unguarded and killed
+                                # the thread with no restart at all.)
+                                print(f"[{self.name}] ⚠ submit browser failed to relaunch in-place after golden restore "
+                                      f"({_relaunch_err}) — escalating to full worker restart.", flush=True)
                                 if _from_queue:
                                     try:
                                         self.job_queue.task_done()
                                     except Exception:
                                         pass
-                                break
+                                raise
                         else:
                             # Golden missing — need to rebuild it via fresh login.
                             print(f"[{self.name}] ⚠ Golden restore failed (golden missing) — triggering re-login to rebuild golden.", flush=True)
@@ -21940,7 +21997,7 @@ if __name__ == "__main__":
     # flow_worker.py on PROCESS launch (the .bat Invoke-WebRequest); a golden
     # restore relaunches the browser, NOT the process, so it does NOT pick up a
     # new deploy. Bump this string on any behavior-affecting worker change.
-    print("[Init] ===== flow_worker build: v778 (proactive-restore relaunch wrapped + retried — account thread no longer dies on lock race) =====", flush=True)
+    print("[Init] ===== flow_worker build: v779 (account-worker supervisor — crashed lifecycle restarts instead of killing the thread) =====", flush=True)
     # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
     try:
         import threading as _kthread
