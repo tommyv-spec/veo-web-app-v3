@@ -672,6 +672,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         # Image worker heartbeat — POST, so not caught by GET-based
         # poll-pattern silencer below. Fires every ~30s per worker.
         "/api/images/worker/heartbeat",
+        # v780 — video (Flow) worker heartbeat. POST every 5s per worker;
+        # silence the request-log noise.
+        "/api/user-worker/heartbeat",
     }
 
     # Patterns for routine polling (suppress unless error)
@@ -12026,8 +12029,57 @@ def verify_user_worker_token(
             or (now - token.last_seen).total_seconds() > 60):
         token.last_seen = now
         db.commit()
-    
+
     return token.user_id
+
+
+@app.post("/api/user-worker/heartbeat")
+async def user_worker_heartbeat(
+    request: Request,
+    authorization: str = Header(None),
+    db: DBSession = Depends(get_db_session),
+):
+    """v780 — dedicated heartbeat for the video (Flow) worker.
+
+    The My Worker page's online indicator keys off ``token.last_seen``. The
+    generic ``verify_user_worker_token`` dependency throttles last_seen writes
+    to once per 60s (connection-pool protection) — too coarse for a responsive
+    indicator and the reason the dot lagged ~30s. This endpoint writes
+    last_seen UNCONDITIONALLY on every call. The worker pings every 5s, so a
+    live worker's last_seen never ages past ~5s and the status endpoint's 15s
+    stale window flips Offline within ~5-15s of an unclean death.
+
+    ``going_offline=true`` (clean Ctrl+C / atexit) backdates last_seen beyond
+    the window so the UI flips to Offline on its very next poll (~3s).
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+    token_value = authorization[7:]
+    token = db.query(UserWorkerToken).filter(
+        UserWorkerToken.id == token_value,
+        UserWorkerToken.is_active == True
+    ).first()
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid or revoked worker token")
+
+    going_offline = False
+    try:
+        body = await request.json()
+        going_offline = bool(body.get("going_offline"))
+    except Exception:
+        going_offline = False
+
+    now = datetime.utcnow()
+    if going_offline:
+        # Backdate beyond the 15s window — UI sees Offline on next poll.
+        token.last_seen = now - timedelta(seconds=3600)
+        # v780 diagnostic — clean-stop signal landed. Low frequency (once per
+        # worker shutdown), so it doesn't spam. Remove once evidence confirms.
+        print(f"[v780] user-worker going_offline user={token.user_id}", flush=True)
+    else:
+        token.last_seen = now
+    db.commit()
+    return {"ok": True, "going_offline": going_offline}
 
 
 # --- Token Management (called from web UI) ---
@@ -13213,7 +13265,12 @@ async def user_worker_combined_status(
         if t.last_seen:
             if last_seen is None or t.last_seen > last_seen:
                 last_seen = t.last_seen
-            if (datetime.utcnow() - t.last_seen).total_seconds() < 30:
+            # v780: stale window 30s -> 15s. Safe because the video worker now
+            # sends a dedicated /api/user-worker/heartbeat every 5s that writes
+            # last_seen UNCONDITIONALLY (bypassing the 60s token-verify throttle),
+            # so a live worker never ages past ~5s. Unclean death now flips the
+            # UI to Offline within ~5-15s instead of the old ~30s.
+            if (datetime.utcnow() - t.last_seen).total_seconds() < 15:
                 online = True
     
     # Check for active job — only show if updated recently (not stale from a previous run)

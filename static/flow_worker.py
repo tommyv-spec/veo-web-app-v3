@@ -21997,7 +21997,7 @@ if __name__ == "__main__":
     # flow_worker.py on PROCESS launch (the .bat Invoke-WebRequest); a golden
     # restore relaunches the browser, NOT the process, so it does NOT pick up a
     # new deploy. Bump this string on any behavior-affecting worker change.
-    print("[Init] ===== flow_worker build: v779 (account-worker supervisor — crashed lifecycle restarts instead of killing the thread) =====", flush=True)
+    print("[Init] ===== flow_worker build: v780 (dedicated 5s heartbeat + going_offline — My Worker online dot now responsive) =====", flush=True)
     # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
     try:
         import threading as _kthread
@@ -22081,7 +22081,56 @@ if __name__ == "__main__":
         print(f"✓ Worker version: {WORKER_VERSION} (build {WORKER_BUILD})", flush=True)
     
     check_for_updates()  # Auto-update on startup
-    
+
+    # ── v780 — dedicated worker heartbeat (user mode only) ──
+    # Drives the "● Online" dot on the My Worker page. Posts every 5s so the
+    # server's token.last_seen stays fresh; the status endpoint's stale window
+    # is 15s, so an unclean death flips the UI to Offline within ~5-15s instead
+    # of the old ~30s. On clean shutdown (Ctrl+C / sys.exit) the atexit hook
+    # fires going_offline=true for an instant flip on the UI's next poll.
+    if WORKER_MODE == "user":
+        import threading as _hb_threading
+        import atexit as _hb_atexit
+        _hb_stop = _hb_threading.Event()
+
+        def _user_worker_heartbeat_loop():
+            while not _hb_stop.is_set():
+                # Re-check after the wait wakes: once shutdown is signalled we
+                # must NOT send another fresh timestamp, or it would land after
+                # the going_offline backdate and leave the dot stuck online.
+                if _hb_stop.is_set():
+                    break
+                try:
+                    api_request("POST", "/heartbeat", {"worker_id": WORKER_ID})
+                except Exception:
+                    pass  # transient — next tick retries
+                _hb_stop.wait(5.0)
+
+        _hb_thread = _hb_threading.Thread(
+            target=_user_worker_heartbeat_loop,
+            name="user-worker-heartbeat",
+            daemon=True,
+        )
+        _hb_thread.start()
+        print("[Init] heartbeat thread started (every 5s) — drives My Worker online dot", flush=True)
+
+        def _heartbeat_going_offline():
+            # Stop the loop, then JOIN so any in-flight normal heartbeat POST
+            # finishes BEFORE we send going_offline. Without the join, a racing
+            # fresh POST could land last and undo the backdate (dot stuck
+            # online on a clean stop). going_offline must be the final write.
+            _hb_stop.set()
+            try:
+                _hb_thread.join(timeout=2.0)
+            except Exception:
+                pass
+            try:
+                api_request("POST", "/heartbeat", {"worker_id": WORKER_ID, "going_offline": True})
+            except Exception:
+                pass
+
+        _hb_atexit.register(_heartbeat_going_offline)
+
     # Create argument parser
     parser = argparse.ArgumentParser(
         description='Local Flow Worker - Multi-Account Video Generation',

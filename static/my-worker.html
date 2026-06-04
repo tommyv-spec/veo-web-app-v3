@@ -468,6 +468,7 @@
 const API = '';
 let state = 'loading';
 let pollTimer = null;
+let _offlineStreak = 0;  // v780: consecutive offline reads, for dot debounce
 let userOS = (() => { const u = navigator.userAgent.toLowerCase(); return u.includes('win') ? 'windows' : u.includes('mac') ? 'mac' : 'linux'; })();
 let activeToken = null;
 let numAccounts = 1;
@@ -550,7 +551,7 @@ function setState(s, data) {
             sub.innerHTML = '';
             document.getElementById('dashboard').classList.add('visible');
             if (data) updateDashboard(data);
-            startPolling(8000);
+            startPolling(3000);  // v780: was 8000 — responsive online dot
             break;
     }
 }
@@ -625,10 +626,15 @@ async function checkStatus() {
         }
         
         if (d.online) {
+            _offlineStreak = 0;  // v780: trust an online reading immediately
             if (state !== 'online') setState('online', d);
             else updateDashboard(d);
         } else if (state === 'online') {
-            setState('ready');
+            // v780: debounce online->offline. Require 2 consecutive offline
+            // reads (~6s at 3s poll) before flipping the dot, so a single DB
+            // blip or one slow heartbeat doesn't false-flip to Offline.
+            _offlineStreak = (_offlineStreak || 0) + 1;
+            if (_offlineStreak >= 2) { _offlineStreak = 0; setState('ready'); }
         } else if (state === 'installing') {
             // Check if token exists now (worker registered but not yet online)
             if (d.has_tokens) setStep(3);
@@ -685,7 +691,7 @@ async function init() {
         if (d.has_tokens) document.getElementById('sessionCard').style.display = '';
         updateManualCmd();
     } catch (e) { setState('setup'); updateManualCmd(); }
-    startPolling(state === 'online' ? 8000 : 10000);
+    startPolling(3000);  // v780: was 8000/10000 — responsive online dot both ways
 }
 
 // ── Tokens ───────────────────────────────────────────────────────
