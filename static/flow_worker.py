@@ -14365,7 +14365,27 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # Check for immediate failure
     immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None)
     if immediate_failure:
-        print(f"[REDO] ⚠️ Clip {clip_index+1} failed immediately — requeueing", flush=True)
+        # v777 — an immediate double-tile failure right after a redo submit is
+        # almost always a content-policy block (same image + same prompt that was
+        # already blocked once). Route it through the SAME durable policy decision
+        # as the main-gen path (v772, policy_gen_next_action) instead of blindly
+        # requeueing. This kills the infinite redo loop seen when a clip is blocked
+        # on BOTH models: a clip already swapped off Omni that STILL fails => both
+        # models tried => terminal GENERATION_POLICY fail (UI shows "change the
+        # prompt"), no more requeue. A clip still on Omni gets ONE swap-and-requeue
+        # (policy_gen_next_action records the swap in _POLICY_SWAP_DONE, so the next
+        # redo uses the other model); the n>=2 / attempt>=POLICY_FAIL_ATTEMPT guards
+        # then cap it. Fixes the clip-3-stuck-forever case (2026-06-04 logs).
+        _action, _msg = policy_gen_next_action(clip_id, getattr(page, '_veo_model', '') or '', attempt)
+        if _action == 'fail':
+            print(f"[REDO] ⛔ Clip {clip_index+1} failed immediately on "
+                  f"{getattr(page, '_veo_model', '?')} (still blocked after model swap) — "
+                  f"terminal policy fail, NOT requeueing", flush=True)
+            fail_clip_general_policy(clip_id, _msg)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False
+        # retry_swap — the swap target is now recorded; next redo uses the other model
+        print(f"[REDO] ⚠️ Clip {clip_index+1} failed immediately — {_msg}; requeueing", flush=True)
         update_clip_status(clip_id, 'flow_redo_queued', error_message="Redo failed immediately — click Retry")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return False
@@ -21875,7 +21895,7 @@ if __name__ == "__main__":
     # flow_worker.py on PROCESS launch (the .bat Invoke-WebRequest); a golden
     # restore relaunches the browser, NOT the process, so it does NOT pick up a
     # new deploy. Bump this string on any behavior-affecting worker change.
-    print("[Init] ===== flow_worker build: v776 (stale-gallery-hash forces upload + redo glitch loop capped) =====", flush=True)
+    print("[Init] ===== flow_worker build: v777 (redo immediate-fail routes through durable policy decision — no double-policy loop) =====", flush=True)
     # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
     try:
         import threading as _kthread
