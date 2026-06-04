@@ -1425,7 +1425,28 @@
         .btn-approve { background: var(--success); color: white; }
         .btn-reject { background: var(--error); color: white; }
         .btn-redo { background: var(--warning); color: white; }
-        
+
+        /* v782 — function-coded utility buttons so upload / download / copy
+           stop looking identical. Tinted (not solid) to stay subordinate to
+           the green/amber/red review actions. */
+        .btn-dl { background: rgba(59,130,246,0.16); color: #60a5fa; border: 1px solid rgba(59,130,246,0.40); }
+        .btn-dl:hover { background: rgba(59,130,246,0.28); }
+        .btn-upload { background: rgba(168,85,247,0.16); color: #c084fc; border: 1px solid rgba(168,85,247,0.40); }
+        .btn-upload:hover { background: rgba(168,85,247,0.28); }
+        .btn-copy { background: transparent; color: var(--text-muted); border: 1px solid var(--border-color); }
+        .btn-copy:hover { background: var(--bg-elevated); color: var(--text-primary); }
+        .btn-del { background: rgba(239,68,68,0.12); color: #f87171; border: 1px solid rgba(239,68,68,0.35); }
+        .btn-del:hover { background: rgba(239,68,68,0.22); }
+
+        /* v782 — clean grouped toolbar under each clip: a REVIEW row
+           (approve / redo / delete) and a FILES row (copy / download /
+           upload), separated by a hairline so "act on clip" vs "get files"
+           read at a glance. */
+        .clip-toolbar { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+        .clip-toolbar-row { display: flex; gap: 6px; justify-content: center; align-items: center; flex-wrap: wrap; }
+        .clip-toolbar-row.files { padding-top: 6px; border-top: 1px solid var(--border-subtle, var(--border-color)); }
+        .clip-toolbar .btn-sm { padding: 3px 9px; font-size: 10px; }
+
         .generate-container { margin-top: 20px; text-align: center; }
         .generate-container .btn-start { width: 100%; max-width: 280px; }
         
@@ -2033,9 +2054,7 @@
            bar at natural height + always visible below the (now shrunk) video.
            This is the row the operator pages takes with. */
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .variant-nav,
-        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-actions,
-        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-paired-frames,
-        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-upload-own {
+        .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .clip-toolbar {
             flex: 0 0 auto;
         }
         .clips-grid.expanded-mode .clip-card.clip-paired .clip-paired-side .variant-nav {
@@ -10842,7 +10861,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if(redoQueued){status='redo queued';badgeClass='redo_queued';}else if(generating){status='generating';badgeClass='running';}else if(skipped){status='skipped';badgeClass='skipped';}else if(failed){status='failed';badgeClass='failed';}else if(approved){status='approved';badgeClass='approved';}else if(rejected){status='rejected';badgeClass='rejected';}else if(waitingApproval){status='waiting approval';badgeClass='waiting_approval';}else if(preparing){status='preparing';badgeClass='preparing';}else if(pending && isContinueWaiting){status='waiting for #'+c.clip_index;badgeClass='waiting_approval';}else if(pending){status='pending';badgeClass='running';}else if(c.status==='completed'){status=c.approval_status||'pending_review';badgeClass=status;}
             let acts='';const clipId=c.id||0;
             // Upload-your-own-video control (every clip card). Adds a new variant via /upload-variant.
-            const uploadVideoCtl=clipId?`<input type="file" id="uploadVideoInput_${clipId}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clipId}, '${jid}', this.files[0])"><button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clipId}').click()" title="upload your own video for this clip">📤 video</button>`:'';
+            const uploadVideoCtl=clipId?`<input type="file" id="uploadVideoInput_${clipId}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clipId}, '${jid}', this.files[0])"><button class="btn btn-upload btn-sm" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clipId}').click()" title="upload your own video for this clip">📤 upload</button>`:'';
             // Small cancel button for any active/pending clip
             const cancelBtn = clipId ? `<button class="btn btn-secondary btn-sm" style="padding:1px 5px;font-size:9px;margin-left:6px;opacity:0.7" onclick="event.stopPropagation();cancelClip(${clipId},${c.clip_index})" title="Skip this clip">✕</button>` : '';
             if(isRegenerating){
@@ -10914,7 +10933,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     const url=`${API}/jobs/${jid}/images/${encodeURIComponent(bn)}`;
                     return `<div style="display:flex;flex-direction:column;align-items:center;gap:3px;">`
                         + `<a href="${url}" target="_blank" title="open ${label} frame full size"><img src="${url}" alt="${label} frame" loading="lazy" style="width:54px;height:54px;object-fit:cover;border-radius:6px;border:1px solid var(--border-color);cursor:pointer" onerror="this.style.display='none'"></a>`
-                        + `<button class="btn btn-secondary btn-sm" style="padding:1px 6px;font-size:9px;" onclick="event.stopPropagation();downloadClip('${url}','clip_${c.clip_index+1}_${label}.png')" title="download ${label} frame">📥 ${label}</button>`
+                        + `<button class="btn btn-dl btn-sm" style="padding:1px 6px;font-size:9px;" onclick="event.stopPropagation();downloadClip('${url}','clip_${c.clip_index+1}_${label}.png')" title="download ${label} frame">📥 ${label}</button>`
                         + `</div>`;
                 };
                 const _start=_frameThumb(c.start_frame,'start');
@@ -11115,38 +11134,42 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // either the b-roll (ships in final) or the voice twin. Reuses the
             // existing uploadClipVideo() endpoint. Per-side clip.id => unique
             // input id, no collision with the non-paired path.
+            // v782 — function-coded (purple) upload button, short label.
             const uploadOwnCtl = clip.id
-                ? `<input type="file" id="uploadVideoInput_${clip.id}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clip.id}, '${jid}', this.files[0])"><button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clip.id}').click()" title="upload your own video for this ${sideLabel}">📤 my clip</button>`
+                ? `<input type="file" id="uploadVideoInput_${clip.id}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clip.id}, '${jid}', this.files[0])"><button class="btn btn-upload btn-sm" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clip.id}').click()" title="upload your own video for this ${sideLabel}">📤 upload</button>`
                 : '';
 
-            // v777 — per-side copy-prompt button. Each twin side has its OWN
-            // prompt (b-roll = video prompt, voice = audio prompt); the old
-            // single header 📋 only ever copied the b-roll side. Wire each side
-            // to copyPrompt(its own clip.id).
+            // v782 — copy-prompt = ghost button (low emphasis utility).
             const copyPromptCtl = clip.id
-                ? `<button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;" onclick="event.stopPropagation();copyPrompt(${clip.id})" title="copy the ${sideLabel} prompt">📋 ${sideLabel} prompt</button>`
+                ? `<button class="btn btn-copy btn-sm" onclick="event.stopPropagation();copyPrompt(${clip.id})" title="copy the ${sideLabel} prompt">📋 prompt</button>`
                 : '';
 
-            // v781 — per-side frame thumbnail + download (same as the non-paired
-            // v779 frameInfo, which twin clips never had). Each side has its own
-            // start/end frame (b-roll = its start frame; voice = the voiceover
-            // anchor image). R2 key -> /api/jobs/{jid}/images/{basename}.
+            // v781/v782 — per-side frame thumbnail + (blue) download. Each side
+            // has its own start/end frame (b-roll = start frame; voice = anchor
+            // image). R2 key -> /api/jobs/{jid}/images/{basename}.
             const _frameDl=(key,label)=>{
                 const bn=(key||'').split('/').pop();
                 if(!bn) return '';
                 const url=`${API}/jobs/${jid}/images/${encodeURIComponent(bn)}`;
                 return `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;">`
                     + `<a href="${url}" target="_blank" title="open ${sideLabel} ${label} frame full size"><img src="${url}" alt="${label} frame" loading="lazy" style="width:40px;height:40px;object-fit:cover;border-radius:5px;border:1px solid var(--border-color);cursor:pointer" onerror="this.style.display='none'"></a>`
-                    + `<button class="btn btn-secondary btn-sm" style="padding:1px 5px;font-size:9px;" onclick="event.stopPropagation();downloadClip('${url}','${sideLabel}_${label}.png')" title="download ${sideLabel} ${label} frame">📥 ${label}</button>`
+                    + `<button class="btn btn-dl btn-sm" onclick="event.stopPropagation();downloadClip('${url}','${sideLabel}_${label}.png')" title="download ${sideLabel} ${label} frame">📥 ${label}</button>`
                     + `</div>`;
             };
             const _fStart=clip.start_frame?_frameDl(clip.start_frame,'start'):'';
             const _fEnd=clip.end_frame?_frameDl(clip.end_frame,'end'):'';
-            const framesCtl=(_fStart||_fEnd)
-                ? `<div class="clip-paired-frames" style="margin-top:4px;display:flex;gap:8px;justify-content:center;align-items:flex-start;flex-wrap:wrap;">${_fStart}${_fEnd}</div>`
-                : '';
+            const _frames=(_fStart||_fEnd)?`${_fStart}${_fEnd}`:'';
 
-            return `<div class="clip-video">${vid}</div>${variantNav}${acts}${framesCtl}<div class="clip-upload-own" style="margin-top:4px;display:flex;gap:6px;justify-content:center;flex-wrap:wrap;">${copyPromptCtl}${uploadOwnCtl}</div>`;
+            // v782 — clean grouped toolbar: REVIEW row (approve/redo) then a
+            // FILES row (copy + upload) below a hairline, then the frame thumbs.
+            // Replaces the old flat row where copy/upload/download all looked
+            // identical (gray btn-secondary).
+            return `<div class="clip-video">${vid}</div>${variantNav}`
+                + `<div class="clip-toolbar">`
+                + (acts ? `<div class="clip-toolbar-row review">${acts}</div>` : '')
+                + `<div class="clip-toolbar-row files">${copyPromptCtl}${uploadOwnCtl}</div>`
+                + (_frames ? `<div class="clip-toolbar-row" style="gap:10px;align-items:flex-start;">${_frames}</div>` : '')
+                + `</div>`;
         }
 
         // v700c — render a paired clip card (b-roll + audio twin side-by-side).
