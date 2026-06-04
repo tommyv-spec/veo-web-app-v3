@@ -19133,7 +19133,7 @@ class AccountWorker(threading.Thread):
                             self.browser.close()
                         except Exception as close_err:
                             print(f"[{self.name}] ⚠ Error closing browser during restore: {close_err}", flush=True)
-                        time.sleep(1)
+                        time.sleep(3)  # v778 — let the OS Chrome process exit + release the user_data_dir lock before relaunch
 
                         # Step 2: Restore SESSION folder immediately (nothing has it open now)
                         session_restored = restore_from_golden(
@@ -19143,59 +19143,58 @@ class AccountWorker(threading.Thread):
                         )
 
                         if session_restored:
-                            # Step 3: Relaunch submit browser immediately from clean session
-                            # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
-                            if BROWSER_MODE == "stealth":
-                                acct_launch_kwargs = {
-                                    'user_data_dir': self.session_folder,
-                                    'channel': 'chrome',
-                                    'ignore_default_args': ['--enable-automation'],
-                                    'headless': False,
-                                    'viewport': {"width": 1280, "height": 720},
-                                    'args': self._launch_args,
-                                }
-                                if self._proxy_config:
-                                    acct_launch_kwargs['proxy'] = self._proxy_config
-                                self.browser = self._playwright.chromium.launch_persistent_context(**acct_launch_kwargs)
-                            else:
-                                acct_launch_kwargs = {
-                                    'user_data_dir': self.session_folder,
-                                    'headless': False,
-                                    'viewport': {"width": 1280, "height": 720},
-                                    'args': self._launch_args,
-                                }
-                                if self._proxy_config:
-                                    acct_launch_kwargs['proxy'] = self._proxy_config
-                                self.browser = self._playwright.chromium.launch_persistent_context(**acct_launch_kwargs)
+                            # Step 3: Relaunch submit browser immediately from clean session.
+                            # v778 — wrapped + retried. The launch can throw on a
+                            # user_data_dir lock race (browser.close() hasn't released
+                            # the SingletonLock yet); pre-v778 that throw escaped this
+                            # except handler and permanently killed the account thread
+                            # (window closed, never reopened). _launch_submit_context
+                            # retries with lock-clear; a hard failure is caught + logged
+                            # loudly and breaks cleanly instead of silently terminating.
+                            try:
+                                self.browser = self._launch_submit_context()
+                                self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
+                                _stash_profile_on_page(self.page, self.session_folder, account_label=getattr(self, 'account_name', None))  # v486 + v700
+                                chrome_warmup(self.page)
+                                self.page.goto(FLOW_HOME_URL)
+                                human_delay(1, 2)
+                                human_mouse_move(self.page)
+                                human_delay(1, 2)
+                                scroll_randomly(self.page)
+                                human_delay(0.5, 1)
+                                check_and_dismiss_popup(self.page)
+                                account_health.reset_failures(self.name)
+                                print(f"[{self.name}] ✅ Submit browser relaunched — resuming submissions.", flush=True)
+                                defocus_chrome(self.page, self.name)
 
-                            self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
-                            _stash_profile_on_page(self.page, self.session_folder, account_label=getattr(self, 'account_name', None))  # v486 + v700
-                            chrome_warmup(self.page)
-                            self.page.goto(FLOW_HOME_URL)
-                            human_delay(1, 2)
-                            human_mouse_move(self.page)
-                            human_delay(1, 2)
-                            scroll_randomly(self.page)
-                            human_delay(0.5, 1)
-                            check_and_dismiss_popup(self.page)
-                            account_health.reset_failures(self.name)
-                            print(f"[{self.name}] ✅ Submit browser relaunched — resuming submissions.", flush=True)
-                            defocus_chrome(self.page, self.name)
+                                # Step 4: Refresh HTTP session with new browser's cookies
+                                self._snapshot_cookies()
+                                print(f"[{self.name}] ✓ HTTP session refreshed after golden restore", flush=True)
 
-                            # Step 4: Refresh HTTP session with new browser's cookies
-                            self._snapshot_cookies()
-                            print(f"[{self.name}] ✓ HTTP session refreshed after golden restore", flush=True)
-
-                            # v174: Self-resume — re-process the same job with the same
-                            # clip assignment instead of re-dispatching through the main loop.
-                            # This prevents parallel re-splitting and cross-account duplication.
-                            _retry_job = job
-                            if _from_queue:
-                                try:
-                                    self.job_queue.task_done()  # Complete the original queue task
-                                except Exception:
-                                    pass
-                            print(f"[{self.name}] ↩ Will self-resume job after restore", flush=True)
+                                # v174: Self-resume — re-process the same job with the same
+                                # clip assignment instead of re-dispatching through the main loop.
+                                # This prevents parallel re-splitting and cross-account duplication.
+                                _retry_job = job
+                                if _from_queue:
+                                    try:
+                                        self.job_queue.task_done()  # Complete the original queue task
+                                    except Exception:
+                                        pass
+                                print(f"[{self.name}] ↩ Will self-resume job after restore", flush=True)
+                            except Exception as _relaunch_err:
+                                # v778 — relaunch exhausted all retries. Do NOT let this
+                                # escape (that killed the thread silently pre-v778). Log
+                                # loudly + break the run loop cleanly. Other account
+                                # threads are independent and keep working.
+                                print(f"[{self.name}] ❌ CRITICAL: submit browser failed to relaunch after golden restore "
+                                      f"({_relaunch_err}) — this account thread is stopping. Other accounts unaffected. "
+                                      f"Restart the worker to recover this account.", flush=True)
+                                if _from_queue:
+                                    try:
+                                        self.job_queue.task_done()
+                                    except Exception:
+                                        pass
+                                break
                         else:
                             # Golden missing — need to rebuild it via fresh login.
                             print(f"[{self.name}] ⚠ Golden restore failed (golden missing) — triggering re-login to rebuild golden.", flush=True)
@@ -19313,6 +19312,55 @@ class AccountWorker(threading.Thread):
                 pass
             print(f"[{self.name}] ✓ Browser closed", flush=True)
     
+    def _launch_submit_context(self, attempts=4):
+        """v778 — launch the persistent submit browser, retrying on profile-lock
+        races. browser.close() does NOT guarantee the OS Chrome process has
+        released the user_data_dir SingletonLock within a second or two; an
+        immediate relaunch then throws 'user data directory is already in use'.
+        Pre-v778 that throw escaped the restore path and killed the account
+        thread for the whole session (operator saw a Chrome window close and
+        never reopen). Retry with backoff; clear stale Singleton* lock files on
+        later attempts (safe once the old process has exited — the cumulative
+        waits cover that). Raises the last error only after all attempts fail."""
+        if BROWSER_MODE == "stealth":
+            kwargs = {
+                'user_data_dir': self.session_folder,
+                'channel': 'chrome',
+                'ignore_default_args': ['--enable-automation'],
+                'headless': False,
+                'viewport': {"width": 1280, "height": 720},
+                'args': self._launch_args,
+            }
+        else:
+            kwargs = {
+                'user_data_dir': self.session_folder,
+                'headless': False,
+                'viewport': {"width": 1280, "height": 720},
+                'args': self._launch_args,
+            }
+        if self._proxy_config:
+            kwargs['proxy'] = self._proxy_config
+        last_err = None
+        for i in range(1, attempts + 1):
+            try:
+                return self._playwright.chromium.launch_persistent_context(**kwargs)
+            except Exception as _le:
+                last_err = _le
+                print(f"[{self.name}] ⚠ submit-browser launch attempt {i}/{attempts} failed: {_le}", flush=True)
+                time.sleep(min(3 * i, 12))
+                if i >= 2:
+                    # Old Chrome should be gone after the cumulative waits — clear
+                    # any stale single-instance lock so the next launch can bind.
+                    for _lock in ('SingletonLock', 'SingletonSocket', 'SingletonCookie'):
+                        try:
+                            _p = os.path.join(self.session_folder, _lock)
+                            if os.path.exists(_p) or os.path.islink(_p):
+                                os.remove(_p)
+                                print(f"[{self.name}] cleared stale {_lock} before relaunch", flush=True)
+                        except Exception:
+                            pass
+        raise last_err if last_err is not None else RuntimeError("launch_persistent_context failed")
+
     def _snapshot_cookies(self):
         """Copy browser cookies into a requests.Session for pure-HTTP downloads.
         Matches single-account mode's _refresh_session / cookie snapshot pattern.
@@ -21895,7 +21943,7 @@ if __name__ == "__main__":
     # flow_worker.py on PROCESS launch (the .bat Invoke-WebRequest); a golden
     # restore relaunches the browser, NOT the process, so it does NOT pick up a
     # new deploy. Bump this string on any behavior-affecting worker change.
-    print("[Init] ===== flow_worker build: v777 (redo immediate-fail routes through durable policy decision — no double-policy loop) =====", flush=True)
+    print("[Init] ===== flow_worker build: v778 (proactive-restore relaunch wrapped + retried — account thread no longer dies on lock race) =====", flush=True)
     # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
     try:
         import threading as _kthread
