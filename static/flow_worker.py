@@ -19243,13 +19243,10 @@ class AccountWorker(threading.Thread):
                                         print(f"[{self.name}] Golden already exists — keeping original (write-once).", flush=True)
                                     # Restore session from golden
                                     restore_from_golden(self.session_folder, self.name, restore_session=True)
-                                    # Relaunch from clean session
-                                    if BROWSER_MODE == "stealth":
-                                        self.browser = self._playwright.chromium.launch_persistent_context(**acct_launch_kwargs)
-                                    else:
-                                        self.browser = self._playwright.chromium.launch_persistent_context(
-                                            user_data_dir=self.session_folder, headless=False,
-                                            viewport={"width": 1280, "height": 720}, args=self._launch_args)
+                                    # Relaunch from clean session (v778 — via the retrying
+                                    # helper; fixes the acct_launch_kwargs NameError in
+                                    # non-stealth mode and handles the user_data_dir lock race)
+                                    self.browser = self._launch_submit_context()
                                     self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
                                     _stash_profile_on_page(self.page, self.session_folder, account_label=getattr(self, 'account_name', None))  # v486 + v700
                                     self.page.goto(FLOW_HOME_URL)
