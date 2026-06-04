@@ -12915,6 +12915,14 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
                           btn_getter, max_attempts=3):
         """Upload a single frame. Returns 'ok', 'rejected', or 'failed'."""
         is_end = (frame_name == "END")
+        # v776 — once a gallery-select fails for this frame, stop preferring
+        # gallery on later attempts and force a real file upload. The global
+        # gallery_cache can hold an image's hash from the ORIGINAL job project
+        # while a REDO runs in a DIFFERENT project whose gallery never had that
+        # image. Without this flag, _hash_in_cache recomputes True every attempt
+        # → gallery select retried + failed forever → 'failed' (start_glitch)
+        # → infinite redo re-queue (the clip-7-stuck bug, 2026-06-04 logs).
+        _force_upload = False
 
         for attempt in range(1, max_attempts + 1):
             # ── Open dialog ──
@@ -12967,7 +12975,7 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
             # ── Strategy: gallery first if image is already uploaded, file upload otherwise ──
             used_gallery = False
             _hash_in_cache = gallery_cache and image_hash and image_hash in gallery_cache
-            if attempt > 1 or _hash_in_cache:
+            if (attempt > 1 or _hash_in_cache) and not _force_upload:
                 # Image already in gallery (either from previous clip's batch upload,
                 # or from attempt 1 of this frame) — select it instantly (~5s vs ~25s upload)
                 cached_name = gallery_cache.get(image_hash) if (gallery_cache and image_hash) else None
@@ -12982,8 +12990,12 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
                         print(f"{prefix}[Gallery] ✓ {frame_name} confirmed from gallery", flush=True)
                         return 'ok'
                     else:
+                        # v776 — the cached hash points at an image NOT actually
+                        # selectable in THIS project's gallery. Stop re-preferring
+                        # it; force a real file upload for every remaining attempt.
+                        _force_upload = True
                         if attempt > 1:
-                            print(f"{prefix}[Gallery] ⚠️ {frame_name}: gallery select failed, falling through to upload", flush=True)
+                            print(f"{prefix}[Gallery] ⚠️ {frame_name}: gallery select failed → forcing file upload (no more gallery retries)", flush=True)
                             # Dialog may have closed from gallery attempt — re-open
                             try: page.keyboard.press("Escape")
                             except Exception: pass
@@ -14326,7 +14338,19 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # This works for both manual redos (from platform UI) and auto-redos (detected failure).
     pre_generate_tile_count = get_tile_count_at_index0(page)
     if not rebuild_clip(page, start_frame_local, end_frame_local, prompt, is_first_clip=_need_new_project):
-        print(f"[REDO] ❌ Failed to submit clip {clip_index+1}", flush=True)
+        # v776 — cap the redo re-queue. A frame that won't attach (start_glitch:
+        # gallery select + upload both fail) would otherwise re-queue forever
+        # (clip-7-stuck bug). Same cap as the main-gen glitch path. After
+        # MAX_AUTO_REDO_CYCLES, mark failed with an actionable Retry message
+        # instead of looping until the 30-min zombie timeout.
+        _redo_cycles = register_auto_redo_cycle(clip_id)
+        if auto_redo_exhausted(_redo_cycles):
+            print(f"[REDO] ❌ clip {clip_index+1} submit failed {_redo_cycles}× (frame won't attach) — giving up, marking failed", flush=True)
+            update_clip_status(clip_id, 'failed', error_message="Frame kept failing to attach after retries — click Retry to try again.")
+            clear_auto_redo_cycle(clip_id)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False
+        print(f"[REDO] ❌ Failed to submit clip {clip_index+1} — requeuing [{_redo_cycles}/{MAX_AUTO_REDO_CYCLES}]", flush=True)
         update_clip_status(clip_id, 'flow_redo_queued', error_message="Redo submission failed — click Retry")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return False
@@ -14334,7 +14358,10 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # Record submission time
     submit_time = datetime.now()
     print(f"[REDO] ✓ Clip {clip_index+1} resubmitted at {submit_time.strftime('%H:%M:%S')}", flush=True)
-    
+    # v776 — resubmit landed; reset the glitch cap so a later unrelated glitch
+    # (or any cycles carried over from the main-gen path) starts fresh.
+    clear_auto_redo_cycle(clip_id)
+
     # Check for immediate failure
     immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None)
     if immediate_failure:
@@ -21848,7 +21875,7 @@ if __name__ == "__main__":
     # flow_worker.py on PROCESS launch (the .bat Invoke-WebRequest); a golden
     # restore relaunches the browser, NOT the process, so it does NOT pick up a
     # new deploy. Bump this string on any behavior-affecting worker change.
-    print("[Init] ===== flow_worker build: v775.1 (frame-attach glitch redoes same image, capped) =====", flush=True)
+    print("[Init] ===== flow_worker build: v776 (stale-gallery-hash forces upload + redo glitch loop capped) =====", flush=True)
     # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
     try:
         import threading as _kthread
