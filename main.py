@@ -1031,6 +1031,13 @@ async def backfill_export_voice_badges(
                 has_exp = any(f.startswith("final_") or f.startswith("export_") for f in filenames)
                 if has_exp:
                     job.has_export = True
+                    # v783 (2026-06-05): admin backfill also repairs the badge
+                    # — final-export exists means job is done. See export-final
+                    # endpoint for the prior-redo-revert rationale.
+                    if job.status not in (JobStatus.CANCELLED.value, JobStatus.FAILED.value, JobStatus.COMPLETED.value):
+                        job.status = JobStatus.COMPLETED.value
+                        if job.completed_at is None:
+                            job.completed_at = datetime.utcnow()
                     _maybe_auto_enter_lifecycle(job, now=datetime.utcnow())
                     export_count += 1
             
@@ -6904,10 +6911,18 @@ async def list_outputs(
         )
         if _has_final_export:
             job.has_export = True
+            # v783 (2026-06-05): final-export-exists implies the job is done.
+            # Repair status alongside has_export so the badge stops showing
+            # PROCESSING for jobs that an earlier Flow redo (L12816) left
+            # status-reverted. Skip cancelled/failed (terminal operator intent).
+            if job.status not in (JobStatus.CANCELLED.value, JobStatus.FAILED.value, JobStatus.COMPLETED.value):
+                job.status = JobStatus.COMPLETED.value
+                if job.completed_at is None:
+                    job.completed_at = datetime.utcnow()
             _maybe_auto_enter_lifecycle(job, now=datetime.utcnow())
             db.commit()
             print(f"[Outputs] self-heal: job={job_id[:8]} has a final export "
-                  f"→ has_export=True, lifecycle_stage={job.lifecycle_stage}", flush=True)
+                  f"→ has_export=True, status={job.status}, lifecycle_stage={job.lifecycle_stage}", flush=True)
 
     return {"job_id": job_id, "videos": videos, "count": len(videos)}
 
@@ -8996,6 +9011,17 @@ async def export_final_video(
 
         # Mark job as exported (v776: also enter post-render lifecycle).
         job.has_export = True
+        # v783 (2026-06-05): export only runs on approved+ready clips. If
+        # job.status is stuck at 'processing'/'running'/'pending' (e.g. an
+        # earlier Flow redo reverted status — main.py L12816 — and the
+        # auto-flip in /api/user-worker/clips/{id}/status didn't fire,
+        # leaving the badge stuck at PROCESSING forever), force-flip to
+        # completed here. Export running == job is done. Never override
+        # cancelled / failed (operator-intent terminal states).
+        if job.status not in (JobStatus.CANCELLED.value, JobStatus.FAILED.value):
+            job.status = JobStatus.COMPLETED.value
+            if job.completed_at is None:
+                job.completed_at = datetime.utcnow()
         _maybe_auto_enter_lifecycle(job, now=datetime.utcnow())
         db.commit()
 
