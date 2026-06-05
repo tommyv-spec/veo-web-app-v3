@@ -281,6 +281,28 @@
         /* Default state (no class) = videos */
         .app-container:not(.tab-images) #imagesTab { display: none !important; }
 
+        /* ============ Tabs relocated into top header ============ */
+        .header-actions #mainTabBar {
+            height: auto; padding: 0; border-bottom: none;
+            background: transparent; align-items: center; gap: 4px; z-index: auto;
+        }
+        .header-actions #mainTabBar .tab-btn { border-radius: 6px; height: auto; padding: 7px 14px; }
+        .header-actions #mainTabBar .tab-btn.active {
+            border-bottom-color: transparent; background: var(--bg-elevated);
+        }
+
+        /* ============ Action bar (second bar, context: video vs image) ============ */
+        .action-bar {
+            display: flex; align-items: center; background: var(--bg-surface);
+            border-bottom: 1px solid var(--border-color); padding: 0 24px;
+            min-height: 48px; position: relative; z-index: 9400;
+        }
+        .action-group { display: flex; align-items: center; gap: 12px; flex: 1; }
+        /* Default (no tab class) = videos shown, images hidden */
+        #imageActions { display: none; }
+        .app-container.tab-images #videoActions { display: none; }
+        .app-container.tab-images #imageActions { display: flex; }
+
         /* ============ Images tab layout ============ */
         #imagesTab {
             display: grid;
@@ -718,12 +740,12 @@
         .add-parent-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
         /* Results — view toggle */
-        #imagesTab .view-toggle { display: inline-flex; background: var(--bg-elevated); border-radius: var(--radius-sm); padding: 3px; gap: 2px; }
-        #imagesTab .view-toggle button {
+        #imageActions .view-toggle { display: inline-flex; background: var(--bg-elevated); border-radius: var(--radius-sm); padding: 3px; gap: 2px; }
+        #imageActions .view-toggle button {
             padding: 6px 12px; border: none; background: transparent; color: var(--text-secondary);
             font-family: inherit; font-size: 12px; cursor: pointer; border-radius: 5px; transition: all 0.15s;
         }
-        #imagesTab .view-toggle button.active { background: var(--accent); color: white; }
+        #imageActions .view-toggle button.active { background: var(--accent); color: white; }
 
         /* Node grid (list view) */
         .img-node-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; margin-top: 16px; }
@@ -2772,13 +2794,12 @@
             </div>
             <div id="appBreadcrumb" class="app-breadcrumb"><span>Browse</span></div>
             <div class="header-actions">
-                <button class="btn btn-tutorial btn-sm" onclick="window.open('/static/how-it-works.html','_blank')" title="Quick overview of how the platform works">&#9889; Quick Guide</button>
-                <button class="btn btn-tutorial btn-sm" onclick="openTutorial()" title="How to use this platform">📖 Tutorial</button>
-                <button class="btn btn-secondary btn-sm" onclick="window.open('/static/my-worker.html?v=214', '_blank')" title="Set up your Flow worker">🖥️ My Worker</button>
-                <button class="btn btn-secondary btn-sm btn-new-job" onclick="setAppMode({mode:'create'})">➕ New Job</button>
-                <button class="btn btn-secondary btn-sm" onclick="openAssembleModal()" title="Upload clips + script → auto-order → export">📦 Assemble</button>
-                <button class="btn btn-secondary btn-sm" onclick="refreshJobs()">🔄 Refresh</button>
-                
+                <!-- Tabs (relocated into top header) -->
+                <div class="tab-bar" id="mainTabBar">
+                    <button class="tab-btn active" data-tab="videos" onclick="switchMainTab('videos')">🎬 Videos</button>
+                    <button class="tab-btn" data-tab="images" onclick="switchMainTab('images')">🖼️ Images <span class="tab-count" id="imagesTabCount" style="display:none;">0</span></button>
+                </div>
+
                 <!-- User Menu -->
                 <div class="user-menu" id="userMenu" style="display: none;">
                     <button class="user-btn" onclick="toggleUserDropdown()">
@@ -2807,10 +2828,29 @@
             </div>
         </header>
 
-        <!-- ============ Tab Bar ============ -->
-        <div class="tab-bar" id="mainTabBar">
-            <button class="tab-btn active" data-tab="videos" onclick="switchMainTab('videos')">🎬 Videos</button>
-            <button class="tab-btn" data-tab="images" onclick="switchMainTab('images')">🖼️ Images <span class="tab-count" id="imagesTabCount" style="display:none;">0</span></button>
+        <!-- ============ Action Bar (second bar; context: video vs image) ============ -->
+        <div class="action-bar" id="actionBar">
+            <div class="action-group" id="videoActions">
+                <button class="btn btn-secondary btn-sm btn-new-job" onclick="setAppMode({mode:'create'})">➕ New Job</button>
+                <button class="btn btn-secondary btn-sm" onclick="openAssembleModal()" title="Upload clips + script → auto-order → export">📦 Assemble</button>
+                <button class="btn btn-secondary btn-sm" onclick="refreshJobs()">🔄 Refresh</button>
+                <button class="btn btn-secondary btn-sm" onclick="window.open('/static/my-worker.html?v=214', '_blank')" title="Set up your Flow worker">🖥️ My Worker</button>
+                <button class="btn btn-tutorial btn-sm" onclick="window.open('/static/how-it-works.html','_blank')" title="Quick overview of how the platform works">&#9889; Quick Guide</button>
+                <button class="btn btn-tutorial btn-sm" onclick="openTutorial()" title="How to use this platform">📖 Tutorial</button>
+            </div>
+            <div class="action-group" id="imageActions">
+                <button class="btn btn-secondary btn-sm" id="imgToggleNewNodeBtn" onclick="imgToggleNewNodeForm()">
+                    <span id="imgNewNodeBtnIcon">+</span>
+                    <span id="imgNewNodeBtnText">New Image Node</span>
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="imgOpenImportModal()" title="Bulk-create nodes from a markdown scene table">📋 Import</button>
+                <button class="btn btn-secondary btn-sm" onclick="imgRefreshNodes()" title="Refresh">🔄 Refresh</button>
+                <button class="btn btn-secondary btn-sm" onclick="imgCleanupOrphans()" title="Clean up orphan nodes">🧹 Cleanup</button>
+                <div class="view-toggle" style="margin-left:auto;">
+                    <button class="active" data-view="list" onclick="imgSwitchView('list')" title="List view">📋</button>
+                    <button data-view="graph" onclick="imgSwitchView('graph')" title="Graph view">🕸</button>
+                </div>
+            </div>
         </div>
         
         <!-- API Keys Modal -->
@@ -3528,12 +3568,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
         <div id="imagesTab">
             <!-- Left sidebar: new-node button (collapsible), worker status, toolbar, job list -->
             <div class="img-config-panel">
-                <!-- Collapsible "New Image Node" form -->
-                <button class="img-sidebar-newnode-btn" id="imgToggleNewNodeBtn" onclick="imgToggleNewNodeForm()">
-                    <span id="imgNewNodeBtnIcon">+</span>
-                    <span id="imgNewNodeBtnText">New Image Node</span>
-                </button>
-
+                <!-- New-Node form (toggled by the #imgToggleNewNodeBtn button in the action bar) -->
                 <div class="card" id="imgNewNodeFormCard" style="display:none;">
                     <label class="field-label">Name <span style="color:var(--text-muted);font-weight:400;">(optional)</span></label>
                     <input type="text" class="img-input" id="imgNodeName" placeholder="e.g. Avatar on stage" style="margin-bottom:12px;">
@@ -3611,16 +3646,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     </div>
                 </div>
 
-                <!-- Toolbar -->
-                <div class="img-sidebar-toolbar">
-                    <button class="btn btn-secondary" onclick="imgOpenImportModal()" title="Bulk-create nodes from a markdown scene table">📋 Import</button>
-                    <button class="btn btn-secondary" onclick="imgRefreshNodes()" title="Refresh">🔄</button>
-                    <button class="btn btn-secondary" onclick="imgCleanupOrphans()" title="Clean up orphan nodes">🧹</button>
-                    <div class="view-toggle">
-                        <button class="active" data-view="list" onclick="imgSwitchView('list')" title="List view">📋</button>
-                        <button data-view="graph" onclick="imgSwitchView('graph')" title="Graph view">🕸</button>
-                    </div>
-                </div>
+                <!-- Toolbar relocated to action bar (#imageActions) -->
 
                 <!-- Job list -->
                 <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);font-weight:600;margin-top:4px;">
@@ -20429,7 +20455,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         function imgSwitchView(view) {
             imgState.view = view;
-            document.querySelectorAll('#imagesTab .view-toggle button').forEach(b => {
+            document.querySelectorAll('#imageActions .view-toggle button').forEach(b => {
                 b.classList.toggle('active', b.dataset.view === view);
             });
             document.getElementById('imgListView').style.display = view === 'list' ? 'block' : 'none';
