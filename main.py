@@ -3184,6 +3184,36 @@ async def list_jobs(
 
     jobs = query.order_by(Job.created_at.desc()).offset(offset).limit(limit).all()
 
+    # v783 (2026-06-05): status reconciler — any job where the counters
+    # already say done but status is stuck mid-flight gets quietly flipped
+    # to 'completed' before serialization. Two recurrent ways to land in
+    # this state:
+    #   1. Flow redo at main.py:12816 reverts status='processing' on a
+    #      previously-completed job; the redo recompute inflates
+    #      completed_clips via audio_pair/Kling-variant siblings; the
+    #      'completed >= total' auto-flip in /api/user-worker/clips/{id}/
+    #      status only fires when THAT specific endpoint is the path
+    #      reporting the redo result. Other report paths (legacy
+    #      flow-worker, abandoned redo, manual variant upload) skip it →
+    #      status stuck at 'processing' indefinitely.
+    #   2. Pre-fix jobs sitting at status='processing' but counters say
+    #      done from earlier inflation.
+    # Skip cancelled / failed (operator terminal intent). Idempotent.
+    _reconciled = 0
+    for j in jobs:
+        if (
+            j.status not in (JobStatus.COMPLETED.value, JobStatus.CANCELLED.value, JobStatus.FAILED.value)
+            and (j.total_clips or 0) > 0
+            and (j.completed_clips or 0) >= j.total_clips
+        ):
+            j.status = JobStatus.COMPLETED.value
+            if j.completed_at is None:
+                j.completed_at = datetime.utcnow()
+            _reconciled += 1
+    if _reconciled:
+        db.commit()
+        print(f"[jobs-list] status reconciler flipped {_reconciled} stuck job(s) → completed", flush=True)
+
     # Batch-fetch first clip (clip_index=0) for each job to get dialogue + frame
     job_ids = [j.id for j in jobs]
     first_clips = {}
