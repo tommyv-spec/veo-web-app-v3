@@ -2792,7 +2792,6 @@
                 <div class="logo-icon">🎬</div>
                 <h1>KavenoBuilder</h1>
             </div>
-            <div id="appBreadcrumb" class="app-breadcrumb"><span>Browse</span></div>
             <div class="header-actions">
                 <!-- Tabs (relocated into top header) -->
                 <div class="tab-bar" id="mainTabBar">
@@ -2831,6 +2830,7 @@
         <!-- ============ Action Bar (second bar; context: video vs image) ============ -->
         <div class="action-bar" id="actionBar">
             <div class="action-group" id="videoActions">
+                <div id="appBreadcrumb" class="app-breadcrumb"><span>Browse</span></div>
                 <button class="btn btn-secondary btn-sm btn-new-job" onclick="setAppMode({mode:'create'})">➕ New Job</button>
                 <button class="btn btn-secondary btn-sm" onclick="openAssembleModal()" title="Upload clips + script → auto-order → export">📦 Assemble</button>
                 <button class="btn btn-secondary btn-sm" onclick="refreshJobs()">🔄 Refresh</button>
