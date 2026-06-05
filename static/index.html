@@ -1536,6 +1536,10 @@
         }
         .app-breadcrumb a:hover { color: var(--accent); border-bottom-color: var(--accent); }
         .app-breadcrumb span { color: var(--text); font-weight: 600; }
+        /* In the video action bar the breadcrumb sits right of the buttons and
+           must truncate so a long Review title never shoves the buttons. */
+        #videoActions .app-breadcrumb { min-width: 0; overflow: hidden; }
+        #videoActions .app-breadcrumb span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         #jobsList details { margin: 6px 0; }
         #jobsList details > summary { cursor: pointer; padding: 6px 0; font-weight: 600; }
         #jobsList .lc-rows { padding: 4px 0; display: flex; flex-direction: column; gap: 6px; }
@@ -2830,13 +2834,13 @@
         <!-- ============ Action Bar (second bar; context: video vs image) ============ -->
         <div class="action-bar" id="actionBar">
             <div class="action-group" id="videoActions">
-                <div id="appBreadcrumb" class="app-breadcrumb"><span>Browse</span></div>
                 <button class="btn btn-secondary btn-sm btn-new-job" onclick="setAppMode({mode:'create'})">➕ New Job</button>
                 <button class="btn btn-secondary btn-sm" onclick="openAssembleModal()" title="Upload clips + script → auto-order → export">📦 Assemble</button>
                 <button class="btn btn-secondary btn-sm" onclick="refreshJobs()">🔄 Refresh</button>
                 <button class="btn btn-secondary btn-sm" onclick="window.open('/static/my-worker.html?v=214', '_blank')" title="Set up your Flow worker">🖥️ My Worker</button>
                 <button class="btn btn-tutorial btn-sm" onclick="window.open('/static/how-it-works.html','_blank')" title="Quick overview of how the platform works">&#9889; Quick Guide</button>
                 <button class="btn btn-tutorial btn-sm" onclick="openTutorial()" title="How to use this platform">📖 Tutorial</button>
+                <div id="appBreadcrumb" class="app-breadcrumb" style="margin-left:auto;"><span>Browse</span></div>
             </div>
             <div class="action-group" id="imageActions">
                 <button class="btn btn-secondary btn-sm" id="imgToggleNewNodeBtn" onclick="imgToggleNewNodeForm()">
