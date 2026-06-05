@@ -4815,6 +4815,13 @@ def import_scene_table(
         )
 
 
+# v781 (operator 2026-06-05): the platform must NEVER auto-chain inline shared
+# ingredients to their first-appearance ("anchor") scene. Image chaining is
+# operator-controlled via explicit `reference_image:` ONLY — "we decide what
+# goes with what." Set True to restore the legacy anchor-scene auto-chain.
+PLATFORM_AUTO_CHAIN_INLINE_INGREDIENTS = False
+
+
 def _import_scene_table_impl(
     req: "ImportSceneTableRequest",
     db: Session,
@@ -5773,6 +5780,19 @@ def _import_scene_table_impl(
                     attached_parents_count += 1
                     slot += 1
                 elif ing_name in anchor_scenes:
+                    # v781 (operator 2026-06-05): NEVER auto-chain an inline
+                    # ingredient shared with an earlier scene. Chaining is
+                    # operator-controlled via explicit `reference_image:` ONLY,
+                    # so a prop/character that happens to appear in two unrelated
+                    # images no longer silently pulls a first-appearance frame in
+                    # as a reference. Skip the anchor-scene parent edge entirely.
+                    if not PLATFORM_AUTO_CHAIN_INLINE_INGREDIENTS:
+                        log.info(
+                            f"[import][v781] Image {image_index}: inline ingredient "
+                            f"'{ing_name}' shared with an earlier scene — NOT auto-chaining "
+                            f"(explicit-reference-only). Use reference_image: to chain."
+                        )
+                        continue
                     # Anchor scene already exists from an earlier scene.
                     # v522: skip if another ingredient already bound this parent
                     anchor_node_id = anchor_scenes[ing_name].id
@@ -5982,11 +6002,15 @@ def _import_scene_table_impl(
             for ing_name in mentioned:
                 if ing_name in ingredient_nodes:
                     attached_parents.append(ingredient_nodes[ing_name])
-                elif ing_name in anchor_scenes and anchor_scenes[ing_name] is not node:
+                elif (PLATFORM_AUTO_CHAIN_INLINE_INGREDIENTS
+                        and ing_name in anchor_scenes
+                        and anchor_scenes[ing_name] is not node):
                     # Was an anchor BEFORE this scene → chained dependency.
-                    # Skip if this scene is itself the anchor (just registered above).
+                    # v781: only gates when auto-chain is enabled. With the flag
+                    # off no anchor-scene edge was created above, so there is no
+                    # parent dependency to wait on here either.
                     attached_parents.append(anchor_scenes[ing_name])
-                # Else: this scene IS the anchor → no parent edge attached
+                # Else: this scene IS the anchor, or auto-chain disabled → no parent edge
             if ref_image is not None:
                 rp = created_nodes_by_image_index.get(ref_image)
                 if rp is not None:
