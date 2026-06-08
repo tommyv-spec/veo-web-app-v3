@@ -4941,21 +4941,36 @@ def export_final_video(
                             # frames_to_cut_end applied) so fallback retains the
                             # line; we only lose silence-tightening on that one
                             # clip — vastly better than losing dialogue.
-                            MIN_KEEP_S = 1.5            # absolute floor (~5w of speech)
-                            MIN_KEEP_RATIO = 0.30       # ≥30% retention vs pre-VAD
+                            # v706.1 (2026-06-08) — script-length-aware floor.
+                            # OLD floor = max(1.5, pre_d * 0.30) scaled off the
+                            # FIXED Veo container (~7.73s), so a legit short line
+                            # (5-6w recipe step ≈ 2s of speech) fell under the
+                            # ~2.32s floor and got REJECTED back to the full-clip
+                            # dead air — directly fighting the v773.10.17 silero
+                            # pseudo-edge shrink (export 9fcc28 → 04acbc: clips
+                            # 5/7/8 rejected at post=2.07/2.31/2.07 vs floor 2.319).
+                            # The floor's real job is catching matcher COLLAPSE
+                            # (Whisper heard 0-2 of N words → ~0.4-0.7s). That
+                            # scales with the SCRIPT, not the container. 0.18s/word
+                            # ≈ 5.5 wps is faster than any human, so the floor sits
+                            # BELOW any real spoken duration and only a true
+                            # collapse falls under it. Semantic missed-word safety
+                            # is already carried by v708 trust gate + v709 audit.
+                            MIN_KEEP_S = 1.0            # hard absolute anti-collapse floor
+                            _word_count = len((full_text or "").split())
                             _vad_accepted = True
                             try:
                                 _pre_d = float(get_duration(ffprobe_json(Path(trimmed_file))))
                                 _post_d = float(get_duration(ffprobe_json(_vad_out)))
-                                _floor = max(MIN_KEEP_S, _pre_d * MIN_KEEP_RATIO)
+                                _floor = max(MIN_KEEP_S, _word_count * 0.18)
                                 if _post_d < _floor:
                                     _vad_accepted = False
                                     print(
                                         f"[VideoProcessor/v706] ⚠ clip "
                                         f"{info.get('clip_index', slot_zero)} VAD "
                                         f"REJECTED: pre={_pre_d:.3f}s post={_post_d:.3f}s "
-                                        f"floor={_floor:.3f}s (matcher likely missed "
-                                        f"words; keeping pre-VAD trimmed file)",
+                                        f"floor={_floor:.3f}s ({_word_count}w script; matcher "
+                                        f"likely missed words; keeping pre-VAD trimmed file)",
                                         flush=True,
                                     )
                             except Exception as _gd_err:
