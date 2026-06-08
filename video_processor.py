@@ -564,6 +564,14 @@ def _whisper_anchor_trim(
             flush=True,
         )
 
+    # v773.10.17 — track which edges are pseudo "keep-to-edge" placeholders.
+    # When Whisper found no head/tail script match, the clip edge is NOT a real
+    # speech boundary — it's dead air. The silero-VAD pass below is allowed to
+    # SHRINK a pseudo edge to the true speech boundary (matched anchors keep the
+    # over-include bias and may only extend).
+    head_is_pseudo = (start_src_word == "<NO_HEAD_MATCH>")
+    tail_is_pseudo = (end_src_word == "<NO_TAIL_MATCH>")
+
     # Monotonicity + sanity
     if end_anchor["end"] <= start_anchor["start"]:
         end_anchor = start_anchor
@@ -618,18 +626,35 @@ def _whisper_anchor_trim(
                     speech_pad_ms=int(_FRAME_PAD * 1000),
                 )
                 _orig_start, _orig_end = keep_start, keep_end
+                # Collect every silero speech region that intersects the
+                # current keep window, then take the union's outer edges.
+                _overlap = []
                 for _t in _ts:
                     _ss = _t["start"] / 16000.0
                     _se = _t["end"] / 16000.0
-                    # Overlap test: silero region intersects current keep window
                     if _se >= keep_start and _ss <= keep_end:
-                        if _ss < keep_start:
-                            keep_start = max(0.0, _ss - _FRAME_PAD)
-                        if _se > keep_end:
-                            keep_end = min(total_duration, _se + _FRAME_PAD)
+                        _overlap.append((_ss, _se))
+                if _overlap:
+                    _spk_start = min(s for s, e in _overlap)
+                    _spk_end = max(e for s, e in _overlap)
+                    # Always EXTEND to catch audible script words Whisper missed
+                    # at the boundaries (over-include bias for matched anchors).
+                    if _spk_start < keep_start:
+                        keep_start = max(0.0, _spk_start - _FRAME_PAD)
+                    if _spk_end > keep_end:
+                        keep_end = min(total_duration, _spk_end + _FRAME_PAD)
+                    # v773.10.17 — pseudo edges (no Whisper anchor match) sit on
+                    # dead air, not speech. SHRINK them to the real speech
+                    # boundary so a short line on a long clip no longer keeps
+                    # several seconds of trailing/leading silence.
+                    if head_is_pseudo and _spk_start - _FRAME_PAD > keep_start:
+                        keep_start = max(0.0, _spk_start - _FRAME_PAD)
+                    if tail_is_pseudo and _spk_end + _FRAME_PAD < keep_end:
+                        keep_end = min(total_duration, _spk_end + _FRAME_PAD)
                 if keep_start != _orig_start or keep_end != _orig_end:
                     print(
-                        f"[WhisperAnchor] silero-VAD extended: "
+                        f"[WhisperAnchor] silero-VAD adjusted "
+                        f"(head_pseudo={head_is_pseudo} tail_pseudo={tail_is_pseudo}): "
                         f"[{_orig_start:.2f}, {_orig_end:.2f}] → "
                         f"[{keep_start:.2f}, {keep_end:.2f}]",
                         flush=True,
