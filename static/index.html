@@ -2843,19 +2843,16 @@
                 <div id="appBreadcrumb" class="app-breadcrumb" style="margin-left:auto;"><span>Browse</span></div>
             </div>
             <div class="action-group" id="imageActions">
-                <!-- v773.11.3 (2026-06-08): 📋 Import is the real entry point of the
-                     Images tab — 87 clicks / 14d vs 0 for New Image Node, Cleanup, and
-                     ~2 for Refresh. Promoted from btn-secondary-sm to btn-primary,
-                     moved to first position. The bulk markdown-import flow is how every
-                     job actually starts (per wiki/analytics/2026-06-05-funnel-audit.md
-                     and the 2026-06-08 re-analysis). -->
+                <!-- v773.11.3 + v773.11.4 (2026-06-08): 📋 Import is the real entry
+                     point of the Images tab — 87 clicks / 14d vs 0 for New Image Node,
+                     0 for Cleanup, 2 for Refresh in the same window. Import promoted
+                     to btn-primary (was secondary-sm); the three dead toolbar buttons
+                     are removed. The JS handlers (imgToggleNewNodeForm, imgRefreshNodes,
+                     imgCleanupOrphans) stay intact in case a future flow needs them or
+                     a future commit reintroduces a button — only the unused entry
+                     points are gone. Per wiki/analytics/2026-06-05-funnel-audit.md and
+                     the 2026-06-08 re-analysis. -->
                 <button class="btn btn-primary" onclick="imgOpenImportModal()" title="Bulk-create image nodes from a markdown scene table — the main way to start a job">📋 Import</button>
-                <button class="btn btn-secondary btn-sm" id="imgToggleNewNodeBtn" onclick="imgToggleNewNodeForm()">
-                    <span id="imgNewNodeBtnIcon">+</span>
-                    <span id="imgNewNodeBtnText">New Image Node</span>
-                </button>
-                <button class="btn btn-secondary btn-sm" onclick="imgRefreshNodes()" title="Refresh">🔄 Refresh</button>
-                <button class="btn btn-secondary btn-sm" onclick="imgCleanupOrphans()" title="Clean up orphan nodes">🧹 Cleanup</button>
                 <!-- Graph view hidden for now (markup + imgSwitchView kept for re-enable;
                      TODO when restored: scope graph per-job, not all jobs at once). -->
                 <div class="view-toggle" style="margin-left:auto;display:none;">
@@ -18274,15 +18271,19 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const _sd = (imgState && typeof imgState.sinceDays === 'number') ? imgState.sinceDays : 3;
                 const _ls = 'background:none;border:none;color:var(--accent);cursor:pointer;padding:0;font:inherit;text-decoration:underline';
                 let _inner;
+                // v773.11.4 (2026-06-08): "↺ Reset to 3 days" and "Show all" had 0
+                // clicks each / 14d. "Show older" (22 / 14d) is the only path the
+                // operator actually uses — it walks the window outward in defined
+                // steps and lands on "all" at the final step anyway, making "Show
+                // all" redundant and "Reset to 3 days" unreachable in practice
+                // (nobody opens "all time" mode). imgResetWindow and imgShowAll
+                // handlers retained in case a future filter restores them.
                 if (_sd === 0) {
-                    _inner = `Showing all time · <button onclick="imgResetWindow()" style="${_ls}">↺ Reset to 3 days</button>`;
+                    _inner = `Showing all time`;
                 } else {
                     const _next = _imgNextStep(_sd);
                     const _delta = _next === 0 ? 'all' : `+${_next - _sd}d → ${_next}d`;
-                    let _btns = `<button onclick="imgShowOlder()" style="${_ls}">Show older (${_delta})</button>`;
-                    if (_next !== 0) {
-                        _btns += ` · <button onclick="imgShowAll()" style="${_ls};opacity:0.7">Show all</button>`;
-                    }
+                    const _btns = `<button onclick="imgShowOlder()" style="${_ls}">Show older (${_delta})</button>`;
                     _inner = `Showing last ${_sd} day${_sd === 1 ? '' : 's'} · ${_btns}`;
                 }
                 const _footer = document.createElement('div');
@@ -19078,9 +19079,11 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 // that retroactively creates an ImageJobBatch row so the
                 // normal promote flow works. Only show this for real "job"
                 // groups — not the pseudo-groups Subjects & Uploads / Other.
-                const nodeIdsJson = JSON.stringify(generatedNodes.map(n => n.id));
-                const b64NodeIds = btoa(nodeIdsJson);
-                bulkActions.push(`<button class="btn btn-primary" onclick="imgBackfillBatchAndPromote('${b64NodeIds}', '${keyAttr}')" title="This import predates the batch system — click to retroactively enable promote-to-video for it">🔗 Enable promote</button>`);
+                // v773.11.4 (2026-06-08): 🔗 Enable promote had 0 clicks / 14d.
+                // It's a one-off retroactive backfill for pre-v428 imports — by now
+                // every active job has a batch_id, so this code path is effectively
+                // dead. Handler imgBackfillBatchAndPromote retained for safety.
+                // (was: bulkActions.push(`<button class="btn btn-primary" onclick="imgBackfillBatchAndPromote('${b64NodeIds}', '${keyAttr}')"...>🔗 Enable promote</button>`))
             }
 
             if (failedCount > 0) {
@@ -19092,7 +19095,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if (sharedBatchId) {
                 bulkActions.push(`<button class="btn btn-secondary" onclick="imgOpenBatchOverview('${sharedBatchId}')" title="View the full source markdown + parsed sections (ingredients, images, scenes, lines, pads, action notes, Veo prompts)">📋 Batch overview</button>`);
             }
-            bulkActions.push(`<button class="btn btn-secondary" onclick="imgBulkExportList('${keyAttr}')" title="Copy a plain-text list of scenes + statuses to clipboard">📋 Export list</button>`);
+            // v773.11.4 (2026-06-08): 📋 Export list had 0 clicks / 14d. Removed
+            // from the bulk-actions row. imgBulkExportList handler kept in case a
+            // future flow re-exposes it.
+            // (was: bulkActions.push(`<button ... onclick="imgBulkExportList(...)"...>📋 Export list</button>`))
             if (!groupKey.startsWith('__') && nodes.length > 0) {
                 bulkActions.push(`<button class="btn btn-secondary" style="color:var(--error);" onclick="imgBulkDeleteJob('${keyAttr}')" title="Delete every node in this job">🗑 Delete job</button>`);
             }
@@ -19924,8 +19930,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         ${node.variants.map(v => {
                             const chosen = v.id === node.chosen_variant_id;
                             const isManual = (v.source === 'manual');
+                            // v773.11.4 (2026-06-08): data-track makes the variant-card
+                            // click readable in PostHog (autocapture stamps data-* attrs).
+                            // 14d data showed 679 empty-text clicks dominated by these
+                            // icon-only cards — now they show up as 'variant_card'.
                             return `
-                                <div class="img-variant ${chosen ? 'chosen' : ''} ${isManual ? 'manual-variant' : ''}" onclick="imgChooseVariant(event, ${node.id}, ${v.id})">
+                                <div class="img-variant ${chosen ? 'chosen' : ''} ${isManual ? 'manual-variant' : ''}"
+                                     data-track="variant_card"
+                                     data-source="${isManual ? 'manual' : 'generated'}"
+                                     onclick="imgChooseVariant(event, ${node.id}, ${v.id})">
                                     <img src="${imgThumbUrl(v.image_url, 256)}" loading="lazy" decoding="async" alt="variant ${v.variant_index}">
                                     ${isManual ? '<div class="manual-badge">M</div>' : ''}
                                     <span class="variant-label">${v.variant_index}</span>
@@ -19934,6 +19947,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                                 </div>`;
                         }).join('')}
                         <div class="img-variant img-upload-tile"
+                             data-track="variant_manual_upload"
                              onclick="imgManualUploadClick(${node.id})"
                              title="Click to browse, or drag &amp; drop an image">
                             <div class="upload-icon">📁</div>
