@@ -388,6 +388,11 @@ def _whisper_anchor_trim(
     _code, _, _err = run(_cmd)
     if _code != 0:
         print(f"[WhisperAnchor] audio extract failed: {_err[:200]} — keeping full clip", flush=True)
+        try:
+            import os as _os_ext
+            _os_ext.unlink(_audio_path)  # v773.10.18 — don't leak the temp wav on the fail path
+        except Exception:
+            pass
         return [(0.0, total_duration)]
 
     # v773.10.9 — use a dedicated Whisper-base lazy singleton (~150 MB int8).
@@ -635,22 +640,57 @@ def _whisper_anchor_trim(
                     if _se >= keep_start and _ss <= keep_end:
                         _overlap.append((_ss, _se))
                 if _overlap:
-                    _spk_start = min(s for s, e in _overlap)
-                    _spk_end = max(e for s, e in _overlap)
+                    _ov = sorted(_overlap)
+                    _spk_start = _ov[0][0]
+                    _spk_end = _ov[-1][1]
                     # Always EXTEND to catch audible script words Whisper missed
                     # at the boundaries (over-include bias for matched anchors).
                     if _spk_start < keep_start:
                         keep_start = max(0.0, _spk_start - _FRAME_PAD)
                     if _spk_end > keep_end:
                         keep_end = min(total_duration, _spk_end + _FRAME_PAD)
-                    # v773.10.17 — pseudo edges (no Whisper anchor match) sit on
-                    # dead air, not speech. SHRINK them to the real speech
-                    # boundary so a short line on a long clip no longer keeps
-                    # several seconds of trailing/leading silence.
-                    if head_is_pseudo and _spk_start - _FRAME_PAD > keep_start:
-                        keep_start = max(0.0, _spk_start - _FRAME_PAD)
-                    if tail_is_pseudo and _spk_end + _FRAME_PAD < keep_end:
-                        keep_end = min(total_duration, _spk_end + _FRAME_PAD)
+                    # v773.10.18 — pseudo edges (no Whisper anchor match) sit on
+                    # dead air. SHRINK them to the real speech boundary. Use the
+                    # CONTIGUOUS speech run anchored to the matched (real) side,
+                    # NOT max/min across ALL overlapping regions: with a pseudo
+                    # edge pinned to the clip edge, every silero region overlaps,
+                    # so a single trailing breath/ambient blip (separated from the
+                    # script by a real silence gap) would otherwise pull the edge
+                    # back out and re-introduce the dead air this is meant to kill.
+                    # Walk from the matched side, stop at the first gap > _GAP.
+                    _GAP = 0.6  # silence gap (s) that marks dead air vs in-line pause
+                    if tail_is_pseudo:
+                        # head is the matched edge → walk forward from the first
+                        # region reaching keep_start; run_end = real speech tail.
+                        _run_end = None
+                        for _s, _e in _ov:
+                            if _run_end is None:
+                                if _e >= keep_start:
+                                    _run_end = _e
+                            elif _s - _run_end <= _GAP:
+                                _run_end = max(_run_end, _e)
+                            else:
+                                break
+                        if _run_end is not None:
+                            _cand = min(total_duration, _run_end + _FRAME_PAD)
+                            if _cand < keep_end:
+                                keep_end = _cand
+                    if head_is_pseudo:
+                        # tail is the matched edge → walk backward from the last
+                        # region reaching keep_end; run_start = real speech head.
+                        _run_start = None
+                        for _s, _e in reversed(_ov):
+                            if _run_start is None:
+                                if _s <= keep_end:
+                                    _run_start = _s
+                            elif _run_start - _e <= _GAP:
+                                _run_start = min(_run_start, _s)
+                            else:
+                                break
+                        if _run_start is not None:
+                            _cand = max(0.0, _run_start - _FRAME_PAD)
+                            if _cand > keep_start:
+                                keep_start = _cand
                 if keep_start != _orig_start or keep_end != _orig_end:
                     print(
                         f"[WhisperAnchor] silero-VAD adjusted "
@@ -4959,9 +4999,28 @@ def export_final_video(
                             MIN_KEEP_S = 1.0            # hard absolute anti-collapse floor
                             _word_count = len((full_text or "").split())
                             _vad_accepted = True
+                            # v706.2 — probe the VAD OUTPUT first and in its own
+                            # guard. A truncated/0-length _vad_out is exactly the
+                            # case that makes ffprobe throw; the OLD single try
+                            # then defaulted to ACCEPT, promoting the one bad file
+                            # the floor exists to reject. On output-probe failure
+                            # → REJECT (keep the known-good pre-VAD file).
                             try:
-                                _pre_d = float(get_duration(ffprobe_json(Path(trimmed_file))))
                                 _post_d = float(get_duration(ffprobe_json(_vad_out)))
+                            except Exception as _gd_err:
+                                _vad_accepted = False
+                                print(
+                                    f"[VideoProcessor/v706] ⚠ clip "
+                                    f"{info.get('clip_index', slot_zero)} VAD output "
+                                    f"unprobeable ({_gd_err}) → REJECTED "
+                                    f"(keeping pre-VAD trimmed file)",
+                                    flush=True,
+                                )
+                            else:
+                                try:
+                                    _pre_d = float(get_duration(ffprobe_json(Path(trimmed_file))))
+                                except Exception:
+                                    _pre_d = -1.0  # log-only; floor uses post vs script
                                 _floor = max(MIN_KEEP_S, _word_count * 0.18)
                                 if _post_d < _floor:
                                     _vad_accepted = False
@@ -4973,26 +5032,35 @@ def export_final_video(
                                         f"likely missed words; keeping pre-VAD trimmed file)",
                                         flush=True,
                                     )
-                            except Exception as _gd_err:
-                                print(
-                                    f"[VideoProcessor/v706] floor probe failed for "
-                                    f"clip {info.get('clip_index', slot_zero)}: "
-                                    f"{_gd_err} — accepting VAD output by default",
-                                    flush=True,
-                                )
 
                             if _vad_accepted:
+                                # v706.2 — rename INTO place first, unlink the
+                                # pre-VAD file only after the rename succeeds. The
+                                # old order (unlink then rename) lost the clip
+                                # entirely if the rename raised. os.replace is
+                                # atomic + overwrites the destination.
                                 try:
-                                    Path(trimmed_file).unlink()
-                                except Exception:
-                                    pass
-                                _vad_out.rename(trimmed_file)
-                                print(
-                                    f"[VideoProcessor/v691d] clip "
-                                    f"{info.get('clip_index', slot_zero)} → "
-                                    f"per-clip Whisper-VAD applied",
-                                    flush=True,
-                                )
+                                    import os as _os_rep
+                                    _os_rep.replace(str(_vad_out), str(trimmed_file))
+                                    print(
+                                        f"[VideoProcessor/v691d] clip "
+                                        f"{info.get('clip_index', slot_zero)} → "
+                                        f"per-clip Whisper-VAD applied",
+                                        flush=True,
+                                    )
+                                except Exception as _rep_err:
+                                    # Rename failed → pre-VAD file is still intact.
+                                    # Keep it; drop the VAD output.
+                                    print(
+                                        f"[VideoProcessor/v706] ⚠ clip "
+                                        f"{info.get('clip_index', slot_zero)} VAD "
+                                        f"rename failed ({_rep_err}) → keeping pre-VAD file",
+                                        flush=True,
+                                    )
+                                    try:
+                                        _vad_out.unlink()
+                                    except Exception:
+                                        pass
                             else:
                                 # Discard the VAD output, keep pre-VAD file in place.
                                 try:
