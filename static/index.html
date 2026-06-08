@@ -2843,11 +2843,17 @@
                 <div id="appBreadcrumb" class="app-breadcrumb" style="margin-left:auto;"><span>Browse</span></div>
             </div>
             <div class="action-group" id="imageActions">
+                <!-- v773.11.3 (2026-06-08): 📋 Import is the real entry point of the
+                     Images tab — 87 clicks / 14d vs 0 for New Image Node, Cleanup, and
+                     ~2 for Refresh. Promoted from btn-secondary-sm to btn-primary,
+                     moved to first position. The bulk markdown-import flow is how every
+                     job actually starts (per wiki/analytics/2026-06-05-funnel-audit.md
+                     and the 2026-06-08 re-analysis). -->
+                <button class="btn btn-primary" onclick="imgOpenImportModal()" title="Bulk-create image nodes from a markdown scene table — the main way to start a job">📋 Import</button>
                 <button class="btn btn-secondary btn-sm" id="imgToggleNewNodeBtn" onclick="imgToggleNewNodeForm()">
                     <span id="imgNewNodeBtnIcon">+</span>
                     <span id="imgNewNodeBtnText">New Image Node</span>
                 </button>
-                <button class="btn btn-secondary btn-sm" onclick="imgOpenImportModal()" title="Bulk-create nodes from a markdown scene table">📋 Import</button>
                 <button class="btn btn-secondary btn-sm" onclick="imgRefreshNodes()" title="Refresh">🔄 Refresh</button>
                 <button class="btn btn-secondary btn-sm" onclick="imgCleanupOrphans()" title="Clean up orphan nodes">🧹 Cleanup</button>
                 <!-- Graph view hidden for now (markup + imgSwitchView kept for re-enable;
