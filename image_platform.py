@@ -1216,7 +1216,7 @@ class ImageSceneAssignment(Base):
     # `scene_type: text_card` allows scene rows with image_node_id=NULL,
     # rendered via ffmpeg drawtext at export time.
     image_node_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=True)
-    clip_mode = Column(String(20), default="blend")   # blend | fresh | continue
+    clip_mode = Column(String(20), default="fresh")   # v782 default fresh (was blend) | blend | fresh | continue
     transition = Column(String(20), nullable=True)    # cut | blend | null
     # JSON arrays, parallel to each other. len(lines_json) == len(action_notes_json).
     # action_notes_json entries may be null for lines that don't have one.
@@ -1335,7 +1335,7 @@ class ImageSceneAssignment(Base):
             "batch_id": self.batch_id,
             "scene_index": self.scene_index,
             "image_node_id": self.image_node_id,
-            "clip_mode": self.clip_mode or "blend",
+            "clip_mode": self.clip_mode or "fresh",  # v782 default fresh
             "transition": self.transition,
             "lines": lines,
             "action_notes": notes,
@@ -6321,7 +6321,7 @@ def _import_scene_table_impl(
             batch_id=batch_id,
             scene_index=s["scene_index"],
             image_node_id=scene_image_node_id,
-            clip_mode=(s.get("clip_mode") or "blend").lower(),
+            clip_mode=(s.get("clip_mode") or "fresh").lower(),  # v782 default fresh
             transition=s.get("scene_transition"),
             lines_json=_json.dumps(s.get("lines") or []),
             action_notes_json=_json.dumps(s.get("action_notes") or []),
@@ -6851,7 +6851,7 @@ def prepare_batch_for_video(
             synthesized.append({
                 "scene_index": idx,
                 "image_node_id": n.id,
-                "clip_mode": (n.clip_mode or "blend").lower(),
+                "clip_mode": (n.clip_mode or "fresh").lower(),  # v782 default fresh
                 "transition": n.scene_transition,
                 "lines": [line_text],
                 "action_notes": [n.action_note or None],
@@ -7187,7 +7187,7 @@ def prepare_batch_for_video(
                 pads.append(None)
             pads = pads[:len(lines)]
 
-        clip_mode = (scene.get("clip_mode") or "blend").lower()
+        clip_mode = (scene.get("clip_mode") or "fresh").lower()  # v782 default fresh
         transition = scene.get("transition")
         if transition in ("", "null", "None"):
             transition = None
@@ -8641,7 +8641,7 @@ def promote_batch_to_video(
         fresh per-job folder populated with the chosen variant files.
       - One Clip per scene, in scene_index order, with:
           * dialogue_text = voiceover_text (or empty string if missing)
-          * clip_mode = the parsed clip_mode (blend/fresh) or 'blend' default
+          * clip_mode = the parsed clip_mode (blend/fresh) or 'fresh' default (v782)
           * scene_index = the scene_index_in_batch
           * start_frame = the R2-style key for the copied variant file
           * prompt_text left unset — video worker builds it from action_note
@@ -8779,7 +8779,7 @@ def promote_batch_to_video(
                 )
 
         line_text_default = n.voiceover_text or ""
-        mode = (n.clip_mode or "blend").lower()
+        mode = (n.clip_mode or "fresh").lower()  # v782 default fresh
         if mode not in ("blend", "fresh", "continue"):
             mode = "blend"
 

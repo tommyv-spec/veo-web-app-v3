@@ -362,7 +362,7 @@ class Clip(Base):
     replacement_start_frame = Column(String(512), nullable=True)
     
     # === Storyboard/Scene Mode Fields ===
-    clip_mode = Column(String(20), default="blend")  # 'blend' | 'continue' | 'fresh'
+    clip_mode = Column(String(20), default="fresh")  # v782 default fresh (was blend) | 'blend' | 'continue' | 'fresh'
     scene_index = Column(Integer, default=0)  # Which scene this clip belongs to
     
     # Generation parameters (for regeneration)
@@ -983,7 +983,7 @@ def _run_migrations_postgresql(engine):
         ("clips", "flow_clip_id", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS flow_clip_id TEXT"),
         ("clips", "output_url", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS output_url TEXT"),
         # Storyboard/Scene mode fields
-        ("clips", "clip_mode", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS clip_mode TEXT DEFAULT 'blend'"),
+        ("clips", "clip_mode", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS clip_mode TEXT DEFAULT 'fresh'"),  # v782 default fresh
         ("clips", "scene_index", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS scene_index INTEGER DEFAULT 0"),
         # User Worker Token table
         ("user_worker_tokens", "_create_table_", """
@@ -1129,7 +1129,7 @@ def _run_migrations_sqlite(engine):
         ("clips", "flow_clip_id", "ALTER TABLE clips ADD COLUMN flow_clip_id TEXT"),
         ("clips", "output_url", "ALTER TABLE clips ADD COLUMN output_url TEXT"),
         # Storyboard/Scene mode fields
-        ("clips", "clip_mode", "ALTER TABLE clips ADD COLUMN clip_mode TEXT DEFAULT 'blend'"),
+        ("clips", "clip_mode", "ALTER TABLE clips ADD COLUMN clip_mode TEXT DEFAULT 'fresh'"),  # v782 default fresh
         ("clips", "scene_index", "ALTER TABLE clips ADD COLUMN scene_index INTEGER DEFAULT 0"),
         # Export / Voice Clone tracking
         ("jobs", "has_export", "ALTER TABLE jobs ADD COLUMN has_export INTEGER DEFAULT 0"),

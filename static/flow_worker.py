@@ -6966,7 +6966,7 @@ def analyze_continue_mode_chains(clips):
         clip = clips[i]
         prev_clip = clips[i - 1]
         
-        clip_mode = clip.get('clip_mode', 'blend')
+        clip_mode = clip.get('clip_mode', 'fresh')  # v782 default fresh
         scene_index = clip.get('scene_index', 0)
         prev_scene_index = prev_clip.get('scene_index', 0)
         
@@ -6985,7 +6985,7 @@ def analyze_continue_mode_chains(clips):
     print(f"[ContinueMode] Analyzed {len(clips)} clips into {len(chains)} chain(s):", flush=True)
     for chain_idx, chain in enumerate(chains):
         if len(chain) > 1:
-            modes = [clips[i].get('clip_mode', 'blend') for i in chain]
+            modes = [clips[i].get('clip_mode', 'fresh') for i in chain]  # v782 default fresh
             print(f"  Chain {chain_idx}: clips {chain} (modes: {modes}) - SEQUENTIAL", flush=True)
         else:
             print(f"  Chain {chain_idx}: clip {chain[0]} - PARALLEL OK", flush=True)
@@ -14702,7 +14702,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
     clip_modes = {}
     has_end_frame = False
     for c in clips:
-        mode = c.get('clip_mode', 'blend')
+        mode = c.get('clip_mode', 'fresh')  # v782 default fresh
         clip_modes[mode] = clip_modes.get(mode, 0) + 1
         if c.get('end_frame_key'):
             has_end_frame = True
@@ -15066,7 +15066,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         end_frame_key = clip.get('end_frame_key')
         
         # Get clip mode and scene info
-        clip_mode = clip.get('clip_mode', 'blend')
+        clip_mode = clip.get('clip_mode', 'fresh')  # v782 default fresh
         scene_index = clip.get('scene_index', 0)
         prev_scene_index = clips[i-1].get('scene_index', 0) if i > 0 else -1
         continue_frame_extracted = False  # Flag to track if we successfully extracted a frame
@@ -16101,7 +16101,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     unique_images = set()
     has_end_frame = False
     for c in clips:
-        mode = c.get('clip_mode', 'blend')
+        mode = c.get('clip_mode', 'fresh')  # v782 default fresh
         clip_modes[mode] = clip_modes.get(mode, 0) + 1
         scene_count.add(c.get('scene_index', 0))
         if c.get('start_frame_key'):
@@ -16698,7 +16698,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         end_frame_key = clip.get('end_frame_key')
         
         # Get clip mode and scene info
-        clip_mode = clip.get('clip_mode', 'blend')
+        clip_mode = clip.get('clip_mode', 'fresh')  # v782 default fresh
         scene_index = clip.get('scene_index', 0)
         continue_frame_extracted = False
         
