@@ -34,7 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, H
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float
+    Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float, or_
 )
 from sqlalchemy.orm import Session, relationship, joinedload, selectinload
 
@@ -2011,10 +2011,21 @@ def list_nodes(
     # v726 — since_days date-window filter (default 3 days).
     # since_days=0 disables, returning the full user history (used by
     # the "Show older" UI escalation: 3 → 14 → 90 → 0).
+    # v773.11.5 (2026-06-08): uploaded reference nodes (kind='upload')
+    # are persistent assets a user re-uses across many jobs — the
+    # subject + product pickers in the Image-job sidebar pull from
+    # this same /api/images/nodes list, and prior to this fix any
+    # upload older than the active window silently disappeared from
+    # the pickers, forcing the operator to re-upload the same file
+    # every few days. The cutoff now applies to generated nodes
+    # only; uploads are always returned regardless of since_days.
     filters = [ImageNode.user_id == current_user.id]
     if since_days > 0:
         cutoff = datetime.utcnow() - timedelta(days=since_days)
-        filters.append(ImageNode.created_at >= cutoff)
+        filters.append(or_(
+            ImageNode.kind == "upload",
+            ImageNode.created_at >= cutoff,
+        ))
 
     nodes = read_query_with_retry(db, lambda: db.query(ImageNode).filter(
         *filters
@@ -2023,6 +2034,20 @@ def list_nodes(
         selectinload(ImageNode.parent_edges).joinedload(ImageEdge.parent),
         selectinload(ImageNode.child_edges).joinedload(ImageEdge.child),
     ).order_by(ImageNode.created_at.desc()).all())
+
+    # v773.11.5 diagnostic — remove in a follow-up commit once a real
+    # operator-side run confirms uploads are now surviving the date
+    # filter (per code/CLAUDE.md "Production deploy discipline").
+    try:
+        _n_total = len(nodes)
+        _n_uploads = sum(1 for _n in nodes if getattr(_n, 'kind', None) == 'upload')
+        print(
+            f"[v773.11.5 list_nodes] user={current_user.id} since_days={since_days} "
+            f"total={_n_total} uploads={_n_uploads} generated={_n_total - _n_uploads}",
+            flush=True,
+        )
+    except Exception:
+        pass
 
     # v640 — ETag/304 support to kill bandwidth waste from 2s sidebar polling.
     # User HAR capture showed `/api/images/nodes` returning 2.9 MB every 2 s
