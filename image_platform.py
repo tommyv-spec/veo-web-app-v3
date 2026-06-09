@@ -2251,6 +2251,7 @@ def update_node(
 @router.delete("/nodes/{node_id}")
 def delete_node(
     node_id: int,
+    force: bool = Query(default=False),
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -2262,7 +2263,7 @@ def delete_node(
         raise HTTPException(404, "Node not found")
     # Check no children depend on this node
     n_children = db.query(ImageEdge).filter(ImageEdge.parent_node_id == node_id).count()
-    if n_children > 0:
+    if n_children > 0 and not force:
         # Get child node names for a helpful message
         child_ids = [
             e.child_node_id for e in
@@ -2276,10 +2277,35 @@ def delete_node(
         names_str = ", ".join(child_names)
         if n_children > 5:
             names_str += f" (and {n_children - 5} more)"
+        # v773.11.6 (2026-06-09): the message now tells the user a force
+        # path exists. Frontend reads the 409 detail + the new
+        # `n_children` header to offer "Delete anyway? Orphan N
+        # children" without re-fetching counts.
         raise HTTPException(
-            409,
-            f"Cannot delete — {n_children} scene(s) use this as a parent: {names_str}. "
-            f"Delete those first."
+            status_code=409,
+            detail=(
+                f"Cannot delete — {n_children} scene(s) use this as a parent: {names_str}. "
+                f"Delete those first, OR retry with ?force=1 to orphan them "
+                f"(generated children stay intact; only the parent link to this upload is dropped)."
+            ),
+            headers={"X-Image-Children-Count": str(n_children)},
+        )
+
+    if n_children > 0 and force:
+        # v773.11.6 — operator force-delete: sever child→this-node edges
+        # so the children become orphaned reference-wise but keep all
+        # of their own variants, chosen variant, voiceover lines, and
+        # downstream descendants. This is the right move for the
+        # "throw away the old upload, keep what I already generated"
+        # workflow (per operator 2026-06-09).
+        deleted_edges = db.query(ImageEdge).filter(
+            ImageEdge.parent_node_id == node_id
+        ).delete(synchronize_session=False)
+        db.flush()
+        print(
+            f"[v773.11.6 delete_node force] user={current_user.id} node={node_id} "
+            f"severed_parent_edges={deleted_edges}",
+            flush=True,
         )
 
     try:

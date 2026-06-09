@@ -20433,7 +20433,26 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
             if (!confirm(msg)) return;
             try {
-                const res = await fetch(`/api/images/nodes/${nodeId}`, { method: 'DELETE' });
+                let res = await fetch(`/api/images/nodes/${nodeId}`, { method: 'DELETE' });
+                // v773.11.6 (2026-06-09): on 409 ("this upload is used as a parent
+                // by N scenes"), let the operator force the delete — the children
+                // stay intact, only the parent-link edges to this upload get
+                // severed. Common case: old reference upload no longer needed,
+                // but the generated images that used it as a parent should stay.
+                if (res.status === 409) {
+                    let detail = '';
+                    try { detail = (await res.clone().json()).detail || ''; } catch (e) {}
+                    const childCount = res.headers.get('X-Image-Children-Count') || '?';
+                    const goAhead = confirm(
+                        `${detail || 'This upload is used by other scenes.'}\n\n` +
+                        `Delete anyway?\n\n` +
+                        `${childCount} child scene(s) will lose their parent link to this upload, ` +
+                        `but keep all their own variants and downstream work intact. ` +
+                        `Only the link to THIS upload is removed.`
+                    );
+                    if (!goAhead) return;
+                    res = await fetch(`/api/images/nodes/${nodeId}?force=1`, { method: 'DELETE' });
+                }
                 if (!res.ok) {
                     let msg = `HTTP ${res.status}`;
                     try {
