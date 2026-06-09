@@ -2035,20 +2035,6 @@ def list_nodes(
         selectinload(ImageNode.child_edges).joinedload(ImageEdge.child),
     ).order_by(ImageNode.created_at.desc()).all())
 
-    # v773.11.5 diagnostic — remove in a follow-up commit once a real
-    # operator-side run confirms uploads are now surviving the date
-    # filter (per code/CLAUDE.md "Production deploy discipline").
-    try:
-        _n_total = len(nodes)
-        _n_uploads = sum(1 for _n in nodes if getattr(_n, 'kind', None) == 'upload')
-        print(
-            f"[v773.11.5 list_nodes] user={current_user.id} since_days={since_days} "
-            f"total={_n_total} uploads={_n_uploads} generated={_n_total - _n_uploads}",
-            flush=True,
-        )
-    except Exception:
-        pass
-
     # v640 — ETag/304 support to kill bandwidth waste from 2s sidebar polling.
     # User HAR capture showed `/api/images/nodes` returning 2.9 MB every 2 s
     # (~21 MB/min sustained) even when nothing was changing. Browser caches
@@ -2298,15 +2284,10 @@ def delete_node(
         # downstream descendants. This is the right move for the
         # "throw away the old upload, keep what I already generated"
         # workflow (per operator 2026-06-09).
-        deleted_edges = db.query(ImageEdge).filter(
+        db.query(ImageEdge).filter(
             ImageEdge.parent_node_id == node_id
         ).delete(synchronize_session=False)
         db.flush()
-        print(
-            f"[v773.11.6 delete_node force] user={current_user.id} node={node_id} "
-            f"severed_parent_edges={deleted_edges}",
-            flush=True,
-        )
 
     try:
         # ===== Scene-assignment merge =====
