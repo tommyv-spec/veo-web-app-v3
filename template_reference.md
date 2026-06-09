@@ -14446,3 +14446,30 @@ Self-check before saving any build: the `clip_mode:` count must equal the `### S
 `main.py` prompt-build logs `[v782] Clip N: clip_mode=... end_fname=... (end_frame ASSIGNED|none)` per clip. On a correct fresh/cut build, `end_fname` is `none` for every clip except explicit `end_frame_image` morphs. A non-None end_fname on a fresh/cut clip = an unwanted blend slipped through. Remove the diagnostic after operator confirms clean exports.
 
 **Touched**: `code/main.py` + `code/worker.py` (defaults + diagnostic), `code/template_new_format.md` (v782 reconciliation note), `code/template_reference.md` (this rule), `wiki/patterns/conventions.md` (index row), root `CLAUDE.md` (gotcha row), `wiki/log.md` (timeline). Retro-fix: `videos/nuri-korella-ed-bigpharma-pour-pills-limp-balloon-pelvis-saffron-v1.md` (explicit fields added to 11 scenes).
+
+---
+
+## v783 — generic nouns are not brand keywords (stop the product upload bleeding into HOOK images)
+
+**Shipped 2026-06-09.** Runtime change (`code/image_platform.py`). Auto-deploys to Render.
+
+### The bug it fixes
+
+The branded product upload (e.g. the Korella saffron bottle) was rendering into images that never asked for it — the operator saw it in HOOK image_1 (a man on a porch tipping a pill bottle) even though the markdown never bound the product there.
+
+Root cause: the v581/v619 **N2 brand-keyword auto-detect**. To catch loose body-prose mentions ("Korella saffron capsule"), N2 tokenizes the product ingredient NAME into keywords and word-boundary-matches them in every image prompt. But the product name `the Korella bottle` tokenized to `{korella, bottle}` — and the GENERIC noun **`bottle`** matched the HOOK's "amber pharmacy pill **bottle**". So N2 auto-set `product_image` on image_1 → N3 prepended "Use the uploaded product reference image" → the binding loop added a Korella `ImageEdge` → NB2 got the bottle upload as a reference → the saffron bottle appeared in the porch scene.
+
+The image's `cast:` bullet did NOT save it: cast-aware suppression (v711) existed only for the CHARACTER gate (N4), never for the product gates (N2/N3).
+
+### The fix (two layers)
+
+- **A — generic-noun filter.** `GENERIC_PRODUCT_NOUNS` (bottle, jar, capsule, pill, tube, box, drink, glass, extract, supplement, saffron, …) are excluded from `brand_keywords`. Only the distinctive brand token (`korella`, `salvora`, `floraviva`, `rosabella`) can match. `the Korella bottle` → keywords `{korella}` only.
+- **B — cast-aware product suppression (mirrors v711 N4).** When an image declares a `cast:` that contains NO product-typed ingredient name, N2 skips the brand-keyword scan entirely. The operator's explicit cast wins for products, exactly as it already did for the persona.
+
+Real product shots still attach correctly — they either declare `- **product_image:**` (handled by N1, runs first) or mention the brand token `korella` in the prompt, or list the product in `cast:`. Verified: image_1 keyword match → None (no attach); image_6 → `korella` (attaches). No markdown change needed — the operator's builds were correct; the platform was over-attaching.
+
+### Authoring note
+
+This is a pure platform fix; builds need no change. But it reinforces the existing discipline: an image's `cast:` bullet is the authoritative present-in-frame list — it now suppresses BOTH stray persona attachment (v711 N4) and stray product attachment (v783). A HOOK image that shows a generic prop named like the product (a "pill bottle" when the product is "the Korella bottle") is safe.
+
+**Touched**: `code/image_platform.py` (this rule), `code/template_reference.md` (this deep-dive), `wiki/patterns/conventions.md` (index row), root `CLAUDE.md` (gotcha row), `wiki/log.md` (timeline).
