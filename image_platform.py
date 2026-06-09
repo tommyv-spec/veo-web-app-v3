@@ -8762,7 +8762,7 @@ def promote_batch_to_video(
         line_text_default = n.voiceover_text or ""
         mode = (n.clip_mode or "fresh").lower()  # v782 default fresh
         if mode not in ("blend", "fresh", "continue"):
-            mode = "blend"
+            mode = "fresh"  # v782 invalid-value fallback = fresh (was blend)
 
         # v572.1 — multi-line scene expansion at promote time.
         # The existing pre-v572 promote flow iterated nodes and emitted
