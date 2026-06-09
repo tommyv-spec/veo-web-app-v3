@@ -1504,7 +1504,7 @@ class JobWorker:
                 
                 # CONTINUE MODE: For clips that require previous clip's video frame
                 # Determine clip_mode from job config (check line first, then scene)
-                clip_mode = "blend"
+                clip_mode = "fresh"  # v782 default fresh (was blend)
                 requires_previous = False
                 
                 try:
@@ -1529,12 +1529,12 @@ class JobWorker:
                         if not clip_mode and scenes_data:
                             for scene in scenes_data:
                                 if scene.get("sceneIndex") == scene_idx or scene.get("scene_index") == scene_idx:
-                                    clip_mode = scene.get("clipMode") or scene.get("mode", "blend")
+                                    clip_mode = scene.get("clipMode") or scene.get("mode", "fresh")  # v782 default fresh
                                     break
                         
                         # Default to blend if still not found
                         if not clip_mode:
-                            clip_mode = "blend"
+                            clip_mode = "fresh"  # v782 default fresh (was blend)
                         
                         # Check if this clip requires previous (same scene, continue mode, not first clip)
                         if clip_mode == "continue" and clip.clip_index > 0:
@@ -2278,7 +2278,7 @@ class JobWorker:
                                         for c in clips:
                                             idx = c.clip_index
                                             line_data = dialogue_lines[idx] if idx < len(dialogue_lines) and isinstance(dialogue_lines[idx], dict) else {}
-                                            clip_mode = line_data.get("clip_mode", "blend")
+                                            clip_mode = line_data.get("clip_mode", "fresh")  # v782 default fresh
                                             start_img_idx = line_data.get("start_image_idx", 0)
                                             
                                             # Start frame
@@ -2300,7 +2300,7 @@ class JobWorker:
                                                     is_last_in_scene = (idx == sc_clips[-1]) if sc_clips else False
                                                     if is_last_in_scene and not is_last:
                                                         nsi = cur_si + 1
-                                                        if nsi < len(scenes) and scenes[nsi].get("transition", "blend") != "cut":
+                                                        if nsi < len(scenes) and scenes[nsi].get("transition", "cut") != "cut":  # v782 default cut
                                                             # v682e — text_card scenes have imageIndex=None.
                                                             # Skip end-frame interpolation when next is
                                                             # text_card (defaulting to 0 silently misroutes
@@ -2550,12 +2550,12 @@ class JobWorker:
             if not clip_mode and scenes_data:
                 for scene in scenes_data:
                     if scene.get("sceneIndex") == scene_idx or scene.get("scene_index") == scene_idx:
-                        clip_mode = scene.get("clipMode") or scene.get("mode", "blend")
+                        clip_mode = scene.get("clipMode") or scene.get("mode", "fresh")  # v782 default fresh
                         break
             
             # Default to blend if still not found
             if not clip_mode:
-                clip_mode = "blend"
+                clip_mode = "fresh"  # v782 default fresh (was blend)
             
             info = {
                 "index": i,
@@ -3284,7 +3284,7 @@ class JobWorker:
             end_frame = frames["end_frame"]  # Can be None if no interpolation needed
             start_index = frames["start_index"]
             end_index = frames["end_index"]  # Can be None if no interpolation needed
-            clip_mode = frames.get("clip_mode", "blend")
+            clip_mode = frames.get("clip_mode", "fresh")  # v782 default fresh
             requires_previous = frames.get("requires_previous", False)
             scene_index = frames.get("scene_index", 0)
             original_scene_idx = frames.get("original_scene_idx", 0)
@@ -4828,7 +4828,7 @@ class JobWorker:
                 # CONTINUE mode: Extract frame from previous clip's video
                 actual_start_frame = frames["start_frame"]
                 original_scene_image = frames["start_frame"]  # Keep original for scene_image param
-                clip_mode = frames.get("clip_mode", "blend")
+                clip_mode = frames.get("clip_mode", "fresh")  # v782 default fresh
                 requires_previous = frames.get("requires_previous", False)
                 
                 if clip_mode == "continue" and requires_previous and clip_index > 0:

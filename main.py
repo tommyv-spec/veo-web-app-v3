@@ -167,7 +167,7 @@ class DialogueLineInput(BaseModel):
     text: str
     start_image_idx: Optional[int] = None  # Storyboard image assignment
     scene_index: Optional[int] = None      # Which scene this clip belongs to
-    clip_mode: Optional[str] = "blend"     # 'blend' | 'continue' | 'fresh'
+    clip_mode: Optional[str] = "fresh"     # v782 default fresh (was blend) | 'blend' | 'continue' | 'fresh'
     scene_transition: Optional[str] = None # 'blend' | 'cut' | null (for first scene)
     action_note: Optional[str] = None      # Custom director action (overrides auto gesture/transition)
     # v572 — per-clip Veo prompt overrides. When `veo_prompt_override`
@@ -245,7 +245,7 @@ class SceneInput(BaseModel):
     # storyboard, with the error:
     #   `body.scenes[N].imageIndex: Input should be a valid integer, input:null`
     imageIndex: Optional[int] = None
-    clipMode: str = "blend"        # 'blend' | 'continue' | 'fresh'
+    clipMode: str = "fresh"        # v782 default fresh (was blend) | 'blend' | 'continue' | 'fresh'
     transition: Optional[str] = None  # 'blend' | 'cut' | null for first scene
     clips: List[int] = []          # List of clip indices in this scene
     # v682e — scene_type denorm so the backend can branch on text_card
@@ -334,7 +334,7 @@ class ClipResponse(BaseModel):
     selected_variant: int = 1
     total_variants: int = 0
     # Scene/mode fields
-    clip_mode: Optional[str] = "blend"
+    clip_mode: Optional[str] = "fresh"  # v782 default fresh (was blend)
     scene_index: Optional[int] = 0
     # Prompt
     prompt_text: Optional[str] = None
@@ -2070,7 +2070,7 @@ async def _create_job_impl(
     # Create Clip rows for each dialogue line (fast — just DB inserts)
     for idx, line in enumerate(dialogue_list):
         line_text = line.get('text', '') if isinstance(line, dict) else str(line)
-        clip_mode = line.get('clip_mode', 'blend') if isinstance(line, dict) else 'blend'
+        clip_mode = line.get('clip_mode', 'fresh') if isinstance(line, dict) else 'fresh'  # v782 default fresh
         scene_idx = line.get('scene_index', 0) if isinstance(line, dict) else 0
         # v644 — propagate optional audio-padding suffix from the dialogue
         # line. None when the LLM-authored markdown didn't include a
@@ -2524,7 +2524,7 @@ async def _setup_job_background(
             for idx in range(total_clips):
                 line_data = dialogue_raw[idx] if isinstance(dialogue_raw[idx], dict) else {"text": dialogue_raw[idx]}
                 dialogue_text = line_data.get("text", "")
-                clip_mode = line_data.get("clip_mode", "blend")
+                clip_mode = line_data.get("clip_mode", "fresh")  # v782 default fresh (was blend) — no silent self/cross-scene start/end interpolation
                 action_note = line_data.get("action_note", None)
 
                 # v682h — skip text_card clips entirely. They have no Veo
@@ -2662,7 +2662,7 @@ async def _setup_job_background(
                             next_scene_idx = current_scene_idx + 1
                             if next_scene_idx < len(scenes):
                                 next_scene = scenes[next_scene_idx]
-                                if next_scene.get("transition", "blend") != "cut":
+                                if next_scene.get("transition", "cut") != "cut":  # v782 default cut (was blend) — missing transition no longer triggers cross-scene end-frame interpolation
                                     # v682e — text_card scenes have imageIndex=None.
                                     # Use .get() default of None (not 0 — defaulting
                                     # to 0 silently misroutes text_card-following
@@ -2689,6 +2689,18 @@ async def _setup_job_background(
                 elif end_fname is None and num_images > 1 and clip_mode == "blend" and use_interpolation:
                     # Multi-image, blend mode, no scenes → self-interpolation
                     end_fname = start_fname
+
+                # v782 DIAGNOSTIC (temporary — remove after operator confirms no unwanted blends):
+                # log the resolved clip_mode + whether an end frame (interpolation/blend)
+                # was assigned for this clip. With v782 defaults (clip_mode=fresh,
+                # transition=cut), end_fname should be None unless the build EXPLICITLY
+                # set clip_mode: blend or an end_frame_image. A non-None end_fname on a
+                # fresh/cut clip means an unwanted blend slipped through.
+                print(
+                    f"[v782] Clip {idx}: clip_mode={clip_mode!r} end_fname={end_fname!r} "
+                    f"(end_frame {'ASSIGNED' if end_fname else 'none'})",
+                    flush=True,
+                )
 
                 # R2 keys for DB storage
                 start_frame_key = f"jobs/{job_id}/frames/{start_fname}" if start_fname else None
@@ -4529,7 +4541,7 @@ async def get_job_clips(
             versions=deduplicate_versions(c.versions_json, job_id=c.job_id),
             selected_variant=c.selected_variant if c.selected_variant else 1,
             total_variants=get_actual_versions_count(c),
-            clip_mode=c.clip_mode or "blend",
+            clip_mode=c.clip_mode or "fresh",
             scene_index=c.scene_index or 0,
             prompt_text=c.prompt_text or None,
             in_lineup=c.id in lineup_set if lineup_set else True,
@@ -4621,7 +4633,7 @@ async def get_job_clips_active(
             versions=deduplicate_versions(c.versions_json, job_id=c.job_id),
             selected_variant=c.selected_variant if c.selected_variant else 1,
             total_variants=get_actual_versions_count(c),
-            clip_mode=c.clip_mode or "blend",
+            clip_mode=c.clip_mode or "fresh",
             scene_index=c.scene_index or 0,
             prompt_text=c.prompt_text or None,
             in_lineup=c.id in lineup_set if lineup_set else True,
@@ -8036,7 +8048,7 @@ async def export_final_video(
                 status=ClipStatus.COMPLETED.value,
                 approval_status="approved",
                 scene_index=_line.get("scene_index"),
-                clip_mode=_line.get("clip_mode") or "blend",
+                clip_mode=_line.get("clip_mode") or "fresh",  # v782 default fresh
                 caption=_line.get("caption"),
                 scene_type="text_card",
                 bg_color=_line.get("bg_color") or "black",
@@ -11016,7 +11028,7 @@ async def local_worker_get_pending_job(
             "start_frame_url": f"{base_url}/api/local-worker/frames/{job.id}/{start_filename}" if start_filename else None,
             "end_frame_url": f"{base_url}/api/local-worker/frames/{job.id}/{end_filename}" if end_filename else None,
             # Storyboard/Scene mode fields for continue mode support
-            "clip_mode": clip.clip_mode or "blend",
+            "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,
         }
         
@@ -11211,7 +11223,7 @@ async def local_worker_get_redo_clips(
                     start_img_idx = line_data.get("start_image_idx", 0) if isinstance(line_data, dict) else 0
                     start_fname = uploaded_frames[start_img_idx % num_images]
                     start_frame_key = f"jobs/{job.id}/frames/{start_fname}"
-                    clip_mode = clip.clip_mode or "blend"
+                    clip_mode = clip.clip_mode or "fresh"
                     if clip_mode == "blend":
                         end_frame_key = start_frame_key
                     clip.start_frame = start_frame_key
@@ -11250,7 +11262,7 @@ async def local_worker_get_redo_clips(
             "redo_reason": clip.redo_reason,
             "claimed_by": clip.claimed_by_worker,
             # Storyboard/Scene mode fields for continue mode support
-            "clip_mode": clip.clip_mode or "blend",
+            "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,
             "short_dialogue_mode": job_config.get("short_dialogue_mode", "optimized"),
             "prefix_short_enabled": job_config.get("prefix_short_enabled", False),
@@ -12320,7 +12332,7 @@ async def user_worker_get_pending_job(
                     _si = _ld.get("start_image_idx", 0) if isinstance(_ld, dict) else 0
                     _sf = _uf[_si % _ni]
                     start_frame_key = f"jobs/{job.id}/frames/{_sf}"
-                    if (clip.clip_mode or "blend") == "blend":
+                    if (clip.clip_mode or "fresh") == "blend":
                         end_frame_key = start_frame_key
                     clip.start_frame = start_frame_key
                     if end_frame_key:
@@ -12342,7 +12354,7 @@ async def user_worker_get_pending_job(
             "status": clip.status,
             "start_frame_url": f"{base_url}/api/user-worker/frames/{job.id}/{start_filename}" if start_filename else None,
             "end_frame_url": f"{base_url}/api/user-worker/frames/{job.id}/{end_filename}" if end_filename else None,
-            "clip_mode": clip.clip_mode or "blend",
+            "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,
         })
     
@@ -12502,7 +12514,7 @@ async def user_worker_get_redo_clips(
                     start_frame_key = f"jobs/{job.id}/frames/{start_fname}"
                     
                     # Also set end frame for blend mode
-                    clip_mode = clip.clip_mode or "blend"
+                    clip_mode = clip.clip_mode or "fresh"
                     if clip_mode == "blend":
                         end_frame_key = start_frame_key
                     
@@ -12539,7 +12551,7 @@ async def user_worker_get_redo_clips(
             "generation_attempt": clip.generation_attempt,
             "redo_reason": clip.redo_reason,
             "claimed_by": clip.claimed_by_worker,
-            "clip_mode": clip.clip_mode or "blend",
+            "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,
             "short_dialogue_mode": job_config.get("short_dialogue_mode", "optimized"),
             "prefix_short_enabled": job_config.get("prefix_short_enabled", False),

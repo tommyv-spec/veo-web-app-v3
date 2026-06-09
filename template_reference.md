@@ -14403,3 +14403,46 @@ Single-frame snapshot reading guesses motion, geometry, and identity. The fix is
 4. The load-bearing rows reconcile with the v598 mechanism stack already named in the same decode.
 
 **Touched**: `code/template_reference.md` (this rule), `code/template_new_format.md` (Comprehension skeleton — new subsection), `wiki/patterns/conventions.md` (index row), `wiki/concepts/script-adaptation/innovation-moves.md` + `innovation-ideation-pipeline.md` (link in). No platform runtime change — no deploy.
+
+---
+
+## v782 — clip_mode / transition platform DEFAULT flipped to fresh / cut (no more silent blend)
+
+**Shipped 2026-06-09.** Runtime change (`code/main.py` + `code/worker.py`). Auto-deploys to Render.
+
+### The bug it fixes
+
+The skeleton (`template_new_format.md`, v544) has long told authors: *"DEFAULT FOR BOTH IS THE SAFE OPTION: clip_mode: fresh, transition: cut."* But the PLATFORM CODE defaulted the opposite way. When a build's `### Scene N` block OMITTED `clip_mode` / `transition`, the parser stored `None`, and every downstream consumer applied a hard-coded `"blend"` default:
+
+- `clip_mode` missing → `"blend"` → the prompt-build loop assigned each clip an **end frame** = its own start image (self-interpolation) or, at a scene boundary, the **NEXT scene's image** (`main.py` ~2685 / ~2665). Veo then morphed start→end on every clip.
+- `transition` missing → `"blend"` (`main.py` ~2665: `next_scene.get("transition", "blend") != "cut"`) → cross-scene end-frame interpolation fired.
+
+Net effect: **a build that omitted the two fields silently blended every clip — using start AND end frames — even though the docs said it would cut.** The doc and the code disagreed; the code won. This burned a build (`nuri-korella-ed-bigpharma-pour-pills-limp-balloon-pelvis-saffron-v1`, 2026-06-08) whose 11 scenes carried neither field → every clip cross-dissolved into the next composition.
+
+### The fix
+
+Every backend **default-when-absent** literal flipped:
+
+| Field | Old default | New default (v782) |
+|---|---|---|
+| `clip_mode` (missing) | `"blend"` | `"fresh"` |
+| `transition` (missing, blend-decision sites) | `"blend"` | `"cut"` |
+
+Sites flipped: `main.py` — Pydantic model defaults (`DialogueLineInput`, `SceneInput`, clip model), the prompt-build resolver (`line_data.get("clip_mode", ...)`), the cross-scene transition check, every API-response serializer (`clip.clip_mode or ...`), the markdown-promote emit path. `worker.py` (redo / Vertex path) — every `clip_mode = "blend"` init + `.get(..., "blend")` + `scene.get("mode", "blend")` + the next-scene transition check. The `clip_mode == "blend"` BEHAVIOR comparisons are unchanged — they still fire when a build EXPLICITLY sets blend.
+
+**`blend` is now explicit opt-in only.** A within-clip morph (limp→firm, fat-melt, Day1→Day14 on one frame) uses the v718h-C `- **end_frame_image:** image_K+1` Scene bullet (the v718i path, resolved BEFORE the clip_mode default), NOT clip_mode blend. So flipping the default does not break any explicit morph build.
+
+### Authoring discipline (unchanged but now matched by the code default)
+
+Every shot scene MUST emit BOTH fields explicitly — never rely on the default:
+```
+- **clip_mode:** fresh
+- **transition:** cut        # null on Scene 1 (first scene)
+```
+Self-check before saving any build: the `clip_mode:` count must equal the `### Scene N` count. A build missing the fields is a silent-blend risk if any future platform path reads a different default.
+
+### Diagnostic (temporary)
+
+`main.py` prompt-build logs `[v782] Clip N: clip_mode=... end_fname=... (end_frame ASSIGNED|none)` per clip. On a correct fresh/cut build, `end_fname` is `none` for every clip except explicit `end_frame_image` morphs. A non-None end_fname on a fresh/cut clip = an unwanted blend slipped through. Remove the diagnostic after operator confirms clean exports.
+
+**Touched**: `code/main.py` + `code/worker.py` (defaults + diagnostic), `code/template_new_format.md` (v782 reconciliation note), `code/template_reference.md` (this rule), `wiki/patterns/conventions.md` (index row), root `CLAUDE.md` (gotcha row), `wiki/log.md` (timeline). Retro-fix: `videos/nuri-korella-ed-bigpharma-pour-pills-limp-balloon-pelvis-saffron-v1.md` (explicit fields added to 11 scenes).

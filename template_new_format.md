@@ -173,6 +173,10 @@
         - realism bank: visible pores, skin texture, single hair strands, subtle wrinkles, imperfections, realistic fabric textures, reflections + shadows.
         - close with "looks like a natural smartphone photo, not professional photography."
       BANNED in image prompts: bokeh, shallow depth of field, f/1.8|f/5.6, softbox, three-point/studio lighting, cinematic, film grain, editorial.
+      FIELD-ORDER TEMPLATE (write the prompt body as these natural sentences, in this order — the operator's proven prompt-document format; NOT bracket [Composition]…[Tech] tags. This field-order ALSO walks the v586 six blocks, so it is v586-compliant + the house format):
+        "Use the uploaded character reference image for the main character.
+         [main character pose/identity-via-upload]. The person is [position/action]. The camera is [eye/chest/waist/selfie/low/high/front/side position]. The person is [distance: close/medium/chest-up/etc + relative depth if multi-subject]. The person is [looking direction]. The person is [action toward camera: talking/presenting/demonstrating]. [OPTIONAL second/third person, with their own depth]. The person is located in [environment]. The room contains [background details]. The main focus of the image is [X]. The composition clearly directs attention toward [main subject]. The lighting is ONLY natural lighting, no artificial lighting at all. There is absolutely no blur anywhere in the image. Everything is in perfectly sharp focus. The realism is top-tier: visible pores, realistic skin texture, single hair strands, subtle wrinkles, imperfections, realistic fabric textures, reflections and shadows. The colors are ultra-realistic, not oversaturated, not too warm, not too cold, not too dark and not too bright. The image looks like a natural smartphone photo, not professional photography. [safety/positive frame]. Aspect ratio 9:16."
+      Recreating a proven frame: match the ORIGINAL depth + attention order (DISTANCE/MAIN-FOCUS fields), don't default avatar-front; use innocent/positive wording, no risk-word negatives. See [[realistic-ugc-prompt-templates]] §recreating-a-frame.
   • Main character: NEVER described — character reference is passed externally to
     Nano Banana 2 on every generation as IMAGE 1. Refer to them as "the main
     character". Describe only pose, expression direction, position in frame.
@@ -612,6 +616,16 @@
     earlier "default to blend" guidance — that was theoretically right but
     wrong in practice; cross-dissolves between non-trivial deltas produce
     morph artifacts that read as render glitches.)
+    v782 (2026-06-09): the PLATFORM CODE default now matches this guidance.
+    Before v782 the backend defaulted a MISSING clip_mode to `blend` and a
+    MISSING transition to `blend` (main.py + worker.py), so a build that
+    OMITTED these fields silently got cross-scene start→end interpolation on
+    every clip — the doc said fresh/cut but the code did blend. v782 flips
+    every backend default to `clip_mode: fresh` + `transition: cut`; `blend`
+    is now EXPLICIT opt-in only. STILL: every shot scene MUST emit both
+    `- **clip_mode:** fresh` and `- **transition:** cut` (or `null` on scene 1)
+    EXPLICITLY — never rely on the default. A within-clip morph uses the
+    v718h-C `end_frame_image:` bullet, NOT clip_mode blend.
   • SPEAKER (v538): on-camera is the default. Voiceover is opt-in only.
       - **speaker:** voiceover   ← off-screen narrator delivers the line; visible
                                    subjects stay silent with closed lips. Use ONLY
