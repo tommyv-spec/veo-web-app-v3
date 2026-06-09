@@ -5189,13 +5189,35 @@ def _import_scene_table_impl(
             "the", "a", "an", "of", "in", "on", "at", "with",
             "and", "or", "for", "to", "from", "by",
         }
+        # v783 — generic product-form / ingredient nouns are NOT brand
+        # keywords. Without this, a product named "the Korella bottle"
+        # yields keywords {korella, bottle}, and N2 below word-boundary
+        # matches the GENERIC word "bottle" in any unrelated image prompt
+        # (e.g. "amber pharmacy pill bottle" in a HOOK) and FALSELY auto-
+        # attaches the branded product upload to that image. Only the
+        # distinctive brand token (korella, salvora, floraviva, ...) should
+        # match. Root cause of the "Korella bottle bled into image_1" bug.
+        GENERIC_PRODUCT_NOUNS = {
+            "bottle", "bottles", "jar", "jars", "tube", "tubes", "box",
+            "boxes", "bag", "bags", "pouch", "tin", "can", "cans", "carton",
+            "capsule", "capsules", "tablet", "tablets", "pill", "pills",
+            "softgel", "softgels", "gummy", "gummies", "powder", "drops",
+            "spray", "cream", "serum", "lotion", "oil", "drink", "glass",
+            "cup", "sachet", "stick", "pack", "packet", "kit", "extract",
+            "supplement", "supplements", "blend", "formula", "complex",
+            "saffron",
+        }
         brand_keywords: List[Tuple[str, str]] = []  # (lowercase_keyword, ingredient_name)
         for ing in product_ingredients:
             name = ing["name"].strip()
             tokens = [t.strip(".,;:!?") for t in name.split()]
             for tok in tokens:
                 tok_lc = tok.lower()
-                if len(tok_lc) >= 4 and tok_lc not in STOP_TOKENS:
+                if (
+                    len(tok_lc) >= 4
+                    and tok_lc not in STOP_TOKENS
+                    and tok_lc not in GENERIC_PRODUCT_NOUNS  # v783
+                ):
                     brand_keywords.append((tok_lc, name))
 
         v581_product_re = _re.compile(
@@ -5222,6 +5244,13 @@ def _import_scene_table_impl(
             ing["name"].strip().lower()
             for ing in parsed_ingredients
             if (ing.get("type") or "").strip().lower() == "character"
+        }
+        # v783 — lowercased product ingredient names, for the cast-aware
+        # product suppression gate in N2 below (mirrors character_names_lc
+        # + the v711 N4 character gate, but for products).
+        product_names_lc_set: set = {
+            ing["name"].strip().lower()
+            for ing in product_ingredients
         }
 
         all_image_indices = {img["image_index"] for img in images}
@@ -5251,8 +5280,28 @@ def _import_scene_table_impl(
                             f"from existing v581 binding line"
                         )
 
+            # v783 — cast-aware product suppression (mirrors v711 N4 for the
+            # character gate). When the image declares a `cast:` that contains
+            # NO product-typed ingredient name, the operator deliberately did
+            # not place the branded product in this scene → do NOT let N2 auto-
+            # attach it from a stray brand-keyword match. The explicit cast wins.
+            _img_cast_for_product = img.get("cast")
+            cast_excludes_product = (
+                _img_cast_for_product is not None
+                and not any(
+                    (c or "").strip().lower() in product_names_lc_set
+                    for c in _img_cast_for_product
+                )
+            )
+
             # N2 — Auto-set product_image from body brand-keyword mention
-            if not current_product_image and brand_keywords:
+            if not current_product_image and brand_keywords and cast_excludes_product:
+                log.info(
+                    f"[image_platform] v783 N2: Image {image_index}: "
+                    f"cast={_img_cast_for_product} excludes all product-typed "
+                    f"ingredients — skipping product auto-attach (no brand-keyword scan)"
+                )
+            elif not current_product_image and brand_keywords:
                 body_lc = body.lower()
                 for kw_lc, ing_name in brand_keywords:
                     # Word-boundary match to avoid false positives
