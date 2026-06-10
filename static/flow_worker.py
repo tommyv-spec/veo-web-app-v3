@@ -5912,11 +5912,12 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                 settings_applied['Video'] = False
                 print(f"{prefix}⚠ Video tab missed", flush=True)
 
-            # Frames vs Ingredients tab. v758: Omni Flash uses Ingredients
-            # mode (image attached as an ingredient); every other model uses
-            # Frames (start/end frame). Ingredients-tab selectors are inferred
-            # (text + icon fallbacks) and diagnosed on a miss.
-            if is_omni(getattr(page, "_veo_model", "")):
+            # Frames vs Ingredients tab. v784: Omni Flash now accepts Frames,
+            # so every model (Omni included) selects the Frames tab via the
+            # else-branch. The Ingredients branch is kept (dead while
+            # _omni_ingredients_mode()==False) for a one-line revert if Flow
+            # drops Omni-on-Frames again.
+            if _omni_ingredients_mode(page):
                 try:
                     ing = page.locator(
                         "button.flow_tab_slider_trigger:has-text('Ingredients'), "
@@ -6094,10 +6095,14 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                 pass
 
             # ---- Check if all critical settings applied ----
-            # v758: Omni Flash uses the Ingredients tab, not Frames — verify
-            # whichever mode tab actually applies to the chosen model, else the
-            # check loops forever on a 'Frames' it never selected.
-            mode_key = 'Ingredients' if is_omni(getattr(page, "_veo_model", "")) else 'Frames'
+            # v784: Omni now uses Frames like every other model; mode_key
+            # follows the same switch so the settings check verifies the tab we
+            # actually selected.
+            mode_key = 'Ingredients' if _omni_ingredients_mode(page) else 'Frames'
+            # DIAG (remove after live Omni-on-Frames run): confirm Omni jobs now
+            # validate the Frames tab, not Ingredients.
+            if is_omni(getattr(page, "_veo_model", "")):
+                print(f"{prefix}[v784] Omni job → mode_key={mode_key} (expect Frames)", flush=True)
             critical = ['Video', mode_key, 'Portrait']
             all_ok = all(settings_applied.get(k) for k in critical)
 
@@ -7842,12 +7847,11 @@ def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retrie
             if frame_btns_count == 0:
                 # Also check without aria-haspopup
                 frame_btns_count = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]').count()
-            # v758.5: Omni/Ingredients — the add_2 button always matches the
-            # frame selector, so the button count is meaningless here. The real
-            # "asset carried over by reuse" signal is the ingredient CHIP; map
-            # it onto the existing (count > 0 == missing) semantics so the rest
-            # of this block is unchanged.
-            if is_omni(getattr(page, "_veo_model", "")):
+            # v758.5 / v784: in Ingredients mode the add_2 button always matches
+            # the frame selector so the chip count was the real signal. With
+            # Omni now on Frames (_omni_ingredients_mode()==False) this override
+            # is skipped and the real frame-button count is used like Veo.
+            if _omni_ingredients_mode(page):
                 frame_btns_count = 0 if _omni_chip_count(page) > 0 else 1
 
             if frame_btns_count > 0:
@@ -7876,7 +7880,7 @@ def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retrie
                     frame_btns_count = page.locator(frame_check_selector).count()
                     if frame_btns_count == 0:
                         frame_btns_count = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]').count()
-                    if is_omni(getattr(page, "_veo_model", "")):
+                    if _omni_ingredients_mode(page):
                         frame_btns_count = 0 if _omni_chip_count(page) > 0 else 1
 
                 if frame_btns_count > 0:
@@ -11925,10 +11929,21 @@ class DownloadHelper:
 
 
 def is_omni(model) -> bool:
-    """True when the chosen model is Omni Flash (drives Ingredients mode).
-    Single source of truth for the Omni branch; matches loosely so suffixes
-    like '[Beta]' still count."""
+    """True when the chosen model is Omni Flash. MODEL-IDENTITY check only —
+    used for dropdown selection + policy-swap (Omni <-> Veo). Does NOT decide
+    Ingredients-vs-Frames mode anymore (see _omni_ingredients_mode). Matches
+    loosely so suffixes like '[Beta]' still count."""
     return bool(model) and "omni" in str(model).lower()
+
+
+def _omni_ingredients_mode(page) -> bool:
+    """v784: Omni Flash now accepts Frames (start/end frame), so it runs the
+    SAME Frames path as Veo — NO model uses Ingredients mode anymore. This is
+    the single switch that gates every Ingredients-vs-Frames branch (tab
+    select + success-signal + prompt-anchor). Returns False so all of them take
+    the Frames branch. If Flow ever reverts Omni to ingredients-only, flip the
+    body back to `return is_omni(getattr(page, "_veo_model", ""))`."""
+    return False
 
 
 def _omni_chip_count(page):
@@ -12177,9 +12192,10 @@ def click_frame_and_upload_with_policy_check(page, image_path, is_end_frame=Fals
             if remaining < btn_count:
                 print(f"{prefix}✓ {frame_name} button gone ({w+1}s), waiting for uploadImage response...", flush=True)
                 btn_gone = True
-            elif is_omni(getattr(page, "_veo_model", "")) and _omni_chip_count(page) > _omni_chip_before:
+            elif _omni_ingredients_mode(page) and _omni_chip_count(page) > _omni_chip_before:
                 # Ingredients mode: frame button never disappears — a NEW
-                # ingredient chip appearing is the success signal.
+                # ingredient chip appearing is the success signal. (v784: dead
+                # while Omni runs on Frames; frame-button-gone above is the path.)
                 print(f"{prefix}✓ {frame_name} ingredient chip attached ({w+1}s)", flush=True)
                 btn_gone = True
         
@@ -12902,12 +12918,10 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
     except Exception:
         pass  # No clear button = input already empty, proceed normally
 
-    # v758.3: Omni Flash uses Ingredients mode. The ONLY change from the
-    # frames flow is the success check (ingredient chip present, not frame
-    # button gone). Clear any leftover ingredient chip here so each clip
-    # starts from zero chips and a freshly attached chip reliably reads as
-    # THIS clip's success.
-    if is_omni(getattr(page, "_veo_model", "")):
+    # v758.3 / v784: Ingredients-mode pre-clear of leftover chips. Skipped now
+    # that Omni runs on Frames (_omni_ingredients_mode()==False) — the frames
+    # flow confirms via frame-button-gone, no chip bookkeeping needed.
+    if _omni_ingredients_mode(page):
         try:
             for _ in range(4):
                 _cx = page.locator("button[data-card-open] i:text-is('cancel')").first
@@ -13121,7 +13135,7 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
                 if not btn_gone and now_count < btn_count_before:
                     print(f"{prefix}✓ {frame_name} button gone ({w+1}s)", flush=True)
                     btn_gone = True
-                elif not btn_gone and is_omni(getattr(page, "_veo_model", "")) and _omni_chip_count(page) > _omni_chip_before:
+                elif not btn_gone and _omni_ingredients_mode(page) and _omni_chip_count(page) > _omni_chip_before:
                     # Ingredients mode: success = a NEW ingredient chip attached.
                     print(f"{prefix}✓ {frame_name} ingredient chip attached ({w+1}s)", flush=True)
                     btn_gone = True
@@ -13362,7 +13376,10 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
         # chip count so a stale chip from a prior clip can't false-positive, and
         # the click below uses a real humanized mouse click (bare img.click did
         # not reliably bind the thumbnail).
-        _omni = is_omni(getattr(page, "_veo_model", ""))
+        # v784: Omni runs on Frames now, so _omni gates only the (dead)
+        # ingredient-chip confirm path; gallery-select confirms via the frame
+        # button count dropping, same as Veo.
+        _omni = _omni_ingredients_mode(page)
         _omni_chip0 = _omni_chip_count(page) if _omni else 0
 
         if filename is None:
@@ -13723,10 +13740,10 @@ def fill_prompt_textarea(page, prompt):
     Slate editor doesn't respond to textContent/innerText changes.
     Must use keyboard-level input or execCommand to update Slate's internal state.
     """
-    # v758: in Omni Flash / Ingredients mode, always anchor the prompt to the
-    # attached photo so Omni keeps the reference framing. Appended once
-    # (idempotent — skipped if the prompt already contains it).
-    if is_omni(getattr(page, "_veo_model", "")):
+    # v758 / v784: Ingredients-mode prompt anchor ("use the photo I added").
+    # Skipped now that Omni runs on Frames — the start frame already pins the
+    # framing, so the extra sentence is unneeded (and would pollute the prompt).
+    if _omni_ingredients_mode(page):
         anchor = "Important: use the photo I added, do not change the framing/camera angle."
         if anchor not in (prompt or ""):
             prompt = (prompt or "").rstrip() + "\n\n" + anchor
@@ -14159,14 +14176,14 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     end_frame_url = clip.get('end_frame_url')
     project_url = clip.get('flow_project_url')
 
-    # v758.8: set the model for this redo so select_frames_to_video_mode picks
-    # the Ingredients tab and rebuild_clip's attach confirms via the ingredient
-    # chip when the job is Omni Flash. Without this, page._veo_model carries
-    # over from a prior job / defaults to Veo → the redo wrongly uses the
-    # frames path and the ingredient is never attached. veo_model is serialized
-    # onto the redo clip by the redo-pending API.
+    # v758.8 / v784: set the model for this redo so select_frames_to_video_mode
+    # selects the right tab + the model dropdown matches. Without this,
+    # page._veo_model carries over from a prior job / defaults to Veo. (v784:
+    # Omni now uses Frames like Veo, so the tab is the same either way — the
+    # model still matters for the dropdown pick.) veo_model is serialized onto
+    # the redo clip by the redo-pending API.
     # v758.17: if this clip was swapped to the other model after a policy block,
-    # use the swapped model for the redo (Omni <-> Veo Frames).
+    # use the swapped model for the redo (Omni <-> Veo, both on Frames).
     _policy_swap_model = _POLICY_SWAP_DONE.get(clip_id)
     page._veo_model = _policy_swap_model or clip.get('veo_model') or getattr(page, '_veo_model', None) or "Veo 3.1 - Lite [Lower Priority]"
     if _policy_swap_model:
@@ -14216,9 +14233,11 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     
     # Navigate to the existing project
     print(f"[REDO] Navigating to existing project...", flush=True)
-    # v758.17: a policy-swap redo changes the MODE (Omni Ingredients <-> Veo
-    # Frames), so it must create a FRESH project and re-apply settings —
-    # reusing the old project would keep the original mode/settings.
+    # v758.17 / v784: a policy-swap redo changes the MODEL (Omni <-> Veo). The
+    # shared project is locked to the original model, so it must create a FRESH
+    # project and re-apply settings — reusing the old project would keep the
+    # original model. (Both models now run Frames, so the tab is unchanged; the
+    # fresh project is still required for the model swap itself.)
     _need_new_project = bool(_policy_swap_model)
     try:
         page.goto(project_url, timeout=60000)
@@ -16646,7 +16665,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
 
         # v764 — a clip with a pending POLICY model-swap must be submitted ONLY
         # by the redo path, which builds a fresh project with the swapped model
-        # + matching mode (Omni Ingredients <-> Veo Frames). This shared project
+        # (Omni <-> Veo, both on Frames). This shared project
         # is locked to the job's original model, so submitting the clip here
         # would re-render it with the SAME model (ignoring the swap) → same
         # content + same model → policy-killed again → loop. Skip it; the
