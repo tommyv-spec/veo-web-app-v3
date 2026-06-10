@@ -18268,7 +18268,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
                 const isExpanded = expandedSet.has(k);
                 const isActiveJob = activeJob === k;
-                const jobKeyAttr = k.replace(/"/g, '&quot;');
+                // v786 — full JS+HTML escaping; plain &quot; replacement left
+                // apostrophes alive inside the onclick JS string (dead click
+                // on any job whose name contains ', e.g. "That's").
+                const jobKeyAttr = imgJsKeyAttr(k);
 
                 const rowsHtml = isExpanded
                     ? nodes.map(n => imgSidebarRowHtml(n, selectedId)).join('')
@@ -18368,7 +18371,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         if (b.failed > 0) tags.push(`<span class="attn-tag failed">${b.failed}✗</span>`);
                         if (b.pending > 0) tags.push(`<span class="attn-tag pending">${b.pending}⏳</span>`);
                         const progress = `<span style="color:var(--text-muted);font-size:10px;">${b.ready}/${b.total}</span>`;
-                        const keyAttr = b.key.replace(/"/g, '&quot;');
+                        const keyAttr = imgJsKeyAttr(b.key); // v786
 
                         // v461: video rows are prefixed with 🎥 and click
                         // opens the promoted video job instead of just
@@ -18527,6 +18530,21 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         // Back-compat: older code referenced imgNodeCardHtml by name
         function imgNodeCardHtml(n) { return imgSidebarRowHtml(n, imgState.detailNodeId); }
+
+        // v786 — escape a group key (or any string) for embedding inside a
+        // single-quoted JS string within an inline onclick attribute:
+        //   onclick="imgSelectJob('<HERE>')"
+        // Two layers, in order:
+        //   1. JS-string escape: backslash + single quote (an apostrophe in
+        //      a job name — e.g. `Symptom-Stack "That's Not a Pickle"` —
+        //      terminated the string early, SyntaxError, dead click)
+        //   2. HTML-attribute escape via imgEscape (quotes, angle brackets)
+        // The old `k.replace(/"/g, '&quot;')` only handled layer 2's double
+        // quote and left apostrophes live.
+        function imgJsKeyAttr(k) {
+            const js = String(k || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            return imgEscape(js);
+        }
 
         function imgEscape(s) {
             return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -20042,7 +20060,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // Hidden when the node isn't grouped (orphan / pre-render).
             const _jobKeyForBack = imgFindGroupKeyForNode(node.id);
             const backToJobBtn = _jobKeyForBack
-                ? `<button class="btn btn-secondary" onclick="imgSelectJob('${_jobKeyForBack.replace(/"/g, '&quot;')}')" style="flex-shrink:0;white-space:nowrap;" title="Back to job overview (batch markdown, scenes, prompts)">← Back to job</button>`
+                ? `<button class="btn btn-secondary" onclick="imgSelectJob('${imgJsKeyAttr(_jobKeyForBack)}')" style="flex-shrink:0;white-space:nowrap;" title="Back to job overview (batch markdown, scenes, prompts)">← Back to job</button>`
                 : '';
 
             area.innerHTML = `
