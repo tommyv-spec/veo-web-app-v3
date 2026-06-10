@@ -6099,10 +6099,6 @@ def select_frames_to_video_mode(page, context="", **kwargs):
             # follows the same switch so the settings check verifies the tab we
             # actually selected.
             mode_key = 'Ingredients' if _omni_ingredients_mode(page) else 'Frames'
-            # DIAG (remove after live Omni-on-Frames run): confirm Omni jobs now
-            # validate the Frames tab, not Ingredients.
-            if is_omni(getattr(page, "_veo_model", "")):
-                print(f"{prefix}[v784] Omni job → mode_key={mode_key} (expect Frames)", flush=True)
             critical = ['Video', mode_key, 'Portrait']
             all_ok = all(settings_applied.get(k) for k in critical)
 

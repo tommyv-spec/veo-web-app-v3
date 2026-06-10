@@ -14473,3 +14473,46 @@ Real product shots still attach correctly — they either declare `- **product_i
 This is a pure platform fix; builds need no change. But it reinforces the existing discipline: an image's `cast:` bullet is the authoritative present-in-frame list — it now suppresses BOTH stray persona attachment (v711 N4) and stray product attachment (v783). A HOOK image that shows a generic prop named like the product (a "pill bottle" when the product is "the Korella bottle") is safe.
 
 **Touched**: `code/image_platform.py` (this rule), `code/template_reference.md` (this deep-dive), `wiki/patterns/conventions.md` (index row), root `CLAUDE.md` (gotcha row), `wiki/log.md` (timeline).
+
+---
+
+## v784 — Omni Flash runs on Frames mode (not Ingredients-only)
+
+**Shipped 2026-06-10.** Runtime change (`code/static/flow_worker.py` — the Flow video worker). Auto-deploys to Render. Operator-confirmed live.
+
+### What changed in Flow
+
+Google Flow's Omni Flash model now accepts start/end **frames** (the same Frames tab Veo uses), not just **Ingredients** (image attached as a reference chip). Before, Omni had no frame slots, so the worker forced it down a separate Ingredients path.
+
+### What the worker did before
+
+`is_omni()` did two unrelated jobs:
+1. **MODEL identity** — which model to pick in the settings dropdown + the policy-swap pairing (Omni ↔ Veo when a clip is policy-blocked).
+2. **MODE** — Ingredients vs Frames. This drove the tab choice, the success signal (ingredient CHIP appearing vs frame-button disappearing), and a prompt-anchor sentence ("use the photo I added").
+
+Note: `attach_ingredient_image_with_check()` was never actually wired in — Ingredients and Frames shared ONE upload path (`upload_both_frames_with_policy_check`). The only real forks were the tab, the success check, and the prompt anchor.
+
+### The fix
+
+Split the two jobs. Added one switch:
+
+```python
+def _omni_ingredients_mode(page) -> bool:
+    # v784: Omni now accepts Frames, so it runs the SAME Frames path as Veo —
+    # no model uses Ingredients mode anymore. Returns False so every
+    # Ingredients-vs-Frames branch takes the Frames path. Revert = flip body
+    # back to `return is_omni(getattr(page, "_veo_model", ""))`.
+    return False
+```
+
+All **8 MODE-gating** `is_omni()` sites now call `_omni_ingredients_mode(page)` → False → Frames branch: tab-select, settings `mode_key`, 2× reuse frame-count override, 2× ingredient-chip success-signal, chip pre-clear, gallery-select confirm, prompt-anchor append.
+
+The **3 MODEL-identity** `is_omni()` sites were LEFT untouched: dropdown model pick (`MODEL_SELECTORS["Omni Flash"]`), `_swap_model_for_policy()`, and the `_already_swapped` guard. Omni is still selected as a model and still policy-swaps with Veo — both just run Frames now.
+
+Policy-swap redo still creates a FRESH project: the swap changes the MODEL (the shared project is locked to its original model), even though both models now share the Frames tab.
+
+### Revert
+
+Dead Ingredients branches are kept in place. If Flow drops Omni-on-Frames, flip the helper body to `return is_omni(getattr(page, "_veo_model", ""))` — one line, restores the old behavior at all 8 sites.
+
+**Touched**: `code/static/flow_worker.py` (this rule + helper), `code/template_reference.md` (this deep-dive), `wiki/patterns/conventions.md` (index row), root `CLAUDE.md` (gotcha row), `wiki/log.md` (timeline).
