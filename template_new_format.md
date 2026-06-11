@@ -441,9 +441,10 @@
         + transition_cue. RISK: Veo may produce partial changes.
         Mitigation TODAY: Half C absolute-magnitude grammar in
         the action_note + an explicit anti-failure-mode clause
-        in the negative prompt (e.g. "no partial fat removal —
-        fat must completely melt off the upper torso, no residual
-        yellow ON the upper-abdominal organs at clip-end").
+        baked into the positive Text prompt (e.g. "the fat melts
+        completely off the upper torso — zero residual yellow on
+        the upper-abdominal organs at clip-end"). (Veo Negative
+        prompt blocks are retired — standing rule 2026-06-04.)
     PLATFORM-FUTURE (unnumbered, not yet shipped — v590 was
     reassigned to chain-optionality): extend the
     parser to support an `image_end:` field on the scene block
@@ -460,8 +461,9 @@
     "largely". REQUIRED absolute alternatives: "completely melts
     away", "fully revealed", "entirely dissolves", "the X is
     gone", "every Y is visible". Hedge language reserved ONLY
-    for genuinely partial states. Negative prompt for state-
-    evolution clips encodes the absolute requirement explicitly.
+    for genuinely partial states. State-evolution clips encode
+    the absolute requirement explicitly in the positive Text
+    prompt (no Negative prompt block — standing rule 2026-06-04).
     Why: surfaced from second-pass review of @icelandicwisdom
     belly-fat HOOK + course-correction on platform alignment.
     User pushback: "it all melts completely while we say
@@ -545,16 +547,15 @@
     (B) `## Veo 3.1 Final Prompts (per clip)` — one fenced block
         per clip, fully assembled with Cinematography + Action
         narrative + Dialogue ("The main AI generated character says in a [qualifier] voice, "...".") +
-        Ambient + per-clip `**Negative prompt:**` block. Canonical
-        12-element negative: "no montage, no cutaways, no scene
-        cuts, no flashbacks, no emotional escalation, no cinematic
-        transitions, no burnt-in text, no captions, no on-screen
-        titles, no face distortion, no morphing, no warping, no
-        duplicate limbs, no extra fingers, no inconsistent
-        lighting, no composite split-screen layouts, no
-        disembodied hands." Source-specific bans appended when
-        warranted (e.g. "no second person in frame" for solo
-        videos, "no kitchen background" for clinic-only videos).
+        Ambient + "(no subtitles, no captions)". NO `**Negative
+        prompt:**` block — RETIRED per operator standing rule
+        2026-06-04 (overrides the old v750 separate-negative
+        requirement): omit it entirely and bake critical
+        constraints affirmatively into the positive Text prompt
+        (e.g. "one continuous shot, clean ambient, no music, no
+        background noise"; source-specific guards as positive
+        sentences — "he is alone in frame" for solo videos, "the
+        scene stays in the clinic" for clinic-only videos).
     The image prompts in `## Images` already serve as ready-to-run
     Banana 2 reproduction prompts (per v586). v587 adds the
     Comprehension layer + Veo final-prompts symmetry — the decode
@@ -929,7 +930,7 @@ The portable-abstraction layer — what makes this video INNOVATABLE. For each l
 
 ## Veo 3.1 Final Prompts (per clip)
 
-What the platform's prompt-builder will emit per scene at job emission. One Veo generation per clip = ONE 8-second video. Each prompt is the **assembled** form of camera spec + action narrative + dialogue + ambient — built from the start-frame image + action_note + line in the Storyboard section. Per the canonical convention, **each clip carries its own `**Negative prompt:**` block** immediately after its text prompt.
+What the platform's prompt-builder will emit per scene at job emission. One Veo generation per clip = ONE 8-second video. Each prompt is the **assembled** form of camera spec + action narrative + dialogue + ambient — built from the start-frame image + action_note + line in the Storyboard section. **NO `**Negative prompt:**` block on any clip** — RETIRED per operator standing rule 2026-06-04 (overrides the old v750 separate-negative requirement): omit it entirely and bake critical constraints affirmatively into the positive Text prompt ("one continuous shot", "clean ambient, no music, no background noise", "(no subtitles, no captions)").
 
 UGC AUDIO + VOICE STANDARD (house standard — wiki [[realistic-ugc-prompt-templates]] §4; matches the runtime isolated-voice enforcement in `flow_backend.py`/`veo_generator.py`):
   - VOICE: the speaker talks fast, dynamic, emotive, passionate, expressive, **English with an American accent** (compose with the v642 voice-qualifier tokens; ADD the American-accent clause).
@@ -950,10 +951,6 @@ The main AI generated character says in a [voice qualifier] voice, "[exact dialo
 Ambient: no music, no background noise (clean isolated voice).
 (no subtitles, no captions)
 ```
-**Negative prompt:**
-```
-no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, no cinematic transitions, no burnt-in text, no captions, no on-screen titles, no face distortion, no morphing, no warping, no duplicate limbs, no extra fingers, no inconsistent lighting, no composite split-screen layouts, no disembodied hands, no music, no background noise.
-```
 
 ### Clip 2.1 — Scene 2, Line 1 (<block tag>)
 **Start frame:** Image 2
@@ -968,9 +965,5 @@ The main AI generated character says in a [voice qualifier] voice, "[exact dialo
 Ambient: no music, no background noise (clean isolated voice).
 (no subtitles, no captions)
 ```
-**Negative prompt:**
-```
-no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, no cinematic transitions, no burnt-in text, no captions, no on-screen titles, no face distortion, no morphing, no warping, no duplicate limbs, no extra fingers, no inconsistent lighting, no composite split-screen layouts, no disembodied hands.
-```
 
-*(Repeat one Clip block per `- **line:**` in the Storyboard section. Multi-line scenes get one Clip block per line, sharing the same Start frame. Append source-specific bans to the negative prompt when the source has a known failure mode — e.g. "no kitchen background" for clinic-only videos, "no second person in frame" for solo videos.)*
+*(Repeat one Clip block per `- **line:**` in the Storyboard section. Multi-line scenes get one Clip block per line, sharing the same Start frame. NO Negative prompt block on any clip — standing rule 2026-06-04. When the source has a known failure mode, bake the guard into the positive Text prompt as an affirmative sentence — e.g. "the scene stays in the clinic for the full clip" for clinic-only videos, "he is alone in frame for the full clip" for solo videos.)*

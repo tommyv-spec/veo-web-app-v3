@@ -1306,23 +1306,27 @@ violated rules in past LLM outputs:
          Generic style line alone can produce a different room.
          Lock the actual setting anchors per video.
 
-     [c] NEGATIVE-CONSTRAINT DISCIPLINE. Every Image prompt body
-         CLOSES with explicit DO-NOT statements AFTER the v603
-         closing tag "Natural ultra-realistic colors, deep focus." Adapt to
-         niche/persona. Anchor against common drift failures.
+     [c] DRIFT-GUARD CONSTRAINT DISCIPLINE (REVISED 2026-06-12 —
+         fold into sentences, NO trailing DO-NOT block). The prompt
+         ENDS at "Aspect ratio 9:16." — nothing after it; the
+         platform appends standardized negatives automatically.
+         Weave the anti-drift constraints INTO the body sentences
+         (inline "no X" within a sentence is fine; a labeled
+         trailing list is not). Adapt to niche/persona.
 
-         Example for T0 kitchen Korella saffron-vitality:
-           "No clinical setting. No lab coat. No medical equipment.
-            No empty kitchen — must have warm honey-oak shelving +
-            ceramic vessels visible. No background change."
+         Example for T0 kitchen Korella saffron-vitality (body
+         sentence): "The kitchen has warm honey-oak shelving and
+         ceramic vessels clearly visible — a lived-in domestic
+         space, no clinical elements, no lab coat, no medical
+         equipment anywhere."
 
-         Example for T2 clinical exam:
-           "No domestic kitchen background. No casual clothing on
-            the clinician. No extra patients. No background change
-            between this and the prior scene."
+         Example for T2 continuity (fold into the chain sentence):
+         "...same room, same furniture, same lighting as the prior
+         scene — nothing in the background changes."
 
-         Format: closing v603 tag -> negative-constraint paragraph
-         as the FINAL paragraph of the Image prompt body.
+         Format: scene description (drift-guards woven in) ->
+         closing v603 tag "Natural ultra-realistic colors, deep
+         focus." -> final line "Aspect ratio 9:16."
 
      [d] VIEWER-LEFT / VIEWER-RIGHT convention. Generators confuse
          "left" and "right" (subject-perspective vs frame-
@@ -1342,7 +1346,8 @@ violated rules in past LLM outputs:
      PRE-OUTPUT VALIDATION:
        NO motion verbs in image prompt body?
        YES camera lock specificity beyond generic v603 line?
-       YES negative-constraint DO-NOT block at end of image prompt?
+       YES drift-guard constraints woven into body sentences (NO
+         trailing DO-NOT block; prompt ends at "Aspect ratio 9:16.")?
        NO bare "left" / "right" — replaced with "viewer-left" /
          "viewer-right"?
 
@@ -1466,38 +1471,26 @@ violated rules in past LLM outputs:
                    "bottom of bottle partially behind desk edge in
                     immediate foreground"
 
-     COMPOSITING PARAGRAPH FORMAT — final paragraph before v603
-     closing tag and before negative-constraint block:
+     COMPOSITING PARAGRAPH FORMAT — final descriptive paragraph,
+     right before the v603 closing tag + "Aspect ratio 9:16." line
+     (REVISED 2026-06-12: no trailing negatives block; the [a]-[f]
+     directives themselves carry the anti-photoshop guards, stated
+     inside the paragraph):
 
        [scene description with persona, props, framing, action]
 
        The bottle integrates naturally with the scene: [a] realistic
        supplement-bottle scale (~5 inches tall), [b] lit by the same
        [scene lighting] as the room with no dedicated product-shot
-       lighting, [c] base [contact-point] with a soft natural cast
-       shadow [direction + length], [d] perspective matching the
-       scene's [camera angle], [e] [grip or surface-contact detail],
-       [f] partially occluded by [foreground element] breaking the
-       silhouette.
+       lighting, label colors matching the room's color temperature,
+       [c] base [contact-point] with a soft natural cast shadow
+       [direction + length], [d] perspective matching the scene's
+       [camera angle], [e] [grip or surface-contact detail — firm
+       physical contact, no floating gap], [f] partially occluded by
+       [foreground element] breaking the silhouette — integrated
+       into the scene, not a center-stage product shot.
 
-       Natural ultra-realistic colors, deep focus.
-
-       [negative constraints including v606 anti-photoshop additions]
-
-     V606 NEGATIVE CONSTRAINTS (add to closing negative block):
-       - No dedicated product-shot lighting on the bottle — same
-         ambient lighting as the rest of the scene.
-       - No oversized bottle — realistic supplement-bottle scale
-         (~5 inches tall).
-       - No floating bottle — must be in physical contact with the
-         surface or hand.
-       - No hard cut-and-paste edges — bottle blends into scene
-         with natural ambient transitions.
-       - No color-saturated label — colors match the room's color
-         temperature and may appear slightly desaturated to match
-         scene ambient.
-       - No center-stage product hero-shot composition — bottle is
-         integrated into the scene, partially occluded by foreground.
+       Natural ultra-realistic colors, deep focus. Aspect ratio 9:16.
 
      PRE-OUTPUT VALIDATION:
        YES [a] scale anchor present?
@@ -1506,7 +1499,8 @@ violated rules in past LLM outputs:
        YES [d] perspective matches scene camera angle?
        YES [e] surface contact / grip explicit?
        YES [f] natural foreground occlusion present?
-       YES v606 negative constraints added to closing block?
+       YES all six guards stated inside the compositing paragraph
+         (NO trailing negatives block — retired 2026-06-12)?
 
 [20] V609 CONCISE REFERENCE-BINDING FORM — drop the redundant
      "match X, Y, Z exactly" clause. Banana 2 already auto-matches
@@ -2000,7 +1994,8 @@ violated rules in past LLM outputs:
            (active-verb present in [Subject — Host])?
        YES Persona face visible above OR beside prop at chest-up per
            v736g (composition phrase present)?
-       YES Negative block <=10 clauses?
+       YES drift-guard / ban sentences <=10 clauses, woven into the
+           body (no trailing negatives block — 2026-06-12)?
        YES Single [Subject — Symptom] block for dual / triple props
            (no [Subject — Symptom A] + [Subject — Symptom B] split)?
 

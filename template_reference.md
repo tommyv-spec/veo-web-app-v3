@@ -798,13 +798,9 @@ A voiceover with [voice quality] speaks in a [tone] tone, "[exact dialogue from 
 Ambient: [setting tone + ambient sound cues].
 (no subtitles, no captions)
 ` ` `
-**Negative prompt:**
-` ` `
-no montage, no cutaways, no scene cuts, no flashbacks, no emotional escalation, no cinematic transitions, no burnt-in text, no captions, no on-screen titles, no face distortion, no morphing, no warping, no duplicate limbs, no extra fingers, no inconsistent lighting, no composite split-screen layouts, no disembodied hands.
-` ` `
 ```
 
-The canonical 12-element negative is the default. Append source-specific bans when the source has a known failure mode — e.g. `no composite split-screen layouts, no disembodied hands` for b-roll-heavy sources where Veo defaults to disembodied-hand recipe shots; `no second person in frame` for solo videos; `no kitchen background` for clinic-only videos.
+NO `**Negative prompt:**` block — RETIRED per operator standing rule 2026-06-04 (`feedback_no-negative-prompts`). Bake critical constraints affirmatively into the Text prompt body ("one continuous shot, clean ambient, no music, no background noise"). When the source has a known failure mode, add a positive guard sentence — e.g. "the persona's hands stay attached and visible" for b-roll-heavy sources where Veo defaults to disembodied-hand recipe shots; "he is alone in frame for the full clip" for solo videos; "the scene stays in the clinic for the full clip" for clinic-only videos.
 
 ### When the source is a video being decoded
 
@@ -3079,7 +3075,7 @@ Per Google's Gemini Nano Banana 2 official prompting docs (ai.google.dev/gemini-
 
 ### The 6 compositing directives
 
-Every Image prompt body where a product is visible (i.e. has `product_image:` field set) must include compositing directives in these six dimensions. Body prose adds a final compositing paragraph BEFORE the v603 closing tag and AFTER the negative-constraint block.
+Every Image prompt body where a product is visible (i.e. has `product_image:` field set) must include compositing directives in these six dimensions. Body prose adds a final compositing paragraph as the LAST descriptive paragraph, right BEFORE the v603 closing tag + the "Aspect ratio 9:16." final line.
 
 #### [a] Scale anchor — realistic real-world size
 
@@ -3150,28 +3146,28 @@ Even subtle foreground occlusion (a hand grazing the edge of the bottle) breaks 
 
 ### Compositing paragraph format
 
-Every product-bearing Image prompt body should include a final compositing paragraph BEFORE the v603 closing tag (`"Natural ultra-realistic colors, deep focus."`) and AFTER the main scene description but BEFORE the negative-constraint block:
+Every product-bearing Image prompt body should include a final compositing paragraph AFTER the main scene description, right BEFORE the v603 closing tag (`"Natural ultra-realistic colors, deep focus."`) + the "Aspect ratio 9:16." final line:
 
 ```
 [scene description with persona, props, framing, action]
 
 The bottle integrates naturally with the scene: [a] realistic supplement-bottle scale (~5 inches tall), [b] lit by the same [scene lighting source] as the room with no dedicated product-shot lighting, [c] base [contact-point] with a soft natural cast shadow [direction + length], [d] perspective matching the scene's [camera angle], [e] [grip or surface-contact detail], [f] partially occluded by [foreground element] breaking the silhouette.
 
-Natural ultra-realistic colors, deep focus.
-
-[negative constraints — including v606-specific anti-photoshop ones below]
+Natural ultra-realistic colors, deep focus. Aspect ratio 9:16.
 ```
 
-### v606 negative constraints (mandatory addendum to existing negative-constraint block)
+### v606 anti-photoshop guards (REVISED 2026-06-12 — live inside the compositing paragraph, no trailing negatives block)
 
-Add these to the closing negative-constraint block in every product-bearing image:
+The old rule appended six "No X" restatements as a trailing negative block. That block is RETIRED (trailing-block placement retired house-wide 2026-06-12 — see v604 rule 3; the platform appends standardized negatives automatically). The guards themselves stay — expressed INSIDE the compositing paragraph, where the [a]–[f] directives already state each one positively:
 
-- "No dedicated product-shot lighting on the bottle — same ambient lighting as the rest of the scene."
-- "No oversized bottle — realistic supplement-bottle scale (~5 inches tall)."
-- "No floating bottle — must be in physical contact with the surface or hand."
-- "No hard cut-and-paste edges — bottle blends into scene with natural ambient transitions."
-- "No color-saturated label — colors match the room's color temperature and may appear slightly desaturated to match scene ambient."
-- "No center-stage product hero-shot composition — bottle is integrated into the scene, partially occluded by foreground elements."
+- product-shot lighting guard → directive [b] ("lit by the same scene light, no dedicated product-shot lighting")
+- oversized-bottle guard → directive [a] (realistic scale + scene-element anchor)
+- floating-bottle guard → directive [e] (explicit contact point / grip)
+- cut-and-paste-edges guard → directive [f] (foreground occlusion breaking the silhouette)
+- color-pop-label guard → directive [b] ("label colors match the room's color temperature, slightly desaturated to scene ambient")
+- hero-shot-composition guard → directive [f] + composition sentence ("integrated into the scene, not a center-stage product shot")
+
+Inline "no X" wording within those sentences is fine; a labeled trailing list is not.
 
 ### Pre-output validation gate
 
@@ -3183,7 +3179,7 @@ Before emitting any Image prompt with a `product_image:` field, scan the body pr
 - ✅ [d] Perspective integration present (bottle angle matches scene camera)?
 - ✅ [e] Surface contact / grip explicit (no floating bottle)?
 - ✅ [f] Natural occlusion (foreground element partially crosses bottle silhouette)?
-- ✅ v606 negative constraints added to closing negative-constraint block?
+- ✅ All six guards expressed inside the compositing paragraph (no trailing negatives block — retired 2026-06-12)?
 
 If any ❌ found, ADD before emitting.
 
@@ -3330,12 +3326,10 @@ Use the uploaded character reference image for the main character.
 Use the uploaded product reference image for the Rosabella Beetroot bottle.
 Use the prior-scene reference image to preserve the walnut desk, warm wood-paneled office, framed diplomas, lighting, framing, and continuity from the previous scene.
 
-Use image_4 as the exact base frame. Keep everything from image_4 identical. Only change: the Rosabella Beetroot bottle is held up at chest height in his blue-gloved viewer-left hand, presented directly toward the lens, label-forward to camera, navy-and-cream wordmark squared to lens, fingers wrapping the cap top. His viewer-right blue-gloved hand gestures next to the bottle for emphasis. He is seated at his walnut desk with eyes locked to camera, expression warm and authoritative. Shot on iPhone wide-angle lens, handheld, deep focus throughout, natural daylight. Natural ultra-realistic colors, deep focus.
-
-No lab coat. No stethoscope. No hospital room. No extra products. No recipe ingredients. No background change. Bottle is real-supplement-sized, not oversized, not floating, not redesigned. Bottle is NOT on the desk in this image — it is held in the persona's viewer-left hand.
+Use image_4 as the exact base frame. Keep everything from image_4 identical — same office, same lighting, nothing in the background changes, no extra products or ingredients enter the frame. Only change: the Rosabella Beetroot bottle is held up at chest height in his blue-gloved viewer-left hand (NOT standing on the desk — the desk surface in front of him stays clear), presented directly toward the lens, label-forward to camera, navy-and-cream wordmark squared to lens, fingers wrapping the cap top, at realistic supplement-bottle scale in firm physical contact with his grip. His viewer-right blue-gloved hand gestures next to the bottle for emphasis. He is seated at his walnut desk with eyes locked to camera, expression warm and authoritative. Shot on iPhone wide-angle lens, handheld, deep focus throughout, natural daylight. Natural ultra-realistic colors, deep focus. Aspect ratio 9:16.
 ```
 
-Note the explicit **"Bottle is NOT on the desk in this image"** in the negative-constraint block — this directly counters the template-bias default that would otherwise place it there.
+Note the explicit **"NOT standing on the desk — the desk surface in front of him stays clear"** woven INTO the body sentence — this directly counters the template-bias default that would otherwise place the bottle there. (Since 2026-06-12 this kind of guard lives inside the sentences, not in a trailing block — see rule 3 below.)
 
 ---
 
@@ -3389,9 +3383,7 @@ Example from the corpus chat:
 ```
 > Use image_4 as the exact base frame. Keep the same silver-haired male clinician, same white button-down shirt, same blue nitrile gloves, same seated chest-up framing, same wooden desk edge at the bottom, same warm wood-paneled office, same framed diplomas on the wall, same phone-camera look, same lighting, same camera distance.
 >
-> Only change: [visual_delta value].
->
-> [negative constraints — see rule 3 below]
+> Only change: [visual_delta value]. [Drift-guard constraints woven into the sentences per rule 3 below — no trailing block.]
 
 This is much stronger than rewriting the whole scene. The model gets a clean signal: "preserve everything, change one thing."
 
@@ -3451,19 +3443,19 @@ The generic v603 line (`"Shot on iPhone wide-angle lens, handheld, deep focus th
 
 For the healthylifesage Rosabella decode, the lock is: "vertical selfie-style phone video, stable handheld, chest-up framing, camera slightly above desk height, face centered upper half, desk edge visible at bottom, warm wood diploma wall behind." That's specific enough to prevent room-drift.
 
-#### 3. Negative-constraint discipline
+#### 3. Drift-guard constraint discipline (REVISED 2026-06-12 — fold into sentences, no trailing block)
 
-Every Image prompt body should close with explicit DO-NOT statements that prevent generator drift. The negative constraints depend on the niche/persona, but the corpus pattern is to anchor against common drift failures:
+Anti-drift constraints stay mandatory, but the **trailing stand-alone DO-NOT paragraph after the closing tag is RETIRED** (2026-06-12, per the house standard `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §1 + `wiki/meta/decode-grammar-checklist.md`: the prompt ENDS at `Aspect ratio 9:16.`; the platform appends its own standardized negative block automatically — an authored trailing block duplicates it).
 
-> No lab coat. No stethoscope. No hospital room. No extra products. No recipe ingredients. No dramatic cinematic lighting. No background change.
+**Where the constraints go now: INSIDE the body sentences**, woven into the description before the closing tag. Inline "no X" phrasing within a sentence is fine (the house template itself uses "NO feet visible, NO floor visible" inline); a labeled trailing list is not. Prefer positive phrasing where it reads naturally:
 
-For Korella saffron-vitality videos in T0 kitchen:
-> No clinical setting. No lab coat. No medical equipment. No empty kitchen (must have warm honey-oak shelving + ceramic vessels visible).
+- Old trailing block: `No lab coat. No stethoscope. No hospital room.` → body sentence: "She wears a casual sundress — regular clothing, a warm home setting, no lab coat or medical equipment anywhere."
+- T0 kitchen: body sentence: "The kitchen has warm honey-oak shelving and ceramic vessels clearly visible — a lived-in domestic space, no clinical elements."
+- T2 continuity: fold into the chain sentence: "...same room, same furniture, same lighting as the prior scene — nothing in the background changes."
 
-For T2 clinical exam scenes:
-> No domestic kitchen background. No casual clothing on the clinician. No extra patients. No background change between this and the prior scene.
+Order inside the prompt: scene description (with the drift-guards woven in) → v603 closing tag `"Natural ultra-realistic colors, deep focus."` → final line `Aspect ratio 9:16.` Nothing after the aspect-ratio line.
 
-The negative-constraint section should be the LAST paragraph of the Image prompt body, after the v603 closing tag `"Natural ultra-realistic colors, deep focus."` This gives the model a clear separation: positive description → style anchor → negative constraints.
+Decode-side reminder (v712): for things that simply should not exist in frame, prefer OMISSION over negation — unnamed = not rendered. Reserve inline "no X" wording for countering a strong Banana 2 default the scene actively fights (oversized prop, balanced two-shot, floor visibility).
 
 #### 4. Viewer-left / viewer-right convention
 
@@ -3488,7 +3480,7 @@ Before emitting any decoded artifact OR generate-side videos/*.md, scan for:
 - ✅ Continuity-chain check: same person + same clothes + same room + same camera + same surface = CHAIN, even across dialogue-beat boundaries
 - ✅ Image prompt body has STATIC pose only — no motion verbs ("captured at", "frozen at", "mid-action")
 - ✅ Camera lock specificity beyond the generic v603 style line — concrete anchors per-video
-- ✅ Negative-constraint DO-NOT block at end of every Image prompt body
+- ✅ Drift-guard constraints woven into the body sentences (NO trailing DO-NOT block — retired 2026-06-12; prompt ends at "Aspect ratio 9:16.")
 - ❌ NO bare "left" / "right" — replaced with "viewer-left" / "viewer-right"
 
 If any ❌ found, FIX before emitting.
@@ -3512,9 +3504,7 @@ Post-v604 (frame-locked reconstruction with all four universal rules):
 > Use the uploaded product reference image for the Rosabella Beetroot bottle.
 > Use the prior-scene reference image to preserve the wood-paneled office, framed diplomas, desk, lighting, framing, and continuity from the previous scene.
 >
-> Use image_4 as the exact base frame. Keep the same silver-haired male clinician, same white button-down shirt, same blue nitrile gloves, same seated chest-up framing, same wooden desk edge at the bottom, same warm wood-paneled office, same framed diplomas on the wall, same phone-camera look, same lighting, same camera distance. Only change: the Rosabella Beetroot bottle is now held at chest height in his gloved hand on the viewer-right side of the frame, label facing camera, navy-and-cream wordmark squared to lens. His other gloved hand on the viewer-left side gestures near the bottle. Natural ultra-realistic colors, deep focus.
->
-> No lab coat. No stethoscope. No hospital room. No extra products. No recipe ingredients. No dramatic cinematic lighting. No background change. Bottle is real-supplement-sized, not oversized, not floating, not redesigned.
+> Use image_4 as the exact base frame. Keep the same silver-haired male clinician, same white button-down shirt, same blue nitrile gloves, same seated chest-up framing, same wooden desk edge at the bottom, same warm wood-paneled office, same framed diplomas on the wall, same phone-camera look, same lighting, same camera distance — nothing in the background changes and no extra products or ingredients enter the frame. Only change: the Rosabella Beetroot bottle is now held at chest height in his gloved hand on the viewer-right side of the frame, label facing camera, navy-and-cream wordmark squared to lens, at realistic supplement-bottle scale in firm physical contact with his grip. His other gloved hand on the viewer-left side gestures near the bottle. Natural ultra-realistic colors, deep focus. Aspect ratio 9:16.
 
 ### Why v604 vs leaving these implicit
 
@@ -6882,7 +6872,7 @@ When operator reports a render failed but doesn't know why:
 2. **Make the diagnostic anchor the centerpiece of the dual-state contrast** — render the diseased model showing the anchor IN ITS PATHOLOGICAL STATE; render the healthy model showing the anchor IN ITS NORMAL STATE
 3. **Name the diagnostic anchor explicitly** in the [Subject — Symptom] block with v716 geometric measurement + clinical condition adjective
 4. **Stack with Pattern 22 vintage-wax register** for Layer 2 safety
-5. **In the negatives block**, explicitly require the diagnostic anchor MUST be visible in both models for comparison
+5. **In the closing body sentences** (no trailing negatives block — 2026-06-12), explicitly require the diagnostic anchor MUST be visible in both models for comparison
 
 **Worked example library (validated production HOOKs — 2026-05-16)**:
 
@@ -6964,7 +6954,7 @@ Bare "fleshy" / "wet" / "glistening" can trigger RAI when adjacent to genital te
 | # | Pattern | Example |
 |---|---|---|
 | 12 | **Medical-jargon anchor pairing** | bare "an anatomical prostate model" → with anchor "an anatomical prostate model showing the dual lobes and the urethra passing through" / "showing benign prostatic hyperplasia stage 2" |
-| 13 | **Anti-sexualization negatives stack** | append to negatives block: `"No sexualized framing. No erotic context. No nudity beyond clinical reference. The anatomical models are silicone medical-school teaching props for clinical demonstration, not real flesh. No suggestive lighting. No bedroom setting."` |
+| 13 | **Anti-sexualization clinical-register sentences** | close the body description with (woven in, no trailing block per 2026-06-12 revision): `"The anatomical models are silicone medical-school teaching props for clinical demonstration, not real flesh — a wholesome clinical-education scene with even neutral lighting, no sexualized framing, no erotic context, no nudity beyond clinical reference, no bedroom setting."` |
 | 14 | **Patient-anatomy-direct rule** (when source shows real patient body part not a model) | crop strictly above navel + below mid-thigh ONLY; reference clothing fabric for lower frame edge; never render visible nude genitalia regardless of vocabulary; use anatomical-region terms ("pelvic region" / "groin area" / "perineum") instead of organ-specific terms |
 | 15 | **Anchor pairing examples** | bare "an anatomical testicle model" → with anchor "an anatomical testicle model with visible epididymis and vas deferens"; bare "an anatomical penis model" → with anchor "an anatomical penis model showing the corpora cavernosa for ED demonstration"; bare "an intestinal cross-section" → with anchor "an anatomical cross-section of the small intestine showing villi, jejunum and ileum labeled"; bare "an anatomical female pelvic model" → with anchor "an anatomical female pelvic model showing the uterus, fallopian tubes, and ovaries with labels" |
 | 16 | **Render 2-3 variants first** | RAI is non-deterministic — same prompt may pass 2 of 3 attempts; always test small batch before promoting to video |
@@ -7406,7 +7396,7 @@ is DEPRECATED. Chained Image bodies now use ONLY:
 - `reference_image: image_K` frontmatter field — KEPT (declares chain).
 - `visual_delta: <one-line description>` frontmatter field — KEPT (structured delta).
 - v589.1 chain semantic line — KEPT (preserves setting / lighting / composition anchors).
-- Negative-constraint block at end of body — KEPT (anti-drift discipline).
+- Drift-guard constraints — KEPT as content, but REVISED 2026-06-12: woven into body sentences, no trailing block (see v604 rule 3).
 - Decode-side v604 fields `frame_anchor:` + `visual_delta:` — KEPT (frame-locked decode anchors are still required).
 
 Only the literal body-prose line `Use image_K as the exact base frame. Keep everything from image_K identical. Only change: ...` is removed.
@@ -8119,7 +8109,7 @@ For `raw/decoded_*.md` Image prompt bodies, use the following grammar order:
 - Operator specifies rule-of-thirds anchoring.
 - Operator specifies crop boundary (`cropped at mid-chest`).
 - Operator specifies viewer-relative directions (mirror prevention).
-- Operator specifies negative-constraint block (`"No generic studio. No smooth forehead."`).
+- Operator weaves drift-guard constraints into the body sentences (`"...a lived-in domestic room, no generic studio backdrop; her forehead wrinkles stay clearly visible"`) — trailing negatives block retired 2026-06-12.
 
 v712 does NOT deprecate v603 / v604 / v521.1 / v586. Those rules remain authoritative for generate side. v712 carves out the decode side and switches it to relational grammar.
 
@@ -8298,21 +8288,21 @@ Per [nano-banana-prompting.md:114](../wiki/generation/nano-banana-prompting.md#L
 
 Camera grammar lives in the `[Composition]` block. v603 closing style tag (`"Natural ultra-realistic colors, deep focus."`) stays in the `[Style]` block at the end. The two are complementary: camera grammar specifies the FRAMING + DEPTH; style tag specifies the GRADING.
 
-**[d] Composition-anti-default negatives.**
+**[d] Composition-anti-default constraints (REVISED 2026-06-12 — inside the [Composition] sentences, no negatives block).**
 
-When the source frame breaks Banana 2 defaults (balanced two-shot, full-character visibility, center composition), add explicit negative constraints in the negatives block:
+When the source frame breaks Banana 2 defaults (balanced two-shot, full-character visibility, center composition), state the anti-default explicitly INSIDE the [Composition] block sentences:
 
-- `"No balanced two-shot — [primary subject] dominates the frame"`
-- `"No full view of [partial-visibility subject]"`
-- `"No center-stage hero composition"`
+- `"[primary subject] dominates the frame — not a balanced two-shot"`
+- `"only [the patient's forearm and hand] enter the frame from viewer-right — [the patient] is never shown in full"`
+- `"the prop is integrated into the scene, not a center-stage hero composition"`
 
-Banana 2 takes negatives seriously per [nano-banana-prompting.md:202](../wiki/generation/nano-banana-prompting.md#L202) ("Be explicit about preservation"). Negatives counter the model's default-priors pull. These compose with v604 negative-constraint block + v606 product negatives — append the v713 composition-anti-default constraints to the existing negatives, do not replace.
+Banana 2 takes explicit anti-default statements seriously per [nano-banana-prompting.md:202](../wiki/generation/nano-banana-prompting.md#L202) ("Be explicit about preservation") — they counter the model's default-priors pull. These compose with the v604 drift-guards + v606 compositing guards, all woven into the body sentences (trailing negatives block retired 2026-06-12 — see v604 rule 3).
 
 **[e] CANONICAL BLOCK ORDER & STRICT SPACING (Banana 2 prompt formula).**
 
 Banana 2 plans the image from structured slots. Packing tokens into a single paragraph not only confuses the parser but spikes the token-density for safety filters (RAI), causing false-positive rejections on clinical / anatomical terms.
 
-You MUST include exactly ONE blank line between the binding instructions, every bracketed block, and the Negatives block.
+You MUST include exactly ONE blank line between the binding instructions and every bracketed block. (The old terminal Negatives block is retired 2026-06-12 — see v604 rule 3.)
 
 REQUIRED SPACING FORMAT:
 
@@ -8329,12 +8319,12 @@ Binding line(s) — with v713(a) partial-visibility override if applicable
 [BLANK LINE]
 [Style] — camera + lighting + grading (v603 closing tag here)
 [BLANK LINE]
-[Tech] — aspect + resolution
-[BLANK LINE]
-Negatives — composition-anti-default (v713) + v604 / v606 product negatives + persona drift constraints
+[Tech] — aspect + resolution (ends the prompt — "Aspect ratio 9:16." is the final line)
 ```
 
-This is Banana 2's canonical Subject / Composition / Action / Location / Style / Tech formula ([nano-banana-prompting.md:91](../wiki/generation/nano-banana-prompting.md#L91)) with three adjustments: (1) Composition comes BEFORE Subject (v713[b] front-load), (2) Negatives appended at end (v604 + v606 + v713), (3) STRICT single-blank-line spacing between EVERY bracketed block (v713[e] amendment, RAI bypass — packed paragraphs trigger safety-filter token-density rejections; structured spacing forces RAI to evaluate the prompt as discrete data fields, bypassing false-positive rejections on clinical / anatomical vocabulary).
+(REVISED 2026-06-12: the old terminal `Negatives` row is RETIRED — drift-guard / anti-default / compositing constraints are woven into the [Composition], [Subject], and [Action] sentences per v604 rule 3; the platform appends standardized negatives automatically.)
+
+This is Banana 2's canonical Subject / Composition / Action / Location / Style / Tech formula ([nano-banana-prompting.md:91](../wiki/generation/nano-banana-prompting.md#L91)) with three adjustments: (1) Composition comes BEFORE Subject (v713[b] front-load), (2) drift-guard constraints woven into the block sentences (v604 + v606 + v713, 2026-06-12 revision), (3) STRICT single-blank-line spacing between EVERY bracketed block (v713[e] amendment, RAI bypass — packed paragraphs trigger safety-filter token-density rejections; structured spacing forces RAI to evaluate the prompt as discrete data fields, bypassing false-positive rejections on clinical / anatomical vocabulary).
 
 **Worked example — Dr. Kim Image 1 frame.**
 
@@ -8890,7 +8880,7 @@ The worked-example bodies below show the `[Composition]` / `[Subject]` / `[Actio
 
 [Tech] [aspect ratio + resolution, e.g. 9:16, 2K output].
 
-Negatives: [v604 negative-constraint block + v606 product negatives + v713(d) composition-anti-default + v715 desk-anchor anti-default].
+(No terminal Negatives row — retired 2026-06-12. The v604 drift-guards + v606 compositing guards + v713(d) composition-anti-default + v715 desk-anchor anti-default are woven into the [Composition] / [Subject] / [Action] sentences above.)
 ```
 ````
 
@@ -9120,7 +9110,7 @@ Banana 2 renders: calf with prominent varicose veins at frame center, camera at 
 2. `[Composition]` block uses Z-axis depth (immediate foreground / midground / background) and explicit anchor-level camera position.
 3. Frame center sits at the prop's anchor body-part level.
 4. Camera height matches the anchor level.
-5. Negatives block bans desk / surface / top-down phrasing.
+5. Body sentences ban desk / surface / top-down phrasing inline (no trailing negatives block — 2026-06-12).
 
 ---
 
@@ -9144,9 +9134,10 @@ grep -niE "\b(immediate (center-)?foreground|directly (behind|above) (the )?prop
 grep -niE "\b(shot from above|high angle|angled down at (the )?(desk|counter|table|surface)|looking down at the prop|top-down view|overhead shot|bird's-eye|camera tilted down|camera at floor level)\b" raw/decoded_<id>.md videos/<file>.md
 # Expect: zero hits on hero-prop image blocks
 
-# v715 gate (e) — required negative constraints when hero prop is subject-anchored
+# v715 gate (e) — required anti-default constraints when hero prop is subject-anchored
+# (2026-06-12: these phrases live INSIDE the body sentences — no trailing negatives block)
 grep -niE "\b(No (desk|counter|table|surface) visible|No (.{1,30} )?on (a|the) (surface|desk|counter|table)|No top-down|No high-angle|No prop (sinking|at floor level)|No empty space between|prop dominates the (center|middle)|symptom dominates the (center|middle))\b" raw/decoded_<id>.md videos/<file>.md
-# Expect: ≥1 hit per hero-prop Image block negatives block
+# Expect: ≥1 hit per hero-prop Image block (closing body sentences)
 ```
 
 ANY gate-(a) hit OR gate-(d) hit on a hero-prop image = rewrite. Missing gate-(b), (c), or (e) hits when hero prop is in frame = rewrite.
@@ -9273,7 +9264,7 @@ ONLY THEN claim v715 elevates hero props faithfully on Banana 2.
 
 Adjective + geometric combo is allowed and preferred. Adjective without geometric is BANNED on AUGMENTED-SYMPTOMS lens images.
 
-**Mandatory anti-normalization negatives** in the negatives block on every AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE image where v622b applies:
+**Mandatory anti-normalization sentences** closing the body description (woven in — no trailing negatives block per the 2026-06-12 revision) on every AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE image where v622b applies:
 
 ```
 No firm [body part]. No normal skin elasticity. No minor [symptom]. No mild [symptom]. The [symptom] MUST be EXTREME and highly visible.
@@ -9300,7 +9291,7 @@ grep -niE "\b([0-9]+(\.[0-9]+)?[- ]?(inch(es)?|mm|cm)|[0-9]+%|[0-9]+\+? (groove|
 
 # Negative-discipline gate
 grep -niE "\bNo (firm|normal|minor|mild) (arm|belly|jaw|forehead|under-eye|scalp|skin|symptom|sagging|wrinkle|vein|acne|bloat|jowl|chin)\b" raw/decoded_<id>.md videos/<file>.md
-# Expect: ≥1 hit per AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE Image block negatives
+# Expect: ≥1 hit per AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE Image block (closing body sentences)
 ```
 
 ---
@@ -9606,10 +9597,10 @@ No firm arm. No normal skin elasticity. The sagging MUST be EXTREME. No normal h
 
 **Pattern.** Each structural ban negates an anatomical / surface default — names the body part + the healthy structural feature being banned. Banana 2 must render the absence of the named anatomy, which forces the symptom-distorted version.
 
-**Where v604b lives** in the canonical block structure: same negatives block at end of body prose, AFTER v716 anti-normalization negatives, BEFORE v713(d) composition-anti-default negatives.
+**Where v604b lives** (REVISED 2026-06-12 — no trailing negatives block): the structural bans close the body description as the LAST sentences before the v603 closing tag, in this order — v716 anti-normalization sentences, then v604b structural-anatomical bans, then v713(d) composition-anti-default statements (which usually sit earlier, inside [Composition]).
 
 ```
-Negatives: [v716 anti-normalization — outcome ban] + [v604b structural-anatomical ban] + [v713(d) composition-anti-default] + [v604 generic per-video negatives] + [v606 product negatives if applicable].
+[...body description...] [v716 anti-normalization — outcome ban sentences] [v604b structural-anatomical ban sentences] Natural ultra-realistic colors, deep focus. Aspect ratio 9:16.
 ```
 
 ---
@@ -9682,9 +9673,9 @@ for m in re.finditer(r'### Image (\d+).*?(?=### Image \d+|\Z)', text, flags=re.D
         print(f'WARN Image {m.group(1)}: AUGMENTED-SYMPTOMS lens but no [Subject — Symptom] block')
 "
 
-# Gate (v604b) — structural anatomical bans in negatives block
+# Gate (v604b) — structural anatomical bans (in the closing body sentences since 2026-06-12)
 grep -niE "\bNo normal (human )?(arm|abdominal|calf|hair|jawline|forehead|under-eye|outer-eye|chin|skin|frontal|periorbital|lateral orbital|mandibular|dermal)( anatomy| wall| surface| structure| silhouette| continuity| anatomy)?\b|No skin attached to|No straight (lower|upper) (arm|leg) contour|No natural (muscle|skin) definition|No (taut|smooth|flat|defined|clean|even|invisible|closed|clear|firm|full) (skin|forehead|abdominal|cheek|jawline|chin|hair|brow line|under-eye skin|outer-eye region|canthal skin|neck contour|submental region|parting line|skin tone|pore visibility|leg silhouette|back|upper-back skin|tear-trough region|chin-to-neck angle|frontal anatomy|obliques)" raw/decoded_<id>.md videos/<file>.md
-# Expect: ≥1 hit per AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE Image block negatives
+# Expect: ≥1 hit per AUGMENTED-SYMPTOMS / HEALER-SHOWING-CURE Image block (closing body sentences)
 ```
 
 ---
@@ -9714,7 +9705,7 @@ v717 composes WITH v716, not instead of:
 
 - v716 v622b (geometric measurements) → v717 v622b-extension adds metaphor anchors on top
 - v716 v715f (Mode 6 body-part-thrust) → v717 v605c symptom-first allocation works inside Mode 6's `[Subject]` block (replaces `[Subject — patient]` with two-block `[Subject — Symptom]` + `[Subject — Host]`)
-- v716 anti-normalization negatives (outcome ban) → v717 v604b structural-anatomical bans append to the same negatives block
+- v716 anti-normalization sentences (outcome ban) → v717 v604b structural-anatomical bans follow them in the same closing body sentences (no trailing block — 2026-06-12)
 
 Stacking rule: **v717 = v716 + metaphor forcing + symptom-first allocation + structural bans.** Both rules ship together on extreme-symptom HOOK frames.
 
@@ -10411,8 +10402,10 @@ When AUTHORING (lift / create / innovate) a body-part symptom, MATCH the source'
 
 [Tech] 9:16, 2K output.
 
-Negatives: No firm arm. No normal skin elasticity. No minor sagging. The sagging MUST be EXTREME. No normal human arm anatomy. No skin attached to the bottom of the bicep. No straight lower arm contour. No natural muscle definition. No holes in the arm flesh. No negative space below the tricep. No loops in the hanging skin. The drape MUST be a solid continuous flap.
+No firm arm, no normal skin elasticity, no minor sagging — the sagging MUST be EXTREME. No normal human arm anatomy, no skin attached to the bottom of the bicep, no straight lower arm contour, no natural muscle definition. No holes in the arm flesh, no negative space below the tricep, no loops in the hanging skin — the drape MUST be a solid continuous flap.
 ```
+
+(The ban sentences close the body description — no labeled `Negatives:` row since 2026-06-12.)
 
 Three layers stacked:
 - v719a solid-volume metaphor ("continuous solid sheet of draped flesh", "dense unbroken curtain", "single continuous fold")
@@ -10435,9 +10428,9 @@ grep -niE "\b(deep U-shape|V-shape|C-shape|Y-shape|doughnut shape|ring shape|loo
 grep -niE "\b(continuous solid sheet|dense unbroken curtain|solid flap hanging|thick mass of pendulous flesh|uninterrupted drape|single continuous fold|solid continuous overhang|thick unbroken mass|continuous slab of soft tissue|continuous .{1,30} drape)\b" raw/decoded_<id>.md videos/<file>.md
 # Expect: ≥1 hit per solid-volume symptom Image block
 
-# Gate (v719b) — topology bans in negatives block
+# Gate (v719b) — topology bans (in the closing body sentences since 2026-06-12)
 grep -niE "\bNo (holes in the|negative space in|loops in|ring shapes|openings|gaps|splits in the) .{1,30}\b|MUST be a solid (continuous|unbroken)" raw/decoded_<id>.md videos/<file>.md
-# Expect: ≥1 hit per solid-volume symptom Image block negatives
+# Expect: ≥1 hit per solid-volume symptom Image block (closing body sentences)
 ```
 
 ---
@@ -10479,7 +10472,7 @@ All five sub-rules ship together on extreme-symptom HOOK frames where the source
 
 ### Migration
 
-Zero required. Pre-v719 artifacts using topology-implying anchors may render with hallucinated holes on Banana 2 — retrofit on next-touch by swapping `"U-shape"` etc. to solid-volume metaphors AND appending v719b topology bans to negatives block. Wiki lint can flag artifacts with topology vocabulary + no topology bans — advisory not blocking.
+Zero required. Pre-v719 artifacts using topology-implying anchors may render with hallucinated holes on Banana 2 — retrofit on next-touch by swapping `"U-shape"` etc. to solid-volume metaphors AND adding v719b topology-ban sentences to the closing body description (no trailing block — 2026-06-12). Wiki lint can flag artifacts with topology vocabulary + no topology bans — advisory not blocking.
 
 ---
 
@@ -10626,9 +10619,9 @@ grep -niE "\b(side-by-side in the midground|share the midground depth plane|midg
 grep -niE "\bextended (straight )?(outward|forward|upward|downward|at a [0-9]+-degree angle) (to the viewer-(left|right)|toward the (camera|lens|floor)|overhead|parallel to the ground)\b" raw/decoded_<id>.md videos/<file>.md
 # Expect: ≥1 hit per extended-limb mention; ZERO "extended arm" / "outstretched arm" / "arm reaching out" without vector
 
-# Gate (v720c) — limb-pose bans in negatives block
+# Gate (v720c) — limb-pose bans (in the closing body sentences since 2026-06-12)
 grep -niE "\bNo (arm|leg|hand) (crossing|thrust|reaching)|MUST extend straight (out|outward|upward|downward) (to the (viewer-)?(left|right|side)|overhead|parallel to the ground)|No overlapping bodies|No persona hiding behind\b" raw/decoded_<id>.md videos/<file>.md
-# Expect: ≥1 hit per lateral-extension Image block negatives
+# Expect: ≥1 hit per lateral-extension Image block (closing body sentences)
 ```
 
 ---
@@ -11811,7 +11804,7 @@ grep -nE 'Across \d+ seconds|throughout the clip|\[Start beat|\[Mid-clip beat|\[
 - Sandbox section (`## Brainstorming Sandbox`) is OUTSIDE Image body — no word ceiling, no meta-ban (sandbox is operator-facing audit, not Banana 2 prompt).
 - Scene action_note is OUTSIDE Image body — beats + temporal language + verbose blocking ARE expected for Veo motion.
 - Frontmatter is OUTSIDE Image body — `corpus_pattern:` / `adaptation_map:` / `corpus_compliance_audit:` (v614) live there.
-- Negatives block IS counted in word-count — but its 5-8 clause ceiling is the practical limit.
+- Drift-guard / ban sentences ARE counted in word-count (they live inside the body since 2026-06-12) — keep them to a 5-8 clause practical ceiling.
 
 **Worked example — the same dual-prostate HOOK shipped two ways**:
 
@@ -13640,8 +13633,8 @@ Storyboard scene count drops from 6 (Option B paired pattern) → 5 (Option C si
 
 **Finding 1 (v750, GOOD structure to codify)**: Gemini's Clip 5.1 example surfaced a cleaner Veo prompt format than the current artifact convention:
 - `### Clip N.M — Scene N, Line M (REGISTER_LABEL)` header (vs current `### Scene N — descriptive`) — disambiguates multi-line scenes (Scene N with K lines emits Clip N.1 + Clip N.2 + ... + Clip N.K)
-- Bolded markdown field labels (`**Start frame:** Image K` + `**Text prompt:**` + `**Negative prompt:**`) — maps 1:1 to Veo I2V API params (cfg.image / prompt / negative_prompt)
-- Negative prompt as separate markdown block (vs crammed into fenced text-prompt's last paragraph) — preserves API field separation
+- Bolded markdown field labels (`**Start frame:** Image K` + `**Text prompt:**`) — maps 1:1 to Veo I2V API params (cfg.image / prompt)
+- (The original v750 also codified a separate `**Negative prompt:**` block — RETIRED by operator standing rule 2026-06-04, `feedback_no-negative-prompts`: NO negative block on any Veo clip; bake critical constraints affirmatively into the positive Text prompt.)
 
 **Finding 2 (operator correction)**: Gemini's example ALSO surfaced a violation of the implicit beats-in-Veo-prompts ban. Gemini's Scene 5 text prompt used `[Start beat 0-2s] LIFTS ... [Mid-clip beat 2-5s] PRESENTS ... [End beat 5-7s] POINT-TO-LENS ...` notation — but v718h-A Step 3 mandates **CONTINUOUS PROSE paragraph (IMMEDIATE ACTION + TERMINAL STATE structure)**, not beat-bracketed format. Beat structure lives in **Storyboard action_note ONLY**; Veo text prompt translates beats into continuous prose with IMMEDIATE ACTION + TERMINAL STATE anchors.
 
@@ -13670,10 +13663,9 @@ The main character says in a <register> voice, "<verbatim dialogue line, lowerca
 
 Ambient: <ambient sound description per Veo 3.1 audio path>.
 (no subtitles, no captions)
-
-**Negative prompt:**
-<negatives, comma-separated single paragraph>
 ```
+
+(NO `**Negative prompt:**` block — retired by operator standing rule 2026-06-04. Bake critical constraints affirmatively into the Text prompt body.)
 
 **Header convention `### Clip N.M — Scene N, Line M (REGISTER_LABEL)`**:
 - `N` = Scene index from Storyboard
@@ -13686,7 +13678,7 @@ Ambient: <ambient sound description per Veo 3.1 audio path>.
 - `**Start frame:** Image K` — maps to Veo `cfg.image`
 - `**End frame:** Image K+1` — REQUIRED when Scene declares `- **end_frame_image:** image_K+1` per v718h-C Option C; maps to Veo `cfg.last_frame`; OMIT for single-image scenes (Options A / B with sequential auto-inference)
 - `**Text prompt:**` — followed by the prompt body (NOT a fenced code block — markdown paragraphs)
-- `**Negative prompt:**` — followed by negative paragraph (separate markdown block, NOT crammed into text prompt)
+- NO `**Negative prompt:**` field — retired 2026-06-04 (standing rule): constraints go affirmatively into the Text prompt
 
 **Text prompt body content discipline (HARD BAN — operator correction 2026-05-18)**:
 - **NO `[Start beat 0-Xs]` / `[Mid-clip beat X-Ys]` / `[End beat Y-Zs]` brackets in Veo text prompt body.** Beat structure lives ONLY in Storyboard scene's `- **action_note:**` field.
@@ -13702,7 +13694,7 @@ Ambient: <ambient sound description per Veo 3.1 audio path>.
 The Veo prompt distills the action_note beats into IMMEDIATE ACTION continuous prose (covering the entire transformation arc) + TERMINAL STATE anchor (locking the end-state for cfg.last_frame interpolation when Option C, or text-prompt steering when Option A).
 
 **Carve-outs**:
-- Multi-line scenes (Scene K with N>1 lines) — each line gets own Clip K.M entry with its own Start frame + Text prompt + Negative prompt block; share Scene K's image_K (unless intra-scene image switching authored, rare)
+- Multi-line scenes (Scene K with N>1 lines) — each line gets own Clip K.M entry with its own Start frame + Text prompt; share Scene K's image_K (unless intra-scene image switching authored, rare)
 - Static scenes (Delta Axis NONE per v738.1 — CTA / talking-head / authority reveal) — IMMEDIATE ACTION + TERMINAL STATE still required but describe the static beat (LIFT-PRE + PRESENT + GESTURE-FORWARD + END-LOOK) without morphological transformation; TERMINAL STATE describes the end-of-clip framing (book still squared to lens, mouth completing line, etc.)
 - v718h-C Option C scenes — `**End frame:**` field is REQUIRED; text prompt body MUST acknowledge the end-frame anchor explicitly (e.g. "Veo natively interpolates start_frame → end_frame across the X seconds via cfg.last_frame")
 
@@ -13737,8 +13729,8 @@ for header in clip_headers:
     if not re.search(r'\*\*Text prompt:\*\*', block):
         print(f'v750 FAIL: Clip {n}.{m} missing **Text prompt:** field')
         fail_count += 1
-    if not re.search(r'\*\*Negative prompt:\*\*', block):
-        print(f'v750 FAIL: Clip {n}.{m} missing **Negative prompt:** separate block; do NOT cram negatives into the text prompt fenced body')
+    if re.search(r'\*\*Negative prompt:\*\*', block):
+        print(f'v750 FAIL: Clip {n}.{m} carries a **Negative prompt:** block — RETIRED per standing rule 2026-06-04 (feedback_no-negative-prompts); remove it and bake constraints affirmatively into the Text prompt')
         fail_count += 1
 if fail_count == 0:
     print('v750 PASS')

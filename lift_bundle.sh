@@ -1366,10 +1366,13 @@ violated rules in past LLM outputs:
          characteristics. Generic style line alone can produce a
          different room.
 
-     [c] NEGATIVE-CONSTRAINT DISCIPLINE. Every Image prompt body
-         closes with explicit DO-NOT statements AFTER v603 closing
-         tag. Adapt to niche/persona. Anchor against common drift
-         failures.
+     [c] DRIFT-GUARD CONSTRAINT DISCIPLINE (REVISED 2026-06-12 —
+         fold into sentences, NO trailing DO-NOT block). The prompt
+         ENDS at "Aspect ratio 9:16."; the platform appends
+         standardized negatives automatically. Weave anti-drift
+         constraints INTO the body sentences (inline "no X" within
+         a sentence is fine; a labeled trailing list is not). Adapt
+         to niche/persona.
 
      [d] VIEWER-LEFT / VIEWER-RIGHT convention. Generators confuse
          "left" / "right" (subject-perspective vs frame-perspective).
@@ -1439,17 +1442,16 @@ violated rules in past LLM outputs:
      [f] OCCLUSION: foreground element partially crosses the bottle
          silhouette (breaks cut-and-paste look)
 
-     Compositing paragraph format — final paragraph before v603
-     closing tag:
+     Compositing paragraph format — final descriptive paragraph,
+     right before the closing tag + aspect-ratio line (REVISED
+     2026-06-12 — no trailing negatives block; the [a]-[f]
+     directives carry the anti-photoshop guards inside the
+     paragraph: same-scene lighting, realistic scale, physical
+     contact, occlusion breaking the silhouette, label colors
+     matched to scene, integrated not center-stage):
        "The bottle integrates naturally with the scene: [a] [b] [c]
         [d] [e] [f]."
-       "Natural ultra-realistic colors, deep focus."
-       "[negative constraints including v606 anti-photoshop adds]"
-
-     V606 NEGATIVE CONSTRAINTS:
-       No dedicated product-shot lighting / No oversized bottle / No
-       floating bottle / No hard cut-and-paste edges / No color-
-       saturated label / No center-stage hero-shot composition.
+       "Natural ultra-realistic colors, deep focus. Aspect ratio 9:16."
 
      LIFT-SPECIFIC: when porting a decoded source, the original
      decoded artifact may not have v606 compositing directives
@@ -1833,7 +1835,8 @@ violated rules in past LLM outputs:
            (active-verb present in [Subject — Host])?
        YES Persona face visible above OR beside prop at chest-up per
            v736g (composition phrase present)?
-       YES Negative block <=10 clauses?
+       YES drift-guard / ban sentences <=10 clauses, woven into the
+           body (no trailing negatives block — 2026-06-12)?
        YES Single [Subject — Symptom] block for dual / triple props
            (no [Subject — Symptom A] + [Subject — Symptom B] split)?
 

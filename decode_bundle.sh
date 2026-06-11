@@ -1216,13 +1216,17 @@ V604 UNIVERSAL PROMPT-DISCIPLINE (decode + generate both):
     "iPhone HDR daylight" alone is too broad. It can create a different
     room. Lock the camera to the actual source-video anchors.
 
-[e] NEGATIVE-CONSTRAINT DISCIPLINE. Every Image prompt body must close
-    with explicit DO-NOT statements that prevent generator drift,
-    AFTER the v603 closing tag "Natural ultra-realistic colors, deep focus.":
-      "No lab coat. No stethoscope. No hospital room. No extra
-       products. No recipe ingredients. No dramatic cinematic lighting.
-       No background change."
-    Adapt to the niche/persona. Anchor against common drift failures.
+[e] DRIFT-GUARD CONSTRAINT DISCIPLINE (REVISED 2026-06-12 — fold into
+    sentences, NO trailing DO-NOT block). The prompt ENDS at
+    "Aspect ratio 9:16."; the platform appends standardized negatives
+    automatically. Weave anti-drift constraints INTO the body
+    sentences (inline "no X" inside a sentence is fine; a labeled
+    trailing list is not). Prefer omission for things that simply
+    should not exist in frame (unnamed = not rendered, v712); reserve
+    inline "no X" for countering a strong Banana 2 default. Example
+    body sentence: "She wears a casual blouse in a warm domestic
+    room — no lab coat, no medical equipment, nothing in the
+    background changes." Adapt to the niche/persona.
 
 [f] VIEWER-LEFT / VIEWER-RIGHT convention. Generators confuse "left"
     and "right" (subject-perspective vs frame-perspective). Always use
@@ -1239,7 +1243,8 @@ PRE-OUTPUT VALIDATION:
       dialogue beat change)?
   YES image prompt body has STATIC pose only (no motion verbs)?
   YES camera lock specificity beyond generic v603 style line?
-  YES negative-constraint DO-NOT block at end of every image prompt?
+  YES drift-guard constraints woven into body sentences (NO trailing
+      DO-NOT block; prompt ends at "Aspect ratio 9:16.")?
   NO bare "left" / "right" — replaced with "viewer-left" / "viewer-right"?
 
 V605 — DECODER ANTI-TEMPLATE-BIAS + PROP-TRACKING MATRIX (NEW 2026-05-06)
@@ -1374,13 +1379,15 @@ Compositing paragraph format:
    contact detail from VLM], [f] partially occluded by [foreground
    element from VLM] breaking the silhouette."
 
-V606 negative constraints to add to closing negative block:
-  - No dedicated product-shot lighting on the bottle.
-  - No oversized bottle — realistic supplement-bottle scale.
-  - No floating bottle — physical contact with surface or hand.
-  - No hard cut-and-paste edges.
-  - No color-saturated label — match scene color temperature.
-  - No center-stage product hero-shot composition.
+V606 anti-photoshop guards (REVISED 2026-06-12 — stated INSIDE the
+compositing paragraph, no trailing negatives block): the [a]-[f]
+directives above carry every guard — same-scene lighting (no
+product-shot lighting), realistic scale, physical contact (no
+floating), foreground occlusion (no cut-and-paste edges), label
+colors matched to scene temperature, integrated composition (not a
+center-stage product shot). The paragraph is the LAST descriptive
+text before "Natural ultra-realistic colors, deep focus. Aspect
+ratio 9:16."
 
 PRE-OUTPUT VALIDATION (v606):
 
@@ -1390,7 +1397,8 @@ PRE-OUTPUT VALIDATION (v606):
   YES [d] perspective matches source-video camera angle?
   YES [e] surface contact / grip explicit?
   YES [f] natural foreground occlusion observed and decoded?
-  YES v606 negative constraints in closing negative block?
+  YES all guards stated inside the compositing paragraph (NO
+      trailing negatives block — retired 2026-06-12)?
 
 If any wrong, FIX before emitting.
 
@@ -1836,15 +1844,17 @@ end.
 [d] COMPOSITION-ANTI-DEFAULT NEGATIVES
 
 When source frame breaks Banana 2 defaults (balanced two-shot,
-full-character visibility, center composition), add explicit
-negative constraints in the negatives block:
-  - "No balanced two-shot — [primary subject] dominates the frame"
-  - "No full view of [partial-visibility subject]"
-  - "No center-stage hero composition"
+full-character visibility, center composition), state the
+anti-default explicitly INSIDE the [Composition] sentences
+(REVISED 2026-06-12 — no trailing negatives block):
+  - "[primary subject] dominates the frame — not a balanced two-shot"
+  - "only [the patient's forearm] enters the frame from viewer-right
+     — [the patient] is never shown in full"
+  - "integrated into the scene, not a center-stage hero composition"
 
-Banana 2 takes negatives seriously (per nano-banana-prompting.md
-"Be explicit about preservation"). Negatives counter the model's
-default-priors pull.
+Banana 2 takes explicit anti-default statements seriously (per
+nano-banana-prompting.md "Be explicit about preservation"). They
+counter the model's default-priors pull.
 
 [e] CANONICAL BLOCK ORDER (Banana 2 prompt formula)
 
@@ -2254,9 +2264,10 @@ PRE-OUTPUT VALIDATION (v715):
   YES Zero hits on banned downward camera angles (shot from above /
       high angle / angled down at the desk / top-down view /
       overhead / bird's-eye)?
-  YES Composition-anti-default negatives in negatives block (No desk
-      visible / No [.{1,30}] on a surface / No top-down / No high-
-      angle / No prop sinking / prop dominates the center)?
+  YES Composition-anti-default sentences in the closing body (no
+      trailing negatives block — 2026-06-12) (No desk visible / No
+      [.{1,30}] on a surface / No top-down / No high-angle / No prop
+      sinking / prop dominates the center)?
 
   If any wrong, FIX before emitting.
 
@@ -2536,7 +2547,8 @@ human arm anatomy with skin attached to bicep") and treats symptom as
 surface decoration on top of the default. v604b bans the UNDERLYING
 ANATOMICAL DEFAULT.
 
-Append structural-anatomical bans to negatives block:
+Add structural-anatomical ban sentences to the closing body
+description (no trailing negatives block — 2026-06-12):
 
   Sagging arm:     "No normal human arm anatomy. No skin attached to
                    the bottom of the bicep. No straight lower arm
@@ -2622,7 +2634,7 @@ PRE-OUTPUT VALIDATION (v717):
       ("like a [object]")?
   YES For AUGMENTED-SYMPTOMS HOOK / before-state frames: [Subject —
       Symptom] block precedes [Subject — Host] block in body prose?
-  YES Negatives block contains ≥1 structural-anatomical ban (No
+  YES Closing body sentences contain ≥1 structural-anatomical ban (No
       normal [body part] anatomy / No skin attached to / No straight
       contour / No natural definition / No taut / No smooth / No
       flat / No invisible)?
@@ -3069,8 +3081,8 @@ PRE-OUTPUT VALIDATION (v719):
   YES For solid-volume symptom sources: zero topology-implying
       anchors (deep U-shape / V-shape / loop / hole / opening)?
   YES Solid-volume metaphor present in [Subject — Symptom] block?
-  YES Topology bans in negatives block (No holes / No negative space
-      / No loops / MUST be solid continuous flap)?
+  YES Topology bans in the closing body sentences (No holes / No
+      negative space / No loops / MUST be solid continuous flap)?
   YES Bidirectional check: prose topology matches source topology?
 
   If any wrong, FIX before emitting.
@@ -3185,8 +3197,8 @@ PRE-OUTPUT VALIDATION (v720):
       Z-axis foreground / midground / background layering)?
   YES Every extended limb has explicit lateral vector clause (NOT
       ambiguous "extended arm" / "outstretched")?
-  YES Limb-pose bans in negatives block (No arm crossing chest /
-      No thrust forward / arm MUST extend straight out / No
+  YES Limb-pose bans in the closing body sentences (No arm crossing
+      chest / No thrust forward / arm MUST extend straight out / No
       overlapping bodies)?
 
   If any wrong, FIX before emitting.

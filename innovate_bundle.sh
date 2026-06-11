@@ -699,11 +699,12 @@ Step 6 — PRE-OUTPUT VALIDATION GATES (mandatory — fix and re-emit if any fai
         Host] (host character demographics, named second). Banana 2
         weights first-tokens heaviest; symptom-first forces planner
         to plan symptom geometry before host anatomy.
-    (c) v604b structural negative constraints — negatives block bans
-        underlying ANATOMICAL DEFAULTS in addition to outcomes (not
-        just "No firm arm" but also "No normal human arm anatomy. No
-        skin attached to the bottom of the bicep. No straight lower
-        arm contour."). Forces Banana 2 to render the absence of the
+    (c) v604b structural bans — the closing body sentences (no
+        trailing negatives block since 2026-06-12) ban underlying
+        ANATOMICAL DEFAULTS in addition to outcomes (not just "No
+        firm arm" but also "No normal human arm anatomy. No skin
+        attached to the bottom of the bicep. No straight lower arm
+        contour."). Forces Banana 2 to render the absence of the
         healthy default, which forces the symptom-distorted version.
   Gate 20 — v718 VLM forensic-perception protocol (PRE-GRAMMAR)
     Applied BEFORE composition prose. Three perceptual checks:
@@ -899,8 +900,11 @@ CANONICAL BLOCK STRUCTURE (parser-compliant, v593 + v696):
 
     [Tech] [aspect ratio + resolution, e.g. 9:16, 2K output].
 
-    Negatives: [v604 negative-constraint block + v606 product negatives +
-    v713(d) composition-anti-default + v715 desk-anchor anti-default].
+    (No terminal Negatives row — retired 2026-06-12. The v604
+    drift-guards + v606 compositing guards + v713(d) composition-
+    anti-default + v715 desk-anchor anti-default are woven into the
+    [Composition] / [Subject] / [Action] sentences above. The [Tech]
+    block ends the prompt — "Aspect ratio 9:16." is the final line.)
     ```
 
   CRITICAL: triple-backtick fence opening + closing required around the
@@ -1044,7 +1048,8 @@ V715 — SUBJECT-ANCHORED PROP COMPOSITION (apply during innovation):
     Symptom on face     -> face level
     Worn on wrist       -> wrist level
 
-  Required negatives block:
+  Required anti-default sentences (woven into the body — no trailing
+  negatives block since 2026-06-12):
     No desk visible. No [prop] on a surface. No top-down camera angle.
     No high-angle shot. No prop sinking to the lower-third. The prop
     dominates the center of the frame.
