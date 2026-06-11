@@ -12989,23 +12989,19 @@ The main character says in a serious, authoritative voice,
 "you shouldn't drink this too often because people will think you've
 been drinking perfume."
 
+The transformation begins on contact — no delay in action, no
+hesitation, no holding the start frame, no shape-shifting lag. The
+fluid never flows over the bumps without consequence: no 3D blisters
+remaining at clip-end, no grey crust surviving the wipe, no rough
+texture in the terminal state, no yellow film remaining, no partial
+transformation. One continuous shot.
+
 Ambient: Rustic apothecary tone, soft fluid trickle of oil splashing
 onto a textured surface, deep quiet.
 (no subtitles, no captions)
-
-Negative prompt:
-
-no delay in action, no hesitation, no holding the start frame, no
-fluid flowing over the bumps, no 3D blisters remaining at clip-end,
-no grey crust surviving the wipe, no rough texture in the terminal
-state, no yellow film remaining, no partial transformation, no
-shape-shifting lag, no liquid pooling without consequence, no
-montage, no cutaways, no scene cuts, no flashbacks, no emotional
-escalation, no cinematic transitions, no burnt-in text, no captions,
-no on-screen titles, no face distortion, no morphing, no warping, no
-duplicate limbs, no extra fingers, no inconsistent lighting, no
-composite split-screen layouts, no disembodied hands.
 ```
+
+(The v718h temporal + pixel guards live INSIDE the Text prompt body — the old trailing `Negative prompt:` block is retired per the 2026-06-04 standing rule.)
 
 **Pre-output mechanical gate (v718h, mandatory before Veo render)**:
 
@@ -13037,18 +13033,14 @@ for n, prompt_body in veo_prompts:
     if not re.search(r'\bTERMINAL STATE\b', prompt_body):
         print(f'v718h FAIL Scene {n}: Step 5 Terminal State Lock missing — closing block must declare "TERMINAL STATE: ..." with explicit final-frame visual target')
         fail_count += 1
-    neg_match = re.search(r'Negative prompt:(.*)', prompt_body, re.DOTALL | re.I)
-    if not neg_match:
-        print(f'v718h FAIL Scene {n}: Negative prompt section missing')
+    # 2026-06-12: temporal + pixel guards live INSIDE the Text prompt body
+    # (Negative prompt blocks retired per standing rule 2026-06-04)
+    if not re.search(r'no (delay in action|hesitation|holding the start frame|shape-shifting lag)', prompt_body, re.I):
+        print(f'v718h FAIL Scene {n}: temporal guards missing from Text prompt body — must include "no delay in action / no hesitation / no holding the start frame / no shape-shifting lag" woven into the body sentences')
         fail_count += 1
-    else:
-        neg = neg_match.group(1)
-        if not re.search(r'no (delay in action|hesitation|holding the start frame|shape-shifting lag)', neg, re.I):
-            print(f'v718h FAIL Scene {n}: temporal negatives missing — must include "no delay in action / no hesitation / no holding the start frame / no shape-shifting lag"')
-            fail_count += 1
-        if not re.search(r'no .{1,30} remaining at clip-end', neg, re.I) and not re.search(r'no .{1,30} surviving the', neg, re.I):
-            print(f'v718h FAIL Scene {n}: start-state pixel negatives missing — must explicitly ban start-state features from surviving (e.g. "no grey crust surviving the wipe" / "no yellow film remaining at clip-end")')
-            fail_count += 1
+    if not re.search(r'no .{1,30} remaining at clip-end', prompt_body, re.I) and not re.search(r'no .{1,30} surviving the', prompt_body, re.I):
+        print(f'v718h FAIL Scene {n}: start-state pixel guards missing from Text prompt body — must explicitly ban start-state features from surviving (e.g. "no grey crust surviving the wipe" / "no yellow film remaining at clip-end")')
+        fail_count += 1
     if axis.lower().startswith('structural'):
         if not re.search(r'\b(digital VFX wipe|VFX wipe|acts as a wipe|ERASING the (3D )?geometry|REPLACED in real-time)\b', prompt_body, re.I):
             print(f'v718h FAIL Scene {n}: Structural Integrity delta declared but VFX Wipe Override pattern missing — surface verbs alone (WASH / DISSOLVE) fail on 3D pathology; must use "digital VFX wipe" + "ERASING the 3D geometry" + "REPLACED in real-time"')
@@ -13994,12 +13986,10 @@ for clip_match in re.finditer(r'^### Clip (\d+)\.(\d+).*?(?=^### Clip|\Z)', veo_
     clip_block = clip_match.group(0)
     ia_match = re.search(r'IMMEDIATE ACTION[^:]*:(.+?)(?=TERMINAL STATE|\Z)', clip_block, re.DOTALL)
     ts_match = re.search(r'TERMINAL STATE[^:]*:(.+?)(?=The main character|\Z)', clip_block, re.DOTALL)
-    neg_match = re.search(r'\*\*Negative prompt:\*\*(.+?)\Z', clip_block, re.DOTALL)
     if not (ia_match and ts_match):
         continue
     ia_text = ia_match.group(1)
     ts_text = ts_match.group(1)
-    neg_text = neg_match.group(1) if neg_match else ''
     if not CATALYST_VERBS.search(ia_text):
         # No catalyst verb → v752 N/A for this clip (NON-TRANSFORMATIVE / autonomous / static)
         continue
@@ -14007,7 +13997,8 @@ for clip_match in re.finditer(r'^### Clip (\d+)\.(\d+).*?(?=^### Clip|\Z)', veo_
     instant_qualifier = re.search(r'INSTANT REACTION ON CONTACT|no gradual progression', ia_text, re.IGNORECASE)
     timing_marker = re.search(r'by the [0-9.]+[- ]second mark|COMPLETE by ~?[0-9.]+ seconds', ia_text, re.IGNORECASE)
     held_qualifier = re.search(r'held from ~?[0-9.]+ seconds? through clip[- ]end|holds .{1,40} through the remaining', ts_text, re.IGNORECASE)
-    no_gradual_neg = re.search(r'no GRADUAL .{1,40} across the full clip|no slow [a-z]+|no progressive transformation', neg_text, re.IGNORECASE)
+    # 2026-06-12: pacing guard lives in the Text prompt body (Negative blocks retired 2026-06-04)
+    no_gradual_neg = re.search(r'no GRADUAL .{1,40} across the full clip|no slow [a-z]+|no progressive transformation|no gradual progression', clip_block, re.IGNORECASE)
     if not instant_qualifier:
         print(f'v752 ADVISORY: Clip {n}.{m} IMMEDIATE ACTION block has catalyst verb but missing "(INSTANT REACTION ON CONTACT — no gradual progression)" qualifier on the block label')
         fail_count += 1
@@ -14018,7 +14009,7 @@ for clip_match in re.finditer(r'^### Clip (\d+)\.(\d+).*?(?=^### Clip|\Z)', veo_
         print(f'v752 ADVISORY: Clip {n}.{m} TERMINAL STATE block missing "(held from ~Y seconds through clip-end)" pacing qualifier')
         fail_count += 1
     if not no_gradual_neg:
-        print(f'v752 ADVISORY: Clip {n}.{m} Negative prompt missing "no GRADUAL ... across the full clip" / "no slow ..." / "no progressive transformation" pacing negative')
+        print(f'v752 ADVISORY: Clip {n}.{m} Text prompt body missing pacing guard ("no GRADUAL ... across the full clip" / "no slow ..." / "no progressive transformation" / "no gradual progression")')
         fail_count += 1
 if fail_count == 0:
     print('v752 PASS')
