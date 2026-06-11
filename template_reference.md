@@ -4414,9 +4414,9 @@ Image prompts are written for Nano Banana 2 with a persona's character reference
 ### Camera and lens — iPhone wide-angle
 Every image prompt opens with a consistent camera/lens spec:
 
-> Shot on iPhone with wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight, slight wide-angle perspective distortion at the edges of frame.
+> Shot on iPhone with wide-angle lens, handheld, deep focus throughout, natural daylight, slight wide-angle perspective distortion at the edges of frame.
 
-This gives the recognizable small-sensor-plus-wide-lens look: deep focus throughout (no cinematic bokeh), slight barrel distortion at the edges, punchy HDR color. Do NOT use cinema camera specs (Sony FX6, 50mm f/1.8, shallow DOF, cinematic 4K grade) unless the source video actually has that look — they'll push the output toward a glossy commercial aesthetic that breaks the TikTok-native feel.
+This gives the recognizable small-sensor-plus-wide-lens look: deep focus throughout (no cinematic bokeh), slight barrel distortion at the edges. Colors stay ultra-realistic — not oversaturated, not too warm or cold (the older "vibrant natural HDR" wording is retired per the house standard `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` — HDR-punchy color reads as an ad, not UGC). Do NOT use cinema camera specs (Sony FX6, 50mm f/1.8, shallow DOF, cinematic 4K grade) unless the source video actually has that look — they'll push the output toward a glossy commercial aesthetic that breaks the TikTok-native feel.
 
 ### Main character — never described
 The persona's character reference image is passed externally to Nano Banana 2 on every single generation, including Image 1. Image prompts must NEVER describe the main character's face, hair, beard, glasses, skin, age, ethnicity, or wardrobe. Refer to them only as **"the main character"** (or `he` / `she` as a pronoun) and describe only what the reference image can't supply:
@@ -4447,8 +4447,8 @@ Generic short forms like `the product` or `the bottle` work too but are less spe
 
 See the **Product frames** section below the isolated-reference rule for the full per-scene decision flow.
 
-### Framing — describe composition, not aspect ratio
-Aspect ratio is handled by the pipeline (vertical 9:16 for Kaveno). Do NOT specify it in prompts. Instead, describe **composition** — how the main subject and other elements occupy the frame. Match the framing 1:1 to what the source video shows in that beat.
+### Framing — describe composition; close with the aspect-ratio line
+End every image prompt with `Aspect ratio 9:16.` as its FINAL sentence — that is the closing line of the house field-order template (`wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §1; the older "do NOT specify aspect ratio" guidance is retired). Beyond that one closing line, don't lean on aspect ratio to do composition work. Describe **composition** — how the main subject and other elements occupy the frame. Match the framing 1:1 to what the source video shows in that beat.
 
 Be specific about where things sit:
 - "His shoulders nearly span the full width of the frame"
