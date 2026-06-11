@@ -788,7 +788,7 @@ Persona is always uploaded as image 1 (Flow slot 0). Product, when present in th
 - **reference_image:** none
 - **Image prompt:**
 ```
-Shot on iPhone with wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight, slight wide-angle perspective distortion at the edges of frame. [One brief anchor phrase for the setting — e.g. "Outdoor garden with blurred foliage" or "Bright modern kitchen with a warm honey-oak tabletop in the lower foreground".] [Describe framing: subject's position in the frame, shoulders-spanning, head placement.] [Describe any secondary characters fully on first appearance only — gendered pronouns are fine here, these are prose-described not upload-bound.] [Describe the main character's pose, hand positions, gesture — NEVER face/hair/beard/glasses/wardrobe AND NEVER gendered pronouns referring to the main character (v602 + v610: identity comes from the upload, not prose).] [Describe the foreground props in active use, their state and position in frame.] [Describe expression direction: mouth open mid-word, eyes tracking, warm teaching smile.] iPhone HDR colors, deep focus.
+Shot on iPhone with wide-angle lens, handheld, deep focus throughout, natural daylight, slight wide-angle perspective distortion at the edges of frame. [One brief anchor phrase for the setting — e.g. "Outdoor garden with blurred foliage" or "Bright modern kitchen with a warm honey-oak tabletop in the lower foreground".] [Describe framing: subject's position in the frame, shoulders-spanning, head placement.] [Describe any secondary characters fully on first appearance only — gendered pronouns are fine here, these are prose-described not upload-bound.] [Describe the main character's pose, hand positions, gesture — NEVER face/hair/beard/glasses/wardrobe AND NEVER gendered pronouns referring to the main character (v602 + v610: identity comes from the upload, not prose).] [Describe the foreground props in active use, their state and position in frame.] [Describe expression direction: mouth open mid-word, eyes tracking, warm teaching smile.] Natural ultra-realistic colors, deep focus. Aspect ratio 9:16.
 ```
 
 ### Image 2
@@ -797,7 +797,7 @@ Shot on iPhone with wide-angle lens, handheld, deep focus throughout, vibrant na
 - **visual_delta:** [v667 — one sentence naming the concrete change vs image_1: prop / pose / wardrobe / expression. Required on every chained image.]
 - **Image prompt:**
 ```
-The main character, same [setting anchor] as image 1, same framing — shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight. [What's changed: new pose, new action, new prop state.] [Expression direction.] iPhone HDR colors, deep focus.
+The main character, same [setting anchor] as image 1, same framing — shot on iPhone wide-angle lens, handheld, deep focus throughout, natural daylight. [What's changed: new pose, new action, new prop state.] [Expression direction.] Natural ultra-realistic colors, deep focus. Aspect ratio 9:16.
 ```
 
 ### Image 3 — example with product (v573)
@@ -806,7 +806,7 @@ The main character, same [setting anchor] as image 1, same framing — shot on i
 - **visual_delta:** The main character now holds the product bottle label-forward at chest height; everything else preserved.
 - **Image prompt:**
 ```
-The main character, same [setting anchor] as image 2, same framing — shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight. The main character holds the [product name — e.g. "the Salvora Rhodiola Rosea bottle"] label-forward to camera, [describe how the product is held: at chest height with the cap thumb-up, mid-pour over a glass, etc.]. [Expression direction.] iPhone HDR colors, deep focus.
+The main character, same [setting anchor] as image 2, same framing — shot on iPhone wide-angle lens, handheld, deep focus throughout, natural daylight. The main character holds the [product name — e.g. "the Salvora Rhodiola Rosea bottle"] label-forward to camera, [describe how the product is held: at chest height with the cap thumb-up, mid-pour over a glass, etc.]. [Expression direction.] Natural ultra-realistic colors, deep focus. Aspect ratio 9:16.
 ```
 *(Name-based product reference. The platform binds "the [product name]" to the product upload at slot 1. Use this pattern only for product frames. In non-product scenes, omit the product mention entirely — chain via reference_image as in Image 2 above.)*
 

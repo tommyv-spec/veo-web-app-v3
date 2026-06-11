@@ -320,7 +320,7 @@ The same source-video frame, decoded pre-v586 vs decoded under v586:
 > The main character at her clinic desk facing camera. Anatomy posters in the background. She is mid-explanation. iPhone wide-angle, deep focus.
 
 **v586 (compliant):**
-> *(Subject)* The main character is seated at her clinic desk facing camera, mouth open mid-word, eyes locked to camera lens, eyebrows raised in confident-authoritative emphasis. *(Composition)* Head and upper torso fill the upper two-thirds of frame, shoulders span frame width, cropped at mid-thigh, NO floor visible, NO feet visible. *(Action)* Right hand resting palm-down on the desk, left hand mid-gesture in the air at chest height — palm open and angled slightly upward in a warm explanatory gesture. *(Location)* Bright modern anatomy clinic interior with two large muscular-anatomy and skeletal-anatomy posters on the white wall behind, multiple framed medical certifications on the left at shoulder height, two small American desk-flag stands at the lower-left of frame, and a glass display cabinet of medical instruments off to the right. *(Style)* Vibrant natural HDR daylight from a side window out of frame to the right, warm-white walls, clean modern clinic palette. *(Tech)* Shot on iPhone wide-angle lens, handheld, camera approximately one arm's length from her at chest level, deep focus throughout, slight wide-angle perspective distortion at the edges of frame.
+> *(Subject)* The main character is seated at her clinic desk facing camera, mouth open mid-word, eyes locked to camera lens, eyebrows raised in confident-authoritative emphasis. *(Composition)* Head and upper torso fill the upper two-thirds of frame, shoulders span frame width, cropped at mid-thigh, NO floor visible, NO feet visible. *(Action)* Right hand resting palm-down on the desk, left hand mid-gesture in the air at chest height — palm open and angled slightly upward in a warm explanatory gesture. *(Location)* Bright modern anatomy clinic interior with two large muscular-anatomy and skeletal-anatomy posters on the white wall behind, multiple framed medical certifications on the left at shoulder height, two small American desk-flag stands at the lower-left of frame, and a glass display cabinet of medical instruments off to the right. *(Style)* Natural daylight from a side window out of frame to the right, warm-white walls, clean modern clinic palette. *(Tech)* Shot on iPhone wide-angle lens, handheld, camera approximately one arm's length from her at chest level, deep focus throughout, slight wide-angle perspective distortion at the edges of frame.
 
 The v586 version answers every visual question Banana 2 will ask: where does each prop sit, where does the subject's eyeline land, how far is the camera, where is the light source, how deep is the focus. Banana 2 stops hallucinating. The same prose form is also what the generate side writes when authoring a NEW script — so the grammar is one language, used in both directions.
 
@@ -3150,14 +3150,14 @@ Even subtle foreground occlusion (a hand grazing the edge of the bottle) breaks 
 
 ### Compositing paragraph format
 
-Every product-bearing Image prompt body should include a final compositing paragraph BEFORE the v603 closing tag (`"iPhone HDR colors, deep focus."`) and AFTER the main scene description but BEFORE the negative-constraint block:
+Every product-bearing Image prompt body should include a final compositing paragraph BEFORE the v603 closing tag (`"Natural ultra-realistic colors, deep focus."`) and AFTER the main scene description but BEFORE the negative-constraint block:
 
 ```
 [scene description with persona, props, framing, action]
 
 The bottle integrates naturally with the scene: [a] realistic supplement-bottle scale (~5 inches tall), [b] lit by the same [scene lighting source] as the room with no dedicated product-shot lighting, [c] base [contact-point] with a soft natural cast shadow [direction + length], [d] perspective matching the scene's [camera angle], [e] [grip or surface-contact detail], [f] partially occluded by [foreground element] breaking the silhouette.
 
-iPhone HDR colors, deep focus.
+Natural ultra-realistic colors, deep focus.
 
 [negative constraints — including v606-specific anti-photoshop ones below]
 ```
@@ -3199,7 +3199,7 @@ The user framing: *"make the product melt into the image and not look like it's 
 > The Korella saffron bottle now prominent in the lower-foreground of the desk in front of her, label-forward, navy-and-cream wordmark squared to lens.
 
 **Post-v606 (compositing directives applied)**:
-> The Korella saffron bottle is in the lower-foreground of the desk, sized at realistic supplement-bottle scale (~5 inches tall, roughly 1/4 of the persona's torso width). The bottle is lit by the same cool-clinical LED ambient as the exam room — slight cool-white highlights on the white cap, the navy-and-cream label colors subtly desaturated to match the muted clinical palette, no dedicated product-shot lighting. The bottle's base sits flush on the desk surface in clear physical contact, casting a soft natural shadow viewer-right approximately 2 inches at a 30-degree angle from the room's window light source camera-left. The bottle is shown at the same camera angle as the rest of the scene (slightly above desk-eye-level), so the label is angled slightly upward toward camera with the cap visible at the top. The persona's gesturing hand on the viewer-left side partially crosses in front of the bottle's upper third, breaking the silhouette so the bottle reads as naturally placed in the workspace, not as a separate product render. iPhone HDR colors, deep focus.
+> The Korella saffron bottle is in the lower-foreground of the desk, sized at realistic supplement-bottle scale (~5 inches tall, roughly 1/4 of the persona's torso width). The bottle is lit by the same cool-clinical LED ambient as the exam room — slight cool-white highlights on the white cap, the navy-and-cream label colors subtly desaturated to match the muted clinical palette, no dedicated product-shot lighting. The bottle's base sits flush on the desk surface in clear physical contact, casting a soft natural shadow viewer-right approximately 2 inches at a 30-degree angle from the room's window light source camera-left. The bottle is shown at the same camera angle as the rest of the scene (slightly above desk-eye-level), so the label is angled slightly upward toward camera with the cap visible at the top. The persona's gesturing hand on the viewer-left side partially crosses in front of the bottle's upper third, breaking the silhouette so the bottle reads as naturally placed in the workspace, not as a separate product render. Natural ultra-realistic colors, deep focus.
 >
 > No dedicated product-shot lighting on the bottle. No oversized bottle. No floating bottle. No hard cut-and-paste edges. No color-saturated label. No center-stage product hero-shot composition.
 
@@ -3313,7 +3313,7 @@ The user framing: AI models are probability engines that fill data gaps with sta
 - **product_image:** the Rosabella Beetroot bottle
 - **Image prompt:**
 
-[persona pose led] Dr. Sage is seated at his walnut desk, eyes locked to camera, expression warm and authoritative. [bottle as background anchor] The Rosabella bottle stands upright on the desk in front of him, label-forward to camera. [generic style] iPhone HDR colors, deep focus.
+[persona pose led] Dr. Sage is seated at his walnut desk, eyes locked to camera, expression warm and authoritative. [bottle as background anchor] The Rosabella bottle stands upright on the desk in front of him, label-forward to camera. [generic style] Natural ultra-realistic colors, deep focus.
 ```
 
 **Post-v605 (VLM-grounded, prop-led, viewer-relative)**:
@@ -3512,7 +3512,7 @@ Post-v604 (frame-locked reconstruction with all four universal rules):
 > Use the uploaded product reference image for the Rosabella Beetroot bottle.
 > Use the prior-scene reference image to preserve the wood-paneled office, framed diplomas, desk, lighting, framing, and continuity from the previous scene.
 >
-> Use image_4 as the exact base frame. Keep the same silver-haired male clinician, same white button-down shirt, same blue nitrile gloves, same seated chest-up framing, same wooden desk edge at the bottom, same warm wood-paneled office, same framed diplomas on the wall, same phone-camera look, same lighting, same camera distance. Only change: the Rosabella Beetroot bottle is now held at chest height in his gloved hand on the viewer-right side of the frame, label facing camera, navy-and-cream wordmark squared to lens. His other gloved hand on the viewer-left side gestures near the bottle. iPhone HDR colors, deep focus.
+> Use image_4 as the exact base frame. Keep the same silver-haired male clinician, same white button-down shirt, same blue nitrile gloves, same seated chest-up framing, same wooden desk edge at the bottom, same warm wood-paneled office, same framed diplomas on the wall, same phone-camera look, same lighting, same camera distance. Only change: the Rosabella Beetroot bottle is now held at chest height in his gloved hand on the viewer-right side of the frame, label facing camera, navy-and-cream wordmark squared to lens. His other gloved hand on the viewer-left side gestures near the bottle. Natural ultra-realistic colors, deep focus.
 >
 > No lab coat. No stethoscope. No hospital room. No extra products. No recipe ingredients. No dramatic cinematic lighting. No background change. Bottle is real-supplement-sized, not oversized, not floating, not redesigned.
 
@@ -5176,7 +5176,7 @@ When continuity matters across a sequence, reuse exact anchor phrases across pro
 - *"same Japandi apothecary background"*
 - *"same honey-oak workbench"*
 - *"same framing as image N"*
-- *"iPhone HDR colors, deep focus"*
+- *"Natural ultra-realistic colors, deep focus"*
 
 Consistent phrasing across prompts helps Nano Banana 2 lock in continuity even when the reference image alone isn't enough.
 
@@ -5940,7 +5940,7 @@ lens, mouth slightly parted in mid-speech. The main character's hands are visibl
 at chest height in a relaxed neutral open-palm gesture, fingers slightly spread,
 palms facing each other about a foot apart. Soft warm half-smile. Cropped at the
 waist; NO counter visible in front, NO floor, NO feet. Camera approximately one
-arm's length from the main character. iPhone HDR colors, deep focus.
+arm's length from the main character. Natural ultra-realistic colors, deep focus.
 \`\`\`
 ```
 
@@ -6293,7 +6293,7 @@ Post-v737 Image 2 (decoupled b-roll — Banana 2 + Veo render cleanly):
 
 [Location] Rustic kitchen with wooden shelves and jars, background fully blurred.
 
-[Style] iPhone 15 Pro main camera, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
+[Style] iPhone 15 Pro main camera, natural daylight. Natural ultra-realistic colors, deep focus.
 
 [Tech] 9:16, 2K output.
 
@@ -6325,7 +6325,7 @@ Image 11 (the shared anchor declared once):
 
 [Location] Bright modern clinic interior with white cabinets and a medical light, background fully blurred.
 
-[Style] iPhone 15 Pro main camera, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
+[Style] iPhone 15 Pro main camera, natural daylight. Natural ultra-realistic colors, deep focus.
 
 [Tech] 9:16, 2K output.
 
@@ -6813,8 +6813,8 @@ Each additional feature beyond 4 is incrementally risky; render-test before comm
 
 | Photo-realistic style (Layer 2 high Violence-classifier on extreme pathology) | Illustration / diagram style (Layer 2 low Violence-classifier) |
 |---|---|
-| "Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight" | "Rendered in the style of a medical school anatomical illustration — pen-and-watercolor textbook plate" |
-| "iPhone HDR colors, deep focus on the props" | "Anatomical wall-chart style — flat colors, clinical labeling, simplified textures, educational diagram register" |
+| "Shot on iPhone 15 Pro main camera, handheld, natural daylight" | "Rendered in the style of a medical school anatomical illustration — pen-and-watercolor textbook plate" |
+| "Natural ultra-realistic colors, deep focus on the props" | "Anatomical wall-chart style — flat colors, clinical labeling, simplified textures, educational diagram register" |
 | "Clean clinical overhead lighting on the models" | "Textbook anatomy diagram lighting — even illumination, no shadows, clinical-illustration aesthetic" |
 | "Photorealistic rendering" | "Illustrated anatomical reference style, watercolor-on-vellum medical textbook plate aesthetic" |
 
@@ -6990,7 +6990,7 @@ Use the uploaded character reference image for the main character.
 
 [Location] Bright modern medical clinic interior with white cabinets, anatomical wall posters showing [organ-system] anatomy in the deep background, and a surgical light visible from the ceiling, background fully blurred [per Pattern 9 + 10].
 
-[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight, clean clinical overhead lighting on the model. iPhone HDR colors, deep focus.
+[Style] Shot on iPhone 15 Pro main camera, handheld, natural daylight, clean clinical overhead lighting on the model. Natural ultra-realistic colors, deep focus.
 
 [Tech] 9:16, 2K output.
 
@@ -7027,7 +7027,7 @@ Use the uploaded character reference image for the main character.
 
 [Location] Bright modern medical clinic interior with white cabinets, anatomical wall posters showing male reproductive anatomy in the deep background, and a surgical light visible from the ceiling, background fully blurred.
 
-[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight, clean clinical overhead lighting on the models. iPhone HDR colors, deep focus on the props and visible face.
+[Style] Shot on iPhone 15 Pro main camera, handheld, natural daylight, clean clinical overhead lighting on the models. Natural ultra-realistic colors, deep focus on the props and visible face.
 
 [Tech] 9:16, 2K output.
 
@@ -8112,7 +8112,7 @@ For `raw/decoded_*.md` Image prompt bodies, use the following grammar order:
 5. **Shot size via DETAIL-DENSITY anchor**, not jargon. Name micro-features that are visible only at the actual framing: `"forehead wrinkles clearly visible, dark eye circles clearly visible"` = close-macro. `"full white lab coat visible, stethoscope visible, ID badge visible"` = medium-wide. Banana 2 infers framing from what is named as visible-and-sharp.
 6. **What is NOT in the frame** by OMISSION, not by negation. Do NOT write `"NO floor visible, NO feet visible"` on decode side — the negation tokens occasionally invoke rendering of the negated item (Banana 2 "no green elephant" hallucination class). Just don't mention floor/feet. What's unnamed = not rendered when prompt focus is tight.
 7. **Background blur statement** at the end: `"background: slightly out-of-focus clinic interior"` or `"background: blurred kitchen counter and pendant lights"`.
-8. **v603 closing tag retained** (`"iPhone HDR colors, deep focus."`) — style lock is orthogonal to composition grammar.
+8. **v603 closing tag retained** (`"Natural ultra-realistic colors, deep focus."`) — style lock is orthogonal to composition grammar.
 
 **Coordinate grammar (v603 / v604 / v521.1) reserved for generate side** (`videos/*.md`), where:
 - Operator specifies aspect ratio (9:16 vertical lock).
@@ -8127,13 +8127,13 @@ v712 does NOT deprecate v603 / v604 / v521.1 / v586. Those rules remain authorit
 
 *Pre-v712 (coordinate, wrong):*
 
-> "Tight chest-up two-shot framing. The patient is on the viewer-left, filling the left half of the frame. The main character stands close beside her on the viewer-right, wearing a dark suit tie under a white lab coat, and purple nitrile exam gloves. The main character's viewer-left index finger POINTS firmly at the patient's deep forehead wrinkles. Heads land near the upper-third line per rule of thirds. Cropped at mid-chest, NO floor visible, NO feet visible. Shot on iPhone with wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight. iPhone HDR colors, deep focus."
+> "Tight chest-up two-shot framing. The patient is on the viewer-left, filling the left half of the frame. The main character stands close beside her on the viewer-right, wearing a dark suit tie under a white lab coat, and purple nitrile exam gloves. The main character's viewer-left index finger POINTS firmly at the patient's deep forehead wrinkles. Heads land near the upper-third line per rule of thirds. Cropped at mid-chest, NO floor visible, NO feet visible. Shot on iPhone with wide-angle lens, handheld, deep focus throughout, natural daylight. Natural ultra-realistic colors, deep focus."
 
 Banana 2 renders: side-by-side chest-up shot, both heads upper third, lab coat visible. Does NOT match source.
 
 *Post-v712 (relational, correct):*
 
-> "The main character with tan-framed glasses, dark hair, open speaking mouth, wearing a dark suit and purple tie, leaning forward over the right shoulder of a white woman in her 60s with a short blonde bob and dark green V-neck scrub top. He points a purple-gloved index finger DOWN at her forehead from above, the fingertip near her right temple. She faces the camera and looks forward, deep horizontal forehead wrinkles and dark circles under her eyes clearly visible. His face is close to her head, faces nearly touching. The camera focuses sharply on both their expressions. Background: slightly out-of-focus clinic interior. iPhone HDR colors, deep focus."
+> "The main character with tan-framed glasses, dark hair, open speaking mouth, wearing a dark suit and purple tie, leaning forward over the right shoulder of a white woman in her 60s with a short blonde bob and dark green V-neck scrub top. He points a purple-gloved index finger DOWN at her forehead from above, the fingertip near her right temple. She faces the camera and looks forward, deep horizontal forehead wrinkles and dark circles under her eyes clearly visible. His face is close to her head, faces nearly touching. The camera focuses sharply on both their expressions. Background: slightly out-of-focus clinic interior. Natural ultra-realistic colors, deep focus."
 
 Banana 2 renders: stacked face-macro, doctor face partial top-right, patient face dominating lower-left + center, finger pointing down. Matches source.
 
@@ -8296,7 +8296,7 @@ Per [nano-banana-prompting.md:114](../wiki/generation/nano-banana-prompting.md#L
 - `"from low-angle / over-shoulder POV"` → camera position
 - `"Hasselblad X2D, 85mm at f/2.8"` → premium portrait
 
-Camera grammar lives in the `[Composition]` block. v603 closing style tag (`"iPhone HDR colors, deep focus."`) stays in the `[Style]` block at the end. The two are complementary: camera grammar specifies the FRAMING + DEPTH; style tag specifies the GRADING.
+Camera grammar lives in the `[Composition]` block. v603 closing style tag (`"Natural ultra-realistic colors, deep focus."`) stays in the `[Style]` block at the end. The two are complementary: camera grammar specifies the FRAMING + DEPTH; style tag specifies the GRADING.
 
 **[d] Composition-anti-default negatives.**
 
@@ -8343,7 +8343,7 @@ Pre-v713 (v712-compliant relational grammar, Banana 2 fights reference):
 ```
 Use the uploaded character reference image for the main character.
 
-The main character leans forward over the right shoulder of a white woman in her 60s with a short blonde bob and dark green V-neck scrub top. He points a purple-gloved index finger DOWN at her forehead from above, the fingertip near her right temple. She faces the camera and looks forward, deep horizontal forehead wrinkles and dark circles under her eyes clearly visible. His face is close to her head, faces nearly touching. The camera focuses sharply on both their expressions. Background: slightly out-of-focus clinic interior. iPhone HDR colors, deep focus.
+The main character leans forward over the right shoulder of a white woman in her 60s with a short blonde bob and dark green V-neck scrub top. He points a purple-gloved index finger DOWN at her forehead from above, the fingertip near her right temple. She faces the camera and looks forward, deep horizontal forehead wrinkles and dark circles under her eyes clearly visible. His face is close to her head, faces nearly touching. The camera focuses sharply on both their expressions. Background: slightly out-of-focus clinic interior. Natural ultra-realistic colors, deep focus.
 ```
 
 GPT image gen renders: stacked face-macro, doctor partial top-right, patient dominant. Matches source. **Banana 2 with persona ref renders: balanced chest-up two-shot, both heads visible, both at equal frame share.** Reference fought the partial-visibility instruction; reference won.
@@ -8361,7 +8361,7 @@ Use the uploaded character reference image for the main character. In this frame
 
 [Location] Bright modern medical clinic interior with white walls, background fully blurred.
 
-[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus on both visible faces.
+[Style] Shot on iPhone 15 Pro main camera, handheld, natural daylight. Natural ultra-realistic colors, deep focus on both visible faces.
 
 [Tech] 9:16, 2K output.
 
@@ -8809,7 +8809,7 @@ In all three: prop / symptom OWNS the center. Frame anchor sits at the body-part
 
 #### v603b — Anchor-Level Camera Framing (amends v603 camera lock)
 
-v603 generic style line (`"Shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight"`) does not specify camera HEIGHT or ANGLE. Default operator phrasing tends toward "looking down at the desk" / "above the prop" / "shot from above" — pulls the camera perspective downward, which pulls the prop downward, which pulls the viewer's eye to the floor. v603b mandates camera AT THE LEVEL of the prop's subject-anchor point (chest, belly, knee, calf, etc.), shooting straight-on, whenever the scene has a hero prop subject-anchored per v605b.
+v603 generic style line (`"Shot on iPhone wide-angle lens, handheld, deep focus throughout, natural daylight"`) does not specify camera HEIGHT or ANGLE. Default operator phrasing tends toward "looking down at the desk" / "above the prop" / "shot from above" — pulls the camera perspective downward, which pulls the prop downward, which pulls the viewer's eye to the floor. v603b mandates camera AT THE LEVEL of the prop's subject-anchor point (chest, belly, knee, calf, etc.), shooting straight-on, whenever the scene has a hero prop subject-anchored per v605b.
 
 **Required camera anchor in v713 `[Composition]` block — generalized to the prop's anchor level:**
 
@@ -8886,7 +8886,7 @@ The worked-example bodies below show the `[Composition]` / `[Subject]` / `[Actio
 
 [Location] [setting + background blur statement per v713].
 
-[Style] [iPhone camera + handheld + lighting + grading + v603 closing tag "iPhone HDR colors, deep focus."].
+[Style] [iPhone camera + handheld + lighting + grading + v603 closing tag "Natural ultra-realistic colors, deep focus."].
 
 [Tech] [aspect ratio + resolution, e.g. 9:16, 2K output].
 
@@ -8921,7 +8921,7 @@ Use the uploaded character reference image for the main character. In this frame
 
 [Location] Bright modern medical clinic interior with white walls, background fully blurred.
 
-[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus on the prop and both visible faces.
+[Style] Shot on iPhone 15 Pro main camera, handheld, natural daylight. Natural ultra-realistic colors, deep focus on the prop and both visible faces.
 
 [Tech] 9:16, 2K output.
 
@@ -9055,7 +9055,7 @@ Use the uploaded character reference image for the main character. In this frame
 
 [Location] Bright modern medical clinic interior with white walls, background fully blurred.
 
-[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus on the prop and both visible faces.
+[Style] Shot on iPhone 15 Pro main camera, handheld, natural daylight. Natural ultra-realistic colors, deep focus on the prop and both visible faces.
 
 [Tech] 9:16, 2K output.
 
@@ -9079,7 +9079,7 @@ Use the uploaded character reference image for the main character. In this frame
 
 [Location] Bright modern medical clinic interior with white walls, background fully blurred.
 
-[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus on the model and both visible faces.
+[Style] Shot on iPhone 15 Pro main camera, handheld, natural daylight. Natural ultra-realistic colors, deep focus on the model and both visible faces.
 
 [Tech] 9:16, 2K output.
 
@@ -9103,7 +9103,7 @@ Use the uploaded character reference image for the main character. In this frame
 
 [Location] Bright modern medical clinic interior with white walls, background fully blurred.
 
-[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus on the calf and visible hand.
+[Style] Shot on iPhone 15 Pro main camera, handheld, natural daylight. Natural ultra-realistic colors, deep focus on the calf and visible hand.
 
 [Tech] 9:16, 2K output.
 
@@ -9371,7 +9371,7 @@ Use the uploaded character reference image for the main character.
 
 [Location] Bright modern medical clinic interior with white walls, background fully blurred.
 
-[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
+[Style] Shot on iPhone 15 Pro main camera, handheld, natural daylight. Natural ultra-realistic colors, deep focus.
 
 [Tech] 9:16, 2K output.
 
@@ -9637,7 +9637,7 @@ Use the uploaded character reference image for the main character.
 
 [Location] Bright modern medical clinic interior with white walls, background fully blurred.
 
-[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
+[Style] Shot on iPhone 15 Pro main camera, handheld, natural daylight. Natural ultra-realistic colors, deep focus.
 
 [Tech] 9:16, 2K output.
 
@@ -10407,7 +10407,7 @@ When AUTHORING (lift / create / innovate) a body-part symptom, MATCH the source'
 
 [Location] Bright modern medical clinic interior with white walls, background fully blurred.
 
-[Style] iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
+[Style] iPhone 15 Pro main camera, handheld, natural daylight. Natural ultra-realistic colors, deep focus.
 
 [Tech] 9:16, 2K output.
 
@@ -10603,7 +10603,7 @@ No arm crossing the chest. No arm thrust forward toward the lens. No arm reachin
 
 [Location] Bright modern medical clinic interior with white walls, background fully blurred.
 
-[Style] Shot on iPhone 15 Pro main camera, handheld, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
+[Style] Shot on iPhone 15 Pro main camera, handheld, natural daylight. Natural ultra-realistic colors, deep focus.
 
 [Tech] 9:16, 2K output.
 
