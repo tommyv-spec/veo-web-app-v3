@@ -3958,6 +3958,12 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         lines_list: List[str] = []
         action_notes: List[Optional[str]] = []
         pads: List[Optional[str]] = []  # v644 parallel array
+        # v786 — silent / text_card scenes have an action_note but NO line
+        # bullets, so the attach-to-most-recent-line rule below would drop
+        # it. Hold it here; if the scene ends with zero lines, emit it as a
+        # 1-entry action_notes list (the prepare_batch_for_video synthetic
+        # flat-row injection reads notes[0] for exactly this case).
+        dangling_action_note: Optional[str] = None
         for m in bullet_pattern.finditer(block):
             key = m.group(1).lower().replace(" ", "_")
             value = m.group(2).strip()
@@ -3969,12 +3975,22 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 if lines_list:
                     # Attach to most recent line
                     action_notes[-1] = value
-                # else: action_note before any line — ignore, likely malformed
+                else:
+                    # v786 — scene-level note on a no-lines (silent /
+                    # text_card) scene; kept, not malformed.
+                    dangling_action_note = value
             elif key == "pad":
                 # v644 — attach pad to most recent line
                 if lines_list:
                     pads[-1] = value
                 # else: pad before any line — ignore, likely malformed
+
+        # v786 — no-lines scene with a scene-level action_note: surface it
+        # as a 1-entry list. Parallel-array invariants hold downstream:
+        # the `if lines:` truncation guard (v682s) skips empty-lines scenes,
+        # and the synthetic flat-row injection reads notes[0].
+        if not lines_list and dangling_action_note:
+            action_notes = [dangling_action_note]
 
         # v681 — text_card scenes AND silent scenes have no `- **line:**`
         # bullets by design. Tolerate missing lines on those. Other scenes

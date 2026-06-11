@@ -19537,12 +19537,42 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 const hasAnyVoiceover = (data.dialogue_lines || []).some(
                     line => line && String(line).trim().length > 0
                 );
+                // v786 — fully-silent builds (speaker: silent on every scene,
+                // zero dialogue lines) are MODERN batches with real storyboard
+                // metadata, not legacy pre-v432 no-metadata batches. Pre-v786
+                // the hasAnyVoiceover gate alone skipped the whole pre-fill for
+                // them: sceneBreaks never assigned → storyboard collapsed to
+                // 1 mega-scene (Scene 1, Clips #1-N, default blend), and the
+                // previous batch's _actionNotes/_veoPromptOverrides leaked
+                // into the editor (stale chips from an unrelated build).
+                // A modern batch is recognizable by ANY flat row carrying
+                // speaker_mode / scene_type / action_note / veo override.
+                const hasSceneMetadata = (data.scenes_metadata || []).some(sm =>
+                    sm && (sm.speaker_mode || sm.scene_type
+                           || (sm.action_note && String(sm.action_note).trim())
+                           || sm.veo_prompt_override));
                 const editorIsStoryboard = (typeof editorMode !== 'undefined'
                                             && editorMode === 'storyboard');
 
-                if (sceneAssignments.length > 0 && hasAnyVoiceover
+                // v786 — reset cross-batch editor state BEFORE the conditional
+                // so a skipped pre-fill (true legacy batch) can never leak the
+                // previous batch's notes / overrides / pads into this one.
+                window._actionNotes = {};
+                window._veoPromptOverrides = {};
+                window._dialoguePads = {};
+
+                if (sceneAssignments.length > 0
+                    && (hasAnyVoiceover || hasSceneMetadata)
                     && editorIsStoryboard
                     && typeof sceneBreaks !== 'undefined') {
+
+                    if (!hasAnyVoiceover) {
+                        console.log(
+                            `[prepare-for-video] v786 silent-build pre-fill: ` +
+                            `${sceneAssignments.length} scenes, no dialogue lines — ` +
+                            `sceneBreaks built from scene metadata`
+                        );
+                    }
 
                     // Build sceneBreaks: one break per scene. lineIndex is
                     // cumulative across all preceding scenes' line counts.
@@ -19558,7 +19588,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         const brk = {
                             lineIndex: cumulativeLineIdx,
                             imgIndex: sa.image_local_index,
-                            clipMode: (sa.clip_mode || 'blend').toLowerCase(),
+                            clipMode: (sa.clip_mode || 'fresh').toLowerCase(),  // v782 default fresh (was blend)
                             transition: transition,
                             interpolate: true,
                             // v682e — preserve scene_type so the /api/jobs
