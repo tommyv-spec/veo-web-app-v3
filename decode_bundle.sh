@@ -9,7 +9,7 @@
 #   ./code/decode_bundle.sh   # without arg — bundles only the prompt context, operator uploads MP4 separately
 #
 # What it does:
-#   - Concatenates the 3 canonical decode-bundle files (per wiki/meta/lift-bundle.md)
+#   - Concatenates the canonical decode-bundle files (see BUNDLE_FILES below)
 #   - Pipes the concatenation to the system clipboard
 #   - Operator pastes the bundle into any LLM + uploads the source MP4 + a
 #     one-line task prompt: "decode this video"
@@ -18,7 +18,7 @@
 # files remain single source of truth. Decode bundle is smaller than lift
 # bundle because decoding is observation, not authoring.
 #
-# Bundle list documented in wiki/meta/lift-bundle.md and must stay in sync.
+# Bundle list = the BUNDLE_FILES array below; keep in sync per code/CLAUDE.md step 7.
 
 set -e
 
@@ -42,7 +42,7 @@ else
     echo "[decode_bundle]          dumping bundle to stdout instead" >&2
 fi
 
-# Decode bundle file list — must match wiki/meta/lift-bundle.md decode-bundle table
+# Decode bundle file list — keep in sync per code/CLAUDE.md "Canonical homes" step 7
 # 2026-05-11: expanded 3 → 6 files. Pre-expansion decoder couldn't classify hook
 # family (no hook-patterns.md), persona archetype (no persona-map.md), or v-rule
 # version (no conventions.md). Added these three to fix systematic gaps in
@@ -51,8 +51,8 @@ BUNDLE_FILES=(
     "code/template_new_format.md"
     "code/template_reference.md"
     "wiki/meta/decode-grammar-checklist.md"
-    "wiki/mechanics/hook-patterns.md"
-    "wiki/persona-map.md"
+    "wiki/patterns/hook-openings-catalog.md"
+    "wiki/patterns/script-structures.md"
     "wiki/patterns/conventions.md"
 )
 

@@ -14,7 +14,7 @@
 #   ./code/create_bundle.sh                       — author from 0 (this script)
 #
 # What it does:
-#   - Concatenates the 17 canonical wiki + code files (per wiki/meta/lift-bundle.md)
+#   - Concatenates the canonical wiki + code files (see BUNDLE_FILES below)
 #   - Pipes the concatenation to the system clipboard (with temp-file fallback)
 #   - Operator pastes the bundle into any LLM + a one-line cell spec:
 #         "create a new videos/*.md for [persona] [niche] [audience] —
@@ -43,26 +43,30 @@ else
     CLIP_CMD=""
 fi
 
-# Bundle file list — same wiki canonical files as lift_bundle.sh
-# (must stay in sync with wiki/meta/lift-bundle.md)
+# Bundle file list — shared generate canon (same core as lift_bundle.sh, minus the
+# adapt-from-source rules). Keep in sync per code/CLAUDE.md "Canonical homes" step 7.
 BUNDLE_FILES=(
-    "wiki/meta/viral-video-pipeline.md"
-    "wiki/audience/niche-audience-matrix.md"
-    "wiki/audience/strategy-mechanisms.md"
-    "wiki/audience/psychology-of-conversion.md"
-    "wiki/audience/audience-mapping.md"
-    "wiki/audience/pain-point-language.md"
-    "wiki/audience/video-types.md"
-    "wiki/audience/avatar-mike-henderson.md"
-    "wiki/mechanics/hook-patterns.md"
-    "wiki/mechanics/cta-patterns.md"
-    "wiki/mechanics/scene-structure.md"
-    "wiki/strategy/risky-vocabulary.md"
-    "wiki/strategy/viral-recreation-method.md"
-    "wiki/products/_index.md"
-    "wiki/products/corella-saffron.md"
+    # ----- canonical rule homes -----
     "code/template_reference.md"
     "code/template_new_format.md"
+    "wiki/index.md"
+    "wiki/patterns/conventions.md"
+    "wiki/meta/generate-video-checklist.md"
+    # ----- shared generate canon (frameworks + patterns + prompting + product) -----
+    "wiki/concepts/script-adaptation/proven-frameworks-catalog.md"
+    "wiki/concepts/script-adaptation/account-priming-discipline.md"
+    "wiki/concepts/script-adaptation/two-moves.md"
+    "wiki/concepts/script-adaptation/format-vs-structure.md"
+    "wiki/concepts/script-adaptation/tiktok-policy-armoring.md"
+    "wiki/patterns/hook-openings-catalog.md"
+    "wiki/patterns/script-structures.md"
+    "wiki/patterns/claim-formats.md"
+    "wiki/patterns/visual-conventions.md"
+    "wiki/concepts/prompting/realistic-ugc-prompt-templates.md"
+    "wiki/concepts/prompting/veo-prompting.md"
+    "wiki/entities/methods/breakthrough-advertising.md"
+    "wiki/entities/products/korella.md"
+    "wiki/entities/products/saffron.md"
 )
 
 # Verify
@@ -581,9 +585,8 @@ violated rules in past LLM outputs:
     independent generations is what proves the character is
     actually moving through a 3D space.
 
-[6] PERSONA FROM PERSONA-MAP (not invented) — pick from corpus-
-    validated personas in wiki/persona-map.md (or the persona pages
-    referenced by strategy-mechanisms.md). The 4 corpus-validated
+[6] PERSONA FROM PERSONA PAGES (not invented) — pick from corpus-
+    validated personas in wiki/entities/personas/. The 4 corpus-validated
     personas as of bundle date: Black-female-practitioner (Korella
     saffron presenter), dr-sage (silver-haired clinical), master-shen
     (Chinese-elder anti-mainstream), plus existing master-chen,

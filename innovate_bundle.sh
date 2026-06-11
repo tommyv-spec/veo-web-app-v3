@@ -70,33 +70,63 @@ if [[ -n "$SOURCE" ]]; then
     fi
 fi
 
-# Innovate bundle file list — 17 lift-bundle + 2 innovation-specific
-# 2026-05-12: added innovation-rules.md (20-rule canonical corpus from LiB call
-# 2026-05-09) + 80-20-script-method.md (80% structural lift + 20% iteration).
-# These are the missing rules that distinguish innovate from lift.
+# Innovate bundle file list — shared generate canon + innovation-specific adapt rules
+# (innovation-moves / preserve-swap / real-adapt-not-reskin / cross-gender) that
+# distinguish innovate from lift. Plus the matching per-niche page auto-appended below.
+# Keep in sync per code/CLAUDE.md "Canonical homes" step 7.
 BUNDLE_FILES=(
-    # ----- 17 lift-bundle canonical files (shared with lift_bundle.sh) -----
-    "wiki/meta/viral-video-pipeline.md"
-    "wiki/audience/niche-audience-matrix.md"
-    "wiki/audience/strategy-mechanisms.md"
-    "wiki/audience/psychology-of-conversion.md"
-    "wiki/audience/audience-mapping.md"
-    "wiki/audience/pain-point-language.md"
-    "wiki/audience/video-types.md"
-    "wiki/audience/avatar-mike-henderson.md"
-    "wiki/mechanics/hook-patterns.md"
-    "wiki/mechanics/cta-patterns.md"
-    "wiki/mechanics/scene-structure.md"
-    "wiki/strategy/risky-vocabulary.md"
-    "wiki/strategy/viral-recreation-method.md"
-    "wiki/products/_index.md"
-    "wiki/products/corella-saffron.md"
+    # ----- canonical rule homes (shared) -----
     "code/template_reference.md"
     "code/template_new_format.md"
-    # ----- 2 innovation-specific files (NOT in lift bundle) -----
-    "wiki/strategy/innovation-rules.md"
-    "wiki/strategy/80-20-script-method.md"
+    "wiki/index.md"
+    "wiki/patterns/conventions.md"
+    "wiki/meta/generate-video-checklist.md"
+    # ----- shared generate canon (frameworks + patterns + prompting + product) -----
+    "wiki/concepts/script-adaptation/proven-frameworks-catalog.md"
+    "wiki/concepts/script-adaptation/account-priming-discipline.md"
+    "wiki/concepts/script-adaptation/two-moves.md"
+    "wiki/concepts/script-adaptation/format-vs-structure.md"
+    "wiki/concepts/script-adaptation/tiktok-policy-armoring.md"
+    "wiki/patterns/hook-openings-catalog.md"
+    "wiki/patterns/script-structures.md"
+    "wiki/patterns/claim-formats.md"
+    "wiki/patterns/visual-conventions.md"
+    "wiki/concepts/prompting/realistic-ugc-prompt-templates.md"
+    "wiki/concepts/prompting/veo-prompting.md"
+    "wiki/entities/methods/breakthrough-advertising.md"
+    "wiki/entities/products/korella.md"
+    "wiki/entities/products/saffron.md"
+    # ----- innovation-specific adaptation rules (NOT in create bundle) -----
+    "wiki/concepts/script-adaptation/innovation-moves.md"
+    "wiki/concepts/script-adaptation/preserve-swap-framework.md"
+    "wiki/concepts/script-adaptation/real-adapt-not-reskin.md"
+    "wiki/concepts/script-adaptation/cross-gender-adaptation.md"
 )
+
+# ----- auto-append the matching per-niche asset-bank page (root CLAUDE.md §6.0) -----
+# Niche page = verbatim language bank + proven hooks + shame-proxy + worked-build
+# precedents. For innovate, the TARGET niche is in the cell spec (NOT the source).
+NICHE_HAYSTACK="$(printf '%s' "$CELL_SPEC" | tr '[:upper:]' '[:lower:]')"
+NICHE_MAP=(
+    "ed:erectile|male[ _-]?ed|\\bed\\b|soldier"
+    "testosterone:testosterone|low[ _-]?t\\b"
+    "prostate-health:prostate"
+    "hair-loss:hair[ _-]?loss|balding"
+    "belly-fat:belly[ _-]?fat"
+    "weight-loss-saggy-legs:saggy[ _-]?leg|weight[ _-]?loss"
+    "cellulite:cellulite"
+    "crepey-skin:crepey|crepe[ _-]?skin"
+    "puffy-face:puffy[ _-]?face"
+)
+for entry in "${NICHE_MAP[@]}"; do
+    slug="${entry%%:*}"; pat="${entry#*:}"
+    if printf '%s' "$NICHE_HAYSTACK" | grep -qiE "$pat"; then
+        npage="wiki/entities/niches/${slug}.md"
+        [[ -f "$REPO_ROOT/$npage" ]] && BUNDLE_FILES+=("$npage") && \
+            echo "[innovate_bundle] niche page auto-added: $npage" >&2
+        break
+    fi
+done
 
 # Verify all bundle files exist
 MISSING=0
@@ -530,7 +560,7 @@ INNOVATE PROCESS (mirrors operator's internal workflow — follow exactly):
 Step 1 — DECOMPOSE the outside-niche source (extract winning structure)
   Read the outside-niche reference. Name explicitly:
 
-  - HOOK family — match to wiki/mechanics/hook-patterns.md taxonomy
+  - HOOK family — match to wiki/patterns/hook-openings-catalog.md taxonomy
     (SHAME-PROXY / VISCERAL-DESTRUCTION sub-variant /
     VICARIOUS-SHOW-THE-PROBLEM / CURIOSITY-GAP / BEFORE-AFTER / etc.)
     AND name the v598 power-test answers (Q1-Q8) the source passes.
@@ -542,8 +572,8 @@ Step 1 — DECOMPOSE the outside-niche source (extract winning structure)
   - CTA shape — canonical "comment X / follow me first" or variant
   - Persona archetype — folk-wisdom-elder / clinic-glam / cultural-authority
 
-Step 2 — DECIDE what to KEEP vs SWAP (80/20 method per
-  wiki/strategy/80-20-script-method.md)
+Step 2 — DECIDE what to KEEP vs SWAP (preserve-swap method per
+  wiki/concepts/script-adaptation/preserve-swap-framework.md)
   KEEP (80% — the structural skeleton):
     - HOOK family + force-verb chain
     - Pattern (A/B/C/D/E)
@@ -560,13 +590,15 @@ Step 2 — DECIDE what to KEEP vs SWAP (80/20 method per
     - Product placement — target Korella product per v599 matrix
       (reveal at recipe product-cascade scene + CTA hero-shot)
     - Pain points — target cell's audience x niche vocabulary
-      (from wiki/audience/pain-point-language.md + niche page)
+      (from the per-niche asset-bank page wiki/entities/niches/<niche>.md)
     - Visual props — target cell's corpus-validated surrogates
     - Dialogue verbatim — rewrite per target cell, preserving cadence
 
-Step 3 — APPLY the 20 innovation rules from
-  wiki/strategy/innovation-rules.md
-  Walk all 20 rules. Mandatory rules (per the LiB call):
+Step 3 — APPLY the innovation moves from
+  wiki/concepts/script-adaptation/innovation-moves.md
+  (default = Grain-2: keep BODY verbatim, innovate HOOK only; run the
+  make-sense / function-transfer test on every borrowed atom).
+  Mandatory rules:
     - Innovation must pull from corpus (never hallucinate)
     - Source's HOOK power-test signal must survive the port (Q1-Q8 still pass)
     - Mechanism remains concrete-benefit (1 line, not jargon-academic)

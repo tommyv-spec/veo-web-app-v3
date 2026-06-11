@@ -8,7 +8,7 @@
 #   ./code/lift_bundle.sh raw/decoded_healthylifesage_DX7iVuRMzUM.md
 #
 # What it does:
-#   - Concatenates the 17 canonical lift-bundle files (per wiki/meta/lift-bundle.md)
+#   - Concatenates the canonical lift-bundle files (see BUNDLE_FILES below)
 #   - Appends the decoded source artifact at the end
 #   - Pipes the concatenation to the system clipboard (clip / pbcopy / xclip)
 #   - Operator pastes the bundle into any LLM + a one-line task prompt:
@@ -17,8 +17,8 @@
 # The bundle is transient (clipboard only, never committed). The canonical
 # files remain single source of truth — wiki edits propagate on next invocation.
 #
-# Bundle list is documented in wiki/meta/lift-bundle.md and must stay in sync
-# with that page. Update both when adding/removing files (e.g. when a new
+# Bundle list = the BUNDLE_FILES array below; keep in sync across all 4 bundle
+# scripts per code/CLAUDE.md "Canonical homes" step 7 (e.g. when a new
 # v-rule introduces a new must-read page).
 
 set -e
@@ -33,9 +33,9 @@ Usage: lift_bundle.sh <decoded-artifact.md>
 Example:
   ./code/lift_bundle.sh raw/decoded_healthylifesage_DX7iVuRMzUM.md
 
-The script concatenates the canonical lift-bundle (14 files per
-wiki/meta/lift-bundle.md) + the decoded source, pipes to clipboard,
-ready to paste into any LLM (Gemini / GPT-4o / Claude API / etc.).
+The script concatenates the canonical lift-bundle (the BUNDLE_FILES
+array below) + the decoded source, pipes to clipboard,
+ready to paste into any LLM (Gemini / GPT-5 / Claude / etc.).
 EOF
     exit 1
 fi
@@ -67,26 +67,58 @@ else
     echo "[lift_bundle]          dumping bundle to stdout instead" >&2
 fi
 
-# Bundle file list — must match wiki/meta/lift-bundle.md table
+# Bundle file list — keep in sync across all 4 bundle scripts (see code/CLAUDE.md
+# "Canonical homes" step 7). Paths are current wiki structure as of 2026-06-10.
 BUNDLE_FILES=(
-    "wiki/meta/viral-video-pipeline.md"
-    "wiki/audience/niche-audience-matrix.md"
-    "wiki/audience/strategy-mechanisms.md"
-    "wiki/audience/psychology-of-conversion.md"
-    "wiki/audience/audience-mapping.md"
-    "wiki/audience/pain-point-language.md"
-    "wiki/audience/video-types.md"
-    "wiki/audience/avatar-mike-henderson.md"
-    "wiki/mechanics/hook-patterns.md"
-    "wiki/mechanics/cta-patterns.md"
-    "wiki/mechanics/scene-structure.md"
-    "wiki/strategy/risky-vocabulary.md"
-    "wiki/strategy/viral-recreation-method.md"
-    "wiki/products/_index.md"
-    "wiki/products/corella-saffron.md"
+    # ----- canonical rule homes -----
     "code/template_reference.md"
     "code/template_new_format.md"
+    "wiki/index.md"
+    "wiki/patterns/conventions.md"
+    "wiki/meta/generate-video-checklist.md"
+    # ----- shared generate canon (frameworks + patterns + prompting + product) -----
+    "wiki/concepts/script-adaptation/proven-frameworks-catalog.md"
+    "wiki/concepts/script-adaptation/account-priming-discipline.md"
+    "wiki/concepts/script-adaptation/two-moves.md"
+    "wiki/concepts/script-adaptation/format-vs-structure.md"
+    "wiki/concepts/script-adaptation/tiktok-policy-armoring.md"
+    "wiki/patterns/hook-openings-catalog.md"
+    "wiki/patterns/script-structures.md"
+    "wiki/patterns/claim-formats.md"
+    "wiki/patterns/visual-conventions.md"
+    "wiki/concepts/prompting/realistic-ugc-prompt-templates.md"
+    "wiki/concepts/prompting/veo-prompting.md"
+    "wiki/entities/methods/breakthrough-advertising.md"
+    "wiki/entities/products/korella.md"
+    "wiki/entities/products/saffron.md"
+    # ----- same-niche recreation rules (preserve + don't-reskin) -----
+    "wiki/concepts/script-adaptation/preserve-swap-framework.md"
+    "wiki/concepts/script-adaptation/real-adapt-not-reskin.md"
 )
+
+# ----- auto-append the matching per-niche asset-bank page (root CLAUDE.md §6.0) -----
+# Lift = same-niche recreation, so the niche is read off the decoded SOURCE filename.
+NICHE_HAYSTACK="$(printf '%s' "${DECODED:-}" | tr '[:upper:]' '[:lower:]')"
+NICHE_MAP=(
+    "ed:erectile|male[ _-]?ed|[ _-]ed[ _-]|soldier"
+    "testosterone:testosterone|low[ _-]?t\\b"
+    "prostate-health:prostate"
+    "hair-loss:hair[ _-]?loss|balding"
+    "belly-fat:belly[ _-]?fat"
+    "weight-loss-saggy-legs:saggy[ _-]?leg|weight[ _-]?loss"
+    "cellulite:cellulite"
+    "crepey-skin:crepey|crepe[ _-]?skin"
+    "puffy-face:puffy[ _-]?face"
+)
+for entry in "${NICHE_MAP[@]}"; do
+    slug="${entry%%:*}"; pat="${entry#*:}"
+    if printf '%s' "$NICHE_HAYSTACK" | grep -qiE "$pat"; then
+        npage="wiki/entities/niches/${slug}.md"
+        [[ -f "$REPO_ROOT/$npage" ]] && BUNDLE_FILES+=("$npage") && \
+            echo "[lift_bundle] niche page auto-added: $npage" >&2
+        break
+    fi
+done
 
 # Verify all bundle files exist before starting
 MISSING=0
@@ -97,7 +129,7 @@ for f in "${BUNDLE_FILES[@]}"; do
     fi
 done
 if [[ $MISSING -gt 0 ]]; then
-    echo "ABORTING: $MISSING bundle files missing. Update wiki/meta/lift-bundle.md if files moved." >&2
+    echo "ABORTING: $MISSING bundle files missing. Fix the BUNDLE_FILES paths above if wiki files moved." >&2
     exit 1
 fi
 
@@ -883,7 +915,7 @@ violated rules in past LLM outputs:
     source shows a Black-female-practitioner and the operator says
     "lift this for [persona] [niche] [audience]" without a persona
     override, keep the same archetype. Pick from corpus-validated
-    personas in wiki/persona-map.md — DO NOT invent a new persona
+    personas in wiki/entities/personas/ — DO NOT invent a new persona
     name.
 
 [7] RISKY-VOCABULARY SWAPPED IN DIALOGUE — actually apply the swaps
