@@ -15,6 +15,52 @@ import sys
 EMDASH = "—"
 
 
+def _flat(token: str) -> str:
+    return "".join(ch for ch in token if ch.isalpha())
+
+
+def _classify_speaker_token(flat: str) -> str | None:
+    # EXACT mirror of image_platform._normalize_speaker_mode token sets.
+    if flat in ("oncamera", "dialogue", "speaks", "spoken", "lipsync",
+                "character", "characterspeaks"):
+        return "on-camera"
+    if flat in ("voiceover", "vo", "narration", "offscreen", "narrator",
+                "narrated"):
+        return "voiceover"
+    if flat in ("silent", "mute", "nodialogue", "nospeech",
+                "music", "musiconly", "sfx", "sfxonly",
+                "broll", "brolloverlay"):
+        return "silent"
+    if flat in ("auto", "detect", "default"):
+        return "auto"
+    return None
+
+
+def _speaker_mode(raw: str) -> str | None:
+    # Mirror of the platform's 3-step normalize: whole string → last token
+    # → per-token with priority voiceover > on-camera > silent > auto.
+    s = raw.strip().lower()
+    if not s:
+        return None
+    c = _classify_speaker_token(_flat(s))
+    if c:
+        return c
+    parts = s.rsplit(None, 1)
+    if len(parts) >= 2:
+        c = _classify_speaker_token(_flat(parts[-1]))
+        if c:
+            return c
+    found = set()
+    for tok in s.split():
+        c = _classify_speaker_token(_flat(tok))
+        if c:
+            found.add(c)
+    for mode in ("voiceover", "on-camera", "silent", "auto"):
+        if mode in found:
+            return mode
+    return None
+
+
 def lint(path: str) -> int:
     t = open(path, encoding="utf-8").read()
     fails: list[str] = []
@@ -71,6 +117,22 @@ def lint(path: str) -> int:
         ef = re.search(r"^-\s+\*\*end_frame_image:\*\*\s+image_(\d+)", blk, re.M)
         if ef and img_m:
             end_frames.append((int(img_m.group(1)), int(ef.group(1))))
+        # v698A Gate 9 mirror — the platform import HARD-FAILS a scene whose
+        # speaker normalizes to 'voiceover' but has no voiceover_anchor_image.
+        # Decode docs write `speaker: voiceover` + `voiceover_anchor_image: none`
+        # for diegetic off-camera voices; builds must NOT copy that — use an
+        # in-scene speaker value instead (e.g. "the wife in-scene (diegetic)").
+        sp = re.search(r"^-\s+\*\*speaker:\*\*\s*(.+)$", blk, re.M)
+        if sp and _speaker_mode(sp.group(1)) == "voiceover":
+            anchor = re.search(
+                r"^-\s+\*\*voiceover_anchor_image:\*\*\s*image_(\d+)", blk, re.M)
+            if not anchor:
+                fails.append(
+                    f"v698A: Scene {sn} speaker reads as voiceover but has no "
+                    f"`- **voiceover_anchor_image:** image_N` — platform import "
+                    f"will reject it (Gate 9). If the voice is diegetic "
+                    f"(spoken in-scene, e.g. off-camera interviewer), use an "
+                    f"in-scene speaker value instead of 'voiceover'")
 
     # end_frame_image validity (v718i)
     for start, end in end_frames:
@@ -83,6 +145,24 @@ def lint(path: str) -> int:
     for n in img_nums:
         if n not in used_imgs:
             warns.append(f"v594: Image {n} declared but never used by a scene")
+
+    # v698A role vocabulary mirror — the platform import HARD-FAILS any
+    # `- **role:**` value other than voiceover_anchor. `role: broll` is
+    # DECODE-side annotation only; builds must not carry it (b-roll images
+    # are plain images, no role bullet).
+    iblocks = re.split(r"(?=^###\s+Image\s+\d+)", t, flags=re.M)
+    for b in iblocks:
+        h = re.match(r"^###\s+Image\s+(\d+)", b, re.M)
+        if not h:
+            continue
+        cut = re.search(r"^(?:###\s|##\s)", b[h.end():], re.M)
+        blk = b[: h.end() + cut.start()] if cut else b
+        rm = re.search(r"^\s*[-*]\s*\*\*role:\*\*\s*(.+?)\s*$", blk, re.M)
+        if rm and rm.group(1).strip().lower() != "voiceover_anchor":
+            fails.append(
+                f"v698A: Image {h.group(1)} has role={rm.group(1).strip()!r} — "
+                f"platform import only accepts role=voiceover_anchor. "
+                f"Delete the role bullet (b-roll images carry no role)")
 
     # --- vocabulary (v693 lowercase + v615 em-dash) ---
     all_lines = re.findall(r"^-\s+\*\*line:\*\*\s+(.+)$", t, re.M)
