@@ -228,10 +228,10 @@ class DialogueLineInput(BaseModel):
     voiceover_anchor_image_node_id: Optional[int] = None
     voiceover_anchor_image_local_index: Optional[int] = None
     voiceover_line: Optional[str] = None
-    # v785 — operator-authored audio-twin prompt (markdown
+    # v789 — operator-authored audio-twin prompt (markdown
     # `### Clip S.L.audio` block). When set, Phase 3b uses it verbatim as
     # the audio_pair Clip's prompt_text instead of build_prompt
-    # auto-construction. NULL = auto-build (pre-v785 behavior).
+    # auto-construction. NULL = auto-build (pre-v789 behavior).
     voiceover_audio_prompt_override: Optional[str] = None
     # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding.
     # When set, veo_generator.py:2605 binds cfg.last_frame to this ImageNode's
@@ -2955,7 +2955,7 @@ async def _setup_job_background(
                                 )
                                 continue
 
-                            # v785 — operator-authored audio-twin prompt
+                            # v789 — operator-authored audio-twin prompt
                             # (markdown `### Clip S.L.audio` block, plumbed
                             # through the dialogue payload). When present it
                             # is used VERBATIM as the audio_pair prompt;
@@ -2973,7 +2973,7 @@ async def _setup_job_background(
                                 ap.status = ClipStatus.PENDING.value
                                 audio_prompts_built += 1
                                 print(
-                                    f"[v785] audio_pair {ap.id} using AUTHORED "
+                                    f"[v789] audio_pair {ap.id} using AUTHORED "
                                     f"twin prompt ({len(_authored_audio)} chars) "
                                     f"— build_prompt skipped",
                                     flush=True,

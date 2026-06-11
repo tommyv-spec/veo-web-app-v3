@@ -4264,7 +4264,7 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
             )
             _veo_prompts_map = _parse_veo_prompts(md_text)
             _attach_veo_prompts(scenes, _veo_prompts_map)
-            # v785 — operator-authored v698A audio-twin prompts
+            # v789 — operator-authored v698A audio-twin prompts
             # (`### Clip S.L.audio` blocks). Attached as a parallel
             # `veo_audio_prompts` list; flows to the audio_pair Clip's
             # prompt at Phase 3b instead of build_prompt auto-construction.
@@ -4272,7 +4272,7 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
             _attach_veo_audio_prompts(scenes, _veo_audio_map)
             if _veo_audio_map:
                 log.info(
-                    f"[v785] parsed {len(_veo_audio_map)} authored audio-twin "
+                    f"[v789] parsed {len(_veo_audio_map)} authored audio-twin "
                     f"prompt(s): {sorted(_veo_audio_map.keys())}"
                 )
         except ImportError:
@@ -7527,7 +7527,7 @@ def prepare_batch_for_video(
                     if (scene_speaker_mode or "").lower() == "voiceover"
                     else None
                 ),
-                # v785 — operator-authored audio-twin prompt (parsed from the
+                # v789 — operator-authored audio-twin prompt (parsed from the
                 # markdown's `### Clip S.L.audio` block, persisted as the
                 # `audio_prompt` key inside the veo_prompts entry). Phase 3b
                 # in main.py uses it as the audio_pair Clip's prompt instead

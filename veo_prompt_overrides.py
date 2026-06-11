@@ -82,12 +82,12 @@ _CLIP_HEADER_RE = re.compile(
     r"^###\s+Clip\s+(\d+)(?:\.(\d+))?(\.audio)?\b[^\n]*$",
     re.MULTILINE | re.IGNORECASE,
 )
-# v785 (NEW 2026-06-11) — group(3) captures the `.audio` suffix on
+# v789 (NEW 2026-06-11) — group(3) captures the `.audio` suffix on
 # `### Clip S.L.audio` headers (the v698A audio-twin anchor clip blocks
-# appended after the visual clips). Pre-v785 the suffix was swallowed by
+# appended after the visual clips). Pre-v789 the suffix was swallowed by
 # `\b[^\n]*$` so an audio block parsed as the SAME (scene, line) key as
 # its visual sibling and, being later in the section, OVERWROTE the
-# visual clip's operator-authored prompt (dict last-wins). v785 routes
+# visual clip's operator-authored prompt (dict last-wins). v789 routes
 # audio blocks into their own map (parse_veo_audio_prompt_overrides) and
 # excludes them from the visual map.
 
@@ -158,7 +158,7 @@ def _split_into_clip_blocks(section_body: str) -> List[Tuple[int, int, bool, str
     """Split the section body into per-clip blocks. Each entry is
     (scene_index, line_index, is_audio, block_text). The block_text is
     the content of one `### Clip S.L` (or `### Clip S.L.audio`) block,
-    ending at the next `### Clip` header or end-of-section. v785 —
+    ending at the next `### Clip` header or end-of-section. v789 —
     is_audio=True flags the v698A audio-twin anchor blocks.
     """
     matches = list(_CLIP_HEADER_RE.finditer(section_body))
@@ -308,7 +308,7 @@ def parse_veo_prompts_block(md_text: str) -> Dict[Tuple[int, int], Dict[str, Opt
 
     out: Dict[Tuple[int, int], Dict[str, Optional[str]]] = {}
     for scene_idx, line_idx, is_audio, block in _split_into_clip_blocks(section):
-        # v785 — `### Clip S.L.audio` blocks are the v698A audio-twin
+        # v789 — `### Clip S.L.audio` blocks are the v698A audio-twin
         # prompts; they live in their own map (see
         # parse_veo_audio_prompt_overrides) and must NOT collide with /
         # overwrite the visual clip's (scene, line) key here.
@@ -381,7 +381,7 @@ def parse_veo_prompts_block(md_text: str) -> Dict[Tuple[int, int], Dict[str, Opt
 def parse_veo_audio_prompt_overrides(
     md_text: str,
 ) -> Dict[Tuple[int, int], str]:
-    """v785 — parse the v698A audio-twin anchor blocks (`### Clip S.L.audio`)
+    """v789 — parse the v698A audio-twin anchor blocks (`### Clip S.L.audio`)
     from the `## Veo 3.1 Final Prompts` section (and/or a following
     `## Audio twin anchor clips` section — `_slice_section` stops at the
     next `## ` heading, so twins under their own `## ` heading are sliced
@@ -436,7 +436,7 @@ def attach_veo_audio_prompts_to_scenes(
     scenes: List[Dict[str, Any]],
     audio_prompts_by_key: Dict[Tuple[int, int], str],
 ) -> None:
-    """v785 — merge authored audio-twin prompts INTO each scene's
+    """v789 — merge authored audio-twin prompts INTO each scene's
     `veo_prompts` entries as an extra `audio_prompt` key (parallel to
     `text_prompt` / `negative_prompt`). Riding the existing entry dicts
     means the value persists through ImageSceneAssignment.veo_prompts_json
