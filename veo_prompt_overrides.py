@@ -79,9 +79,17 @@ _SECTION_HEADER_RE = re.compile(
 # correctly. Pre-v682i these artifacts hit zero matches → empty
 # prompts_by_key → no veo_prompt_override on any line at submission.
 _CLIP_HEADER_RE = re.compile(
-    r"^###\s+Clip\s+(\d+)(?:\.(\d+))?\b[^\n]*$",
+    r"^###\s+Clip\s+(\d+)(?:\.(\d+))?(\.audio)?\b[^\n]*$",
     re.MULTILINE | re.IGNORECASE,
 )
+# v785 (NEW 2026-06-11) — group(3) captures the `.audio` suffix on
+# `### Clip S.L.audio` headers (the v698A audio-twin anchor clip blocks
+# appended after the visual clips). Pre-v785 the suffix was swallowed by
+# `\b[^\n]*$` so an audio block parsed as the SAME (scene, line) key as
+# its visual sibling and, being later in the section, OVERWROTE the
+# visual clip's operator-authored prompt (dict last-wins). v785 routes
+# audio blocks into their own map (parse_veo_audio_prompt_overrides) and
+# excludes them from the visual map.
 
 # Field labels — bold ** wrapping is required to match the rest of the
 # scene-table convention.
@@ -146,26 +154,28 @@ def _slice_section(md_text: str) -> Optional[str]:
     return md_text[body_start:]
 
 
-def _split_into_clip_blocks(section_body: str) -> List[Tuple[int, int, str]]:
+def _split_into_clip_blocks(section_body: str) -> List[Tuple[int, int, bool, str]]:
     """Split the section body into per-clip blocks. Each entry is
-    (scene_index, line_index, block_text). The block_text is the
-    content of one `### Clip S.L` block, ending at the next `### Clip`
-    header or end-of-section.
+    (scene_index, line_index, is_audio, block_text). The block_text is
+    the content of one `### Clip S.L` (or `### Clip S.L.audio`) block,
+    ending at the next `### Clip` header or end-of-section. v785 —
+    is_audio=True flags the v698A audio-twin anchor blocks.
     """
     matches = list(_CLIP_HEADER_RE.finditer(section_body))
     if not matches:
         return []
-    blocks: List[Tuple[int, int, str]] = []
+    blocks: List[Tuple[int, int, bool, str]] = []
     for i, m in enumerate(matches):
         scene_idx = int(m.group(1))
         # v682i — line index optional; default to 1 when absent.
         line_idx = int(m.group(2)) if m.group(2) else 1
+        is_audio = bool(m.group(3))
         block_start = m.end()
         if i + 1 < len(matches):
             block_end = matches[i + 1].start()
         else:
             block_end = len(section_body)
-        blocks.append((scene_idx, line_idx, section_body[block_start:block_end]))
+        blocks.append((scene_idx, line_idx, is_audio, section_body[block_start:block_end]))
     return blocks
 
 
@@ -297,7 +307,13 @@ def parse_veo_prompts_block(md_text: str) -> Dict[Tuple[int, int], Dict[str, Opt
         return {}
 
     out: Dict[Tuple[int, int], Dict[str, Optional[str]]] = {}
-    for scene_idx, line_idx, block in _split_into_clip_blocks(section):
+    for scene_idx, line_idx, is_audio, block in _split_into_clip_blocks(section):
+        # v785 — `### Clip S.L.audio` blocks are the v698A audio-twin
+        # prompts; they live in their own map (see
+        # parse_veo_audio_prompt_overrides) and must NOT collide with /
+        # overwrite the visual clip's (scene, line) key here.
+        if is_audio:
+            continue
         # v682i — try the labeled format first (`**Text prompt:**`
         # before the fence). If absent, fall back to the bare-fence
         # format where the clip block has a single ```fence``` directly
@@ -360,6 +376,88 @@ def parse_veo_prompts_block(md_text: str) -> Dict[Tuple[int, int], Dict[str, Opt
             "negative_prompt": negative_prompt,
         }
     return out
+
+
+def parse_veo_audio_prompt_overrides(
+    md_text: str,
+) -> Dict[Tuple[int, int], str]:
+    """v785 — parse the v698A audio-twin anchor blocks (`### Clip S.L.audio`)
+    from the `## Veo 3.1 Final Prompts` section (and/or a following
+    `## Audio twin anchor clips` section — `_slice_section` stops at the
+    next `## ` heading, so twins under their own `## ` heading are sliced
+    separately below).
+
+    Returns a dict keyed by (scene_index, line_index) → text_prompt str.
+    The authored audio prompt replaces Phase 3b's build_prompt
+    auto-construction for that scene's audio_pair Clip. Negative prompts
+    are ignored on audio twins (platform standardized negatives apply).
+    """
+    out: Dict[Tuple[int, int], str] = {}
+
+    def _harvest(body: Optional[str]) -> None:
+        if not body:
+            return
+        for scene_idx, line_idx, is_audio, block in _split_into_clip_blocks(body):
+            if not is_audio:
+                continue
+            text_prompt = _extract_prompt_content(
+                block, _TEXT_PROMPT_LABEL_RE, _TEXT_BODY_BOUNDARY_RE
+            )
+            if text_prompt is None:
+                fence_m = _FENCE_RE.search(block)
+                text_prompt = fence_m.group(1).strip() if fence_m else None
+            if text_prompt:
+                out[(scene_idx, line_idx)] = text_prompt
+
+    _harvest(_slice_section(md_text))
+
+    # Audio twins may also live under their own `## Audio twin anchor clips`
+    # section (the house build convention appends them AFTER the Veo
+    # section under a separate `## ` heading, so _slice_section misses them).
+    m = re.search(
+        r"^##\s+Audio\s+twin\b.*$", md_text, flags=re.MULTILINE | re.IGNORECASE
+    )
+    if m:
+        body_start = m.end()
+        next_section = re.search(
+            r"^##\s+(?!#)", md_text[body_start:], flags=re.MULTILINE
+        )
+        body = (
+            md_text[body_start : body_start + next_section.start()]
+            if next_section
+            else md_text[body_start:]
+        )
+        _harvest(body)
+
+    return out
+
+
+def attach_veo_audio_prompts_to_scenes(
+    scenes: List[Dict[str, Any]],
+    audio_prompts_by_key: Dict[Tuple[int, int], str],
+) -> None:
+    """v785 — merge authored audio-twin prompts INTO each scene's
+    `veo_prompts` entries as an extra `audio_prompt` key (parallel to
+    `text_prompt` / `negative_prompt`). Riding the existing entry dicts
+    means the value persists through ImageSceneAssignment.veo_prompts_json
+    with NO schema migration; every existing reader uses .get(...) so the
+    extra key is invisible to them. Call AFTER attach_veo_prompts_to_scenes
+    (the `veo_prompts` lists must already exist).
+    """
+    if not audio_prompts_by_key:
+        return
+    for scene in scenes:
+        scene_index = scene.get("scene_index")
+        vps = scene.get("veo_prompts")
+        if vps is None:
+            continue
+        for li0 in range(len(vps)):
+            audio = audio_prompts_by_key.get((scene_index, li0 + 1))
+            if not audio:
+                continue
+            if vps[li0] is None:
+                vps[li0] = {"text_prompt": None, "negative_prompt": None}
+            vps[li0]["audio_prompt"] = audio
 
 
 def attach_veo_prompts_to_scenes(

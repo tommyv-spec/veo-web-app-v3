@@ -9529,6 +9529,12 @@ Example: A realistic vertical video of a professional presenter speaking directl
                                 ? promoteMeta.voiceover_anchor_image_local_index
                                 : null),
                         voiceover_line: promoteMeta.voiceover_line || null,
+                        // v785 — operator-authored audio-twin prompt
+                        // (markdown `### Clip S.L.audio` block). Backend
+                        // Phase 3b uses it as the audio_pair Clip's
+                        // prompt instead of auto-construction.
+                        voiceover_audio_prompt_override:
+                            promoteMeta.voiceover_audio_prompt_override || null,
                         // v718i (NEW 2026-05-18) — Veo native end-frame
                         // interpolation per-scene binding. Plumb the
                         // parser's per-line end-frame-image metadata

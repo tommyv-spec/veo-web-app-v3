@@ -4259,15 +4259,29 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
             from veo_prompt_overrides import (
                 parse_veo_prompts_block as _parse_veo_prompts,
                 attach_veo_prompts_to_scenes as _attach_veo_prompts,
+                parse_veo_audio_prompt_overrides as _parse_veo_audio_prompts,
+                attach_veo_audio_prompts_to_scenes as _attach_veo_audio_prompts,
             )
             _veo_prompts_map = _parse_veo_prompts(md_text)
             _attach_veo_prompts(scenes, _veo_prompts_map)
+            # v785 — operator-authored v698A audio-twin prompts
+            # (`### Clip S.L.audio` blocks). Attached as a parallel
+            # `veo_audio_prompts` list; flows to the audio_pair Clip's
+            # prompt at Phase 3b instead of build_prompt auto-construction.
+            _veo_audio_map = _parse_veo_audio_prompts(md_text)
+            _attach_veo_audio_prompts(scenes, _veo_audio_map)
+            if _veo_audio_map:
+                log.info(
+                    f"[v785] parsed {len(_veo_audio_map)} authored audio-twin "
+                    f"prompt(s): {sorted(_veo_audio_map.keys())}"
+                )
         except ImportError:
             # Module not present on disk → graceful no-op. Existing
             # markdown without the section keeps working unchanged
             # because per-line `veo_prompts` is initialized to None.
             for s in scenes:
                 s.setdefault("veo_prompts", [None] * len(s.get("lines") or []))
+                s.setdefault("veo_audio_prompts", [None] * len(s.get("lines") or []))
 
         # v698A — cross-validate Gates 10 + 12 (require image-level info
         # that's only available after both images and scenes are parsed).
@@ -7510,6 +7524,17 @@ def prepare_batch_for_video(
                 ),
                 "voiceover_line": (
                     line_text
+                    if (scene_speaker_mode or "").lower() == "voiceover"
+                    else None
+                ),
+                # v785 — operator-authored audio-twin prompt (parsed from the
+                # markdown's `### Clip S.L.audio` block, persisted as the
+                # `audio_prompt` key inside the veo_prompts entry). Phase 3b
+                # in main.py uses it as the audio_pair Clip's prompt instead
+                # of build_prompt auto-construction. None on non-voiceover
+                # lines and when the markdown has no authored twin.
+                "voiceover_audio_prompt_override": (
+                    (vp or {}).get("audio_prompt")
                     if (scene_speaker_mode or "").lower() == "voiceover"
                     else None
                 ),

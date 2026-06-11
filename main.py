@@ -228,6 +228,11 @@ class DialogueLineInput(BaseModel):
     voiceover_anchor_image_node_id: Optional[int] = None
     voiceover_anchor_image_local_index: Optional[int] = None
     voiceover_line: Optional[str] = None
+    # v785 — operator-authored audio-twin prompt (markdown
+    # `### Clip S.L.audio` block). When set, Phase 3b uses it verbatim as
+    # the audio_pair Clip's prompt_text instead of build_prompt
+    # auto-construction. NULL = auto-build (pre-v785 behavior).
+    voiceover_audio_prompt_override: Optional[str] = None
     # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding.
     # When set, veo_generator.py:2605 binds cfg.last_frame to this ImageNode's
     # rendered output instead of auto-inferring from next clip's start image.
@@ -2946,6 +2951,31 @@ async def _setup_job_background(
                                 print(
                                     f"[v698A/Phase3b] audio_pair {ap.id} anchor "
                                     f"local file missing ({anchor_fname}); skipping",
+                                    flush=True,
+                                )
+                                continue
+
+                            # v785 — operator-authored audio-twin prompt
+                            # (markdown `### Clip S.L.audio` block, plumbed
+                            # through the dialogue payload). When present it
+                            # is used VERBATIM as the audio_pair prompt;
+                            # build_prompt auto-construction only fires as
+                            # the fallback.
+                            _authored_audio = (
+                                (line_data.get("voiceover_audio_prompt_override") or "").strip()
+                                or None
+                            )
+                            if _authored_audio:
+                                ap.prompt_text = _authored_audio
+                                ap.start_frame = (
+                                    f"jobs/{job_id}/frames/{anchor_fname}"
+                                )
+                                ap.status = ClipStatus.PENDING.value
+                                audio_prompts_built += 1
+                                print(
+                                    f"[v785] audio_pair {ap.id} using AUTHORED "
+                                    f"twin prompt ({len(_authored_audio)} chars) "
+                                    f"— build_prompt skipped",
                                     flush=True,
                                 )
                                 continue
