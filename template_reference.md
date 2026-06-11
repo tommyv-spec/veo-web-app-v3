@@ -14535,3 +14535,21 @@ Dead Ingredients branches are kept in place. If Flow drops Omni-on-Frames, flip 
 **Revert**: set `UPLOAD_HARD_400_LIMIT` very high — strikes never trip, behavior returns to pure glitch-redo.
 
 **Touched**: `code/static/flow_worker.py` (monitor + strike counter + REDO routing), `code/template_reference.md` (this deep-dive), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline).
+
+## v789 — Operator-authored audio-twin prompts (`### Clip S.L.audio`) + .audio header collision fix
+
+**The problem (2 layers).** (1) FEATURE GAP: v698A audio-twin clips (the Omni anchor clip that carries the voice for a silent b-roll visual) always got an AUTO-BUILT prompt at Phase 3b (`build_prompt` on the anchor frame + voiceover_line) — the authored `### Clip S.L.audio` blocks the builds append after the Veo section were never read. Operator 2026-06-11: "the prompt for the voice clips are still empty and the platform does them, but we can pass them." (2) BUG: `_CLIP_HEADER_RE` swallowed the `.audio` suffix via `\b[^\n]*$`, so `### Clip 4.1.audio` parsed as key (4,1) — the SAME key as the visual `### Clip 4.1` — and, being later in the section, OVERWROTE the visual clip's authored prompt (dict last-wins). Every shipped build with audio-twin blocks (storytelling family + walkout v5) had its silent b-roll visuals rendering with the AUDIO prompt.
+
+**The rule (build side).** Author the audio twin as a `### Clip S.L.audio — ...` block with `**Start frame:**` + `**Text prompt:**` (fenced or unfenced), either inside `## Veo 3.1 Final Prompts` or under a separate `## Audio twin anchor clips` heading. S.L = the scene + line of the VISUAL sibling. The platform uses the authored text VERBATIM as the audio_pair Clip prompt; no block = auto-build fallback (pre-v789 behavior).
+
+**Mechanics.**
+- `veo_prompt_overrides.py`: `_CLIP_HEADER_RE` group(3) captures `.audio`; `_split_into_clip_blocks` returns `(scene, line, is_audio, block)`; the visual parse SKIPS audio blocks (collision fix); new `parse_veo_audio_prompt_overrides()` harvests audio blocks from the Veo section AND the `## Audio twin anchor clips` section; `attach_veo_audio_prompts_to_scenes()` merges each prompt INTO the scene's `veo_prompts` entry as an `audio_prompt` key — rides the existing `ImageSceneAssignment.veo_prompts_json` with NO schema migration (all readers use `.get(...)`).
+- `image_platform.py`: parse+attach at the markdown import site (with `[v789]` log); prepare-batch denorms `voiceover_audio_prompt_override` onto the flat per-line metadata (voiceover lines only).
+- `static/index.html`: dialogue payload copies `voiceover_audio_prompt_override` from promoteMeta (same plumbing pattern as v700b/v718i.1 — without the copy the field dies at the frontend).
+- `main.py`: `DialogueLineInput.voiceover_audio_prompt_override`; Phase 3b uses it verbatim (`ap.prompt_text = authored`, start_frame + PENDING set, `[v789]` diagnostic) and only auto-builds when absent.
+
+**Verified.** Parser regression on `videos/nuri-korella-ed-restaurant-cam-walkout-ultimatum-soldier-v5.md`: 28 visual keys + 4 audio keys; visual (4,1) keeps its silent-visual prompt; audio (4,1) carries the authored line; merge emits the `audio_prompt` key. cavecrew-reviewer on 386f08f: no issues. Operator-side evidence pending: next import + render should show `[v789] parsed N authored audio-twin prompt(s)` then `[v789] audio_pair <id> using AUTHORED twin prompt`.
+
+**Revert.** Remove the parse+attach call in image_platform.py (audio map empty → Phase 3b fallback fires everywhere) — the collision fix in the header regex should stay regardless.
+
+**Touched**: `code/veo_prompt_overrides.py`, `code/image_platform.py`, `code/main.py`, `code/static/index.html` (commits 386f08f + 291abdd), this deep-dive, `wiki/patterns/conventions.md` row, `wiki/meta/generate-video-checklist.md` note, root `CLAUDE.md` gotcha row, `wiki/log.md`.
