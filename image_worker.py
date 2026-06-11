@@ -1591,8 +1591,14 @@ def configure_image_settings(page, aspect_ratio="16:9", resolution="1K",
     # --- Variants ---
     try:
         target = f"x{variants}"
+        # Flow labels the single-variant tab "1x" while multi tabs are
+        # "x2"/"x3"/"x4" — match both label orders, plus an aria-controls
+        # fallback (the tab's panel id ends in the variant number,
+        # e.g. radix-:r15k:-content-1).
         var_tab = page.locator(
-            f"button.flow_tab_slider_trigger:text-is('{target}')"
+            f"button.flow_tab_slider_trigger:text-is('x{variants}'), "
+            f"button.flow_tab_slider_trigger:text-is('{variants}x'), "
+            f"button.flow_tab_slider_trigger[aria-controls$='-content-{variants}']"
         ).first
         var_tab.wait_for(state="visible", timeout=3000)
         if var_tab.get_attribute("aria-selected") != "true":
