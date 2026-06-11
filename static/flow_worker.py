@@ -12398,31 +12398,50 @@ def upload_both_frames(page, start_image, end_image, context=""):
     print(f"{prefix}\u2713 Both frames uploaded", flush=True)
 
 
+# v787 — Flow's uploadImage endpoint can return a bare 4xx with NO policy
+# verdict in the body. One 400 can be transient; the SAME image 400-ing
+# repeatedly means Flow hard-blocks that file (clip 10609 log 2026-06-11:
+# 6× 400 across 2 accounts + both upload paths, then the generic
+# start_glitch redo loop burned ~90 min before giving up). Track bare-400s
+# per image hash; at the limit, treat the image as rejected so the caller
+# renders the replace-image card instead of glitch-redoing forever.
+UPLOAD_HARD_400_LIMIT = 2
+_upload_hard_400_counts = {}
+
+# v787 — per-thread record of WHY the last rebuild_clip upload failed
+# ('start'/'end'/'extra' = image rejected, None = glitch/other). Lets the
+# REDO caller route rejections to the replace-image card instead of the
+# generic v776 glitch re-queue. Thread-local because account threads run
+# concurrently.
+_frame_rejection_tls = threading.local()
+
+
 class FramePolicyMonitor:
     """Monitor uploadImage network responses for policy rejections.
-    
+
     Intercepts responses to the uploadImage endpoint and checks for
     PUBLIC_ERROR_PROMINENT_PEOPLE_UPLOAD in the response body.
-    
+
     Also tracks successful uploads so callers can distinguish between
     "still waiting" vs "upload succeeded" vs "upload rejected".
-    
+
     The uploadImage request can take 20-30 seconds to return.
     """
-    
+
     def __init__(self, page):
         self.page = page
         self.rejected = False
         self.succeeded = False
+        self.hard_400 = False
         self.error_reason = None
         self._handler = None
-    
+
     def _on_response(self, response):
         try:
             url = response.url
             if 'uploadImage' not in url and 'uploadimage' not in url.lower():
                 return
-            
+
             status = response.status
             if status >= 400:
                 try:
@@ -12432,6 +12451,7 @@ class FramePolicyMonitor:
                         self.error_reason = 'PUBLIC_ERROR_PROMINENT_PEOPLE_UPLOAD'
                         print(f"[PolicyMonitor] ⚠️ uploadImage REJECTED: {self.error_reason}", flush=True)
                     else:
+                        self.hard_400 = True  # v787 — non-policy upload failure
                         print(f"[PolicyMonitor] uploadImage returned {status} (not policy)", flush=True)
                 except:
                     pass
@@ -12440,10 +12460,11 @@ class FramePolicyMonitor:
                 print(f"[PolicyMonitor] ✓ uploadImage succeeded (200)", flush=True)
         except:
             pass
-    
+
     def start(self):
         self.rejected = False
         self.succeeded = False
+        self.hard_400 = False
         self.error_reason = None
         self._handler = self._on_response
         self.page.on("response", self._handler)
@@ -13144,6 +13165,8 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
             monitor.stop()
 
             if policy_ok:
+                if image_hash:
+                    _upload_hard_400_counts.pop(image_hash, None)  # v787 — clean upload resets the 400 strike count
                 # Cache hash for gallery retry on subsequent clips
                 if gallery_cache is not None and image_hash:
                     gallery_cache[image_hash] = image_basename
@@ -13162,11 +13185,26 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
                     # Button disappeared + no rejection = Flow accepted the image.
                     # The network monitor just missed the response (timing/race).
                     print(f"{prefix}✓ {frame_name}: button gone + no rejection = treating as success (policy monitor missed response)", flush=True)
+                    if image_hash:
+                        _upload_hard_400_counts.pop(image_hash, None)  # v787 — accepted = reset strikes
                     if gallery_cache is not None and image_hash:
                         gallery_cache[image_hash] = image_basename
                         print(f"{prefix}[Gallery] Cached {frame_name} hash→'{image_basename}'", flush=True)
                     return 'ok'
                 print(f"{prefix}⚠️ {frame_name}: policy check timed out after 40s (attempt {attempt})", flush=True)
+                # v787 — the "timeout" was actually a bare 400 from uploadImage
+                # (no policy verdict, is_resolved() never fired). Count strikes
+                # per image hash; at the limit the image is hard-blocked by
+                # Flow → surface as a rejection so the replace-image card shows.
+                if getattr(monitor, 'hard_400', False) and image_hash:
+                    _n400 = _upload_hard_400_counts.get(image_hash, 0) + 1
+                    _upload_hard_400_counts[image_hash] = _n400
+                    print(f"{prefix}[v787] {frame_name}: uploadImage hard-400 strike {_n400}/{UPLOAD_HARD_400_LIMIT} for hash={image_hash[:8]}", flush=True)
+                    if _n400 >= UPLOAD_HARD_400_LIMIT:
+                        print(f"{prefix}[v787] ❌ {frame_name}: image 400-rejected {_n400}× — treating as image rejection (replace-image card)", flush=True)
+                        try: page.keyboard.press("Escape")
+                        except Exception: pass
+                        return 'rejected'
                 # Hash is cached from upload so gallery retry can work
                 if gallery_cache is not None and image_hash:
                     gallery_cache[image_hash] = image_basename
@@ -13963,6 +14001,7 @@ def rebuild_clip(page, start_frame_path, end_frame_path, prompt, is_first_clip=F
     - click_frame_and_upload_with_policy_check for single frames
     - Waits for Generate button to be enabled before clicking
     """
+    _frame_rejection_tls.which = None  # v787 — reset before this attempt
     try:
         check_and_dismiss_popup(page)
         
@@ -13997,6 +14036,8 @@ def rebuild_clip(page, start_frame_path, end_frame_path, prompt, is_first_clip=F
                 page, s_path, e_path, context=context, gallery_cache=_gallery_cache)
             if not upload_ok:
                 print(f"{context} ⚠️ Frame upload failed (rejected: {rejected_which})", flush=True)
+                if rejected_which in ('start', 'end', 'extra'):
+                    _frame_rejection_tls.which = rejected_which  # v787
                 return False
         elif s_path:
             # v758.10: route single-start (the redo case) through the SAME robust
@@ -14010,6 +14051,8 @@ def rebuild_clip(page, start_frame_path, end_frame_path, prompt, is_first_clip=F
                 page, s_path, None, context=context, gallery_cache=_gallery_cache)
             if not upload_ok:
                 print(f"{context} ⚠️ START frame upload failed (rejected: {rejected_which})", flush=True)
+                if rejected_which in ('start', 'end', 'extra'):
+                    _frame_rejection_tls.which = rejected_which  # v787
                 return False
         elif e_path:
             result, reason = click_frame_and_upload_with_policy_check(page, e_path, is_end_frame=True, context=context)
@@ -14360,6 +14403,19 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # This works for both manual redos (from platform UI) and auto-redos (detected failure).
     pre_generate_tile_count = get_tile_count_at_index0(page)
     if not rebuild_clip(page, start_frame_local, end_frame_local, prompt, is_first_clip=_need_new_project):
+        # v787 — image REJECTED (policy or persistent uploadImage 400): show
+        # the replace-image card and stop. Re-queuing would resubmit the same
+        # blocked image forever (clip 10609, 2026-06-11: 2 accounts + redo
+        # cycles burned on an image Flow 400-blocks every time).
+        _rej_which = getattr(_frame_rejection_tls, 'which', None)
+        if _rej_which in ('start', 'end', 'extra'):
+            _rej_key = clip.get('end_frame_key') if _rej_which == 'end' else clip.get('start_frame_key')
+            print(f"[REDO] ❌ clip {clip_index+1} frame REJECTED ({_rej_which}) — replace-image card, not re-queuing", flush=True)
+            report_policy_violation(clip_id, rejected_image_key=_rej_key,
+                                    detail="⚠️ Flow keeps rejecting this image upload. Upload a replacement to retry.")
+            clear_auto_redo_cycle(clip_id)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False
         # v776 — cap the redo re-queue. A frame that won't attach (start_glitch:
         # gallery select + upload both fail) would otherwise re-queue forever
         # (clip-7-stuck bug). Same cap as the main-gen glitch path. After
