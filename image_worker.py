@@ -5488,40 +5488,69 @@ def _download_reference_inputs(api_key, input_images, work_dir):
         slug = _slugify_role(role, original_stem)
         filename = f"{slug}{ext}"
 
-        try:
-            resp = requests.get(url,
-                                headers={"Authorization": f"Bearer {api_key}"},
-                                timeout=60, stream=True)
-            if resp.status_code == 404:
-                err = f"Reference file no longer available (404) — parent node may have been regenerated"
-                print(f"  ⚠ {filename} [{slot}]: {err}", flush=True)
-                missing.append({"filename": filename, "role": role, "error": err})
-                continue
-            if not resp.ok:
-                err = f"HTTP {resp.status_code} fetching reference"
-                print(f"  ⚠ {filename} [{slot}]: {err}", flush=True)
-                missing.append({"filename": filename, "role": role, "error": err})
-                continue
+        # Retry on transient failures. A reference URL points at a parent
+        # node's output; while that parent is being regenerated (redo in
+        # flight) the URL 404s for a window, then comes back. Observed:
+        # node 1746 avatar ref 404'd on first claim, then downloaded fine
+        # (6800 KB, same URL) minutes later. Without retry the worker
+        # dropped the avatar and silently shipped 4 avatar-less variants.
+        # Retry 404 / 5xx / network with backoff; fail-fast on other 4xx.
+        backoffs = [2, 5, 10]  # 4 attempts total
+        last_err = None
+        saved = False
+        for attempt in range(len(backoffs) + 1):
+            try:
+                resp = requests.get(url,
+                                    headers={"Authorization": f"Bearer {api_key}"},
+                                    timeout=60, stream=True)
+                if resp.status_code == 404 or resp.status_code >= 500:
+                    if resp.status_code == 404:
+                        last_err = "Reference file no longer available (404) — parent node may have been regenerated"
+                    else:
+                        last_err = f"HTTP {resp.status_code} fetching reference"
+                    if attempt < len(backoffs):
+                        wait = backoffs[attempt]
+                        print(f"  ⚠ {filename} [{slot}]: {last_err} — retry {attempt+1}/{len(backoffs)} in {wait}s", flush=True)
+                        time.sleep(wait)
+                        continue
+                    print(f"  ⚠ {filename} [{slot}]: {last_err}", flush=True)
+                    break
+                if not resp.ok:
+                    # Other 4xx — retrying won't help.
+                    last_err = f"HTTP {resp.status_code} fetching reference"
+                    print(f"  ⚠ {filename} [{slot}]: {last_err}", flush=True)
+                    break
 
-            local_file = os.path.join(work_dir, filename)
-            with open(local_file, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            size_kb = os.path.getsize(local_file) / 1024
-            print(f"  ⬇ {filename}  [{slot}]  ({size_kb:.0f} KB)", flush=True)
-            results.append({
-                "path": local_file,
-                "filename": filename,
-                "role": role,
-            })
-        except requests.exceptions.RequestException as e:
-            err = f"Network error: {str(e)[:80]}"
-            print(f"  ⚠ {filename} [{slot}]: {err}", flush=True)
-            missing.append({"filename": filename, "role": role, "error": err})
-        except Exception as e:
-            err = f"Unexpected error: {str(e)[:80]}"
-            print(f"  ⚠ {filename} [{slot}]: {err}", flush=True)
-            missing.append({"filename": filename, "role": role, "error": err})
+                local_file = os.path.join(work_dir, filename)
+                with open(local_file, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                size_kb = os.path.getsize(local_file) / 1024
+                print(f"  ⬇ {filename}  [{slot}]  ({size_kb:.0f} KB)", flush=True)
+                results.append({
+                    "path": local_file,
+                    "filename": filename,
+                    "role": role,
+                })
+                saved = True
+                break
+            except requests.exceptions.RequestException as e:
+                last_err = f"Network error: {str(e)[:80]}"
+                if attempt < len(backoffs):
+                    wait = backoffs[attempt]
+                    print(f"  ⚠ {filename} [{slot}]: {last_err} — retry {attempt+1}/{len(backoffs)} in {wait}s", flush=True)
+                    time.sleep(wait)
+                    continue
+                print(f"  ⚠ {filename} [{slot}]: {last_err}", flush=True)
+                break
+            except Exception as e:
+                last_err = f"Unexpected error: {str(e)[:80]}"
+                print(f"  ⚠ {filename} [{slot}]: {last_err}", flush=True)
+                break
+
+        if not saved:
+            missing.append({"filename": filename, "role": role,
+                            "error": last_err or "unknown download error"})
 
     return results, missing
 
@@ -7725,7 +7754,26 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     pass
                 return False
             if missing_refs:
-                print(f"[API:submit] ⚠ Node {node_id}: {len(missing_refs)} refs missing, proceeding with {len(input_items)}", flush=True)
+                # Fail-hard on partial-missing. Every ref in input_images was
+                # deliberately attached by the artifact author (avatar /
+                # product / inline character). Proceeding with a subset always
+                # produces a degraded render — e.g. an avatar-less Nuri frame —
+                # that silently burns 4 variants of wasted spend. After the
+                # retry/backoff in _download_reference_inputs already exhausted
+                # the transient-404 window, a still-missing ref means redo this
+                # node, not ship garbage.
+                lost = ", ".join(f"{m.get('filename','?')} [{m.get('role','') or '?'}]"
+                                 for m in missing_refs)
+                reasons = "; ".join({m.get("error", "unknown") for m in missing_refs})
+                err = (f"{len(missing_refs)} of {len(input_images)} reference image(s) "
+                       f"could not be downloaded after retries: {lost} ({reasons})")
+                print(f"[API:submit] ✗ Node {node_id}: {err} — failing job (no partial-ref render)", flush=True)
+                _post_status(api_url, api_key, node_id, "failed", error=err)
+                try:
+                    shutil.rmtree(job_work)
+                except Exception:
+                    pass
+                return False
 
             input_paths = [it["path"] for it in input_items]
 
