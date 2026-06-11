@@ -1218,7 +1218,7 @@ V604 UNIVERSAL PROMPT-DISCIPLINE (decode + generate both):
 
 [e] NEGATIVE-CONSTRAINT DISCIPLINE. Every Image prompt body must close
     with explicit DO-NOT statements that prevent generator drift,
-    AFTER the v603 closing tag "iPhone HDR colors, deep focus.":
+    AFTER the v603 closing tag "Natural ultra-realistic colors, deep focus.":
       "No lab coat. No stethoscope. No hospital room. No extra
        products. No recipe ingredients. No dramatic cinematic lighting.
        No background change."
@@ -1719,7 +1719,7 @@ GRAMMAR ORDER (decode-side Image prompt body):
      at the top of his head / the rest of his head cropped above the
      frame edge"). Grid-quadrant cropping BANNED.
   7. Background blur statement at end.
-  8. v603 closing tag retained ("iPhone HDR colors, deep focus.").
+  8. v603 closing tag retained ("Natural ultra-realistic colors, deep focus.").
 
 ALLOWED PREPOSITIONS (subject-to-subject geometry):
   above / below / behind / in front of / over the shoulder of /
@@ -1830,7 +1830,7 @@ Use:
   - "Hasselblad X2D, 85mm at f/2.8" -> premium portrait
 
 Camera grammar lives in the [Composition] block. v603 closing style
-tag ("iPhone HDR colors, deep focus.") stays in [Style] block at the
+tag ("Natural ultra-realistic colors, deep focus.") stays in [Style] block at the
 end.
 
 [d] COMPOSITION-ANTI-DEFAULT NEGATIVES
@@ -1889,8 +1889,8 @@ corner, patient face dominant lower-left + center):
   [Location] Bright modern medical clinic interior with white walls,
   background fully blurred.
 
-  [Style] Shot on iPhone 15 Pro main camera, handheld, vibrant
-  natural HDR daylight. iPhone HDR colors, deep focus on both
+  [Style] Shot on iPhone 15 Pro main camera, handheld,
+  natural daylight. Natural ultra-realistic colors, deep focus on both
   visible faces.
 
   [Tech] 9:16, 2K output.
@@ -2598,8 +2598,8 @@ COMBINED WORKED EXAMPLE — varicose-veins HOOK with full v717 stack:
 
   [Location] Bright modern medical clinic interior. Background blurred.
 
-  [Style] iPhone 15 Pro main camera, handheld, vibrant natural HDR
-  daylight. iPhone HDR colors, deep focus.
+  [Style] iPhone 15 Pro main camera, handheld, natural
+  daylight. Natural ultra-realistic colors, deep focus.
 
   [Tech] 9:16, 2K output.
 

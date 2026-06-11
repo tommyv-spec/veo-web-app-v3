@@ -1320,10 +1320,10 @@ violated rules in past LLM outputs:
 
      Every Image prompt body MUST include this exact opener:
        "Shot on iPhone wide-angle lens, handheld, deep focus
-        throughout, vibrant natural HDR daylight"
+        throughout, natural daylight"
 
      Every Image prompt MUST close with this exact tag:
-       "iPhone HDR colors, deep focus."
+       "Natural ultra-realistic colors, deep focus."
 
      Without these, Banana 2 defaults to studio-clean. Corpus uses
      UGC iPhone-handheld. Mandatory.
@@ -1443,7 +1443,7 @@ violated rules in past LLM outputs:
      closing tag:
        "The bottle integrates naturally with the scene: [a] [b] [c]
         [d] [e] [f]."
-       "iPhone HDR colors, deep focus."
+       "Natural ultra-realistic colors, deep focus."
        "[negative constraints including v606 anti-photoshop adds]"
 
      V606 NEGATIVE CONSTRAINTS:

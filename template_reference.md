@@ -297,7 +297,7 @@ Every `### Image N` block's `Image prompt:` body must capture all six blocks. Th
 | **(2) Composition** | Frame partition (where head and eyes land per rule of thirds — typically upper two-thirds), depth layers (every visible element placed in foreground / middle / background), crop boundary (where bottom / top / sides cut — "cropped at lower ribs", "NO floor visible", "cropped at mid-thigh"), foreshortening note when wide-angle (e.g. "the banana foreshortened larger in the lower-center foreground because it's closest to the lens"), single vs two-shot, headroom. |
 | **(3) Action** | Current gesture, hand positions (left / right, height, holding what), eye tracking (locked to lens vs tracking to a prop), expression beat. The static-frame action — the snapshot of motion mid-clip. |
 | **(4) Location** | Setting + every anchor prop with **explicit position**. Not "anatomy posters in the background" but "two large muscular-anatomy and skeletal-anatomy posters on the white wall behind, multiple framed medical certifications on the left at shoulder height, two small American desk-flag stands at the lower-left of frame, glass display cabinet of medical instruments off to the right". |
-| **(5) Style** | Lighting direction ("vibrant natural HDR daylight from a glass-door window in the right side of frame"), color palette ("warm white walls, clean modern morning-kitchen light"), mood. |
+| **(5) Style** | Lighting direction ("natural daylight from a glass-door window in the right side of frame"), color palette ("warm white walls, clean modern morning-kitchen light"), mood. |
 | **(6) Tech** | Camera type / lens (iPhone wide-angle by default per v553), distance from subject in feet or arm-lengths ("camera approximately one arm's length", "approximately 4 to 5 feet from the desk"), focus depth (deep / shallow, where focus lands — "deep focus throughout"), motion blur if relevant ("motion blur trailing behind the falling cluster"). |
 
 ### Mandatory dimensions per action_note (the five-block checklist)
@@ -3330,7 +3330,7 @@ Use the uploaded character reference image for the main character.
 Use the uploaded product reference image for the Rosabella Beetroot bottle.
 Use the prior-scene reference image to preserve the walnut desk, warm wood-paneled office, framed diplomas, lighting, framing, and continuity from the previous scene.
 
-Use image_4 as the exact base frame. Keep everything from image_4 identical. Only change: the Rosabella Beetroot bottle is held up at chest height in his blue-gloved viewer-left hand, presented directly toward the lens, label-forward to camera, navy-and-cream wordmark squared to lens, fingers wrapping the cap top. His viewer-right blue-gloved hand gestures next to the bottle for emphasis. He is seated at his walnut desk with eyes locked to camera, expression warm and authoritative. Shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight. iPhone HDR colors, deep focus.
+Use image_4 as the exact base frame. Keep everything from image_4 identical. Only change: the Rosabella Beetroot bottle is held up at chest height in his blue-gloved viewer-left hand, presented directly toward the lens, label-forward to camera, navy-and-cream wordmark squared to lens, fingers wrapping the cap top. His viewer-right blue-gloved hand gestures next to the bottle for emphasis. He is seated at his walnut desk with eyes locked to camera, expression warm and authoritative. Shot on iPhone wide-angle lens, handheld, deep focus throughout, natural daylight. Natural ultra-realistic colors, deep focus.
 
 No lab coat. No stethoscope. No hospital room. No extra products. No recipe ingredients. No background change. Bottle is real-supplement-sized, not oversized, not floating, not redesigned. Bottle is NOT on the desk in this image — it is held in the persona's viewer-left hand.
 ```
@@ -3439,7 +3439,7 @@ The static-pose phrasing tells the model "this is what's in the photo." The moti
 
 v603 introduced the iPhone-UGC style lock as a baseline. v604 extends it: per-video, the decoded artifact should also lock specific camera anchors that aren't covered by the generic style line.
 
-The generic v603 line (`"Shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight"`) is necessary but not sufficient — different videos need different camera anchors:
+The generic v603 line (`"Shot on iPhone wide-angle lens, handheld, deep focus throughout, natural daylight"`) is necessary but not sufficient — different videos need different camera anchors:
 
 - **Vertical or horizontal aspect?** — vertical selfie / horizontal landscape
 - **Tripod or handheld?** — fixed tripod / stable handheld / shaky-vlog
@@ -3463,7 +3463,7 @@ For Korella saffron-vitality videos in T0 kitchen:
 For T2 clinical exam scenes:
 > No domestic kitchen background. No casual clothing on the clinician. No extra patients. No background change between this and the prior scene.
 
-The negative-constraint section should be the LAST paragraph of the Image prompt body, after the v603 closing tag `"iPhone HDR colors, deep focus."` This gives the model a clear separation: positive description → style anchor → negative constraints.
+The negative-constraint section should be the LAST paragraph of the Image prompt body, after the v603 closing tag `"Natural ultra-realistic colors, deep focus."` This gives the model a clear separation: positive description → style anchor → negative constraints.
 
 #### 4. Viewer-left / viewer-right convention
 
@@ -3535,16 +3535,18 @@ The corpus reference (`videos/nuri-saffron-ed-anatomy-clinic.md`) uses a specifi
 Every Image prompt body MUST include this exact style anchor as part of the composition description:
 
 ```
-Shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight
+Shot on iPhone wide-angle lens, handheld, deep focus throughout, natural daylight
 ```
 
-And every Image prompt MUST close with this exact tag as the final sentence:
+And every Image prompt MUST close with this exact tag:
 
 ```
-iPhone HDR colors, deep focus.
+Natural ultra-realistic colors, deep focus.
 ```
 
-This pair — opener style-lock + closing tag — anchors Banana 2 to the corpus UGC aesthetic. Without it, Banana 2 defaults to studio-clean which doesn't match what's already shipping on viral accounts.
+After the closing tag, the prompt's LAST line is `Aspect ratio 9:16.` — the house field-order template's final sentence (see §"Image prompt conventions" → Framing + `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §1).
+
+This pair — opener style-lock + closing tag — anchors Banana 2 to the corpus UGC aesthetic. Without it, Banana 2 defaults to studio-clean which doesn't match what's already shipping on viral accounts. (The original v603 strings said "vibrant natural HDR daylight" / "iPhone HDR colors" — retired 2026-06-11 per the house standard: HDR-punchy color reads as an ad, not UGC. Colors stay ultra-realistic, not oversaturated, not too warm or cold.)
 
 ### Prose discipline — 4-7 sentences per image prompt body
 
@@ -3559,7 +3561,7 @@ Target: **4-7 sentences** per Image prompt body. Each sentence carries one of:
 2. Subject + props + composition ("the main character is seated at... | foreground props are...")
 3. Active gesture + body language
 4. Eye-contact + facial expression
-5. Closing style tag ("iPhone HDR colors, deep focus.")
+5. Closing style tag ("Natural ultra-realistic colors, deep focus.") + final line "Aspect ratio 9:16."
 
 What gets CUT from prompt bodies:
 - Rule citations: `"per v601 SYMPTOM-DEMO HOOK"`, `"per v585 motion calibration"`, `"per v600 magnitude"` — these are AUTHOR-SIDE notes, not Banana 2 instructions. Move to YAML frontmatter or commentary.
@@ -3591,8 +3593,8 @@ NOT:
 ### Pre-output validation
 
 Before emitting any Image prompt, scan the body for:
-- ✅ Opener style lock present? (`"Shot on iPhone wide-angle lens, handheld, deep focus throughout, vibrant natural HDR daylight"`)
-- ✅ Closing tag present? (`"iPhone HDR colors, deep focus."`)
+- ✅ Opener style lock present? (`"Shot on iPhone wide-angle lens, handheld, deep focus throughout, natural daylight"`)
+- ✅ Closing tag present? (`"Natural ultra-realistic colors, deep focus."`)
 - ✅ Concrete camera distance? (`"camera approximately X"`)
 - ✅ Explicit crop? (`"cropped at X, NO floor visible, NO feet visible"`)
 - ✅ Body prose 4-7 sentences total (after binding lines)?

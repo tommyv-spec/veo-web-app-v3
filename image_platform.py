@@ -4537,8 +4537,9 @@ def _synthesize_bootstrap_prompt(ing: Dict[str, Any]) -> str:
             f"three-quarter torso portrait of {body}. Standing facing camera, "
             f"relaxed natural pose, hands at sides. Neutral expression with a "
             f"soft warm smile, looking directly at camera. Cropped at "
-            f"mid-thigh — NO feet visible, NO floor visible. iPhone HDR "
-            f"colors, deep focus, no other people or objects in frame."
+            f"mid-thigh — NO feet visible, NO floor visible. Natural "
+            f"ultra-realistic colors, deep focus, no other people or "
+            f"objects in frame."
         )
     elif "product" in typ:
         return (
@@ -4551,18 +4552,18 @@ def _synthesize_bootstrap_prompt(ing: Dict[str, Any]) -> str:
     elif "setting" in typ or "location" in typ:
         return (
             f"Shot on iPhone with wide-angle lens, handheld, deep focus "
-            f"throughout, vibrant natural HDR daylight. Wide establishing "
-            f"shot of {body}. No people in frame. iPhone HDR colors, "
-            f"deep focus."
+            f"throughout, natural daylight. Wide establishing "
+            f"shot of {body}. No people in frame. Natural ultra-realistic "
+            f"colors, deep focus."
         )
     else:
         # Unknown type — use the description verbatim with a generic
         # iPhone-look scaffold so it stays consistent with the rest of
         # the pipeline aesthetic.
         return (
-            f"Shot on iPhone with wide-angle lens, deep focus, vibrant "
-            f"natural HDR daylight. {body}. Clean composition, no other "
-            f"subjects in frame. iPhone HDR colors."
+            f"Shot on iPhone with wide-angle lens, deep focus, natural "
+            f"daylight. {body}. Clean composition, no other "
+            f"subjects in frame. Natural ultra-realistic colors."
         )
 
 

@@ -1203,11 +1203,11 @@ violated rules in past LLM outputs:
      anchor:
 
        "Shot on iPhone wide-angle lens, handheld, deep focus
-        throughout, vibrant natural HDR daylight"
+        throughout, natural daylight"
 
      Every Image prompt MUST close with this exact tag:
 
-       "iPhone HDR colors, deep focus."
+       "Natural ultra-realistic colors, deep focus."
 
      Without these two anchors, Banana 2 defaults to studio-clean
      aesthetic. Corpus uses UGC iPhone-handheld aesthetic. Different
@@ -1292,7 +1292,7 @@ violated rules in past LLM outputs:
 
      [b] CAMERA LOCK SPECIFICITY beyond v603 style line. The generic
          "Shot on iPhone wide-angle lens, handheld, deep focus
-         throughout, vibrant natural HDR daylight" is necessary but
+         throughout, natural daylight" is necessary but
          not sufficient. Per-video, also lock:
            - vertical or horizontal aspect?
            - tripod or stable handheld?
@@ -1308,7 +1308,7 @@ violated rules in past LLM outputs:
 
      [c] NEGATIVE-CONSTRAINT DISCIPLINE. Every Image prompt body
          CLOSES with explicit DO-NOT statements AFTER the v603
-         closing tag "iPhone HDR colors, deep focus." Adapt to
+         closing tag "Natural ultra-realistic colors, deep focus." Adapt to
          niche/persona. Anchor against common drift failures.
 
          Example for T0 kitchen Korella saffron-vitality:
@@ -1480,7 +1480,7 @@ violated rules in past LLM outputs:
        [f] partially occluded by [foreground element] breaking the
        silhouette.
 
-       iPhone HDR colors, deep focus.
+       Natural ultra-realistic colors, deep focus.
 
        [negative constraints including v606 anti-photoshop additions]
 

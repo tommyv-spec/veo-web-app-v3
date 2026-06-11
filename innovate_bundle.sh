@@ -895,7 +895,7 @@ CANONICAL BLOCK STRUCTURE (parser-compliant, v593 + v696):
     [Location] [setting + background blur statement].
 
     [Style] [iPhone camera + handheld + lighting + grading + v603 closing
-    tag "iPhone HDR colors, deep focus."].
+    tag "Natural ultra-realistic colors, deep focus."].
 
     [Tech] [aspect ratio + resolution, e.g. 9:16, 2K output].
 
