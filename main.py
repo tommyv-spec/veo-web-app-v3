@@ -10129,6 +10129,10 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
+        # Deploy probe: which commit this container was built from. Render
+        # sets RENDER_GIT_COMMIT at build time. Unauthenticated on purpose —
+        # lets us confirm a deploy landed without dashboard access.
+        "render_commit": os.environ.get("RENDER_GIT_COMMIT", "not set"),
         "workers": {
             "running_jobs": len(worker.running_jobs),
             "max_workers": worker.max_workers,
