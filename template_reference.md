@@ -14516,3 +14516,22 @@ Policy-swap redo still creates a FRESH project: the swap changes the MODEL (the 
 Dead Ingredients branches are kept in place. If Flow drops Omni-on-Frames, flip the helper body to `return is_omni(getattr(page, "_veo_model", ""))` — one line, restores the old behavior at all 8 sites.
 
 **Touched**: `code/static/flow_worker.py` (this rule + helper), `code/template_reference.md` (this deep-dive), `wiki/patterns/conventions.md` (index row), root `CLAUDE.md` (gotcha row), `wiki/log.md` (timeline).
+
+---
+
+## v787 — Persistent uploadImage 400 = image rejection, not attach glitch
+
+**What broke**: Flow's `uploadImage` endpoint can return a bare HTTP 400 with NO policy verdict in the body. The worker only recognized policy rejections (`PROMINENT_PEOPLE` in body) — a bare 400 left the policy monitor unresolved, the 40s wait "timed out", and the frame counted as a generic attach glitch (`start_glitch`). The glitch path redoes the clip with the SAME image, so a hard-blocked image looped forever: clip 10609 (2026-06-11 log) got 6× 400 across 2 accounts + both upload paths (fresh file upload AND gallery select) and burned ~90 min of redo cycles before the v776 cap gave up with a generic "frame won't attach" failure — no replace-image card, no signal to the operator that the IMAGE was the problem.
+
+**The rule**: one 400 can be transient; the SAME image 400-ing twice is Flow hard-blocking the file. Count bare-400 strikes per image hash; at 2 strikes treat the image as REJECTED so the existing v701 policy machinery shows the replace-image card.
+
+**Mechanics** (`code/static/flow_worker.py`):
+- `FramePolicyMonitor` gains `hard_400` flag — set when `uploadImage` returns 4xx without policy text (reset in `start()`).
+- `_upload_one_frame` timeout branch: if the monitor saw a hard 400, increment `_upload_hard_400_counts[image_hash]`; at `UPLOAD_HARD_400_LIMIT` (2) return `'rejected'` → caller blacklists the image + calls `report_policy_violation` → replace-image card. Successful upload pops the counter, so transient 400s never accumulate against a good image.
+- `rebuild_clip` records the rejection reason in `_frame_rejection_tls` (thread-local — account threads run concurrently); the REDO caller routes `'start'/'end'/'extra'` rejections to `report_policy_violation` + `clear_auto_redo_cycle` instead of the v776 generic re-queue. Before this, the REDO path swallowed rejections as glitches.
+
+**Diagnostics**: `[v787] <frame>: uploadImage hard-400 strike N/2 for hash=...` + `[v787] ❌ ... treating as image rejection`. Confirm on next operator-side run that a 400-blocked image trips the card within one submission.
+
+**Revert**: set `UPLOAD_HARD_400_LIMIT` very high — strikes never trip, behavior returns to pure glitch-redo.
+
+**Touched**: `code/static/flow_worker.py` (monitor + strike counter + REDO routing), `code/template_reference.md` (this deep-dive), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline).
