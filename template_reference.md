@@ -13659,6 +13659,8 @@ Ambient: <ambient sound description per Veo 3.1 audio path>.
 
 (NO `**Negative prompt:**` block — retired by operator standing rule 2026-06-04. Bake critical constraints affirmatively into the Text prompt body.)
 
+**Migration: ZERO (operator 2026-06-12 — forward-only).** Existing `videos/*.md` + decoded artifacts keep their negative blocks as-is; do NOT retro-edit them. The retirement applies to every NEW build and to any artifact you are ALREADY editing for another reason. Same for the image-side trailing-block retirement (v604 rule 3).
+
 **Header convention `### Clip N.M — Scene N, Line M (REGISTER_LABEL)`**:
 - `N` = Scene index from Storyboard
 - `M` = Line index within Scene (1-based; single-line scenes always `.1`)
@@ -13722,6 +13724,9 @@ for header in clip_headers:
         print(f'v750 FAIL: Clip {n}.{m} missing **Text prompt:** field')
         fail_count += 1
     if re.search(r'\*\*Negative prompt:\*\*', block):
+        # FORWARD-ONLY (operator 2026-06-12): fires on NEW/edited builds only.
+        # Pre-2026-06-12 artifacts are NOT retro-stripped — do not run this
+        # gate on old videos/*.md just to clean them; they shipped fine.
         print(f'v750 FAIL: Clip {n}.{m} carries a **Negative prompt:** block — RETIRED per standing rule 2026-06-04 (feedback_no-negative-prompts); remove it and bake constraints affirmatively into the Text prompt')
         fail_count += 1
 if fail_count == 0:
