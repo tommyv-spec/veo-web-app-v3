@@ -1477,13 +1477,34 @@ def _lookup_uuid_binding(uuid_str, current_job_id=None):
     return dict(b)
 
 
+def _clip_has_own_bindings(job_id, clip_index):
+    """v792 — True when at least one captured mediaId binding points at
+    (job_id, clip_index). Means this clip's REAL media is known."""
+    with _PRIMARY_MEDIA_LOCK:
+        for v in _PRIMARY_MEDIA_BINDINGS.values():
+            if v.get('clip_index') == clip_index and (not job_id or v.get('job_id') == job_id):
+                return True
+    return False
+
+
 def _split_item_by_uuid_binding(item):
     """If `item` (an http_dl_queue payload) contains URLs that bind to
     DIFFERENT clip_indices than declared, split it into one or more new
     items each with the correct (clip_index, clip_id). URLs with no
     binding stay attached to the original declared clip_index (legacy
     fallback). Returns the list of items to enqueue. Returns `[item]`
-    unchanged when no binding mismatch exists."""
+    unchanged when no binding mismatch exists.
+
+    v792 — tile-identity check on the legacy fallback. FailCheck/PolicyScan
+    Retry-clicks spawn NEW unbound mediaIds that carry the RETRIED clip's
+    content; tile order drifts and the ready-scan can push such a uuid under
+    a different clip's declared index (job aec1efeb 2026-06-12: clip 5 saved
+    clip 3's video). Rule: an unbound uuid may fall back to the declared clip
+    ONLY if (a) some url in this same item binds to the declared clip (tile
+    confirmed — protects the bound-1/2-expected variant case), or (b) the
+    declared clip has NO bindings at all (full-legacy clip, position is all
+    we have). Otherwise the tile is foreign → DROP the url; the clip's real
+    media arrives via its own scan or redo. Missing beats wrong-content."""
     if not isinstance(item, dict):
         return [item]
     if 'urls' not in item or 'clip_index' not in item:
@@ -1495,13 +1516,36 @@ def _split_item_by_uuid_binding(item):
     if not urls:
         return [item]
 
-    # group urls by target (clip_index, clip_id). None binding => declared.
-    groups = {}  # (ci, cid) -> list[url]
-    rewrites = 0
+    # First pass: resolve uuid + binding per url; note whether any url
+    # confirms this tile as the declared clip's own.
+    resolved = []  # (url, uid, binding)
+    tile_confirmed_declared = False
     for u in urls:
         uid = _extract_uuid_from_url(u)
         binding = _lookup_uuid_binding(uid, current_job_id=job_id) if uid else None
+        if binding is not None and binding.get('clip_index') == declared_ci:
+            tile_confirmed_declared = True
+        resolved.append((u, uid, binding))
+
+    # group urls by target (clip_index, clip_id). None binding => declared.
+    groups = {}  # (ci, cid) -> list[url]
+    rewrites = 0
+    dropped = 0
+    declared_has_bindings = None  # lazy
+    for u, uid, binding in resolved:
         if binding is None:
+            if uid and not tile_confirmed_declared:
+                if declared_has_bindings is None:
+                    declared_has_bindings = _clip_has_own_bindings(job_id, declared_ci)
+                if declared_has_bindings:
+                    dropped += 1
+                    print(
+                        f"[v792] DROP unbound uuid={uid[:8]} declared clip {declared_ci}: "
+                        f"clip has its own bound mediaId(s) and none match this tile — "
+                        f"foreign tile (retry-spawned?), not saving under this clip",
+                        flush=True,
+                    )
+                    continue
             tgt = (declared_ci, declared_id)
         else:
             tgt = (binding.get('clip_index'), binding.get('clip_id') or declared_id)
@@ -1514,8 +1558,13 @@ def _split_item_by_uuid_binding(item):
                 )
         groups.setdefault(tgt, []).append(u)
 
-    # No rebinds and no splits → return unchanged.
-    if rewrites == 0 and len(groups) == 1 and next(iter(groups.keys())) == (declared_ci, declared_id):
+    # v792 — every url dropped: return an empty-urls item so the v681d
+    # dedup queue's DROP-on-empty path logs + discards it cleanly.
+    if not groups:
+        return [dict(item, urls=[])]
+
+    # No rebinds, no drops, no splits → return unchanged.
+    if rewrites == 0 and dropped == 0 and len(groups) == 1 and next(iter(groups.keys())) == (declared_ci, declared_id):
         return [item]
 
     new_items = []
