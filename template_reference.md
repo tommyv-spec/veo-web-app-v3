@@ -14595,3 +14595,15 @@ Dead Ingredients branches are kept in place. If Flow drops Omni-on-Frames, flip 
 **Worked references:** the 6 approved test prompts live in the 2026-06-12 session log; the grammar skeleton is in `template_new_format.md` §Image 1 HOOK note + `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §"HOOK safe-area composition grammar (v791)".
 
 **Touched**: this deep-dive, `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` (canonical wiki section), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (HOOK authoring row), `code/template_new_format.md` (skeleton note), all 4 bundle scripts, root `CLAUDE.md` (gotcha row), `wiki/log.md`.
+
+---
+
+## v792 — Foreign-tile guard on the uuid legacy fallback (clip-5-got-clip-3)
+
+**What broke**: FailCheck/PolicyScan click Retry on failed tiles. Each Retry spawns a NEW Flow generation with NEW mediaIds that bind to no clip (no pending submit slot) but carry the RETRIED clip's content. Tile order drifts as retry tiles insert; a ready-scan can push such a uuid under a DIFFERENT clip's declared index. The legacy fallback in `_split_item_by_uuid_binding` attributed any UNBOUND uuid to the declared clip — job aec1efeb (2026-06-12): clip 5 (10744) saved clip 3's video (`db6cfa94`, never bound) while clip 5's real bound media existed. v700 REBIND only rescues uuids that ARE bound.
+
+**The rule**: an unbound uuid may fall back to the declared clip ONLY if (a) some url in the same enqueue binds to the declared clip — tile confirmed; protects the bound-1/2-expected variant case — or (b) the declared clip has NO bindings at all (full-legacy clip, position is all we have). Otherwise the tile is foreign → DROP the url with a `[v792]` log. All-dropped items return `urls=[]` and die through the v681d DROP-on-empty path. Missing (clip redoes) beats wrong-content (clip ships with another clip's video).
+
+**Mechanics**: `_clip_has_own_bindings(job_id, clip_index)` scans `_PRIMARY_MEDIA_BINDINGS` job-scoped (falsy job_id → guard off, legacy behavior — cross-job index collision would wrong-drop). Two-pass resolve in `_split_item_by_uuid_binding`: first compute uuid+binding per url and whether any url confirms the tile as the declared clip's; then group, drop foreign unbound urls, REBIND bound ones as before.
+
+**Touched**: `code/static/flow_worker.py` (commits 30f6cc4 + 988859a), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline).
