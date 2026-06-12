@@ -7470,6 +7470,58 @@ def ensure_lower_priority_model(page, label=""):
         print(f"{prefix}⚠ Model check failed: {e}", flush=True)
 
 
+# v788 — Generate-disabled handling. Omni job aec1efeb (2026-06-12) looped
+# 11+ hours: Generate never enabled, every cycle ended in exception → HOT →
+# golden restore → self-resume → same wall. Zero submits, cause invisible in
+# logs (manual Omni+frames on the SAME account worked). Two pieces:
+# 1) _dump_generate_disabled_state — TEMP DIAGNOSTIC, prints WHY the button is
+#    disabled (button state, toasts, frame slots, prompt, model, tabs).
+#    Remove after operator-side evidence lands.
+# 2) per-job strike cap (checked in the account-thread except handler) — a job
+#    whose submits keep dying on Generate-disabled gets marked failed instead
+#    of looping restores forever (restore churn = throttling risk).
+GENERATE_DISABLED_JOB_CAP = 6  # exceptions across both accounts ≈ 3 cycles each
+_generate_disabled_strikes = {}
+
+
+def _dump_generate_disabled_state(page, prefix=""):
+    """v788 TEMP DIAGNOSTIC — one-shot page-state dump when Generate stays
+    disabled after the 60s wait. Answers: is the button found/disabled, is
+    there a visible error/toast, is the frame slot actually filled, does the
+    prompt have text, what model does the bottom bar show, which tabs are
+    selected, is a dialog stuck open, does the page mention credits/quota."""
+    try:
+        state = page.evaluate("""() => {
+            const out = {};
+            const icons = Array.from(document.querySelectorAll('button i')).filter(i => (i.textContent||'').trim() === 'arrow_forward');
+            const btn = icons.length ? icons[0].closest('button') : null;
+            out.gen_btn = btn ? {
+                disabled: btn.disabled, aria_disabled: btn.getAttribute('aria-disabled'),
+                cls: (btn.className||'').slice(0,120), title: btn.getAttribute('title'),
+                aria_label: btn.getAttribute('aria-label'),
+            } : 'NOT FOUND';
+            out.toasts = Array.from(document.querySelectorAll("[role='alert'], [role='status'], [class*='toast'], [class*='snackbar']"))
+                .map(el => (el.innerText||'').trim()).filter(Boolean).slice(0,5);
+            const frames = Array.from(document.querySelectorAll("div[aria-haspopup='dialog'], button[aria-haspopup='dialog']"));
+            out.frame_btns = frames.length;
+            out.frame_thumbs = frames.filter(f => !!f.querySelector('img')).length;
+            const ta = document.querySelector('textarea') || document.querySelector("[contenteditable='true']");
+            out.prompt_len = ta ? ((ta.value !== undefined ? ta.value : ta.innerText) || '').length : -1;
+            const mb = Array.from(document.querySelectorAll('button')).find(b => /omni|veo/i.test(b.innerText||''));
+            out.model_btn = mb ? (mb.innerText||'').replace(/\\n/g,' ').slice(0,60) : 'NOT FOUND';
+            out.tabs = Array.from(document.querySelectorAll('button.flow_tab_slider_trigger')).map(t => `${(t.innerText||'').replace(/\\n/g,' ').trim().slice(0,20)}:${t.getAttribute('aria-selected')}`);
+            const dlg = document.querySelector("[role='dialog']");
+            out.dialog_open = dlg ? (dlg.innerText||'').trim().slice(0,120) : null;
+            const bt = document.body ? (document.body.innerText||'') : '';
+            const m = bt.match(/.{0,60}(out of credits|no credits|upgrade to|quota|limit reached|not available|unavailable)\\b.{0,60}/i);
+            out.body_err = m ? m[0].replace(/\\s+/g,' ') : null;
+            return out;
+        }""")
+        print(f"{prefix}[v788-diag] generate-disabled page state: {state}", flush=True)
+    except Exception as _dge:
+        print(f"{prefix}[v788-diag] dump failed: {_dge}", flush=True)
+
+
 def click_generate_button(page, context_name="", max_retries=3):
     """
     Click the arrow_forward (Generate) button with retry logic.
@@ -7519,6 +7571,7 @@ def click_generate_button(page, context_name="", max_retries=3):
                         break
                 if not button_ready:
                     print(f"{prefix}⚠️ Generate button still disabled after 60s (attempt {attempt + 1}/{max_retries})", flush=True)
+                    _dump_generate_disabled_state(page, prefix)  # v788 diag
                     if attempt < max_retries - 1:
                         time.sleep(3)
                         continue
@@ -19231,6 +19284,30 @@ class AccountWorker(threading.Thread):
                                 _failed_job_id = job.get('id')  # regular job
                     except Exception:
                         pass
+
+                    # v788 — Generate-disabled strike cap. A job whose submits keep
+                    # dying on "Generate button is disabled" loops forever otherwise
+                    # (exception → HOT → restore → self-resume → same wall; aec1efeb
+                    # burned 11h + a restore every ~4.5min). At the cap, park the job
+                    # as failed (operator fixes cause + clicks Retry; strikes reset so
+                    # the retry gets a fresh count). [v788-diag] dumps carry the cause.
+                    if 'Generate button' in str(e) and _failed_job_id:
+                        _gd_n = _generate_disabled_strikes.get(_failed_job_id, 0) + 1
+                        _generate_disabled_strikes[_failed_job_id] = _gd_n
+                        print(f"[{self.name}] [v788] Generate-disabled strike {_gd_n}/{GENERATE_DISABLED_JOB_CAP} for job {_failed_job_id[:8]}", flush=True)
+                        if _gd_n >= GENERATE_DISABLED_JOB_CAP:
+                            print(f"[{self.name}] [v788] ⛔ job {_failed_job_id[:8]} hit Generate-disabled cap — marking failed, NOT retrying. See [v788-diag] page-state dumps above for the cause.", flush=True)
+                            try:
+                                update_job_status(_failed_job_id, 'failed', "Generate button never enabled across retries — job parked to stop restore churn. Check worker log [v788-diag] lines for the page state, fix the cause, then Retry.")
+                            except Exception as _cap_err:
+                                print(f"[v788] job-fail status call failed: {_cap_err}", flush=True)
+                            _generate_disabled_strikes.pop(_failed_job_id, None)
+                            try:
+                                if _from_queue:
+                                    self.job_queue.task_done()
+                            except Exception:
+                                pass
+                            continue
 
                     # GOLDEN RESTORE: on definite failure (HOT_THRESHOLD consecutive failures),
                     # restore session and download profiles from the clean post-login snapshot.
