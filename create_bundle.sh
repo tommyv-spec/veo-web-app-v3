@@ -1359,25 +1359,34 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
     prompt — control the SHAPE of the description, not layout
     constraints.
 
-    Order inside the HOOK image's fenced prompt:
-      1. ONE camera sentence FIRST: "A vertical 9:16 smartphone
-         photo, [close shot / extreme close-up / selfie front
-         camera] from [one arm's length / half an arm's length],
-         [optional high/low angle], the camera tilted slightly down
-         toward the ground so the head(s) sit near the top of the
-         frame with minimal space above them."
-      2. Hero layer (v791.1 — NEVER "foreground"/"closest to the
+    Order inside the HOOK image's fenced prompt (v791.2 FINAL):
+      1. ONE camera sentence FIRST naming the LENS + height lock:
+         "A vertical 9:16 smartphone photo shot on an iPhone
+         ultra-wide 0.5x lens (13mm equivalent), [selfie front
+         camera / candid handheld interview view / extreme close
+         two-shot] from [distance], the lens level with the
+         [person]'s raised hand." The ultra-wide does the dominance
+         work optically: near object huge, background visible AND
+         sharp (native deep focus, fits the no-blur rule).
+      2. Hero layer (v791.2 — NEVER "foreground"/"closest to the
          lens" on the prop: NB2's ground-plane prior drops it to
-         the BOTTOM edge). Pin height to a body landmark + depth as
-         between-person-and-camera: "Held up at [chest/chin/face]
-         height, between [person] and the camera and closer to the
-         lens than [his] body, [hero prop] thrust toward the camera
-         — render it slightly larger than real scale so it sits at
-         the very center of the frame, level with [his chest/face]."
-         Arms extended toward the lens when a hand carries the prop.
+         the BOTTOM edge): "[Person] raises his open palm to his
+         own [eye/chin] level and extends it straight toward the
+         camera, presenting [hero prop + plain state-words] on the
+         flat of his hand — the huge foreshortened hand and the
+         [prop] sit at the very middle of the frame; his face is
+         right behind and just above his hand, the top of his head
+         touching the top edge of the frame." Three load-bearing
+         phrases, none optional: palm raised to OWN eye level /
+         lens level with the raised hand / head touching the top
+         edge. Prop's first mention carries one plain state-word
+         cluster ("unmistakably limp and lifeless / rotten / dying
+         / heavy") so the eye reads the state at first glance.
       3. Person right behind the prop (face behind it).
       4. Secondary people beside / behind the shoulder.
-      5. Background setting last (brief anchor + US-iconic blends).
+      5. Background last: "In the background, sharp and fully
+         visible in the wide view, [brief anchor + US-iconic
+         blends]."
       6. House realism block + "Aspect ratio 9:16." final line.
 
     BANNED (render-validated drift causes): thirds/grid words

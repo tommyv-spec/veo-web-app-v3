@@ -1388,18 +1388,19 @@ violated rules in past LLM outputs:
 V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
 
     The HOOK image's fenced prompt opens with ONE camera sentence
-    ("A vertical 9:16 smartphone photo, [shot type] from [distance],
-    the camera tilted slightly down toward the ground so the heads
-    sit near the top of the frame with minimal space above them"),
-    then builds hero -> background. Hero prop wording (v791.1 —
-    NEVER "foreground"/"closest to the lens", it drops the prop to
-    the bottom edge): "Held up at [chest/chin/face] height, between
-    [person] and the camera and closer to the lens than [his] body,
-    [hero prop] thrust toward the camera — render it slightly
-    larger than real scale so it sits at the very center of the
-    frame, level with [his chest/face]" -> person right behind it ->
-    secondary people -> setting last -> house realism block +
-    "Aspect ratio 9:16."
+    naming the LENS + height lock (v791.2): "A vertical 9:16
+    smartphone photo shot on an iPhone ultra-wide 0.5x lens (13mm
+    equivalent), [view] from [distance], the lens level with the
+    [person]'s raised hand", then the hero layer (NEVER
+    "foreground"/"closest to the lens" — bottom-drop): "[Person]
+    raises his open palm to his own [eye/chin] level and extends it
+    straight toward the camera, presenting [prop + plain
+    state-words] on the flat of his hand — the huge foreshortened
+    hand and the [prop] sit at the very middle of the frame; his
+    face right behind and just above his hand, the top of his head
+    touching the top edge of the frame" -> person right behind it ->
+    secondary people -> background "sharp and fully visible in the
+    wide view" -> house realism block + "Aspect ratio 9:16."
 
     BANNED: thirds/grid words, crop-boundary negotiation, trailing
     zone-bans, "clearly visible/readable" on secondary elements.
