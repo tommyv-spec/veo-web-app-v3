@@ -14578,13 +14578,13 @@ Dead Ingredients branches are kept in place. If Flow drops Omni-on-Frames, flip 
 **THE GRAMMAR (mandatory order inside the HOOK image's fenced prompt):**
 
 1. **Camera sentence FIRST** — one sentence: `A vertical 9:16 smartphone photo, [shot type: close shot / extreme close-up / selfie from the front camera] from [distance: one arm's length / half an arm's length], [optional: high angle / low-angle], the camera tilted slightly down toward the ground so the head(s) sit near the top of the frame with minimal space above them.` The down-tilt clause kills dead headroom (top UI zone) and drops the action to dead-center.
-2. **Foreground layer** — `In the immediate foreground, closest to the lens / inches from the lens, [hero prop or action] thrust toward the camera ... render it slightly larger than real scale so it dominates the center of the frame.` Arms extended toward the lens when a hand carries the prop.
+2. **Hero layer (v791.1 wording — operator render check 2026-06-12: "immediate foreground / closest to the lens" sends the object to the BOTTOM of the frame; NB2's ground-plane prior reads near-camera = low)** — never say "foreground" on the hero prop. Pin its HEIGHT to a body landmark and its DEPTH as between-person-and-camera: `Held up at [chest / chin / face] height, between [person] and the camera and closer to the lens than [his] body, [hero prop] thrust toward the camera — render it slightly larger than real scale so it sits at the very center of the frame, level with [his chest / face].` Arms extended toward the lens when a hand carries the prop.
 3. **Mid layer** — the prop-handler / affected person "right behind it", face behind the prop.
 4. **Secondary people** — beside / behind the shoulder, same band.
 5. **Background setting last** — one brief anchor phrase + US-iconic blends.
 6. House realism block + `Aspect ratio 9:16.` final line — unchanged (v603 + house standard).
 
-**BANNED in HOOK prompts (these caused the drift):** thirds/grid vocabulary ("upper-third line", "center crossing"), explicit crop-boundary negotiation ("framed from their heads to their chests"), trailing zone-ban sentences ("nothing important in the bottom third"), re-compose force-words on secondary elements ("clearly visible/readable" pushes NB2 to re-frame to prove it).
+**BANNED in HOOK prompts (these caused the drift):** thirds/grid vocabulary ("upper-third line", "center crossing"), explicit crop-boundary negotiation ("framed from their heads to their chests"), trailing zone-ban sentences ("nothing important in the bottom third"), re-compose force-words on secondary elements ("clearly visible/readable" pushes NB2 to re-frame to prove it), and **"immediate foreground / closest to the lens" on the hero prop** (v791.1 — ground-plane prior drops it to the bottom edge; use body-landmark height + "between X and the camera" instead).
 
 **Wide-staging carve-out (CCTV / room-wide hooks):** foreshortening would break the surveillance/wide register — instead pull the action to "the exact center of the view, rendered slightly closer to the camera than the [ceiling corner / fixed cam] would really allow."
 

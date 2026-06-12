@@ -1391,9 +1391,13 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
     ("A vertical 9:16 smartphone photo, [shot type] from [distance],
     the camera tilted slightly down toward the ground so the heads
     sit near the top of the frame with minimal space above them"),
-    then builds foreground -> background: hero prop thrust toward
-    the lens + "render it slightly larger than real scale so it
-    dominates the center of the frame" -> person right behind it ->
+    then builds hero -> background. Hero prop wording (v791.1 —
+    NEVER "foreground"/"closest to the lens", it drops the prop to
+    the bottom edge): "Held up at [chest/chin/face] height, between
+    [person] and the camera and closer to the lens than [his] body,
+    [hero prop] thrust toward the camera — render it slightly
+    larger than real scale so it sits at the very center of the
+    frame, level with [his chest/face]" -> person right behind it ->
     secondary people -> setting last -> house realism block +
     "Aspect ratio 9:16."
 

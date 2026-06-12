@@ -1366,11 +1366,15 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
          [optional high/low angle], the camera tilted slightly down
          toward the ground so the head(s) sit near the top of the
          frame with minimal space above them."
-      2. Foreground layer: "In the immediate foreground, closest to
-         the lens, [hero prop/action] thrust toward the camera —
-         render it slightly larger than real scale so it dominates
-         the center of the frame." Arms extended toward the lens
-         when a hand carries the prop.
+      2. Hero layer (v791.1 — NEVER "foreground"/"closest to the
+         lens" on the prop: NB2's ground-plane prior drops it to
+         the BOTTOM edge). Pin height to a body landmark + depth as
+         between-person-and-camera: "Held up at [chest/chin/face]
+         height, between [person] and the camera and closer to the
+         lens than [his] body, [hero prop] thrust toward the camera
+         — render it slightly larger than real scale so it sits at
+         the very center of the frame, level with [his chest/face]."
+         Arms extended toward the lens when a hand carries the prop.
       3. Person right behind the prop (face behind it).
       4. Secondary people beside / behind the shoulder.
       5. Background setting last (brief anchor + US-iconic blends).
