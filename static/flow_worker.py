@@ -1479,10 +1479,15 @@ def _lookup_uuid_binding(uuid_str, current_job_id=None):
 
 def _clip_has_own_bindings(job_id, clip_index):
     """v792 — True when at least one captured mediaId binding points at
-    (job_id, clip_index). Means this clip's REAL media is known."""
+    (job_id, clip_index). Means this clip's REAL media is known.
+    No job_id → return False: without job scope we could match another
+    job's clip at the same index and wrongly drop legit urls; falling
+    back to legacy position attribution is the safer failure mode."""
+    if not job_id:
+        return False
     with _PRIMARY_MEDIA_LOCK:
         for v in _PRIMARY_MEDIA_BINDINGS.values():
-            if v.get('clip_index') == clip_index and (not job_id or v.get('job_id') == job_id):
+            if v.get('clip_index') == clip_index and v.get('job_id') == job_id:
                 return True
     return False
 
