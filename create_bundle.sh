@@ -1351,6 +1351,47 @@ violated rules in past LLM outputs:
        NO bare "left" / "right" — replaced with "viewer-left" /
          "viewer-right"?
 
+V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
+
+    Reels/TikTok UI covers top ~14% / bottom ~35% / right ~12% of
+    the screen. The HOOK's focal action must land in the central
+    band, big and immediate. NB2 plans ONE coherent photo from the
+    prompt — control the SHAPE of the description, not layout
+    constraints.
+
+    Order inside the HOOK image's fenced prompt:
+      1. ONE camera sentence FIRST: "A vertical 9:16 smartphone
+         photo, [close shot / extreme close-up / selfie front
+         camera] from [one arm's length / half an arm's length],
+         [optional high/low angle], the camera tilted slightly down
+         toward the ground so the head(s) sit near the top of the
+         frame with minimal space above them."
+      2. Foreground layer: "In the immediate foreground, closest to
+         the lens, [hero prop/action] thrust toward the camera —
+         render it slightly larger than real scale so it dominates
+         the center of the frame." Arms extended toward the lens
+         when a hand carries the prop.
+      3. Person right behind the prop (face behind it).
+      4. Secondary people beside / behind the shoulder.
+      5. Background setting last (brief anchor + US-iconic blends).
+      6. House realism block + "Aspect ratio 9:16." final line.
+
+    BANNED (render-validated drift causes): thirds/grid words
+    ("upper-third line", "center crossing"), crop-boundary
+    negotiation ("framed from heads to chests"), trailing zone-bans
+    ("nothing in the bottom third"), "clearly visible/readable" on
+    secondary elements (forces re-framing).
+
+    Wide staging (CCTV / room-wide): no foreshortening — action at
+    the exact center of the view, "rendered slightly closer to the
+    camera than the [fixed cam] would really allow."
+
+    Placement lands close-but-small -> EDIT, don't re-roll: "Keep
+    everything exactly the same, but bring [the prop] closer to the
+    camera so it fills more of the frame."
+
+    Deep-dive: template_reference.md §v791. Forward-only.
+
 [18] V605 PROP-TRACKING + PROP-AS-SUBJECT (product-reveal scenes):
 
      For every Image with product_image: field set, the body prose

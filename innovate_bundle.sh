@@ -706,6 +706,20 @@ Step 6 — PRE-OUTPUT VALIDATION GATES (mandatory — fix and re-emit if any fai
         attached to the bottom of the bicep. No straight lower arm
         contour."). Forces Banana 2 to render the absence of the
         healthy default, which forces the symptom-distorted version.
+  Gate 19b — v791 HOOK safe-area composition grammar (HOOK / image_1
+    ONLY). The HOOK image's fenced prompt opens with ONE camera
+    sentence ("A vertical 9:16 smartphone photo, [shot type] from
+    [distance], the camera tilted slightly down toward the ground so
+    the heads sit near the top of the frame with minimal space above
+    them"), then builds foreground -> background: hero prop thrust
+    toward the lens + "render it slightly larger than real scale so
+    it dominates the center of the frame" -> person right behind it
+    -> secondary people -> setting last -> house realism block +
+    "Aspect ratio 9:16." BANNED: thirds/grid words, crop-boundary
+    negotiation, trailing zone-bans, "clearly visible" on secondary
+    elements. CCTV/wide staging: action at exact center, "slightly
+    closer than the cam would really allow." Close-but-small render
+    -> EDIT, don't re-roll. Deep-dive: template_reference.md §v791.
   Gate 20 — v718 VLM forensic-perception protocol (PRE-GRAMMAR)
     Applied BEFORE composition prose. Three perceptual checks:
     (a) v718a kinematic tracing — limbs attributed by clothing-color

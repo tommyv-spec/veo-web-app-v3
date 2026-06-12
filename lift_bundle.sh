@@ -1385,6 +1385,31 @@ violated rules in past LLM outputs:
      and visual_delta values exactly. The decoded artifact is the
      source-of-truth for what the source video actually shows.
 
+V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
+
+    The HOOK image's fenced prompt opens with ONE camera sentence
+    ("A vertical 9:16 smartphone photo, [shot type] from [distance],
+    the camera tilted slightly down toward the ground so the heads
+    sit near the top of the frame with minimal space above them"),
+    then builds foreground -> background: hero prop thrust toward
+    the lens + "render it slightly larger than real scale so it
+    dominates the center of the frame" -> person right behind it ->
+    secondary people -> setting last -> house realism block +
+    "Aspect ratio 9:16."
+
+    BANNED: thirds/grid words, crop-boundary negotiation, trailing
+    zone-bans, "clearly visible/readable" on secondary elements.
+    CCTV/wide staging: action at exact center, "rendered slightly
+    closer to the camera than the [fixed cam] would really allow."
+    Close-but-small render -> EDIT ("keep everything the same, bring
+    X closer to the camera"), don't re-roll.
+
+    LIFT-SPECIFIC: v791 composes WITH the source recreation (v790
+    frames-are-ground-truth) — keep the source's staging atoms, but
+    re-frame the HOOK to the safe-area grammar when the source's own
+    framing parks the action low or far. Deep-dive:
+    template_reference.md §v791. Forward-only.
+
 [18] V605 PROP-TRACKING + PROP-AS-SUBJECT (product-reveal scenes):
 
      For every Image with product_image: field set, body prose MUST

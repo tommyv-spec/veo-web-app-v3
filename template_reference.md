@@ -14561,3 +14561,37 @@ Dead Ingredients branches are kept in place. If Flow drops Omni-on-Frames, flip 
 **The meta-rule (the "completely unrelated cases" half):** before authoring artifact B from artifact A, ask what A actually IS. If A is an observation/summary/derived text, it is NOT ground truth for B — go one level down to the source A describes (frames, parser code, raw transcript, live platform behavior) and verify there. Same family as root `CLAUDE.md` §2 read-current-state; this rule pins it to the decode→build authoring path specifically.
 
 **Touched**: this deep-dive, `code/verify_video_format.py` (c5463a0, the two mirrored gates), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (authoring-step note), `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` (§conversation staging + §recreate-from-frames), root `CLAUDE.md` (gotcha row), `wiki/log.md`.
+
+## v791 — HOOK safe-area composition grammar (camera-first + layered foreground + scale cheat)
+
+**Surfaced 2026-06-12** from the operator's safe-area brief: on Reels/TikTok the app UI covers the top ~14%, the bottom ~35% and the right ~12% of the screen — the HOOK's focal action must land in the central band, big and immediate. Three rounds of test prompts on 6 corpus hooks (Costco lift / pills-on-balloon / Walmart-selfie banana / shelf smash / porch sunflower / restaurant CCTV) found what does and does not move Nano Banana 2's composition. Operator verdict on the final grammar: "I like this style for the hook."
+
+**Why the old attempts failed (validated by renders).** NB2 is a reasoning model: it PLANS one coherent photograph from the description. Frame-geometry language ("his eyes land on the upper-third line", "the prop at the center crossing", "framed from heads to chests", trailing zone-bans "nothing in the bottom third") is human layout talk, not photography — many competing placement clauses get AVERAGED into a generic wide two-shot. Renders came back too far from camera, action low, elements confused.
+
+**What does work (Google official prompting guide + prompt↔image galleries + render tests):**
+1. **Narrative scene, not constraints** — the model's documented core strength.
+2. **Construction order controls layering** — official pattern: "First, the background... Then, in the foreground... Finally, place..." Foreground dominance = describe the layers in order.
+3. **One decisive camera sentence** — short photographic phrases ("extreme close-up", "high angle", "low-angle perspective", distance in arm's lengths), not negotiating paragraphs.
+4. **The scale cheat** — gallery-validated: "render it slightly larger than real scale so it dominates the center of the frame." Plain instruction to break scale = reliable foreground dominance.
+5. **Semantic positives** — "minimal space above the heads" via the down-tilt clause, never "no headroom".
+
+**THE GRAMMAR (mandatory order inside the HOOK image's fenced prompt):**
+
+1. **Camera sentence FIRST** — one sentence: `A vertical 9:16 smartphone photo, [shot type: close shot / extreme close-up / selfie from the front camera] from [distance: one arm's length / half an arm's length], [optional: high angle / low-angle], the camera tilted slightly down toward the ground so the head(s) sit near the top of the frame with minimal space above them.` The down-tilt clause kills dead headroom (top UI zone) and drops the action to dead-center.
+2. **Foreground layer** — `In the immediate foreground, closest to the lens / inches from the lens, [hero prop or action] thrust toward the camera ... render it slightly larger than real scale so it dominates the center of the frame.` Arms extended toward the lens when a hand carries the prop.
+3. **Mid layer** — the prop-handler / affected person "right behind it", face behind the prop.
+4. **Secondary people** — beside / behind the shoulder, same band.
+5. **Background setting last** — one brief anchor phrase + US-iconic blends.
+6. House realism block + `Aspect ratio 9:16.` final line — unchanged (v603 + house standard).
+
+**BANNED in HOOK prompts (these caused the drift):** thirds/grid vocabulary ("upper-third line", "center crossing"), explicit crop-boundary negotiation ("framed from their heads to their chests"), trailing zone-ban sentences ("nothing important in the bottom third"), re-compose force-words on secondary elements ("clearly visible/readable" pushes NB2 to re-frame to prove it).
+
+**Wide-staging carve-out (CCTV / room-wide hooks):** foreshortening would break the surveillance/wide register — instead pull the action to "the exact center of the view, rendered slightly closer to the camera than the [ceiling corner / fixed cam] would really allow."
+
+**Multi-turn fallback (official recommended workflow):** when a render is close but the prop is too small or low — do NOT re-roll. Edit via reference_image chain: "Keep everything exactly the same, but bring [the prop] closer to the camera so it fills more of the frame."
+
+**Scope: HOOK image (image_1 / Scene 1 start frame) ONLY for now** — operator 2026-06-12 "this is valid just for the hook for now, then we'll see." Body/CTA frames keep the existing field-order conventions. **Forward-only** per `feedback_rule-changes-forward-only` — no retro-edits to shipped builds.
+
+**Worked references:** the 6 approved test prompts live in the 2026-06-12 session log; the grammar skeleton is in `template_new_format.md` §Image 1 HOOK note + `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §"HOOK safe-area composition grammar (v791)".
+
+**Touched**: this deep-dive, `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` (canonical wiki section), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (HOOK authoring row), `code/template_new_format.md` (skeleton note), all 4 bundle scripts, root `CLAUDE.md` (gotcha row), `wiki/log.md`.

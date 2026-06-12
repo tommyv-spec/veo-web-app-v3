@@ -1235,6 +1235,12 @@ V604 UNIVERSAL PROMPT-DISCIPLINE (decode + generate both):
       REQUIRED:  "her gloved hand on the viewer-left side POINTS at..."
     Universal — applies to decode prompts, generate prompts, action_notes.
 
+    SCOPE NOTE (v791): the HOOK safe-area composition grammar
+    (camera-tilt + prop-thrust-at-lens + scale cheat) is GENERATE-side
+    only. Decode prompts stay FRAME-FAITHFUL to the source (v790
+    render-ready gate) — do NOT re-compose a decoded frame to the
+    safe-area grammar; the build side decides that at lift/innovate.
+
 PRE-OUTPUT VALIDATION:
 
   YES every Image block has frame_anchor: field with timestamp?
