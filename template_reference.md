@@ -14607,3 +14607,20 @@ Dead Ingredients branches are kept in place. If Flow drops Omni-on-Frames, flip 
 **Mechanics**: `_clip_has_own_bindings(job_id, clip_index)` scans `_PRIMARY_MEDIA_BINDINGS` job-scoped (falsy job_id → guard off, legacy behavior — cross-job index collision would wrong-drop). Two-pass resolve in `_split_item_by_uuid_binding`: first compute uuid+binding per url and whether any url confirms the tile as the declared clip's; then group, drop foreign unbound urls, REBIND bound ones as before.
 
 **Touched**: `code/static/flow_worker.py` (commits 30f6cc4 + 988859a), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline).
+
+## v786 — Fully-silent builds: storyboard pre-fill + scene-level action_note (no dialogue lines anywhere)
+
+**What broke**: the Rovellaro grandma build (2026-06-12) is fully silent — `speaker: silent` on all 19 scenes, ZERO `- **line:**` bullets, natural sounds only, captions in CapCut. Import parsed fine, but on promote-to-video the storyboard editor collapsed to ONE mega-scene ("Scene 1 (Image 1) Clips #1-19", default blend) AND the note chips showed a DIFFERENT build's beats. Cause: the frontend pre-fill gate (`static/index.html`, prepare flow step 6.5) required `hasAnyVoiceover` — meant to skip legacy pre-v432 no-metadata batches — so a zero-line build skipped the whole pre-fill: `sceneBreaks` never assigned, and the previous batch's `window._actionNotes` / `_veoPromptOverrides` leaked into the new editor render. Second gap: the markdown bullet parser attached `action_note` only to a preceding `line:` bullet, so a silent scene's note was silently dropped ("malformed") — empty chips even with pre-fill fixed.
+
+**The rule (authoring side — how to write a fully-silent build)**:
+- Every scene: `- **speaker:** silent`, NO `- **line:**` bullets, scene-level `- **action_note:**` (now retained — v786).
+- Veo prompt per scene rides a `### Clip N — Scene N (silent)` block in `## Veo 3.1 Final Prompts` (v682f non-dotted header form; the platform uses it verbatim as the silent clip's prompt).
+- Worked example: `videos/rovellaro-grandma-sewing-guide-comment-to-creation-v1.md` (19 scenes / 19 images / 19 silent clips).
+
+**Mechanics (platform side)**:
+- `static/index.html` pre-fill gate: `hasAnyVoiceover` → `(hasAnyVoiceover || hasSceneMetadata)`; `hasSceneMetadata` = any `scenes_metadata` flat row carrying `speaker_mode` / `scene_type` / non-empty `action_note` / `veo_prompt_override`. Legacy no-metadata batches still skip (unchanged).
+- Cross-batch state (`window._actionNotes` / `_veoPromptOverrides` / `_dialoguePads`) reset BEFORE the gate — a skipped pre-fill can no longer leak the previous batch's chips. `clipMode` fallback aligned to v782 `fresh`.
+- `image_platform.py` bullet parser: `dangling_action_note` held when an `action_note` appears before any line; emitted as a 1-entry `action_notes` list when the scene ends with zero lines (the v681 synthetic flat-row injection reads `notes[0]` for exactly this case; v682s truncation guard already skips empty-lines scenes).
+- `verify_video_format.py` linter: `speaker: silent` scenes exempt from the v696 line gate; clips regex also counts non-dotted `### Clip N` headers.
+
+**Touched**: `code/static/index.html` + `code/image_platform.py` (commit ab1b694), `code/verify_video_format.py` (commit ed332e9, first tracked), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline). Operator-verified working 2026-06-12.
