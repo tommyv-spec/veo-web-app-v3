@@ -8480,6 +8480,44 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             # Fully-failed case: no committed tiles, failure indicator present
             committed = int(c.get("committed_tile_count") or 0)
             if c.get("has_failed") and committed == 0:
+                # v793: success-sibling guard. Flow splits a partial x4
+                # (some variants policy-rejected, some OK) into a Failed
+                # container PLUS a committed container — both carry the
+                # same prompt. The Failed one often sits at a lower
+                # data-index so it's iterated first; marking the node
+                # failed + GC here removes it from pending_live BEFORE the
+                # committed sibling is reached, so the good tiles get
+                # abandoned (operator saw "worker skipped the ones that
+                # worked"). The ID-attribution path already does this
+                # right (only fails when `not ready and failed`); the
+                # legacy path was missing it. Before failing, look ahead
+                # in THIS scan for a settled committed container that
+                # matches the same node's full prompt_key (800-char scene
+                # body per v733 — discriminating per scene). If one
+                # exists, skip this failed container so the success
+                # container claims the node next iteration.
+                key = match.prompt_key or ""
+                _success_sibling = False
+                if key and len(key) >= 20:
+                    k_norm = "".join(key.split()).lower()
+                    for other in containers:
+                        if other is c or other.get("still_rendering"):
+                            continue
+                        if int(other.get("committed_tile_count") or 0) <= 0:
+                            continue
+                        otext = other.get("prompt_text") or ""
+                        if key not in otext and k_norm not in "".join(otext.split()).lower():
+                            continue
+                        o_urls = set(other.get("tile_image_urls") or [])
+                        if o_urls and (o_urls & _claimed_tile_urls):
+                            continue  # sibling already claimed elsewhere
+                        if match.baseline_urls and o_urls and not (o_urls - match.baseline_urls):
+                            continue  # sibling is all-baseline (stale), not this job's result
+                        _success_sibling = True
+                        break
+                if _success_sibling:
+                    print(f"[API:scan] ⏭ [v793] Node {match.node_id}: failed container skipped — committed success sibling present in same scan", flush=True)
+                    continue
                 print(f"[API:scan] ✗ Node {match.node_id} — tile marked Failed (0 successes)", flush=True)
                 http_queue.put({
                     "node_id": match.node_id,
