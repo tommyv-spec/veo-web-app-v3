@@ -3618,6 +3618,14 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
     Opt out with LAPTOP_PULL_DISABLED=1. Fail-safe: errors logged, never raises,
     never blocks launch. Runs BEFORE restore_from_golden so golden exists below."""
     try:
+        # DEFAULT OFF. Copying the laptop profile cannot carry a Chrome 127+
+        # login (app-bound cookie encryption -> copied profile is logged out;
+        # verified on this machine), and opening the real multi-profile Chrome
+        # dir in place times out under automation. So the worker logs in once in
+        # its own session and golden-persists it (turn "Wipe saved login" OFF).
+        # Re-enable this experimental pull only with LAPTOP_PULL_ENABLED=1.
+        if os.environ.get("LAPTOP_PULL_ENABLED", "").strip().lower() not in ("1", "true", "yes"):
+            return
         if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
         # Force a fresh load of the just-synced companion. The updater writes
