@@ -126,7 +126,10 @@ def close_laptop_chrome(user_data_dir, log=print):
             cmd = line[len("CommandLine="):]
         elif line.startswith("ProcessId="):
             pid = line[len("ProcessId="):].strip()
-            if pid and _chrome_proc_uses_dir(cmd or "", user_data_dir):
+            # Require a real CommandLine for this record; a None/empty cmd means
+            # we could not read it (access denied / record boundary) -> skip,
+            # never kill on a stale or missing commandline.
+            if pid and cmd and _chrome_proc_uses_dir(cmd, user_data_dir):
                 try:
                     subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
                     killed += 1
@@ -187,15 +190,26 @@ def pull_profile_from_laptop(email, golden_folder, label="",
         shutil.rmtree(tmp, ignore_errors=True)
         return False
 
-    # Swap: only now does the old golden go away.
+    # Swap: rename the old golden aside, move the temp in, then drop the backup.
+    # If the move fails, restore the old golden -- never leave the worker with
+    # no golden at all (all paths share one parent dir => same volume rename).
+    backup = golden_folder + ".old"
     try:
+        if os.path.exists(backup):
+            shutil.rmtree(backup, ignore_errors=True)
         if os.path.exists(golden_folder):
-            shutil.rmtree(golden_folder, ignore_errors=True)
-        os.replace(tmp, golden_folder)
+            os.rename(golden_folder, backup)
+        os.rename(tmp, golden_folder)
     except Exception as e:
         log(f"{tag}laptop pull: swap failed: {e}")
+        if not os.path.exists(golden_folder) and os.path.exists(backup):
+            try:
+                os.rename(backup, golden_folder)
+            except Exception:
+                pass
         shutil.rmtree(tmp, ignore_errors=True)
         return False
+    shutil.rmtree(backup, ignore_errors=True)
 
     log(f"{tag}pulled laptop profile for {email} ({profile_folder} -> golden)")
     return True

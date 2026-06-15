@@ -109,6 +109,7 @@ def test_pull_builds_golden_with_default_and_local_state(tmp_path):
     with open(os.path.join(golden, "Local State"), encoding="utf-8") as f:
         assert json.load(f)["os_crypt"]["encrypted_key"] == "LAPTOPKEY"
     assert not os.path.exists(golden + ".pull_tmp")
+    assert not os.path.exists(golden + ".old")
 
 
 def test_pull_empty_email_is_noop(tmp_path):
