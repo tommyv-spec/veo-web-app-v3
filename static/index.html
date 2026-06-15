@@ -10976,7 +10976,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             if(redoQueued){status='redo queued';badgeClass='redo_queued';}else if(generating){status='generating';badgeClass='running';}else if(skipped){status='skipped';badgeClass='skipped';}else if(failed){status='failed';badgeClass='failed';}else if(approved){status='approved';badgeClass='approved';}else if(rejected){status='rejected';badgeClass='rejected';}else if(waitingApproval){status='waiting approval';badgeClass='waiting_approval';}else if(preparing){status='preparing';badgeClass='preparing';}else if(pending && isContinueWaiting){status='waiting for #'+c.clip_index;badgeClass='waiting_approval';}else if(pending){status='pending';badgeClass='running';}else if(c.status==='completed'){status=c.approval_status||'pending_review';badgeClass=status;}
             let acts='';const clipId=c.id||0;
             // Upload-your-own-video control (every clip card). Adds a new variant via /upload-variant.
-            const uploadVideoCtl=clipId?`<input type="file" id="uploadVideoInput_${clipId}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clipId}, '${jid}', this.files[0])"><button class="btn btn-upload btn-sm" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clipId}').click()" title="upload your own video for this clip">⬆️ upload</button>`:'';
+            const uploadVideoCtl=clipId?`<input type="file" id="uploadVideoInput_${clipId}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clipId}, '${jid}', this.files[0])"><button class="btn btn-upload btn-sm" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clipId}').click()" title="upload your own video for this clip">📤 upload video</button>`:'';
             // Small cancel button for any active/pending clip
             const cancelBtn = clipId ? `<button class="btn btn-secondary btn-sm" style="padding:1px 5px;font-size:9px;margin-left:6px;opacity:0.7" onclick="event.stopPropagation();cancelClip(${clipId},${c.clip_index})" title="Skip this clip">✕</button>` : '';
             if(isRegenerating){
@@ -11221,7 +11221,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 // clips sharing it (one upload retries all stuck voice scenes).
                 const _isImageAttributable = IMAGE_ATTRIBUTABLE_CODES.has(clip.error_code || '');
                 const _uploadBtn = _isImageAttributable
-                    ? `<input type="file" id="pairedReplaceImageInput_${clip.id}" accept="image/png,image/jpeg,image/webp" style="display:none;" onchange="replaceClipImage(${clip.id}, '${jid}', this.files[0])"><button class="btn btn-primary btn-sm" style="padding:4px 10px;font-size:11px;" onclick="document.getElementById('pairedReplaceImageInput_${clip.id}').click()" title="upload a different image (anchor face) to retry this voice clip + every sibling sharing the same anchor">📁 upload</button>`
+                    ? `<input type="file" id="pairedReplaceImageInput_${clip.id}" accept="image/png,image/jpeg,image/webp" style="display:none;" onchange="replaceClipImage(${clip.id}, '${jid}', this.files[0])"><button class="btn btn-primary btn-sm" style="padding:4px 10px;font-size:11px;" onclick="document.getElementById('pairedReplaceImageInput_${clip.id}').click()" title="upload a different image (anchor face) to retry this voice clip + every sibling sharing the same anchor">📁 upload image</button>`
                     : '';
                 acts = `<div style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap;"><button class="btn btn-redo btn-sm" style="padding:4px 10px;font-size:11px" onclick="redoModal(${clip.id},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''}>↻ retry ${sideLabel}</button>${_uploadBtn}${_revertBtn}</div>`;
             } else if (pending || waitingApproval) {
@@ -11251,7 +11251,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // input id, no collision with the non-paired path.
             // v782 — function-coded (purple) upload button, short label.
             const uploadOwnCtl = clip.id
-                ? `<input type="file" id="uploadVideoInput_${clip.id}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clip.id}, '${jid}', this.files[0])"><button class="btn btn-upload btn-sm" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clip.id}').click()" title="upload your own video for this ${sideLabel}">⬆️ upload</button>`
+                ? `<input type="file" id="uploadVideoInput_${clip.id}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clip.id}, '${jid}', this.files[0])"><button class="btn btn-upload btn-sm" onclick="event.stopPropagation();document.getElementById('uploadVideoInput_${clip.id}').click()" title="upload your own finished video for this ${sideLabel}">📤 upload video</button>`
                 : '';
 
             // v782 — copy-prompt = ghost button (low emphasis utility).
@@ -11596,9 +11596,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     ${cascadeNotice}
                     <div style="display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap;">
                         <input type="file" id="replaceImageInput_${clipId}" accept="image/png,image/jpeg,image/webp" style="display:none;" onchange="replaceClipImage(${clipId}, '${jid}', this.files[0])">
-                        <button class="btn btn-primary btn-sm" style="padding:6px 14px;font-size:12px;" onclick="document.getElementById('replaceImageInput_${clipId}').click()" title="upload a new image">📁 upload replacement</button>
+                        <button class="btn btn-primary btn-sm" style="padding:6px 14px;font-size:12px;" onclick="document.getElementById('replaceImageInput_${clipId}').click()" title="upload a new image">📁 upload image</button>
                         <input type="file" id="uploadVideoInput_${clipId}" accept="video/*" style="display:none;" onchange="uploadClipVideo(${clipId}, '${jid}', this.files[0])">
-                        <button class="btn btn-secondary btn-sm" style="padding:6px 14px;font-size:12px;margin-left:8px;" onclick="document.getElementById('uploadVideoInput_${clipId}').click()" title="upload your own finished video instead">📤 upload my own video</button>
+                        <button class="btn btn-secondary btn-sm" style="padding:6px 14px;font-size:12px;margin-left:8px;" onclick="document.getElementById('uploadVideoInput_${clipId}').click()" title="upload your own finished video instead">📤 upload video</button>
                         ${((c.versions||[]).some(v => v && v.filename)) ? `<button class="btn btn-secondary btn-sm" style="padding:6px 12px;font-size:12px;background:rgba(99,102,241,0.18);color:#a5b4fc;border-color:rgba(99,102,241,0.4);" onclick="revertToPriorVersion(${clipId},${c.clip_index})" title="restore the clip that rendered fine before this redo">↶ revert to prior render</button>` : ''}
                         <button class="btn btn-secondary btn-sm" style="padding:6px 10px;font-size:12px;color:var(--text-muted);" onclick="confirmDelete(${clipId},${c.clip_index})" title="remove this clip from the lineup">🗑</button>
                     </div>
@@ -19158,6 +19158,11 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // from the bulk-actions row. imgBulkExportList handler kept in case a
             // future flow re-exposes it.
             // (was: bulkActions.push(`<button ... onclick="imgBulkExportList(...)"...>📋 Export list</button>`))
+            // v794 — download every generated image in this job as one zip,
+            // numbered in scene order. Frontend-only (lazy-loads JSZip).
+            if (!groupKey.startsWith('__') && generatedNodes.length > 0) {
+                bulkActions.push(`<button class="btn btn-secondary" onclick="imgDownloadAllImages('${keyAttr}')" title="Download every generated image in this job as one zip, numbered in scene order">📥 Download all</button>`);
+            }
             if (!groupKey.startsWith('__') && nodes.length > 0) {
                 bulkActions.push(`<button class="btn btn-secondary" style="color:var(--error);" onclick="imgBulkDeleteJob('${keyAttr}')" title="Delete every node in this job">🗑 Delete job</button>`);
             }
@@ -19206,6 +19211,76 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     : `<div class="img-storyboard-grid">${tilesHtml}</div>`
                 }
             `;
+        }
+
+        // v794 — lazy-load JSZip from cdnjs (same pattern as cytoscape above).
+        let _imgJsZipPromise = null;
+        function imgEnsureJSZip() {
+            if (window.JSZip) return Promise.resolve(window.JSZip);
+            if (_imgJsZipPromise) return _imgJsZipPromise;
+            _imgJsZipPromise = new Promise((resolve, reject) => {
+                const s = document.createElement('script');
+                s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+                s.onload = () => window.JSZip ? resolve(window.JSZip) : reject(new Error('JSZip loaded but missing'));
+                s.onerror = () => reject(new Error('Failed to load JSZip from cdnjs'));
+                document.head.appendChild(s);
+            });
+            return _imgJsZipPromise;
+        }
+
+        // v794 — download every generated image in a job as a single ordered zip.
+        // Pulls the FULL-res chosen variant (or first variant) per node, in the
+        // same order the tiles render, and names files 01_sceneN.ext so they sort
+        // correctly in any file manager.
+        async function imgDownloadAllImages(groupKey) {
+            const nodes = imgState.groupsByKey[groupKey] || [];
+            const items = [];
+            nodes.forEach((n, idx) => {
+                const url = n.chosen_variant ? n.chosen_variant.image_url
+                          : (n.variants && n.variants.length ? n.variants[0].image_url : null);
+                if (!url) return;
+                const mm = (n.name || '').match(/Scene\s+(\d+)/i);
+                const label = mm ? ('scene' + mm[1]) : ('image' + (idx + 1));
+                items.push({ url, label });
+            });
+            if (!items.length) { alert('No generated images to download in this job'); return; }
+
+            const btns = document.querySelectorAll(`button[onclick*="imgDownloadAllImages('${groupKey}')"]`);
+            const setBtn = (txt, disabled) => btns.forEach(b => { b.textContent = txt; b.disabled = disabled; });
+            setBtn('⏳ Zipping…', true);
+            try {
+                const JSZip = await imgEnsureJSZip();
+                const zip = new JSZip();
+                for (let i = 0; i < items.length; i++) {
+                    const it = items[i];
+                    setBtn(`⏳ ${i + 1}/${items.length}`, true);
+                    const res = await fetch(it.url);
+                    if (!res.ok) throw new Error(`fetch failed (${res.status}) for ${it.label}`);
+                    const blob = await res.blob();
+                    let ext = 'png';
+                    const ct = res.headers.get('content-type') || '';
+                    if (ct.includes('webp')) ext = 'webp';
+                    else if (ct.includes('jpeg') || ct.includes('jpg')) ext = 'jpg';
+                    else { const m = it.url.split('?')[0].match(/\.(png|jpe?g|webp)$/i); if (m) ext = m[1].toLowerCase().replace('jpeg', 'jpg'); }
+                    const seq = String(i + 1).padStart(2, '0');
+                    zip.file(`${seq}_${it.label}.${ext}`, blob);
+                }
+                setBtn('⏳ Building zip…', true);
+                const out = await zip.generateAsync({ type: 'blob' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(out);
+                a.download = 'images.zip';
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+            } catch (e) {
+                console.error('Download all images failed:', e);
+                alert('Download failed: ' + e.message);
+            } finally {
+                setBtn('📥 Download all', false);
+            }
         }
 
         // Bulk action: regenerate all failed scenes in a job
