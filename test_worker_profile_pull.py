@@ -38,6 +38,17 @@ def test_find_profile_dir_for_email_no_match_returns_none(tmp_path):
     assert wpp.find_profile_dir_for_email(ud, "nobody@gmail.com") is None
 
 
+def test_find_profile_dir_for_email_secondary_account(tmp_path):
+    # Account present only as a SECONDARY (Preferences account_info), not in
+    # Local State info_cache — must still be found.
+    ud = tmp_path / "User Data"
+    (ud / "Profile 65").mkdir(parents=True)
+    (ud / "Profile 65" / "Preferences").write_text(
+        json.dumps({"account_info": [{"email": "aelabs7105@gmail.com"}]}), encoding="utf-8")
+    _write_local_state(str(ud), {"Default": {"user_name": "someone@gmail.com"}})
+    assert wpp.find_profile_dir_for_email(str(ud), "aelabs7105@gmail.com") == "Profile 65"
+
+
 def test_list_profile_emails(tmp_path):
     ud = str(tmp_path / "User Data")
     _write_local_state(ud, {
@@ -79,6 +90,19 @@ def test_resolve_user_data_dir_none_when_no_env():
     assert wpp.resolve_laptop_user_data_dir(env={}) is None
 
 
+def test_resolve_user_data_dirs_includes_beta():
+    dirs = wpp.resolve_laptop_user_data_dirs(env={"LOCALAPPDATA": r"C:\u\AppData\Local"})
+    assert os.path.join(r"C:\u\AppData\Local", "Google", "Chrome", "User Data") in dirs
+    assert os.path.join(r"C:\u\AppData\Local", "Google", "Chrome Beta", "User Data") in dirs
+    # stable searched before Beta
+    assert dirs.index(os.path.join(r"C:\u\AppData\Local", "Google", "Chrome", "User Data")) < \
+           dirs.index(os.path.join(r"C:\u\AppData\Local", "Google", "Chrome Beta", "User Data"))
+
+
+def test_resolve_user_data_dirs_override():
+    assert wpp.resolve_laptop_user_data_dirs(env={"LAPTOP_CHROME_USER_DATA": "X:/ud"}) == ["X:/ud"]
+
+
 # --- Task 3: the pull -------------------------------------------------------
 
 def _fake_laptop(tmp_path, email="me@gmail.com", folder="Profile 3"):
@@ -100,7 +124,7 @@ def test_pull_builds_golden_with_default_and_local_state(tmp_path):
     calls = []
     ok = wpp.pull_profile_from_laptop(
         "me@gmail.com", golden, label="Account1",
-        user_data_dir=ud, close_chrome=lambda: calls.append("closed"),
+        user_data_dir=ud, close_chrome=lambda _ud: calls.append("closed"),
         log=lambda m: None,
     )
     assert ok is True
@@ -126,7 +150,7 @@ def test_pull_email_not_found_fails_keeps_golden(tmp_path):
     os.makedirs(os.path.join(golden, "Default"))
     open(os.path.join(golden, "Default", "marker"), "w").close()
     ok = wpp.pull_profile_from_laptop("me@gmail.com", golden, user_data_dir=ud,
-                                      close_chrome=lambda: None, log=lambda m: None)
+                                      close_chrome=lambda _ud: None, log=lambda m: None)
     assert ok is False
     assert os.path.isfile(os.path.join(golden, "Default", "marker"))
 
@@ -184,7 +208,7 @@ def test_pull_auto_detect_no_email(tmp_path):
     ud = _fake_laptop(tmp_path, email="me@gmail.com", folder="Default")
     golden = str(tmp_path / "chrome-golden")
     ok = wpp.pull_profile_from_laptop("", golden, user_data_dir=ud,
-                                      close_chrome=lambda: None, log=lambda m: None)
+                                      close_chrome=lambda _ud: None, log=lambda m: None)
     assert ok is True
     assert os.path.isfile(os.path.join(golden, "Default", "Network", "Cookies"))
 
@@ -194,7 +218,7 @@ def test_pull_no_email_no_signin_returns_false(tmp_path):
     _write_local_state(ud, {"Default": {}})
     golden = str(tmp_path / "chrome-golden")
     ok = wpp.pull_profile_from_laptop("", golden, user_data_dir=ud,
-                                      close_chrome=lambda: None, log=lambda m: None)
+                                      close_chrome=lambda _ud: None, log=lambda m: None)
     assert ok is False
 
 

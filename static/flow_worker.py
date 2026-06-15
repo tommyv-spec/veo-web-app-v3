@@ -3621,30 +3621,23 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
         if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
         from worker_profile_pull import (
-            pull_profile_from_laptop, resolve_laptop_user_data_dir, close_laptop_chrome,
-            load_laptop_email as _load_laptop_email,
+            pull_profile_from_laptop, load_laptop_email as _load_laptop_email,
         )
         # Re-read at call time: on the first launch after an update the module
         # was not yet present when ACCOUNTS was built, so the import-time email
         # is ''. The updater has now synced the module — re-read env + file.
         email = ACCOUNTS[0].get("laptop_email", "") or _load_laptop_email(
             os.path.join(_BASE, "worker_settings.json"))
-        _ud = resolve_laptop_user_data_dir()
-        if not _ud:
-            print(f"[{label}] DIAG laptop pull: no Chrome User Data dir "
-                  f"(set LAPTOP_CHROME_USER_DATA)", flush=True)
-            return
         # No email: only seed when golden is missing, so an established worker
         # session is not clobbered every boot. Email: force pull every start.
         if not email and os.path.exists(golden_folder):
             return
         print(f"[{label}] DIAG laptop pull start "
-              f"email={email or '(auto-detect signed-in)'} ud={_ud}", flush=True)
-        pull_profile_from_laptop(
-            email, golden_folder, label=label,
-            close_chrome=lambda: close_laptop_chrome(_ud, log=lambda m: print(m, flush=True)),
-            log=lambda m: print(m, flush=True),
-        )
+              f"email={email or '(auto-detect signed-in)'}", flush=True)
+        # pull searches all Chrome channels (stable/Beta/Dev/Canary) + closes
+        # the matched channel's Chrome itself.
+        pull_profile_from_laptop(email, golden_folder, label=label,
+                                 log=lambda m: print(m, flush=True))
     except Exception as _pe:
         print(f"[{label}] laptop pull error (continuing): {_pe}", flush=True)
 

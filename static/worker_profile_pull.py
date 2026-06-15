@@ -20,22 +20,42 @@ import sys
 import time
 
 
-def find_profile_dir_for_email(user_data_dir, email):
-    """Return the profile folder name (e.g. 'Default', 'Profile 3') logged
-    into `email`, or None. Match is case-insensitive on info_cache.user_name."""
-    local_state_path = os.path.join(user_data_dir, "Local State")
+def _profile_account_emails(user_data_dir, folder):
+    """All Google account emails in a profile, from its Preferences
+    account_info — includes SECONDARY accounts added via 'add another account'
+    that Local State's info_cache (primary only) does not list."""
+    pref = os.path.join(user_data_dir, folder, "Preferences")
     try:
-        with open(local_state_path, "r", encoding="utf-8") as f:
-            state = json.load(f)
+        with open(pref, "r", encoding="utf-8") as f:
+            accs = json.load(f).get("account_info", []) or []
     except (OSError, ValueError):
-        return None
-    cache = state.get("profile", {}).get("info_cache", {})
+        return []
+    return [str(a.get("email", "")).strip().lower() for a in accs if a.get("email")]
+
+
+def find_profile_dir_for_email(user_data_dir, email):
+    """Return the profile folder name (e.g. 'Default', 'Profile 65') logged into
+    `email`, or None. Checks Local State info_cache (primary account) first, then
+    each profile's Preferences account_info (catches secondary accounts that
+    info_cache omits). Case-insensitive."""
     target = (email or "").strip().lower()
     if not target:
         return None
+    # 1. Local State info_cache — the synced/primary account per profile.
+    try:
+        with open(os.path.join(user_data_dir, "Local State"), "r", encoding="utf-8") as f:
+            cache = json.load(f).get("profile", {}).get("info_cache", {})
+    except (OSError, ValueError):
+        cache = {}
     for folder, info in cache.items():
         if str(info.get("user_name", "")).strip().lower() == target:
             return folder
+    # 2. Per-profile Preferences account_info — catches secondary accounts.
+    if os.path.isdir(user_data_dir):
+        for entry in sorted(os.listdir(user_data_dir)):
+            if os.path.isdir(os.path.join(user_data_dir, entry)):
+                if target in _profile_account_emails(user_data_dir, entry):
+                    return entry
     return None
 
 
@@ -103,6 +123,25 @@ def resolve_laptop_user_data_dir(env=None):
     if not local_appdata:
         return None
     return os.path.join(local_appdata, "Google", "Chrome", "User Data")
+
+
+def resolve_laptop_user_data_dirs(env=None):
+    r"""All Chrome-family User Data dirs to search for the account, in order:
+    stable, Beta, Dev, Canary (SxS), Chromium. The Google account may live in
+    any channel — Beta has its own %LOCALAPPDATA%\Google\Chrome Beta\User Data.
+    LAPTOP_CHROME_USER_DATA override returns just that one."""
+    env = os.environ if env is None else env
+    override = env.get("LAPTOP_CHROME_USER_DATA")
+    if override:
+        return [override]
+    dirs = []
+    local_appdata = env.get("LOCALAPPDATA")
+    if local_appdata:
+        for parts in (("Google", "Chrome"), ("Google", "Chrome Beta"),
+                      ("Google", "Chrome Dev"), ("Google", "Chrome SxS"),
+                      ("Chromium",)):
+            dirs.append(os.path.join(local_appdata, *parts, "User Data"))
+    return dirs
 
 
 def _parse_user_data_dir_from_cmdline(cmdline):
@@ -187,43 +226,51 @@ def pull_profile_from_laptop(email, golden_folder, label="",
     before copying; pass a targeted closer in production, a stub in tests."""
     tag = f"[{label}] " if label else ""
 
-    user_data_dir = user_data_dir or resolve_laptop_user_data_dir()
-    if not user_data_dir or not os.path.isdir(user_data_dir):
-        log(f"{tag}laptop pull: Chrome User Data not found ({user_data_dir})")
-        return False
-    if not os.path.isfile(os.path.join(user_data_dir, "Local State")):
-        log(f"{tag}laptop pull: Local State missing in {user_data_dir}")
+    # Search every Chrome channel (stable, Beta, Dev, Canary, Chromium) — the
+    # account may live in any of them (e.g. Chrome Beta has its own User Data).
+    candidates = [user_data_dir] if user_data_dir else resolve_laptop_user_data_dirs()
+
+    user_data_dir, profile_folder = None, None
+    for ud in candidates:
+        if not ud or not os.path.isdir(ud) or not os.path.isfile(os.path.join(ud, "Local State")):
+            continue
+        pf = find_profile_dir_for_email(ud, email) if email else find_logged_in_profile(ud)
+        if pf:
+            user_data_dir, profile_folder = ud, pf
+            break
+
+    if not profile_folder:
+        avail = []
+        for ud in candidates:
+            try:
+                avail += list_profile_emails(ud)
+            except Exception:
+                pass
+        if email:
+            # Email given => use exactly that account; never pull a different one.
+            log(f"{tag}laptop pull: account {email!r} is NOT logged into any Chrome "
+                f"channel (stable/Beta/Dev/Canary). Log into it in Chrome first, or "
+                f"use one of: {avail}")
+        else:
+            log(f"{tag}laptop pull: no signed-in Chrome profile found in any channel.")
         return False
 
-    # Email given => use exactly that account. If it is not logged into this
-    # Chrome, FAIL clearly (do NOT silently pull a different account).
-    # No email => auto-detect the signed-in / Default profile.
-    if email:
-        profile_folder = find_profile_dir_for_email(user_data_dir, email)
-        if not profile_folder:
-            log(f"{tag}laptop pull: account {email!r} is NOT logged into this Chrome. "
-                f"Log into it in your normal Chrome first, or use one of: "
-                f"{list_profile_emails(user_data_dir)}")
-            return False
-    else:
-        profile_folder = find_logged_in_profile(user_data_dir)
-        if not profile_folder:
-            log(f"{tag}laptop pull: no signed-in Chrome profile found. "
-                f"Available: {list_profile_emails(user_data_dir)}")
-            return False
-        log(f"{tag}laptop pull: auto-detected profile {profile_folder!r}")
     src_profile = os.path.join(user_data_dir, profile_folder)
     if not os.path.isdir(src_profile):
         log(f"{tag}laptop pull: profile folder missing {src_profile}")
         return False
+    log(f"{tag}laptop pull: using profile {profile_folder!r} from {user_data_dir}")
 
-    # Unlock cookie/login SQLite DBs by closing the laptop's Chrome.
-    if close_chrome is not None:
-        try:
-            close_chrome()
-        except Exception as e:
-            log(f"{tag}laptop pull: close chrome failed: {e}")
-            return False
+    # Unlock cookie/login SQLite DBs by closing the laptop Chrome that owns this
+    # profile (the channel we matched).
+    try:
+        if close_chrome is not None:
+            close_chrome(user_data_dir)
+        else:
+            close_laptop_chrome(user_data_dir, log=log)
+    except Exception as e:
+        log(f"{tag}laptop pull: close chrome failed: {e}")
+        return False
 
     # Build into a temp dir, then atomic swap -- never wipe the live golden first.
     tmp = golden_folder + ".pull_tmp"
