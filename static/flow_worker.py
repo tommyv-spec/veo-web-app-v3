@@ -3622,8 +3622,13 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
             return
         from worker_profile_pull import (
             pull_profile_from_laptop, resolve_laptop_user_data_dir, close_laptop_chrome,
+            load_laptop_email as _load_laptop_email,
         )
-        email = ACCOUNTS[0].get("laptop_email", "")
+        # Re-read at call time: on the first launch after an update the module
+        # was not yet present when ACCOUNTS was built, so the import-time email
+        # is ''. The updater has now synced the module — re-read env + file.
+        email = ACCOUNTS[0].get("laptop_email", "") or _load_laptop_email(
+            os.path.join(_BASE, "worker_settings.json"))
         _ud = resolve_laptop_user_data_dir()
         if not _ud:
             print(f"[{label}] DIAG laptop pull: no Chrome User Data dir "
@@ -22296,6 +22301,26 @@ if __name__ == "__main__":
             update_url = f"{WEB_APP_URL}/api/user-worker/download/flow_worker.py"
             
             print(f"Checking for updates from {WEB_APP_URL}...", flush=True)
+
+            # Companion module: the worker only auto-downloads flow_worker.py, so
+            # fetch worker_profile_pull.py (which flow_worker imports) next to it
+            # every launch. Done BEFORE the flow_worker hash/restart below so it
+            # is present even when flow_worker.py itself restarts.
+            try:
+                _comp_url = f"{WEB_APP_URL}/api/user-worker/download/worker_profile_pull.py"
+                _creq = _urllib.Request(_comp_url, headers={"User-Agent": f"flow-worker/{WORKER_BUILD}"})
+                with _urllib.urlopen(_creq, timeout=15) as _cresp:
+                    _cbytes = _cresp.read()
+                compile(_cbytes.decode('utf-8'), '<worker_profile_pull>', 'exec')
+                _cpath = os.path.join(os.path.dirname(my_path), "worker_profile_pull.py")
+                _ctmp = _cpath + ".tmp"
+                with open(_ctmp, 'wb') as _cf:
+                    _cf.write(_cbytes)
+                os.replace(_ctmp, _cpath)
+                print("✓ Synced worker_profile_pull.py companion module", flush=True)
+            except Exception as _ce:
+                print(f"⚠ Could not sync worker_profile_pull.py ({_ce})", flush=True)
+
             req = _urllib.Request(update_url, headers={"User-Agent": f"flow-worker/{WORKER_BUILD}"})
             with _urllib.urlopen(req, timeout=15) as resp:
                 latest = resp.read()

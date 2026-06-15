@@ -13287,6 +13287,16 @@ async def serve_flow_worker():
     return Response(content=worker_path.read_text(), media_type="text/x-python")
 
 
+@app.get("/api/user-worker/download/worker_profile_pull.py")
+async def serve_worker_profile_pull():
+    """Serve the laptop-profile-pull companion module. flow_worker.py imports it;
+    the worker's auto-updater fetches it next to flow_worker.py every launch."""
+    mod_path = Path(__file__).parent / "static" / "worker_profile_pull.py"
+    if not mod_path.exists():
+        raise HTTPException(404, "Module not found")
+    return Response(content=mod_path.read_text(), media_type="text/x-python")
+
+
 @app.get("/api/user-worker/version")
 async def worker_version():
     """Return current worker version (content hash) for auto-update checks."""
