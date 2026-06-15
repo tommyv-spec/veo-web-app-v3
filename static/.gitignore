@@ -1,0 +1,2 @@
+# Local-only worker config (holds an email; per-machine, not committed)
+worker_settings.json

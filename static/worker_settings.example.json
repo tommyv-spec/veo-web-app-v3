@@ -1,0 +1,4 @@
+{
+  "_comment": "Copy this to worker_settings.json next to flow_worker.py. Set laptop_email to the Google account your laptop Chrome is logged into + trusted. Empty disables the feature. Env var ACCOUNT1_LAPTOP_EMAIL overrides this file.",
+  "laptop_email": ""
+}

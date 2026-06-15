@@ -3568,6 +3568,14 @@ def _get_proxy(account_num):
 # Golden folders are derived automatically by get_golden_folder():
 #   chrome-golden    / chrome-golden-2    / chrome-golden-3    / chrome-golden-4
 _BASE = os.environ.get("WORKER_BASE_DIR", os.path.dirname(os.path.abspath(__file__)))
+
+# Laptop-profile pull (optional; empty email => feature off, current behavior)
+try:
+    from worker_profile_pull import load_laptop_email
+except Exception:
+    def load_laptop_email(*_a, **_k):
+        return ""
+
 ACCOUNTS = [
     {
         "name": "Account1",
@@ -3575,6 +3583,7 @@ ACCOUNTS = [
         "download_folder": os.environ.get("ACCOUNT1_DOWNLOAD", os.path.join(_BASE, "chrome-download")),
         "proxy": _get_proxy(1),
         "enabled": os.environ.get("ACCOUNT1_ENABLED", "true").lower() == "true",
+        "laptop_email": load_laptop_email(os.path.join(_BASE, "worker_settings.json")),
     },
     {
         "name": "Account2",
@@ -18861,6 +18870,24 @@ class AccountWorker(threading.Thread):
           # accidentally kills another account's already-running browser via substring match)
             if not self.golden_restored:
                 _acct_golden = get_golden_folder(self.session_folder)
+                # --- Laptop-profile pull (slot 1 only, if email configured) ---
+                # Additive + fail-safe: any error here must NOT break launch.
+                _laptop_email = ACCOUNTS[0].get("laptop_email", "")
+                if _laptop_email and self.session_folder == ACCOUNTS[0]["session_folder"]:
+                    try:
+                        from worker_profile_pull import (
+                            pull_profile_from_laptop, resolve_laptop_user_data_dir,
+                            close_laptop_chrome,
+                        )
+                        _ud = resolve_laptop_user_data_dir()
+                        print(f"[{self.name}] DIAG laptop pull start email={_laptop_email} ud={_ud}", flush=True)
+                        pull_profile_from_laptop(
+                            _laptop_email, _acct_golden, label=self.name,
+                            close_chrome=(lambda: close_laptop_chrome(_ud, log=lambda m: print(m, flush=True))) if _ud else None,
+                            log=lambda m: print(m, flush=True),
+                        )
+                    except Exception as _pe:
+                        print(f"[{self.name}] laptop pull error (continuing on existing golden): {_pe}", flush=True)
                 if os.path.exists(_acct_golden):
                     print(f"[{self.name}] Restoring session from golden before launch: {_acct_golden}", flush=True)
                     kill_chrome_using_profile(self.session_folder, label=self.name)
