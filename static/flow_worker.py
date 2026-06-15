@@ -3608,6 +3608,29 @@ ACCOUNTS = [
     },
 ]
 
+def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
+    """If slot-1 has a laptop_email set, rebuild its golden from the laptop's
+    already-trusted Chrome profile so Google skips the verification code.
+    Slot-1 only, fail-safe: any error logged, never raises, never blocks launch.
+    Must run BEFORE restore_from_golden so golden exists for the restore."""
+    try:
+        email = ACCOUNTS[0].get("laptop_email", "")
+        if not email or session_folder != ACCOUNTS[0]["session_folder"]:
+            return
+        from worker_profile_pull import (
+            pull_profile_from_laptop, resolve_laptop_user_data_dir, close_laptop_chrome,
+        )
+        _ud = resolve_laptop_user_data_dir()
+        print(f"[{label}] DIAG laptop pull start email={email} ud={_ud}", flush=True)
+        pull_profile_from_laptop(
+            email, golden_folder, label=label,
+            close_chrome=(lambda: close_laptop_chrome(_ud, log=lambda m: print(m, flush=True))) if _ud else None,
+            log=lambda m: print(m, flush=True),
+        )
+    except Exception as _pe:
+        print(f"[{label}] laptop pull error (continuing): {_pe}", flush=True)
+
+
 # Enable multi-account mode via env var (auto-detected if Account2 is enabled)
 MULTI_ACCOUNT_MODE = os.environ.get("MULTI_ACCOUNT_MODE", "false").lower() == "true"
 
@@ -18870,24 +18893,8 @@ class AccountWorker(threading.Thread):
           # accidentally kills another account's already-running browser via substring match)
             if not self.golden_restored:
                 _acct_golden = get_golden_folder(self.session_folder)
-                # --- Laptop-profile pull (slot 1 only, if email configured) ---
-                # Additive + fail-safe: any error here must NOT break launch.
-                _laptop_email = ACCOUNTS[0].get("laptop_email", "")
-                if _laptop_email and self.session_folder == ACCOUNTS[0]["session_folder"]:
-                    try:
-                        from worker_profile_pull import (
-                            pull_profile_from_laptop, resolve_laptop_user_data_dir,
-                            close_laptop_chrome,
-                        )
-                        _ud = resolve_laptop_user_data_dir()
-                        print(f"[{self.name}] DIAG laptop pull start email={_laptop_email} ud={_ud}", flush=True)
-                        pull_profile_from_laptop(
-                            _laptop_email, _acct_golden, label=self.name,
-                            close_chrome=(lambda: close_laptop_chrome(_ud, log=lambda m: print(m, flush=True))) if _ud else None,
-                            log=lambda m: print(m, flush=True),
-                        )
-                    except Exception as _pe:
-                        print(f"[{self.name}] laptop pull error (continuing on existing golden): {_pe}", flush=True)
+                # Slot-1 laptop-profile pull (fallback path when not pre-restored).
+                _maybe_pull_laptop_profile(self.session_folder, _acct_golden, label=self.name)
                 if os.path.exists(_acct_golden):
                     print(f"[{self.name}] Restoring session from golden before launch: {_acct_golden}", flush=True)
                     kill_chrome_using_profile(self.session_folder, label=self.name)
@@ -20158,6 +20165,9 @@ def main_multi_account(accounts_override=None):
         session_folder = account['session_folder']
         account_label = account['name']
         golden = get_golden_folder(session_folder)
+        # Slot-1 laptop-profile pull (rebuilds golden from the laptop's trusted
+        # Chrome login). Runs here BEFORE the restore so golden exists below.
+        _maybe_pull_laptop_profile(session_folder, golden, label=account_label)
         if os.path.exists(golden):
             print(f"[{account_label}] Killing stale Chrome and restoring from golden...", flush=True)
             kill_chrome_using_profile(session_folder, label=account_label)
@@ -20594,6 +20604,8 @@ def main(account_session=None, account_download=None, account_label=None):
         # Always start from the clean golden profile (not whatever accumulated state
         # was left in session_folder from a previous run).
         _startup_golden = get_golden_folder(SESSION_FOLDER)
+        # Slot-1 laptop-profile pull (rebuilds golden from laptop trusted login).
+        _maybe_pull_laptop_profile(SESSION_FOLDER, _startup_golden, label="STARTUP")
         if os.path.exists(_startup_golden):
             print(f"[STARTUP] Restoring session from golden before launch: {_startup_golden}", flush=True)
             kill_chrome_using_profile(SESSION_FOLDER, label="STARTUP")
