@@ -3618,6 +3618,8 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
     try:
         email = ACCOUNTS[0].get("laptop_email", "")
         if not email:
+            print(f"[{label}] DIAG laptop pull SKIPPED — no email "
+                  f"(ACCOUNT1_LAPTOP_EMAIL env empty / not in .env)", flush=True)
             return
         from worker_profile_pull import (
             pull_profile_from_laptop, resolve_laptop_user_data_dir, close_laptop_chrome,
