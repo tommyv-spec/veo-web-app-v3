@@ -17,6 +17,7 @@ import re as _re
 import shutil
 import subprocess
 import sys
+import time
 
 
 def find_profile_dir_for_email(user_data_dir, email):
@@ -128,42 +129,54 @@ def _chrome_proc_uses_dir(cmdline, target_user_data_dir):
 
 
 def close_laptop_chrome(user_data_dir, log=print):
-    """Force-close Chrome processes belonging to the laptop User Data (and
-    default-profile Chrome). Leaves worker-slot Chrome (explicit other
-    --user-data-dir) running. Windows-first; best-effort elsewhere."""
+    """Close laptop Chrome so its cookie/login DBs unlock for copying. Targets
+    Chrome using the laptop User Data (or default-profile Chrome) and spares
+    worker-slot Chrome (explicit other --user-data-dir).
+
+    Windows: enumerate via PowerShell CIM — `wmic` is REMOVED on recent Win11.
+    If enumeration fails, fall back to closing all Chrome (safe at pre-start:
+    no worker Chrome is running yet). Sleeps after killing so Windows releases
+    the file locks before the copy."""
     if sys.platform != "win32":
         try:
             subprocess.run(["pkill", "-f", "chrome"], capture_output=True)
+            time.sleep(1.0)
         except Exception as e:
             log(f"laptop pull: pkill failed: {e}")
         return
-    try:
-        out = subprocess.run(
-            ["wmic", "process", "where", "name='chrome.exe'",
-             "get", "ProcessId,CommandLine", "/format:list"],
-            capture_output=True, text=True).stdout
-    except Exception as e:
-        log(f"laptop pull: wmic enumerate failed: {e}")
-        return
-    pid, cmd = None, None
+
+    def _taskkill_all():
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"],
+                           capture_output=True)
+        except Exception as e:
+            log(f"laptop pull: taskkill all failed: {e}")
+
     killed = 0
-    for line in out.splitlines():
-        line = line.strip()
-        if line.startswith("CommandLine="):
-            cmd = line[len("CommandLine="):]
-        elif line.startswith("ProcessId="):
-            pid = line[len("ProcessId="):].strip()
-            # Require a real CommandLine for this record; a None/empty cmd means
-            # we could not read it (access denied / record boundary) -> skip,
-            # never kill on a stale or missing commandline.
-            if pid and cmd and _chrome_proc_uses_dir(cmd, user_data_dir):
+    try:
+        ps = ("Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
+              "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, timeout=30).stdout
+        rows = [r for r in out.splitlines() if r.strip()]
+        if not rows:
+            log("laptop pull: no Chrome processes found to close")
+            return
+        for row in rows:
+            pid, _, cmd = row.partition("\t")
+            pid = pid.strip()
+            if pid and _chrome_proc_uses_dir(cmd or "", user_data_dir):
                 try:
                     subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
                     killed += 1
                 except Exception:
                     pass
-            pid, cmd = None, None
-    log(f"laptop pull: closed {killed} laptop Chrome process(es)")
+        log(f"laptop pull: closed {killed} laptop Chrome process(es)")
+    except Exception as e:
+        log(f"laptop pull: PowerShell enumerate failed ({e}); closing all Chrome")
+        _taskkill_all()
+    time.sleep(2.0)  # let Windows release the cookie/session file locks
 
 
 def pull_profile_from_laptop(email, golden_folder, label="",
@@ -182,22 +195,23 @@ def pull_profile_from_laptop(email, golden_folder, label="",
         log(f"{tag}laptop pull: Local State missing in {user_data_dir}")
         return False
 
-    # Email given => use that profile (fall back to any signed-in profile if the
-    # email is not found). No email => auto-detect the signed-in profile.
+    # Email given => use exactly that account. If it is not logged into this
+    # Chrome, FAIL clearly (do NOT silently pull a different account).
+    # No email => auto-detect the signed-in / Default profile.
     if email:
         profile_folder = find_profile_dir_for_email(user_data_dir, email)
         if not profile_folder:
-            profile_folder = find_logged_in_profile(user_data_dir)
-            if profile_folder:
-                log(f"{tag}laptop pull: email {email!r} not found, using signed-in "
-                    f"profile {profile_folder!r}. Available: {list_profile_emails(user_data_dir)}")
+            log(f"{tag}laptop pull: account {email!r} is NOT logged into this Chrome. "
+                f"Log into it in your normal Chrome first, or use one of: "
+                f"{list_profile_emails(user_data_dir)}")
+            return False
     else:
         profile_folder = find_logged_in_profile(user_data_dir)
-        if profile_folder:
-            log(f"{tag}laptop pull: auto-detected signed-in profile {profile_folder!r}")
-    if not profile_folder:
-        log(f"{tag}laptop pull: no signed-in Chrome profile found. Available: {list_profile_emails(user_data_dir)}")
-        return False
+        if not profile_folder:
+            log(f"{tag}laptop pull: no signed-in Chrome profile found. "
+                f"Available: {list_profile_emails(user_data_dir)}")
+            return False
+        log(f"{tag}laptop pull: auto-detected profile {profile_folder!r}")
     src_profile = os.path.join(user_data_dir, profile_folder)
     if not os.path.isdir(src_profile):
         log(f"{tag}laptop pull: profile folder missing {src_profile}")

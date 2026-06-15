@@ -118,18 +118,17 @@ def test_pull_empty_email_is_noop(tmp_path):
     assert not os.path.exists(golden)
 
 
-def test_pull_email_not_found_falls_back_to_signed_in(tmp_path):
-    # Email not present, but a profile IS signed in -> fall back to it so login
-    # still happens (golden gets rebuilt from the signed-in profile).
+def test_pull_email_not_found_fails_keeps_golden(tmp_path):
+    # Email given but NOT logged into this Chrome -> fail clearly, never pull a
+    # different account. Existing golden untouched.
     ud = _fake_laptop(tmp_path, email="other@gmail.com", folder="Default")
     golden = str(tmp_path / "chrome-golden")
     os.makedirs(os.path.join(golden, "Default"))
     open(os.path.join(golden, "Default", "marker"), "w").close()
     ok = wpp.pull_profile_from_laptop("me@gmail.com", golden, user_data_dir=ud,
                                       close_chrome=lambda: None, log=lambda m: None)
-    assert ok is True
-    assert not os.path.isfile(os.path.join(golden, "Default", "marker"))
-    assert os.path.isfile(os.path.join(golden, "Default", "Network", "Cookies"))
+    assert ok is False
+    assert os.path.isfile(os.path.join(golden, "Default", "marker"))
 
 
 def test_pull_email_not_found_no_signin_keeps_golden(tmp_path):
