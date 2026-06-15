@@ -18984,6 +18984,16 @@ class AccountWorker(threading.Thread):
             
             # Match test_human_like.py
             self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
+            # DIAG: which Chrome actually launched? Beta=~150, stable=~149. If
+            # channel was chrome-beta but this shows stable, the app-bound cookie
+            # key (bound to Beta) can't be unwrapped -> pulled login is dead.
+            try:
+                _bro = getattr(self.browser, "browser", None)
+                _bver = _bro.version if _bro else "?"
+                print(f"[{self.name}] DIAG launched Chrome version={_bver} "
+                      f"(requested channel={_worker_chrome_channel()})", flush=True)
+            except Exception as _ve:
+                print(f"[{self.name}] DIAG could not read Chrome version: {_ve}", flush=True)
             # Note: Patchright handles stealth natively — no init script needed
 
             # v486: stash profile path on page so _find_chrome_hwnd can
