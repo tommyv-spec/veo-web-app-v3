@@ -322,6 +322,16 @@
                 </div>
             </div>
         </div>
+
+        <div class="card" id="emailCard">
+            <div style="font-size:13px;font-weight:500;color:var(--text-primary);">Skip the Google code</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px;margin-bottom:10px;line-height:1.5;">
+                Type the Gmail your Chrome is already logged into. The worker reuses that login so Google won't ask you for a verification code. Leave blank to log in by hand. Works when the worker runs on this same computer. Your normal Chrome will close once when the worker starts.
+            </div>
+            <input id="laptopEmail" type="email" placeholder="you@gmail.com" autocomplete="off" spellcheck="false"
+                style="width:100%;padding:9px 12px;background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:8px;color:var(--text-primary);font-size:13px;font-family:inherit;outline:none;"
+                oninput="laptopEmail=this.value.trim()">
+        </div>
     </div>
 
     <!-- Orb -->
@@ -473,6 +483,7 @@ let userOS = (() => { const u = navigator.userAgent.toLowerCase(); return u.incl
 let activeToken = null;
 let numAccounts = 1;
 let resetSessions = false;
+let laptopEmail = '';
 
 // ── Settings ─────────────────────────────────────────────────────
 
@@ -601,7 +612,8 @@ function downloadInstaller(os, opts) {
     const url = API + '/api/user-worker/download/installer?os=' + os
         + '&accounts=' + numAccounts
         + '&reset=' + reset
-        + '&update_only=' + update;
+        + '&update_only=' + update
+        + '&laptop_email=' + encodeURIComponent(laptopEmail || '');
     let iframe = document.getElementById('dlFrame');
     if (!iframe) { iframe = document.createElement('iframe'); iframe.id = 'dlFrame'; iframe.style.display = 'none'; document.body.appendChild(iframe); }
     iframe.src = url;

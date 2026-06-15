@@ -13448,16 +13448,24 @@ async def download_installer(
     accounts: int = Query(1, ge=1, le=4),
     reset: int = Query(0),
     update_only: int = Query(0),
+    laptop_email: str = Query(""),
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db_session)
 ):
     """Generate OS-specific installer with user's token baked in.
-    
+
     Settings from the web UI are baked into the installer:
     - accounts: number of Chrome windows
     - reset: 1 = wipe session folders for fresh Google login
     - update_only: 1 = only re-download flow_worker.py, keep everything else
+    - laptop_email: reuse the Chrome profile already logged into this Gmail so
+      the worker skips the Google verification code (blank = manual login)
     """
+    # Sanitize the email before it is baked into a shell .env line.
+    _laptop_email = (laptop_email or "").strip()
+    if len(_laptop_email) > 254 or not _re.match(
+            r'^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', _laptop_email):
+        _laptop_email = ""
     # Get or create token
     token = db.query(UserWorkerToken).filter(
         UserWorkerToken.user_id == user.id,
@@ -13478,7 +13486,7 @@ async def download_installer(
         app_url = "https://kavenobuilder.com"
     
     if os == "windows":
-        content = _generate_windows_installer(token.id, app_url, accounts, bool(reset), bool(update_only))
+        content = _generate_windows_installer(token.id, app_url, accounts, bool(reset), bool(update_only), _laptop_email)
         filename = "KavenoBuilder-Worker-Setup.bat"
         media_type = "application/x-bat"
         return Response(
@@ -13493,7 +13501,7 @@ async def download_installer(
         # Mac/Linux: wrap .command in a .zip to preserve execute permissions
         # Browsers strip execute bits on download; zips preserve them
         import zipfile, io
-        content = _generate_unix_installer(token.id, app_url, accounts, bool(reset), bool(update_only))
+        content = _generate_unix_installer(token.id, app_url, accounts, bool(reset), bool(update_only), _laptop_email)
         inner_filename = "KavenoBuilder-Worker-Setup.command"
         
         buf = io.BytesIO()
@@ -13515,7 +13523,7 @@ async def download_installer(
         )
 
 
-def _generate_windows_installer(token: str, app_url: str, accounts: int = 1, reset: bool = False, update_only: bool = False) -> str:
+def _generate_windows_installer(token: str, app_url: str, accounts: int = 1, reset: bool = False, update_only: bool = False, laptop_email: str = "") -> str:
     """Generate a Windows .bat — simple, one process, everything direct. This is the approach that works."""
     
     # Each account flag needs its OWN `echo` — a multi-line value after a single
@@ -13639,6 +13647,7 @@ echo BROWSER_MODE=stealth
 echo MULTI_ACCOUNT={multi}
 echo MULTI_ACCOUNT_MODE={multi}
 echo PROXY_TYPE=none
+echo ACCOUNT1_LAPTOP_EMAIL={laptop_email}
 {env_accounts}
 ) > "%WORKER_DIR%\\.env"
 echo         OK
@@ -13672,7 +13681,7 @@ pause >nul
 '''
 
 
-def _generate_unix_installer(token: str, app_url: str, accounts: int = 1, reset: bool = False, update_only: bool = False) -> str:
+def _generate_unix_installer(token: str, app_url: str, accounts: int = 1, reset: bool = False, update_only: bool = False, laptop_email: str = "") -> str:
     """Generate a Mac/Linux .command installer with minimal terminal output."""
     
     env_accounts = "ACCOUNT1_ENABLED=true"
@@ -13778,6 +13787,7 @@ BROWSER_MODE=stealth
 MULTI_ACCOUNT={multi}
 MULTI_ACCOUNT_MODE={multi}
 PROXY_TYPE=none
+ACCOUNT1_LAPTOP_EMAIL={laptop_email}
 {env_accounts}
 ENVEOF
 # Fix $HOME in .env (heredoc doesn't expand inside single-quoted delimiter)
