@@ -3609,13 +3609,15 @@ ACCOUNTS = [
 ]
 
 def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
-    """If slot-1 has a laptop_email set, rebuild its golden from the laptop's
+    """If a laptop_email is set, rebuild this slot's golden from the laptop's
     already-trusted Chrome profile so Google skips the verification code.
-    Slot-1 only, fail-safe: any error logged, never raises, never blocks launch.
+    The SAME login is used for ALL accounts (one email total) — every slot's
+    golden gets a copy of the same laptop profile.
+    Fail-safe: any error logged, never raises, never blocks launch.
     Must run BEFORE restore_from_golden so golden exists for the restore."""
     try:
         email = ACCOUNTS[0].get("laptop_email", "")
-        if not email or session_folder != ACCOUNTS[0]["session_folder"]:
+        if not email:
             return
         from worker_profile_pull import (
             pull_profile_from_laptop, resolve_laptop_user_data_dir, close_laptop_chrome,
