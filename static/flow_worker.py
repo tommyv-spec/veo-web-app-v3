@@ -3635,11 +3635,38 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
         print(f"[{label}] DIAG laptop pull start "
               f"email={email or '(auto-detect signed-in)'}", flush=True)
         # pull searches all Chrome channels (stable/Beta/Dev/Canary) + closes
-        # the matched channel's Chrome itself.
-        pull_profile_from_laptop(email, golden_folder, label=label,
-                                 log=lambda m: print(m, flush=True))
+        # the matched channel's Chrome itself. Returns the channel on success so
+        # the worker launches the SAME Chrome channel as the pulled profile.
+        _ch = pull_profile_from_laptop(email, golden_folder, label=label,
+                                       log=lambda m: print(m, flush=True))
+        if isinstance(_ch, str) and _ch:
+            try:
+                with open(os.path.join(_BASE, ".worker_chrome_channel"), "w", encoding="utf-8") as _cf:
+                    _cf.write(_ch)
+                print(f"[{label}] worker will launch Chrome channel: {_ch}", flush=True)
+            except Exception:
+                pass
     except Exception as _pe:
         print(f"[{label}] laptop pull error (continuing): {_pe}", flush=True)
+
+
+def _worker_chrome_channel():
+    """Chrome channel for the worker browser. Priority: WORKER_CHROME_CHANNEL
+    env override, else the channel recorded by the laptop-profile pull (the
+    pulled profile may be from Chrome Beta), else stable 'chrome'."""
+    ch = os.environ.get("WORKER_CHROME_CHANNEL", "").strip()
+    if ch:
+        return ch
+    try:
+        sidecar = os.path.join(_BASE, ".worker_chrome_channel")
+        if os.path.isfile(sidecar):
+            with open(sidecar, "r", encoding="utf-8") as _f:
+                v = _f.read().strip()
+            if v:
+                return v
+    except Exception:
+        pass
+    return "chrome"
 
 
 # Enable multi-account mode via env var (auto-detected if Account2 is enabled)
@@ -18930,7 +18957,7 @@ class AccountWorker(threading.Thread):
                 # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
                 acct_launch_kwargs = {
                     'user_data_dir': self.session_folder,
-                    'channel': 'chrome',
+                    'channel': _worker_chrome_channel(),
                     'ignore_default_args': ['--enable-automation'],
                     'headless': False,
                     'viewport': {"width": 1280, "height": 720},
@@ -19141,7 +19168,7 @@ class AccountWorker(threading.Thread):
                     # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
                     relaunch_kwargs = {
                         'user_data_dir': self.session_folder,
-                        'channel': 'chrome',
+                        'channel': _worker_chrome_channel(),
                         'ignore_default_args': ['--enable-automation'],
                         'headless': False,
                         'viewport': {"width": 1280, "height": 720},
@@ -19507,7 +19534,7 @@ class AccountWorker(threading.Thread):
                                 if BROWSER_MODE == "stealth":
                                     acct_launch_kwargs = {
                                         'user_data_dir': self.session_folder,
-                                        'channel': 'chrome',
+                                        'channel': _worker_chrome_channel(),
                                         'ignore_default_args': ['--enable-automation'],
                                         'headless': False,
                                         'viewport': {"width": 1280, "height": 720},
@@ -19626,7 +19653,7 @@ class AccountWorker(threading.Thread):
         if BROWSER_MODE == "stealth":
             kwargs = {
                 'user_data_dir': self.session_folder,
-                'channel': 'chrome',
+                'channel': _worker_chrome_channel(),
                 'ignore_default_args': ['--enable-automation'],
                 'headless': False,
                 'viewport': {"width": 1280, "height": 720},
@@ -19999,7 +20026,7 @@ class AccountWorker(threading.Thread):
             # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
             relaunch_kwargs = {
                 'user_data_dir': self.session_folder,
-                'channel': 'chrome',
+                'channel': _worker_chrome_channel(),
                 'ignore_default_args': ['--enable-automation'],
                 'headless': False,
                 'viewport': {"width": 1280, "height": 720},
@@ -20642,7 +20669,7 @@ def main(account_session=None, account_download=None, account_label=None):
             # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
             launch_kwargs = {
                 'user_data_dir': SESSION_FOLDER,
-                'channel': 'chrome',
+                'channel': _worker_chrome_channel(),
                 'ignore_default_args': ['--enable-automation'],
                 'headless': False,
                 'viewport': {"width": 1280, "height": 720},
@@ -20807,7 +20834,7 @@ def main(account_session=None, account_download=None, account_label=None):
                 if BROWSER_MODE == "stealth":
                     relaunch_kwargs = {
                         'user_data_dir': SESSION_FOLDER,
-                        'channel': 'chrome',
+                        'channel': _worker_chrome_channel(),
                         'ignore_default_args': ['--enable-automation'],
                         'headless': False,
                         'viewport': {"width": 1280, "height": 720},
@@ -21501,7 +21528,7 @@ def main_multi_coordinator(accounts):
             # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
             launch_kwargs = {
                 'user_data_dir': session,
-                'channel': 'chrome',
+                'channel': _worker_chrome_channel(),
                 'ignore_default_args': ['--enable-automation'],
                 'headless': False,
                 'viewport': {"width": 1280, "height": 720},

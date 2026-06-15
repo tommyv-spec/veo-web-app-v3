@@ -125,6 +125,22 @@ def resolve_laptop_user_data_dir(env=None):
     return os.path.join(local_appdata, "Google", "Chrome", "User Data")
 
 
+def _channel_for_user_data_dir(user_data_dir):
+    """Map a Chrome User Data path to its Playwright launch channel so the
+    worker can open the pulled profile with the SAME Chrome channel it came
+    from (a Beta profile should be opened by Chrome Beta)."""
+    u = (user_data_dir or "").lower()
+    if "chrome beta" in u:
+        return "chrome-beta"
+    if "chrome dev" in u:
+        return "chrome-dev"
+    if "chrome sxs" in u:
+        return "chrome-canary"
+    if "chromium" in u:
+        return "chromium"
+    return "chrome"
+
+
 def resolve_laptop_user_data_dirs(env=None):
     r"""All Chrome-family User Data dirs to search for the account, in order:
     stable, Beta, Dev, Canary (SxS), Chromium. The Google account may live in
@@ -309,5 +325,7 @@ def pull_profile_from_laptop(email, golden_folder, label="",
         return False
     shutil.rmtree(backup, ignore_errors=True)
 
-    log(f"{tag}pulled laptop profile for {email} ({profile_folder} -> golden)")
-    return True
+    channel = _channel_for_user_data_dir(user_data_dir)
+    log(f"{tag}pulled laptop profile for {email or '(auto)'} "
+        f"({profile_folder} -> golden, channel={channel})")
+    return channel

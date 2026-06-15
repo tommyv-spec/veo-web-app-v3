@@ -103,6 +103,14 @@ def test_resolve_user_data_dirs_override():
     assert wpp.resolve_laptop_user_data_dirs(env={"LAPTOP_CHROME_USER_DATA": "X:/ud"}) == ["X:/ud"]
 
 
+def test_channel_for_user_data_dir():
+    f = wpp._channel_for_user_data_dir
+    assert f(r"C:\x\Google\Chrome\User Data") == "chrome"
+    assert f(r"C:\x\Google\Chrome Beta\User Data") == "chrome-beta"
+    assert f(r"C:\x\Google\Chrome SxS\User Data") == "chrome-canary"
+    assert f(r"C:\x\Chromium\User Data") == "chromium"
+
+
 # --- Task 3: the pull -------------------------------------------------------
 
 def _fake_laptop(tmp_path, email="me@gmail.com", folder="Profile 3"):
@@ -127,7 +135,7 @@ def test_pull_builds_golden_with_default_and_local_state(tmp_path):
         user_data_dir=ud, close_chrome=lambda _ud: calls.append("closed"),
         log=lambda m: None,
     )
-    assert ok is True
+    assert ok == "chrome"   # success returns the channel string
     assert calls == ["closed"]
     assert os.path.isfile(os.path.join(golden, "Default", "Network", "Cookies"))
     with open(os.path.join(golden, "Local State"), encoding="utf-8") as f:
@@ -209,7 +217,7 @@ def test_pull_auto_detect_no_email(tmp_path):
     golden = str(tmp_path / "chrome-golden")
     ok = wpp.pull_profile_from_laptop("", golden, user_data_dir=ud,
                                       close_chrome=lambda _ud: None, log=lambda m: None)
-    assert ok is True
+    assert ok == "chrome"
     assert os.path.isfile(os.path.join(golden, "Default", "Network", "Cookies"))
 
 
