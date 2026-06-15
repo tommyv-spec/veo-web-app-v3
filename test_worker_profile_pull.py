@@ -118,8 +118,24 @@ def test_pull_empty_email_is_noop(tmp_path):
     assert not os.path.exists(golden)
 
 
-def test_pull_email_not_found_keeps_existing_golden(tmp_path):
-    ud = _fake_laptop(tmp_path, email="other@gmail.com")
+def test_pull_email_not_found_falls_back_to_signed_in(tmp_path):
+    # Email not present, but a profile IS signed in -> fall back to it so login
+    # still happens (golden gets rebuilt from the signed-in profile).
+    ud = _fake_laptop(tmp_path, email="other@gmail.com", folder="Default")
+    golden = str(tmp_path / "chrome-golden")
+    os.makedirs(os.path.join(golden, "Default"))
+    open(os.path.join(golden, "Default", "marker"), "w").close()
+    ok = wpp.pull_profile_from_laptop("me@gmail.com", golden, user_data_dir=ud,
+                                      close_chrome=lambda: None, log=lambda m: None)
+    assert ok is True
+    assert not os.path.isfile(os.path.join(golden, "Default", "marker"))
+    assert os.path.isfile(os.path.join(golden, "Default", "Network", "Cookies"))
+
+
+def test_pull_email_not_found_no_signin_keeps_golden(tmp_path):
+    # Email not present AND nothing signed in -> keep the existing golden.
+    ud = str(tmp_path / "User Data")
+    _write_local_state(ud, {"Default": {}})
     golden = str(tmp_path / "chrome-golden")
     os.makedirs(os.path.join(golden, "Default"))
     open(os.path.join(golden, "Default", "marker"), "w").close()
@@ -132,6 +148,54 @@ def test_pull_missing_user_data_dir_returns_false(tmp_path):
     golden = str(tmp_path / "chrome-golden")
     ok = wpp.pull_profile_from_laptop("me@gmail.com", golden,
                                       user_data_dir=str(tmp_path / "nope"), log=lambda m: None)
+    assert ok is False
+
+
+def test_find_logged_in_profile_prefers_default(tmp_path):
+    ud = str(tmp_path / "User Data")
+    _write_local_state(ud, {
+        "Default": {"user_name": "a@gmail.com"},
+        "Profile 1": {"user_name": "b@gmail.com"},
+    })
+    assert wpp.find_logged_in_profile(ud) == "Default"
+
+
+def test_find_logged_in_profile_first_when_no_default(tmp_path):
+    ud = str(tmp_path / "User Data")
+    _write_local_state(ud, {"Default": {}, "Profile 2": {"user_name": "b@gmail.com"}})
+    assert wpp.find_logged_in_profile(ud) == "Profile 2"
+
+
+def test_find_logged_in_profile_none_when_no_signin_and_no_folders(tmp_path):
+    ud = str(tmp_path / "User Data")
+    _write_local_state(ud, {"Default": {}, "Profile 1": {}})
+    assert wpp.find_logged_in_profile(ud) is None
+
+
+def test_find_logged_in_profile_disk_fallback_when_sync_off(tmp_path):
+    # Sync off (no user_name) but the Default folder exists on disk -> use it.
+    ud = tmp_path / "User Data"
+    (ud / "Default").mkdir(parents=True)
+    _write_local_state(str(ud), {})
+    assert wpp.find_logged_in_profile(str(ud)) == "Default"
+
+
+def test_pull_auto_detect_no_email(tmp_path):
+    # No email -> auto-detect the signed-in Default profile and pull it.
+    ud = _fake_laptop(tmp_path, email="me@gmail.com", folder="Default")
+    golden = str(tmp_path / "chrome-golden")
+    ok = wpp.pull_profile_from_laptop("", golden, user_data_dir=ud,
+                                      close_chrome=lambda: None, log=lambda m: None)
+    assert ok is True
+    assert os.path.isfile(os.path.join(golden, "Default", "Network", "Cookies"))
+
+
+def test_pull_no_email_no_signin_returns_false(tmp_path):
+    ud = str(tmp_path / "User Data")
+    _write_local_state(ud, {"Default": {}})
+    golden = str(tmp_path / "chrome-golden")
+    ok = wpp.pull_profile_from_laptop("", golden, user_data_dir=ud,
+                                      close_chrome=lambda: None, log=lambda m: None)
     assert ok is False
 
 

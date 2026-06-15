@@ -3609,26 +3609,35 @@ ACCOUNTS = [
 ]
 
 def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
-    """If a laptop_email is set, rebuild this slot's golden from the laptop's
-    already-trusted Chrome profile so Google skips the verification code.
-    The SAME login is used for ALL accounts (one email total) — every slot's
-    golden gets a copy of the same laptop profile.
-    Fail-safe: any error logged, never raises, never blocks launch.
-    Must run BEFORE restore_from_golden so golden exists for the restore."""
+    """Seed/refresh this slot's golden from the laptop's already-trusted Chrome
+    login so Google skips the verification code. Same login for ALL accounts.
+      - laptop_email set -> pull that profile every start (force).
+      - no email         -> auto-detect the signed-in laptop profile; pull only
+                            when this slot has NO golden yet (seed once, don't
+                            clobber a working session on every boot).
+    Opt out with LAPTOP_PULL_DISABLED=1. Fail-safe: errors logged, never raises,
+    never blocks launch. Runs BEFORE restore_from_golden so golden exists below."""
     try:
-        email = ACCOUNTS[0].get("laptop_email", "")
-        if not email:
-            print(f"[{label}] DIAG laptop pull SKIPPED — no email "
-                  f"(ACCOUNT1_LAPTOP_EMAIL env empty / not in .env)", flush=True)
+        if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
         from worker_profile_pull import (
             pull_profile_from_laptop, resolve_laptop_user_data_dir, close_laptop_chrome,
         )
+        email = ACCOUNTS[0].get("laptop_email", "")
         _ud = resolve_laptop_user_data_dir()
-        print(f"[{label}] DIAG laptop pull start email={email} ud={_ud}", flush=True)
+        if not _ud:
+            print(f"[{label}] DIAG laptop pull: no Chrome User Data dir "
+                  f"(set LAPTOP_CHROME_USER_DATA)", flush=True)
+            return
+        # No email: only seed when golden is missing, so an established worker
+        # session is not clobbered every boot. Email: force pull every start.
+        if not email and os.path.exists(golden_folder):
+            return
+        print(f"[{label}] DIAG laptop pull start "
+              f"email={email or '(auto-detect signed-in)'} ud={_ud}", flush=True)
         pull_profile_from_laptop(
             email, golden_folder, label=label,
-            close_chrome=(lambda: close_laptop_chrome(_ud, log=lambda m: print(m, flush=True))) if _ud else None,
+            close_chrome=lambda: close_laptop_chrome(_ud, log=lambda m: print(m, flush=True)),
             log=lambda m: print(m, flush=True),
         )
     except Exception as _pe:

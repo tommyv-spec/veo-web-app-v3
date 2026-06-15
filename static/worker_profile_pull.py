@@ -49,6 +49,33 @@ def list_profile_emails(user_data_dir):
     return [info.get("user_name", "") for info in cache.values() if info.get("user_name")]
 
 
+def find_logged_in_profile(user_data_dir):
+    """Pick the laptop Chrome profile most likely to hold the Google login when
+    no email is given. First prefer a profile flagged signed-in in Local State
+    (Chrome sync on); otherwise fall back to the 'Default' profile folder on
+    disk — its Cookies hold the Google session even when Chrome sync is OFF
+    (logged into Gmail in a tab but not into the browser). None if nothing."""
+    try:
+        with open(os.path.join(user_data_dir, "Local State"), "r", encoding="utf-8") as f:
+            cache = json.load(f).get("profile", {}).get("info_cache", {})
+    except (OSError, ValueError):
+        cache = {}
+    signed_in = [folder for folder, info in cache.items()
+                 if str(info.get("user_name", "")).strip()]
+    if "Default" in signed_in:
+        return "Default"
+    if signed_in:
+        return sorted(signed_in)[0]
+    # No Chrome-sync sign-in info -> fall back to a real profile folder on disk.
+    if os.path.isdir(os.path.join(user_data_dir, "Default")):
+        return "Default"
+    if os.path.isdir(user_data_dir):
+        for entry in sorted(os.listdir(user_data_dir)):
+            if entry.startswith("Profile") and os.path.isdir(os.path.join(user_data_dir, entry)):
+                return entry
+    return None
+
+
 def load_laptop_email(settings_path, env=None):
     """Email from ACCOUNT1_LAPTOP_EMAIL env (override) else
     worker_settings.json {"laptop_email": ...}. '' if neither."""
@@ -146,8 +173,6 @@ def pull_profile_from_laptop(email, golden_folder, label="",
     Never raises. `close_chrome` (callable) is invoked to unlock cookie DBs
     before copying; pass a targeted closer in production, a stub in tests."""
     tag = f"[{label}] " if label else ""
-    if not email:
-        return False
 
     user_data_dir = user_data_dir or resolve_laptop_user_data_dir()
     if not user_data_dir or not os.path.isdir(user_data_dir):
@@ -157,9 +182,21 @@ def pull_profile_from_laptop(email, golden_folder, label="",
         log(f"{tag}laptop pull: Local State missing in {user_data_dir}")
         return False
 
-    profile_folder = find_profile_dir_for_email(user_data_dir, email)
+    # Email given => use that profile (fall back to any signed-in profile if the
+    # email is not found). No email => auto-detect the signed-in profile.
+    if email:
+        profile_folder = find_profile_dir_for_email(user_data_dir, email)
+        if not profile_folder:
+            profile_folder = find_logged_in_profile(user_data_dir)
+            if profile_folder:
+                log(f"{tag}laptop pull: email {email!r} not found, using signed-in "
+                    f"profile {profile_folder!r}. Available: {list_profile_emails(user_data_dir)}")
+    else:
+        profile_folder = find_logged_in_profile(user_data_dir)
+        if profile_folder:
+            log(f"{tag}laptop pull: auto-detected signed-in profile {profile_folder!r}")
     if not profile_folder:
-        log(f"{tag}laptop pull: email {email!r} not found. Available: {list_profile_emails(user_data_dir)}")
+        log(f"{tag}laptop pull: no signed-in Chrome profile found. Available: {list_profile_emails(user_data_dir)}")
         return False
     src_profile = os.path.join(user_data_dir, profile_folder)
     if not os.path.isdir(src_profile):
