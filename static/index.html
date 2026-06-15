@@ -19161,7 +19161,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             // v794 — download every generated image in this job as one zip,
             // numbered in scene order. Frontend-only (lazy-loads JSZip).
             if (!groupKey.startsWith('__') && generatedNodes.length > 0) {
-                bulkActions.push(`<button class="btn btn-secondary" onclick="imgDownloadAllImages('${keyAttr}')" title="Download every generated image in this job as one zip, numbered in scene order">📥 Download all</button>`);
+                bulkActions.push(`<button class="btn btn-secondary" onclick="imgDownloadAllImages(event, '${keyAttr}')" title="Download every generated image in this job as one zip, numbered in scene order">📥 Download all</button>`);
             }
             if (!groupKey.startsWith('__') && nodes.length > 0) {
                 bulkActions.push(`<button class="btn btn-secondary" style="color:var(--error);" onclick="imgBulkDeleteJob('${keyAttr}')" title="Delete every node in this job">🗑 Delete job</button>`);
@@ -19232,7 +19232,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
         // Pulls the FULL-res chosen variant (or first variant) per node, in the
         // same order the tiles render, and names files 01_sceneN.ext so they sort
         // correctly in any file manager.
-        async function imgDownloadAllImages(groupKey) {
+        async function imgDownloadAllImages(ev, groupKey) {
             const nodes = imgState.groupsByKey[groupKey] || [];
             const items = [];
             nodes.forEach((n, idx) => {
@@ -19245,8 +19245,10 @@ Example: A realistic vertical video of a professional presenter speaking directl
             });
             if (!items.length) { alert('No generated images to download in this job'); return; }
 
-            const btns = document.querySelectorAll(`button[onclick*="imgDownloadAllImages('${groupKey}')"]`);
-            const setBtn = (txt, disabled) => btns.forEach(b => { b.textContent = txt; b.disabled = disabled; });
+            // Use the clicked button directly — a querySelector on the onclick
+            // attribute breaks when the group key contains quotes (v794.1).
+            const btn = ev && ev.currentTarget ? ev.currentTarget : null;
+            const setBtn = (txt, disabled) => { if (btn) { btn.textContent = txt; btn.disabled = disabled; } };
             setBtn('⏳ Zipping…', true);
             try {
                 const JSZip = await imgEnsureJSZip();
