@@ -3620,6 +3620,12 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
     try:
         if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
+        # Force a fresh load of the just-synced companion. The updater writes
+        # worker_profile_pull.py to disk AFTER flow_worker imported it at module
+        # load, so sys.modules pins the STALE version — pop it so this import
+        # reads the new file from disk (same-launch fixes would be lost otherwise).
+        import sys as _sys
+        _sys.modules.pop("worker_profile_pull", None)
         from worker_profile_pull import (
             pull_profile_from_laptop, load_laptop_email as _load_laptop_email,
         )
