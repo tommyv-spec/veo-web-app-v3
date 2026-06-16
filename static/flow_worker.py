@@ -19026,18 +19026,24 @@ class AccountWorker(threading.Thread):
                             _cks = json.load(_f)
                         if _cks:
                             _ok = 0
-                            try:
-                                self.browser.add_cookies(_cks)
-                                _ok = len(_cks)
-                            except Exception:
-                                # One bad cookie fails the batch — add individually.
-                                for _ck in _cks:
+                            _failed = []
+                            for _ck in _cks:
+                                try:
+                                    self.browser.add_cookies([_ck])
+                                    _ok += 1
+                                except Exception:
+                                    # Retry host-only via url (covers domain/__Host- issues).
                                     try:
-                                        self.browser.add_cookies([_ck])
+                                        _alt = {k: v for k, v in _ck.items() if k != "domain"}
+                                        _h = (_ck.get("domain") or "").lstrip(".") or "accounts.google.com"
+                                        _alt["url"] = "https://" + _h
+                                        _alt["sameSite"] = "Lax"
+                                        self.browser.add_cookies([_alt])
                                         _ok += 1
                                     except Exception:
-                                        pass
-                            print(f"[{self.name}] injected {_ok}/{len(_cks)} laptop-login cookies", flush=True)
+                                        _failed.append(_ck.get("name", "?"))
+                            print(f"[{self.name}] injected {_ok}/{len(_cks)} laptop-login cookies"
+                                  + (f" (failed: {_failed})" if _failed else ""), flush=True)
             except Exception as _ie:
                 print(f"[{self.name}] cookie injection failed (continuing): {_ie}", flush=True)
 
