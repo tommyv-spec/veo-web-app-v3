@@ -147,6 +147,7 @@ def extract_cookies(user_data_dir, profile_dir, channel, log=print):
             exe, f"--user-data-dir={user_data_dir}", f"--profile-directory={profile_dir}",
             f"--log-net-log={nl}", "--net-log-capture-mode=IncludeSensitive",
             "--no-first-run", "--no-default-browser-check", "--start-minimized",
+            "--disable-search-engine-choice-screen", "--ash-no-nudges",
             "https://labs.google/fx/tools/flow",
         ])
     except Exception as e:
