@@ -2638,7 +2638,37 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
     _consecutive_no_buttons = 0
     for attempt in range(max_attempts):
         state = _get_page_state(page)
-        
+
+        # Flow signin / error=Callback page: the Google session IS valid (our
+        # injected SSO cookies), so clicking "Sign in with Google" completes the
+        # handshake and lands back in Flow — exactly what works manually. The
+        # worker would otherwise classify this as 'other' and re-navigate forever.
+        try:
+            _cur_url = page.url
+        except Exception:
+            _cur_url = ""
+        if "/api/auth/signin" in _cur_url or "error=callback" in _cur_url.lower():
+            print(f"[{label}] On Flow signin page — clicking 'Sign in with Google' (SSO)", flush=True)
+            _sso_clicked = False
+            for _sso_sel in ["button:has-text('Sign in with Google')",
+                             "a:has-text('Sign in with Google')",
+                             "button:has-text('Accedi con Google')",
+                             "a:has-text('Accedi con Google')",
+                             "button:has-text('Sign in')",
+                             "a:has-text('Sign in')"]:
+                try:
+                    _sso_b = page.locator(_sso_sel).first
+                    if _sso_b.is_visible(timeout=1500):
+                        human_click_element(page, _sso_b, f"[{label}] SSO {_sso_sel}")
+                        _sso_clicked = True
+                        break
+                except Exception:
+                    pass
+            if not _sso_clicked:
+                print(f"[{label}] ⚠ 'Sign in with Google' button not found on signin page", flush=True)
+            _wait_for_page_settle(page, max_seconds=25)
+            continue
+
         if state == 'flow_logged_in':
             if attempt == 0:
                 print(f"[{label}] ✓ Already logged in on Flow", flush=True)
