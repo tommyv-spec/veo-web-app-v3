@@ -31,14 +31,70 @@ _ELEVATOR = {
 }
 
 
+class _GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+
+
 def _guid(s):
-    from comtypes import GUID
-    return GUID("{" + s + "}")
+    """Build a GUID struct from a string via CLSIDFromString — no comtypes
+    (importing comtypes re-inits COM and throws RPC_E_CHANGED_MODE on a thread
+    Playwright already initialized)."""
+    g = _GUID()
+    hr = ctypes.windll.ole32.CLSIDFromString(ctypes.c_wchar_p("{" + s + "}"), ctypes.byref(g))
+    if hr != 0:
+        raise OSError(f"CLSIDFromString failed for {s} hr=0x{hr & 0xffffffff:08x}")
+    return g
+
+
+def _decrypt_app_bound_key_com(blob, ids, log):
+    """The actual COM call. Runs on a dedicated thread with its own MTA COM init
+    so it never collides with the worker thread's existing apartment."""
+    ole32 = ctypes.windll.ole32
+    oleaut = ctypes.windll.oleaut32
+    oleaut.SysAllocStringByteLen.restype = c_void_p
+    oleaut.SysAllocStringByteLen.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+    oleaut.SysStringByteLen.restype = c_ulong
+    oleaut.SysStringByteLen.argtypes = [c_void_p]
+
+    ole32.CoInitializeEx(None, 0x0)  # fresh thread -> COINIT_MULTITHREADED, S_OK
+    try:
+        clsid = _guid(ids[0]); iid = _guid(ids[1])
+        p = c_void_p()
+        hr = ole32.CoCreateInstance(byref(clsid), None, 4, byref(iid), byref(p))  # LOCAL_SERVER
+        if hr != 0 or not p.value:
+            log(f"cookie-extract: CoCreateInstance failed hr=0x{hr & 0xffffffff:08x}")
+            return None
+        ole32.CoSetProxyBlanket(p, 0xffffffff, 0xffffffff, None, 6, 3, None, 0x40)
+        inb = oleaut.SysAllocStringByteLen(blob, len(blob))
+        outb = c_void_p(); lasterr = c_ulong(0)
+        vtbl = ctypes.cast(p, POINTER(c_void_p))[0]
+        decrypt = ctypes.cast(
+            ctypes.cast(vtbl, POINTER(c_void_p))[5],  # IElevator vtable slot 5 = DecryptData
+            WINFUNCTYPE(c_long, c_void_p, c_void_p, POINTER(c_void_p), POINTER(c_ulong)))
+        hr2 = decrypt(p, inb, byref(outb), byref(lasterr))
+        if hr2 != 0 or not outb.value:
+            log(f"cookie-extract: DecryptData failed hr=0x{hr2 & 0xffffffff:08x} last_error={lasterr.value}")
+            return None
+        n = oleaut.SysStringByteLen(outb.value)
+        data = ctypes.string_at(outb.value, n)
+        if len(data) < 32:
+            log(f"cookie-extract: decrypted key too short ({len(data)})")
+            return None
+        return data[-32:]  # AES key is the last 32 bytes
+    finally:
+        try:
+            ole32.CoUninitialize()
+        except Exception:
+            pass
 
 
 def get_app_bound_key(user_data_dir, channel, log=print):
     """Decrypt Local State os_crypt.app_bound_encrypted_key via the channel's
-    elevation service. Returns the 32-byte AES-256 cookie key, or None."""
+    elevation service. Returns the 32-byte AES-256 cookie key, or None.
+    The COM call runs on a dedicated thread to avoid the worker thread's COM
+    apartment (Playwright sets it, so re-init here throws RPC_E_CHANGED_MODE)."""
+    import threading
     ids = _ELEVATOR.get(channel)
     if not ids:
         log(f"cookie-extract: no elevation IDs for channel {channel!r}")
@@ -55,39 +111,19 @@ def get_app_bound_key(user_data_dir, channel, log=print):
         return None
     blob = blob[4:]
 
-    ole32 = ctypes.windll.ole32
-    oleaut = ctypes.windll.oleaut32
-    oleaut.SysAllocStringByteLen.restype = c_void_p
-    oleaut.SysAllocStringByteLen.argtypes = [ctypes.c_char_p, ctypes.c_uint]
-    oleaut.SysStringByteLen.restype = c_ulong
-    oleaut.SysStringByteLen.argtypes = [c_void_p]
+    result = {}
 
-    ole32.CoInitializeEx(None, 0)
-    clsid = _guid(ids[0]); iid = _guid(ids[1])
-    p = c_void_p()
-    hr = ole32.CoCreateInstance(byref(clsid), None, 4, byref(iid), byref(p))  # CLSCTX_LOCAL_SERVER
-    if hr != 0 or not p.value:
-        log(f"cookie-extract: CoCreateInstance failed hr=0x{hr & 0xffffffff:08x}")
-        return None
-    # Allow the service to impersonate so it can unwrap the user-bound layer.
-    ole32.CoSetProxyBlanket(p, 0xffffffff, 0xffffffff, None, 6, 3, None, 0x40)
-    inb = oleaut.SysAllocStringByteLen(blob, len(blob))
-    outb = c_void_p(); lasterr = c_ulong(0)
-    vtbl = ctypes.cast(p, POINTER(c_void_p))[0]
-    decrypt = ctypes.cast(
-        ctypes.cast(vtbl, POINTER(c_void_p))[5],  # IElevator vtable slot 5 = DecryptData
-        WINFUNCTYPE(c_long, c_void_p, c_void_p, POINTER(c_void_p), POINTER(c_ulong)))
-    hr2 = decrypt(p, inb, byref(outb), byref(lasterr))
-    if hr2 != 0 or not outb.value:
-        log(f"cookie-extract: DecryptData failed hr=0x{hr2 & 0xffffffff:08x} last_error={lasterr.value}")
-        return None
-    n = oleaut.SysStringByteLen(outb.value)
-    data = ctypes.string_at(outb.value, n)
-    # The decrypted blob ends with the 32-byte AES key.
-    if len(data) < 32:
-        log(f"cookie-extract: decrypted key too short ({len(data)})")
-        return None
-    return data[-32:]
+    def _run():
+        try:
+            result["key"] = _decrypt_app_bound_key_com(blob, ids, log)
+        except Exception as e:
+            log(f"cookie-extract: COM decrypt thread error: {e}")
+            result["key"] = None
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=60)
+    return result.get("key")
 
 
 def _decrypt_v20(enc, key):
