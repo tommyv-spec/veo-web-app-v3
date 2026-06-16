@@ -118,8 +118,15 @@ def _parse_netlog_cookies(path, log):
             name = name.strip()
             if name and name not in by_name:
                 by_name[name] = (value.strip(), host or "google.com")
+    # Transient next-auth OAuth-handshake cookies are single-use for ONE sign-in
+    # attempt. Injecting stale ones collides with Flow's fresh handshake ->
+    # error=Callback. Keep the SESSION token; drop the handshake cookies.
+    _skip_substr = ("csrf-token", "callback-url", ".state", "pkce", "nonce")
     cookies = []
     for name, (value, host) in by_name.items():
+        _nl = name.lower()
+        if "next-auth" in _nl and any(s in _nl for s in _skip_substr):
+            continue
         if name.startswith("__Host-"):
             # __Host- cookies MUST be host-only -> url form ONLY (Playwright
             # rejects url + path together: "should have either url or path").
