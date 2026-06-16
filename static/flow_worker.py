@@ -17945,32 +17945,28 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # Uses the same container-matching logic as the sweep — correct clip, correct URLs.
         # Most clips won't have a URL yet at failcheck (still generating) — that's fine,
         # the sweep will catch them. But if a clip finishes fast, this queues it immediately.
-        if not clip_failed and http_dl_queue is not None:
+        if not clip_failed and http_dl_queue is not None and clip_index not in http_enqueued_clips:
+            # v794 STUCK-CLIP FIX: resolve THIS clip's download URLs from its bound
+            # mediaId (uuid-keyed, position-independent) — NOT dialogue-text DOM
+            # matching. The old dialogue-match grabbed a SIBLING's already-finished
+            # video for empty/non-unique-dialogue (b-roll) clips, then called
+            # http_enqueued_clips.add() — which is the SAME set object the working
+            # v663 ready-scan uses for dedup (wait_between_clips `_dl_checked =
+            # already_enqueued`). So the correct producer SKIPPED the clip forever →
+            # stuck "generating" (clip-3 bug, 2026-06-16 logs). captured_urls_for_clip
+            # returns [] until the mediaId binds (~35s post-click); on [] we DON'T
+            # queue and DON'T touch the dedup set, so the v663 scan downloads it
+            # correctly. No dialogue-match fallback here — the v663 ready-scan is the
+            # safety net for not-yet-bound clips.
             try:
-                _dialogue_key = (clip.get('dialogue_text') or '')[:20]
-                _video_urls = page.evaluate(f"""() => {{
-                    const dialogue = {repr(_dialogue_key)};
-                    for (const c of document.querySelectorAll('[data-index]')) {{
-                        const text = c.innerText || c.textContent || '';
-                        if (!dialogue || text.includes(dialogue)) {{
-                            const urls = [];
-                            for (const v of c.querySelectorAll('video')) {{
-                                const u = v.src || v.querySelector('source')?.src || '';
-                                if (u && !u.startsWith('blob:')) urls.push(u);
-                            }}
-                            if (urls.length > 0) return urls;
-                        }}
-                    }}
-                    return [];
-                }}""")
-                if _video_urls:
-                    if clip_index not in http_enqueued_clips:
-                        http_dl_queue.put({'job_id': job_id, 'clip_index': clip_index,
-                            'clip_id': clip['id'], 'urls': _video_urls, 'temp_dir': temp_dir})
-                        http_enqueued_clips.add(clip_index)
-                        print(f"[HTTP-DL] ✓ Queued clip {clip_index+1} immediately ({len(_video_urls)} URL(s))", flush=True)
+                _bound_urls = captured_urls_for_clip(job_id, clip_index, captured_media_urls)
+                if _bound_urls:
+                    http_dl_queue.put({'job_id': job_id, 'clip_index': clip_index,
+                        'clip_id': clip['id'], 'urls': _bound_urls, 'temp_dir': temp_dir})
+                    http_enqueued_clips.add(clip_index)
+                    print(f"[HTTP-DL] ✓ Queued clip {clip_index+1} immediately ({len(_bound_urls)} URL(s) via bound mediaId)", flush=True)
             except Exception:
-                pass  # Sweep will handle it
+                pass  # v663 ready-scan / final sweep will handle it
 
         if not clip_failed and not download_queued:
             download_queue.put({
@@ -18018,25 +18014,33 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             continue
                         _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
                         try:
-                            _urls = page.evaluate(f"""() => {{
-                                for (const c of document.querySelectorAll('[data-index]')) {{
-                                    if ((c.innerText||'').includes({repr(_dlg)})) {{
-                                        const urls = [];
-                                        for (const v of c.querySelectorAll('video')) {{
-                                            const u = v.src || (v.querySelector('source')||{{}}).src || '';
-                                            if (u && !u.startsWith('blob:')) urls.push(u);
+                            # v794 STUCK-CLIP FIX: prefer bound mediaId (correct clip,
+                            # position-independent). By the 70s ready mark the binding
+                            # has landed (bind latency ~35s) so this is reliable here.
+                            # Fall back to dialogue-match ONLY for NON-EMPTY dialogue —
+                            # the empty-dialogue wildcard grabbed a sibling's video and
+                            # poisoned http_enqueued_clips (shared dedup) → stuck clip.
+                            _urls = captured_urls_for_clip(job_id, _ci, captured_media_urls)
+                            if not _urls and _dlg:
+                                _urls = page.evaluate(f"""() => {{
+                                    for (const c of document.querySelectorAll('[data-index]')) {{
+                                        if ((c.innerText||'').includes({repr(_dlg)})) {{
+                                            const urls = [];
+                                            for (const v of c.querySelectorAll('video')) {{
+                                                const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                                if (u && !u.startsWith('blob:')) urls.push(u);
+                                            }}
+                                            if (urls.length) return urls;
                                         }}
-                                        if (urls.length) return urls;
                                     }}
-                                }}
-                                return [];
-                            }}""")
+                                    return [];
+                                }}""")
                             if _urls:
                                 if _ci not in http_enqueued_clips:
                                     http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
                                         'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir})
                                     http_enqueued_clips.add(_ci)
-                                    print(f"[Flow] ✓ Pre-restore: clip {_ci+1} ready → HTTP worker", flush=True)
+                                    print(f"[Flow] ✓ Pre-restore: clip {_ci+1} ready → HTTP worker (via bound mediaId or dialogue)", flush=True)
                         except Exception:
                             pass
             raise Exception(f"Proactive restore threshold reached after clip {clip_index}")
