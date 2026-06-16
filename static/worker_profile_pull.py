@@ -160,6 +160,19 @@ def resolve_laptop_user_data_dirs(env=None):
     return dirs
 
 
+def locate_profile(email):
+    """Find (user_data_dir, profile_folder, channel) for `email` across all
+    Chrome channels (stable/Beta/Dev/Canary) + secondary accounts. If no email,
+    falls back to the signed-in/Default profile. None if nothing found."""
+    for ud in resolve_laptop_user_data_dirs():
+        if not ud or not os.path.isdir(ud) or not os.path.isfile(os.path.join(ud, "Local State")):
+            continue
+        pf = find_profile_dir_for_email(ud, email) if email else find_logged_in_profile(ud)
+        if pf:
+            return ud, pf, _channel_for_user_data_dir(ud)
+    return None
+
+
 def _parse_user_data_dir_from_cmdline(cmdline):
     """Extract --user-data-dir value from a Chrome commandline, or None."""
     if not cmdline:
