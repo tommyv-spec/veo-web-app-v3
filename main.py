@@ -13645,9 +13645,9 @@ set "PY=python"
 echo         OK
 {reset_cmds}
 echo   [2/5] Installing packages (may take a minute)...
-!PY! -m pip install patchright requests comtypes pycryptodome --quiet --disable-pip-version-check 2>nul
+!PY! -m pip install patchright requests --quiet --disable-pip-version-check 2>nul
 if errorlevel 1 (
-    !PY! -m pip install patchright requests comtypes pycryptodome --quiet --user --disable-pip-version-check 2>nul
+    !PY! -m pip install patchright requests --quiet --user --disable-pip-version-check 2>nul
 )
 echo         OK
 

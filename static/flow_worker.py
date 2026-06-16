@@ -3630,7 +3630,7 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
         import sys as _sys
         for _m in ("worker_profile_pull", "worker_cookie_extract"):
             _sys.modules.pop(_m, None)
-        from worker_profile_pull import locate_profile, close_laptop_chrome, load_laptop_email as _lle
+        from worker_profile_pull import locate_profile, load_laptop_email as _lle
         from worker_cookie_extract import extract_cookies
         email = ACCOUNTS[0].get("laptop_email", "") or _lle(os.path.join(_BASE, "worker_settings.json"))
         if not email:
@@ -3650,8 +3650,9 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
                 _cf.write(_ch)
         except Exception:
             pass
-        print(f"[{label}] laptop login: {email} in {_pf} ({_ch}); closing {_ch} + decrypting cookies", flush=True)
-        close_laptop_chrome(_ud, log=lambda m: print(m, flush=True))
+        print(f"[{label}] laptop login: {email} in {_pf} ({_ch}); capturing live cookies via net-log", flush=True)
+        # extract_cookies launches the real profile no-debug + net-log, captures
+        # the live auth cookies, and closes it (channel-only). No decrypt needed.
         cookies = extract_cookies(_ud, _pf, _ch, log=lambda m: print(m, flush=True))
         if cookies:
             with open(cookie_marker, "w", encoding="utf-8") as _f:
