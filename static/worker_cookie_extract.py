@@ -162,6 +162,10 @@ def extract_cookies(user_data_dir, profile_dir, channel, log=print):
             f"--log-net-log={nl}", "--net-log-capture-mode=IncludeSensitive",
             "--no-first-run", "--no-default-browser-check", "--start-minimized",
             "--disable-search-engine-choice-screen", "--ash-no-nudges",
+            # Open a *.google.com page AND Flow as two tabs so the netlog captures
+            # BOTH the Google-account login cookies (SID/LSID/SAPISID on .google.com,
+            # never sent to labs.google) AND Flow's own session cookies.
+            "https://myaccount.google.com/",
             "https://labs.google/fx/tools/flow",
         ])
     except Exception as e:
