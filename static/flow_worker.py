@@ -6084,17 +6084,32 @@ def select_frames_to_video_mode(page, context="", **kwargs):
             # Support BOTH icons + a text-based fallback so the worker
             # is forward-compatible with future icon swaps.
             try:
-                tab = page.locator(
-                    "button.flow_tab_slider_trigger:has(i:text-is('play_circle')), "
-                    "button.flow_tab_slider_trigger:has(i:text-is('videocam')), "
-                    "button.flow_tab_slider_trigger:has-text('Video')"
-                ).first
-                tab.wait_for(state="visible", timeout=10000)
-                if tab.get_attribute("aria-selected") != "true":
-                    human_click_element(page, tab, f"{prefix}Video tab")
-                    time.sleep(0.5)
-                settings_applied['Video'] = True
-                print(f"{prefix}✓ Video tab OK", flush=True)
+                # aria-controls$='-content-VIDEO' is locale-proof (es-419 shows
+                # "Video" text but the control id stays "VIDEO"). VERIFY the tab
+                # actually became selected + retry — old code clicked once,
+                # slept 0.5s, declared OK without checking, so a silently-missed
+                # click left the panel on Image and lied "Video tab OK".
+                def _vtab():
+                    return page.locator(
+                        "button.flow_tab_slider_trigger[aria-controls$='-content-VIDEO'], "
+                        "button.flow_tab_slider_trigger:has(i:text-is('play_circle')), "
+                        "button.flow_tab_slider_trigger:has(i:text-is('videocam')), "
+                        "button.flow_tab_slider_trigger:has-text('Video')"
+                    ).first
+                _vtab().wait_for(state="visible", timeout=10000)
+                video_ok = ((_vtab().get_attribute("aria-selected") or "") == "true")
+                for _vt in range(3):
+                    if video_ok:
+                        break
+                    human_click_element(page, _vtab(), f"{prefix}Video tab (try {_vt+1})")
+                    time.sleep(0.6)
+                    video_ok = ((_vtab().get_attribute("aria-selected") or "") == "true")
+                settings_applied['Video'] = video_ok
+                if video_ok:
+                    print(f"{prefix}✓ Video tab OK (verified)", flush=True)
+                else:
+                    print(f"{prefix}⚠ Video tab NOT selected after retries — panel may be on Image", flush=True)
+                    _dump_open_menu(page, "video-tab-not-selected")
             except:
                 settings_applied['Video'] = False
                 print(f"{prefix}⚠ Video tab missed", flush=True)
@@ -6190,14 +6205,21 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                                                         "[role='menuitem']:has-text('Lower Priority')",
                                                         "[role='menuitem']:has(span:text-is('Veo 3.1 - Lite'))"],
                 }
-                # Scope to the open settings dropdown when present; match by model text.
+                # Scope to the open settings dropdown when present.
+                # ROOT FIX (live DOM 2026-06-16): the model button is the ONLY
+                # button[aria-haspopup="menu"] carrying an arrow_drop_down icon
+                # (text = "Omni Flash" / "Veo 3.1 ..."). The old selector used
+                # text clauses including `button:has-text('Imagen')` — but the
+                # Image/Video TOGGLE's first button is literally "Imagen" and
+                # sits earlier in DOM, so `.first` grabbed the TAB, read text
+                # "imagen" (already-check failed), then CLICKED it → flipped the
+                # whole panel to Image ("keeps going back to images tab") →
+                # model menuitems empty → Escape closed the menu → variants
+                # missed. Match by structure (haspopup+arrow), never by tab text.
                 dropdown_scope = "[role='menu'][data-state='open'] "
                 model_btn = page.locator(
-                    f"{dropdown_scope}button:has-text('Veo 3'), "
-                    f"{dropdown_scope}button:has-text('Omni'), "
-                    f"{dropdown_scope}button:has-text('Imagen'), "
-                    "button[aria-haspopup='menu']:has-text('Veo 3'), "
-                    "button:has-text('Veo 3'):has(i:text-is('arrow_drop_down'))"
+                    f"{dropdown_scope}button[aria-haspopup='menu']:has(i:text-is('arrow_drop_down')), "
+                    "button[aria-haspopup='menu']:has(i:text-is('arrow_drop_down'))"
                 ).first
                 model_btn.wait_for(state="visible", timeout=3000)
                 model_text = model_btn.inner_text().lower()
@@ -6234,15 +6256,12 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                         except:
                             continue
                     if not sel_found:
-                        print(f"{prefix}⚠ Model option not found for '{target}'", flush=True)
-                        try:
-                            visible = page.evaluate("""() => {
-                                const items = document.querySelectorAll('[role=\"menuitem\"]');
-                                return Array.from(items).map(el => (el.innerText || '').trim()).filter(Boolean);
-                            }""")
-                            print(f"{prefix}[model-dump] visible menuitems: {visible}", flush=True)
-                        except Exception as _diag_e:
-                            print(f"{prefix}[model-dump] failed: {_diag_e}", flush=True)
+                        print(f"{prefix}⚠ Model option not found for '{target}' (model_text was {model_text!r})", flush=True)
+                        # Full open-menu dump — reveals the REAL role of model
+                        # options (menuitem vs option vs menuitemradio) so the
+                        # MODEL_SELECTORS can be fixed from evidence next time a
+                        # genuine model switch is needed.
+                        _dump_open_menu(page, "model-submenu")
                         page.keyboard.press("Escape")
                         time.sleep(0.3)
                     else:
@@ -12233,6 +12252,32 @@ def _frame_slot_probe(page):
         return {"error": str(e)}
 
 
+def _dump_open_menu(page, where=""):
+    """Diagnostic: dump every VISIBLE interactive element on the page so a
+    failed settings selector (model submenu / variants tab / Video-Image
+    toggle) can be fixed from the REAL DOM instead of a guess. Logs text +
+    role + class + aria-selected + aria-haspopup. Covers menuitem/option/tab
+    roles AND Flow's flow_tab_slider_trigger tabs. Log-only."""
+    try:
+        data = page.evaluate(
+            "() => {"
+            "  const out = []; const seen = new Set();"
+            "  const sel = \"button, [role='menuitem'], [role='option'], [role='tab'], .flow_tab_slider_trigger, [aria-haspopup]\";"
+            "  document.querySelectorAll(sel).forEach(e => {"
+            "    const r = e.getBoundingClientRect(); if (r.width===0 || r.height===0) return;"
+            "    const t = (e.innerText||'').replace(/\\s+/g,' ').trim().slice(0,40);"
+            "    const k = t + '|' + e.getAttribute('role') + '|' + (e.className||'');"
+            "    if (seen.has(k)) return; seen.add(k);"
+            "    out.push({t, role: e.getAttribute('role'), cls: (typeof e.className==='string'?e.className:'').slice(0,45), asel: e.getAttribute('aria-selected'), hp: e.getAttribute('aria-haspopup')});"
+            "  });"
+            "  return out.slice(0, 45);"
+            "}"
+        )
+        print(f"[menu-dump]{(' '+where) if where else ''} {data}", flush=True)
+    except Exception as e:
+        print(f"[menu-dump]{(' '+where) if where else ''} failed: {e}", flush=True)
+
+
 def click_frame_and_upload(page, image_path, is_end_frame=False, context=""):
     """Click a frame button, open dialog, upload file. Used for individual frame uploads."""
     prefix = f"{context} " if context else ""
@@ -14529,6 +14574,7 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     
     print(f"\n{'='*60}", flush=True)
     print(f"REDO: Clip {clip_index+1} (Attempt {attempt})", flush=True)
+    print(f"[worker-id] {WORKER_VERSION} build={WORKER_BUILD} path=redo job={str(job_id)[:8]}", flush=True)
     print(f"Job: {job_id[:8]}...", flush=True)
     print(f"Project: {project_url or 'unknown'}", flush=True)
     print(f"{'='*60}", flush=True)
