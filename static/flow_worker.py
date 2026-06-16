@@ -3609,59 +3609,58 @@ ACCOUNTS = [
 ]
 
 def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
-    """Seed/refresh this slot's golden from the laptop's already-trusted Chrome
-    login so Google skips the verification code. Same login for ALL accounts.
-      - laptop_email set -> pull that profile every start (force).
-      - no email         -> auto-detect the signed-in laptop profile; pull only
-                            when this slot has NO golden yet (seed once, don't
-                            clobber a working session on every boot).
-    Opt out with LAPTOP_PULL_DISABLED=1. Fail-safe: errors logged, never raises,
-    never blocks launch. Runs BEFORE restore_from_golden so golden exists below."""
+    """Slot-1 + laptop_email: reuse the operator's existing Google login WITHOUT
+    a manual code. Copying the profile can't work (Chrome 127+ app-bound cookie
+    encryption) and the real profile can't be automated (Chrome 136+ blocks
+    debugging on the default profile). So we DECRYPT the cookies from the real
+    profile (via Chrome's elevation service) and STAGE them; they get injected
+    into the worker's OWN fresh session (which IS automatable) right after launch.
+
+    Records the Chrome channel (so the worker launches Beta if that's where the
+    account lives) and closes ONLY that channel's Chrome. Fail-safe: any error is
+    logged, never raises; if extraction fails the worker just needs a manual login
+    that run. Set LAPTOP_PULL_DISABLED=1 to turn the whole thing off."""
+    cookie_marker = os.path.join(_BASE, ".worker_injected_cookies.json")
     try:
-        # DEFAULT OFF. Copying the laptop profile cannot carry a Chrome 127+
-        # login (app-bound cookie encryption -> copied profile is logged out;
-        # verified on this machine), and opening the real multi-profile Chrome
-        # dir in place times out under automation. So the worker logs in once in
-        # its own session and golden-persists it (turn "Wipe saved login" OFF).
-        # Re-enable this experimental pull only with LAPTOP_PULL_ENABLED=1.
-        if os.environ.get("LAPTOP_PULL_ENABLED", "").strip().lower() not in ("1", "true", "yes"):
-            return
         if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
-        # Force a fresh load of the just-synced companion. The updater writes
-        # worker_profile_pull.py to disk AFTER flow_worker imported it at module
-        # load, so sys.modules pins the STALE version — pop it so this import
-        # reads the new file from disk (same-launch fixes would be lost otherwise).
+        if session_folder != ACCOUNTS[0]["session_folder"]:
+            return  # slot 1 only — one Google account, injected into its session
+        # Fresh-load the synced companions (updater writes them after import).
         import sys as _sys
-        _sys.modules.pop("worker_profile_pull", None)
-        from worker_profile_pull import (
-            pull_profile_from_laptop, load_laptop_email as _load_laptop_email,
-        )
-        # Re-read at call time: on the first launch after an update the module
-        # was not yet present when ACCOUNTS was built, so the import-time email
-        # is ''. The updater has now synced the module — re-read env + file.
-        email = ACCOUNTS[0].get("laptop_email", "") or _load_laptop_email(
-            os.path.join(_BASE, "worker_settings.json"))
-        # No email: only seed when golden is missing, so an established worker
-        # session is not clobbered every boot. Email: force pull every start.
-        if not email and os.path.exists(golden_folder):
-            return
-        print(f"[{label}] DIAG laptop pull start "
-              f"email={email or '(auto-detect signed-in)'}", flush=True)
-        # pull searches all Chrome channels (stable/Beta/Dev/Canary) + closes
-        # the matched channel's Chrome itself. Returns the channel on success so
-        # the worker launches the SAME Chrome channel as the pulled profile.
-        _ch = pull_profile_from_laptop(email, golden_folder, label=label,
-                                       log=lambda m: print(m, flush=True))
-        if isinstance(_ch, str) and _ch:
+        for _m in ("worker_profile_pull", "worker_cookie_extract"):
+            _sys.modules.pop(_m, None)
+        from worker_profile_pull import locate_profile, close_laptop_chrome, load_laptop_email as _lle
+        from worker_cookie_extract import extract_cookies
+        email = ACCOUNTS[0].get("laptop_email", "") or _lle(os.path.join(_BASE, "worker_settings.json"))
+        if not email:
             try:
-                with open(os.path.join(_BASE, ".worker_chrome_channel"), "w", encoding="utf-8") as _cf:
-                    _cf.write(_ch)
-                print(f"[{label}] worker will launch Chrome channel: {_ch}", flush=True)
+                if os.path.isfile(cookie_marker):
+                    os.remove(cookie_marker)
             except Exception:
                 pass
+            return
+        loc = locate_profile(email)
+        if not loc:
+            print(f"[{label}] laptop login: {email!r} not logged into any Chrome channel", flush=True)
+            return
+        _ud, _pf, _ch = loc
+        try:
+            with open(os.path.join(_BASE, ".worker_chrome_channel"), "w", encoding="utf-8") as _cf:
+                _cf.write(_ch)
+        except Exception:
+            pass
+        print(f"[{label}] laptop login: {email} in {_pf} ({_ch}); closing {_ch} + decrypting cookies", flush=True)
+        close_laptop_chrome(_ud, log=lambda m: print(m, flush=True))
+        cookies = extract_cookies(_ud, _pf, _ch, log=lambda m: print(m, flush=True))
+        if cookies:
+            with open(cookie_marker, "w", encoding="utf-8") as _f:
+                json.dump(cookies, _f)
+            print(f"[{label}] laptop login: staged {len(cookies)} cookies for injection", flush=True)
+        else:
+            print(f"[{label}] laptop login: 0 cookies extracted — manual login needed this run", flush=True)
     except Exception as _pe:
-        print(f"[{label}] laptop pull error (continuing): {_pe}", flush=True)
+        print(f"[{label}] laptop login error (continuing): {_pe}", flush=True)
 
 
 def _worker_chrome_channel():
@@ -19015,6 +19014,21 @@ class AccountWorker(threading.Thread):
 
             print(f"[{self.name}] ✓ Browser started", flush=True)
 
+            # Slot-1 laptop login: inject the cookies decrypted from the operator's
+            # real Chrome profile so this fresh (automatable) session is already
+            # logged into Google — no verification code. Fail-safe + idempotent.
+            try:
+                if self.session_folder == ACCOUNTS[0]["session_folder"]:
+                    _ckf = os.path.join(_BASE, ".worker_injected_cookies.json")
+                    if os.path.isfile(_ckf):
+                        with open(_ckf, "r", encoding="utf-8") as _f:
+                            _cks = json.load(_f)
+                        if _cks:
+                            self.browser.add_cookies(_cks)
+                            print(f"[{self.name}] injected {len(_cks)} laptop-login cookies", flush=True)
+            except Exception as _ie:
+                print(f"[{self.name}] cookie injection failed (continuing): {_ie}", flush=True)
+
             # flow_api: attach bearer-sniff listener at startup so window.__faSniff
             # is populated for console-debug snippets even before any project
             # create. Idempotent — no-op if already installed.
@@ -22346,24 +22360,25 @@ if __name__ == "__main__":
             
             print(f"Checking for updates from {WEB_APP_URL}...", flush=True)
 
-            # Companion module: the worker only auto-downloads flow_worker.py, so
-            # fetch worker_profile_pull.py (which flow_worker imports) next to it
-            # every launch. Done BEFORE the flow_worker hash/restart below so it
-            # is present even when flow_worker.py itself restarts.
-            try:
-                _comp_url = f"{WEB_APP_URL}/api/user-worker/download/worker_profile_pull.py"
-                _creq = _urllib.Request(_comp_url, headers={"User-Agent": f"flow-worker/{WORKER_BUILD}"})
-                with _urllib.urlopen(_creq, timeout=15) as _cresp:
-                    _cbytes = _cresp.read()
-                compile(_cbytes.decode('utf-8'), '<worker_profile_pull>', 'exec')
-                _cpath = os.path.join(os.path.dirname(my_path), "worker_profile_pull.py")
-                _ctmp = _cpath + ".tmp"
-                with open(_ctmp, 'wb') as _cf:
-                    _cf.write(_cbytes)
-                os.replace(_ctmp, _cpath)
-                print("✓ Synced worker_profile_pull.py companion module", flush=True)
-            except Exception as _ce:
-                print(f"⚠ Could not sync worker_profile_pull.py ({_ce})", flush=True)
+            # Companion modules: the worker only auto-downloads flow_worker.py, so
+            # fetch the helper modules it imports next to it every launch. Done
+            # BEFORE the flow_worker hash/restart below so they are present even
+            # when flow_worker.py itself restarts.
+            for _comp in ("worker_profile_pull.py", "worker_cookie_extract.py"):
+                try:
+                    _comp_url = f"{WEB_APP_URL}/api/user-worker/download/{_comp}"
+                    _creq = _urllib.Request(_comp_url, headers={"User-Agent": f"flow-worker/{WORKER_BUILD}"})
+                    with _urllib.urlopen(_creq, timeout=15) as _cresp:
+                        _cbytes = _cresp.read()
+                    compile(_cbytes.decode('utf-8'), f'<{_comp}>', 'exec')
+                    _cpath = os.path.join(os.path.dirname(my_path), _comp)
+                    _ctmp = _cpath + ".tmp"
+                    with open(_ctmp, 'wb') as _cf:
+                        _cf.write(_cbytes)
+                    os.replace(_ctmp, _cpath)
+                    print(f"✓ Synced {_comp} companion module", flush=True)
+                except Exception as _ce:
+                    print(f"⚠ Could not sync {_comp} ({_ce})", flush=True)
 
             req = _urllib.Request(update_url, headers={"User-Agent": f"flow-worker/{WORKER_BUILD}"})
             with _urllib.urlopen(req, timeout=15) as resp:

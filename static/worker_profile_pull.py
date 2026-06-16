@@ -184,29 +184,22 @@ def _chrome_proc_uses_dir(cmdline, target_user_data_dir):
 
 
 def close_laptop_chrome(user_data_dir, log=print):
-    """Close laptop Chrome so its cookie/login DBs unlock for copying. Targets
-    Chrome using the laptop User Data (or default-profile Chrome) and spares
-    worker-slot Chrome (explicit other --user-data-dir).
-
-    Windows: enumerate via PowerShell CIM — `wmic` is REMOVED on recent Win11.
-    If enumeration fails, fall back to closing all Chrome (safe at pre-start:
-    no worker Chrome is running yet). Sleeps after killing so Windows releases
-    the file locks before the copy."""
+    """Close ONLY the Chrome channel that owns user_data_dir (e.g. Chrome Beta),
+    sparing the operator's OTHER Chrome (stable stays open). Matches processes
+    whose command line contains the channel's app folder, e.g. '\\Chrome Beta\\'.
+    Windows-only via PowerShell CIM (`wmic` is removed on Win11). On enumerate
+    failure it closes nothing (safer than killing the wrong Chrome). Sleeps after
+    so the cookie DB file lock is released before we read it."""
     if sys.platform != "win32":
         try:
             subprocess.run(["pkill", "-f", "chrome"], capture_output=True)
             time.sleep(1.0)
         except Exception as e:
-            log(f"laptop pull: pkill failed: {e}")
+            log(f"close chrome: pkill failed: {e}")
         return
-
-    def _taskkill_all():
-        try:
-            subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"],
-                           capture_output=True)
-        except Exception as e:
-            log(f"laptop pull: taskkill all failed: {e}")
-
+    # ...\Google\Chrome Beta\User Data -> folder "Chrome Beta" -> needle "\chrome beta\"
+    folder = os.path.basename(os.path.dirname(os.path.normpath(user_data_dir)))
+    needle = (os.sep + folder + os.sep).lower()
     killed = 0
     try:
         ps = ("Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
@@ -214,24 +207,22 @@ def close_laptop_chrome(user_data_dir, log=print):
         out = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
             capture_output=True, text=True, timeout=30).stdout
-        rows = [r for r in out.splitlines() if r.strip()]
-        if not rows:
-            log("laptop pull: no Chrome processes found to close")
-            return
-        for row in rows:
+        for row in out.splitlines():
+            row = row.strip()
+            if not row:
+                continue
             pid, _, cmd = row.partition("\t")
             pid = pid.strip()
-            if pid and _chrome_proc_uses_dir(cmd or "", user_data_dir):
+            if pid and needle in (cmd or "").lower():
                 try:
                     subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
                     killed += 1
                 except Exception:
                     pass
-        log(f"laptop pull: closed {killed} laptop Chrome process(es)")
+        log(f"close chrome: closed {killed} '{folder}' process(es); other Chrome left running")
     except Exception as e:
-        log(f"laptop pull: PowerShell enumerate failed ({e}); closing all Chrome")
-        _taskkill_all()
-    time.sleep(2.0)  # let Windows release the cookie/session file locks
+        log(f"close chrome: enumerate failed ({e}); closed nothing (safe)")
+    time.sleep(2.0)  # let Windows release the cookie DB file lock
 
 
 def pull_profile_from_laptop(email, golden_folder, label="",

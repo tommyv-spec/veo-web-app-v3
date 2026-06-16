@@ -13297,6 +13297,17 @@ async def serve_worker_profile_pull():
     return Response(content=mod_path.read_text(), media_type="text/x-python")
 
 
+@app.get("/api/user-worker/download/worker_cookie_extract.py")
+async def serve_worker_cookie_extract():
+    """Serve the cookie-extraction companion module (decrypts the operator's own
+    Chrome login for injection into the worker's fresh session). Fetched by the
+    worker's auto-updater next to flow_worker.py every launch."""
+    mod_path = Path(__file__).parent / "static" / "worker_cookie_extract.py"
+    if not mod_path.exists():
+        raise HTTPException(404, "Module not found")
+    return Response(content=mod_path.read_text(), media_type="text/x-python")
+
+
 @app.get("/api/user-worker/version")
 async def worker_version():
     """Return current worker version (content hash) for auto-update checks."""
@@ -13634,9 +13645,9 @@ set "PY=python"
 echo         OK
 {reset_cmds}
 echo   [2/5] Installing packages (may take a minute)...
-!PY! -m pip install patchright requests --quiet --disable-pip-version-check 2>nul
+!PY! -m pip install patchright requests comtypes pycryptodome --quiet --disable-pip-version-check 2>nul
 if errorlevel 1 (
-    !PY! -m pip install patchright requests --quiet --user --disable-pip-version-check 2>nul
+    !PY! -m pip install patchright requests comtypes pycryptodome --quiet --user --disable-pip-version-check 2>nul
 )
 echo         OK
 
