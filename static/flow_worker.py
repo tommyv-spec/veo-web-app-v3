@@ -22,7 +22,11 @@ def _compute_build():
     except Exception:
         return "unknown"
 WORKER_BUILD = _compute_build()
-WORKER_VERSION = "v701g"
+# WORKER_VERSION is a human label only. WORKER_BUILD (md5 of this file) is the
+# AUTHORITATIVE identity — compare it to md5(static/flow_worker.py) on main to
+# tell whether the operator is running current code. The label was frozen at
+# v701g for ~90 v-rules; keep it roughly current but trust the build hash.
+WORKER_VERSION = "v793+identity"
 
 import subprocess, sys, shutil
 
@@ -6259,7 +6263,16 @@ def select_frames_to_video_mode(page, context="", **kwargs):
             # Variants
             try:
                 target = f"x{variants_count}"
-                tab = page.locator(f"button.flow_tab_slider_trigger:text-is('{target}')").first
+                # v788 (ported from image_worker.py): Flow relabeled the
+                # single-variant tab "1x" while multi tabs stay "x2"/"x3"/"x4".
+                # Match BOTH label orders + an aria-controls fallback (panel id
+                # ends in the variant number). Old code tried only "x{n}" →
+                # "Variants tab missed" whenever Flow used the "{n}x" order.
+                tab = page.locator(
+                    f"button.flow_tab_slider_trigger:text-is('x{variants_count}'), "
+                    f"button.flow_tab_slider_trigger:text-is('{variants_count}x'), "
+                    f"button.flow_tab_slider_trigger[aria-controls$='-content-{variants_count}']"
+                ).first
                 tab.wait_for(state="visible", timeout=3000)
                 if tab.get_attribute("aria-selected") != "true":
                     human_click_element(page, tab, f"{prefix}Variants {target}")
@@ -12188,6 +12201,38 @@ def _omni_chip_count(page):
         return 0
 
 
+def _frame_slot_probe(page):
+    """Ground-truth frame-bind check (diagnostic mechanism, log-only).
+
+    The legacy success heuristic = "frame-slot button count drops". When that
+    fails to fire we cannot tell apart:
+      (A) image NOT bound — slot still empty, click did nothing, OR
+      (B) image bound but heuristic STALE — Flow kept aria-haspopup on the
+          filled slot, so the count never drops and the worker loops forever
+          throwing away good attaches.
+    This inspects the MAIN page (not the upload dialog) for a real bound
+    thumbnail (Flow thumbs carry 'getMediaUrlRedirect' in src; blob:/data: also
+    count). Returns a dict so any log slice shows which case we are in."""
+    try:
+        return page.evaluate(
+            "() => {"
+            "  const slots = Array.from(document.querySelectorAll('div[aria-haspopup=\"dialog\"], button[aria-haspopup=\"dialog\"]'));"
+            "  const real = (s) => !!s && (s.indexOf('getMediaUrlRedirect')>=0 || s.startsWith('blob:') || s.startsWith('data:image'));"
+            "  let slotsWithThumb = 0; const sample = [];"
+            "  for (const s of slots) {"
+            "    const imgs = Array.from(s.querySelectorAll('img')).filter(i => real(i.src||i.getAttribute('src')||''));"
+            "    if (imgs.length) slotsWithThumb++;"
+            "    sample.push((s.outerHTML||'').replace(/\\s+/g,' ').slice(0,140));"
+            "  }"
+            "  const dlg = document.querySelector(\"[role='dialog']\");"
+            "  const mainThumbs = Array.from(document.querySelectorAll('img')).filter(i => real(i.src||'') && (!dlg || !dlg.contains(i))).length;"
+            "  return {slots: slots.length, slotsWithThumb, mainThumbs, dialogOpen: !!dlg, verdict: (slotsWithThumb>0?'B_bound_stale_heuristic': (mainThumbs>0?'B_maybe_bound':'A_not_bound')), sample: sample.slice(0,3)};"
+            "}"
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def click_frame_and_upload(page, image_path, is_end_frame=False, context=""):
     """Click a frame button, open dialog, upload file. Used for individual frame uploads."""
     prefix = f"{context} " if context else ""
@@ -13409,6 +13454,7 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
                     print(f"{prefix}[Gallery] Cached {frame_name} hash→'{image_basename}'", flush=True)
                 if not btn_gone:
                     print(f"{prefix}⚠️ {frame_name}: policy OK but button still visible — will retry via gallery", flush=True)
+                    print(f"{prefix}[slot-probe] {_frame_slot_probe(page)}", flush=True)
                     # policy_ok + btn_gone=False: frame may not have bound to slot.
                     # Hash is now cached so next attempt uses gallery.
                     try: page.keyboard.press("Escape")
@@ -13817,6 +13863,7 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
         # nothing vs (B) it filled but the count heuristic is stale.
         print(f"[Gallery] ⚠ Frame button count unchanged after gallery click — will upload "
               f"(expected_btn={expected_btn_count} remaining={remaining} sel={frame_selector!r})", flush=True)
+        print(f"[Gallery] [slot-probe] {_frame_slot_probe(page)}", flush=True)
         try:
             _diag = page.evaluate(
                 "() => {"
@@ -15295,6 +15342,13 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
     # mid-submission deletes go unnoticed and the worker keeps clicking
     # Generate clip-after-clip on a dead job (burns Veo credits).
     register_clips_for_job(clips, job_id)
+
+    # Per-job worker identity — guarantees EVERY job log slice reveals the
+    # running code's content hash (banner only prints at startup, which a
+    # mid-run log slice never shows). Compare build= to md5(static/flow_worker.py)
+    # on main to confirm the operator is running current code, not a stale cache.
+    print(f"[worker-id] {WORKER_VERSION} build={WORKER_BUILD} file=static/flow_worker.py "
+          f"job={str(job_id)[:8]} clips={len(clips)}", flush=True)
 
     for i, clip in enumerate(clips):
         # v700d — abort checkpoint at the TOP of each clip iteration.
@@ -16924,6 +16978,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             print(f"[Flow] Resume: clip {_ci+1} status={_api_check.get('status') if _api_check else '?'} — post-job scan will handle", flush=True)
                     except Exception as _ae:
                         print(f"[Flow] Resume: API check failed for clip {_ci+1}: {_ae}", flush=True)
+
+    # Per-job worker identity (see other submit loop) — any log slice reveals
+    # the running content hash; compare build= to md5(static/flow_worker.py) on main.
+    print(f"[worker-id] {WORKER_VERSION} build={WORKER_BUILD} file=static/flow_worker.py "
+          f"job={str(job_id)[:8]} clips={len(clips)} path=process_job_submission", flush=True)
 
     for i, clip in enumerate(clips):
         # v455: abort checkpoint. If the user deleted this job, the
