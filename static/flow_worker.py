@@ -19024,8 +19024,19 @@ class AccountWorker(threading.Thread):
                         with open(_ckf, "r", encoding="utf-8") as _f:
                             _cks = json.load(_f)
                         if _cks:
-                            self.browser.add_cookies(_cks)
-                            print(f"[{self.name}] injected {len(_cks)} laptop-login cookies", flush=True)
+                            _ok = 0
+                            try:
+                                self.browser.add_cookies(_cks)
+                                _ok = len(_cks)
+                            except Exception:
+                                # One bad cookie fails the batch — add individually.
+                                for _ck in _cks:
+                                    try:
+                                        self.browser.add_cookies([_ck])
+                                        _ok += 1
+                                    except Exception:
+                                        pass
+                            print(f"[{self.name}] injected {_ok}/{len(_cks)} laptop-login cookies", flush=True)
             except Exception as _ie:
                 print(f"[{self.name}] cookie injection failed (continuing): {_ie}", flush=True)
 
