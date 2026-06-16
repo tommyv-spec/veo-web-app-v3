@@ -4076,6 +4076,13 @@ MAX_GENERATION_RETRIES = 2   # Max retries per clip
 CLIP_READY_WAIT = 50    # Seconds to wait after submission before clip is ready for download
 FAILURE_CHECK_DELAY = 1 # Brief pause before failure check (check itself polls for up to 8s)
 GENERATION_WAIT = 90    # Seconds to wait for generation before download
+# v794c — the bound-mediaId getMediaUrlRedirect URL is STABLE but serves a POSTER
+# (image, ~70KB) while the clip is still rendering, then the real mp4 once done.
+# The HTTP-DL validates content-type + size and retries the SAME url until ready.
+# Fixes the clip-9 70KB-poster bug (last clip grabbed before render-complete).
+MIN_VIDEO_BYTES = 200_000  # below this (or image content-type) = poster/partial, not a real video
+POSTER_RETRY_MAX = 6       # retries on the same stable URL while it's still a poster
+POSTER_RETRY_DELAY = 20    # seconds between poster retries (6×20 = 120s ≈ an 8s clip's render time)
 
 # v737 — "We noticed some unusual activity" account-block detection.
 # Per-job strike counter. When all tiles fail with the unusual-activity Help-Center
@@ -20011,15 +20018,29 @@ class AccountWorker(threading.Thread):
                             url = 'https://labs.google' + url
                         try:
                             print(f"[{account_name}-HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1}: {url[:80]}", flush=True)
-                            resp = sess.get(url, timeout=120, allow_redirects=True)
-                            if resp.status_code == 401 and sess is not session_ref[0] and session_ref[0] is not None:
-                                print(f"[{account_name}-HTTP-DL] 401 — retrying with current session", flush=True)
-                                resp = session_ref[0].get(url, timeout=120, allow_redirects=True)
-                            if not resp.ok:
-                                raise Exception(f"HTTP {resp.status_code}")
-                            body = resp.content
-                            if len(body) < 10000:
-                                raise Exception(f"Too small: {len(body)} bytes")
+                            # v794c — validate it's a real video, not a poster the
+                            # stable mediaId URL serves while still rendering. Retry
+                            # the SAME url until content-type is non-image AND size is
+                            # video-sized; once Flow finishes, the same url returns mp4.
+                            body = None
+                            for _vtry in range(POSTER_RETRY_MAX):
+                                resp = sess.get(url, timeout=120, allow_redirects=True)
+                                if resp.status_code == 401 and sess is not session_ref[0] and session_ref[0] is not None:
+                                    print(f"[{account_name}-HTTP-DL] 401 — retrying with current session", flush=True)
+                                    resp = session_ref[0].get(url, timeout=120, allow_redirects=True)
+                                if not resp.ok:
+                                    raise Exception(f"HTTP {resp.status_code}")
+                                _ct = (resp.headers.get('Content-Type') or '').lower()
+                                _b = resp.content
+                                if 'image' not in _ct and len(_b) >= MIN_VIDEO_BYTES:
+                                    body = _b
+                                    break
+                                # poster/partial → clip still rendering; wait + retry SAME url
+                                if _vtry < POSTER_RETRY_MAX - 1:
+                                    print(f"[{account_name}-HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1} not ready (ct={_ct or '?'} {len(_b):,}b) — retry {_vtry+1}/{POSTER_RETRY_MAX} in {POSTER_RETRY_DELAY}s", flush=True)
+                                    time.sleep(POSTER_RETRY_DELAY)
+                            if body is None:
+                                raise Exception(f"still poster/too-small after {POSTER_RETRY_MAX} tries — clip not rendered")
                             out = os.path.join(temp_dir, f"clip_{ci}_{attempt}.{vi+1}.mp4")
                             with open(out, 'wb') as f:
                                 f.write(body)
