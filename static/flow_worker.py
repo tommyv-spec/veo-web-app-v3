@@ -19027,23 +19027,30 @@ class AccountWorker(threading.Thread):
                         if _cks:
                             _ok = 0
                             _failed = []
+                            _errs = []
                             for _ck in _cks:
                                 try:
                                     self.browser.add_cookies([_ck])
                                     _ok += 1
-                                except Exception:
-                                    # Retry host-only via url (covers domain/__Host- issues).
-                                    try:
-                                        _alt = {k: v for k, v in _ck.items() if k != "domain"}
-                                        _h = (_ck.get("domain") or "").lstrip(".") or "accounts.google.com"
-                                        _alt["url"] = "https://" + _h
-                                        _alt["sameSite"] = "Lax"
-                                        self.browser.add_cookies([_alt])
-                                        _ok += 1
-                                    except Exception:
-                                        _failed.append(_ck.get("name", "?"))
+                                    continue
+                                except Exception as _e1:
+                                    _last = _e1
+                                # Retry: host-only via url + Lax (covers __Host- rules).
+                                try:
+                                    _h = (_ck.get("domain") or "").lstrip(".") or "accounts.google.com"
+                                    _alt = {"name": _ck["name"], "value": _ck["value"],
+                                            "url": "https://" + _h, "path": "/",
+                                            "secure": True, "sameSite": "Lax"}
+                                    self.browser.add_cookies([_alt])
+                                    _ok += 1
+                                    continue
+                                except Exception as _e2:
+                                    _last = _e2
+                                _failed.append(_ck.get("name", "?"))
+                                if len(_errs) < 2:
+                                    _errs.append(f"{_ck.get('name','?')}: {str(_last)[:90]}")
                             print(f"[{self.name}] injected {_ok}/{len(_cks)} laptop-login cookies"
-                                  + (f" (failed: {_failed})" if _failed else ""), flush=True)
+                                  + (f" (failed: {_failed} | {_errs})" if _failed else ""), flush=True)
             except Exception as _ie:
                 print(f"[{self.name}] cookie injection failed (continuing): {_ie}", flush=True)
 
