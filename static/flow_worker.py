@@ -1135,6 +1135,40 @@ def captured_urls_for_clip(job_id, clip_index, captured_media_urls):
     return out
 
 
+def resolve_clip_download_urls(page, job_id, clip_index, dialogue_key, captured_media_urls):
+    """v794 — SINGLE source of truth for a clip's download URLs across every
+    producer. Priority:
+      1) bound mediaId (uuid-keyed, position-independent) — captured_urls_for_clip.
+      2) fallback: dialogue-text DOM match, ONLY when dialogue_key is non-empty.
+         An EMPTY key matched the first tile = a SIBLING clip's finished video,
+         which then poisoned http_enqueued_clips (shared dedup) → stuck clip
+         (clip-3 bug, 2026-06-16). Empty key → skip the DOM match entirely.
+    Returns [] when nothing resolves; callers must NOT mark the clip enqueued on
+    [] so a later scan (v663 data-index / bound mediaId) can still pick it up."""
+    urls = captured_urls_for_clip(job_id, clip_index, captured_media_urls)
+    if urls:
+        return urls
+    if not dialogue_key:
+        return []
+    try:
+        urls = page.evaluate(f"""() => {{
+            for (const c of document.querySelectorAll('[data-index]')) {{
+                if ((c.innerText||'').includes({repr(dialogue_key)})) {{
+                    const out = [];
+                    for (const v of c.querySelectorAll('video')) {{
+                        const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                        if (u && !u.startsWith('blob:')) out.push(u);
+                    }}
+                    if (out.length) return out;
+                }}
+            }}
+            return [];
+        }}""")
+        return urls or []
+    except Exception:
+        return []
+
+
 def _install_submit_response_listener(page, account_label=""):
     """v700 — install a one-shot Playwright `response` handler on `page`
     that captures `batchAsyncGenerateVideoStartImage` 200 responses into
@@ -16984,19 +17018,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             continue
                         _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
                         try:
-                            _urls = page.evaluate(f"""() => {{
-                                for (const c of document.querySelectorAll('[data-index]')) {{
-                                    if ((c.innerText||'').includes({repr(_dlg)})) {{
-                                        const urls = [];
-                                        for (const v of c.querySelectorAll('video')) {{
-                                            const u = v.src || (v.querySelector('source')||{{}}).src || '';
-                                            if (u && !u.startsWith('blob:')) urls.push(u);
-                                        }}
-                                        if (urls.length) return urls;
-                                    }}
-                                }}
-                                return [];
-                            }}""")
+                            _urls = resolve_clip_download_urls(page, job_id, _ci, _dlg, captured_media_urls)  # v794: bound mediaId first, no sibling-grab/poison
                             if _urls:
                                 http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
                                     'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir})
@@ -17227,19 +17249,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                 continue
                             _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
                             try:
-                                _urls = page.evaluate(f"""() => {{
-                                    for (const c of document.querySelectorAll('[data-index]')) {{
-                                        if ((c.innerText||'').includes({repr(_dlg)})) {{
-                                            const urls = [];
-                                            for (const v of c.querySelectorAll('video')) {{
-                                                const u = v.src || (v.querySelector('source')||{{}}).src || '';
-                                                if (u && !u.startsWith('blob:')) urls.push(u);
-                                            }}
-                                            if (urls.length) return urls;
-                                        }}
-                                    }}
-                                    return [];
-                                }}""")
+                                _urls = resolve_clip_download_urls(page, job_id, _ci, _dlg, captured_media_urls)  # v794: bound mediaId first, no sibling-grab/poison
                                 if _urls:
                                     http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
                                         'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir})
@@ -18280,19 +18290,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             page.reload(wait_until='domcontentloaded', timeout=30000)
                             time.sleep(2)
                             ensure_videos_tab_selected(page)
-                        _urls = page.evaluate(f"""() => {{
-                            for (const c of document.querySelectorAll('[data-index]')) {{
-                                if ((c.innerText||'').includes({repr(_dlg)})) {{
-                                    const urls = [];
-                                    for (const v of c.querySelectorAll('video')) {{
-                                        const u = v.src || (v.querySelector('source')||{{}}).src || '';
-                                        if (u && !u.startsWith('blob:')) urls.push(u);
-                                    }}
-                                    if (urls.length) return urls;
-                                }}
-                            }}
-                            return [];
-                        }}""")
+                        _urls = resolve_clip_download_urls(page, job_id, _ci, _dlg, captured_media_urls)  # v794: bound mediaId first, no sibling-grab/poison
                         if _urls:
                             if _ci not in http_enqueued_clips:
                                 http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
@@ -18624,11 +18622,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             continue
                         _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
                         try:
-                            # Same scan as between-clip (which always works):
-                            # iterate all [data-index] containers, match by dialogue text
-                            _urls = page.evaluate(f"""() => {{
+                            # v794: prefer bound mediaId (position-independent; handles
+                            # empty-dialogue clips). Dialogue scan only as fallback, and
+                            # empty-guarded so an empty key can't grab a sibling's tile.
+                            _urls = captured_urls_for_clip(job_id, _ci, captured_media_urls) or page.evaluate(f"""() => {{
                                 for (const c of document.querySelectorAll('[data-index]')) {{
-                                    if ((c.innerText||'').includes({repr(_dlg)})) {{
+                                    if ({repr(_dlg)} && (c.innerText||'').includes({repr(_dlg)})) {{
                                         const urls = [];
                                         for (const v of c.querySelectorAll('video')) {{
                                             const u = v.src || (v.querySelector('source')||{{}}).src || '';
@@ -18644,7 +18643,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             if not _urls or _urls == ['__blob__']:
                                 _tile_fail_type = page.evaluate(f"""() => {{
                                     for (const c of document.querySelectorAll('[data-index]')) {{
-                                        if ((c.innerText||'').includes({repr(_dlg)})) {{
+                                        if ({repr(_dlg)} && (c.innerText||'').includes({repr(_dlg)})) {{
                                             const icons = Array.from(c.querySelectorAll('i')).map(i => i.textContent.trim());
                                             const hasRefresh = icons.includes('refresh');
                                             const hasFailed = c.innerText.includes('Failed');
