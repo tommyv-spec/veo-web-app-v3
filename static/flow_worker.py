@@ -19019,38 +19019,39 @@ class AccountWorker(threading.Thread):
             # real Chrome profile so this fresh (automatable) session is already
             # logged into Google — no verification code. Fail-safe + idempotent.
             try:
-                if self.session_folder == ACCOUNTS[0]["session_folder"]:
-                    _ckf = os.path.join(_BASE, ".worker_injected_cookies.json")
-                    if os.path.isfile(_ckf):
-                        with open(_ckf, "r", encoding="utf-8") as _f:
-                            _cks = json.load(_f)
-                        if _cks:
-                            _ok = 0
-                            _failed = []
-                            _errs = []
-                            for _ck in _cks:
-                                try:
-                                    self.browser.add_cookies([_ck])
-                                    _ok += 1
-                                    continue
-                                except Exception as _e1:
-                                    _last = _e1
-                                # Retry: host-only via url + Lax (covers __Host- rules).
-                                try:
-                                    _h = (_ck.get("domain") or "").lstrip(".") or "accounts.google.com"
-                                    _alt = {"name": _ck["name"], "value": _ck["value"],
-                                            "url": "https://" + _h, "path": "/",
-                                            "secure": True, "sameSite": "Lax"}
-                                    self.browser.add_cookies([_alt])
-                                    _ok += 1
-                                    continue
-                                except Exception as _e2:
-                                    _last = _e2
-                                _failed.append(_ck.get("name", "?"))
-                                if len(_errs) < 2:
-                                    _errs.append(f"{_ck.get('name','?')}: {str(_last)[:90]}")
-                            print(f"[{self.name}] injected {_ok}/{len(_cks)} laptop-login cookies"
-                                  + (f" (failed: {_failed} | {_errs})" if _failed else ""), flush=True)
+                # Inject the captured laptop login into EVERY slot's session so
+                # all worker windows are logged into the same Google account.
+                _ckf = os.path.join(_BASE, ".worker_injected_cookies.json")
+                if os.path.isfile(_ckf):
+                    with open(_ckf, "r", encoding="utf-8") as _f:
+                        _cks = json.load(_f)
+                    if _cks:
+                        _ok = 0
+                        _failed = []
+                        _errs = []
+                        for _ck in _cks:
+                            try:
+                                self.browser.add_cookies([_ck])
+                                _ok += 1
+                                continue
+                            except Exception as _e1:
+                                _last = _e1
+                            # Retry host-only via url ONLY (no path — Playwright
+                            # rejects url+path together).
+                            try:
+                                _h = (_ck.get("domain") or "").lstrip(".") or "accounts.google.com"
+                                _alt = {"name": _ck["name"], "value": _ck["value"],
+                                        "url": "https://" + _h, "secure": True, "sameSite": "Lax"}
+                                self.browser.add_cookies([_alt])
+                                _ok += 1
+                                continue
+                            except Exception as _e2:
+                                _last = _e2
+                            _failed.append(_ck.get("name", "?"))
+                            if len(_errs) < 2:
+                                _errs.append(f"{_ck.get('name','?')}: {str(_last)[:90]}")
+                        print(f"[{self.name}] injected {_ok}/{len(_cks)} laptop-login cookies"
+                              + (f" (failed: {_failed} | {_errs})" if _failed else ""), flush=True)
             except Exception as _ie:
                 print(f"[{self.name}] cookie injection failed (continuing): {_ie}", flush=True)
 

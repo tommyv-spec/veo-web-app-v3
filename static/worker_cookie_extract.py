@@ -120,15 +120,16 @@ def _parse_netlog_cookies(path, log):
                 by_name[name] = (value.strip(), host or "google.com")
     cookies = []
     for name, (value, host) in by_name.items():
-        ck = {"name": name, "value": value, "path": "/", "secure": True}
         if name.startswith("__Host-"):
-            # __Host- cookies MUST be host-only (no domain attribute) -> use url.
-            ck["url"] = "https://" + (host or "accounts.google.com")
-            ck["sameSite"] = "Lax"
+            # __Host- cookies MUST be host-only -> url form ONLY (Playwright
+            # rejects url + path together: "should have either url or path").
+            cookies.append({"name": name, "value": value,
+                            "url": "https://" + (host or "accounts.google.com"),
+                            "secure": True, "sameSite": "Lax"})
         else:
-            ck["domain"] = _registrable_domain(host)
-            ck["sameSite"] = "None"
-        cookies.append(ck)
+            cookies.append({"name": name, "value": value,
+                            "domain": _registrable_domain(host), "path": "/",
+                            "secure": True, "sameSite": "None"})
     log(f"cookie-capture: parsed {len(cookies)} distinct cookies from netlog")
     return cookies
 
