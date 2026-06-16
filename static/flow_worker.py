@@ -2636,37 +2636,35 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
     # ── Main logic: loop until logged into Flow ──
     max_attempts = 8
     _consecutive_no_buttons = 0
+    _sso_attempts = 0
     for attempt in range(max_attempts):
         state = _get_page_state(page)
 
         # Flow signin / error=Callback page: the Google session IS valid (our
-        # injected SSO cookies), so clicking "Sign in with Google" completes the
-        # handshake and lands back in Flow — exactly what works manually. The
-        # worker would otherwise classify this as 'other' and re-navigate forever.
+        # injected SSO cookies), so clicking "Sign in with Google" ONCE completes
+        # the handshake and lands back in Flow. Cap clicks — spamming it races the
+        # OAuth callback and produces error=Callback.
         try:
             _cur_url = page.url
         except Exception:
             _cur_url = ""
-        if "/api/auth/signin" in _cur_url or "error=callback" in _cur_url.lower():
-            print(f"[{label}] On Flow signin page — clicking 'Sign in with Google' (SSO)", flush=True)
-            _sso_clicked = False
+        if ("/api/auth/signin" in _cur_url or "error=callback" in _cur_url.lower()) and _sso_attempts < 2:
+            _sso_attempts += 1
+            print(f"[{label}] On Flow signin page — clicking 'Sign in with Google' (SSO) [{_sso_attempts}/2]", flush=True)
             for _sso_sel in ["button:has-text('Sign in with Google')",
                              "a:has-text('Sign in with Google')",
                              "button:has-text('Accedi con Google')",
-                             "a:has-text('Accedi con Google')",
-                             "button:has-text('Sign in')",
-                             "a:has-text('Sign in')"]:
+                             "a:has-text('Accedi con Google')"]:
                 try:
                     _sso_b = page.locator(_sso_sel).first
                     if _sso_b.is_visible(timeout=1500):
                         human_click_element(page, _sso_b, f"[{label}] SSO {_sso_sel}")
-                        _sso_clicked = True
                         break
                 except Exception:
                     pass
-            if not _sso_clicked:
-                print(f"[{label}] ⚠ 'Sign in with Google' button not found on signin page", flush=True)
-            _wait_for_page_settle(page, max_seconds=25)
+            # Wait LONG for the full Google->Flow handshake; do not re-click during it.
+            _wait_for_page_settle(page, max_seconds=40)
+            time.sleep(4)
             continue
 
         if state == 'flow_logged_in':
