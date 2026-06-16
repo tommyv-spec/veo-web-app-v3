@@ -2834,16 +2834,25 @@ def check_ultra_account(page, label="", timeout=5):
     try:
         # Wait briefly for header to fully render
         time.sleep(2)
-        
-        # Check for ULTRA badge — multiple selector strategies
-        for _ in range(timeout):
-            is_ultra = page.evaluate(_ULTRA_BADGE_JS)
 
-            if is_ultra:
-                _ULTRA_VERIFIED.add(label)
-                print(f"{prefix}✓ Account verified: ULTRA", flush=True)
-                return True
-            time.sleep(1)
+        # Poll for the ULTRA badge generously + reload once between rounds. The
+        # injected-cookie (laptop-login) session renders the nav/plan badge late
+        # (after the credits API resolves), so a short poll misses it.
+        _poll = max(timeout, 12)
+        for _round in range(2):
+            for _ in range(_poll):
+                if page.evaluate(_ULTRA_BADGE_JS):
+                    _ULTRA_VERIFIED.add(label)
+                    print(f"{prefix}✓ Account verified: ULTRA", flush=True)
+                    return True
+                time.sleep(1)
+            if _round == 0:
+                print(f"{prefix}ULTRA badge not seen yet — reloading + re-polling...", flush=True)
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=30000)
+                    time.sleep(3)
+                except Exception:
+                    pass
 
         # v758.22 — badge not found. If this account was ALREADY verified ULTRA
         # earlier this session, this is almost certainly a transient post-reload
@@ -2869,6 +2878,14 @@ def check_ultra_account(page, label="", timeout=5):
             except Exception as _re_e:
                 print(f"{prefix}⚠ reload during ULTRA re-check failed: {_re_e}", flush=True)
             print(f"{prefix}⚠ ULTRA badge still not visible — continuing anyway (account previously verified this session).", flush=True)
+            return True
+
+        # Laptop-login (injected-cookie) mode: the account was logged in via
+        # captured cookies. The ULTRA badge render is flaky in that session, so
+        # do NOT hard-kill — the account may well be ULTRA (operator-confirmed).
+        # Continue with a warning; Flow itself gates generation if truly non-ULTRA.
+        if os.path.exists(os.path.join(_BASE, ".worker_injected_cookies.json")):
+            print(f"{prefix}⚠ ULTRA badge not detected, but this is a laptop-login (injected) session — continuing anyway (Flow gates generation if truly non-ULTRA).", flush=True)
             return True
 
         # DIAG (remove after ULTRA detection verified): dump any element text
