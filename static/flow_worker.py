@@ -18994,7 +18994,38 @@ class AccountWorker(threading.Thread):
         self._http_dl_queue = None  # Per-account HTTP download queue — set in run()
         self._http_session_ref = [None]  # Mutable ref to requests.Session with browser cookies
         self.redispatch_queue = None  # Shared queue — put job_id here when reset to pending after restore
-    
+        # v794b — uuid→getMediaUrlRedirect URL map for THIS account's page.
+        # Parallel mode previously passed captured_media_urls=None to
+        # process_job_submission, so captured_urls_for_clip() always returned []
+        # → every bound-mediaId recovery (v774 + v794) was a no-op in parallel
+        # mode → clips fell back to fragile DOM attribution → stuck. This map +
+        # _install_media_url_capture() wire the bound-mediaId fetch into parallel.
+        self._captured_media_urls = {}
+
+    def _install_media_url_capture(self):
+        """v794b — capture getMediaUrlRedirect URLs (uuid→URL) on this account's
+        page so a clip's bound primaryMediaId resolves to a real download URL.
+        Idempotent per page object; re-installs automatically after a golden-
+        restore page relaunch (new page → flag absent → re-installs)."""
+        try:
+            if self.page is None or getattr(self.page, '_media_capture_installed', False):
+                return
+            _cap_map = self._captured_media_urls
+            def _cap(response):
+                try:
+                    u = response.url
+                    if 'getMediaUrlRedirect' in u:
+                        import re as _re2
+                        m = _re2.search(r'[?&]name=([a-f0-9-]+)', u)
+                        if m:
+                            _cap_map[m.group(1)] = u
+                except Exception:
+                    pass
+            self.page.on("response", _cap)
+            self.page._media_capture_installed = True
+        except Exception:
+            pass
+
     def request_shutdown(self):
         """Request the worker to shutdown gracefully"""
         print(f"[{self.name}] Shutdown requested", flush=True)
@@ -20043,12 +20074,14 @@ class AccountWorker(threading.Thread):
         try:
             job['account_name'] = self.name  # Stamp so cache is namespaced per account
             defocus_chrome(self.page, self.name)  # Prevent Chrome from stealing focus when navigating to project
+            self._install_media_url_capture()  # v794b — wire bound-mediaId fetch (was no-op in this path: captured_media_urls=None)
             result = process_job_submission(
                 page=self.page,
                 job=job,
                 cache=self.cache,
                 download_queue=acc,
                 http_dl_queue=self._http_dl_queue,
+                captured_media_urls=self._captured_media_urls,
                 session_refresh_callback=self._snapshot_cookies,
             )
             return result
@@ -20121,12 +20154,14 @@ class AccountWorker(threading.Thread):
         acc = PassthroughAccumulator()
         try:
             filtered_job['account_name'] = self.name
+            self._install_media_url_capture()  # v794b — wire bound-mediaId fetch into parallel mode
             result = process_job_submission(
                 page=self.page,
                 job=filtered_job,
                 cache=self.cache,
                 download_queue=acc,
                 http_dl_queue=self._http_dl_queue,
+                captured_media_urls=self._captured_media_urls,
                 session_refresh_callback=self._snapshot_cookies,
             )
             return result
