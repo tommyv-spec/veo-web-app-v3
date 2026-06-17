@@ -3777,9 +3777,12 @@ Example: A realistic vertical video of a professional presenter speaking directl
                             <li><code style="font-size:10px;">## Ingredients</code> — a table naming your uploads (the <strong>character</strong> = your subject, an optional <strong>product</strong>). Optional, used to bind the product upload by name.</li>
                             <li><code style="font-size:10px;">## Images</code> — one <code style="font-size:10px;">### Image N</code> per image to generate. <code style="font-size:10px;">- **reference_image:**</code> is <code style="font-size:10px;">none</code> or <code style="font-size:10px;">image_K</code> (a lower number, to build on an earlier image). The prompt goes in a fenced block under <code style="font-size:10px;">- **Image prompt:**</code>.</li>
                             <li><code style="font-size:10px;">## Storyboard</code> — one <code style="font-size:10px;">### Scene N</code> per clip. It points at an image with <code style="font-size:10px;">- **image:** image_N</code> and carries the spoken <code style="font-size:10px;">- **line:**</code> + <code style="font-size:10px;">- **action_note:**</code>.</li>
+                            <li><code style="font-size:10px;">## Veo 3.1 Final Prompts</code> — the per-clip <strong>video</strong> prompt (what gets passed to Veo when the build is generated / promoted to video). One <code style="font-size:10px;">### Clip N.M</code> per clip, with <code style="font-size:10px;">**Start frame:** Image N</code> + a fenced <code style="font-size:10px;">**Text prompt:**</code>.</li>
                         </ul>
                         <div style="font-weight:600;color:var(--text-primary);margin:10px 0 4px;">Inside the Image prompt (the prompt format)</div>
                         <p style="margin:0 0 8px;">Each fenced <code style="font-size:10px;">**Image prompt:**</code> follows the build convention — labelled sections then quality rules:<br><code style="font-size:10px;">[Composition] [Subject] [Action] [Location] [Style] [Tech]</code> then a <code style="font-size:10px;">POSITIVE:</code> line and one or more <code style="font-size:10px;">[...] NEGATIVE:</code> lines. The whole block is sent to Nano Banana as the prompt. Your <strong>Prompt prefix</strong> (below) is prepended to every scene.</p>
+                        <div style="font-weight:600;color:var(--text-primary);margin:10px 0 4px;">Inside a Veo clip prompt (the prompt you actually pass per clip)</div>
+                        <p style="margin:0 0 8px;">Each <code style="font-size:10px;">### Clip N.M — Scene N, Line M (REGISTER)</code> has <code style="font-size:10px;">**Start frame:** Image N</code> (ties the clip to its image) then a fenced <code style="font-size:10px;">**Text prompt:**</code>: a <strong>camera</strong> line → the <strong>action</strong> across the clip → the spoken line inline (<code style="font-size:10px;">says in a &lt;tone&gt; voice, "…"</code>) → <code style="font-size:10px;">Ambient:</code> → <code style="font-size:10px;">(no subtitles, no captions)</code>. <strong>No separate Negative prompt block</strong> — bans are written affirmatively into the text (standing rule).</p>
                         <pre style="white-space:pre-wrap;background:var(--bg-primary);border:1px solid var(--border-color);border-radius:4px;padding:10px;font-family:'JetBrains Mono',monospace;font-size:10.5px;overflow-x:auto;margin:0 0 8px;">## Ingredients
 
 | Name (used in prompts) | Type | Description | Source | Attached to |
@@ -3840,7 +3843,37 @@ POSITIVE: one unified photorealistic image, natural skin + liquid detail.
 - **transition:** cut
 - **speaker:** the main character on-camera
 - **line:** pour it into warm milk and drink it before bed.
-- **action_note:** [Start beat] pinch. [Mid-clip beat] pour. [End beat] glance to lens.</pre>
+- **action_note:** [Start beat] pinch. [Mid-clip beat] pour. [End beat] glance to lens.
+
+## Veo 3.1 Final Prompts (per clip)
+
+### Clip 1.1 — Scene 1, Line 1 (HOOK)
+**Start frame:** Image 1
+**Text prompt:**
+```
+Static handheld camera, slight natural drift.
+
+Across the clip, the main character lifts the jar toward the camera, then locks eyes to the lens through the line.
+
+The main character says in a warm, confident voice, "here's the one thing nobody tells you."
+
+Ambient: quiet sunlit kitchen room tone.
+(no subtitles, no captions)
+```
+
+### Clip 2.1 — Scene 2, Line 1 (RECIPE)
+**Start frame:** Image 2
+**Text prompt:**
+```
+Static handheld camera, slight natural drift.
+
+Across the clip, the main character pours the jar into the warm milk, then glances to the lens.
+
+The main character says in a warm, teaching voice, "pour it into warm milk and drink it before bed."
+
+Ambient: same kitchen room tone, soft pour sound.
+(no subtitles, no captions)
+```</pre>
                         <div style="color:var(--text-muted);margin-bottom:8px;">An image with <strong>reference_image: image_1</strong> waits in <em>draft</em> until you pick a chosen variant of image 1 — then it auto-queues. Legacy files that use <code style="font-size:10px;">### Scene N</code> with an inline Image prompt (no <code style="font-size:10px;">### Image N</code>) still import too.</div>
                         <button type="button" class="btn btn-secondary btn-sm" onclick="imgInsertExampleMarkdown()" style="font-size:11px;padding:4px 10px;">📥 Insert this example</button>
                     </div>
@@ -21264,6 +21297,36 @@ POSITIVE: one unified photorealistic image, natural skin + liquid detail.
                 '- **speaker:** the main character on-camera',
                 '- **line:** pour it into warm milk and drink it before bed.',
                 '- **action_note:** [Start beat] pinch. [Mid-clip beat] pour. [End beat] glance to lens.',
+                '',
+                '## Veo 3.1 Final Prompts (per clip)',
+                '',
+                '### Clip 1.1 — Scene 1, Line 1 (HOOK)',
+                '**Start frame:** Image 1',
+                '**Text prompt:**',
+                '```',
+                'Static handheld camera, slight natural drift.',
+                '',
+                'Across the clip, the main character lifts the jar toward the camera, then locks eyes to the lens through the line.',
+                '',
+                'The main character says in a warm, confident voice, "here\'s the one thing nobody tells you."',
+                '',
+                'Ambient: quiet sunlit kitchen room tone.',
+                '(no subtitles, no captions)',
+                '```',
+                '',
+                '### Clip 2.1 — Scene 2, Line 1 (RECIPE)',
+                '**Start frame:** Image 2',
+                '**Text prompt:**',
+                '```',
+                'Static handheld camera, slight natural drift.',
+                '',
+                'Across the clip, the main character pours the jar into the warm milk, then glances to the lens.',
+                '',
+                'The main character says in a warm, teaching voice, "pour it into warm milk and drink it before bed."',
+                '',
+                'Ambient: same kitchen room tone, soft pour sound.',
+                '(no subtitles, no captions)',
+                '```',
                 ''
             ].join('\n');
             if (ta.value.trim() && !confirm('Replace the current markdown with the example?')) return;
