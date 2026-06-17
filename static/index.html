@@ -3771,22 +3771,77 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     <div id="imgImportPreview" style="margin-top:8px;font-size:11px;color:var(--text-muted);"></div>
                     <!-- Format help — toggled by the "❔ See format" button -->
                     <div id="imgFormatHelp" style="display:none;margin-top:8px;padding:12px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:6px;font-size:11px;color:var(--text-secondary);line-height:1.6;">
-                        <div style="font-weight:600;color:var(--text-primary);margin-bottom:6px;">How to structure the scene table</div>
-                        <p style="margin:0 0 8px;">One <code style="font-size:10px;">### Scene N</code> block per image. Set <code style="font-size:10px;">- **reference_image:**</code> to <code style="font-size:10px;">none</code> for a standalone scene, or <code style="font-size:10px;">image_K</code> to build the scene on top of an earlier one (K must be a lower number). Put the prompt in a fenced block under <code style="font-size:10px;">**Image prompt:**</code>.</p>
-                        <pre style="white-space:pre-wrap;background:var(--bg-primary);border:1px solid var(--border-color);border-radius:4px;padding:10px;font-family:'JetBrains Mono',monospace;font-size:10.5px;overflow-x:auto;margin:0 0 8px;">### Scene 1
+                        <div style="font-weight:600;color:var(--text-primary);margin-bottom:6px;">How the build markdown is structured</div>
+                        <p style="margin:0 0 8px;">The importer reads your build file. It has up to three sections:</p>
+                        <ul style="margin:0 0 8px;padding-left:18px;">
+                            <li><code style="font-size:10px;">## Ingredients</code> — a table naming your uploads (the <strong>character</strong> = your subject, an optional <strong>product</strong>). Optional, used to bind the product upload by name.</li>
+                            <li><code style="font-size:10px;">## Images</code> — one <code style="font-size:10px;">### Image N</code> per image to generate. <code style="font-size:10px;">- **reference_image:**</code> is <code style="font-size:10px;">none</code> or <code style="font-size:10px;">image_K</code> (a lower number, to build on an earlier image). The prompt goes in a fenced block under <code style="font-size:10px;">- **Image prompt:**</code>.</li>
+                            <li><code style="font-size:10px;">## Storyboard</code> — one <code style="font-size:10px;">### Scene N</code> per clip. It points at an image with <code style="font-size:10px;">- **image:** image_N</code> and carries the spoken <code style="font-size:10px;">- **line:**</code> + <code style="font-size:10px;">- **action_note:**</code>.</li>
+                        </ul>
+                        <div style="font-weight:600;color:var(--text-primary);margin:10px 0 4px;">Inside the Image prompt (the prompt format)</div>
+                        <p style="margin:0 0 8px;">Each fenced <code style="font-size:10px;">**Image prompt:**</code> follows the build convention — labelled sections then quality rules:<br><code style="font-size:10px;">[Composition] [Subject] [Action] [Location] [Style] [Tech]</code> then a <code style="font-size:10px;">POSITIVE:</code> line and one or more <code style="font-size:10px;">[...] NEGATIVE:</code> lines. The whole block is sent to Nano Banana as the prompt. Your <strong>Prompt prefix</strong> (below) is prepended to every scene.</p>
+                        <pre style="white-space:pre-wrap;background:var(--bg-primary);border:1px solid var(--border-color);border-radius:4px;padding:10px;font-family:'JetBrains Mono',monospace;font-size:10.5px;overflow-x:auto;margin:0 0 8px;">## Ingredients
+
+| Name (used in prompts) | Type | Description | Source | Attached to |
+|---|---|---|---|---|
+| `the main character` | character | your avatar (identity from upload) | upload | image_1, image_2 |
+
+## Images
+
+### Image 1
 - **reference_image:** none
-**Image prompt:**
+- **Image prompt:**
 ```
-A sunlit American kitchen. A woman in her 40s stands at a marble island holding a small amber glass jar, smiling at the camera. Photorealistic, natural light.
+Use the uploaded character reference image for the main character.
+
+[Composition] iPhone wide-angle, 9:16. The main character chest-up holding a small amber jar.
+[Subject] The main character, warm confident expression, eyes to the lens.
+[Action] She lifts the jar toward the camera.
+[Location] Sunlit American kitchen, marble island, blurred shelves behind.
+[Style] Natural HDR daylight, warm palette, photorealistic.
+[Tech] iPhone wide-angle, deep focus, 2K, 9:16.
+POSITIVE: one unified photorealistic image, correct proportions, natural skin detail.
+[ANATOMY] NEGATIVE: no extra fingers, no distorted anatomy, no text, no watermark.
 ```
 
-### Scene 2
+### Image 2
 - **reference_image:** image_1
-**Image prompt:**
+- **visual_delta:** same kitchen + persona; now pouring the jar into a glass of warm milk.
+- **Image prompt:**
 ```
-Same woman, same kitchen, now pouring the jar into a glass of warm milk. Close-up on her hands. Photorealistic.
-```</pre>
-                        <div style="color:var(--text-muted);margin-bottom:8px;">A scene with <strong>reference_image: image_1</strong> waits in <em>draft</em> until you pick a chosen variant of Scene 1 — then it auto-queues.</div>
+Use the uploaded character reference image for the main character.
+
+[Composition] Chest-up, close on her hands over a glass of warm milk on the counter.
+[Action] She pours the jar into the warm milk.
+[Location] Same kitchen.
+[Style] Natural HDR daylight, photorealistic.
+[Tech] iPhone wide-angle, deep focus, 2K, 9:16.
+POSITIVE: one unified photorealistic image, natural skin + liquid detail.
+[ANATOMY] NEGATIVE: no extra fingers, no distorted anatomy, no text, no watermark.
+```
+
+## Storyboard
+
+### Scene 1
+- **image:** image_1
+- **scene_type:** shot
+- **cast:** the main character
+- **clip_mode:** fresh
+- **transition:** null
+- **speaker:** the main character on-camera
+- **line:** here's the one thing nobody tells you.
+- **action_note:** [Start beat] lifts the jar. [Mid-clip beat] addresses the lens. [End beat] holds eye contact.
+
+### Scene 2
+- **image:** image_2
+- **scene_type:** shot
+- **cast:** the main character
+- **clip_mode:** fresh
+- **transition:** cut
+- **speaker:** the main character on-camera
+- **line:** pour it into warm milk and drink it before bed.
+- **action_note:** [Start beat] pinch. [Mid-clip beat] pour. [End beat] glance to lens.</pre>
+                        <div style="color:var(--text-muted);margin-bottom:8px;">An image with <strong>reference_image: image_1</strong> waits in <em>draft</em> until you pick a chosen variant of image 1 — then it auto-queues. Legacy files that use <code style="font-size:10px;">### Scene N</code> with an inline Image prompt (no <code style="font-size:10px;">### Image N</code>) still import too.</div>
                         <button type="button" class="btn btn-secondary btn-sm" onclick="imgInsertExampleMarkdown()" style="font-size:11px;padding:4px 10px;">📥 Insert this example</button>
                     </div>
 
@@ -21148,19 +21203,67 @@ Same woman, same kitchen, now pouring the jar into a glass of warm milk. Close-u
             const ta = document.getElementById('imgImportMarkdown');
             if (!ta) return;
             const ex = [
-                '### Scene 1',
+                '## Ingredients',
+                '',
+                '| Name (used in prompts) | Type | Description | Source | Attached to |',
+                '|---|---|---|---|---|',
+                '| `the main character` | character | your avatar (identity from upload) | upload | image_1, image_2 |',
+                '',
+                '## Images',
+                '',
+                '### Image 1',
                 '- **reference_image:** none',
-                '**Image prompt:**',
+                '- **Image prompt:**',
                 '```',
-                'A sunlit American kitchen. A woman in her 40s stands at a marble island holding a small amber glass jar, smiling at the camera. Photorealistic, natural light.',
+                'Use the uploaded character reference image for the main character.',
+                '',
+                '[Composition] iPhone wide-angle, 9:16. The main character chest-up holding a small amber jar.',
+                '[Subject] The main character, warm confident expression, eyes to the lens.',
+                '[Action] She lifts the jar toward the camera.',
+                '[Location] Sunlit American kitchen, marble island, blurred shelves behind.',
+                '[Style] Natural HDR daylight, warm palette, photorealistic.',
+                '[Tech] iPhone wide-angle, deep focus, 2K, 9:16.',
+                'POSITIVE: one unified photorealistic image, correct proportions, natural skin detail.',
+                '[ANATOMY] NEGATIVE: no extra fingers, no distorted anatomy, no text, no watermark.',
                 '```',
                 '',
-                '### Scene 2',
+                '### Image 2',
                 '- **reference_image:** image_1',
-                '**Image prompt:**',
+                '- **visual_delta:** same kitchen + persona; now pouring the jar into a glass of warm milk.',
+                '- **Image prompt:**',
                 '```',
-                'Same woman, same kitchen, now pouring the jar into a glass of warm milk. Close-up on her hands. Photorealistic.',
+                'Use the uploaded character reference image for the main character.',
+                '',
+                '[Composition] Chest-up, close on her hands over a glass of warm milk on the counter.',
+                '[Action] She pours the jar into the warm milk.',
+                '[Location] Same kitchen.',
+                '[Style] Natural HDR daylight, photorealistic.',
+                '[Tech] iPhone wide-angle, deep focus, 2K, 9:16.',
+                'POSITIVE: one unified photorealistic image, natural skin + liquid detail.',
+                '[ANATOMY] NEGATIVE: no extra fingers, no distorted anatomy, no text, no watermark.',
                 '```',
+                '',
+                '## Storyboard',
+                '',
+                '### Scene 1',
+                '- **image:** image_1',
+                '- **scene_type:** shot',
+                '- **cast:** the main character',
+                '- **clip_mode:** fresh',
+                '- **transition:** null',
+                '- **speaker:** the main character on-camera',
+                '- **line:** here\'s the one thing nobody tells you.',
+                '- **action_note:** [Start beat] lifts the jar. [Mid-clip beat] addresses the lens. [End beat] holds eye contact.',
+                '',
+                '### Scene 2',
+                '- **image:** image_2',
+                '- **scene_type:** shot',
+                '- **cast:** the main character',
+                '- **clip_mode:** fresh',
+                '- **transition:** cut',
+                '- **speaker:** the main character on-camera',
+                '- **line:** pour it into warm milk and drink it before bed.',
+                '- **action_note:** [Start beat] pinch. [Mid-clip beat] pour. [End beat] glance to lens.',
                 ''
             ].join('\n');
             if (ta.value.trim() && !confirm('Replace the current markdown with the example?')) return;
