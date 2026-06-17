@@ -2853,7 +2853,7 @@
                      points are gone. Per wiki/analytics/2026-06-05-funnel-audit.md and
                      the 2026-06-08 re-analysis. -->
                 <button class="btn btn-primary" onclick="imgOpenImportModal()" title="Bulk-create image nodes from a markdown scene table — the main way to start a job">📋 Import</button>
-                <button class="btn btn-tutorial btn-sm" style="margin-left:auto;" onclick="window.open('/static/tutorial.html#images-tab','_blank')" title="How the Images tab works">📖 Tutorial</button>
+                <button class="btn btn-tutorial btn-sm" style="margin-left:auto;" onclick="openTutorial()" title="How the Images tab works">📖 Tutorial</button>
                 <!-- Graph view hidden for now (markup + imgSwitchView kept for re-enable;
                      TODO when restored: scope graph per-job, not all jobs at once). -->
                 <div class="view-toggle" style="display:none;">
@@ -15811,8 +15811,12 @@ Example: A realistic vertical video of a professional presenter speaking directl
             pctLabel.textContent = '0% read';
             document.getElementById('tutorialDontShow').checked = false;
             
-            // Load tutorial page into iframe
-            iframe.src = '/static/tutorial.html';
+            // Load tutorial page into iframe — pass the active tab so the
+            // tutorial shows the matching sections (images vs video).
+            let _tab = (typeof imgState !== 'undefined' && imgState && imgState.currentTab)
+                || document.querySelector('#mainTabBar .tab-btn.active')?.dataset.tab
+                || 'videos';
+            iframe.src = '/static/tutorial.html?tab=' + (_tab === 'images' ? 'images' : 'videos');
             
             // Show overlay
             overlay.classList.add('show');

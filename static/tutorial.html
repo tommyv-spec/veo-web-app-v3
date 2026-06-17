@@ -470,5 +470,53 @@
   <p>KavenoBuilder — User Guide</p>
   <p>Powered by Google Veo &nbsp;&middot;&nbsp; Flow Worker &nbsp;&middot;&nbsp; Voice Cloning via OpenVoice &amp; ElevenLabs</p>
 </div>
+
+<script>
+  // Context filter: when opened with ?tab=images (or ?tab=videos), show only the
+  // sections relevant to that tab. Shared sections (overview, tips, troubleshooting)
+  // show in both. Visible sidenav items + section headers are renumbered 1..N.
+  (function () {
+    var tab = new URLSearchParams(location.search).get('tab');
+    if (tab !== 'images' && tab !== 'videos') return; // no param -> show everything
+    var showImage = tab === 'images';
+    var IMAGE = ['images-tab', 'img-import', 'img-settings', 'img-worker', 'img-promote'];
+    var BOTH = ['overview', 'tips', 'troubleshooting'];
+    function scopeOf(id) { return IMAGE.indexOf(id) >= 0 ? 'image' : (BOTH.indexOf(id) >= 0 ? 'both' : 'video'); }
+    function vis(id) { var s = scopeOf(id); return s === 'both' || (showImage ? s === 'image' : s === 'video'); }
+
+    document.querySelectorAll('section[id]').forEach(function (sec) {
+      sec.style.display = vis(sec.id) ? '' : 'none';
+    });
+
+    var nav = document.querySelector('.sidenav');
+    if (!nav) return;
+    var links = Array.prototype.slice.call(nav.querySelectorAll('a[href^="#"]'));
+    links.forEach(function (a) {
+      var id = a.getAttribute('href').slice(1);
+      a.style.display = vis(id) ? '' : 'none';
+    });
+    // Hide a group header when no visible link follows it before the next header.
+    var kids = Array.prototype.slice.call(nav.children);
+    for (var i = 0; i < kids.length; i++) {
+      if (!(kids[i].classList && kids[i].classList.contains('sn-group'))) continue;
+      var anyVisible = false;
+      for (var j = i + 1; j < kids.length; j++) {
+        var k = kids[j];
+        if (k.classList && k.classList.contains('sn-group')) break;
+        if (k.tagName === 'A' && k.style.display !== 'none') { anyVisible = true; break; }
+      }
+      kids[i].style.display = anyVisible ? '' : 'none';
+    }
+    // Renumber visible items + their section headers 1..N.
+    var n = 0;
+    links.forEach(function (a) {
+      if (a.style.display === 'none') return;
+      n++; var num = ('0' + n).slice(-2);
+      var sn = a.querySelector('.sn-num'); if (sn) sn.textContent = num;
+      var sec = document.getElementById(a.getAttribute('href').slice(1));
+      var h = sec && sec.querySelector('.h2-num'); if (h) h.textContent = num;
+    });
+  })();
+</script>
 </body>
 </html>
