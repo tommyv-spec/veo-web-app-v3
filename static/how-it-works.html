@@ -277,6 +277,57 @@ body{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans
   </div>
 </div>
 
+<!-- IMAGES QUICK-START -->
+<div class="section-label">Images &mdash; Build the Frames First (optional)</div>
+<div class="workflow">
+  <p style="color:var(--text2);font-size:13.5px;margin-bottom:20px;">The <strong>&#128444;&#65039; Images</strong> tab generates still frames with Google's Nano Banana / Imagen models. Build and approve the images, then promote them straight into a video. Runs on your own browser worker (like the Flow worker, pointed at Nano Banana).</p>
+  <div class="wf-steps">
+
+    <div class="wf-step">
+      <div class="wf-num">1</div>
+      <div class="wf-body">
+        <h3>Import a Scene Table</h3>
+        <p>On the <strong>&#128444;&#65039; Images</strong> tab click <strong>&#128203; Import</strong>. Paste a markdown scene table &mdash; each <code style="font-size:11px;">### Scene N</code> block becomes one image. Pick a <strong>Subject</strong> photo (the person in every scene) and an optional <strong>Product</strong> image.</p>
+        <div class="sub">
+          <span class="wf-tag">&#128203; One scene = one image</span>
+          <span class="wf-tag">&#128100; Subject = image 1</span>
+          <span class="wf-tag">&#128230; Product = image 2 (optional)</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="wf-step">
+      <div class="wf-num">2</div>
+      <div class="wf-body">
+        <h3>Start Your Image Worker</h3>
+        <p>In the left <strong>&#9881; Worker</strong> panel, download the installer (<strong>.bat</strong> / <strong>.command</strong>) and run it. Optionally enter the Google email your computer's Chrome is already signed into &mdash; the worker reuses that login with no code (BYO). Keep the terminal open while generating.</p>
+        <div class="sub">
+          <span class="wf-tag">&#11015; Download Installer</span>
+          <span class="wf-tag">&#128273; Reuse existing Chrome login (BYO)</span>
+          <span class="wf-tag">&#9889; 4 parallel slots recommended</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="wf-step">
+      <div class="wf-num">3</div>
+      <div class="wf-body">
+        <h3>Pick the Best Variant</h3>
+        <p>Each scene generates up to four variants. Click the one you like to mark it <strong>&#10003; chosen</strong>. Choosing a frame also unlocks any later scene that references it. Use <strong>&#128229; Download all</strong> for a zip, or <strong>&#8635; Regenerate failed</strong> if some scenes missed.</p>
+      </div>
+    </div>
+
+    <div class="wf-step">
+      <div class="wf-num">4</div>
+      <div class="wf-body">
+        <h3>Promote to Video</h3>
+        <p>Once every scene is ready with a chosen variant, click <strong>&#127916; Promote to video</strong>. The whole batch stages in the <strong>Videos</strong> tab for a final review, then generates the talking-head video from your approved frames.</p>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <!-- QUICK TIPS -->
 <div class="section-label">Quick Tips</div>
 <div class="tips">
@@ -324,6 +375,16 @@ body{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans
     <div class="tip-icon">&#127908;</div>
     <h4>Save Voice Presets</h4>
     <p>In the ElevenLabs voice panel, save your API key + Voice ID + settings as a named preset. Select from the dropdown on future exports — no re-entry needed.</p>
+  </div>
+  <div class="tip">
+    <div class="tip-icon">&#128444;&#65039;</div>
+    <h4>Generate images first</h4>
+    <p>Use the Images tab to build and approve every frame, then Promote to video. You review the look before spending a video render.</p>
+  </div>
+  <div class="tip">
+    <div class="tip-icon">&#10003;</div>
+    <h4>Choose variants in order</h4>
+    <p>Chained image scenes wait for their parent's chosen frame. Pick top-to-bottom so each scene builds on an approved one.</p>
   </div>
 </div>
 

@@ -2853,9 +2853,10 @@
                      points are gone. Per wiki/analytics/2026-06-05-funnel-audit.md and
                      the 2026-06-08 re-analysis. -->
                 <button class="btn btn-primary" onclick="imgOpenImportModal()" title="Bulk-create image nodes from a markdown scene table — the main way to start a job">📋 Import</button>
+                <button class="btn btn-tutorial btn-sm" style="margin-left:auto;" onclick="window.open('/static/tutorial.html#images-tab','_blank')" title="How the Images tab works">📖 Tutorial</button>
                 <!-- Graph view hidden for now (markup + imgSwitchView kept for re-enable;
                      TODO when restored: scope graph per-job, not all jobs at once). -->
-                <div class="view-toggle" style="margin-left:auto;display:none;">
+                <div class="view-toggle" style="display:none;">
                     <button class="active" data-view="list" onclick="imgSwitchView('list')" title="List view">📋</button>
                     <button data-view="graph" onclick="imgSwitchView('graph')" title="Graph view">🕸</button>
                 </div>
