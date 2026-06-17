@@ -1552,6 +1552,22 @@ def _split_item_by_uuid_binding(item):
         return [item]
     if 'urls' not in item or 'clip_index' not in item:
         return [item]
+    # v792.1 — REDO direct-DOM scrape is position-authoritative. A single-clip
+    # redo runs in a fresh project with one tile at data-index=0 that the worker
+    # JUST generated, so position IS identity. The v792 foreign-tile guard exists
+    # for the BATCH path (tile order drifts); applying it to a redo wrongly drops
+    # the redo's good render because the FAILED first-gen left stale mediaId
+    # bindings on the slot (declared_has_bindings=True) while the redo's fresh
+    # DOM uuids are unbound → "foreign tile" → all URLs dropped → clip never
+    # uploads. trust_position bypasses the guard; the downstream v681d
+    # cross-attribution dedup still runs (fresh uuids are unclaimed → kept).
+    if item.get('trust_position'):
+        print(
+            f"[v792.1] trust_position: clip {item.get('clip_index')} "
+            f"redo DOM-scrape — skipping v792 foreign-tile guard",
+            flush=True,
+        )
+        return [item]
     declared_ci = item.get('clip_index')
     declared_id = item.get('clip_id')
     job_id = item.get('job_id')
@@ -14967,6 +14983,10 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                         'urls': _video_urls,
                         'temp_dir': temp_dir,
                         'generation_attempt': attempt,
+                        # v792.1 — redo tile at data-index=0 is position-authoritative;
+                        # bypass the v792 foreign-tile guard so the failed first-gen's
+                        # stale bindings don't drop this good render.
+                        'trust_position': True,
                     })
                     print(f"[REDO] ✓ Clip {clip_index+1} → HTTP worker ({len(_video_urls)} URL(s) from data-index=0)", flush=True)
                     _urls_found = True
