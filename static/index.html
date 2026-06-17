@@ -16204,11 +16204,109 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     </div>
                 `,
             },
+
+            // ===== IMAGE TAB STEPS (shown only on the 🖼️ Images tab) =====
+            {
+                id: 'img_worker',
+                tab: 'images',
+                title: '🖥️ Set Up Your Image Worker',
+                check: () => window._imgWorkerDisplayedOnline === true,
+                content: () => `
+                    <div class="ob-step-num">1</div>
+                    <div class="ob-step-title">Set Up Your Image Worker</div>
+                    <div class="ob-step-desc">
+                        <p>Images generate through your own browser worker — like the video worker, pointed at <strong>Nano Banana</strong>. Find it in the left <strong>⚙ Worker</strong> panel.</p>
+                    </div>
+                    <ol class="ob-step-list">
+                        <li>Open the <strong>⚙ Worker</strong> panel (left sidebar)</li>
+                        <li>Pick your OS, set <strong>parallel slots</strong> (4 = recommended max)</li>
+                        <li>Optional <strong>Google login email (BYO)</strong> — reuse the account your Chrome is already signed into, no code needed</li>
+                        <li>Click <strong>⬇ Download Installer</strong>, run it, keep the terminal open</li>
+                    </ol>
+                    <div class="ob-tip"><strong>💡 Tip:</strong> The panel shows <strong>● Online</strong> once the worker connects.</div>
+                    <div class="ob-status waiting">
+                        <span class="ob-spinner">⏳</span> Start your image worker to continue...
+                    </div>
+                `,
+            },
+            {
+                id: 'img_import',
+                tab: 'images',
+                title: '📋 Import a Scene Table',
+                check: () => (typeof imgState !== 'undefined' && imgState && Array.isArray(imgState.nodes) && imgState.nodes.length > 0),
+                content: () => `
+                    <div class="ob-step-num">2</div>
+                    <div class="ob-step-title">Import a Scene Table</div>
+                    <div class="ob-step-desc">
+                        <p>Click <strong>📋 Import</strong> in the top bar to start an image job.</p>
+                    </div>
+                    <ol class="ob-step-list">
+                        <li>Paste a markdown <strong>scene table</strong> (or upload a .md). Each <strong>### Scene N</strong> becomes one image.</li>
+                        <li>Pick a <strong>Subject image</strong> (the person in every scene); optionally a <strong>Product image</strong>.</li>
+                        <li>Set aspect ratio, resolution, model, and variants per scene.</li>
+                        <li>Click <strong>📋 Import</strong> — scenes are created and queued.</li>
+                    </ol>
+                    <div class="ob-tip"><strong>💡 Tip:</strong> Add <strong>reference_image: Scene N</strong> to a scene to build it from an earlier one.</div>
+                    <div class="ob-status waiting">
+                        <span class="ob-spinner">⏳</span> Import a scene table to continue...
+                    </div>
+                `,
+            },
+            {
+                id: 'img_pick',
+                tab: 'images',
+                title: '✅ Pick the Best Variant',
+                check: () => (typeof imgState !== 'undefined' && imgState && Array.isArray(imgState.nodes) && imgState.nodes.some(n => n.chosen_variant_id)),
+                content: () => `
+                    <div class="ob-step-num">3</div>
+                    <div class="ob-step-title">Pick the Best Variant</div>
+                    <div class="ob-step-desc">
+                        <p>Open a scene from the list. Each scene generates up to four variants.</p>
+                    </div>
+                    <ol class="ob-step-list">
+                        <li>Click the variant you like to mark it <strong>✓ chosen</strong> (one per scene).</li>
+                        <li>Choosing a frame unlocks any scene that references it.</li>
+                        <li><strong>📥 Download all</strong> for a zip, or <strong>↻ Regenerate failed</strong> if some missed.</li>
+                    </ol>
+                    <div class="ob-tip"><strong>💡 Tip:</strong> Pick top-to-bottom — chained scenes wait for their parent's chosen frame.</div>
+                    <div class="ob-status waiting">
+                        <span class="ob-spinner">⏳</span> Choose a variant to continue...
+                    </div>
+                `,
+            },
+            {
+                id: 'img_promote',
+                tab: 'images',
+                title: '🎬 Promote to Video',
+                check: () => false,
+                content: () => `
+                    <div class="ob-step-num">4</div>
+                    <div class="ob-step-title">Promote to Video</div>
+                    <div class="ob-step-desc">
+                        <p>Once every scene is ready with a chosen variant, click <strong>🎬 Promote to video</strong>.</p>
+                    </div>
+                    <ol class="ob-step-list">
+                        <li>The batch stages in the <strong>Videos</strong> tab for a final review.</li>
+                        <li>Generate the talking-head video from your approved frames.</li>
+                        <li>Use <strong>🔄 Re-promote</strong> later to rebuild from updated prompts.</li>
+                    </ol>
+                    <div class="ob-status done">
+                        ✅ That's the image flow! Promote when ready — this guide stays here if you need it.
+                    </div>
+                `,
+            },
         ];
         
-        // Helper: get the active step sequence based on current app state
+        // Helper: which main tab is active (drives video vs image step set)
+        function obActiveTab() {
+            return (typeof imgState !== 'undefined' && imgState && imgState.currentTab) || 'videos';
+        }
+        // Helper: get the active step sequence based on current app state.
+        // Steps default to the 'videos' tab; image-workflow steps are tagged
+        // tab:'images' so each tab shows only its own guide.
         function obGetActiveSteps() {
-            return OB_STEPS.filter(s => !s.condition || s.condition());
+            const tab = obActiveTab();
+            return OB_STEPS.filter(s => (!s.condition || s.condition()) && ((s.tab || 'videos') === tab));
         }
         
         // Helper: find current step index in the active sequence
@@ -16478,6 +16576,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
             document.querySelectorAll('.tab-btn').forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.tab === tab);
             });
+            // Re-run the onboarding guide so it shows this tab's step set
+            // (video steps on Videos, image steps on Images).
+            if (typeof obAdvance === 'function') { obLastDetermined = null; obAdvance(); }
             if (tab === 'images') {
                 imgOnEnterTab();
             } else {
