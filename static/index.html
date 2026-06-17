@@ -3763,11 +3763,32 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         <label class="field-label" style="margin:0;">Scene table markdown</label>
                         <div>
                             <input type="file" id="imgImportFile" accept=".md,.markdown,.txt" style="display:none;" onchange="imgLoadMarkdownFile(event)">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="imgToggleFormatHelp()" style="font-size:11px;padding:4px 10px;" title="See how the scene-table markdown should be structured">❔ See format</button>
                             <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('imgImportFile').click();" style="font-size:11px;padding:4px 10px;">📎 Upload .md file</button>
                         </div>
                     </div>
                     <textarea id="imgImportMarkdown" class="img-prompt" placeholder="Paste or upload the markdown file content here..." style="min-height:180px;font-family:'JetBrains Mono',monospace;font-size:11px;"></textarea>
                     <div id="imgImportPreview" style="margin-top:8px;font-size:11px;color:var(--text-muted);"></div>
+                    <!-- Format help — toggled by the "❔ See format" button -->
+                    <div id="imgFormatHelp" style="display:none;margin-top:8px;padding:12px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:6px;font-size:11px;color:var(--text-secondary);line-height:1.6;">
+                        <div style="font-weight:600;color:var(--text-primary);margin-bottom:6px;">How to structure the scene table</div>
+                        <p style="margin:0 0 8px;">One <code style="font-size:10px;">### Scene N</code> block per image. Set <code style="font-size:10px;">- **reference_image:**</code> to <code style="font-size:10px;">none</code> for a standalone scene, or <code style="font-size:10px;">image_K</code> to build the scene on top of an earlier one (K must be a lower number). Put the prompt in a fenced block under <code style="font-size:10px;">**Image prompt:**</code>.</p>
+                        <pre style="white-space:pre-wrap;background:var(--bg-primary);border:1px solid var(--border-color);border-radius:4px;padding:10px;font-family:'JetBrains Mono',monospace;font-size:10.5px;overflow-x:auto;margin:0 0 8px;">### Scene 1
+- **reference_image:** none
+**Image prompt:**
+```
+A sunlit American kitchen. A woman in her 40s stands at a marble island holding a small amber glass jar, smiling at the camera. Photorealistic, natural light.
+```
+
+### Scene 2
+- **reference_image:** image_1
+**Image prompt:**
+```
+Same woman, same kitchen, now pouring the jar into a glass of warm milk. Close-up on her hands. Photorealistic.
+```</pre>
+                        <div style="color:var(--text-muted);margin-bottom:8px;">A scene with <strong>reference_image: image_1</strong> waits in <em>draft</em> until you pick a chosen variant of Scene 1 — then it auto-queues.</div>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="imgInsertExampleMarkdown()" style="font-size:11px;padding:4px 10px;">📥 Insert this example</button>
+                    </div>
 
                     <label class="field-label" style="margin-top:16px;">
                         Prompt prefix
@@ -21114,6 +21135,37 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         function imgCloseImportModal() {
             document.getElementById('imgImportModal').classList.remove('show');
+        }
+
+        // Toggle the "How to structure the scene table" example panel.
+        function imgToggleFormatHelp() {
+            const el = document.getElementById('imgFormatHelp');
+            if (el) el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none';
+        }
+
+        // Drop a minimal valid scene table into the markdown box.
+        function imgInsertExampleMarkdown() {
+            const ta = document.getElementById('imgImportMarkdown');
+            if (!ta) return;
+            const ex = [
+                '### Scene 1',
+                '- **reference_image:** none',
+                '**Image prompt:**',
+                '```',
+                'A sunlit American kitchen. A woman in her 40s stands at a marble island holding a small amber glass jar, smiling at the camera. Photorealistic, natural light.',
+                '```',
+                '',
+                '### Scene 2',
+                '- **reference_image:** image_1',
+                '**Image prompt:**',
+                '```',
+                'Same woman, same kitchen, now pouring the jar into a glass of warm milk. Close-up on her hands. Photorealistic.',
+                '```',
+                ''
+            ].join('\n');
+            if (ta.value.trim() && !confirm('Replace the current markdown with the example?')) return;
+            ta.value = ex;
+            ta.dispatchEvent(new Event('input'));
         }
 
         function imgUpdateImportPreview() {
