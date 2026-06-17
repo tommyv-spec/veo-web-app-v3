@@ -5528,7 +5528,14 @@ Ambient: same kitchen room tone, soft pour sound.
           }
           // Re-run the onboarding guide so it reflects the current view
           // (browse-with-filter shows a stage suggestion; create shows the flow).
-          if (typeof obAdvance === 'function') { obLastDetermined = null; obAdvance(); }
+          if (typeof obAdvance === 'function') {
+            obLastDetermined = null;
+            obAdvance();
+            // The browse suggestion stays the SAME step across filter changes,
+            // so obAdvance's step-change check won't re-render it — its content()
+            // reads the active chip live, so force a re-render on every view change.
+            if (typeof obRender === 'function' && obCurrentStep === 'browse_suggestion') obRender();
+          }
         }
 
         function updateBreadcrumb({ mode, stage, job }) {
