@@ -138,9 +138,13 @@
   <a href="#img-settings"><span class="sn-num">16</span> Settings &amp; Models</a>
   <a href="#img-worker"><span class="sn-num">17</span> Image Worker (BYO)</a>
   <a href="#img-promote"><span class="sn-num">18</span> Variants &amp; Promote</a>
+  <div class="sn-group">Publishing &amp; Tracking</div>
+  <a href="#jobs-lifecycle"><span class="sn-num">19</span> Jobs Lifecycle</a>
+  <a href="#local-folder"><span class="sn-num">20</span> Local Folder</a>
+  <a href="#instagram-tracking"><span class="sn-num">21</span> Instagram Tracking</a>
   <div class="sn-group">Reference</div>
-  <a href="#tips"><span class="sn-num">19</span> Tips</a>
-  <a href="#troubleshooting"><span class="sn-num">20</span> Troubleshooting</a>
+  <a href="#tips"><span class="sn-num">22</span> Tips</a>
+  <a href="#troubleshooting"><span class="sn-num">23</span> Troubleshooting</a>
 </nav>
 
 <div class="content">
@@ -432,8 +436,46 @@
   <div class="tip"><span class="callout-icon">💡</span><div>Pick the chosen variant for each scene <strong>in order</strong>. Chained scenes won't start generating until their parent has a chosen frame.</div></div>
 </section>
 
+<section id="jobs-lifecycle">
+  <h2><span class="h2-num">19</span> Jobs Lifecycle</h2>
+  <p>Every job moves through stages on the <strong>📋 Jobs</strong> board (the kanban on the left). The filter chips at the top jump to any stage; search by slug or dialogue.</p>
+  <div class="table-wrap"><table><thead><tr><th>Stage</th><th>What it means</th></tr></thead><tbody>
+    <tr><td><strong>Generating</strong></td><td>Clips are being created.</td></tr>
+    <tr><td><strong>Awaiting Approval</strong></td><td>Clips are done — review and approve them.</td></tr>
+    <tr><td><strong>Awaiting Export</strong></td><td>Approved — ready to merge into a final video.</td></tr>
+    <tr><td><strong>Awaiting Finishing</strong></td><td>Exported — waiting for the finished file (e.g. edited or captioned) to land.</td></tr>
+    <tr><td><strong>Published</strong></td><td>Final video is in. Ready to post; the Instagram link fills in once the reel goes live.</td></tr>
+  </tbody></table></div>
+  <div class="tip"><span class="callout-icon">💡</span><div>The <strong>Instagram</strong> and <strong>Local folder</strong> chips open their own panels (next two sections). Jobs older than 30 days in the early stages auto-hide — click <strong>Show all</strong> to reveal them.</div></div>
+</section>
+
+<section id="local-folder">
+  <h2><span class="h2-num">20</span> Local Folder</h2>
+  <p>Connect a folder on your computer so finished videos get picked up automatically. Open the <strong>Local folder</strong> chip on the Jobs board.</p>
+  <ol class="steps">
+    <li>Click <strong>📁 Pick local folder</strong> and choose a folder.</li>
+    <li>While the tab is open, the app scans it every ~30 seconds for new <code>.mp4 / .mov / .webm</code> files.</li>
+    <li>New files upload and auto-match to jobs in <strong>Awaiting Finishing</strong>, moving them to <strong>Published</strong>.</li>
+    <li><strong>🔄 Force rescan</strong> runs a scan right now; <strong>Stop watching</strong> disconnects the folder.</li>
+  </ol>
+  <div class="info"><span class="callout-icon">ℹ️</span><div>Install KavenoBuilder as an app (Chrome address bar → install icon) so the folder permission sticks across sessions. Otherwise re-pick the folder once each session.</div></div>
+  <div class="warn"><span class="callout-icon">⚠️</span><div>Folder watching works in <strong>Chrome, Edge, and Opera</strong> only — Firefox and Safari can't watch local folders.</div></div>
+</section>
+
+<section id="instagram-tracking">
+  <h2><span class="h2-num">21</span> Instagram Tracking</h2>
+  <p>Connect an Instagram account to track when your reels go live. Open the <strong>Instagram</strong> chip on the Jobs board.</p>
+  <ol class="steps">
+    <li>Click <strong>+ Add account</strong>.</li>
+    <li>Enter the <strong>@handle</strong> and your <strong>HikerAPI key</strong>, then Save.</li>
+    <li><strong>Sync</strong> pulls the account's recent posts.</li>
+    <li>When a published job's reel is detected live, its <strong>📷 Instagram link</strong> fills in on the job card automatically.</li>
+  </ol>
+  <div class="tip"><span class="callout-icon">💡</span><div>A <strong>📷</strong> badge on a job card links straight to the posted reel.</div></div>
+</section>
+
 <section id="tips">
-  <h2><span class="h2-num">19</span> Tips &amp; Best Practices</h2>
+  <h2><span class="h2-num">22</span> Tips &amp; Best Practices</h2>
   <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">📸 Use the right image</h4><p>Well-lit, front-facing photos with clean backgrounds. Avoid heavy filters or unusual angles.</p></div>
   <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">⏱️ Always use 8s + interpolation</h4><p>The single biggest quality improvement. 8s gives the AI room for natural speech motion. 4s clips often look mechanical.</p></div>
   <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">🖥️ Run 2+ Chrome Windows</h4><p>Each window is a parallel worker account. Two or more process clips simultaneously — roughly the time of one for several clips.</p></div>
@@ -444,7 +486,7 @@
 </section>
 
 <section id="troubleshooting">
-  <h2><span class="h2-num">20</span> Troubleshooting</h2>
+  <h2><span class="h2-num">23</span> Troubleshooting</h2>
   <div class="table-wrap"><table><thead><tr><th>Problem</th><th>Likely Cause</th><th>Fix</th></tr></thead><tbody>
     <tr><td><strong>Can't start generation</strong></td><td>Missing images, empty script, or incompatible settings</td><td>Check: images uploaded, at least one dialogue line, settings compatible (1080p needs 8s)</td></tr>
     <tr><td><strong>Job stuck on "pending"</strong></td><td>Worker not running</td><td>Check your worker terminal. Go to 🖥️ My Worker to verify token is active.</td></tr>

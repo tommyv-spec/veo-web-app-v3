@@ -16175,7 +16175,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
             {
                 id: 'export',
                 title: '📥 Export',
-                check: () => false, // Always show this step when we're at this stage
+                // Advance once a job has been exported (reached finishing/published)
+                // so the guide can continue to the publishing steps.
+                check: () => { try { return typeof _lifecycleJobsByStage !== 'undefined' && (((_lifecycleJobsByStage.awaiting_finishing || []).length + (_lifecycleJobsByStage.published || []).length) > 0); } catch (e) { return false; } },
                 content: () => `
                     <div class="ob-step-num">6</div>
                     <div class="ob-step-title">Export Your Final Video</div>
@@ -16199,8 +16201,49 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         <p><strong>ElevenLabs</strong> — Premium quality, requires API key + Voice ID. <strong>Save voice presets</strong> (name + key + settings) for one-click reuse on future exports.</p>
                     </div>
                     <div class="ob-tip"><strong>💡 Tip:</strong> Speed Up at 1.10× is barely noticeable but makes content punchier. Keep DeepFilterNet and Loudness Norm ON for the cleanest audio.</div>
+                    <div class="ob-status waiting">
+                        <span class="ob-spinner">⏳</span> Export your video to continue...
+                    </div>
+                `,
+            },
+            {
+                id: 'connect_folder',
+                title: '📁 Connect a Local Folder',
+                check: () => { try { return typeof _localDirHandle !== 'undefined' && !!_localDirHandle; } catch (e) { return false; } },
+                content: () => `
+                    <div class="ob-step-num">7</div>
+                    <div class="ob-step-title">Connect a Local Folder (optional)</div>
+                    <div class="ob-step-desc">
+                        <p>Auto-pick up finished videos from a folder on your computer. On the <strong>📋 Jobs</strong> board, open the <strong>Local folder</strong> chip.</p>
+                    </div>
+                    <ol class="ob-step-list">
+                        <li>Click <strong>📁 Pick local folder</strong> and choose a folder.</li>
+                        <li>While the tab is open, the app scans it every ~30s for new <strong>.mp4 / .mov / .webm</strong> files.</li>
+                        <li>New files upload and auto-match jobs in <strong>Awaiting Finishing</strong> → <strong>Published</strong>.</li>
+                    </ol>
+                    <div class="ob-tip"><strong>💡 Tip:</strong> Install Kaveno as an app (Chrome address bar → install icon) so the folder permission sticks. Chrome / Edge / Opera only.</div>
+                    <div class="ob-status waiting">
+                        <span class="ob-spinner">⏳</span> Pick a local folder to continue...
+                    </div>
+                `,
+            },
+            {
+                id: 'connect_instagram',
+                title: '📷 Connect Instagram',
+                check: () => false,
+                content: () => `
+                    <div class="ob-step-num">8</div>
+                    <div class="ob-step-title">Connect Instagram (optional)</div>
+                    <div class="ob-step-desc">
+                        <p>Track when your reels go live. On the <strong>📋 Jobs</strong> board, open the <strong>Instagram</strong> chip.</p>
+                    </div>
+                    <ol class="ob-step-list">
+                        <li>Click <strong>+ Add account</strong>.</li>
+                        <li>Enter the <strong>@handle</strong> + your <strong>HikerAPI key</strong>, then Save.</li>
+                        <li><strong>Sync</strong> pulls recent posts; a published reel's <strong>📷 link</strong> fills in on the job automatically.</li>
+                    </ol>
                     <div class="ob-status done">
-                        ✅ You've reached the final step! Export when ready. This guide will stay here if you need it.
+                        ✅ That's the full flow — generate, publish, track. This guide stays here if you need it.
                     </div>
                 `,
             },
