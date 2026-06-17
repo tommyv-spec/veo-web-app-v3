@@ -106,7 +106,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v576"
+WORKER_VERSION = "img-v577"  # v791b interleaved download scan + v791c 403/stale-URL re-resolve retry
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FOLDER = os.environ.get("IMAGE_SESSION_FOLDER",
@@ -6830,6 +6830,12 @@ class InFlightJob:
         # called again verbatim when a stuck job is retried.
         "retry_count",
         "_original_job",
+        # v791c: download-retry bookkeeping. dl_retry_count = how many times
+        # the HTTP worker reported an auth/expiry (403/401/410) download
+        # failure for this job so the main thread re-resolved FRESH signed
+        # URLs from the still-present Flow tiles and re-enqueued. Bounded by
+        # MAX_DL_RETRIES so a genuinely-broken tile still fails eventually.
+        "dl_retry_count",
     )
 
     def __init__(self, node_id, node_name, prompt, prompt_key, variants,
@@ -6851,6 +6857,7 @@ class InFlightJob:
         self._last_diag_at = 0.0  # v476
         self.tile_ids = list(tile_ids) if tile_ids else []  # v521
         self.retry_count = retry_count  # v709
+        self.dl_retry_count = 0  # v791c — download re-resolve attempts
         self._original_job = original_job  # v709
 
 
@@ -7379,6 +7386,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
 
                 # Download each URL → variant_N.png
                 saved_paths = []
+                auth_fail = False  # v791c — saw a 401/403/410 (stale signed URL)
                 for idx, url in enumerate(urls, start=1):
                     save_name = f"variant_{idx}.png"
                     save_path = os.path.join(output_dir, save_name)
@@ -7386,6 +7394,8 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                         print(f"[API:http] node {node_id} variant {idx}: GET {url[:80]}...", flush=True)
                         resp = sess.get(url, timeout=120, allow_redirects=True)
                         if resp.status_code != 200:
+                            if resp.status_code in (401, 403, 410):
+                                auth_fail = True
                             raise RuntimeError(f"HTTP {resp.status_code}")
                         content = resp.content
                         if not content or len(content) < 100:
@@ -7398,6 +7408,17 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                         print(f"[API:http]   ✗ variant {idx} download failed: {e}", flush=True)
 
                 if not saved_paths:
+                    # v791c — a 403/401/410 on EVERY variant means the signed
+                    # flow-content URLs went stale before we fetched them (the
+                    # images ARE still in Flow). Don't terminally fail — ask the
+                    # main thread to re-resolve FRESH signed URLs from the
+                    # still-present tiles and re-enqueue. _drain_done_queue caps
+                    # this at MAX_DL_RETRIES so a truly-dead tile still fails.
+                    if auth_fail:
+                        print(f"[API:http] ⟳ Node {node_id} all variants returned auth/expiry (403/401/410) — signing URLs stale, requesting re-resolve", flush=True)
+                        done_queue.put({"node_id": node_id, "outcome": "retry_resolve",
+                                        "error": "All variants 403/401/410 (stale signed URLs)"})
+                        continue
                     raise RuntimeError("No variants downloaded successfully")
 
                 # Upload + post status
@@ -8623,6 +8644,41 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             except _queue.Empty:
                 break
             nid = msg.get("node_id")
+
+            # v791c — re-resolve path: the HTTP worker hit 403/401/410 on every
+            # variant (stale signed URLs) but the tiles are still live in Flow.
+            # Re-arm the job so the next scan re-resolves FRESH signed URLs from
+            # the DOM tiles and re-enqueues. Bounded by MAX_DL_RETRIES.
+            if msg.get("outcome") == "retry_resolve":
+                MAX_DL_RETRIES = 3
+                rjob = in_flight.get(nid)
+                if rjob is None:
+                    continue  # already gone — nothing to retry
+                if rjob.dl_retry_count >= MAX_DL_RETRIES:
+                    err = msg.get("error") or "Download failed (stale signed URLs)"
+                    print(f"[API:http] ✗ Node {nid} download failed after {rjob.dl_retry_count} re-resolve attempt(s) — failing ({err})", flush=True)
+                    try:
+                        _post_status(api_url, api_key, nid, "failed", error=err)
+                    except Exception:
+                        pass
+                    in_flight.pop(nid, None)
+                    _gc_pending_submission(nid)
+                    try:
+                        shutil.rmtree(os.path.dirname(rjob.output_dir), ignore_errors=True)
+                    except Exception:
+                        pass
+                else:
+                    rjob.dl_retry_count += 1
+                    # Drop the stale network-captured URLs so the next scan
+                    # SKIPS Tier A and falls through to the DOM tile-ID lookup,
+                    # which reads the current (fresh) signed image_url. Cookies
+                    # are re-snapshotted each scan cycle, so an expired-cookie
+                    # cause is also covered.
+                    captured_urls_by_node.pop(nid, None)
+                    rjob.status = "submitted"  # back into the scan's pending set
+                    print(f"[API:http] ⟳ Node {nid} re-resolving fresh signed URLs (attempt {rjob.dl_retry_count}/{MAX_DL_RETRIES})", flush=True)
+                continue
+
             job = in_flight.pop(nid, None)
             _gc_pending_submission(nid)  # v730 — defense in depth: also GC at done-queue drain
             if job is not None:
@@ -8648,6 +8704,18 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     #   3. Else if we have in-flight work: SCAN
     #   4. Else: idle sleep
     consecutive_errors = 0
+    # v791b — interleave downloads DURING a submit burst. The submit-or-scan
+    # priority below skips the scan on any tick that submitted a job. With a
+    # high --parallel slot count the worker submits every queued scene before
+    # `active` ever hits capacity, so the first scan (and thus the first
+    # download) only fires after the WHOLE batch is submitted — images then
+    # all land at the very end. This timer forces a download cycle at least
+    # every SCAN_DURING_SUBMIT_INTERVAL seconds even mid-burst, so each ready
+    # image is enqueued for download as soon as it completes. Kept time-gated
+    # (not every tick) to preserve the "don't scan right after every submit"
+    # optimization that avoids pinning the gallery viewport at the bottom.
+    SCAN_DURING_SUBMIT_INTERVAL = 20.0  # seconds
+    _last_scan_time = 0.0
     # v456: cooldown timer. Set when a claim is released due to batch mismatch.
     # Until this time, skip /jobs/pending polling to avoid thrashing the DB
     # in tight claim/release cycles. With the server-side prefer_batch filter
@@ -8849,13 +8917,22 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                         # thrash the DB.
                         _release_cooldown_until = time.time() + 30
 
-            # 3. If we didn't submit this tick AND have in-flight work → SCAN.
-            # Never scan in the same tick as a submit — the submit already
-            # churned the page state and a scan right after would just see
-            # transient UI.
-            if not did_work and active > 0:
-                _run_download_cycle()
-                did_work = True
+            # 3. SCAN for completed tiles → enqueue ready images for download.
+            # Normally we never scan on a tick that submitted (the submit just
+            # churned the page; a scan right after sees transient UI). But
+            # during a long submit burst that rule starves scanning entirely,
+            # so ALSO scan if it's been > SCAN_DURING_SUBMIT_INTERVAL since the
+            # last one — this drips ready images out as they finish instead of
+            # all at the end of the batch (v791b).
+            if active > 0:
+                _due_for_scan = (time.time() - _last_scan_time) >= SCAN_DURING_SUBMIT_INTERVAL
+                if not did_work or _due_for_scan:
+                    if did_work and _due_for_scan:
+                        print(f"[API:scan] [v791b] interleaved scan during submit burst "
+                              f"(active={active}, {time.time() - _last_scan_time:.0f}s since last scan)", flush=True)
+                    _run_download_cycle()
+                    _last_scan_time = time.time()
+                    did_work = True
 
             # 4. Sleep
             if did_work:
