@@ -133,27 +133,9 @@ body{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans
   <div class="flow-step"><div class="ico">&#128229;</div><div class="lbl">Export</div><div class="desc">Final video</div></div>
 </div>
 
-<!-- STEP 1: CHOOSE METHOD -->
-<div class="section-label">Step 0 &mdash; Pick Your Generation Method</div>
-<div class="methods">
-
-  <div class="method method-a">
-    <div class="method-header">
-      <div class="method-icon">&#128273;</div>
-      <div>
-        <div class="method-name">API Keys</div>
-        <span class="method-tag">FASTER</span>
-      </div>
-    </div>
-    <ol class="method-steps">
-      <li>Go to <strong>aistudio.google.com/apikey</strong></li>
-      <li>Create a project &rarr; enable Generative Language API</li>
-      <li>Click <strong>Create API Key</strong> &mdash; starts with <code style="font-family:'JetBrains Mono';font-size:11px;background:rgba(16,185,129,0.1);padding:1px 5px;border-radius:4px;color:#6ee7b7;">AIzaSy...</code></li>
-      <li>In the platform: click your <strong>avatar &rarr; &#128273; API Keys</strong></li>
-      <li>Paste your key. Add 3&ndash;5 for parallel processing.</li>
-    </ol>
-    <div class="method-note">&#9989; No worker needed. Runs 24/7 on our servers. Best for high volume.</div>
-  </div>
+<!-- STEP 0: SET UP WORKER -->
+<div class="section-label">Step 0 &mdash; Set Up Your Worker</div>
+<div class="methods" style="grid-template-columns:1fr;">
 
   <div class="method method-b">
     <div class="method-header">
@@ -170,26 +152,9 @@ body{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans
       <li>Double-click <strong>KavenoBuilder-Worker-Setup.bat</strong></li>
       <li>Chrome opens &mdash; sign into your Google account &rarr; worker auto-connects</li>
     </ol>
-    <div class="method-note">&#128187; Uses your Google account &amp; computer. Sessions auto-refresh every 6 clips. Multi-account = parallel generation for 2&times; speed. No API key needed.</div>
+    <div class="method-note">&#128187; Uses your Google account &amp; computer &mdash; no API keys needed. Sessions auto-refresh every 6 clips. Multi-account = parallel generation for 2&ndash;4&times; speed. Keep the worker running while you generate.</div>
   </div>
 
-</div>
-
-<!-- COMPARISON TABLE -->
-<div class="section-label">Comparison</div>
-<div class="compare">
-  <div class="compare-head">
-    <div></div>
-    <div class="col-a">&#128273; API Keys</div>
-    <div class="col-b">&#128187; Flow Worker</div>
-  </div>
-  <div class="compare-row"><div class="label">Cost</div><div class="col-a">Free tier available</div><div class="col-b">Completely free</div></div>
-  <div class="compare-row"><div class="label">Speed</div><div class="col-a">&#9889; Faster</div><div class="col-b">&#9889; Fast (2&ndash;4&times; with multi-account)</div></div>
-  <div class="compare-row"><div class="label">Setup</div><div class="col-a">Get key from Google</div><div class="col-b">Run 1 command on PC</div></div>
-  <div class="compare-row"><div class="label">PC required?</div><div class="col-a class=cross">No</div><div class="col-b">Yes, while generating</div></div>
-  <div class="compare-row"><div class="label">Runs 24/7?</div><div class="col-a"><span class="check">&#10003;</span> Yes</div><div class="col-b">Only while worker is open</div></div>
-  <div class="compare-row"><div class="label">Parallel?</div><div class="col-a"><span class="check">&#10003;</span> Multi-key</div><div class="col-b"><span class="check">&#10003;</span> Multi-account (2&ndash;4&times;)</div></div>
-  <div class="compare-row"><div class="label">Best for</div><div class="col-a">High volume / teams</div><div class="col-b">Getting started / free</div></div>
 </div>
 
 <!-- WORKFLOW STEPS -->
@@ -337,9 +302,9 @@ body{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans
     <p>The single biggest quality improvement. Natural speech motion needs room. 4s clips often look stiff.</p>
   </div>
   <div class="tip">
-    <div class="tip-icon">&#128273;</div>
-    <h4>Add 3&ndash;5 API keys</h4>
-    <p>The platform rotates between keys to avoid rate limits. More keys = parallel generation = faster jobs.</p>
+    <div class="tip-icon">&#128187;</div>
+    <h4>Run 2&ndash;4 Chrome Windows</h4>
+    <p>Each window is a parallel worker account. More windows = clips generate side by side = faster jobs.</p>
   </div>
   <div class="tip">
     <div class="tip-icon">&#9989;</div>
@@ -391,7 +356,7 @@ body{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans
 <!-- FOOTER -->
 <div class="footer">
   <p>KavenoBuilder &mdash; Quick Guide</p>
-  <p>Powered by Google Veo &nbsp;&middot;&nbsp; API Keys or Flow Worker &nbsp;&middot;&nbsp; Voice Cloning via OpenVoice &amp; ElevenLabs</p>
+  <p>Powered by Google Veo &nbsp;&middot;&nbsp; Flow Worker &nbsp;&middot;&nbsp; Voice Cloning via OpenVoice &amp; ElevenLabs</p>
 </div>
 
 </div>

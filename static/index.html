@@ -3022,9 +3022,9 @@
                         </span>
                     </div>
                     <div class="config-grid">
-                        <!-- Method -->
+                        <!-- Method — hidden; Flow is the default + only method. Toggle kept (display:none) so the active 'flow' value still feeds job config. -->
                         <div class="group">
-                            <div class="lbl">Method
+                            <div class="lbl" style="display:none;">Method
                                 <span class="info-icon">?
                                     <div class="tooltip">
                                         <h5>🔧 Generation Method</h5>
@@ -3037,13 +3037,13 @@
                                     </div>
                                 </span>
                             </div>
-                            <div class="seg" id="backendToggle">
-                                <button class="active" data-value="auto" onclick="selectBackend(this)">Auto</button>
+                            <div class="seg" id="backendToggle" style="display:none;">
+                                <button data-value="auto" onclick="selectBackend(this)">Auto</button>
                                 <button data-value="api" onclick="selectBackend(this)">API Keys</button>
-                                <button data-value="flow" onclick="selectBackend(this)">Flow</button>
+                                <button class="active" data-value="flow" onclick="selectBackend(this)">Flow</button>
                             </div>
-                            <div id="backendHintFlow" class="backend-hint flow-hint" style="display:none;">
-                                <strong style="color:var(--accent);">🖥️ Flow Mode Selected</strong> — Generate videos using your Google account. No API keys needed.<br>
+                            <div id="backendHintFlow" class="backend-hint flow-hint" style="display:block;">
+                                <strong style="color:var(--accent);">🖥️ Flow Mode</strong> — Generate videos using your Google account. No API keys needed.<br>
                                 <div style="margin-top:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
                                     <a href="/static/my-worker.html?v=214" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:8px 16px;background:var(--accent);color:white;border-radius:8px;font-size:13px;font-weight:600;text-decoration:none;transition:opacity 0.15s;">🖥️ Set Up My Worker →</a>
                                     <span style="font-size:11px;color:var(--text-muted);">Install once, then keep it running while generating</span>
@@ -9580,7 +9580,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     generationMode = document.getElementById('generationMode')?.value || 'staggered';
                 }
                 
-                const selectedBackend = document.querySelector('#backendToggle button.active')?.dataset.value || 'auto';
+                const selectedBackend = document.querySelector('#backendToggle button.active')?.dataset.value || 'flow';
                 const useGestures=useAI&&(document.querySelector('#gestureSeg button.active')?.dataset.value||'false')==='true';
                 const cfg={aspect_ratio:getSelectedAspect(),resolution:getSelectedResolution(),duration:document.getElementById('duration').value,language:document.getElementById('language').value,use_interpolation:useInterpolation,use_openai_prompt_tuning:useAI,use_frame_vision:useAI,custom_prompt:useAI?'':customPrompt,user_context:useAI?contextInput:'',single_image_mode:uploadedImages.length===1,max_retries_per_clip:5,parallel_clips:1,storyboard_mode:editorMode==='storyboard',generation_mode:generationMode,backend_preference:promptOnly?'prompt_only':selectedBackend,flow_variants_count:getFlowVariantsCount(),veo_model:getVeoModel(),kling_variant:(getVideoBackend()==='higgsfield'),use_gesture_enrichment:useGestures,short_dialogue_mode:document.querySelector('#shortDialogueSeg button.active')?.dataset.value||'optimized',prefix_short_enabled:(document.querySelector('#prefixShortSeg button.active')?.dataset.value||'off')==='on',prefix_short_word:(document.getElementById('prefixShortWord')?.value||'only').trim()||'only',prefix_short_threshold:(parseInt(document.getElementById('prefixShortThreshold')?.value,10)||15)};
                 
@@ -15854,7 +15854,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
         const OB_STORAGE_KEY = 'veo_onboarding_state';
         const OB_DISMISSED_KEY = 'veo_onboarding_dismissed';
         const OB_VERSION_KEY = 'veo_onboarding_version';
-        const OB_CURRENT_VERSION = 'v130.46'; // bump this to force re-show on new deploys
+        const OB_CURRENT_VERSION = 'v130.47'; // bump this to force re-show on new deploys
         let obCurrentStep = null;
         let obPollTimer = null;
         
@@ -15870,63 +15870,33 @@ Example: A realistic vertical video of a professional presenter speaking directl
         const OB_STEPS = [
             {
                 id: 'api_keys',
-                title: '🔧 Choose Your Method',
+                title: '🖥️ Set Up Your Worker',
                 check: () => {
-                    // Pass if user has API keys OR has selected Flow mode
-                    const hasKeysVar = typeof userApiKeys !== 'undefined' && Array.isArray(userApiKeys) && userApiKeys.length > 0;
-                    if (hasKeysVar) return true;
-                    // Also check the DOM — the keys list has items
-                    const listEl = document.getElementById('apiKeysList');
-                    if (listEl) {
-                        const keyItems = listEl.querySelectorAll('.api-key-item');
-                        if (keyItems.length > 0) {
-                            console.log('[Onboarding] API key check — found', keyItems.length, 'key items in DOM');
-                            return true;
-                        }
-                    }
-                    // Also pass if Flow is selected
+                    // Flow is the default + only method — this step is informational.
                     const backendBtn = document.querySelector('#backendToggle button.active');
-                    if (backendBtn && backendBtn.dataset.value === 'flow') return true;
-                    return false;
+                    return !!(backendBtn && backendBtn.dataset.value === 'flow');
                 },
                 content: () => `
                     <div class="ob-step-num">1</div>
-                    <div class="ob-step-title">Choose Your Method</div>
+                    <div class="ob-step-title">Set Up Your Worker</div>
                     <div class="ob-step-desc">
-                        <p>Pick how you want to generate videos. You have <strong>two options</strong>:</p>
+                        <p>Videos generate through <strong>Google Flow</strong> using your own <strong>Google account</strong> — browser automation runs on your computer. No API keys needed.</p>
                     </div>
-                    
-                    <div style="display:flex;flex-direction:column;gap:14px;margin:16px 0;">
-                        <div style="padding:14px 16px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:10px;">
-                            <div style="font-weight:600;color:var(--success);margin-bottom:8px;font-size:14px;">🔑 Option A: API Keys <span style="font-size:11px;font-weight:400;color:var(--text-muted);">(faster)</span></div>
-                            <p style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin:0;">Use your own Gemini API keys for direct video generation. Faster processing, no worker needed.</p>
-                            <ol class="ob-step-list" style="margin-top:10px;font-size:12px;">
-                                <li>Go to <a href="https://console.cloud.google.com" target="_blank">console.cloud.google.com</a> → <strong>"Start for Free"</strong></li>
-                                <li><strong>Create a Project</strong> → enable <strong>"Generative Language API"</strong></li>
-                                <li><strong>Credentials → + Create Credentials → API Key</strong></li>
-                                <li>Click your <strong>profile avatar</strong> (top-right) → <strong>"🔑 API Keys"</strong> → paste it</li>
-                            </ol>
-                        </div>
-                        
-                        <div style="text-align:center;color:var(--text-muted);font-size:12px;font-weight:500;">— OR —</div>
-                        
-                        <div style="padding:14px 16px;background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.2);border-radius:10px;">
-                            <div style="font-weight:600;color:var(--accent);margin-bottom:8px;font-size:14px;">🖥️ Option B: Flow <span style="font-size:11px;font-weight:400;color:var(--text-muted);">(no API key needed)</span></div>
-                            <p style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin:0;">Use your <strong>Google account</strong> to generate videos through Google Flow — browser automation runs on your computer.</p>
-                            <ol class="ob-step-list" style="margin-top:10px;font-size:12px;">
-                                <li>In <strong>Settings</strong> below, set Method to <strong>"Flow"</strong></li>
-                                <li>Click <strong>"🖥️ My Worker"</strong> in the top bar</li>
-                                <li>Set the number of <strong>Chrome Windows</strong> (1 to start, 2+ for parallel speed)</li>
-                                <li>Click the <strong>▶ Start</strong> button — downloads a .bat installer</li>
-                                <li>Double-click the .bat → Chrome opens → sign into Google</li>
-                                <li>Worker auto-connects — you'll see <strong>● Online</strong> on the My Worker page</li>
-                            </ol>
-                        </div>
+
+                    <div style="padding:14px 16px;background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.2);border-radius:10px;margin:16px 0;">
+                        <div style="font-weight:600;color:var(--accent);margin-bottom:8px;font-size:14px;">🖥️ Flow Worker</div>
+                        <ol class="ob-step-list" style="margin-top:6px;font-size:12px;">
+                            <li>Click <strong>"🖥️ My Worker"</strong> in the top bar</li>
+                            <li>Set the number of <strong>Chrome Windows</strong> (1 to start, 2+ for parallel speed)</li>
+                            <li>Click the <strong>▶ Start</strong> button — downloads a .bat installer</li>
+                            <li>Double-click the .bat → Chrome opens → sign into Google</li>
+                            <li>Worker auto-connects — you'll see <strong>● Online</strong> on the My Worker page</li>
+                        </ol>
                     </div>
-                    
-                    <div class="ob-tip"><strong>💡 Tip:</strong> Not sure? Try <strong>Flow</strong> first — it's free and uses your existing Google account. Switch to API Keys later for faster processing.</div>
+
+                    <div class="ob-tip"><strong>💡 Tip:</strong> Keep the worker running while you generate. Install once, reuse anytime. Run 2+ Chrome Windows for parallel speed.</div>
                     <div class="ob-status waiting" id="obKeyStatus">
-                        <span class="ob-spinner">⏳</span> Add an API key or select <strong>Flow</strong> in Settings to continue...
+                        <span class="ob-spinner">⏳</span> Set up your worker, then continue…
                     </div>
                 `,
             },

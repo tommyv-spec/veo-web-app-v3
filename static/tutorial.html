@@ -159,40 +159,15 @@
 
 <section id="setup">
   <h2><span class="h2-num">02</span> First-Time Setup</h2>
-  <h3>Choose Your Generation Method</h3>
-  <div class="cols">
-    <div class="card">
-      <h4 style="text-transform:none;letter-spacing:0;font-size:15px;color:#34D399;">🔑 API Keys</h4>
-      <ul><li>Uses the Gemini API directly</li><li>Faster — no worker needed</li><li>Requires Gemini API keys</li><li>Add multiple keys to avoid rate limits</li></ul>
-    </div>
-    <div class="card">
-      <h4 style="text-transform:none;letter-spacing:0;font-size:15px;color:#A78BFA;">🖥️ Flow (Browser)</h4>
-      <ul><li>Uses browser automation on your computer</li><li>No API keys needed</li><li>Requires running the Worker app</li><li>Your computer does the processing</li></ul>
-    </div>
-  </div>
-
-  <h3>Option A: API Keys</h3>
-  <ol class="steps">
-    <li>Click your <strong>profile avatar</strong> (top-right corner)</li>
-    <li>Select <strong>🔑 API Keys</strong> from the dropdown</li>
-    <li>Paste one or more keys — one per line for bulk add. Keys start with <code>AIzaSy...</code></li>
-    <li>Keys are validated automatically. Re-check All Keys to refresh statuses.</li>
-  </ol>
-  <div class="tip"><span class="callout-icon">💡</span><div>Get keys at <strong>aistudio.google.com/apikey</strong>. Add 3–5 keys so the platform can rotate between them and avoid rate limits.</div></div>
-  <div class="table-wrap"><table><thead><tr><th>Status</th><th>Meaning</th></tr></thead><tbody>
-    <tr><td><span class="dot dot-green"></span>Working</td><td>Valid and has quota</td></tr>
-    <tr><td><span class="dot dot-amber"></span>Rate Limited</td><td>Temporarily exhausted — platform skips and retries later</td></tr>
-    <tr><td><span class="dot dot-rose"></span>Invalid</td><td>Incorrect or revoked key</td></tr>
-  </tbody></table></div>
-
-  <h3>Option B: Flow Worker</h3>
+  <p>Videos generate through your own <strong>Flow Worker</strong> — browser automation that runs on your computer using your Google account. No API keys needed. Set it up once, then keep it running while you generate.</p>
+  <h3>Set Up the Flow Worker</h3>
   <ol class="steps">
     <li>Click <strong>🖥️ My Worker</strong> in the navigation bar</li>
     <li>Set the number of <strong>Chrome Windows</strong> (accounts) — each runs in parallel for faster generation. Start with 1.</li>
     <li>Click the big <strong>▶ Start</strong> button (the orb)</li>
     <li>A <strong>.bat installer</strong> downloads automatically — double-click <strong>KavenoBuilder-Worker-Setup.bat</strong></li>
     <li>Chrome opens — <strong>sign into your Google account</strong> (or select an existing logged-in profile)</li>
-    <li>The worker auto-connects and this page shows <strong>● Online</strong></li>
+    <li>The worker auto-connects and the My Worker page shows <strong>● Online</strong></li>
     <li>Start generating jobs — the worker picks them up automatically</li>
   </ol>
   <div class="info"><span class="callout-icon">ℹ️</span><div><strong>Multi-account:</strong> Set 2+ Chrome Windows for parallel generation. Each window uses its own Google account. Sessions auto-refresh every 6 clips (golden restore) to prevent detection.</div></div>
@@ -221,7 +196,6 @@
     <tr><td><strong>Model</strong></td><td>Omni Flash / Veo 3.1 Lite / Fast / Quality</td><td>Which video model renders the clips. Quality is sharpest; Lite is fastest. Default is a low-priority Lite tier.</td></tr>
     <tr><td><strong>AI Prompts</strong></td><td>On / Off</td><td>ON = AI analyzes your image and writes optimized visual prompts. OFF = you write your own prompts.</td></tr>
     <tr><td><strong>Gesture Enrichment</strong></td><td>On / Off</td><td>Only when AI Prompts is ON. AI adds content-matched gestures (mention the head → points at head, list three things → holds up three fingers). Small extra cost per clip.</td></tr>
-    <tr><td><strong>Method</strong></td><td>API / Flow</td><td>Which generation backend to use. See Setup section.</td></tr>
   </tbody></table></div>
   <h3>Context for AI (Optional)</h3>
   <p>A text area below the toggles lets you give the AI extra context: speaker role, tone, setting, voice style. Example: <em>"Professional doctor, confident tone, medical office background."</em></p>
@@ -462,7 +436,7 @@
   <h2><span class="h2-num">19</span> Tips &amp; Best Practices</h2>
   <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">📸 Use the right image</h4><p>Well-lit, front-facing photos with clean backgrounds. Avoid heavy filters or unusual angles.</p></div>
   <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">⏱️ Always use 8s + interpolation</h4><p>The single biggest quality improvement. 8s gives the AI room for natural speech motion. 4s clips often look mechanical.</p></div>
-  <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">🔑 Add multiple API keys</h4><p>3–5 keys let the platform rotate between them and process clips in parallel without hitting rate limits.</p></div>
+  <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">🖥️ Run 2+ Chrome Windows</h4><p>Each window is a parallel worker account. Two or more process clips simultaneously — roughly the time of one for several clips.</p></div>
   <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">✍️ Write like you talk</h4><p>Contractions, natural sentence lengths, numbers as words ("twenty five"). The AI needs speech patterns, not written prose.</p></div>
   <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">✅ Review as you go</h4><p>Approve good clips immediately and Redo bad ones right away — redos process in parallel with remaining clips.</p></div>
   <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">✂️ Keep Smart Trim on</h4><p>Preserves natural openings for the first clip and scene cuts while trimming static frames at clip joins.</p></div>
@@ -473,8 +447,7 @@
   <h2><span class="h2-num">20</span> Troubleshooting</h2>
   <div class="table-wrap"><table><thead><tr><th>Problem</th><th>Likely Cause</th><th>Fix</th></tr></thead><tbody>
     <tr><td><strong>Can't start generation</strong></td><td>Missing images, empty script, or incompatible settings</td><td>Check: images uploaded, at least one dialogue line, settings compatible (1080p needs 8s)</td></tr>
-    <tr><td><strong>Clips fail (API mode)</strong></td><td>All keys rate-limited or invalid</td><td>Open API Keys → Re-check All Keys. Add more keys if all rate-limited.</td></tr>
-    <tr><td><strong>Job stuck on "pending"</strong></td><td>Worker not running (Flow mode)</td><td>Check your worker terminal. Go to 🖥️ My Worker to verify token is active.</td></tr>
+    <tr><td><strong>Job stuck on "pending"</strong></td><td>Worker not running</td><td>Check your worker terminal. Go to 🖥️ My Worker to verify token is active.</td></tr>
     <tr><td><strong>Worker "401 Unauthorized"</strong></td><td>Token expired or revoked</td><td>Generate a new token in 🖥️ My Worker, update your worker .env file.</td></tr>
     <tr><td><strong>Clips stuck on "queued_for_flow"</strong></td><td>Worker disconnected or Chrome crashed</td><td>Restart the worker. Already-completed clips are not re-generated.</td></tr>
     <tr><td><strong>Clip has no audio</strong></td><td>Dialogue line was too short or empty</td><td>Each line needs at least 3–4 words of meaningful dialogue.</td></tr>
@@ -495,7 +468,7 @@
 
 <div class="footer">
   <p>KavenoBuilder — User Guide</p>
-  <p>Powered by Google Veo &nbsp;&middot;&nbsp; API Keys or Flow Worker &nbsp;&middot;&nbsp; Voice Cloning via OpenVoice &amp; ElevenLabs</p>
+  <p>Powered by Google Veo &nbsp;&middot;&nbsp; Flow Worker &nbsp;&middot;&nbsp; Voice Cloning via OpenVoice &amp; ElevenLabs</p>
 </div>
 </body>
 </html>
