@@ -5526,6 +5526,9 @@ Ambient: same kitchen room tone, soft pour sound.
             if (job) url.searchParams.set("job", job); else url.searchParams.delete("job");
             window.history.pushState({ mode, stage, job }, "", url.toString());
           }
+          // Re-run the onboarding guide so it reflects the current view
+          // (browse-with-filter shows a stage suggestion; create shows the flow).
+          if (typeof obAdvance === 'function') { obLastDetermined = null; obAdvance(); }
         }
 
         function updateBreadcrumb({ mode, stage, job }) {
@@ -16018,6 +16021,45 @@ Ambient: same kitchen room tone, soft pour sound.
         
         // Step definitions — each step has an id, condition checker, and content generator
         const OB_STEPS = [
+            {
+                // Browse-mode contextual suggestion — shown (video tab) when the
+                // user is managing existing jobs with a stage filter active,
+                // instead of parking on the create-flow "Upload Images" step.
+                id: 'browse_suggestion',
+                title: '🗂️ Managing Jobs',
+                check: () => false,
+                condition: () => {
+                    if (obActiveTab() !== 'videos') return false;
+                    const c = document.getElementById('appContainer');
+                    if (!c || !c.classList.contains('state-browse')) return false;
+                    const chip = document.querySelector('.lifecycle-chips .chip-active');
+                    const stage = chip ? chip.dataset.stage : null;
+                    return !!(stage && stage !== 'all');
+                },
+                content: () => {
+                    const chip = document.querySelector('.lifecycle-chips .chip-active');
+                    const stage = chip ? chip.dataset.stage : 'all';
+                    const label = chip ? (chip.textContent || '').replace(/\d+\s*$/, '').trim() : stage;
+                    const tips = {
+                        generating: 'These jobs are still rendering clips. Open one to watch progress. If any sit <strong>stuck</strong> for hours, check <strong>🖥️ My Worker</strong> is Online.',
+                        awaiting_approval: 'Clips are ready to review. Open a job, then <strong>✓ Approve</strong> the good clips and <strong>↻ Redo</strong> the bad ones.',
+                        awaiting_export: 'Approved and ready. Open a job, then <strong>✂️ Export Final</strong> to merge the clips into one video.',
+                        awaiting_finishing: 'Exported — waiting for the finished file. Drop it into your watched <strong>Local folder</strong> (it auto-matches and moves to Published), or click <strong>→ Published</strong> on the job.',
+                        published: 'Done — these are ready to post. Connect <strong>Instagram</strong> to auto-track the reel link once it goes live.',
+                        instagram: 'Click <strong>+ Add account</strong>, enter your <strong>@handle</strong> + <strong>HikerAPI key</strong>, then <strong>Sync</strong>.',
+                        local: 'Click <strong>📁 Pick local folder</strong> so finished videos upload automatically and match to jobs in Finishing.',
+                        archived: 'Archived jobs. Open one to unarchive it, or start a fresh build with <strong>➕ New Job</strong>.'
+                    };
+                    const tip = tips[stage] || 'Open a job to act on it, or click <strong>➕ New Job</strong> to start a fresh build.';
+                    return `
+                        <div class="ob-step-num">👁</div>
+                        <div class="ob-step-title">You're viewing: ${label || stage}</div>
+                        <div class="ob-step-desc"><p>${tip}</p></div>
+                        <div class="ob-tip"><strong>💡</strong> Click <strong>All</strong> to see every stage, or <strong>➕ New Job</strong> to start creating. This panel updates as you switch filters.</div>
+                        <div class="ob-status done">Suggestion based on your active filter.</div>
+                    `;
+                },
+            },
             {
                 id: 'api_keys',
                 title: '🖥️ Set Up Your Worker',
