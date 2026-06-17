@@ -9964,10 +9964,27 @@ Example: A realistic vertical video of a professional presenter speaking directl
         const REDO_GRACE_PERIOD_MS = 90000; // 90 seconds grace period after redo
         
         async function selectJob(id){
-            if(selectedJobId===id)return;selectedJobId=id;lastLogId=0;clipStates={};clipVideoKeys={};clipUIKeys={};currentJobStatus=null;currentJobApprovedCount=0;currentJobBackend=null;
+            if(selectedJobId===id){
+              // vUI-refresh — re-clicking the already-selected job must still
+              // force a fresh authoritative /clips fetch. Without this, a stale
+              // v639 localStorage first-paint (e.g. "generating") stays on screen
+              // and the v727 sig-skip poller never re-fetches → the user only
+              // sees the completed clips after a manual page reload.
+              window._freshClipsFetched = window._freshClipsFetched || {};
+              window._freshClipsFetched[id] = false;
+              loadClips(id);
+              return;
+            }
+            selectedJobId=id;lastLogId=0;clipStates={};clipVideoKeys={};clipUIKeys={};currentJobStatus=null;currentJobApprovedCount=0;currentJobBackend=null;
             // v727 — clear active-clips probe signature so the new job's
             // first poll tick always triggers a full loadClips reload.
             window._clipsActiveSig = null;
+            // vUI-refresh — mark that no authoritative full /clips fetch has
+            // landed yet for this newly-selected job. The poll loop force-fetches
+            // loadClips() until this flips true (set in loadClips on success), so
+            // the grid can never stay stuck on the stale localStorage first-paint.
+            window._freshClipsFetched = window._freshClipsFetched || {};
+            window._freshClipsFetched[id] = false;
             // v655 — clear image-platform selection so its 2-second poll
             // (imgStartPolling at line 11983) stops firing imgRefreshNodes
             // while the user is on a video job. Without this, navigating
@@ -10027,7 +10044,22 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     const statusChanged = lastJobStatus !== job.status;
                     lastJobStatus = job.status;
                     currentJobStatus = job.status; // Keep JS variable in sync with server
-                    
+
+                    // vUI-refresh — guarantee ONE authoritative full /clips fetch
+                    // per selection, independent of job status and the v727 sig-skip.
+                    // The first paint can come from the v639 localStorage cache (last-
+                    // saved, often "generating"); if selectJob early-returned (re-click)
+                    // or the active signature never changed (job already settled
+                    // server-side), no fresh /clips fetch ever lands and the grid stays
+                    // stuck on the stale cache until a manual page reload. loadClips()
+                    // flips _freshClipsFetched[id]=true on success, so this fires at
+                    // most until the first authoritative fetch lands.
+                    if(currentJobBackend !== 'prompt_only' &&
+                       !(window._freshClipsFetched && window._freshClipsFetched[id])){
+                        console.log('[Polling][vUI-refresh] no authoritative /clips fetch yet for '+id+' — forcing loadClips (localStorage paint may be stale)');
+                        loadClips(id);
+                    }
+
                     // Reload clips while job is active
                     // Skip prompt_only jobs — prompts are static, polling rebuilds DOM and kills scroll
                     // v540 — fix: also poll when ANY clip is in an active state (generating,
@@ -10532,6 +10564,11 @@ Example: A realistic vertical video of a professional presenter speaking directl
             }
             if(!r.ok)return;const clips=await r.json();const c=document.getElementById('clipsList');
             cachedClipsData = clips; cachedJobId = id;
+            // vUI-refresh — an authoritative full /clips fetch has now landed and
+            // repainted the grid from server truth; the poll loop can stop force-
+            // fetching and resume the cheap v727 sig-skip path.
+            window._freshClipsFetched = window._freshClipsFetched || {};
+            window._freshClipsFetched[id] = true;
             // v639 — persist clip metadata to localStorage so reopening a
             // job renders cards instantly from cache while fresh data
             // fetches in background. ~KB per job, no quota concerns.
