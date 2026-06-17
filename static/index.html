@@ -17243,7 +17243,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     const apiUrl = window.location.origin;
                     const defaultOS = /mac|darwin/i.test(navigator.userAgent) ? 'mac' : 'windows';
                     if (!window.imgWorkerSetupState) {
-                        window.imgWorkerSetupState = { os: defaultOS, reset: false, parallel: 2 };
+                        window.imgWorkerSetupState = { os: defaultOS, reset: false, parallel: 2, laptopEmail: '' };
                     }
                     // v571: ensure parallel field is set even on legacy state objects
                     if (typeof window.imgWorkerSetupState.parallel !== 'number') {
@@ -17281,6 +17281,13 @@ Example: A realistic vertical video of a professional presenter speaking directl
                             <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer;user-select:none;">
                                 <input type="checkbox" id="imgResetSessions" ${st.reset ? 'checked' : ''} onchange="imgToggleWorkerReset(this.checked)" style="cursor:pointer;">
                                 <span style="font-size:11px;color:var(--text-secondary);">Wipe Chrome session before start (force re-login)</span>
+                            </label>
+
+                            <!-- Laptop login email (optional) — reuse the Google account this PC's Chrome is already logged into, no verification code -->
+                            <label style="display:block;margin-bottom:10px;font-size:11px;color:var(--text-secondary);">
+                                <span style="display:block;margin-bottom:4px;">Google login email (optional):</span>
+                                <input type="email" id="imgLaptopEmail" value="${(st.laptopEmail || '').replace(/"/g, '&quot;')}" oninput="imgSetWorkerLaptopEmail(this.value)" placeholder="you@gmail.com" autocomplete="off" style="width:100%;padding:5px 8px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-primary);color:var(--text-primary);font-size:11px;box-sizing:border-box;">
+                                <span style="display:block;color:var(--text-muted);font-size:10px;margin-top:3px;">If your Chrome is already signed into this account, the worker reuses that login — no code needed. Leave blank to log in manually.</span>
                             </label>
 
                             <!-- Primary download button -->
@@ -17369,6 +17376,14 @@ Example: A realistic vertical video of a professional presenter speaking directl
             imgWorkerSetupState.os = os;
             imgRefreshWorkerStatus();  // re-render to swap button label + help text
         }
+
+        // Stash the optional laptop-login email so imgDownloadInstaller can bake
+        // it into the installer (.env -> ACCOUNT1_LAPTOP_EMAIL). No re-render —
+        // would steal focus mid-type. Read live from the input on download too.
+        function imgSetWorkerLaptopEmail(v) {
+            if (!window.imgWorkerSetupState) window.imgWorkerSetupState = {};
+            imgWorkerSetupState.laptopEmail = (v || '').trim();
+        }
         // v758 — force the setup/launch UI to appear even when the status reads
         // "online". Used when a stale/zombie heartbeat row keeps the indicator
         // green so the operator can still download + relaunch the worker.
@@ -17442,10 +17457,14 @@ Example: A realistic vertical video of a professional presenter speaking directl
         }
         function imgDownloadInstaller() {
             const st = window.imgWorkerSetupState || { os: 'windows', reset: false, parallel: 2 };
+            // Read the email live from the input (state may lag if untouched).
+            const emailEl = document.getElementById('imgLaptopEmail');
+            const laptopEmail = ((emailEl && emailEl.value) || st.laptopEmail || '').trim();
             const url = '/api/images/worker/download/installer'
                 + '?os=' + encodeURIComponent(st.os)
                 + '&reset=' + (st.reset ? 1 : 0)
-                + '&parallel=' + (parseInt(st.parallel, 10) || 2);  // v571: pass user-selected parallel slots;
+                + '&parallel=' + (parseInt(st.parallel, 10) || 2)  // v571: pass user-selected parallel slots;
+                + '&laptop_email=' + encodeURIComponent(laptopEmail);
             // Use a hidden iframe so the browser triggers a download without
             // navigating away from the current page (same trick as my-worker.html).
             let iframe = document.getElementById('imgDlFrame');

@@ -114,6 +114,137 @@ SESSION_FOLDER = os.environ.get("IMAGE_SESSION_FOLDER",
 BROWSER_MODE = os.environ.get("BROWSER_MODE", "stealth")
 
 
+# ============================================================
+# LAPTOP-LOGIN PULL (parity with flow_worker.py startup)
+# ============================================================
+# Same mechanism the video worker uses: if ACCOUNT1_LAPTOP_EMAIL (or
+# worker_settings.json {"laptop_email": ...}) names a Google account the
+# operator's real Chrome is already logged into, capture that login's LIVE
+# cookies and inject them into this worker's fresh (automatable) session — so
+# the worker starts already logged in, no manual verification code. Empty email
+# => no-op (prior behavior). LAPTOP_PULL_DISABLED=1 turns the whole thing off.
+_COOKIE_MARKER = os.path.join(BASE_DIR, ".worker_injected_cookies.json")
+
+
+def _sync_companion_modules(base_url):
+    """Download worker_profile_pull.py + worker_cookie_extract.py next to this
+    worker (same as flow_worker's auto-update companion sync). The image
+    installer only fetches image_worker.py, so without this the laptop-login
+    helpers are absent in production and the pull silently no-ops. Best-effort:
+    any failure is logged, never raises. Skipped when no base_url is known."""
+    if not base_url:
+        return
+    import urllib.request as _urllib
+    base = base_url.rstrip("/")
+    for _comp in ("worker_profile_pull.py", "worker_cookie_extract.py"):
+        try:
+            _url = f"{base}/api/user-worker/download/{_comp}"
+            _req = _urllib.Request(_url, headers={"User-Agent": f"image-worker/{WORKER_VERSION}"})
+            with _urllib.urlopen(_req, timeout=15) as _resp:
+                _bytes = _resp.read()
+            compile(_bytes.decode("utf-8"), f"<{_comp}>", "exec")  # reject corrupt downloads
+            _path = os.path.join(BASE_DIR, _comp)
+            _tmp = _path + ".tmp"
+            with open(_tmp, "wb") as _f:
+                _f.write(_bytes)
+            os.replace(_tmp, _path)
+            print(f"[IMAGE] ✓ Synced {_comp} companion module", flush=True)
+        except Exception as _ce:
+            print(f"[IMAGE] ⚠ Could not sync {_comp} ({_ce})", flush=True)
+
+
+def _laptop_pull_companions():
+    """Import worker_profile_pull + worker_cookie_extract, searching both the
+    worker dir (deploy: companions sit next to image_worker.py) and ./static
+    (dev: code/static/). Returns (locate_profile, load_laptop_email,
+    extract_cookies) or None when the modules aren't available."""
+    for _p in (BASE_DIR, os.path.join(BASE_DIR, "static")):
+        if os.path.isdir(_p) and _p not in sys.path:
+            sys.path.insert(0, _p)
+    # Fresh-load (the updater rewrites these companions after download).
+    for _m in ("worker_profile_pull", "worker_cookie_extract"):
+        sys.modules.pop(_m, None)
+    try:
+        from worker_profile_pull import locate_profile, load_laptop_email
+        from worker_cookie_extract import extract_cookies
+        return locate_profile, load_laptop_email, extract_cookies
+    except Exception:
+        return None
+
+
+def _maybe_pull_laptop_login(label="IMAGE"):
+    """Stage the operator's live Google-login cookies for injection after
+    launch. Fail-safe: any error is logged, never raises. Mirrors
+    flow_worker._maybe_pull_laptop_profile (cookie-staging half)."""
+    try:
+        if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+            return
+        comp = _laptop_pull_companions()
+        if not comp:
+            return  # companions not deployed alongside this worker — no-op
+        locate_profile, load_laptop_email, extract_cookies = comp
+        # load_laptop_email reads ACCOUNT1_LAPTOP_EMAIL env first, then the file.
+        email = load_laptop_email(os.path.join(BASE_DIR, "worker_settings.json"))
+        if not email:
+            try:
+                if os.path.isfile(_COOKIE_MARKER):
+                    os.remove(_COOKIE_MARKER)
+            except Exception:
+                pass
+            return
+        loc = locate_profile(email)
+        if not loc:
+            print(f"[{label}] laptop login: {email!r} not logged into any Chrome channel", flush=True)
+            return
+        _ud, _pf, _ch = loc
+        print(f"[{label}] laptop login: {email} in {_pf} ({_ch}); capturing live cookies via net-log", flush=True)
+        cookies = extract_cookies(_ud, _pf, _ch, log=lambda m: print(m, flush=True))
+        if cookies:
+            with open(_COOKIE_MARKER, "w", encoding="utf-8") as _f:
+                json.dump(cookies, _f)
+            print(f"[{label}] laptop login: staged {len(cookies)} cookies for injection", flush=True)
+        else:
+            print(f"[{label}] laptop login: 0 cookies extracted — manual login needed this run", flush=True)
+    except Exception as _pe:
+        print(f"[{label}] laptop login error (continuing): {_pe}", flush=True)
+
+
+def _inject_laptop_cookies(browser, label="IMAGE"):
+    """Inject staged laptop-login cookies into the fresh session so it's already
+    logged into Google. Mirrors flow_worker's post-launch injection (host-only
+    url retry on the first add_cookies failure). Fail-safe + idempotent."""
+    try:
+        if not os.path.isfile(_COOKIE_MARKER):
+            return
+        with open(_COOKIE_MARKER, "r", encoding="utf-8") as _f:
+            _cks = json.load(_f)
+        if not _cks:
+            return
+        _ok, _failed = 0, []
+        for _ck in _cks:
+            try:
+                browser.add_cookies([_ck])
+                _ok += 1
+                continue
+            except Exception:
+                pass
+            # Retry host-only via url ONLY (Playwright rejects url+path together).
+            try:
+                _h = (_ck.get("domain") or "").lstrip(".") or "accounts.google.com"
+                _alt = {"name": _ck["name"], "value": _ck["value"],
+                        "url": "https://" + _h, "secure": True, "sameSite": "Lax"}
+                browser.add_cookies([_alt])
+                _ok += 1
+                continue
+            except Exception:
+                pass
+            _failed.append(_ck.get("name", "?"))
+        print(f"[{label}] injected {_ok}/{len(_cks)} laptop-login cookies"
+              + (f" (failed: {_failed})" if _failed else ""), flush=True)
+    except Exception as _ie:
+        print(f"[{label}] cookie injection failed (continuing): {_ie}", flush=True)
+
+
 # Minimal stealth — real Chrome has native plugins/runtime, don't fake them
 STEALTH_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', {
@@ -8994,7 +9125,12 @@ def launch_browser(session_folder=SESSION_FOLDER):
     
     # Ensure session folder exists
     os.makedirs(session_folder, exist_ok=True)
-    
+
+    # Laptop-login pull (parity with flow_worker startup): stage the operator's
+    # live Google cookies BEFORE golden restore, so they're ready to inject into
+    # the fresh session right after launch. No-op when no email is configured.
+    _maybe_pull_laptop_login("IMAGE")
+
     # Restore from golden if available
     golden = get_golden_folder(session_folder)
     if os.path.exists(golden):
@@ -9033,6 +9169,10 @@ def launch_browser(session_folder=SESSION_FOLDER):
     page = browser.pages[0] if browser.pages else browser.new_page()
     _stash_profile_on_page(page, session_folder)  # v486
     print("[IMAGE] ✓ Browser launched", flush=True)
+
+    # Inject the staged laptop-login cookies so this fresh session is already
+    # logged into Google — no manual verification code (parity with flow_worker).
+    _inject_laptop_cookies(browser, "IMAGE")
 
     # flow_api: attach the bearer-token sniff listener BEFORE any navigation to
     # Flow happens. The page's initial auth-bearing requests (project navigate,
@@ -9184,7 +9324,12 @@ Examples:
     print("="*60)
     print(f"IMAGE WORKER {WORKER_VERSION}")
     print("="*60)
-    
+
+    # Laptop-login parity with the video worker: sync the helper modules next to
+    # this worker (the installer only ships image_worker.py) so the startup pull
+    # can read the configured email + reuse the operator's Google login.
+    _sync_companion_modules(args.api_url or os.environ.get("WEB_APP_URL") or os.environ.get("APP_URL"))
+
     # Launch browser
     pw, browser, page = launch_browser(session_folder=args.session)
     
@@ -9211,6 +9356,7 @@ Examples:
                 )
                 page = browser.pages[0] if browser.pages else browser.new_page()
                 _stash_profile_on_page(page, args.session)  # v486
+                _inject_laptop_cookies(browser, "IMAGE")  # re-inject after relaunch
         
         # Navigate to Flow and verify login
         print("[IMAGE] Navigating to Flow...", flush=True)

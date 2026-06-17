@@ -9174,6 +9174,7 @@ def serve_image_worker_script():
 @router.get("/worker/download/setup.ps1")
 def serve_image_worker_setup_ps1(
     request: Request,
+    laptop_email: str = Query(""),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db_session),
 ):
@@ -9213,6 +9214,8 @@ $ErrorActionPreference = 'Continue'
 $AppUrl  = '__APP_URL__'
 $ApiKey  = '__API_KEY__'
 $WorkDir = "$env:USERPROFILE\KavenoImageWorker"
+# Optional: reuse the Google account this PC's Chrome is already logged into.
+$env:ACCOUNT1_LAPTOP_EMAIL = '__LAPTOP_EMAIL__'
 
 Write-Host "===============================================" -ForegroundColor Cyan
 Write-Host "  KavenoBuilder Image Worker - Quick Setup"     -ForegroundColor Cyan
@@ -9302,8 +9305,17 @@ Set-Location $WorkDir
 & $pythonPath image_worker.py --api-url $AppUrl --api-key $ApiKey
 """
 
+    # Validate the optional laptop-login email; malformed => empty (feature off).
+    import re as _re
+    _le = (laptop_email or "").strip()
+    if len(_le) > 254 or not _re.match(
+            r'^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', _le):
+        _le = ""
+
     # Substitute placeholders
-    script = script.replace("__API_KEY__", default_key).replace("__APP_URL__", app_url)
+    script = (script.replace("__API_KEY__", default_key)
+                    .replace("__APP_URL__", app_url)
+                    .replace("__LAPTOP_EMAIL__", _le))
     return FAResponse(content=script, media_type="text/plain")
 
 
@@ -9321,6 +9333,7 @@ def download_image_worker_installer(
     reset: int = Query(0),
     update_only: int = Query(0),
     parallel: int = Query(2, ge=1, le=8),
+    laptop_email: str = Query(""),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db_session),
 ):
@@ -9362,10 +9375,19 @@ def download_image_worker_installer(
     if "kavenobuilder.com" not in app_url and "localhost" not in app_url and "127.0.0.1" not in app_url:
         app_url = "https://kavenobuilder.com"
 
+    # Laptop-login email (optional): reuse the Chrome profile already logged into
+    # this Gmail so the worker starts authenticated with no verification code.
+    # Validate to a safe address; anything malformed => empty (feature off).
+    import re as _re
+    _laptop_email = (laptop_email or "").strip()
+    if len(_laptop_email) > 254 or not _re.match(
+            r'^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', _laptop_email):
+        _laptop_email = ""
+
     if os == "windows":
         content = _generate_image_windows_installer(
             effective_key, app_url, bool(reset), bool(update_only),
-            parallel_slots=parallel)
+            parallel_slots=parallel, laptop_email=_laptop_email)
         return FAResponse(
             content=content,
             media_type="application/x-bat",
@@ -9381,7 +9403,7 @@ def download_image_worker_installer(
         import io
         content = _generate_image_unix_installer(
             effective_key, app_url, bool(reset), bool(update_only),
-            parallel_slots=parallel)
+            parallel_slots=parallel, laptop_email=_laptop_email)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             import time as _t
@@ -9401,7 +9423,7 @@ def download_image_worker_installer(
 
 def _generate_image_windows_installer(
     api_key: str, app_url: str, reset: bool = False, update_only: bool = False,
-    parallel_slots: int = 2,
+    parallel_slots: int = 2, laptop_email: str = "",
 ) -> str:
     """Windows .bat installer. Mirrors video worker installer structure.
 
@@ -9520,6 +9542,7 @@ echo   [4/5] Writing config...
 echo IMAGE_SESSION_FOLDER=%WORKER_DIR%\\image-chrome-session
 echo LOCAL_WORKER_API_KEY=%API_KEY%
 echo PARALLEL_SLOTS={parallel_slots}
+echo ACCOUNT1_LAPTOP_EMAIL={laptop_email}
 ) > "%WORKER_DIR%\\.env"
 echo         OK
 
@@ -9546,7 +9569,7 @@ pause >nul
 
 def _generate_image_unix_installer(
     api_key: str, app_url: str, reset: bool = False, update_only: bool = False,
-    parallel_slots: int = 2,
+    parallel_slots: int = 2, laptop_email: str = "",
 ) -> str:
     """Mac/Linux .command installer. Mirrors video worker installer."""
     reset_cmds = ""
@@ -9634,6 +9657,7 @@ cat > "$DIR/.env" << ENVEOF
 IMAGE_SESSION_FOLDER=$DIR/image-chrome-session
 LOCAL_WORKER_API_KEY={api_key}
 PARALLEL_SLOTS={parallel_slots}
+ACCOUNT1_LAPTOP_EMAIL={laptop_email}
 ENVEOF
 log ".env written"
 echo "        OK"
