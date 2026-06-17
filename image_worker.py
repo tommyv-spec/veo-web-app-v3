@@ -7407,18 +7407,21 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     except Exception as e:
                         print(f"[API:http]   ✗ variant {idx} download failed: {e}", flush=True)
 
+                # v791c — a 403/401/410 on ANY variant means that variant's
+                # signed flow-content URL went stale before we fetched it (the
+                # image IS still in Flow). Whenever a stale-URL error left us
+                # short of the full set (none OR only some saved), don't upload
+                # a partial result and don't terminally fail — ask the main
+                # thread to re-resolve FRESH signed URLs for ALL variants from
+                # the still-present tiles and re-enqueue. _drain_done_queue caps
+                # this at MAX_DL_RETRIES so a truly-dead tile still fails.
+                if auth_fail and len(saved_paths) < len(urls):
+                    print(f"[API:http] ⟳ Node {node_id} {len(saved_paths)}/{len(urls)} variant(s) saved, rest hit auth/expiry (403/401/410) — signed URLs stale, requesting re-resolve", flush=True)
+                    done_queue.put({"node_id": node_id, "outcome": "retry_resolve",
+                                    "error": "Variant(s) 403/401/410 (stale signed URLs)"})
+                    continue
+
                 if not saved_paths:
-                    # v791c — a 403/401/410 on EVERY variant means the signed
-                    # flow-content URLs went stale before we fetched them (the
-                    # images ARE still in Flow). Don't terminally fail — ask the
-                    # main thread to re-resolve FRESH signed URLs from the
-                    # still-present tiles and re-enqueue. _drain_done_queue caps
-                    # this at MAX_DL_RETRIES so a truly-dead tile still fails.
-                    if auth_fail:
-                        print(f"[API:http] ⟳ Node {node_id} all variants returned auth/expiry (403/401/410) — signing URLs stale, requesting re-resolve", flush=True)
-                        done_queue.put({"node_id": node_id, "outcome": "retry_resolve",
-                                        "error": "All variants 403/401/410 (stale signed URLs)"})
-                        continue
                     raise RuntimeError("No variants downloaded successfully")
 
                 # Upload + post status
@@ -8638,6 +8641,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     def _drain_done_queue():
         """Main-thread only. Pop everything the HTTP worker has reported,
         remove those jobs from in_flight, clean up their temp dirs."""
+        nonlocal _last_scan_time  # v791c — re-arm path forces an immediate scan
         while True:
             try:
                 msg = done_queue.get_nowait()
@@ -8676,6 +8680,10 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     # cause is also covered.
                     captured_urls_by_node.pop(nid, None)
                     rjob.status = "submitted"  # back into the scan's pending set
+                    # Force the next main-loop tick to scan immediately (don't
+                    # wait up to SCAN_DURING_SUBMIT_INTERVAL) so fresh URLs get
+                    # re-resolved ASAP — the whole point of the retry.
+                    _last_scan_time = 0.0
                     print(f"[API:http] ⟳ Node {nid} re-resolving fresh signed URLs (attempt {rjob.dl_retry_count}/{MAX_DL_RETRIES})", flush=True)
                 continue
 
