@@ -2134,16 +2134,37 @@ def defocus_chrome(page, label=""):
         pass
 
 
+def _is_laptop_login_mode():
+    """True when this worker logged in via captured laptop cookies (the staged
+    `.worker_injected_cookies.json` exists). In this mode we must NOT click
+    'Sign in with Google' (Google rejects the silent OAuth for such sessions ->
+    error=interaction_required) and must NOT warm up on google.com (poking Google
+    disturbs the injected session and bounces Flow to signin). We rely purely on
+    the injected next-auth session-token, which authenticates Flow directly."""
+    try:
+        return os.path.isfile(os.path.join(_BASE, ".worker_injected_cookies.json"))
+    except Exception:
+        return False
+
+
 def chrome_warmup(page):
     """Warm up Chrome by visiting Google pages first.
-    
+
     This triggers Chrome's VariationsService to sync with clientservices.googleapis.com
     and download the variations seed. Without this, the x-client-data header sent to
     Google properties has only 1 trial ID (looks like fresh/automated install).
     A real Chrome with synced variations has 5-6+ trial IDs.
-    
+
     reCAPTCHA Enterprise checks x-client-data — a short header = low trust score = 403.
     """
+    # Laptop-login sessions: skip the google.com warmup. Loading Google pages with
+    # the injected login cookies makes Google notice the foreign session and
+    # disturbs it (Flow then bounces to signin). A clean inject->Flow navigate
+    # lands on the app; warmup is what breaks it. Stealth/x-client-data is moot
+    # here because we are already logged in via the captured token.
+    if _is_laptop_login_mode():
+        print("[Warmup] laptop-login mode — skipping google.com warmup (avoids disturbing the injected session)", flush=True)
+        return
     try:
         print("[Warmup] Loading Google pages to sync Chrome variations...", flush=True)
         
@@ -2553,6 +2574,30 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             except Exception:
                 pass
             
+            # DOM indicators missing (avatar/New-project render late or selectors
+            # don't match the current UI). Before assuming logged-out, ask Flow's
+            # authoritative auth endpoint — a live next-auth session returns
+            # {"user":{"email":...}}. This is how a token-based (laptop-login)
+            # session is recognized when the DOM hasn't hydrated yet.
+            try:
+                _sess_email = p.evaluate("""async () => {
+                    try {
+                        const ctl = new AbortController();
+                        const to = setTimeout(() => ctl.abort(), 8000);
+                        const r = await fetch('https://labs.google/fx/api/auth/session',
+                                              {credentials: 'include', headers: {'accept': 'application/json'}, signal: ctl.signal});
+                        clearTimeout(to);
+                        if (!r.ok) return null;
+                        const j = await r.json();
+                        return (j && j.user && j.user.email) ? j.user.email : null;
+                    } catch (e) { return null; }
+                }""")
+                if _sess_email:
+                    print(f"[Login] ✓ Auth session endpoint confirms logged in as {_sess_email} (DOM indicators missing)", flush=True)
+                    return 'flow_logged_in'
+            except Exception:
+                pass
+
             # Still nothing — page is on the Flow URL but login state is unclear.
             # Returning 'other' causes infinite re-navigation (page is already here).
             # Treat as flow_not_logged_in to trigger the click-through/login path instead.
@@ -2691,6 +2736,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
     max_attempts = 8
     _consecutive_no_buttons = 0
     _sso_attempts = 0
+    _renav_live = 0
     for attempt in range(max_attempts):
         state = _get_page_state(page)
 
@@ -2702,31 +2748,70 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             _cur_url = page.url
         except Exception:
             _cur_url = ""
-        # Mirror the MANUAL login exactly: ONE clean "Sign in with Google" click.
-        # The injected Google cookies make Google approve silently and bind a FRESH
-        # next-auth session to THIS browser. Click EXACTLY ONCE — a 2nd click races
-        # the in-flight OAuth callback and produces error=Callback -> permanent loop
-        # (this was the bug: the old cap of 2 clicked twice, [1/2] then [2/2], and
-        # the 2nd raced the first). After the single click we wait long and never
-        # re-click; the loop's logged-in detection takes over.
-        if ("/api/auth/signin" in _cur_url or "error=callback" in _cur_url.lower()) and _sso_attempts < 1:
-            _sso_attempts += 1
-            print(f"[{label}] On Flow signin page — clicking 'Sign in with Google' (SSO, single clean click)", flush=True)
-            for _sso_sel in ["button:has-text('Sign in with Google')",
-                             "a:has-text('Sign in with Google')",
-                             "button:has-text('Accedi con Google')",
-                             "a:has-text('Accedi con Google')"]:
+        if "/api/auth/signin" in _cur_url or "error=callback" in _cur_url.lower():
+            if _is_laptop_login_mode():
+                # LAPTOP-LOGIN MODE: the injected next-auth session-token already
+                # authenticates Flow (verified: /fx/api/auth/session returns the user
+                # and a fresh navigate lands on the app). Clicking "Sign in with
+                # Google" here starts a Google OAuth that THIS account rejects
+                # (error=interaction_required / access_denied) -> error=Callback ->
+                # permanent loop, and it poisons the good session. So NEVER click SSO
+                # in this mode. Verify the session via the auth endpoint and just
+                # re-navigate / reload until Flow honors the token.
+                _live = None
                 try:
-                    _sso_b = page.locator(_sso_sel).first
-                    if _sso_b.is_visible(timeout=1500):
-                        human_click_element(page, _sso_b, f"[{label}] SSO {_sso_sel}")
-                        break
+                    _live = page.evaluate("""async () => {
+                        try {
+                            const ctl = new AbortController();
+                            const to = setTimeout(() => ctl.abort(), 8000);
+                            const r = await fetch('https://labs.google/fx/api/auth/session',
+                                                  {credentials: 'include', headers: {'accept': 'application/json'}, signal: ctl.signal});
+                            clearTimeout(to);
+                            if (!r.ok) return null;
+                            const j = await r.json();
+                            return (j && j.user && j.user.email) ? j.user.email : null;
+                        } catch (e) { return null; }
+                    }""")
                 except Exception:
-                    pass
-            # Wait LONG for the full Google->Flow handshake; do not re-click during it.
-            _wait_for_page_settle(page, max_seconds=45)
-            time.sleep(5)
-            continue
+                    _live = None
+                if _live and _renav_live < 4:
+                    _renav_live += 1
+                    print(f"[{label}] laptop-login: auth session LIVE ({_live}) — re-navigating to Flow, NO SSO click [{_renav_live}/4]", flush=True)
+                    try:
+                        page.goto(FLOW_HOME_URL)
+                    except Exception:
+                        pass
+                    _wait_for_page_settle(page, max_seconds=20)
+                    continue
+                if _live:
+                    print(f"[{label}] laptop-login: session LIVE but Flow kept showing signin — proceeding as logged in (token valid).", flush=True)
+                    check_and_dismiss_popup(page)
+                    return False
+                # No live session at the signin page -> the captured token is
+                # invalid/expired. We cannot OAuth our way out in laptop mode
+                # (Google rejects it). Fall through to manual/entry handling.
+                print(f"[{label}] laptop-login: no live session at signin page — captured token invalid/expired; manual login may be required.", flush=True)
+            # NON-laptop (manual / standard) accounts: mirror the manual login with a
+            # single clean "Sign in with Google" click. Click EXACTLY ONCE — a 2nd
+            # click races the in-flight OAuth callback and produces error=Callback.
+            elif _sso_attempts < 1:
+                _sso_attempts += 1
+                print(f"[{label}] On Flow signin page — clicking 'Sign in with Google' (SSO, single clean click)", flush=True)
+                for _sso_sel in ["button:has-text('Sign in with Google')",
+                                 "a:has-text('Sign in with Google')",
+                                 "button:has-text('Accedi con Google')",
+                                 "a:has-text('Accedi con Google')"]:
+                    try:
+                        _sso_b = page.locator(_sso_sel).first
+                        if _sso_b.is_visible(timeout=1500):
+                            human_click_element(page, _sso_b, f"[{label}] SSO {_sso_sel}")
+                            break
+                    except Exception:
+                        pass
+                # Wait LONG for the full Google->Flow handshake; do not re-click during it.
+                _wait_for_page_settle(page, max_seconds=45)
+                time.sleep(5)
+                continue
 
         if state == 'flow_logged_in':
             if attempt == 0:
