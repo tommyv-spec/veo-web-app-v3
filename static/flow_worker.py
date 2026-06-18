@@ -3707,6 +3707,12 @@ ACCOUNTS = [
     },
 ]
 
+# Goldens already built from the real profile THIS session. Restarts must NOT
+# re-copy — the copy closes the channel's Chrome, which would kill the worker's
+# own running Beta browsers (cascade crash). Build once, reuse the golden after.
+_LAPTOP_COPIED_GOLDENS = set()
+
+
 def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
     """laptop_email: reuse the operator's existing Chrome login by COPYING the real
     profile into this slot's golden. Requires App-Bound Encryption disabled
@@ -3730,6 +3736,12 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
             os.remove(cookie_marker)
     except Exception:
         pass
+    # Build the golden from the real profile ONCE per session. On a worker restart
+    # the golden already exists — re-copying would close the channel's Chrome and
+    # kill the other slot's running browser (cascade crash). Reuse the golden.
+    if golden_folder in _LAPTOP_COPIED_GOLDENS and os.path.isdir(golden_folder):
+        print(f"[{label}] laptop login: golden already built this session — reusing (no re-copy)", flush=True)
+        return
     try:
         if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
@@ -3794,10 +3806,28 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
             except Exception:
                 pass
         _skip = {"Cache", "Code Cache", "GPUCache", "Service Worker", "DawnGraphiteCache",
-                 "DawnWebGPUCache", "component_crx_cache", "GraphiteDawnCache", "Crashpad", "ShaderCache"}
-        _sh.copytree(os.path.join(_ud, _pf), os.path.join(golden_folder, "Default"),
+                 "DawnWebGPUCache", "component_crx_cache", "GraphiteDawnCache", "Crashpad", "ShaderCache",
+                 # tab/session-restore state — without these Chrome opens ONE tab,
+                 # not the operator's whole window of restored tabs.
+                 "Sessions", "Current Tabs", "Current Session", "Last Tabs", "Last Session"}
+        _dst_default = os.path.join(golden_folder, "Default")
+        _sh.copytree(os.path.join(_ud, _pf), _dst_default,
                      ignore=lambda d, n: [x for x in n if x in _skip],
                      ignore_dangling_symlinks=True, copy_function=_sh.copy2)
+        # Mark the copied profile as cleanly exited so Chrome doesn't try to
+        # restore the old session / show the "restore pages?" crash bubble.
+        try:
+            _pp = os.path.join(_dst_default, "Preferences")
+            _pr = _json.load(open(_pp, encoding="utf-8"))
+            _pr.setdefault("profile", {})
+            _pr["profile"]["exit_type"] = "Normal"
+            _pr["profile"]["exited_cleanly"] = True
+            _ss = _pr.setdefault("session", {})
+            _ss["restore_on_startup"] = 5  # 5 = open New Tab Page (don't restore tabs)
+            _json.dump(_pr, open(_pp, "w", encoding="utf-8"))
+        except Exception:
+            pass
+        _LAPTOP_COPIED_GOLDENS.add(golden_folder)
         print(f"[{label}] laptop login: copied {_pf} -> golden/Default (real session, no code). "
               f"DIAG golden={golden_folder}", flush=True)
     except Exception as _pe:
