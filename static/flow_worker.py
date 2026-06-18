@@ -2562,8 +2562,11 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             try:
                 _sess_email = p.evaluate("""async () => {
                     try {
+                        const ctl = new AbortController();
+                        const to = setTimeout(() => ctl.abort(), 8000);
                         const r = await fetch('https://labs.google/fx/api/auth/session',
-                                              {credentials: 'include', headers: {'accept': 'application/json'}});
+                                              {credentials: 'include', headers: {'accept': 'application/json'}, signal: ctl.signal});
+                        clearTimeout(to);
                         if (!r.ok) return null;
                         const j = await r.json();
                         return (j && j.user && j.user.email) ? j.user.email : null;
@@ -2726,21 +2729,25 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             _cur_url = page.url
         except Exception:
             _cur_url = ""
-        if ("/api/auth/signin" in _cur_url or "error=callback" in _cur_url.lower()) and _sso_attempts < 2:
-            # GUARD: a valid injected next-auth session can still land here via a
-            # middleware redirect that fires before client hydration. Clicking
-            # "Sign in with Google" would START a FRESH OAuth that needs the
-            # transient next-auth cookies we intentionally dropped -> error=Callback
-            # -> permanent loop, DESTROYING the already-valid session. So ask Flow's
-            # own auth endpoint first; if a user is live, just re-navigate to Flow
-            # home (clean) instead of clicking SSO. Same-origin fetch (we are on a
-            # labs.google signin URL here), so cookies are sent.
+        if "/api/auth/signin" in _cur_url or "error=callback" in _cur_url.lower():
+            # GUARD (runs on EVERY signin/error=callback page, independent of the
+            # SSO-click cap): a valid injected next-auth session can still land here
+            # via a middleware redirect that fires before client hydration. Clicking
+            # "Sign in with Google" would START a FRESH OAuth that needs the transient
+            # next-auth cookies we intentionally dropped -> error=Callback -> permanent
+            # loop, DESTROYING the already-valid session. So ask Flow's own auth
+            # endpoint first; if a user is live, re-navigate to Flow home instead of
+            # clicking SSO. Same-parent fetch (we are on a labs.google signin URL),
+            # so cookies are sent; 8s abort guards against a hung endpoint.
             _live_user = None
             try:
                 _live_user = page.evaluate("""async () => {
                     try {
+                        const ctl = new AbortController();
+                        const to = setTimeout(() => ctl.abort(), 8000);
                         const r = await fetch('https://labs.google/fx/api/auth/session',
-                                              {credentials: 'include', headers: {'accept': 'application/json'}});
+                                              {credentials: 'include', headers: {'accept': 'application/json'}, signal: ctl.signal});
+                        clearTimeout(to);
                         if (!r.ok) return null;
                         const j = await r.json();
                         return (j && j.user && j.user.email) ? j.user.email : null;
@@ -2764,23 +2771,26 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                           f"treating as logged in (session valid).", flush=True)
                     check_and_dismiss_popup(page)
                     return False
-            _sso_attempts += 1
-            print(f"[{label}] On Flow signin page — clicking 'Sign in with Google' (SSO) [{_sso_attempts}/2]", flush=True)
-            for _sso_sel in ["button:has-text('Sign in with Google')",
-                             "a:has-text('Sign in with Google')",
-                             "button:has-text('Accedi con Google')",
-                             "a:has-text('Accedi con Google')"]:
-                try:
-                    _sso_b = page.locator(_sso_sel).first
-                    if _sso_b.is_visible(timeout=1500):
-                        human_click_element(page, _sso_b, f"[{label}] SSO {_sso_sel}")
-                        break
-                except Exception:
-                    pass
-            # Wait LONG for the full Google->Flow handshake; do not re-click during it.
-            _wait_for_page_settle(page, max_seconds=40)
-            time.sleep(4)
-            continue
+            # No live session -> a real OAuth handshake IS needed. Cap clicks:
+            # spamming races the callback and itself produces error=Callback.
+            if _sso_attempts < 2:
+                _sso_attempts += 1
+                print(f"[{label}] On Flow signin page — clicking 'Sign in with Google' (SSO) [{_sso_attempts}/2]", flush=True)
+                for _sso_sel in ["button:has-text('Sign in with Google')",
+                                 "a:has-text('Sign in with Google')",
+                                 "button:has-text('Accedi con Google')",
+                                 "a:has-text('Accedi con Google')"]:
+                    try:
+                        _sso_b = page.locator(_sso_sel).first
+                        if _sso_b.is_visible(timeout=1500):
+                            human_click_element(page, _sso_b, f"[{label}] SSO {_sso_sel}")
+                            break
+                    except Exception:
+                        pass
+                # Wait LONG for the full Google->Flow handshake; do not re-click during it.
+                _wait_for_page_settle(page, max_seconds=40)
+                time.sleep(4)
+                continue
 
         if state == 'flow_logged_in':
             if attempt == 0:
