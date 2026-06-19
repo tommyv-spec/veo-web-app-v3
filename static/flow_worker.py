@@ -4289,7 +4289,7 @@ _UNUSUAL_GR_LOCK = threading.Lock()
 # lowercase 'email' labs.google cookie (the only structural blocked-vs-working
 # cookie difference); the strip also runs before every submit, so the handler
 # strip is a fallback. Cheap (CDP delete, no navigation), so allow a few.
-MAX_UNUSUAL_COOKIE_CLEARS = 3    # per job: email-strip tries, then golden restore
+MAX_UNUSUAL_COOKIE_CLEARS = 1    # per job: 1 handler re-auth fallback (FailCheck already re-auths), then golden restore
 _UNUSUAL_COOKIE_CLEARS = {}      # job_id -> int (cumulative cookie-clears)
 
 # v758.29/31 — submission-rate backoff. PROVEN (worker log 16:10-16:14): the
@@ -4682,15 +4682,18 @@ def reauth_flow_session(page, label="", timeout_s=45):
                     return c.get("value", "")
             return ""
         old_sess = _sess()
-        # Delete the flagged session bits so the flow re-mints cleanly (matches the
-        # operator's working state: no stale session-token / lowercase email /
-        # deep callback-url).
-        for name in ("__Secure-next-auth.session-token", "email", "__Secure-next-auth.callback-url"):
-            for dom in ("labs.google", ".labs.google"):
+        # v758.32 — delete ALL labs.google cookies (the operator's manual fix is a
+        # full labs.google cookie delete, not a 3-cookie subset). google.com SSO is
+        # untouched, so the OAuth re-init below re-mints a fresh session.
+        _del = 0
+        for c in cdp.send("Network.getCookies").get("cookies", []):
+            if "labs.google" in (c.get("domain") or ""):
                 try:
-                    cdp.send("Network.deleteCookies", {"name": name, "domain": dom, "path": "/"})
+                    cdp.send("Network.deleteCookies", {"name": c.get("name", ""), "domain": c.get("domain"), "path": c.get("path", "/")})
+                    _del += 1
                 except Exception:
                     pass
+        print(f"{prefix}🧹 v758.32 re-auth: deleted {_del} labs.google cookies (google SSO kept)", flush=True)
         # Must be on a labs.google origin for the same-origin signin fetch.
         cur_url = page.url or ""
         if "labs.google" not in cur_url:
@@ -9312,8 +9315,32 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         # once-per-job gate); otherwise fall through to the retry + strike path.
         _first_unusual = result.get('unusualActivityCount', 0)
         if _first_unusual > 0 and job_id:
-            print(f"[FailCheck] ⚠ unusual-activity on FIRST check ({_first_unusual}/{tiles} tiles) — routing to cookie-clear before retry (retry would mask it) (v758.20)", flush=True)
-            return "abort_unusual_activity"
+            # v758.32 — the operator's manual fix for Flow's known "unusual
+            # activity" error: delete the labs.google cookies, then the Flow tab
+            # auto-refreshes / re-auths, and the NEXT generate works. The worker's
+            # programmatic equivalent of that auto-re-auth is reauth_flow_session
+            # (delete all labs cookies -> NextAuth OAuth via the intact google SSO
+            # -> fresh session, lands back on this project). After it, RE-READ the
+            # tiles and fall through to the Retry-click below to re-generate with
+            # the fresh session — instead of aborting the whole job to a restore.
+            print(f"[FailCheck] ⚠ unusual-activity on FIRST check ({_first_unusual}/{tiles} tiles) — v758.32 delete labs cookies + re-auth, then retry in-place (operator's manual fix)", flush=True)
+            try:
+                _ra_ok = reauth_flow_session(page, "FailCheck")
+                print(f"[FailCheck] v758.32 re-auth ok={_ra_ok}", flush=True)
+            except Exception as _re:
+                print(f"[FailCheck] v758.32 re-auth raised: {_re}", flush=True)
+            time.sleep(5)  # let the project tiles re-render after the re-auth nav
+            try:
+                result = page.evaluate(TILE_CHECK_JS.replace("DATA_INDEX_PLACEHOLDER", str(data_index)))
+                tiles = result.get('tiles', 0)
+                has_video = result.get('hasVideo', False)
+                has_generating = result.get('hasGenerating', False)
+                failed_count = result.get('failedCount', 0)
+                all_failed = result.get('allFailed', False)
+                print(f"[FailCheck] post-reauth: {tiles} tiles, {failed_count} failed, generating={has_generating}, video={has_video}", flush=True)
+            except Exception as _rr:
+                print(f"[FailCheck] post-reauth re-read failed: {_rr}", flush=True)
+            # fall through to Retry-click + recheck below (no early abort)
 
         # Click Retry on truly failed tiles (ones with 'refresh' button)
         if failed_count > 0:
@@ -17481,15 +17508,6 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         
         print(f"\n--- Clip {i+1}/{len(clips)} (clip_index={clip_index}) ---")
 
-        # v758.31 — hold the WORKING cookie shape: strip the lowercase 'email'
-        # labs.google cookie before each submit. It is the ONLY structural cookie
-        # that differs between the operator's blocked vs working exports (present
-        # => blocked, absent => works), and the app keeps re-creating it.
-        try:
-            strip_lowercase_email_cookie(page, account_name)
-        except Exception:
-            pass
-
         # v758.29 — mild submission-rate backoff safety net (no-op when healthy).
         _rate_backoff_wait(account_name)
 
@@ -18260,9 +18278,9 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # the worker log even with a fresh session.) Google SSO untouched →
                 # account stays signed in + ULTRA. strip_lowercase_email_cookie also
                 # runs before every submit (clip-loop top) to hold the working shape.
-                _stripped = strip_lowercase_email_cookie(page, account_name)
-                print(f"[Flow] 🧼 v758.31: 'unusual activity' on job {job_id[:8]} (email-strip {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}, removed={_stripped}) — stripped lowercase 'email' cookie, retrying WITHOUT golden restore", flush=True)
-                clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, email-strip {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
+                _ra_ok = reauth_flow_session(page, account_name)
+                print(f"[Flow] 🔑 v758.32: 'unusual activity' on job {job_id[:8]} (re-auth {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}, ok={_ra_ok}) — deleted labs cookies + re-auth, retrying WITHOUT golden restore", flush=True)
+                clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, re-auth {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
                 _drain_bound_downloads()
                 # Reset non-completed clips to pending; drop project_url so the
                 # retry re-submits into a fresh project on the SAME (cleared)
