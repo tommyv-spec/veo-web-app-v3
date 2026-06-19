@@ -17594,6 +17594,17 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         
         print(f"\n--- Clip {i+1}/{len(clips)} (clip_index={clip_index}) ---")
 
+        # v758.31 (restored) — strip the lowercase 'email' labs.google cookie
+        # before each submit to hold the working cookie shape. Operator confirmed
+        # v758.31's pre-submit strip was working for the "unusual activity" block;
+        # it PREVENTS the block forming, so most clips never need the heavier
+        # on-block re-auth recovery (v758.33) which stays as the fallback. Cheap
+        # CDP delete; keeps uppercase 'EMAIL'.
+        try:
+            strip_lowercase_email_cookie(page, account_name)
+        except Exception:
+            pass
+
         # v758.29 — mild submission-rate backoff safety net (no-op when healthy).
         _rate_backoff_wait(account_name)
 
