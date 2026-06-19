@@ -4697,6 +4697,91 @@ def strip_lowercase_email_cookie(page, label=""):
     return removed > 0
 
 
+# v758.36 — operator-supplied "working" labs.google cookie set. The operator drops
+# a Netscape-format cookie export (the one captured while generation WORKS) at this
+# path; on a block we delete the stale labs cookies and inject this working set
+# (fresh session-token + full labs cookies) so the worker's session MATCHES the
+# working one. google.com SSO is never touched. Refresh the file when the
+# session-token expires.
+WORKING_COOKIES_FILE = os.path.join(BASE_DIR, "working_cookies.txt")
+# next-auth cookies are httpOnly; the Netscape export can't encode that, so flag them by name.
+_HTTPONLY_LABS_NAMES = ("next-auth.session-token", "next-auth.csrf-token", "next-auth.callback-url")
+
+
+def _parse_netscape_labs_cookies(path):
+    """Parse a Netscape cookie file → list of labs.google cookie dicts for CDP."""
+    out = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                domain, _flag, cpath, secure, expiry, name, value = parts[:7]
+                if "labs.google" not in domain:
+                    continue
+                ck = {
+                    "name": name,
+                    "value": value,
+                    "domain": domain,
+                    "path": cpath or "/",
+                    "secure": (secure.strip().upper() == "TRUE"),
+                    "httpOnly": any(h in name for h in _HTTPONLY_LABS_NAMES),
+                }
+                try:
+                    exp = int(float(expiry))
+                    if exp > 0:
+                        ck["expires"] = exp
+                except Exception:
+                    pass
+                out.append(ck)
+    except Exception:
+        return []
+    return out
+
+
+def inject_working_labs_cookies(page, label=""):
+    """v758.36 — delete the stale labs.google cookies and inject the operator's
+    known-working set from WORKING_COOKIES_FILE, so the worker session MATCHES the
+    working cookies. Returns True if cookies were injected."""
+    prefix = f"[{label}] " if label else ""
+    cookies = _parse_netscape_labs_cookies(WORKING_COOKIES_FILE)
+    if not cookies:
+        print(f"{prefix}ⓘ no working_cookies.txt (or no labs cookies in it) — skipping inject", flush=True)
+        return False
+    cdp = None
+    try:
+        cdp = page.context.new_cdp_session(page)
+        # delete current labs cookies first so the injected set fully replaces them
+        for c in cdp.send("Network.getCookies").get("cookies", []):
+            if "labs.google" in (c.get("domain") or ""):
+                try:
+                    cdp.send("Network.deleteCookies", {"name": c.get("name", ""), "domain": c.get("domain"), "path": c.get("path", "/")})
+                except Exception:
+                    pass
+        ok = 0
+        for ck in cookies:
+            try:
+                cdp.send("Network.setCookie", ck)
+                ok += 1
+            except Exception as _se:
+                print(f"{prefix}⚠ setCookie {ck['name']} failed: {_se}", flush=True)
+        print(f"{prefix}🍪 v758.36 injected {ok}/{len(cookies)} working labs.google cookies (matches operator's working set)", flush=True)
+        return ok > 0
+    except Exception as e:
+        print(f"{prefix}⚠ inject working cookies failed: {e}", flush=True)
+        return False
+    finally:
+        if cdp is not None:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+
+
 def reauth_flow_session(page, label="", timeout_s=45):
     """v758.30 — re-mint a FRESH labs.google NextAuth session via the OAuth
     sign-in flow, using the intact google.com SSO (NO full re-login, NO golden
@@ -9400,10 +9485,26 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
 
             _MAX_REAUTH = 2
             for _att in range(1, _MAX_REAUTH + 1):
+                # v758.36 — MATCH the operator's working cookies: inject the
+                # known-working labs.google set (fresh session) from
+                # working_cookies.txt, then reload so the SPA adopts it. If there
+                # is no working file, fall back to the NextAuth re-auth (which
+                # mints a comparable fresh session).
+                _injected = False
                 try:
-                    reauth_flow_session(page, "FailCheck")
-                except Exception as _re:
-                    print(f"[FailCheck] re-auth raised: {_re}", flush=True)
+                    _injected = inject_working_labs_cookies(page, "FailCheck")
+                except Exception as _ie:
+                    print(f"[FailCheck] inject raised: {_ie}", flush=True)
+                if _injected:
+                    try:
+                        page.reload(wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        reauth_flow_session(page, "FailCheck")
+                    except Exception as _re:
+                        print(f"[FailCheck] re-auth raised: {_re}", flush=True)
                 time.sleep(4)
                 _click_retry_failed_tiles()
                 _v, rc = None, {}
@@ -17594,16 +17695,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         
         print(f"\n--- Clip {i+1}/{len(clips)} (clip_index={clip_index}) ---")
 
-        # v758.31 (restored) — strip the lowercase 'email' labs.google cookie
-        # before each submit to hold the working cookie shape. Operator confirmed
-        # v758.31's pre-submit strip was working for the "unusual activity" block;
-        # it PREVENTS the block forming, so most clips never need the heavier
-        # on-block re-auth recovery (v758.33) which stays as the fallback. Cheap
-        # CDP delete; keeps uppercase 'EMAIL'.
-        try:
-            strip_lowercase_email_cookie(page, account_name)
-        except Exception:
-            pass
+        # v758.36 — NO email-strip. The operator's working cookie export (file 6)
+        # CONTAINS the lowercase 'email' cookie, so its presence is NOT the block.
+        # The block is a stale/flagged labs session; recovery = a fresh valid
+        # session, which we get by injecting the operator's working cookie set
+        # (inject_working_labs_cookies) and/or re-auth — handled on-block in FailCheck.
 
         # v758.29 — mild submission-rate backoff safety net (no-op when healthy).
         _rate_backoff_wait(account_name)
