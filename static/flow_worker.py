@@ -15410,8 +15410,22 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # (or any cycles carried over from the main-gen path) starts fresh.
     clear_auto_redo_cycle(clip_id)
 
-    # Check for immediate failure
-    immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None)
+    # Check for immediate failure. v759c — pass job_id so the unusual-activity
+    # inject recovery runs here too (the redo path used to omit it, so an
+    # "actividad inusual" block fell through to the policy router below and was
+    # wrongly treated as a content-policy block → "switching model to Veo 3.1
+    # Fast" + redo loop). With job_id, check_recent_clip_failure injects the
+    # working cookies + retries inline; if it recovers it returns False (redo
+    # proceeds), else it returns "abort_unusual_activity".
+    immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None, job_id=job_id)
+    if immediate_failure == "abort_unusual_activity":
+        # v759c — unusual-activity block, NOT a content-policy block. Do NOT route
+        # to policy_gen_next_action (it wrongly swaps model + loops). Just requeue
+        # the redo so a later attempt retries with a fresh injected session.
+        print(f"[REDO] 🧹 Clip {clip_index+1} unusual-activity block (not policy) — requeueing redo, NO model swap", flush=True)
+        update_clip_status(clip_id, 'flow_redo_queued', error_message="Unusual-activity block — will retry")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return False
     if immediate_failure:
         # v777 — an immediate double-tile failure right after a redo submit is
         # almost always a content-policy block (same image + same prompt that was
