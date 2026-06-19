@@ -4455,34 +4455,53 @@ def clear_flow_site_data(page, label=""):
     Returns True if the cookie clear succeeded."""
     prefix = f"[{label}] " if label else ""
     ok = False
-    # 1) Cookies — SURGICALLY delete ONLY labs.google cookies via CDP. Do NOT
-    #    clear_cookies()+add_cookies(): clearing all then re-adding is lossy and
-    #    dropped the Google SSO auth cookies, forcing a re-login on the next run
-    #    and corrupting the saved profile. CDP delete-by-name/domain touches
-    #    only the labs.google entries; google.com / accounts cookies are never
-    #    cleared.
+    # 1) Cookies — SURGICALLY delete ONLY the labs.google fingerprint cookies via
+    #    CDP. Do NOT clear_cookies()+add_cookies() (lossy — dropped the google.com
+    #    SSO auth cookies). google.com / accounts cookies are never touched here.
+    #
+    # v758.27 — PRESERVE the labs.google NextAuth session/auth cookies. The
+    #    Flow/fx app uses NextAuth.js; its cookies hold the USER SESSION + ULTRA
+    #    entitlement + CSRF token:
+    #      __Secure-next-auth.session-token  (the session; ULTRA lives here)
+    #      __Host-next-auth.csrf-token       (CSRF; generate POSTs fail without it)
+    #      __Secure-next-auth.callback-url
+    #    Deleting all 7 labs.google cookies (v758.26) nuked these → ULTRA badge
+    #    gone, editor SPA never hydrated ("Settings button not found"), every clip
+    #    failed. The "unusual activity" block keys off the fingerprint/client-id
+    #    cookies (the Google-Analytics `_ga*` client id + any non-auth labs cookie),
+    #    NOT the NextAuth session. So delete everything on labs.google EXCEPT the
+    #    NextAuth session family — lifts the block without logging the user out.
+    PRESERVE_SUBSTR = ("next-auth",)  # any cookie name containing this is kept
     try:
         ctx = page.context
         cdp = ctx.new_cdp_session(page)
         all_c = cdp.send("Network.getCookies").get("cookies", [])
         removed = 0
+        kept = []
         for c in all_c:
             dom = c.get("domain") or ""
-            if "labs.google" in dom:
-                try:
-                    cdp.send("Network.deleteCookies", {
-                        "name": c.get("name", ""),
-                        "domain": dom,
-                        "path": c.get("path", "/"),
-                    })
-                    removed += 1
-                except Exception:
-                    pass
+            if "labs.google" not in dom:
+                continue
+            name = c.get("name", "")
+            if any(s in name for s in PRESERVE_SUBSTR):
+                kept.append(name)
+                continue
+            try:
+                cdp.send("Network.deleteCookies", {
+                    "name": name,
+                    "domain": dom,
+                    "path": c.get("path", "/"),
+                })
+                removed += 1
+                print(f"{prefix}🧹   deleted labs cookie: {name} (dom={dom})", flush=True)
+            except Exception:
+                pass
         try:
             cdp.detach()
         except Exception:
             pass
-        print(f"{prefix}🧹 cookies: removed {removed} labs.google (Google SSO auth untouched)", flush=True)
+        print(f"{prefix}🧹 cookies: removed {removed} labs.google fingerprint cookie(s); "
+              f"kept {len(kept)} NextAuth session cookie(s) {kept} + all google.com SSO", flush=True)
         ok = True
     except Exception as e:
         print(f"{prefix}⚠ cookie clear failed: {e}", flush=True)
