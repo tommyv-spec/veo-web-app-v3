@@ -742,6 +742,46 @@ def _fa_init_project_best_effort(page, project_id, context=""):
     except Exception as e:
         print(f"{pfx}[flow_api] page.reload() failed (non-blocking): {e}", flush=True)
 
+    # v758.34 — VERIFY the Agent is actually OFF. Flow keeps the project in Agent
+    # mode if the disable PATCH didn't take, and the submit UI's settings/variants
+    # toolbar only exists in the Agent-OFF layout (operator: "they all failed
+    # because the agent is still on" -> "Settings button not found"). Check the DOM
+    # for the variants toolbar; if missing, re-PATCH agentToggleState=DISABLED +
+    # reload, up to 3x. Logs the PATCH status so a Flow-side change is visible.
+    def _agent_off_in_dom():
+        try:
+            return page.evaluate(r"""() => {
+                const btns = [...document.querySelectorAll('button')];
+                const hasVariants = btns.some(b => /(^|\s)x[1-4](\s|$)/.test((b.innerText||'').trim()));
+                const agentLanding = /Start creating|Empieza a crear|drop media|Suelta el contenido|chat/i.test(document.body.innerText||'');
+                return {hasVariants, agentLanding};
+            }""")
+        except Exception:
+            return {"hasVariants": False, "agentLanding": False}
+    for _agc in range(3):
+        _ast = _agent_off_in_dom()
+        if _ast.get("hasVariants"):
+            if _agc:
+                print(f"{pfx}[flow_api] ✓ Agent-OFF confirmed after {_agc} re-disable(s) (variants toolbar present)", flush=True)
+            break
+        print(f"{pfx}[flow_api] ⚠ Agent still ON (variants toolbar missing, landing={_ast.get('agentLanding')}) — re-disabling ({_agc+1}/3)", flush=True)
+        _adr = _fa_api_fetch(
+            page,
+            f"{AISBX}/v1/projects/{project_id}/agentInfo?updateMask=agent_toggle_state",
+            "PATCH", _bearer(),
+            {"agentToggleState": "AGENT_TOGGLE_STATE_DISABLED"},
+        )
+        print(f"{pfx}[flow_api] re-disable PATCH status={_adr.get('status') if isinstance(_adr, dict) else '?'} "
+              f"err={_fa_error_reason(_adr) or 'none'}", flush=True)
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                time.sleep(2)
+        except Exception:
+            pass
+
 
 def _fa_try_create_new_project_api(page, context=""):
     """Try API project create. Returns full project URL on success, None on failure.
