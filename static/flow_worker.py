@@ -4276,16 +4276,16 @@ _UNUSUAL_GR_LOCK = threading.Lock()
 # restore" path golden-looped on a real block. Do up to this many cookie-clears
 # per job first; only if the block survives all of them do we fall through to the
 # golden-restore escalation (still capped by MAX_UNUSUAL_GOLDEN_RESTORES).
-# v758.29 — GOLDEN-FIRST. Live testing (test_cookie_clear.py) proved the
-# cookie-clear cannot lift this block: the "unusual activity" flag is tied to the
-# labs.google NextAuth SESSION (not the _ga fingerprint), so deleting _ga while
-# keeping the session leaves the block in place, and deleting the session logs
-# the account out with NO auto-re-auth (app strands on the marketing landing
-# page). Only a GOLDEN RESTORE supplies a fresh signed-in session. So allow just
-# ONE cheap clear (covers the occasional soft/partial block) then escalate
-# straight to golden restore — instead of burning 3 clears on a block they can't
-# fix.
-MAX_UNUSUAL_COOKIE_CLEARS = 1    # per job, then escalate to golden restore
+# v758.30 — the per-job cap on NextAuth RE-AUTH attempts (reauth_flow_session)
+# before escalating to a golden restore. The "unusual activity" flag is bound to
+# the labs.google NextAuth session-token; re-minting it via the OAuth flow lifts
+# the block WITHOUT a golden restore and WITHOUT logging the account out (google
+# SSO untouched). Proven against the operator's working-vs-blocked cookie exports
+# + test_reauth.py. (v758.26-29 history: plain cookie delete + reload could NOT
+# re-mint the token — it left the flagged session or stranded on the marketing
+# landing page — which is why those versions had to fall back to golden restore.)
+# 2 re-auth tries, then golden restore as a last resort.
+MAX_UNUSUAL_COOKIE_CLEARS = 2    # per job: NextAuth re-auth tries, then golden restore
 _UNUSUAL_COOKIE_CLEARS = {}      # job_id -> int (cumulative cookie-clears)
 
 # v758.29 — submission-rate backoff. The "unusual activity" block is Google
@@ -4613,6 +4613,89 @@ def clear_flow_site_data(page, label=""):
     except Exception as e:
         print(f"{prefix}⚠ CDP origin clear failed (non-fatal): {e}", flush=True)
     return ok
+
+
+def reauth_flow_session(page, label="", timeout_s=45):
+    """v758.30 — re-mint a FRESH labs.google NextAuth session via the OAuth
+    sign-in flow, using the intact google.com SSO (NO full re-login, NO golden
+    restore). THIS is what lifts the 'unusual activity' block.
+
+    Proven against the operator's known-good vs blocked cookie exports + a live
+    test (test_reauth.py): the block is bound to the labs.google
+    __Secure-next-auth.session-token; a fresh token clears it while the google.com
+    SSO cookies stay identical (so the account stays signed in + ULTRA). Plain
+    cookie deletion + reload does NOT re-mint the token (the app strands on the
+    marketing landing page) — only the NextAuth OAuth init does:
+        GET  /fx/api/auth/csrf                  -> csrfToken
+        POST /fx/api/auth/signin/google         -> {url: accounts.google.com/...}
+        GET  that url                           -> silent SSO -> callback -> new session
+    Returns True if a new session-token was minted."""
+    prefix = f"[{label}] " if label else ""
+    cdp = None
+    try:
+        cdp = page.context.new_cdp_session(page)
+        def _sess():
+            for c in cdp.send("Network.getCookies").get("cookies", []):
+                if "labs.google" in (c.get("domain") or "") and c.get("name") == "__Secure-next-auth.session-token":
+                    return c.get("value", "")
+            return ""
+        old_sess = _sess()
+        # Delete the flagged session bits so the flow re-mints cleanly (matches the
+        # operator's working state: no stale session-token / lowercase email /
+        # deep callback-url).
+        for name in ("__Secure-next-auth.session-token", "email", "__Secure-next-auth.callback-url"):
+            for dom in ("labs.google", ".labs.google"):
+                try:
+                    cdp.send("Network.deleteCookies", {"name": name, "domain": dom, "path": "/"})
+                except Exception:
+                    pass
+        # Must be on a labs.google origin for the same-origin signin fetch.
+        cur_url = page.url or ""
+        if "labs.google" not in cur_url:
+            try:
+                page.goto("https://labs.google/fx", wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            cur_url = page.url or "https://labs.google/fx"
+        oauth = page.evaluate(r"""async (cb) => {
+            const base = location.origin + '/fx';
+            try {
+                const csrf = (await (await fetch(base + '/api/auth/csrf', {credentials:'include'})).json()).csrfToken;
+                const body = new URLSearchParams({csrfToken: csrf, callbackUrl: cb, json: 'true'});
+                const r = await fetch(base + '/api/auth/signin/google', {
+                    method:'POST', credentials:'include',
+                    headers:{'Content-Type':'application/x-www-form-urlencoded'}, body});
+                const j = await r.json().catch(()=>({}));
+                return {status: r.status, url: j.url || null};
+            } catch(e){ return {error: String(e)}; }
+        }""", cur_url)
+        if not oauth or not oauth.get("url"):
+            print(f"{prefix}⚠ v758.30 re-auth: signin init failed ({oauth})", flush=True)
+            return False
+        # Navigate to Google OAuth — intact SSO makes it silent and redirects back.
+        try:
+            page.goto(oauth["url"], wait_until="domcontentloaded", timeout=timeout_s * 1000)
+        except Exception:
+            pass
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            s = _sess()
+            if s and s != old_sess:
+                print(f"{prefix}🔑 v758.30 re-auth: minted a FRESH labs session (block lifts; still signed in)", flush=True)
+                return True
+            time.sleep(2)
+        print(f"{prefix}⚠ v758.30 re-auth: no fresh session-token after {timeout_s}s", flush=True)
+        return False
+    except Exception as e:
+        print(f"{prefix}⚠ v758.30 re-auth raised: {e}", flush=True)
+        return False
+    finally:
+        if cdp is not None:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+
 
 # v738 — Stuck-clip detection during inter-clip wait scanner.
 # Veo render may complete server-side but the DOM never updates with the <video>
@@ -18120,26 +18203,24 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 if _do_cookie_clear:
                     _UNUSUAL_COOKIE_CLEARS[job_id] = _cc_count + 1
             if _do_cookie_clear:
-                # Cooldown-dedupe: when several clips / parallel accounts trip the
-                # same block within seconds, reuse the prior clear instead of
-                # re-clearing the session needlessly.
+                # v758.30 — re-mint a FRESH labs session via the NextAuth OAuth
+                # flow (proven against the operator's working-vs-blocked cookie
+                # exports). This actually lifts the block — unlike the v758.26
+                # cookie delete + reload, which left the flagged session in place
+                # (block persisted) or logged the account out (no auto re-auth).
+                # The google.com SSO is untouched, so the account stays signed in +
+                # ULTRA. Cooldown-dedupe so several clips / parallel accounts that
+                # trip the same block within seconds don't each re-auth.
                 _now = time.time()
                 _last = _COOKIE_CLEAR_LAST.get(job_id, 0)
+                _reauth_ok = True
                 if _now - _last >= COOKIE_CLEAR_COOLDOWN:
                     _COOKIE_CLEAR_LAST[job_id] = _now
-                    try:
-                        clear_flow_site_data(page, account_name)
-                    except Exception as _cce:
-                        print(f"[Flow] ⚠ cookie-clear raised (non-fatal): {_cce}", flush=True)
-                    # reload so the cleared session re-auths via google.com SSO
-                    try:
-                        page.reload(wait_until="domcontentloaded", timeout=30000)
-                    except Exception:
-                        pass
+                    _reauth_ok = reauth_flow_session(page, account_name)
                 else:
-                    print(f"[Flow] 🧹 cookie-clear skipped (cooldown {int(_now - _last)}s < {COOKIE_CLEAR_COOLDOWN}s) — reusing prior clear", flush=True)
-                print(f"[Flow] 🧹 v758.26: 'unusual activity' on job {job_id[:8]} (cookie-clear {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}) — cleared labs.google cookies, retrying WITHOUT golden restore", flush=True)
-                clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, cookie-clear {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
+                    print(f"[Flow] 🔑 re-auth skipped (cooldown {int(_now - _last)}s < {COOKIE_CLEAR_COOLDOWN}s) — reusing prior re-auth", flush=True)
+                print(f"[Flow] 🔑 v758.30: 'unusual activity' on job {job_id[:8]} (re-auth {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}, ok={_reauth_ok}) — re-minted labs session, retrying WITHOUT golden restore", flush=True)
+                clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, re-auth {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
                 _drain_bound_downloads()
                 # Reset non-completed clips to pending; drop project_url so the
                 # retry re-submits into a fresh project on the SAME (cleared)
