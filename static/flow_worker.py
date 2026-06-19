@@ -4472,15 +4472,19 @@ def clear_flow_site_data(page, label=""):
     #    NOT the NextAuth session. So delete everything on labs.google EXCEPT the
     #    session/identity cookies — lifts the block without logging the user out.
     #
-    # v758.27a — live test (test_cookie_clear.py against a golden-2 copy) showed
-    #    the labs.google jar also carries an `EMAIL` cookie (the signed-in user's
-    #    email = "info of the user") beyond the 3 next-auth cookies. Preserve it
-    #    too. The test confirmed: keeping the next-auth session-token + csrf-token
-    #    keeps the editor SPA alive + ULTRA intact across the clear+reload (v758.26
-    #    deleted them → editor never hydrated). The deleted `_ga*` fingerprint
-    #    cookies regenerate with a FRESH client-id on the next page load — exactly
-    #    the fingerprint reset that should dodge the "unusual activity" block.
-    PRESERVE_SUBSTR = ("next-auth", "EMAIL")  # cookie name contains any → kept
+    # v758.27a — keep the labs.google identity cookies too. Beyond the 3 next-auth
+    #    cookies the jar carries the user's email. The operator's known-good cookie
+    #    export has 8 labs.google cookies and BOTH casings appear — `EMAIL` AND
+    #    lowercase `email` — so the preserve match is CASE-INSENSITIVE (a
+    #    case-sensitive "EMAIL" dropped the lowercase one). Identity cookies to
+    #    keep: __Secure-next-auth.session-token (session; ULTRA lives here),
+    #    __Host-next-auth.csrf-token (generate POSTs), __Secure-next-auth.callback-url,
+    #    email, EMAIL. Live test (test_cookie_clear.py vs a golden-2 copy) confirmed:
+    #    keeping these keeps the editor SPA alive + ULTRA intact across clear+reload
+    #    (v758.26 deleted them → editor never hydrated). Only the `_ga*` fingerprint
+    #    cookies are deleted; they regenerate with a FRESH client-id on the next
+    #    load — the intended fingerprint reset that should dodge the block.
+    PRESERVE_SUBSTR = ("next-auth", "email")  # CASE-INSENSITIVE; name contains any → kept
     try:
         ctx = page.context
         cdp = ctx.new_cdp_session(page)
@@ -4492,7 +4496,8 @@ def clear_flow_site_data(page, label=""):
             if "labs.google" not in dom:
                 continue
             name = c.get("name", "")
-            if any(s in name for s in PRESERVE_SUBSTR):
+            _nl = name.lower()
+            if any(s in _nl for s in PRESERVE_SUBSTR):
                 kept.append(name)
                 continue
             try:
