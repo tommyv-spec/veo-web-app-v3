@@ -4329,7 +4329,7 @@ _UNUSUAL_GR_LOCK = threading.Lock()
 # lowercase 'email' labs.google cookie (the only structural blocked-vs-working
 # cookie difference); the strip also runs before every submit, so the handler
 # strip is a fallback. Cheap (CDP delete, no navigation), so allow a few.
-MAX_UNUSUAL_COOKIE_CLEARS = 1    # per job: 1 handler re-auth fallback (FailCheck already re-auths), then golden restore
+MAX_UNUSUAL_COOKIE_CLEARS = 3    # per job: email-strip tries, then golden restore
 _UNUSUAL_COOKIE_CLEARS = {}      # job_id -> int (cumulative cookie-clears)
 
 # v758.29/31 — submission-rate backoff. PROVEN (worker log 16:10-16:14): the
@@ -9355,77 +9355,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         # once-per-job gate); otherwise fall through to the retry + strike path.
         _first_unusual = result.get('unusualActivityCount', 0)
         if _first_unusual > 0 and job_id:
-            # v758.32/33 — the operator's manual fix for Flow's known "unusual
-            # activity" error: delete the labs.google cookies, the Flow tab
-            # re-auths (reauth_flow_session = the worker's auto-refresh equivalent:
-            # delete all labs cookies -> NextAuth OAuth via the intact google SSO
-            # -> fresh session, lands back on this project), then RE-GENERATE the
-            # failed tile in the SAME project.
-            #
-            # v758.33 — VERIFY the recovery STICKS. After re-auth the blocked tile
-            # can flash a transient 'generating %' and then fail again — the worker
-            # thought it recovered (operator: "i still get the error but we don't
-            # see it"), queued a download for a clip that never rendered, and it
-            # stuck. So do NOT trust an immediate 'generating'. Re-generate, then
-            # poll: success only on a real <video> or sustained generating WITHOUT
-            # re-showing the block; a re-shown block => re-auth again; escalate
-            # after a few tries.
-            print(f"[FailCheck] ⚠ unusual-activity on FIRST check ({_first_unusual}/{tiles} tiles) — v758.33 re-auth + verify-retry (operator's manual fix)", flush=True)
-
-            def _click_retry_failed_tiles():
-                try:
-                    container = page.locator(f"div[data-index='{data_index}']").first
-                    all_raw = container.locator("[data-tile-id]").all()
-                    seen_ids, uniq = set(), []
-                    for t in all_raw:
-                        try:
-                            tid = t.get_attribute("data-tile-id")
-                            if tid and tid not in seen_ids:
-                                seen_ids.add(tid); uniq.append(t)
-                        except Exception:
-                            pass
-                    _n = 0
-                    for _i, tile in enumerate(uniq):
-                        try:
-                            rb = tile.locator("button:has(i:text('refresh'))").first
-                            if rb.count() > 0 and rb.is_visible(timeout=2000):
-                                human_click_element(page, rb, f"Retry tile {_i+1}")
-                                _n += 1; time.sleep(1)
-                        except Exception:
-                            pass
-                    if _n:
-                        print(f"[FailCheck] v758.33 clicked Retry on {_n} failed tile(s)", flush=True)
-                except Exception as _e:
-                    print(f"[FailCheck] v758.33 retry-click error: {_e}", flush=True)
-
-            _MAX_REAUTH = 2
-            for _att in range(1, _MAX_REAUTH + 1):
-                try:
-                    reauth_flow_session(page, "FailCheck")
-                except Exception as _re:
-                    print(f"[FailCheck] re-auth raised: {_re}", flush=True)
-                time.sleep(4)
-                _click_retry_failed_tiles()
-                _v, rc = None, {}
-                _deadline = time.time() + 40   # transient fails re-block within ~15-20s; 40s catches them
-                while time.time() < _deadline:
-                    time.sleep(5)
-                    try:
-                        rc = page.evaluate(TILE_CHECK_JS.replace("DATA_INDEX_PLACEHOLDER", str(data_index)))
-                    except Exception:
-                        continue
-                    if rc.get('hasVideo'):
-                        _v = 'video'; break
-                    if rc.get('unusualActivityCount', 0) > 0:
-                        _v = 'blocked'; break
-                if _v is None:
-                    _v = 'generating' if rc.get('hasGenerating') else 'failed'
-                print(f"[FailCheck] v758.33 attempt {_att}/{_MAX_REAUTH}: verdict={_v}", flush=True)
-                if _v in ('video', 'generating'):
-                    print(f"[FailCheck] ✓ v758.33 recovery verified ({_v}) — clip is really rendering", flush=True)
-                    return False
-                # blocked / failed → loop: re-auth again with another fresh session
-            print(f"[FailCheck] ⚠ v758.33 re-auth x{_MAX_REAUTH} did not stick — escalating to handler", flush=True)
+            print(f"[FailCheck] ⚠ unusual-activity on FIRST check ({_first_unusual}/{tiles} tiles) — routing to cookie-clear before retry (retry would mask it) (v758.20)", flush=True)
             return "abort_unusual_activity"
 
         # Click Retry on truly failed tiles (ones with 'refresh' button)
@@ -18375,9 +18305,9 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # the worker log even with a fresh session.) Google SSO untouched →
                 # account stays signed in + ULTRA. strip_lowercase_email_cookie also
                 # runs before every submit (clip-loop top) to hold the working shape.
-                _ra_ok = reauth_flow_session(page, account_name)
-                print(f"[Flow] 🔑 v758.32: 'unusual activity' on job {job_id[:8]} (re-auth {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}, ok={_ra_ok}) — deleted labs cookies + re-auth, retrying WITHOUT golden restore", flush=True)
-                clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, re-auth {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
+                _stripped = strip_lowercase_email_cookie(page, account_name)
+                print(f"[Flow] 🧼 v758.31: 'unusual activity' on job {job_id[:8]} (email-strip {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}, removed={_stripped}) — stripped lowercase 'email' cookie, retrying WITHOUT golden restore", flush=True)
+                clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, email-strip {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
                 _drain_bound_downloads()
                 # Reset non-completed clips to pending; drop project_url so the
                 # retry re-submits into a fresh project on the SAME (cleared)
