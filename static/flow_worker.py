@@ -19369,6 +19369,29 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                     return null;
                                 }}""")
 
+                            # v759-diag — confirm the done-clip-not-downloaded root
+                            # cause: BOUND mediaId URL count vs the tile's actually-
+                            # rendered <video> count. If bound>0 (poster) while dom>0
+                            # (a real rendered video exists), we download the wrong
+                            # (poster) variant and the rendered one is lost.
+                            try:
+                                _b_n = len(captured_urls_for_clip(job_id, _ci, captured_media_urls))
+                                _d_n = page.evaluate(f"""() => {{
+                                    let n = 0;
+                                    for (const c of document.querySelectorAll('[data-index]')) {{
+                                        if ({repr(_dlg)} && (c.innerText||'').includes({repr(_dlg)})) {{
+                                            for (const v of c.querySelectorAll('video')) {{
+                                                const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                                if (u && !u.startsWith('blob:')) n++;
+                                            }}
+                                        }}
+                                    }}
+                                    return n;
+                                }}""")
+                                print(f"[Flow] [v759-diag] post-job clip {_ci+1}: bound_urls={_b_n} dom_rendered_videos={_d_n} fail_type={_tile_fail_type}", flush=True)
+                            except Exception:
+                                pass
+
                             if _urls and _urls != ['__blob__']:
                                 http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
                                     'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir})
@@ -20742,7 +20765,12 @@ class AccountWorker(threading.Thread):
                                     print(f"[{account_name}-HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1} not ready (ct={_ct or '?'} {len(_b):,}b) — retry {_vtry+1}/{POSTER_RETRY_MAX} in {POSTER_RETRY_DELAY}s", flush=True)
                                     time.sleep(POSTER_RETRY_DELAY)
                             if body is None:
-                                raise Exception(f"still poster/too-small after {POSTER_RETRY_MAX} tries — clip not rendered")
+                                # v759-diag — name the likely root cause: this URL is the
+                                # bound mediaId's; if it stays a poster, that bound variant
+                                # never rendered. When a clip had 1 of 2 tiles blocked
+                                # (unusual/prominent), the OTHER (rendered) variant's mediaId
+                                # may not have bound, so its video is never downloaded.
+                                raise Exception(f"still poster/too-small after {POSTER_RETRY_MAX} tries — bound mediaId never rendered (url=...{url[-48:]}); a rendered sibling variant may exist but be unbound")
                             out = os.path.join(temp_dir, f"clip_{ci}_{attempt}.{vi+1}.mp4")
                             with open(out, 'wb') as f:
                                 f.write(body)
