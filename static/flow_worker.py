@@ -4269,6 +4269,16 @@ MAX_UNUSUAL_GOLDEN_RESTORES = 4  # per job, then fail instead of restoring again
 _UNUSUAL_GOLDEN_RESTORES = {}    # job_id -> int (cumulative golden restores)
 _UNUSUAL_GR_LOCK = threading.Lock()
 
+# v758.26 — try the operator's proven manual fix (surgically delete the
+# labs.google cookies → Google SSO keeps us signed in → block lifts) BEFORE
+# escalating to a golden restore. A golden restore re-applies the SAME flagged
+# profile cookies and never clears the block, so the v758.24 "straight to golden
+# restore" path golden-looped on a real block. Do up to this many cookie-clears
+# per job first; only if the block survives all of them do we fall through to the
+# golden-restore escalation (still capped by MAX_UNUSUAL_GOLDEN_RESTORES).
+MAX_UNUSUAL_COOKIE_CLEARS = 3    # per job, then escalate to golden restore
+_UNUSUAL_COOKIE_CLEARS = {}      # job_id -> int (cumulative cookie-clears)
+
 # v779 — account-worker supervisor: how many times run() restarts a crashed
 # _run_once() before giving up. A single transient (goto timeout on a network
 # blip, browser death, lock race) must NEVER permanently kill an account thread;
@@ -8987,6 +8997,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
             let hasGenerating = false;
             let failedCount = 0;
             let unusualActivityCount = 0;
+            const failedTexts = [];
 
             tiles.forEach(t => {
                 // Check for completed video
@@ -9011,9 +9022,37 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
 
                 if (hasRefresh) {
                     failedCount++;
-                    // v737 — Google account-block detection. Signature text on the
-                    // failed tile is "unusual activity" / "Help Center".
-                    if (text.includes('unusual activity') || text.includes('Help Center')) {
+                    // record the tile's text for diagnostics (collapse whitespace, cap len)
+                    failedTexts.push(text.replace(/\s+/g, ' ').trim().slice(0, 200));
+                    // v758.26 — Google account-block detection, LANGUAGE-AGNOSTIC.
+                    // The Flow UI localizes the block card, so English-only matching
+                    // (v737: 'unusual activity' / 'Help Center') missed it whenever
+                    // Chrome rendered another locale — e.g. Spanish "Detectamos
+                    // actividad inusual" / "Centro de ayuda" — so unusualActivityCount
+                    // stayed 0, FailCheck returned a generic failure, and the worker
+                    // golden-restore-looped instead of routing to the block handler.
+                    // Match a normalized (lowercased, accent- + curly-apostrophe-
+                    // stripped) copy against every known localization.
+                    const norm = text.toLowerCase()
+                        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+                        .replace(/[‘’]/g, "'");
+                    const UNUSUAL = [
+                        'unusual activity',        // en
+                        'actividad inusual',       // es
+                        'activite inhabituelle',   // fr
+                        'ungewohnliche aktivitat', // de
+                        'attivita insolita',       // it
+                        'atividade incomum',       // pt
+                    ];
+                    const HELP = [
+                        'help center',             // en
+                        'centro de ayuda',         // es
+                        "centre d'aide",           // fr
+                        'hilfecenter',             // de
+                        'centro assistenza',       // it
+                        'central de ajuda',        // pt
+                    ];
+                    if (UNUSUAL.some(s => norm.includes(s)) || HELP.some(s => norm.includes(s))) {
                         unusualActivityCount++;
                     }
                     return;
@@ -9028,6 +9067,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                 hasGenerating: hasGenerating,
                 failedCount: failedCount,
                 unusualActivityCount: unusualActivityCount,
+                failedTexts: failedTexts,
                 allFailed: tiles.length > 0 && failedCount === tiles.length && !hasGenerating && !hasVideo
             };
         }
@@ -9046,6 +9086,14 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         all_failed = result.get('allFailed', False)
         
         print(f"[FailCheck] data-index={data_index}: {tiles} tiles, {failed_count} failed, generating={has_generating}, video={has_video}", flush=True)
+
+        # v758.26 — dump the actual failed-tile text so the on-screen block reason
+        # (e.g. localized "unusual activity" card) is visible in logs. Without this
+        # we only saw "N failed" and could not tell a block from a transient render
+        # fail — the gap that hid the Spanish-locale detection miss.
+        _ft = result.get('failedTexts', [])
+        if _ft:
+            print(f"[FailCheck] failed-tile text: {_ft}", flush=True)
 
         # v758.20 — detect 'We noticed some unusual activity' on the FIRST read,
         # BEFORE clicking Retry. Retry can't clear an account block, and worse:
@@ -9115,6 +9163,9 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
             rc_failed = recheck.get('failedCount', 0)
             rc_tiles = recheck.get('tiles', 0)
             print(f"[FailCheck] Re-check: {rc_tiles} tiles, {rc_failed} failed, generating={rc_generating}, video={rc_video}", flush=True)
+            _rcft = recheck.get('failedTexts', [])
+            if _rcft:
+                print(f"[FailCheck] re-check failed-tile text: {_rcft}", flush=True)
             
             if rc_generating:
                 print(f"[FailCheck] ✓ Clip generating after retry (has percentage)", flush=True)
@@ -17903,6 +17954,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # v737 — successful submission clears unusual-activity strike counter for this job
             with _UNUSUAL_ACTIVITY_LOCK:
                 _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
+            # v758.26 — a clean submit means the block lifted; reset the per-job
+            # cookie-clear + golden-restore escalation counters so a later block
+            # on this job starts the recovery ladder fresh (cookie-clear first).
+            with _UNUSUAL_GR_LOCK:
+                _UNUSUAL_COOKIE_CLEARS.pop(job_id, None)
+                _UNUSUAL_GOLDEN_RESTORES.pop(job_id, None)
 
         # v758.21 — "unusual activity" block: replicate the operator's manual
         # fix EVERY time it appears — delete the labs.google cookies + reload
@@ -17911,26 +17968,90 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # we keep clearing. A short cooldown skips a redundant clear when
         # several clips / parallel accounts trip the same block within seconds.
         if clip_failed == "abort_unusual_activity":
-            # v758.24 — operator decision: skip the cookie-clear and go straight
-            # to a GOLDEN RESTORE. The cookie-clear logs the account out of Flow
-            # (removing the labs.google session cookie drops the SPA to the
-            # marketing landing page on a project URL); a plain reload does NOT
-            # re-auth, so the worker stranded until a golden restore ran anyway.
-            # Golden restore re-supplies a clean signed-in profile and reliably
-            # clears the block, so trigger it directly. Reset this clip +
-            # remaining + in-flight to pending and drop the project URL so the
-            # self-resume re-submits into a fresh project after the restore. The
-            # raise string matches the existing "stopping job to trigger golden
-            # restore" branch in _process_parallel_job / _process_job_with_failover,
-            # which force-marks the account HOT so run() golden-restores + self-resumes.
-            # v758.25 — refresh DB truth FIRST. The HTTP download worker
-            # completes clips asynchronously, so the in-memory clips[].status is
-            # stale: a clip that already finished still shows 'generating'/'pending'
-            # here. Without this, the reset loops below flip an already-COMPLETED
-            # clip back to 'pending' — which shows "waiting" again in the UI and
-            # re-submits a done clip. refresh_clip_statuses patches clips[].status
-            # from the DB so the 'completed' guards work.
+            # v758.26 — the operator's PROVEN manual fix for the Google "unusual
+            # activity" block is to delete the labs.google site cookies: Google
+            # SSO keeps the account signed in, the block lifts, generation resumes.
+            # clear_flow_site_data (v758.23) does exactly that surgically via CDP
+            # (only labs.google cookies + cache; google.com SSO and the app's
+            # localStorage route state are preserved, so the SPA stays on the
+            # editor — NOT the marketing landing page the old lossy clear hit). So
+            # replicate the manual fix automatically FIRST and retry the job
+            # WITHOUT a golden restore. The v758.24 "straight to golden restore"
+            # path was wrong on a real block: a golden restore re-applies the SAME
+            # flagged profile cookies and never clears it → the golden-restore loop
+            # the operator saw. Escalate to golden restore only if the block
+            # survives MAX_UNUSUAL_COOKIE_CLEARS surgical clears.
+            #
+            # v758.25 — refresh DB truth FIRST so the reset loops below never flip
+            # an already-COMPLETED clip (finished async by the HTTP download worker,
+            # still 'generating' in memory) back to 'pending'.
             refresh_clip_statuses(job)
+
+            with _UNUSUAL_GR_LOCK:
+                _cc_count = _UNUSUAL_COOKIE_CLEARS.get(job_id, 0)
+            if _cc_count < MAX_UNUSUAL_COOKIE_CLEARS:
+                with _UNUSUAL_GR_LOCK:
+                    _UNUSUAL_COOKIE_CLEARS[job_id] = _cc_count + 1
+                # Cooldown-dedupe: when several clips / parallel accounts trip the
+                # same block within seconds, reuse the prior clear instead of
+                # re-clearing the session needlessly.
+                _now = time.time()
+                _last = _COOKIE_CLEAR_LAST.get(job_id, 0)
+                if _now - _last >= COOKIE_CLEAR_COOLDOWN:
+                    _COOKIE_CLEAR_LAST[job_id] = _now
+                    try:
+                        clear_flow_site_data(page, account_name)
+                    except Exception as _cce:
+                        print(f"[Flow] ⚠ cookie-clear raised (non-fatal): {_cce}", flush=True)
+                    # reload so the cleared session re-auths via google.com SSO
+                    try:
+                        page.reload(wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+                else:
+                    print(f"[Flow] 🧹 cookie-clear skipped (cooldown {int(_now - _last)}s < {COOKIE_CLEAR_COOLDOWN}s) — reusing prior clear", flush=True)
+                print(f"[Flow] 🧹 v758.26: 'unusual activity' on job {job_id[:8]} (cookie-clear {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}) — cleared labs.google cookies, retrying WITHOUT golden restore", flush=True)
+                clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, cookie-clear {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
+                # v758.26 (Fix 3) — drain in-flight downloads BEFORE the reset.
+                # On this path no golden restore runs, so the HTTP download worker
+                # stays alive and clips that already finished in Flow can still
+                # land. Poll DB truth for a short window so any completing clip
+                # flips to 'completed' and the reset loops below PRESERVE it
+                # (the != 'completed' guards) instead of throwing away a done
+                # render — the "clips done in Flow but not caught" loss.
+                _drain_deadline = time.time() + 10
+                while time.time() < _drain_deadline:
+                    refresh_clip_statuses(job)
+                    if all(c.get('status') == 'completed' for c in clips):
+                        break
+                    time.sleep(2)
+                _done_now = sorted(c['clip_index'] + 1 for c in clips if c.get('status') == 'completed')
+                print(f"[Flow] 💾 v758.26 drain: clips completed + preserved before reset: {_done_now}", flush=True)
+                # Reset non-completed clips to pending; drop project_url so the
+                # retry re-submits into a fresh project on the SAME (cleared)
+                # session. Completed clips are preserved by the != 'completed' guards.
+                if clip.get('status') != 'completed':
+                    update_clip_status(clip['id'], 'pending', error_message=None)
+                for rc in clips[i+1:]:
+                    if rc.get('status') != 'completed':
+                        update_clip_status(rc['id'], 'pending', error_message=None)
+                for gc in [c for c in clips[:i] if c.get('status') == 'generating']:
+                    update_clip_status(gc['id'], 'pending', error_message=None)
+                update_job_status(job_id, 'pending')
+                if job_id in cache.get('jobs', {}):
+                    cache['jobs'][job_id]['status'] = 'pending'
+                    cache['jobs'][job_id]['project_url'] = None
+                    save_cache(cache)
+                with _UNUSUAL_ACTIVITY_LOCK:
+                    _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
+                # raise string routes to the v758.7 cookie-clear recovery handler
+                # in _process_parallel_job / _process_job_with_failover, which
+                # records a MILD failure (no force_hot) → retry WITHOUT golden restore.
+                raise Exception(f"Job {job_id} unusual activity — retrying after labs.google cookie clear (v758.26)")
+
+            # Cookie-clears exhausted — block survived all of them. Escalate to a
+            # golden restore (still capped by MAX_UNUSUAL_GOLDEN_RESTORES).
+            print(f"[Flow] 🔁 v758.26: cookie-clear x{MAX_UNUSUAL_COOKIE_CLEARS} did not lift block on job {job_id[:8]} — escalating to golden restore", flush=True)
             with _UNUSUAL_GR_LOCK:
                 _gr_count = _UNUSUAL_GOLDEN_RESTORES.get(job_id, 0) + 1
                 _UNUSUAL_GOLDEN_RESTORES[job_id] = _gr_count
@@ -17959,10 +18080,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     save_cache(cache)
                 with _UNUSUAL_GR_LOCK:
                     _UNUSUAL_GOLDEN_RESTORES.pop(job_id, None)
+                    _UNUSUAL_COOKIE_CLEARS.pop(job_id, None)
                 with _UNUSUAL_ACTIVITY_LOCK:
                     _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
                 raise Exception(f"Job {job_id} aborted — unusual activity persists after {MAX_UNUSUAL_GOLDEN_RESTORES} golden restores")
-            print(f"[Flow] 🔥 v758.24: 'unusual activity' on job {job_id[:8]} (golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}) — stopping job to trigger golden restore (cookie-clear can't re-auth into Flow)", flush=True)
+            print(f"[Flow] 🔥 v758.24: 'unusual activity' on job {job_id[:8]} (golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}) — stopping job to trigger golden restore (cookie-clear exhausted, escalating to clean profile)", flush=True)
             clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}")
             if clip.get('status') != 'completed':
                 update_clip_status(clip['id'], 'pending', error_message=None)
