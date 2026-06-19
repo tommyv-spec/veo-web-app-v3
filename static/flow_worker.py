@@ -18049,24 +18049,43 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     print(f"[Flow] 🧹 cookie-clear skipped (cooldown {int(_now - _last)}s < {COOKIE_CLEAR_COOLDOWN}s) — reusing prior clear", flush=True)
                 print(f"[Flow] 🧹 v758.26: 'unusual activity' on job {job_id[:8]} (cookie-clear {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}) — cleared labs.google cookies, retrying WITHOUT golden restore", flush=True)
                 clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, cookie-clear {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
-                # v758.26 (Fix 3) — drain in-flight downloads BEFORE the reset.
-                # On this path no golden restore runs, so the HTTP download worker
-                # stays alive and clips that already finished in Flow can still
-                # land. Poll DB truth for a short window so any completing clip
-                # flips to 'completed' and the reset loops below PRESERVE it
-                # (the != 'completed' guards) instead of throwing away a done
-                # render — the "clips done in Flow but not caught" loss.
-                _drain_deadline = time.time() + 10
+                # v758.28 (Fix 3, revised) — drain in-flight DOWNLOADS before the
+                # reset. A clip is only marked 'completed' AFTER the HTTP/download
+                # worker fetches it + uploads to R2, which lands well after the
+                # render finishes in Flow: the v700 submit-response bind itself is
+                # often LATE (35-60s) and the download adds more. The old 10s
+                # status-only drain almost always found nothing, so done-in-Flow
+                # clips were reset to pending + the project dropped = orphaned
+                # renders (operator: "clip 2 and 4 done in Flow but never
+                # downloaded"). On this path no golden restore runs — the browser +
+                # HTTP download workers stay alive and project_url is still intact
+                # here — so WAIT, keyed on clips that have a bound mediaId (those
+                # WILL resolve + download). Unbound clips (genuinely failed /
+                # not-submitted) do not hold up the wait, so there is no penalty
+                # when there is nothing to save.
+                BIND_DRAIN_MAX = 150  # seconds — covers late-bind + download
+                def _bound_clip_idx():
+                    with _PRIMARY_MEDIA_LOCK:
+                        return {b.get('clip_index') for b in _PRIMARY_MEDIA_BINDINGS.values()
+                                if b.get('job_id') == job_id and b.get('clip_index') is not None}
+                _drain_deadline = time.time() + BIND_DRAIN_MAX
                 while time.time() < _drain_deadline:
                     try:
                         refresh_clip_statuses(job)
                     except Exception:
                         break  # job deleted / DB gone mid-drain — don't strand the retry
-                    if all(c.get('status') == 'completed' for c in clips):
-                        break
-                    time.sleep(2)
+                    _bound = _bound_clip_idx()
+                    _bound_incomplete = [c for c in clips
+                                         if c.get('clip_index') in _bound
+                                         and c.get('status') != 'completed']
+                    if not _bound_incomplete:
+                        break  # every bound (downloadable) clip has landed — stop waiting
+                    print(f"[Flow] ⏳ v758.28 drain: waiting on {len(_bound_incomplete)} bound clip(s) "
+                          f"{sorted(c['clip_index'] + 1 for c in _bound_incomplete)} to download "
+                          f"(~{int(_drain_deadline - time.time())}s left)", flush=True)
+                    time.sleep(5)
                 _done_now = sorted(c['clip_index'] + 1 for c in clips if c.get('status') == 'completed')
-                print(f"[Flow] 💾 v758.26 drain: clips completed + preserved before reset: {_done_now}", flush=True)
+                print(f"[Flow] 💾 v758.28 drain: clips completed + preserved before reset: {_done_now}", flush=True)
                 # Reset non-completed clips to pending; drop project_url so the
                 # retry re-submits into a fresh project on the SAME (cleared)
                 # session. Completed clips are preserved by the != 'completed' guards.
