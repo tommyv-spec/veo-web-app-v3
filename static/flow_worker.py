@@ -4284,47 +4284,55 @@ _UNUSUAL_GR_LOCK = threading.Lock()
 # + test_reauth.py. (v758.26-29 history: plain cookie delete + reload could NOT
 # re-mint the token — it left the flagged session or stranded on the marketing
 # landing page — which is why those versions had to fall back to golden restore.)
-# 2 re-auth tries, then golden restore as a last resort.
-MAX_UNUSUAL_COOKIE_CLEARS = 2    # per job: NextAuth re-auth tries, then golden restore
+# v758.31 — per-job cap on the cheap email-cookie-strip recovery before
+# escalating to a golden restore. The block is held off by stripping the
+# lowercase 'email' labs.google cookie (the only structural blocked-vs-working
+# cookie difference); the strip also runs before every submit, so the handler
+# strip is a fallback. Cheap (CDP delete, no navigation), so allow a few.
+MAX_UNUSUAL_COOKIE_CLEARS = 3    # per job: email-strip tries, then golden restore
 _UNUSUAL_COOKIE_CLEARS = {}      # job_id -> int (cumulative cookie-clears)
 
-# v758.29 — submission-rate backoff. The "unusual activity" block is Google
-# account-level rate-limiting triggered by generating too fast. After a block we
-# slow this account's submissions for a decaying window so the account cools off
-# and stops re-tripping the flag the moment it resumes. account_name -> dict(
-# until=epoch the backoff expires, delay=extra seconds to sleep before each submit).
-_RATE_BACKOFF = {}
+# v758.29/31 — submission-rate backoff. PROVEN (worker log 16:10-16:14): the
+# "unusual activity" block is Google ACCOUNT-LEVEL rate-limiting from generating
+# too fast — re-minting a fresh session (v758.30 re-auth, ok=True) does NOT lift
+# it; the block recurs 2/2 on the very next submit. Only TIME (backing off) clears
+# it. So after a block we HARD-pause submissions for a decaying window.
+#
+# v758.31 — the backoff is GLOBAL, not per-worker: both worker "accounts"
+# (Account1/Account2) drive the SAME google account, so they share one rate limit.
+# A block on either must pause BOTH. Stored under a single shared key.
+_RATE_BACKOFF = {}             # shared key '_shared' -> dict(until, delay)
+_RATE_BACKOFF_KEY = '_shared'
 _RATE_BACKOFF_LOCK = threading.Lock()
-RATE_BACKOFF_WINDOW = 600      # seconds the backoff stays active after the last block
-RATE_BACKOFF_STEP = 25         # extra seconds added per consecutive block
+RATE_BACKOFF_WINDOW = 900      # seconds the backoff stays active after the last block
+RATE_BACKOFF_STEP = 30         # extra seconds added per consecutive block (mild safety net)
 RATE_BACKOFF_MAX = 120         # cap on the per-submit extra delay
 
 def _note_unusual_block(account_name):
-    """Record an unusual-activity block: bump this account's submission backoff."""
-    if not account_name:
-        return
+    """Record an unusual-activity block: bump the SHARED submission backoff so
+    both workers (same google account) pause before their next submit."""
     with _RATE_BACKOFF_LOCK:
-        st = _RATE_BACKOFF.get(account_name) or {'until': 0, 'delay': 0}
+        st = _RATE_BACKOFF.get(_RATE_BACKOFF_KEY) or {'until': 0, 'delay': 0}
         st['delay'] = min(RATE_BACKOFF_MAX, (st['delay'] or 0) + RATE_BACKOFF_STEP)
         st['until'] = time.time() + RATE_BACKOFF_WINDOW
-        _RATE_BACKOFF[account_name] = st
+        _RATE_BACKOFF[_RATE_BACKOFF_KEY] = st
+        _delay = st['delay']
+    print(f"[{account_name or 'worker'}] 🐢 v758.31 rate-backoff bumped → {_delay}s/submit "
+          f"(account-level rate-limit; both workers pause)", flush=True)
 
 def _rate_backoff_wait(account_name):
-    """Sleep this account's current backoff delay before a submit, if active.
-    Returns seconds slept (0 if none)."""
-    if not account_name:
-        return 0
+    """Sleep the SHARED backoff delay before a submit, if active. Returns seconds slept."""
     with _RATE_BACKOFF_LOCK:
-        st = _RATE_BACKOFF.get(account_name)
+        st = _RATE_BACKOFF.get(_RATE_BACKOFF_KEY)
         if not st:
             return 0
         if time.time() >= st.get('until', 0):
-            _RATE_BACKOFF.pop(account_name, None)  # window expired — reset
+            _RATE_BACKOFF.pop(_RATE_BACKOFF_KEY, None)  # window expired — reset
             return 0
         delay = st.get('delay', 0)
     if delay > 0:
-        print(f"[{account_name}] 🐢 v758.29 rate-backoff: waiting {delay}s before submit "
-              f"(account recently rate-limited — slowing to cool off)", flush=True)
+        print(f"[{account_name or 'worker'}] 🐢 v758.31 rate-backoff: waiting {delay}s before submit "
+              f"(account recently rate-limited — cooling off)", flush=True)
         time.sleep(delay)
     return delay
 
@@ -4613,6 +4621,40 @@ def clear_flow_site_data(page, label=""):
     except Exception as e:
         print(f"{prefix}⚠ CDP origin clear failed (non-fatal): {e}", flush=True)
     return ok
+
+
+def strip_lowercase_email_cookie(page, label=""):
+    """v758.31 — delete the lowercase `email` labs.google cookie (keep the
+    uppercase `EMAIL`). Proven from the operator's blocked-vs-working cookie
+    exports: the ONLY structural cookie difference is this cookie — PRESENT when
+    the account is blocked ("unusual activity"), ABSENT when it works. The app /
+    OAuth callback keeps re-creating it, so we strip it right before each submit
+    to hold the working cookie shape. Returns True if a cookie was removed."""
+    prefix = f"[{label}] " if label else ""
+    removed = 0
+    cdp = None
+    try:
+        cdp = page.context.new_cdp_session(page)
+        for c in cdp.send("Network.getCookies").get("cookies", []):
+            dom = c.get("domain") or ""
+            # exact lowercase name only — never touch uppercase EMAIL (kept in working state)
+            if "labs.google" in dom and c.get("name") == "email":
+                try:
+                    cdp.send("Network.deleteCookies", {"name": "email", "domain": dom, "path": c.get("path", "/")})
+                    removed += 1
+                except Exception:
+                    pass
+        if removed:
+            print(f"{prefix}🧼 v758.31 stripped lowercase 'email' cookie ({removed}) — matches working state", flush=True)
+    except Exception as e:
+        print(f"{prefix}⚠ strip email cookie failed: {e}", flush=True)
+    finally:
+        if cdp is not None:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+    return removed > 0
 
 
 def reauth_flow_session(page, label="", timeout_s=45):
@@ -17439,10 +17481,16 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         
         print(f"\n--- Clip {i+1}/{len(clips)} (clip_index={clip_index}) ---")
 
-        # v758.29 — submission-rate backoff: if this account recently hit an
-        # "unusual activity" block, slow down before submitting so it cools off
-        # and stops re-tripping Google's account-level rate limit. No-op when the
-        # account is healthy (backoff window expired / never set).
+        # v758.31 — hold the WORKING cookie shape: strip the lowercase 'email'
+        # labs.google cookie before each submit. It is the ONLY structural cookie
+        # that differs between the operator's blocked vs working exports (present
+        # => blocked, absent => works), and the app keeps re-creating it.
+        try:
+            strip_lowercase_email_cookie(page, account_name)
+        except Exception:
+            pass
+
+        # v758.29 — mild submission-rate backoff safety net (no-op when healthy).
         _rate_backoff_wait(account_name)
 
         # Detect Chrome tab crash ("Aw, Snap!") before attempting any interaction
@@ -18203,24 +18251,18 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 if _do_cookie_clear:
                     _UNUSUAL_COOKIE_CLEARS[job_id] = _cc_count + 1
             if _do_cookie_clear:
-                # v758.30 — re-mint a FRESH labs session via the NextAuth OAuth
-                # flow (proven against the operator's working-vs-blocked cookie
-                # exports). This actually lifts the block — unlike the v758.26
-                # cookie delete + reload, which left the flagged session in place
-                # (block persisted) or logged the account out (no auto re-auth).
-                # The google.com SSO is untouched, so the account stays signed in +
-                # ULTRA. Cooldown-dedupe so several clips / parallel accounts that
-                # trip the same block within seconds don't each re-auth.
-                _now = time.time()
-                _last = _COOKIE_CLEAR_LAST.get(job_id, 0)
-                _reauth_ok = True
-                if _now - _last >= COOKIE_CLEAR_COOLDOWN:
-                    _COOKIE_CLEAR_LAST[job_id] = _now
-                    _reauth_ok = reauth_flow_session(page, account_name)
-                else:
-                    print(f"[Flow] 🔑 re-auth skipped (cooldown {int(_now - _last)}s < {COOKIE_CLEAR_COOLDOWN}s) — reusing prior re-auth", flush=True)
-                print(f"[Flow] 🔑 v758.30: 'unusual activity' on job {job_id[:8]} (re-auth {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}, ok={_reauth_ok}) — re-minted labs session, retrying WITHOUT golden restore", flush=True)
-                clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, re-auth {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
+                # v758.31 — the operator's blocked-vs-working cookie exports show the
+                # ONLY structural difference is the lowercase 'email' labs.google
+                # cookie (present => blocked, absent => works) — "it's not timing,
+                # it's the cookies". So the recovery is simply to STRIP that cookie
+                # and retry. (NOT a re-auth: re-auth re-mints the session AND lets
+                # the app re-create the 'email' cookie, so the block persisted in
+                # the worker log even with a fresh session.) Google SSO untouched →
+                # account stays signed in + ULTRA. strip_lowercase_email_cookie also
+                # runs before every submit (clip-loop top) to hold the working shape.
+                _stripped = strip_lowercase_email_cookie(page, account_name)
+                print(f"[Flow] 🧼 v758.31: 'unusual activity' on job {job_id[:8]} (email-strip {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}, removed={_stripped}) — stripped lowercase 'email' cookie, retrying WITHOUT golden restore", flush=True)
+                clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, email-strip {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
                 _drain_bound_downloads()
                 # Reset non-completed clips to pending; drop project_url so the
                 # retry re-submits into a fresh project on the SAME (cleared)
