@@ -18453,7 +18453,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # by the != 'completed' reset guards instead of being orphaned. Unbound
             # clips do not hold up the wait — no penalty when there is nothing to
             # save. Used by BOTH the cookie-clear and golden-restore paths.
-            def _drain_bound_downloads(max_s=150):
+            def _drain_bound_downloads(max_s=25):
+                # v759 — capped from 150s. The drain blocks the submit thread while
+                # waiting for bound clips to download, but when the bound mediaId is
+                # a poster variant they NEVER complete here, so it just stalled the
+                # worker ~2.5 min and preserved nothing. The HTTP download worker
+                # keeps downloading async regardless; a brief drain is enough.
                 _deadline = time.time() + max_s
                 while time.time() < _deadline:
                     try:
@@ -19513,7 +19518,47 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             _cs.remove(_ci)
                             save_cache(cache)
 
-
+            # v759 — RENDERED-VIDEO REAPER (ground-truth download rescue).
+            # The bound-mediaId download fails when the bound variant was the
+            # BLOCKED one (its getMediaUrlRedirect URL serves a poster forever),
+            # even though the OTHER variant rendered — the clip the operator sees
+            # "done on Flow" but that never downloads. A DOM <video> with a real
+            # (non-blob) src is PROOF the clip rendered, regardless of which
+            # mediaId bound. So at job end, scan every clip NOT 'completed' and, if
+            # its tile has a rendered <video>, queue THAT src directly. Additive
+            # (the HTTP worker dedups already-completed clips); only matches by
+            # non-empty dialogue to avoid grabbing a sibling clip's tile.
+            try:
+                refresh_clip_statuses(job)
+                if http_dl_queue is not None:
+                    for _rc in clips:
+                        if _rc.get('status') == 'completed':
+                            continue
+                        _rci = _rc.get('clip_index')
+                        _rdlg = (_rc.get('dialogue_text') or '')[:20]
+                        if not _rdlg:
+                            continue  # empty dialogue can't be matched safely (sibling-grab risk)
+                        try:
+                            _vsrcs = page.evaluate(f"""() => {{
+                                for (const c of document.querySelectorAll('[data-index]')) {{
+                                    if (!((c.innerText||'').includes({repr(_rdlg)}))) continue;
+                                    const out = [];
+                                    for (const v of c.querySelectorAll('video')) {{
+                                        const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                        if (u && !u.startsWith('blob:')) out.push(u);
+                                    }}
+                                    return out;
+                                }}
+                                return [];
+                            }}""")
+                            if _vsrcs:
+                                http_dl_queue.put({'job_id': job_id, 'clip_index': _rci,
+                                    'clip_id': _rc['id'], 'urls': _vsrcs, 'temp_dir': temp_dir})
+                                print(f"[Flow] [v759-reaper] clip {_rci+1}: rendered <video> found ({len(_vsrcs)} src) — queued for download (bypasses poster bound-mediaId)", flush=True)
+                        except Exception:
+                            pass
+            except Exception as _reaper_err:
+                print(f"[Flow] [v759-reaper] error (non-fatal): {_reaper_err}", flush=True)
 
         return project_url
 
