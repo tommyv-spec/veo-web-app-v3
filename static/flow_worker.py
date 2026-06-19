@@ -2187,27 +2187,44 @@ def chrome_warmup(page):
     try:
         print("[Warmup] Loading Google pages to sync Chrome variations...", flush=True)
         
-        # Intercept requests to capture x-client-data header
+        # v758.37 — capture x-client-data via CDP. Chrome injects x-client-data at
+        # the NETWORK layer (for Google domains), BELOW Playwright's renderer-level
+        # request events — so page.on("request").headers NEVER sees it. The old
+        # "No x-client-data captured" was a FALSE NEGATIVE: a CDP capture shows
+        # Chrome actually sends a healthy ~376-char header (many trial IDs).
+        # Network.requestWillBeSentExtraInfo exposes the real on-the-wire headers.
         x_client_data = {}
-        def capture_header(request):
-            xcd = request.headers.get('x-client-data', '')
-            if xcd and len(xcd) > len(x_client_data.get('value', '')):
-                x_client_data['value'] = xcd
-        
-        page.on("request", capture_header)
-        
+        _xcd_cdp = None
+        try:
+            _xcd_cdp = page.context.new_cdp_session(page)
+            _xcd_cdp.send("Network.enable")
+            def _xcd_capture(params):
+                try:
+                    for _k, _v in (params.get("headers") or {}).items():
+                        if _k.lower() == "x-client-data" and _v and len(_v) > len(x_client_data.get('value', '')):
+                            x_client_data['value'] = _v
+                except Exception:
+                    pass
+            _xcd_cdp.on("Network.requestWillBeSentExtraInfo", _xcd_capture)
+        except Exception as _xe:
+            print(f"[Warmup] ⚠ x-client-data CDP capture setup failed: {_xe}", flush=True)
+
         # Visit Google — triggers variations seed download
         page.goto("https://www.google.com")
         human_delay(3, 5)
-        
+
         # Do some human-like browsing (builds interaction history for reCAPTCHA)
         human_mouse_move(page)
         human_delay(1, 2)
         scroll_randomly(page)
         human_delay(1, 2)
-        
-        # Remove listener
-        page.remove_listener("request", capture_header)
+
+        # Detach CDP capture
+        try:
+            if _xcd_cdp is not None:
+                _xcd_cdp.detach()
+        except Exception:
+            pass
         
         # Report x-client-data status
         xcd = x_client_data.get('value', '')
