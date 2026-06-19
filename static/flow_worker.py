@@ -4276,8 +4276,57 @@ _UNUSUAL_GR_LOCK = threading.Lock()
 # restore" path golden-looped on a real block. Do up to this many cookie-clears
 # per job first; only if the block survives all of them do we fall through to the
 # golden-restore escalation (still capped by MAX_UNUSUAL_GOLDEN_RESTORES).
-MAX_UNUSUAL_COOKIE_CLEARS = 3    # per job, then escalate to golden restore
+# v758.29 — GOLDEN-FIRST. Live testing (test_cookie_clear.py) proved the
+# cookie-clear cannot lift this block: the "unusual activity" flag is tied to the
+# labs.google NextAuth SESSION (not the _ga fingerprint), so deleting _ga while
+# keeping the session leaves the block in place, and deleting the session logs
+# the account out with NO auto-re-auth (app strands on the marketing landing
+# page). Only a GOLDEN RESTORE supplies a fresh signed-in session. So allow just
+# ONE cheap clear (covers the occasional soft/partial block) then escalate
+# straight to golden restore — instead of burning 3 clears on a block they can't
+# fix.
+MAX_UNUSUAL_COOKIE_CLEARS = 1    # per job, then escalate to golden restore
 _UNUSUAL_COOKIE_CLEARS = {}      # job_id -> int (cumulative cookie-clears)
+
+# v758.29 — submission-rate backoff. The "unusual activity" block is Google
+# account-level rate-limiting triggered by generating too fast. After a block we
+# slow this account's submissions for a decaying window so the account cools off
+# and stops re-tripping the flag the moment it resumes. account_name -> dict(
+# until=epoch the backoff expires, delay=extra seconds to sleep before each submit).
+_RATE_BACKOFF = {}
+_RATE_BACKOFF_LOCK = threading.Lock()
+RATE_BACKOFF_WINDOW = 600      # seconds the backoff stays active after the last block
+RATE_BACKOFF_STEP = 25         # extra seconds added per consecutive block
+RATE_BACKOFF_MAX = 120         # cap on the per-submit extra delay
+
+def _note_unusual_block(account_name):
+    """Record an unusual-activity block: bump this account's submission backoff."""
+    if not account_name:
+        return
+    with _RATE_BACKOFF_LOCK:
+        st = _RATE_BACKOFF.get(account_name) or {'until': 0, 'delay': 0}
+        st['delay'] = min(RATE_BACKOFF_MAX, (st['delay'] or 0) + RATE_BACKOFF_STEP)
+        st['until'] = time.time() + RATE_BACKOFF_WINDOW
+        _RATE_BACKOFF[account_name] = st
+
+def _rate_backoff_wait(account_name):
+    """Sleep this account's current backoff delay before a submit, if active.
+    Returns seconds slept (0 if none)."""
+    if not account_name:
+        return 0
+    with _RATE_BACKOFF_LOCK:
+        st = _RATE_BACKOFF.get(account_name)
+        if not st:
+            return 0
+        if time.time() >= st.get('until', 0):
+            _RATE_BACKOFF.pop(account_name, None)  # window expired — reset
+            return 0
+        delay = st.get('delay', 0)
+    if delay > 0:
+        print(f"[{account_name}] 🐢 v758.29 rate-backoff: waiting {delay}s before submit "
+              f"(account recently rate-limited — slowing to cool off)", flush=True)
+        time.sleep(delay)
+    return delay
 
 # v779 — account-worker supervisor: how many times run() restarts a crashed
 # _run_once() before giving up. A single transient (goto timeout on a network
@@ -17307,6 +17356,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         
         print(f"\n--- Clip {i+1}/{len(clips)} (clip_index={clip_index}) ---")
 
+        # v758.29 — submission-rate backoff: if this account recently hit an
+        # "unusual activity" block, slow down before submitting so it cools off
+        # and stops re-tripping Google's account-level rate limit. No-op when the
+        # account is healthy (backoff window expired / never set).
+        _rate_backoff_wait(account_name)
+
         # Detect Chrome tab crash ("Aw, Snap!") before attempting any interaction
         if is_page_crashed(page):
             print(f"[SUBMIT] 💥 Tab crashed ('Aw, Snap!') before clip {clip_index+1} — recovering...", flush=True)
@@ -18020,6 +18075,42 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # still 'generating' in memory) back to 'pending'.
             refresh_clip_statuses(job)
 
+            # v758.29 — record the block so this account backs off its submission
+            # rate (the block is Google account-level rate-limiting from going too
+            # fast). _rate_backoff_wait() at the top of each clip loop enforces it.
+            _note_unusual_block(account_name)
+
+            # v758.28/29 — drain in-flight DOWNLOADS before any reset. A clip is
+            # only marked 'completed' AFTER the HTTP/download worker fetches it and
+            # uploads to R2, which lands well after the render finishes in Flow
+            # (the v700 submit-response bind alone is often LATE, 35-60s). Wait
+            # keyed on clips that have a bound mediaId (those WILL resolve +
+            # download) so done-in-Flow clips flip to 'completed' and are preserved
+            # by the != 'completed' reset guards instead of being orphaned. Unbound
+            # clips do not hold up the wait — no penalty when there is nothing to
+            # save. Used by BOTH the cookie-clear and golden-restore paths.
+            def _drain_bound_downloads(max_s=150):
+                _deadline = time.time() + max_s
+                while time.time() < _deadline:
+                    try:
+                        refresh_clip_statuses(job)
+                    except Exception:
+                        break  # job deleted / DB gone mid-drain — don't strand the retry
+                    with _PRIMARY_MEDIA_LOCK:
+                        _bound = {b.get('clip_index') for b in _PRIMARY_MEDIA_BINDINGS.values()
+                                  if b.get('job_id') == job_id and b.get('clip_index') is not None}
+                    _bound_incomplete = [c for c in clips
+                                         if c.get('clip_index') in _bound
+                                         and c.get('status') != 'completed']
+                    if not _bound_incomplete:
+                        break  # every bound (downloadable) clip has landed
+                    print(f"[Flow] ⏳ v758.28 drain: waiting on {len(_bound_incomplete)} bound clip(s) "
+                          f"{sorted(c['clip_index'] + 1 for c in _bound_incomplete)} to download "
+                          f"(~{int(_deadline - time.time())}s left)", flush=True)
+                    time.sleep(5)
+                _done = sorted(c['clip_index'] + 1 for c in clips if c.get('status') == 'completed')
+                print(f"[Flow] 💾 v758.28 drain: clips completed + preserved before reset: {_done}", flush=True)
+
             # Read-check-increment ATOMICALLY under one lock hold: in parallel
             # mode two accounts can trip the same job_id's block concurrently, so
             # a read-then-later-increment would race past the cap.
@@ -18049,43 +18140,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     print(f"[Flow] 🧹 cookie-clear skipped (cooldown {int(_now - _last)}s < {COOKIE_CLEAR_COOLDOWN}s) — reusing prior clear", flush=True)
                 print(f"[Flow] 🧹 v758.26: 'unusual activity' on job {job_id[:8]} (cookie-clear {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}) — cleared labs.google cookies, retrying WITHOUT golden restore", flush=True)
                 clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, cookie-clear {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
-                # v758.28 (Fix 3, revised) — drain in-flight DOWNLOADS before the
-                # reset. A clip is only marked 'completed' AFTER the HTTP/download
-                # worker fetches it + uploads to R2, which lands well after the
-                # render finishes in Flow: the v700 submit-response bind itself is
-                # often LATE (35-60s) and the download adds more. The old 10s
-                # status-only drain almost always found nothing, so done-in-Flow
-                # clips were reset to pending + the project dropped = orphaned
-                # renders (operator: "clip 2 and 4 done in Flow but never
-                # downloaded"). On this path no golden restore runs — the browser +
-                # HTTP download workers stay alive and project_url is still intact
-                # here — so WAIT, keyed on clips that have a bound mediaId (those
-                # WILL resolve + download). Unbound clips (genuinely failed /
-                # not-submitted) do not hold up the wait, so there is no penalty
-                # when there is nothing to save.
-                BIND_DRAIN_MAX = 150  # seconds — covers late-bind + download
-                def _bound_clip_idx():
-                    with _PRIMARY_MEDIA_LOCK:
-                        return {b.get('clip_index') for b in _PRIMARY_MEDIA_BINDINGS.values()
-                                if b.get('job_id') == job_id and b.get('clip_index') is not None}
-                _drain_deadline = time.time() + BIND_DRAIN_MAX
-                while time.time() < _drain_deadline:
-                    try:
-                        refresh_clip_statuses(job)
-                    except Exception:
-                        break  # job deleted / DB gone mid-drain — don't strand the retry
-                    _bound = _bound_clip_idx()
-                    _bound_incomplete = [c for c in clips
-                                         if c.get('clip_index') in _bound
-                                         and c.get('status') != 'completed']
-                    if not _bound_incomplete:
-                        break  # every bound (downloadable) clip has landed — stop waiting
-                    print(f"[Flow] ⏳ v758.28 drain: waiting on {len(_bound_incomplete)} bound clip(s) "
-                          f"{sorted(c['clip_index'] + 1 for c in _bound_incomplete)} to download "
-                          f"(~{int(_drain_deadline - time.time())}s left)", flush=True)
-                    time.sleep(5)
-                _done_now = sorted(c['clip_index'] + 1 for c in clips if c.get('status') == 'completed')
-                print(f"[Flow] 💾 v758.28 drain: clips completed + preserved before reset: {_done_now}", flush=True)
+                _drain_bound_downloads()
                 # Reset non-completed clips to pending; drop project_url so the
                 # retry re-submits into a fresh project on the SAME (cleared)
                 # session. Completed clips are preserved by the != 'completed' guards.
@@ -18145,6 +18200,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 raise Exception(f"Job {job_id} aborted — unusual activity persists after {MAX_UNUSUAL_GOLDEN_RESTORES} golden restores")
             print(f"[Flow] 🔥 v758.24: 'unusual activity' on job {job_id[:8]} (golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}) — stopping job to trigger golden restore (cookie-clear exhausted, escalating to clean profile)", flush=True)
             clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}")
+            # v758.29 — save already-rendered clips before the golden restore tears
+            # down the project (golden restore kills the browser, orphaning the old
+            # project). The HTTP download worker is still alive here, so drain the
+            # bound/done clips to 'completed' first.
+            _drain_bound_downloads()
             if clip.get('status') != 'completed':
                 update_clip_status(clip['id'], 'pending', error_message=None)
             for rc in clips[i+1:]:
