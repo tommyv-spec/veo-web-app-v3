@@ -9502,48 +9502,53 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
 
             _MAX_REAUTH = 2
             for _att in range(1, _MAX_REAUTH + 1):
-                # v758.36 — MATCH the operator's working cookies: inject the
-                # known-working labs.google set (fresh session) from
-                # working_cookies.txt, then reload so the SPA adopts it. If there
-                # is no working file, fall back to the NextAuth re-auth (which
-                # mints a comparable fresh session).
+                # v758.38 — inject the operator's working labs cookies IN PLACE —
+                # do NOT reload. A page reload makes the in-progress/failed tile
+                # DISAPPEAR (operator: "when we refresh the page and it's not done
+                # the tile disappears, and if failed it disappears too"), which
+                # destroyed the retry target + made verify see an empty slot and
+                # wrongly call rendered clips 'failed'. We inject a VALID session
+                # (not a logout like the operator's manual delete), so the next API
+                # call — the Retry click — just uses the fresh session cookie; no
+                # reload needed. Fall back to NextAuth re-auth only if there is no
+                # working cookie file.
                 _injected = False
                 try:
                     _injected = inject_working_labs_cookies(page, "FailCheck")
                 except Exception as _ie:
                     print(f"[FailCheck] inject raised: {_ie}", flush=True)
-                if _injected:
-                    try:
-                        page.reload(wait_until="domcontentloaded", timeout=30000)
-                    except Exception:
-                        pass
-                else:
+                if not _injected:
                     try:
                         reauth_flow_session(page, "FailCheck")
                     except Exception as _re:
                         print(f"[FailCheck] re-auth raised: {_re}", flush=True)
-                time.sleep(4)
+                time.sleep(2)            # let the injected cookies commit (no reload — keep the tiles)
                 _click_retry_failed_tiles()
-                _v, rc = None, {}
-                _deadline = time.time() + 40   # transient fails re-block within ~15-20s; 40s catches them
+                # VERIFY — the ONLY real failure is the unusual-activity block
+                # RE-APPEARING. A 4s clip takes 30-90s to render and a ready clip
+                # shows a POSTER (no <video> tag yet), so "no video" is NOT failure
+                # (that false-negative marked already-rendered clips 2 & 4 failed).
+                # Watch ~30s: block re-appears => re-inject; otherwise (video /
+                # generating / poster / idle) => recovered, let it render + download.
+                _blocked = False
+                _video = False
+                _deadline = time.time() + 30
                 while time.time() < _deadline:
                     time.sleep(5)
                     try:
                         rc = page.evaluate(TILE_CHECK_JS.replace("DATA_INDEX_PLACEHOLDER", str(data_index)))
                     except Exception:
                         continue
-                    if rc.get('hasVideo'):
-                        _v = 'video'; break
                     if rc.get('unusualActivityCount', 0) > 0:
-                        _v = 'blocked'; break
-                if _v is None:
-                    _v = 'generating' if rc.get('hasGenerating') else 'failed'
-                print(f"[FailCheck] v758.33 attempt {_att}/{_MAX_REAUTH}: verdict={_v}", flush=True)
-                if _v in ('video', 'generating'):
-                    print(f"[FailCheck] ✓ v758.33 recovery verified ({_v}) — clip is really rendering", flush=True)
-                    return False
-                # blocked / failed → loop: re-auth again with another fresh session
-            print(f"[FailCheck] ⚠ v758.33 re-auth x{_MAX_REAUTH} did not stick — escalating to handler", flush=True)
+                        _blocked = True; break
+                    if rc.get('hasVideo'):
+                        _video = True; break
+                if _blocked:
+                    print(f"[FailCheck] v758.38 attempt {_att}/{_MAX_REAUTH}: block RE-APPEARED — re-injecting", flush=True)
+                    continue
+                print(f"[FailCheck] ✓ v758.38 recovery verified ({'video' if _video else 'no re-block'}) — clip rendering, letting it download", flush=True)
+                return False
+            print(f"[FailCheck] ⚠ v758.38 recovery x{_MAX_REAUTH} did not stick — escalating to handler", flush=True)
             return "abort_unusual_activity"
 
         # Click Retry on truly failed tiles (ones with 'refresh' button)
