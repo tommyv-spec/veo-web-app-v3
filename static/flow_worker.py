@@ -1159,18 +1159,23 @@ def bound_media_ids_for_clip(job_id, clip_index):
 
 
 def captured_urls_for_clip(job_id, clip_index, captured_media_urls):
-    """v774 — resolve a clip's bound mediaIds to the getMediaUrlRedirect URLs the
-    network listener already captured (captured_media_urls: uuid -> redirect URL;
-    same uuid as primaryMediaId). Non-empty result = the clip's video ACTUALLY
-    rendered, regardless of where its tile sits in the DOM. [] if nothing
-    bound/captured. Case-insensitive (bound ids are lowercased)."""
-    if not captured_media_urls:
-        return []
-    _lc = {str(k).lower(): v for k, v in captured_media_urls.items()}
+    """v759b — build the VIDEO download URL for each of the clip's bound mediaIds.
+
+    HAR-PROVEN root cause of "done clips never download / ct=image/jpeg poster
+    forever": media.getMediaUrlRedirect?name=<id>&mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL
+    307-redirects to flow-content.google/IMAGE/<id> (the poster the UI shows in the
+    tile). The network listener captured THAT thumbnail URL, so the download polled
+    a JPEG forever and gave up — even though the status API reports the clip
+    SUCCESSFUL with an ~800KB video. Plain ?name=<id> (no mediaUrlType) redirects to
+    flow-content.google/VIDEO/<id> = the real mp4. So CONSTRUCT the plain video URL
+    from the bound mediaId instead of trusting the captured (thumbnail) URL.
+    captured_media_urls kept in the signature for callers; no longer needed."""
     out = []
     for mid in bound_media_ids_for_clip(job_id, clip_index):
-        u = _lc.get(mid)
-        if u and u not in out:
+        if not mid:
+            continue
+        u = f"https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name={mid}"
+        if u not in out:
             out.append(u)
     return out
 
@@ -20786,6 +20791,11 @@ class AccountWorker(threading.Thread):
                             continue
                         if url.startswith('/'):
                             url = 'https://labs.google' + url
+                        # v759b — never download the THUMBNAIL. The mediaUrlType=
+                        # MEDIA_URL_TYPE_THUMBNAIL param redirects to /image/ (poster);
+                        # dropping it redirects to /video/ (the mp4).
+                        if 'MEDIA_URL_TYPE_THUMBNAIL' in url:
+                            url = url.replace('&mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL', '').replace('mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL&', '').replace('?mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL', '')
                         try:
                             print(f"[{account_name}-HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1}: {url[:80]}", flush=True)
                             # v794c — validate it's a real video, not a poster the
@@ -22030,6 +22040,11 @@ def main(account_session=None, account_download=None, account_label=None):
                             continue
                         if url.startswith('/'):
                             url = 'https://labs.google' + url
+                        # v759b — never download the THUMBNAIL. The mediaUrlType=
+                        # MEDIA_URL_TYPE_THUMBNAIL param redirects to /image/ (poster);
+                        # dropping it redirects to /video/ (the mp4).
+                        if 'MEDIA_URL_TYPE_THUMBNAIL' in url:
+                            url = url.replace('&mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL', '').replace('mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL&', '').replace('?mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL', '')
                         try:
                             print(f"[HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1}: {url[:80]}", flush=True)
                             resp = sess.get(url, timeout=120, allow_redirects=True)
