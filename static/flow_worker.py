@@ -4470,8 +4470,17 @@ def clear_flow_site_data(page, label=""):
     #    failed. The "unusual activity" block keys off the fingerprint/client-id
     #    cookies (the Google-Analytics `_ga*` client id + any non-auth labs cookie),
     #    NOT the NextAuth session. So delete everything on labs.google EXCEPT the
-    #    NextAuth session family — lifts the block without logging the user out.
-    PRESERVE_SUBSTR = ("next-auth",)  # any cookie name containing this is kept
+    #    session/identity cookies — lifts the block without logging the user out.
+    #
+    # v758.27a — live test (test_cookie_clear.py against a golden-2 copy) showed
+    #    the labs.google jar also carries an `EMAIL` cookie (the signed-in user's
+    #    email = "info of the user") beyond the 3 next-auth cookies. Preserve it
+    #    too. The test confirmed: keeping the next-auth session-token + csrf-token
+    #    keeps the editor SPA alive + ULTRA intact across the clear+reload (v758.26
+    #    deleted them → editor never hydrated). The deleted `_ga*` fingerprint
+    #    cookies regenerate with a FRESH client-id on the next page load — exactly
+    #    the fingerprint reset that should dodge the "unusual activity" block.
+    PRESERVE_SUBSTR = ("next-auth", "EMAIL")  # cookie name contains any → kept
     try:
         ctx = page.context
         cdp = ctx.new_cdp_session(page)
