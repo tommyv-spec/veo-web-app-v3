@@ -17987,11 +17987,15 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # still 'generating' in memory) back to 'pending'.
             refresh_clip_statuses(job)
 
+            # Read-check-increment ATOMICALLY under one lock hold: in parallel
+            # mode two accounts can trip the same job_id's block concurrently, so
+            # a read-then-later-increment would race past the cap.
             with _UNUSUAL_GR_LOCK:
                 _cc_count = _UNUSUAL_COOKIE_CLEARS.get(job_id, 0)
-            if _cc_count < MAX_UNUSUAL_COOKIE_CLEARS:
-                with _UNUSUAL_GR_LOCK:
+                _do_cookie_clear = _cc_count < MAX_UNUSUAL_COOKIE_CLEARS
+                if _do_cookie_clear:
                     _UNUSUAL_COOKIE_CLEARS[job_id] = _cc_count + 1
+            if _do_cookie_clear:
                 # Cooldown-dedupe: when several clips / parallel accounts trip the
                 # same block within seconds, reuse the prior clear instead of
                 # re-clearing the session needlessly.
@@ -18021,7 +18025,10 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # render — the "clips done in Flow but not caught" loss.
                 _drain_deadline = time.time() + 10
                 while time.time() < _drain_deadline:
-                    refresh_clip_statuses(job)
+                    try:
+                        refresh_clip_statuses(job)
+                    except Exception:
+                        break  # job deleted / DB gone mid-drain — don't strand the retry
                     if all(c.get('status') == 'completed' for c in clips):
                         break
                     time.sleep(2)
