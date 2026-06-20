@@ -9751,7 +9751,8 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                     if rc.get('hasVideo'):
                         _video = True; break
                 if _blocked:
-                    print(f"[FailCheck] v801 attempt {_att}/{_MAX_REAUTH}: block RE-APPEARED — escalating recovery (next: delete + re-mint)", flush=True)
+                    _next = "next: delete + re-mint" if _att < _MAX_REAUTH else "recovery exhausted — escalating to handler"
+                    print(f"[FailCheck] v801 attempt {_att}/{_MAX_REAUTH}: block RE-APPEARED — {_next}", flush=True)
                     continue
                 print(f"[FailCheck] ✓ v758.38 recovery verified ({'video' if _video else 'no re-block'}) — clip rendering, letting it download", flush=True)
                 return False
