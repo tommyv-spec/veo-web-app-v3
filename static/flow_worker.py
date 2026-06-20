@@ -14525,39 +14525,54 @@ def find_dialog_upload_button(dialog):
     drive_folder_upload), on a DESCENDANT <i>/<span> (descendant, not a brittle
     direct-child chain). Localized visible-label text is only a fallback.
     """
-    # 1) icon ligature == 'upload' EXACT — locale-independent, excludes Drive's
-    #    'drive_folder_upload'. Covers <i> and material-symbol <span>, in a
-    #    <button>, an ARIA button div, or a focusable div.
-    icon_hosts = ':is(button, div[role="button"], div[tabindex], [aria-haspopup])'
-    for selector in [
-        f'{icon_hosts}:has(i:text-is("upload"))',
-        f'{icon_hosts}:has(span:text-is("upload"))',
-        'i:text-is("upload")',     # bare icon — Playwright returns the clickable ancestor on click
-        'span:text-is("upload")',
-    ]:
-        try:
-            btn = dialog.locator(selector)
-            if btn.count() > 0:
-                return btn.first
-        except Exception:
-            continue
+    # v803 — JS SCAN (replaces the v799 CSS approach, which was too strict: its
+    # ':is(button, [role=button], [tabindex], [aria-haspopup])' host filter
+    # EXCLUDED the bare <div> Google now uses for the upload control, so the
+    # Spanish 'Cargar medios' / icon never matched → fell to button.first =
+    # the date dropdown). This scans every element for the material-icon
+    # ligature 'upload' (EXACT — excludes Drive's 'drive_folder_upload') OR a
+    # localized upload label, skips Drive/Recents/Images, then climbs to the
+    # nearest clickable ancestor and tags it. Locale + DOM-structure agnostic.
+    try:
+        found = dialog.evaluate("""(root) => {
+            const norm = s => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const iconExactUpload = el => {
+                for (const ic of el.querySelectorAll('i, span, [class*=symbol], [class*=icon]')) {
+                    if (norm(ic.textContent) === 'upload') return true;
+                }
+                return false;
+            };
+            const labelRe = /(upload media|upload image|^upload$|cargar medios|cargar archivos|subir archivos|carregar|t[e\\u00e9]l[e\\u00e9]verser|importer|hochladen|carica|\\u8f7d|\\u4e0a\\u4f20)/i;
+            const skipRe = /(drive|cargas|recient|recent|im[a\\u00e1]genes|images|galer|gallery)/i;
+            const cands = root.querySelectorAll('button, [role=button], [tabindex], div, span, label');
+            for (const el of cands) {
+                const t = el.textContent || '';
+                if (skipRe.test(t)) continue;
+                if (iconExactUpload(el) || labelRe.test(t)) {
+                    let n = el;
+                    for (let i = 0; i < 5 && n && n !== root; i++) {
+                        if (n.tagName === 'BUTTON' || n.getAttribute('role') === 'button' || n.hasAttribute('tabindex') || n.hasAttribute('aria-haspopup')) break;
+                        n = n.parentElement;
+                    }
+                    (n || el).setAttribute('data-kv-upload', '1');
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        if found:
+            return dialog.locator('[data-kv-upload="1"]').first
+    except Exception as _e:
+        print(f"[find_dialog_upload_button] JS scan error: {_e}", flush=True)
 
-    # 2) visible label across locales (EN / ES / PT / FR / DE / IT). 'Cargar'
-    #    is distinct from the Drive control's 'Cargas' (no substring overlap).
-    for word in ["Upload media", "Upload image", "Cargar medios", "Subir archivos",
-                 "Carregar", "Téléverser", "Importer un", "Medien hochladen",
-                 "Carica supporti", "Cargar", "Upload"]:
-        try:
-            btn = dialog.locator(f'{icon_hosts}:has-text("{word}")')
-            if btn.count() > 0:
-                return btn.first
-        except Exception:
-            continue
-
-    # Last resort — could not identify it. Return button.first so the caller's
-    # wait_for(visible) contract holds; it is logged loudly so the cause is
-    # visible rather than silently uploading to the wrong control.
-    print("[find_dialog_upload_button] ⚠️ Could not find upload button by icon/label (locale?) — using button.first as last resort", flush=True)
+    # Diagnostic: dump the dialog's clickable HTML so the exact upload-control
+    # structure is captured if this STILL misses (fix precisely, not blind).
+    try:
+        _dump = dialog.evaluate("""(root) => Array.from(root.querySelectorAll('button, [role=button], div[tabindex], [aria-haspopup], div')).slice(0, 14).map(b => (b.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 140))""")
+        print(f"[find_dialog_upload_button] ⚠️ no upload control matched — dialog clickables: {_dump}", flush=True)
+    except Exception:
+        pass
+    print("[find_dialog_upload_button] ⚠️ falling back to button.first (last resort)", flush=True)
     return dialog.locator("button").first
 
 
@@ -21111,6 +21126,15 @@ class AccountWorker(threading.Thread):
                                     print(f"[{account_name}-HTTP-DL] 401 — retrying with current session", flush=True)
                                     resp = session_ref[0].get(url, timeout=120, allow_redirects=True)
                                 if not resp.ok:
+                                    # v803 — 5xx/429 are TRANSIENT (Google rate-limiting the
+                                    # download endpoint, or the video not yet ready server-side).
+                                    # The SAME url succeeds seconds later (proven: the v759 reaper
+                                    # re-pulled identical 500'd URLs fine). Retry instead of an
+                                    # instant redo that re-renders a clip which already exists.
+                                    if resp.status_code in (429, 500, 502, 503, 504) and _vtry < POSTER_RETRY_MAX - 1:
+                                        print(f"[{account_name}-HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1} transient HTTP {resp.status_code} — retry {_vtry+1}/{POSTER_RETRY_MAX} in {POSTER_RETRY_DELAY}s", flush=True)
+                                        time.sleep(POSTER_RETRY_DELAY)
+                                        continue
                                     raise Exception(f"HTTP {resp.status_code}")
                                 _ct = (resp.headers.get('Content-Type') or '').lower()
                                 _b = resp.content
