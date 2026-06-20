@@ -1023,6 +1023,22 @@ def _install_flow_api_capture(page):
         "submitBatchLog",
     )
 
+    # v796 — subset of _watch worth printing to the CONSOLE. Everything in _watch
+    # is still written to the jsonl capture file for deep debugging; only these
+    # signal endpoints (submit / upscale / frame upload) reach the console, so the
+    # per-clip log isn't buried under routine page chatter (status polls, agentInfo,
+    # credits, recommendations, frontend-event logs → file only).
+    _console_signal = (
+        "batchAsyncGenerateVideoStartImage",
+        "batchAsyncGenerateVideoStartAndEndImage",
+        "batchAsyncGenerateVideoReferenceImages",
+        "batchAsyncGenerateVideo",
+        "flowMedia:batchGenerateImages",
+        "batchGenerateImages",
+        "upsampleImage",
+        "uploadImage",
+    )
+
     def _on_request(req):
         try:
             url = getattr(req, 'url', '') or ''
@@ -1056,11 +1072,14 @@ def _install_flow_api_capture(page):
                 except Exception:
                     pass
             endpoint = url.split('?', 1)[0]
-            print(
-                f"[flow-api-capture] {endpoint.rsplit('/', 1)[-1]} "
-                f"videoModelKey={model_key or '-'} shape={ingredient_shape or '-'}",
-                flush=True,
-            )
+            _short = endpoint.rsplit('/', 1)[-1]
+            # v796 — console gets ONLY signal endpoints; routine chatter stays in the
+            # jsonl capture (written below) but no longer spams 'videoModelKey=- shape=-'.
+            if any(s in url for s in _console_signal):
+                if model_key or ingredient_shape:
+                    print(f"[flow-api-capture] ▶ {_short} model={model_key or '?'} frames={ingredient_shape or '?'}", flush=True)
+                else:
+                    print(f"[flow-api-capture] ▶ {_short}", flush=True)
             try:
                 with open(out_path, 'a', encoding='utf-8') as f:
                     f.write(json.dumps({
@@ -7168,8 +7187,8 @@ def refresh_clip_statuses(job):
             generating = sum(1 for c in fresh_statuses.values() if c.get('status') == 'generating')
             print(f"[RefreshClips] ✓ Updated {updated} clip statuses for {job_id[:8]} "
                   f"(DB: {completed} completed, {generating} generating, {len(clips)} total)", flush=True)
-        else:
-            print(f"[RefreshClips] No status changes for {job_id[:8]}", flush=True)
+        # v796 — silent when nothing changed (was '[RefreshClips] No status changes'
+        # every poll); the 'Updated' line above prints only on a real status change.
     except Exception as e:
         print(f"[RefreshClips] ⚠ Failed to refresh (non-fatal): {e}", flush=True)
 
@@ -7234,6 +7253,97 @@ def update_job_status(job_id, status, error_message=None, retries=3):
     return None
 
 
+# v797 — CLIP FAILURE LEDGER. Every clip failure/redo funnels through
+# update_clip_status(); capture each one (categorized + full reason + attempt +
+# job) to a greppable jsonl AND one clean console line, so failure MODES are
+# visible and improvable instead of buried in the scroll. Inspect with:
+#   python -c "import json,collections as c; \
+#     t=c.Counter(json.loads(l)['type'] for l in open('clip_failures.jsonl')); \
+#     [print(n,k) for k,n in t.most_common()]"
+CLIP_FAILURES_FILE = os.path.join(BASE_DIR, "clip_failures.jsonl")
+
+
+def _categorize_clip_failure(status, error_message):
+    """Map a failure/redo into a coarse TYPE so patterns aggregate. Buckets track
+    the REAL worker failure modes; add a bucket when an 'other' reason recurs."""
+    m = (error_message or "").lower()
+    if status == 'flow_redo_queued':
+        if any(k in m for k in ('download', 'mediaid', 'never rendered', 'not found', 'unbound')):
+            return 'redo_download'
+        return 'redo'
+    if any(k in m for k in ('unusual activity', 'actividad inusual', 'rate-limit', 'rate limit')):
+        return 'unusual_activity'
+    if any(k in m for k in ('no downloadable video', 'mediaid', 'never rendered', 'unbound', 'poster')):
+        return 'dead_mediaid_404'
+    if any(k in m for k in ('policy', 'content', 'prominent', 'rejected')):
+        return 'content_policy'
+    if any(k in m for k in ('timed out', 'timeout', 'stuck')):
+        return 'timeout'
+    if any(k in m for k in ('crash', 'snap')):
+        return 'browser_crash'
+    if any(k in m for k in ('no start frame', 'no clip data', 'cannot regenerate', 'frame')):
+        return 'missing_input'
+    if 'submission crashed' in m:
+        return 'submit_error'
+    return 'other'
+
+
+def _record_clip_failure(clip_id, status, error_message):
+    """Append a structured failure record + print ONE clean console line. Called
+    from update_clip_status for 'failed'/'flow_redo_queued' only. Never raises."""
+    try:
+        ftype = _categorize_clip_failure(status, error_message)
+        with _CLIP_ATTEMPT_LOCK:
+            attempt = _CLIP_ATTEMPTS.get(clip_id, 0)
+        try:
+            job_id = lookup_job_for_clip(clip_id)
+        except Exception:
+            job_id = None
+        reason = (error_message or "").strip() or "(no reason given)"
+        print(f"[clip-fail] clip={clip_id} ▸ {ftype.upper()} ({status}) attempt={attempt} — {reason}", flush=True)
+        try:
+            with open(CLIP_FAILURES_FILE, 'a', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    'ts': time.time(),
+                    'clip_id': clip_id,
+                    'job_id': job_id,
+                    'attempt': attempt,
+                    'status': status,
+                    'type': ftype,
+                    'reason': reason,
+                }) + "\n")
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def job_failure_rollup(job_id):
+    """v797 — categorized one-line failure summary for a job, read from the
+    ledger. Counts terminal 'failed' only (skips transient redo churn). '' if
+    none. Lets each job END with what actually broke + how often."""
+    if not job_id:
+        return ""
+    try:
+        import collections
+        counts = collections.Counter()
+        with open(CLIP_FAILURES_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if r.get('job_id') == job_id and r.get('status') == 'failed':
+                    counts[r.get('type', 'other')] += 1
+        if not counts:
+            return ""
+        return " · ".join(f"{t} ×{n}" for t, n in counts.most_common())
+    except FileNotFoundError:
+        return ""
+    except Exception:
+        return ""
+
+
 def update_clip_status(clip_id, status, output_url=None, error_message=None, retries=3):
     """Update clip status via API with retry on failure.
 
@@ -7252,6 +7362,10 @@ def update_clip_status(clip_id, status, output_url=None, error_message=None, ret
         "output_url": output_url,
         "error_message": error_message
     }
+    # v797 — failure ledger: capture every failure/redo at the funnel, BEFORE the
+    # API write, so the reason is recorded even if the platform write itself fails.
+    if status in ('failed', 'flow_redo_queued'):
+        _record_clip_failure(clip_id, status, error_message)
     for attempt in range(retries):
         result, code = api_request_ex("POST", f"/clips/{clip_id}/status", data)
         if result:
@@ -15213,11 +15327,15 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
             if cached_url:
                 project_url = cached_url
     
+    _redo_trigger = (clip.get('error_message') or clip.get('status') or '(unknown)')
+    if isinstance(_redo_trigger, str):
+        _redo_trigger = _redo_trigger.strip()[:160] or '(unknown)'
     print(f"\n{'='*60}", flush=True)
-    print(f"REDO: Clip {clip_index+1} (Attempt {attempt})", flush=True)
+    print(f"REDO ▶ clip {clip_index+1}  attempt {attempt}  acct={account_name or 'single'}", flush=True)
+    print(f"  WHY (trigger): {_redo_trigger}", flush=True)
     print(f"[worker-id] {WORKER_VERSION} build={WORKER_BUILD} path=redo job={str(job_id)[:8]}", flush=True)
-    print(f"Job: {job_id[:8]}...", flush=True)
-    print(f"Project: {project_url or 'unknown'}", flush=True)
+    print(f"  job={job_id[:8]}  project={project_url or 'unknown'}", flush=True)
+    print(f"  steps follow, each tagged [REDO]: navigate → reattach frames → resubmit → check → download", flush=True)
     print(f"{'='*60}", flush=True)
     
     if not project_url:
@@ -19555,29 +19673,56 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             continue
                         _rci = _rc.get('clip_index')
                         _rdlg = (_rc.get('dialogue_text') or '')[:20]
-                        if not _rdlg:
-                            continue  # empty dialogue can't be matched safely (sibling-grab risk)
+                        # v795 — empty-dialogue HOOK / b-roll clips ALSO need this rescue:
+                        # their bound mediaId is the one most often DEAD (a blocked tile was
+                        # Retried, the OTHER variant re-rendered, but the stale blocked-tile
+                        # mediaId stayed bound → getMediaUrlRedirect 404). With no dialogue
+                        # to match on, match the tile by data-index (== clip_index) instead
+                        # of skipping. Only NOT-'completed' clips are scanned, so it is a
+                        # no-op once the clip lands; a real <video> src is proof it rendered.
+                        _match_by_index = not _rdlg
                         try:
-                            _vsrcs = page.evaluate(f"""() => {{
-                                for (const c of document.querySelectorAll('[data-index]')) {{
-                                    if (!((c.innerText||'').includes({repr(_rdlg)}))) continue;
+                            if _match_by_index:
+                                _vsrcs = page.evaluate(f"""() => {{
+                                    const c = document.querySelector('[data-index="{int(_rci)}"]');
+                                    if (!c) return [];
                                     const out = [];
                                     for (const v of c.querySelectorAll('video')) {{
                                         const u = v.src || (v.querySelector('source')||{{}}).src || '';
                                         if (u && !u.startsWith('blob:')) out.push(u);
                                     }}
                                     return out;
-                                }}
-                                return [];
-                            }}""")
+                                }}""")
+                            else:
+                                _vsrcs = page.evaluate(f"""() => {{
+                                    for (const c of document.querySelectorAll('[data-index]')) {{
+                                        if (!((c.innerText||'').includes({repr(_rdlg)}))) continue;
+                                        const out = [];
+                                        for (const v of c.querySelectorAll('video')) {{
+                                            const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                                            if (u && !u.startsWith('blob:')) out.push(u);
+                                        }}
+                                        return out;
+                                    }}
+                                    return [];
+                                }}""")
                             if _vsrcs:
                                 http_dl_queue.put({'job_id': job_id, 'clip_index': _rci,
                                     'clip_id': _rc['id'], 'urls': _vsrcs, 'temp_dir': temp_dir})
-                                print(f"[Flow] [v759-reaper] clip {_rci+1}: rendered <video> found ({len(_vsrcs)} src) — queued for download (bypasses poster bound-mediaId)", flush=True)
+                                print(f"[Flow] [v759-reaper] clip {_rci+1}: rendered <video> found ({len(_vsrcs)} src, match={'index' if _match_by_index else 'dialogue'}) — queued for download (bypasses dead bound mediaId)", flush=True)
                         except Exception:
                             pass
             except Exception as _reaper_err:
                 print(f"[Flow] [v759-reaper] error (non-fatal): {_reaper_err}", flush=True)
+
+            # v797 — job-end failure rollup: one categorized line so each job
+            # closes with WHAT broke + how often (detail in clip_failures.jsonl).
+            try:
+                _roll = job_failure_rollup(job_id)
+                if _roll:
+                    print(f"[Flow] 📋 Job {str(job_id)[:8]} failure rollup: {_roll}  (detail → clip_failures.jsonl)", flush=True)
+            except Exception:
+                pass
 
         return project_url
 
@@ -20852,6 +20997,7 @@ class AccountWorker(threading.Thread):
                             all_ok = False
                     if all_ok or any_ok:
                         update_clip_status(clip_id, 'completed')
+                        clear_auto_redo_cycle(clip_id)   # v761.1 — reset redo budget on success
                         print(f"[{account_name}-HTTP-DL] ✓ Clip {ci+1} done — marked completed", flush=True)
                         clip_log(clip_id, ci, "COMPLETED")
                         total_job_clips = item.get('total_job_clips')
@@ -20867,8 +21013,22 @@ class AccountWorker(threading.Thread):
                             except Exception:
                                 pass
                     if not all_ok and not any_ok:
-                        print(f"[{account_name}-HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo", flush=True)
-                        update_clip_status(clip_id, 'flow_redo_queued')
+                        # v761.1 — CAP this redo path. Was bare flow_redo_queued with NO
+                        # counter → get_redo_clips() re-picked it forever → clip never
+                        # marked failed → operator never saw the error. Mirror v776/v758.19:
+                        # after MAX_AUTO_REDO_CYCLES, mark 'failed' with a visible reason so
+                        # it surfaces in the platform UI. (Message must NOT contain the
+                        # substring "file not found" — main.py poll re-queues that.)
+                        _dl_cycles = register_auto_redo_cycle(clip_id)
+                        if auto_redo_exhausted(_dl_cycles):
+                            print(f"[{account_name}-HTTP-DL] ⛔ Clip {ci+1} download failed {_dl_cycles}× (bound mediaId never rendered) — marking FAILED", flush=True)
+                            update_clip_status(clip_id, 'failed',
+                                error_message="Render produced no downloadable video after retries (a blocked sibling tile left the rendered variant unbound). Click Retry to try again.")
+                            clip_log(clip_id, ci, "FAILED", f"download exhausted {_dl_cycles}/{MAX_AUTO_REDO_CYCLES}")
+                            clear_auto_redo_cycle(clip_id)
+                        else:
+                            print(f"[{account_name}-HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo [{_dl_cycles}/{MAX_AUTO_REDO_CYCLES}]", flush=True)
+                            update_clip_status(clip_id, 'flow_redo_queued', error_message="Download failed — retrying")
                     http_queue.task_done()
                 except Exception as e:
                     print(f"[{account_name}-HTTP-DL] ✗ Error: {e}", flush=True)
@@ -21482,7 +21642,10 @@ def main_multi_account(accounts_override=None):
                             target_account = idle_for_redo[_redo_idx % len(idle_for_redo)]
                             queued_redo_keys[redo_key] = time.time()  # v463: timestamp instead of set-add
                             account_job_queues[target_account].put({'type': 'redo', 'clip': clip})
-                            print(f"  → Clip {clip.get('clip_index', 0)+1} (attempt {attempt}) assigned to {target_account}")
+                            _rtrig = (clip.get('error_message') or clip.get('status') or '?')
+                            if isinstance(_rtrig, str):
+                                _rtrig = _rtrig.strip()[:120] or '?'
+                            print(f"  → [redo-trigger] clip {clip.get('clip_index', 0)+1} attempt {attempt} → {target_account}  ◀ WHY: {_rtrig}")
                             _redo_idx += 1
             
             # Re-try held jobs before fetching new ones
@@ -22087,6 +22250,7 @@ def main(account_session=None, account_download=None, account_label=None):
                     if all_ok or any_ok:
                         # At least one variant uploaded — clip is usable
                         update_clip_status(clip_id, 'completed')
+                        clear_auto_redo_cycle(clip_id)   # v761.1 — reset redo budget on success
                         # Tell dh loop this clip is done — prevents re-download
                         _dh = dh_ref[0]
                         if hasattr(_dh, '_downloaded_clip_indices'):
@@ -22101,10 +22265,20 @@ def main(account_session=None, account_download=None, account_label=None):
                                 update_job_status(job_id, 'completed')
                                 print(f"[HTTP-DL] ✓ Job {job_id[:8]}... complete ({total_job_clips} clips done)", flush=True)
                     if not all_ok and not any_ok:
-                        # All variants failed — queue as flow_redo_queued so get_redo_clips()
-                        # picks it up on the next poll cycle (seconds), not full job reprocess
-                        print(f"[HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo", flush=True)
-                        update_clip_status(clip_id, 'flow_redo_queued')
+                        # v761.1 — CAP this redo path (was uncapped → infinite redo, clip
+                        # never marked failed in the UI). Mirror v776/v758.19. Message must
+                        # NOT contain the substring "file not found" (main.py poll re-queues it).
+                        _dl_cycles = register_auto_redo_cycle(clip_id)
+                        if auto_redo_exhausted(_dl_cycles):
+                            print(f"[HTTP-DL] ⛔ Clip {ci+1} download failed {_dl_cycles}× (bound mediaId never rendered) — marking FAILED", flush=True)
+                            update_clip_status(clip_id, 'failed',
+                                error_message="Render produced no downloadable video after retries (a blocked sibling tile left the rendered variant unbound). Click Retry to try again.")
+                            clip_log(clip_id, ci, "FAILED", f"download exhausted {_dl_cycles}/{MAX_AUTO_REDO_CYCLES}")
+                            clear_auto_redo_cycle(clip_id)
+                        else:
+                            # queue as flow_redo_queued so get_redo_clips() picks it up next poll
+                            print(f"[HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo [{_dl_cycles}/{MAX_AUTO_REDO_CYCLES}]", flush=True)
+                            update_clip_status(clip_id, 'flow_redo_queued', error_message="Download failed — retrying")
                     http_queue.task_done()
                 except Exception as e:
                     print(f"[HTTP-DL] ✗ Error processing clip: {e}", flush=True)
