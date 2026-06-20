@@ -9698,22 +9698,33 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                 # call — the Retry click — just uses the fresh session cookie; no
                 # reload needed. Fall back to NextAuth re-auth only if there is no
                 # working cookie file.
-                # v802 — MIMIC THE OPERATOR'S MANUAL FIX: DELETE the labs.google
-                # cookies and let Google SSO re-mint a FRESH session. Do NOT inject a
-                # saved cookie set — a saved __Secure-next-auth.session-token goes
-                # stale/flagged and re-blocks (the "injected 8/8 but still blocked"
-                # loop). The operator's proven manual fix is the diff between a
-                # blocked and a working export: delete the labs auth cookies
-                # (next-auth.session-token + csrf-token + callback-url + EMAIL +
-                # email + _ga) so the app re-auths fresh. reauth_flow_session does
-                # exactly that — delete ALL labs.google cookies (google SSO kept,
-                # account stays signed in + ULTRA), then the NextAuth OAuth re-init
-                # re-mints. Same on every attempt. It navigates (can drop in-progress
-                # tiles) but v798 reaper + v800 scoped reset cushion that.
-                try:
-                    reauth_flow_session(page, "FailCheck")
-                except Exception as _re:
-                    print(f"[FailCheck] re-auth raised: {_re}", flush=True)
+                # v804 — INJECT-FIRST (operator's choice). Inject a FRESH working
+                # cookie set from working_cookies.txt: it needs NO page navigation,
+                # so it KEEPS the in-progress tiles and avoids the re-mint "ghost"
+                # desync (the v802 delete+re-mint navigates → reload mid-submit →
+                # 'Generate click had no effect' ghosts → redo storm). Re-mint is
+                # now the FALLBACK ONLY — used when there is no working set (attempt
+                # 1) or the injected set has gone stale and the block survives into
+                # attempt 2. The operator refreshes working_cookies.txt each session
+                # so the injected token is valid.
+                if _att == 1:
+                    _injected = False
+                    try:
+                        _injected = inject_working_labs_cookies(page, "FailCheck")
+                    except Exception as _ie:
+                        print(f"[FailCheck] inject raised: {_ie}", flush=True)
+                    if not _injected:
+                        print("[FailCheck] v804: no working cookie set to inject — re-minting a fresh session", flush=True)
+                        try:
+                            reauth_flow_session(page, "FailCheck")
+                        except Exception as _re:
+                            print(f"[FailCheck] re-auth raised: {_re}", flush=True)
+                else:
+                    print("[FailCheck] v804: injected set did not lift the block (stale?) — falling back to delete + re-mint", flush=True)
+                    try:
+                        reauth_flow_session(page, "FailCheck")
+                    except Exception as _re:
+                        print(f"[FailCheck] re-auth raised: {_re}", flush=True)
                 time.sleep(2)            # let the re-mint settle
                 _click_retry_failed_tiles()
                 # VERIFY — the ONLY real failure is the unusual-activity block
@@ -9736,8 +9747,8 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                     if rc.get('hasVideo'):
                         _video = True; break
                 if _blocked:
-                    _next = "retrying delete + re-mint" if _att < _MAX_REAUTH else "recovery exhausted — escalating to handler"
-                    print(f"[FailCheck] v802 attempt {_att}/{_MAX_REAUTH}: block RE-APPEARED — {_next}", flush=True)
+                    _next = "next: delete + re-mint" if _att < _MAX_REAUTH else "recovery exhausted — escalating to handler"
+                    print(f"[FailCheck] v804 attempt {_att}/{_MAX_REAUTH}: block RE-APPEARED — {_next}", flush=True)
                     continue
                 print(f"[FailCheck] ✓ v758.38 recovery verified ({'video' if _video else 'no re-block'}) — clip rendering, letting it download", flush=True)
                 return False
