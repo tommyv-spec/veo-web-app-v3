@@ -8839,20 +8839,23 @@ def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retrie
                     print(f"{prefix}⚠️ Frames still missing after re-click — uploading manually...", flush=True)
                     
                     if start_frame and os.path.exists(start_frame):
-                        try:
-                            upload_ok, rejected_which = upload_both_frames_with_policy_check(
-                                page, start_frame, end_frame, context=f"{prefix}Clip {clip_num} reuse-fallback")
-                            if upload_ok:
-                                print(f"{prefix}✓ Frames uploaded manually as fallback", flush=True)
-                                # CRITICAL: Re-fill prompt — upload_both_frames clears the input
-                                fill_prompt_textarea(page, prompt)
-                                print(f"{prefix}✓ Re-filled prompt after manual upload", flush=True)
-                            else:
-                                print(f"{prefix}⚠️ Frame upload rejected ({rejected_which}) — continuing without frames", flush=True)
-                        except Exception as upload_err:
-                            print(f"{prefix}⚠️ Frame upload error: {upload_err} — continuing", flush=True)
+                        # v799 — NEVER fall through to Generate without the start
+                        # frame. The old code caught the failure and printed
+                        # "continuing without frames", submitting a frame-less
+                        # render = silent garbage that looked "done". Any failure
+                        # here now RAISES → this attempt retries (caller requeues
+                        # the clip if attempts exhaust) per the function contract.
+                        upload_ok, rejected_which = upload_both_frames_with_policy_check(
+                            page, start_frame, end_frame, context=f"{prefix}Clip {clip_num} reuse-fallback")
+                        if upload_ok:
+                            print(f"{prefix}✓ Frames uploaded manually as fallback", flush=True)
+                            # CRITICAL: Re-fill prompt — upload_both_frames clears the input
+                            fill_prompt_textarea(page, prompt)
+                            print(f"{prefix}✓ Re-filled prompt after manual upload", flush=True)
+                        else:
+                            raise Exception(f"reuse-fallback frame upload failed ({rejected_which}) — refusing to submit clip {clip_num} without its start frame")
                     else:
-                        print(f"{prefix}⚠️ No frame files available for manual upload", flush=True)
+                        raise Exception(f"reuse-fallback: no frame file available for clip {clip_num} — refusing to submit without start frame")
             else:
                 print(f"{prefix}✓ Frames included in reuse", flush=True)
             
@@ -14492,21 +14495,38 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
 
 
 def find_dialog_upload_button(dialog):
-    """Find the actual 'Upload image' button inside a Flow frame dialog.
-    
-    The dialog contains multiple buttons (date dropdown, upload, 'Recently Used' dropdown).
-    The upload element is identified by its <i> icon with text 'upload' or text 'Upload image'.
-    
-    NOTE: As of April 2025, Google changed the upload button from <button> to <div>,
-    so we check both element types.
+    """Find the 'Upload media' control inside a Flow frame dialog.
+
+    v799 — LANGUAGE-AGNOSTIC + STRUCTURE-AGNOSTIC. The dialog has several
+    controls (date dropdown, Images tab, Drive uploads, Upload-media, a 'Recent'
+    dropdown). The OLD selectors mixed two broken assumptions:
+      1. English UI TEXT ('Upload image' / has-text('Upload')) — these MISS on a
+         Spanish (es-419) account where the button reads 'Cargar medios'. The
+         worker's accounts run localized Flow, so every text selector failed.
+      2. ':text(\"upload\")' is a SUBSTRING match, so the icon selector also
+         matched the DRIVE button whose ligature is 'drive_folder_upload'.
+    When all five missed, the caller fell back to dialog.locator('button').first
+    = the DATE DROPDOWN, which set no file → the clip was submitted with NO
+    start frame (silent garbage render).
+
+    The only reliable cross-locale signal is the material-icon ligature, which
+    Google does NOT translate and which renders here as visible text:
+        upload               -> the Upload-media control we want
+        drive_folder_upload  -> Drive uploads (DIFFERENT button, must NOT match)
+        image                -> Images tab
+    So match the icon by EXACT text 'upload' (text-is, not substring → excludes
+    drive_folder_upload), on a DESCENDANT <i>/<span> (descendant, not a brittle
+    direct-child chain). Localized visible-label text is only a fallback.
     """
-    # Primary: div or button with upload icon (current Flow UI uses <div>)
+    # 1) icon ligature == 'upload' EXACT — locale-independent, excludes Drive's
+    #    'drive_folder_upload'. Covers <i> and material-symbol <span>, in a
+    #    <button>, an ARIA button div, or a focusable div.
+    icon_hosts = ':is(button, div[role="button"], div[tabindex], [aria-haspopup])'
     for selector in [
-        "div:has(> div > i:text('upload'))",           # New: nested div > div > i
-        "div:has(i:text('upload')):has-text('Upload')", # New: div with icon + text
-        "button:has(i:text('upload'))",                 # Legacy: button with icon
-        "div:has-text('Upload image')",                 # Text-based div match
-        "button:has(span:text('Upload image'))",        # Legacy: button with span
+        f'{icon_hosts}:has(i:text-is("upload"))',
+        f'{icon_hosts}:has(span:text-is("upload"))',
+        'i:text-is("upload")',     # bare icon — Playwright returns the clickable ancestor on click
+        'span:text-is("upload")',
     ]:
         try:
             btn = dialog.locator(selector)
@@ -14514,9 +14534,23 @@ def find_dialog_upload_button(dialog):
                 return btn.first
         except Exception:
             continue
-    
-    # Last resort
-    print("[find_dialog_upload_button] ⚠️ Could not find upload button by icon/text, using button.first", flush=True)
+
+    # 2) visible label across locales (EN / ES / PT / FR / DE / IT). 'Cargar'
+    #    is distinct from the Drive control's 'Cargas' (no substring overlap).
+    for word in ["Upload media", "Upload image", "Cargar medios", "Subir archivos",
+                 "Carregar", "Téléverser", "Importer un", "Medien hochladen",
+                 "Carica supporti", "Cargar", "Upload"]:
+        try:
+            btn = dialog.locator(f'{icon_hosts}:has-text("{word}")')
+            if btn.count() > 0:
+                return btn.first
+        except Exception:
+            continue
+
+    # Last resort — could not identify it. Return button.first so the caller's
+    # wait_for(visible) contract holds; it is logged loudly so the cause is
+    # visible rather than silently uploading to the wrong control.
+    print("[find_dialog_upload_button] ⚠️ Could not find upload button by icon/label (locale?) — using button.first as last resort", flush=True)
     return dialog.locator("button").first
 
 
