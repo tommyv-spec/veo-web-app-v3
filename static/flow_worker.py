@@ -1199,6 +1199,70 @@ def captured_urls_for_clip(job_id, clip_index, captured_media_urls):
     return out
 
 
+def reap_rendered_videos_to_queue(page, clips, job_id, http_dl_queue, temp_dir, where=""):
+    """v798 — DOM-truth download rescue, callable MID-job (not only at job-end).
+
+    The unusual-activity recovery (v758.26 cookie-clear / v758.24 golden restore)
+    RAISES before the job-end reaper (v759/v795) ever runs, so a clip that DID
+    render but whose bound mediaId is DEAD (a blocked tile was Retried, the
+    rendered variant left unbound → getMediaUrlRedirect 404) got reset to pending
+    and RE-rendered instead of downloaded — "clip done on Flow but never
+    downloads". This harvests the same ground truth the job-end reaper uses: a
+    real (non-blob) <video> src in the clip's tile is PROOF it rendered,
+    regardless of which (possibly dead) mediaId bound. Queue THAT url — a
+    session-fresh page URL that does not 404. Empty-dialogue clips match by
+    data-index (== clip_index); others by dialogue substring. Additive +
+    idempotent (HTTP-DL dedups completed clips; only NOT-'completed' clips are
+    scanned). Returns count queued.
+
+    Call BEFORE _drain_bound_downloads() on a reset path so the drain then sees
+    the rescued clips reach 'completed' and does NOT reset them to pending."""
+    if http_dl_queue is None or page is None:
+        return 0
+    _queued = 0
+    for _rc in clips:
+        if _rc.get('status') == 'completed':
+            continue
+        _rci = _rc.get('clip_index')
+        if _rci is None:
+            continue
+        _rdlg = (_rc.get('dialogue_text') or '')[:20]
+        _match_by_index = not _rdlg
+        try:
+            if _match_by_index:
+                _vsrcs = page.evaluate(f"""() => {{
+                    const c = document.querySelector('[data-index="{int(_rci)}"]');
+                    if (!c) return [];
+                    const out = [];
+                    for (const v of c.querySelectorAll('video')) {{
+                        const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                        if (u && !u.startsWith('blob:')) out.push(u);
+                    }}
+                    return out;
+                }}""")
+            else:
+                _vsrcs = page.evaluate(f"""() => {{
+                    for (const c of document.querySelectorAll('[data-index]')) {{
+                        if (!((c.innerText||'').includes({repr(_rdlg)}))) continue;
+                        const out = [];
+                        for (const v of c.querySelectorAll('video')) {{
+                            const u = v.src || (v.querySelector('source')||{{}}).src || '';
+                            if (u && !u.startsWith('blob:')) out.push(u);
+                        }}
+                        return out;
+                    }}
+                    return [];
+                }}""")
+            if _vsrcs:
+                http_dl_queue.put({'job_id': job_id, 'clip_index': _rci,
+                    'clip_id': _rc['id'], 'urls': _vsrcs, 'temp_dir': temp_dir})
+                _queued += 1
+                print(f"[Flow] [v798-reaper{(' ' + where) if where else ''}] clip {_rci+1}: rendered <video> found ({len(_vsrcs)} src, match={'index' if _match_by_index else 'dialogue'}) — queued for download (bypasses dead bound mediaId)", flush=True)
+        except Exception:
+            pass
+    return _queued
+
+
 def resolve_clip_download_urls(page, job_id, clip_index, dialogue_key, captured_media_urls):
     """v794 — SINGLE source of truth for a clip's download URLs across every
     producer. Priority:
@@ -18638,6 +18702,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 _ra_ok = reauth_flow_session(page, account_name)
                 print(f"[Flow] 🔑 v758.32: 'unusual activity' on job {job_id[:8]} (re-auth {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}, ok={_ra_ok}) — deleted labs cookies + re-auth, retrying WITHOUT golden restore", flush=True)
                 clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, re-auth {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
+                # v798 — harvest clips that DID render (dead bound mediaId would
+                # otherwise 404) via DOM <video> truth BEFORE draining, so the
+                # drain sees them complete and does NOT reset them to re-render.
+                _reaped = reap_rendered_videos_to_queue(page, clips, job_id, http_dl_queue, temp_dir, where="pre-cookie-clear")
+                if _reaped:
+                    print(f"[Flow] [v798] reaped {_reaped} rendered clip(s) before cookie-clear reset — draining so they download instead of re-rendering", flush=True)
                 _drain_bound_downloads()
                 # Reset non-completed clips to pending; drop project_url so the
                 # retry re-submits into a fresh project on the SAME (cleared)
@@ -18702,6 +18772,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # down the project (golden restore kills the browser, orphaning the old
             # project). The HTTP download worker is still alive here, so drain the
             # bound/done clips to 'completed' first.
+            # v798 — reap DOM <video> truth first (dead bound mediaId 404s) so a
+            # clip that rendered downloads instead of being lost with the project.
+            _reaped = reap_rendered_videos_to_queue(page, clips, job_id, http_dl_queue, temp_dir, where="pre-golden-restore")
+            if _reaped:
+                print(f"[Flow] [v798] reaped {_reaped} rendered clip(s) before golden restore — draining so they download before the project is torn down", flush=True)
             _drain_bound_downloads()
             if clip.get('status') != 'completed':
                 update_clip_status(clip['id'], 'pending', error_message=None)
