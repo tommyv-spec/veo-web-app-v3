@@ -742,46 +742,6 @@ def _fa_init_project_best_effort(page, project_id, context=""):
     except Exception as e:
         print(f"{pfx}[flow_api] page.reload() failed (non-blocking): {e}", flush=True)
 
-    # v758.34 — VERIFY the Agent is actually OFF. Flow keeps the project in Agent
-    # mode if the disable PATCH didn't take, and the submit UI's settings/variants
-    # toolbar only exists in the Agent-OFF layout (operator: "they all failed
-    # because the agent is still on" -> "Settings button not found"). Check the DOM
-    # for the variants toolbar; if missing, re-PATCH agentToggleState=DISABLED +
-    # reload, up to 3x. Logs the PATCH status so a Flow-side change is visible.
-    def _agent_off_in_dom():
-        try:
-            return page.evaluate(r"""() => {
-                const btns = [...document.querySelectorAll('button')];
-                const hasVariants = btns.some(b => /(^|\s)x[1-4](\s|$)/.test((b.innerText||'').trim()));
-                const agentLanding = /Start creating|Empieza a crear|drop media|Suelta el contenido|chat/i.test(document.body.innerText||'');
-                return {hasVariants, agentLanding};
-            }""")
-        except Exception:
-            return {"hasVariants": False, "agentLanding": False}
-    for _agc in range(3):
-        _ast = _agent_off_in_dom()
-        if _ast.get("hasVariants"):
-            if _agc:
-                print(f"{pfx}[flow_api] ✓ Agent-OFF confirmed after {_agc} re-disable(s) (variants toolbar present)", flush=True)
-            break
-        print(f"{pfx}[flow_api] ⚠ Agent still ON (variants toolbar missing, landing={_ast.get('agentLanding')}) — re-disabling ({_agc+1}/3)", flush=True)
-        _adr = _fa_api_fetch(
-            page,
-            f"{AISBX}/v1/projects/{project_id}/agentInfo?updateMask=agent_toggle_state",
-            "PATCH", _bearer(),
-            {"agentToggleState": "AGENT_TOGGLE_STATE_DISABLED"},
-        )
-        print(f"{pfx}[flow_api] re-disable PATCH status={_adr.get('status') if isinstance(_adr, dict) else '?'} "
-              f"err={_fa_error_reason(_adr) or 'none'}", flush=True)
-        try:
-            page.reload(wait_until="domcontentloaded", timeout=30000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                time.sleep(2)
-        except Exception:
-            pass
-
 
 def _fa_try_create_new_project_api(page, context=""):
     """Try API project create. Returns full project URL on success, None on failure.
@@ -1023,22 +983,6 @@ def _install_flow_api_capture(page):
         "submitBatchLog",
     )
 
-    # v796 — subset of _watch worth printing to the CONSOLE. Everything in _watch
-    # is still written to the jsonl capture file for deep debugging; only these
-    # signal endpoints (submit / upscale / frame upload) reach the console, so the
-    # per-clip log isn't buried under routine page chatter (status polls, agentInfo,
-    # credits, recommendations, frontend-event logs → file only).
-    _console_signal = (
-        "batchAsyncGenerateVideoStartImage",
-        "batchAsyncGenerateVideoStartAndEndImage",
-        "batchAsyncGenerateVideoReferenceImages",
-        "batchAsyncGenerateVideo",
-        "flowMedia:batchGenerateImages",
-        "batchGenerateImages",
-        "upsampleImage",
-        "uploadImage",
-    )
-
     def _on_request(req):
         try:
             url = getattr(req, 'url', '') or ''
@@ -1072,14 +1016,11 @@ def _install_flow_api_capture(page):
                 except Exception:
                     pass
             endpoint = url.split('?', 1)[0]
-            _short = endpoint.rsplit('/', 1)[-1]
-            # v796 — console gets ONLY signal endpoints; routine chatter stays in the
-            # jsonl capture (written below) but no longer spams 'videoModelKey=- shape=-'.
-            if any(s in url for s in _console_signal):
-                if model_key or ingredient_shape:
-                    print(f"[flow-api-capture] ▶ {_short} model={model_key or '?'} frames={ingredient_shape or '?'}", flush=True)
-                else:
-                    print(f"[flow-api-capture] ▶ {_short}", flush=True)
+            print(
+                f"[flow-api-capture] {endpoint.rsplit('/', 1)[-1]} "
+                f"videoModelKey={model_key or '-'} shape={ingredient_shape or '-'}",
+                flush=True,
+            )
             try:
                 with open(out_path, 'a', encoding='utf-8') as f:
                     f.write(json.dumps({
@@ -1178,89 +1119,20 @@ def bound_media_ids_for_clip(job_id, clip_index):
 
 
 def captured_urls_for_clip(job_id, clip_index, captured_media_urls):
-    """v759b — build the VIDEO download URL for each of the clip's bound mediaIds.
-
-    HAR-PROVEN root cause of "done clips never download / ct=image/jpeg poster
-    forever": media.getMediaUrlRedirect?name=<id>&mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL
-    307-redirects to flow-content.google/IMAGE/<id> (the poster the UI shows in the
-    tile). The network listener captured THAT thumbnail URL, so the download polled
-    a JPEG forever and gave up — even though the status API reports the clip
-    SUCCESSFUL with an ~800KB video. Plain ?name=<id> (no mediaUrlType) redirects to
-    flow-content.google/VIDEO/<id> = the real mp4. So CONSTRUCT the plain video URL
-    from the bound mediaId instead of trusting the captured (thumbnail) URL.
-    captured_media_urls kept in the signature for callers; no longer needed."""
+    """v774 — resolve a clip's bound mediaIds to the getMediaUrlRedirect URLs the
+    network listener already captured (captured_media_urls: uuid -> redirect URL;
+    same uuid as primaryMediaId). Non-empty result = the clip's video ACTUALLY
+    rendered, regardless of where its tile sits in the DOM. [] if nothing
+    bound/captured. Case-insensitive (bound ids are lowercased)."""
+    if not captured_media_urls:
+        return []
+    _lc = {str(k).lower(): v for k, v in captured_media_urls.items()}
     out = []
     for mid in bound_media_ids_for_clip(job_id, clip_index):
-        if not mid:
-            continue
-        u = f"https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name={mid}"
-        if u not in out:
+        u = _lc.get(mid)
+        if u and u not in out:
             out.append(u)
     return out
-
-
-def reap_rendered_videos_to_queue(page, clips, job_id, http_dl_queue, temp_dir, where=""):
-    """v798 — DOM-truth download rescue, callable MID-job (not only at job-end).
-
-    The unusual-activity recovery (v758.26 cookie-clear / v758.24 golden restore)
-    RAISES before the job-end reaper (v759/v795) ever runs, so a clip that DID
-    render but whose bound mediaId is DEAD (a blocked tile was Retried, the
-    rendered variant left unbound → getMediaUrlRedirect 404) got reset to pending
-    and RE-rendered instead of downloaded — "clip done on Flow but never
-    downloads". This harvests the same ground truth the job-end reaper uses: a
-    real (non-blob) <video> src in the clip's tile is PROOF it rendered,
-    regardless of which (possibly dead) mediaId bound. Queue THAT url — a
-    session-fresh page URL that does not 404. Empty-dialogue clips match by
-    data-index (== clip_index); others by dialogue substring. Additive +
-    idempotent (HTTP-DL dedups completed clips; only NOT-'completed' clips are
-    scanned). Returns count queued.
-
-    Call BEFORE _drain_bound_downloads() on a reset path so the drain then sees
-    the rescued clips reach 'completed' and does NOT reset them to pending."""
-    if http_dl_queue is None or page is None:
-        return 0
-    _queued = 0
-    for _rc in clips:
-        if _rc.get('status') == 'completed':
-            continue
-        _rci = _rc.get('clip_index')
-        if _rci is None:
-            continue
-        _rdlg = (_rc.get('dialogue_text') or '')[:20]
-        _match_by_index = not _rdlg
-        try:
-            if _match_by_index:
-                _vsrcs = page.evaluate(f"""() => {{
-                    const c = document.querySelector('[data-index="{int(_rci)}"]');
-                    if (!c) return [];
-                    const out = [];
-                    for (const v of c.querySelectorAll('video')) {{
-                        const u = v.src || (v.querySelector('source')||{{}}).src || '';
-                        if (u && !u.startsWith('blob:')) out.push(u);
-                    }}
-                    return out;
-                }}""")
-            else:
-                _vsrcs = page.evaluate(f"""() => {{
-                    for (const c of document.querySelectorAll('[data-index]')) {{
-                        if (!((c.innerText||'').includes({repr(_rdlg)}))) continue;
-                        const out = [];
-                        for (const v of c.querySelectorAll('video')) {{
-                            const u = v.src || (v.querySelector('source')||{{}}).src || '';
-                            if (u && !u.startsWith('blob:')) out.push(u);
-                        }}
-                        return out;
-                    }}
-                    return [];
-                }}""")
-            if _vsrcs:
-                http_dl_queue.put({'job_id': job_id, 'clip_index': _rci,
-                    'clip_id': _rc['id'], 'urls': _vsrcs, 'temp_dir': temp_dir})
-                _queued += 1
-                print(f"[Flow] [v798-reaper{(' ' + where) if where else ''}] clip {_rci+1}: rendered <video> found ({len(_vsrcs)} src, match={'index' if _match_by_index else 'dialogue'}) — queued for download (bypasses dead bound mediaId)", flush=True)
-        except Exception:
-            pass
-    return _queued
 
 
 def resolve_clip_download_urls(page, job_id, clip_index, dialogue_key, captured_media_urls):
@@ -2275,44 +2147,27 @@ def chrome_warmup(page):
     try:
         print("[Warmup] Loading Google pages to sync Chrome variations...", flush=True)
         
-        # v758.37 — capture x-client-data via CDP. Chrome injects x-client-data at
-        # the NETWORK layer (for Google domains), BELOW Playwright's renderer-level
-        # request events — so page.on("request").headers NEVER sees it. The old
-        # "No x-client-data captured" was a FALSE NEGATIVE: a CDP capture shows
-        # Chrome actually sends a healthy ~376-char header (many trial IDs).
-        # Network.requestWillBeSentExtraInfo exposes the real on-the-wire headers.
+        # Intercept requests to capture x-client-data header
         x_client_data = {}
-        _xcd_cdp = None
-        try:
-            _xcd_cdp = page.context.new_cdp_session(page)
-            _xcd_cdp.send("Network.enable")
-            def _xcd_capture(params):
-                try:
-                    for _k, _v in (params.get("headers") or {}).items():
-                        if _k.lower() == "x-client-data" and _v and len(_v) > len(x_client_data.get('value', '')):
-                            x_client_data['value'] = _v
-                except Exception:
-                    pass
-            _xcd_cdp.on("Network.requestWillBeSentExtraInfo", _xcd_capture)
-        except Exception as _xe:
-            print(f"[Warmup] ⚠ x-client-data CDP capture setup failed: {_xe}", flush=True)
-
+        def capture_header(request):
+            xcd = request.headers.get('x-client-data', '')
+            if xcd and len(xcd) > len(x_client_data.get('value', '')):
+                x_client_data['value'] = xcd
+        
+        page.on("request", capture_header)
+        
         # Visit Google — triggers variations seed download
         page.goto("https://www.google.com")
         human_delay(3, 5)
-
+        
         # Do some human-like browsing (builds interaction history for reCAPTCHA)
         human_mouse_move(page)
         human_delay(1, 2)
         scroll_randomly(page)
         human_delay(1, 2)
-
-        # Detach CDP capture
-        try:
-            if _xcd_cdp is not None:
-                _xcd_cdp.detach()
-        except Exception:
-            pass
+        
+        # Remove listener
+        page.remove_listener("request", capture_header)
         
         # Report x-client-data status
         xcd = x_client_data.get('value', '')
@@ -3852,53 +3707,37 @@ ACCOUNTS = [
     },
 ]
 
-# Goldens already built from the real profile THIS session. Restarts must NOT
-# re-copy — the copy closes the channel's Chrome, which would kill the worker's
-# own running Beta browsers (cascade crash). Build once, reuse the golden after.
-_LAPTOP_COPIED_GOLDENS = set()
-
-
 def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
-    """laptop_email: reuse the operator's existing Chrome login by COPYING the real
-    profile into this slot's golden. Requires App-Bound Encryption disabled
-    (HKCU\\Software\\Policies\\Google\\Chrome\\ApplicationBoundEncryptionEnabled=0)
-    so the cookies re-encrypt with user-DPAPI and decrypt from a copy on the SAME
-    Windows user. The worker then golden->session->launch a COPY of the profile;
-    the REAL profile is only READ, never automated or force-killed -> it cannot be
-    signed out (the old net-log capture did that). No code, no SSO, no injection:
-    the copy carries the real, healthy session (token refresh works), so Flow
-    accepts it where a reconstituted cookie-inject got rejected.
+    """Slot-1 + laptop_email: reuse the operator's existing Google login WITHOUT
+    a manual code. Copying the profile can't work (Chrome 127+ app-bound cookie
+    encryption) and the real profile can't be automated (Chrome 136+ blocks
+    debugging on the default profile). So we DECRYPT the cookies from the real
+    profile (via Chrome's elevation service) and STAGE them; they get injected
+    into the worker's OWN fresh session (which IS automatable) right after launch.
 
-    The real profile (any name, e.g. 'Profile 70') is copied into the golden as the
-    standard 'Default' profile, and Local State is rewritten to match, so the normal
-    launch (no --profile-directory) uses it. Records the Chrome channel so the worker
-    launches the right Chrome (e.g. Beta). Fail-safe: never raises. Set
-    LAPTOP_PULL_DISABLED=1 to turn it off."""
+    Records the Chrome channel (so the worker launches Beta if that's where the
+    account lives) and closes ONLY that channel's Chrome. Fail-safe: any error is
+    logged, never raises; if extraction fails the worker just needs a manual login
+    that run. Set LAPTOP_PULL_DISABLED=1 to turn the whole thing off."""
     cookie_marker = os.path.join(_BASE, ".worker_injected_cookies.json")
-    # Copy mode never injects — make sure no stale capture marker lingers.
-    try:
-        if os.path.isfile(cookie_marker):
-            os.remove(cookie_marker)
-    except Exception:
-        pass
-    # Build the golden from the real profile ONCE per session. On a worker restart
-    # the golden already exists — re-copying would close the channel's Chrome and
-    # kill the other slot's running browser (cascade crash). Reuse the golden.
-    if golden_folder in _LAPTOP_COPIED_GOLDENS:
-        # Pure flag check (no isdir): a FAILED copy removes the golden but stays
-        # flagged so we never re-run the channel-Chrome close, which would kill the
-        # other slot's running Beta browser. Once attempted/session = never again.
-        print(f"[{label}] laptop login: already attempted this session — not re-copying (protects running workers)", flush=True)
-        return
     try:
         if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
-        # Fresh-load the synced companion (updater writes it after import).
+        if session_folder != ACCOUNTS[0]["session_folder"]:
+            return  # slot 1 only — one Google account, injected into its session
+        # Fresh-load the synced companions (updater writes them after import).
         import sys as _sys
-        _sys.modules.pop("worker_profile_pull", None)
+        for _m in ("worker_profile_pull", "worker_cookie_extract"):
+            _sys.modules.pop(_m, None)
         from worker_profile_pull import locate_profile, load_laptop_email as _lle
+        from worker_cookie_extract import extract_cookies
         email = ACCOUNTS[0].get("laptop_email", "") or _lle(os.path.join(_BASE, "worker_settings.json"))
         if not email:
+            try:
+                if os.path.isfile(cookie_marker):
+                    os.remove(cookie_marker)
+            except Exception:
+                pass
             return
         loc = locate_profile(email)
         if not loc:
@@ -3910,87 +3749,18 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
                 _cf.write(_ch)
         except Exception:
             pass
-        # Mark BEFORE the close+copy: this runs at most ONCE per session per golden,
-        # success or fail, because the channel-Chrome close would kill the worker's
-        # own running Beta browsers on any retry. A failed build => this slot needs a
-        # manual login that run, never a cascade.
-        _LAPTOP_COPIED_GOLDENS.add(golden_folder)
-        print(f"[{label}] laptop login: {email} in {_pf} ({_ch}); copying profile -> golden (real session reuse)", flush=True)
-
-        import shutil as _sh
-        import json as _json
-        # Close ONLY that channel's Chrome once so the cookie DB is flushed for a
-        # clean copy (single graceful close — NOT the old repeated capture loop).
-        try:
-            _sys.modules.pop("worker_cookie_extract", None)
-            from worker_cookie_extract import _close_channel_chrome as _ccc
-            _ccc(_ud, lambda m: print(f"[{label}] {m}", flush=True))
-        except Exception:
-            try:
-                import subprocess as _sp
-                _sp.run(["powershell", "-NoProfile", "-Command",
-                         "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*Chrome Beta*' } | "
-                         "ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }"],
-                        capture_output=True)
-            except Exception:
-                pass
-        time.sleep(2)
-
-        # Rebuild golden = Local State (profile renamed to Default) + Default (copy of _pf).
-        if os.path.exists(golden_folder):
-            _sh.rmtree(golden_folder, ignore_errors=True)
-        os.makedirs(golden_folder, exist_ok=True)
-        _src_ls = os.path.join(_ud, "Local State")
-        _dst_ls = os.path.join(golden_folder, "Local State")
-        try:
-            _ls = _json.load(open(_src_ls, encoding="utf-8"))
-            _prof = _ls.get("profile", {})
-            _ic = _prof.get("info_cache", {})
-            if _pf in _ic and _pf != "Default":
-                _ic["Default"] = _ic.pop(_pf)
-            _prof["info_cache"] = _ic
-            _prof["last_used"] = "Default"
-            _prof["last_active_profiles"] = ["Default"]
-            _ls["profile"] = _prof
-            _json.dump(_ls, open(_dst_ls, "w", encoding="utf-8"))
-        except Exception:
-            try:
-                _sh.copy2(_src_ls, _dst_ls)
-            except Exception:
-                pass
-        _skip = {"Cache", "Code Cache", "GPUCache", "Service Worker", "DawnGraphiteCache",
-                 "DawnWebGPUCache", "component_crx_cache", "GraphiteDawnCache", "Crashpad", "ShaderCache",
-                 # tab/session-restore state — without these Chrome opens ONE tab,
-                 # not the operator's whole window of restored tabs.
-                 "Sessions", "Current Tabs", "Current Session", "Last Tabs", "Last Session"}
-        _dst_default = os.path.join(golden_folder, "Default")
-        try:
-            _sh.copytree(os.path.join(_ud, _pf), _dst_default,
-                         ignore=lambda d, n: [x for x in n if x in _skip],
-                         ignore_dangling_symlinks=True, copy_function=_sh.copy2)
-        except Exception as _ce:
-            # Partial/failed copy: remove the half-built golden so the launcher
-            # reports "No golden — login on first start" rather than launching a
-            # broken profile. Already flagged above, so NO retry / no re-close.
-            _sh.rmtree(golden_folder, ignore_errors=True)
-            print(f"[{label}] laptop login: profile copy FAILED ({_ce}) — slot needs manual login this run", flush=True)
-            return
-        # Mark the copied profile as cleanly exited so Chrome doesn't try to
-        # restore the old session / show the "restore pages?" crash bubble.
-        try:
-            _pp = os.path.join(_dst_default, "Preferences")
-            _pr = _json.load(open(_pp, encoding="utf-8"))
-            _pr.setdefault("profile", {})
-            _pr["profile"]["exit_type"] = "Normal"
-            _pr["profile"]["exited_cleanly"] = True
-            _ss = _pr.setdefault("session", {})
-            _ss["restore_on_startup"] = 5  # 5 = open New Tab Page (don't restore tabs)
-            _json.dump(_pr, open(_pp, "w", encoding="utf-8"))
-        except Exception:
-            pass
-        print(f"[{label}] laptop login: copied {_pf} -> golden/Default (real session, no code).", flush=True)
+        print(f"[{label}] laptop login: {email} in {_pf} ({_ch}); capturing live cookies via net-log", flush=True)
+        # extract_cookies launches the real profile no-debug + net-log, captures
+        # the live auth cookies, and closes it (channel-only). No decrypt needed.
+        cookies = extract_cookies(_ud, _pf, _ch, log=lambda m: print(m, flush=True))
+        if cookies:
+            with open(cookie_marker, "w", encoding="utf-8") as _f:
+                json.dump(cookies, _f)
+            print(f"[{label}] laptop login: staged {len(cookies)} cookies for injection", flush=True)
+        else:
+            print(f"[{label}] laptop login: 0 cookies extracted — manual login needed this run", flush=True)
     except Exception as _pe:
-        print(f"[{label}] laptop login copy error (continuing, will need manual login): {_pe}", flush=True)
+        print(f"[{label}] laptop login error (continuing): {_pe}", flush=True)
 
 
 def _worker_chrome_channel():
@@ -4414,73 +4184,6 @@ MAX_UNUSUAL_GOLDEN_RESTORES = 4  # per job, then fail instead of restoring again
 _UNUSUAL_GOLDEN_RESTORES = {}    # job_id -> int (cumulative golden restores)
 _UNUSUAL_GR_LOCK = threading.Lock()
 
-# v758.26 — try the operator's proven manual fix (surgically delete the
-# labs.google cookies → Google SSO keeps us signed in → block lifts) BEFORE
-# escalating to a golden restore. A golden restore re-applies the SAME flagged
-# profile cookies and never clears the block, so the v758.24 "straight to golden
-# restore" path golden-looped on a real block. Do up to this many cookie-clears
-# per job first; only if the block survives all of them do we fall through to the
-# golden-restore escalation (still capped by MAX_UNUSUAL_GOLDEN_RESTORES).
-# v758.30 — the per-job cap on NextAuth RE-AUTH attempts (reauth_flow_session)
-# before escalating to a golden restore. The "unusual activity" flag is bound to
-# the labs.google NextAuth session-token; re-minting it via the OAuth flow lifts
-# the block WITHOUT a golden restore and WITHOUT logging the account out (google
-# SSO untouched). Proven against the operator's working-vs-blocked cookie exports
-# + test_reauth.py. (v758.26-29 history: plain cookie delete + reload could NOT
-# re-mint the token — it left the flagged session or stranded on the marketing
-# landing page — which is why those versions had to fall back to golden restore.)
-# v758.31 — per-job cap on the cheap email-cookie-strip recovery before
-# escalating to a golden restore. The block is held off by stripping the
-# lowercase 'email' labs.google cookie (the only structural blocked-vs-working
-# cookie difference); the strip also runs before every submit, so the handler
-# strip is a fallback. Cheap (CDP delete, no navigation), so allow a few.
-MAX_UNUSUAL_COOKIE_CLEARS = 1    # per job: 1 handler re-auth fallback (FailCheck already re-auths), then golden restore
-_UNUSUAL_COOKIE_CLEARS = {}      # job_id -> int (cumulative cookie-clears)
-
-# v758.29/31 — submission-rate backoff. PROVEN (worker log 16:10-16:14): the
-# "unusual activity" block is Google ACCOUNT-LEVEL rate-limiting from generating
-# too fast — re-minting a fresh session (v758.30 re-auth, ok=True) does NOT lift
-# it; the block recurs 2/2 on the very next submit. Only TIME (backing off) clears
-# it. So after a block we HARD-pause submissions for a decaying window.
-#
-# v758.31 — the backoff is GLOBAL, not per-worker: both worker "accounts"
-# (Account1/Account2) drive the SAME google account, so they share one rate limit.
-# A block on either must pause BOTH. Stored under a single shared key.
-_RATE_BACKOFF = {}             # shared key '_shared' -> dict(until, delay)
-_RATE_BACKOFF_KEY = '_shared'
-_RATE_BACKOFF_LOCK = threading.Lock()
-RATE_BACKOFF_WINDOW = 900      # seconds the backoff stays active after the last block
-RATE_BACKOFF_STEP = 30         # extra seconds added per consecutive block (mild safety net)
-RATE_BACKOFF_MAX = 120         # cap on the per-submit extra delay
-
-def _note_unusual_block(account_name):
-    """Record an unusual-activity block: bump the SHARED submission backoff so
-    both workers (same google account) pause before their next submit."""
-    with _RATE_BACKOFF_LOCK:
-        st = _RATE_BACKOFF.get(_RATE_BACKOFF_KEY) or {'until': 0, 'delay': 0}
-        st['delay'] = min(RATE_BACKOFF_MAX, (st['delay'] or 0) + RATE_BACKOFF_STEP)
-        st['until'] = time.time() + RATE_BACKOFF_WINDOW
-        _RATE_BACKOFF[_RATE_BACKOFF_KEY] = st
-        _delay = st['delay']
-    print(f"[{account_name or 'worker'}] 🐢 v758.31 rate-backoff bumped → {_delay}s/submit "
-          f"(account-level rate-limit; both workers pause)", flush=True)
-
-def _rate_backoff_wait(account_name):
-    """Sleep the SHARED backoff delay before a submit, if active. Returns seconds slept."""
-    with _RATE_BACKOFF_LOCK:
-        st = _RATE_BACKOFF.get(_RATE_BACKOFF_KEY)
-        if not st:
-            return 0
-        if time.time() >= st.get('until', 0):
-            _RATE_BACKOFF.pop(_RATE_BACKOFF_KEY, None)  # window expired — reset
-            return 0
-        delay = st.get('delay', 0)
-    if delay > 0:
-        print(f"[{account_name or 'worker'}] 🐢 v758.31 rate-backoff: waiting {delay}s before submit "
-              f"(account recently rate-limited — cooling off)", flush=True)
-        time.sleep(delay)
-    return delay
-
 # v779 — account-worker supervisor: how many times run() restarts a crashed
 # _run_once() before giving up. A single transient (goto timeout on a network
 # blip, browser death, lock race) must NEVER permanently kill an account thread;
@@ -4657,67 +4360,34 @@ def clear_flow_site_data(page, label=""):
     Returns True if the cookie clear succeeded."""
     prefix = f"[{label}] " if label else ""
     ok = False
-    # 1) Cookies — SURGICALLY delete ONLY the labs.google fingerprint cookies via
-    #    CDP. Do NOT clear_cookies()+add_cookies() (lossy — dropped the google.com
-    #    SSO auth cookies). google.com / accounts cookies are never touched here.
-    #
-    # v758.27 — PRESERVE the labs.google NextAuth session/auth cookies. The
-    #    Flow/fx app uses NextAuth.js; its cookies hold the USER SESSION + ULTRA
-    #    entitlement + CSRF token:
-    #      __Secure-next-auth.session-token  (the session; ULTRA lives here)
-    #      __Host-next-auth.csrf-token       (CSRF; generate POSTs fail without it)
-    #      __Secure-next-auth.callback-url
-    #    Deleting all 7 labs.google cookies (v758.26) nuked these → ULTRA badge
-    #    gone, editor SPA never hydrated ("Settings button not found"), every clip
-    #    failed. The "unusual activity" block keys off the fingerprint/client-id
-    #    cookies (the Google-Analytics `_ga*` client id + any non-auth labs cookie),
-    #    NOT the NextAuth session. So delete everything on labs.google EXCEPT the
-    #    session/identity cookies — lifts the block without logging the user out.
-    #
-    # v758.27a — keep the labs.google identity cookies too. Beyond the 3 next-auth
-    #    cookies the jar carries the user's email. The operator's known-good cookie
-    #    export has 8 labs.google cookies and BOTH casings appear — `EMAIL` AND
-    #    lowercase `email` — so the preserve match is CASE-INSENSITIVE (a
-    #    case-sensitive "EMAIL" dropped the lowercase one). Identity cookies to
-    #    keep: __Secure-next-auth.session-token (session; ULTRA lives here),
-    #    __Host-next-auth.csrf-token (generate POSTs), __Secure-next-auth.callback-url,
-    #    email, EMAIL. Live test (test_cookie_clear.py vs a golden-2 copy) confirmed:
-    #    keeping these keeps the editor SPA alive + ULTRA intact across clear+reload
-    #    (v758.26 deleted them → editor never hydrated). Only the `_ga*` fingerprint
-    #    cookies are deleted; they regenerate with a FRESH client-id on the next
-    #    load — the intended fingerprint reset that should dodge the block.
-    PRESERVE_SUBSTR = ("next-auth", "email")  # CASE-INSENSITIVE; name contains any → kept
+    # 1) Cookies — SURGICALLY delete ONLY labs.google cookies via CDP. Do NOT
+    #    clear_cookies()+add_cookies(): clearing all then re-adding is lossy and
+    #    dropped the Google SSO auth cookies, forcing a re-login on the next run
+    #    and corrupting the saved profile. CDP delete-by-name/domain touches
+    #    only the labs.google entries; google.com / accounts cookies are never
+    #    cleared.
     try:
         ctx = page.context
         cdp = ctx.new_cdp_session(page)
         all_c = cdp.send("Network.getCookies").get("cookies", [])
         removed = 0
-        kept = []
         for c in all_c:
             dom = c.get("domain") or ""
-            if "labs.google" not in dom:
-                continue
-            name = c.get("name", "")
-            _nl = name.lower()
-            if any(s in _nl for s in PRESERVE_SUBSTR):
-                kept.append(name)
-                continue
-            try:
-                cdp.send("Network.deleteCookies", {
-                    "name": name,
-                    "domain": dom,
-                    "path": c.get("path", "/"),
-                })
-                removed += 1
-                print(f"{prefix}🧹   deleted labs cookie: {name} (dom={dom})", flush=True)
-            except Exception:
-                pass
+            if "labs.google" in dom:
+                try:
+                    cdp.send("Network.deleteCookies", {
+                        "name": c.get("name", ""),
+                        "domain": dom,
+                        "path": c.get("path", "/"),
+                    })
+                    removed += 1
+                except Exception:
+                    pass
         try:
             cdp.detach()
         except Exception:
             pass
-        print(f"{prefix}🧹 cookies: removed {removed} labs.google fingerprint cookie(s); "
-              f"kept {len(kept)} NextAuth session cookie(s) {kept} + all google.com SSO", flush=True)
+        print(f"{prefix}🧹 cookies: removed {removed} labs.google (Google SSO auth untouched)", flush=True)
         ok = True
     except Exception as e:
         print(f"{prefix}⚠ cookie clear failed: {e}", flush=True)
@@ -4766,211 +4436,6 @@ def clear_flow_site_data(page, label=""):
     except Exception as e:
         print(f"{prefix}⚠ CDP origin clear failed (non-fatal): {e}", flush=True)
     return ok
-
-
-def strip_lowercase_email_cookie(page, label=""):
-    """v758.31 — delete the lowercase `email` labs.google cookie (keep the
-    uppercase `EMAIL`). Proven from the operator's blocked-vs-working cookie
-    exports: the ONLY structural cookie difference is this cookie — PRESENT when
-    the account is blocked ("unusual activity"), ABSENT when it works. The app /
-    OAuth callback keeps re-creating it, so we strip it right before each submit
-    to hold the working cookie shape. Returns True if a cookie was removed."""
-    prefix = f"[{label}] " if label else ""
-    removed = 0
-    cdp = None
-    try:
-        cdp = page.context.new_cdp_session(page)
-        for c in cdp.send("Network.getCookies").get("cookies", []):
-            dom = c.get("domain") or ""
-            # exact lowercase name only — never touch uppercase EMAIL (kept in working state)
-            if "labs.google" in dom and c.get("name") == "email":
-                try:
-                    cdp.send("Network.deleteCookies", {"name": "email", "domain": dom, "path": c.get("path", "/")})
-                    removed += 1
-                except Exception:
-                    pass
-        if removed:
-            print(f"{prefix}🧼 v758.31 stripped lowercase 'email' cookie ({removed}) — matches working state", flush=True)
-    except Exception as e:
-        print(f"{prefix}⚠ strip email cookie failed: {e}", flush=True)
-    finally:
-        if cdp is not None:
-            try:
-                cdp.detach()
-            except Exception:
-                pass
-    return removed > 0
-
-
-# v758.36 — operator-supplied "working" labs.google cookie set. The operator drops
-# a Netscape-format cookie export (the one captured while generation WORKS) at this
-# path; on a block we delete the stale labs cookies and inject this working set
-# (fresh session-token + full labs cookies) so the worker's session MATCHES the
-# working one. google.com SSO is never touched. Refresh the file when the
-# session-token expires.
-WORKING_COOKIES_FILE = os.path.join(BASE_DIR, "working_cookies.txt")
-# next-auth cookies are httpOnly; the Netscape export can't encode that, so flag them by name.
-_HTTPONLY_LABS_NAMES = ("next-auth.session-token", "next-auth.csrf-token", "next-auth.callback-url")
-
-
-def _parse_netscape_labs_cookies(path):
-    """Parse a Netscape cookie file → list of labs.google cookie dicts for CDP."""
-    out = []
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.rstrip("\n")
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split("\t")
-                if len(parts) < 7:
-                    continue
-                domain, _flag, cpath, secure, expiry, name, value = parts[:7]
-                if "labs.google" not in domain:
-                    continue
-                ck = {
-                    "name": name,
-                    "value": value,
-                    "domain": domain,
-                    "path": cpath or "/",
-                    "secure": (secure.strip().upper() == "TRUE"),
-                    "httpOnly": any(h in name for h in _HTTPONLY_LABS_NAMES),
-                }
-                try:
-                    exp = int(float(expiry))
-                    if exp > 0:
-                        ck["expires"] = exp
-                except Exception:
-                    pass
-                out.append(ck)
-    except Exception:
-        return []
-    return out
-
-
-def inject_working_labs_cookies(page, label=""):
-    """v758.36 — delete the stale labs.google cookies and inject the operator's
-    known-working set from WORKING_COOKIES_FILE, so the worker session MATCHES the
-    working cookies. Returns True if cookies were injected."""
-    prefix = f"[{label}] " if label else ""
-    cookies = _parse_netscape_labs_cookies(WORKING_COOKIES_FILE)
-    if not cookies:
-        print(f"{prefix}ⓘ no working_cookies.txt (or no labs cookies in it) — skipping inject", flush=True)
-        return False
-    cdp = None
-    try:
-        cdp = page.context.new_cdp_session(page)
-        # delete current labs cookies first so the injected set fully replaces them
-        for c in cdp.send("Network.getCookies").get("cookies", []):
-            if "labs.google" in (c.get("domain") or ""):
-                try:
-                    cdp.send("Network.deleteCookies", {"name": c.get("name", ""), "domain": c.get("domain"), "path": c.get("path", "/")})
-                except Exception:
-                    pass
-        ok = 0
-        for ck in cookies:
-            try:
-                cdp.send("Network.setCookie", ck)
-                ok += 1
-            except Exception as _se:
-                print(f"{prefix}⚠ setCookie {ck['name']} failed: {_se}", flush=True)
-        print(f"{prefix}🍪 v758.36 injected {ok}/{len(cookies)} working labs.google cookies (matches operator's working set)", flush=True)
-        return ok > 0
-    except Exception as e:
-        print(f"{prefix}⚠ inject working cookies failed: {e}", flush=True)
-        return False
-    finally:
-        if cdp is not None:
-            try:
-                cdp.detach()
-            except Exception:
-                pass
-
-
-def reauth_flow_session(page, label="", timeout_s=45):
-    """v758.30 — re-mint a FRESH labs.google NextAuth session via the OAuth
-    sign-in flow, using the intact google.com SSO (NO full re-login, NO golden
-    restore). THIS is what lifts the 'unusual activity' block.
-
-    Proven against the operator's known-good vs blocked cookie exports + a live
-    test (test_reauth.py): the block is bound to the labs.google
-    __Secure-next-auth.session-token; a fresh token clears it while the google.com
-    SSO cookies stay identical (so the account stays signed in + ULTRA). Plain
-    cookie deletion + reload does NOT re-mint the token (the app strands on the
-    marketing landing page) — only the NextAuth OAuth init does:
-        GET  /fx/api/auth/csrf                  -> csrfToken
-        POST /fx/api/auth/signin/google         -> {url: accounts.google.com/...}
-        GET  that url                           -> silent SSO -> callback -> new session
-    Returns True if a new session-token was minted."""
-    prefix = f"[{label}] " if label else ""
-    cdp = None
-    try:
-        cdp = page.context.new_cdp_session(page)
-        def _sess():
-            for c in cdp.send("Network.getCookies").get("cookies", []):
-                if "labs.google" in (c.get("domain") or "") and c.get("name") == "__Secure-next-auth.session-token":
-                    return c.get("value", "")
-            return ""
-        old_sess = _sess()
-        # v758.32 — delete ALL labs.google cookies (the operator's manual fix is a
-        # full labs.google cookie delete, not a 3-cookie subset). google.com SSO is
-        # untouched, so the OAuth re-init below re-mints a fresh session.
-        _del = 0
-        for c in cdp.send("Network.getCookies").get("cookies", []):
-            if "labs.google" in (c.get("domain") or ""):
-                try:
-                    cdp.send("Network.deleteCookies", {"name": c.get("name", ""), "domain": c.get("domain"), "path": c.get("path", "/")})
-                    _del += 1
-                except Exception:
-                    pass
-        print(f"{prefix}🧹 v758.32 re-auth: deleted {_del} labs.google cookies (google SSO kept)", flush=True)
-        # Must be on a labs.google origin for the same-origin signin fetch.
-        cur_url = page.url or ""
-        if "labs.google" not in cur_url:
-            try:
-                page.goto("https://labs.google/fx", wait_until="domcontentloaded", timeout=30000)
-            except Exception:
-                pass
-            cur_url = page.url or "https://labs.google/fx"
-        oauth = page.evaluate(r"""async (cb) => {
-            const base = location.origin + '/fx';
-            try {
-                const csrf = (await (await fetch(base + '/api/auth/csrf', {credentials:'include'})).json()).csrfToken;
-                const body = new URLSearchParams({csrfToken: csrf, callbackUrl: cb, json: 'true'});
-                const r = await fetch(base + '/api/auth/signin/google', {
-                    method:'POST', credentials:'include',
-                    headers:{'Content-Type':'application/x-www-form-urlencoded'}, body});
-                const j = await r.json().catch(()=>({}));
-                return {status: r.status, url: j.url || null};
-            } catch(e){ return {error: String(e)}; }
-        }""", cur_url)
-        if not oauth or not oauth.get("url"):
-            print(f"{prefix}⚠ v758.30 re-auth: signin init failed ({oauth})", flush=True)
-            return False
-        # Navigate to Google OAuth — intact SSO makes it silent and redirects back.
-        try:
-            page.goto(oauth["url"], wait_until="domcontentloaded", timeout=timeout_s * 1000)
-        except Exception:
-            pass
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            s = _sess()
-            if s and s != old_sess:
-                print(f"{prefix}🔑 v758.30 re-auth: minted a FRESH labs session (block lifts; still signed in)", flush=True)
-                return True
-            time.sleep(2)
-        print(f"{prefix}⚠ v758.30 re-auth: no fresh session-token after {timeout_s}s", flush=True)
-        return False
-    except Exception as e:
-        print(f"{prefix}⚠ v758.30 re-auth raised: {e}", flush=True)
-        return False
-    finally:
-        if cdp is not None:
-            try:
-                cdp.detach()
-            except Exception:
-                pass
-
 
 # v738 — Stuck-clip detection during inter-clip wait scanner.
 # Veo render may complete server-side but the DOM never updates with the <video>
@@ -7251,8 +6716,8 @@ def refresh_clip_statuses(job):
             generating = sum(1 for c in fresh_statuses.values() if c.get('status') == 'generating')
             print(f"[RefreshClips] ✓ Updated {updated} clip statuses for {job_id[:8]} "
                   f"(DB: {completed} completed, {generating} generating, {len(clips)} total)", flush=True)
-        # v796 — silent when nothing changed (was '[RefreshClips] No status changes'
-        # every poll); the 'Updated' line above prints only on a real status change.
+        else:
+            print(f"[RefreshClips] No status changes for {job_id[:8]}", flush=True)
     except Exception as e:
         print(f"[RefreshClips] ⚠ Failed to refresh (non-fatal): {e}", flush=True)
 
@@ -7317,97 +6782,6 @@ def update_job_status(job_id, status, error_message=None, retries=3):
     return None
 
 
-# v797 — CLIP FAILURE LEDGER. Every clip failure/redo funnels through
-# update_clip_status(); capture each one (categorized + full reason + attempt +
-# job) to a greppable jsonl AND one clean console line, so failure MODES are
-# visible and improvable instead of buried in the scroll. Inspect with:
-#   python -c "import json,collections as c; \
-#     t=c.Counter(json.loads(l)['type'] for l in open('clip_failures.jsonl')); \
-#     [print(n,k) for k,n in t.most_common()]"
-CLIP_FAILURES_FILE = os.path.join(BASE_DIR, "clip_failures.jsonl")
-
-
-def _categorize_clip_failure(status, error_message):
-    """Map a failure/redo into a coarse TYPE so patterns aggregate. Buckets track
-    the REAL worker failure modes; add a bucket when an 'other' reason recurs."""
-    m = (error_message or "").lower()
-    if status == 'flow_redo_queued':
-        if any(k in m for k in ('download', 'mediaid', 'never rendered', 'not found', 'unbound')):
-            return 'redo_download'
-        return 'redo'
-    if any(k in m for k in ('unusual activity', 'actividad inusual', 'rate-limit', 'rate limit')):
-        return 'unusual_activity'
-    if any(k in m for k in ('no downloadable video', 'mediaid', 'never rendered', 'unbound', 'poster')):
-        return 'dead_mediaid_404'
-    if any(k in m for k in ('policy', 'content', 'prominent', 'rejected')):
-        return 'content_policy'
-    if any(k in m for k in ('timed out', 'timeout', 'stuck')):
-        return 'timeout'
-    if any(k in m for k in ('crash', 'snap')):
-        return 'browser_crash'
-    if any(k in m for k in ('no start frame', 'no clip data', 'cannot regenerate', 'frame')):
-        return 'missing_input'
-    if 'submission crashed' in m:
-        return 'submit_error'
-    return 'other'
-
-
-def _record_clip_failure(clip_id, status, error_message):
-    """Append a structured failure record + print ONE clean console line. Called
-    from update_clip_status for 'failed'/'flow_redo_queued' only. Never raises."""
-    try:
-        ftype = _categorize_clip_failure(status, error_message)
-        with _CLIP_ATTEMPT_LOCK:
-            attempt = _CLIP_ATTEMPTS.get(clip_id, 0)
-        try:
-            job_id = lookup_job_for_clip(clip_id)
-        except Exception:
-            job_id = None
-        reason = (error_message or "").strip() or "(no reason given)"
-        print(f"[clip-fail] clip={clip_id} ▸ {ftype.upper()} ({status}) attempt={attempt} — {reason}", flush=True)
-        try:
-            with open(CLIP_FAILURES_FILE, 'a', encoding='utf-8') as f:
-                f.write(json.dumps({
-                    'ts': time.time(),
-                    'clip_id': clip_id,
-                    'job_id': job_id,
-                    'attempt': attempt,
-                    'status': status,
-                    'type': ftype,
-                    'reason': reason,
-                }) + "\n")
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-
-def job_failure_rollup(job_id):
-    """v797 — categorized one-line failure summary for a job, read from the
-    ledger. Counts terminal 'failed' only (skips transient redo churn). '' if
-    none. Lets each job END with what actually broke + how often."""
-    if not job_id:
-        return ""
-    try:
-        import collections
-        counts = collections.Counter()
-        with open(CLIP_FAILURES_FILE, 'r', encoding='utf-8') as f:
-            for line in f:
-                try:
-                    r = json.loads(line)
-                except Exception:
-                    continue
-                if r.get('job_id') == job_id and r.get('status') == 'failed':
-                    counts[r.get('type', 'other')] += 1
-        if not counts:
-            return ""
-        return " · ".join(f"{t} ×{n}" for t, n in counts.most_common())
-    except FileNotFoundError:
-        return ""
-    except Exception:
-        return ""
-
-
 def update_clip_status(clip_id, status, output_url=None, error_message=None, retries=3):
     """Update clip status via API with retry on failure.
 
@@ -7426,10 +6800,6 @@ def update_clip_status(clip_id, status, output_url=None, error_message=None, ret
         "output_url": output_url,
         "error_message": error_message
     }
-    # v797 — failure ledger: capture every failure/redo at the funnel, BEFORE the
-    # API write, so the reason is recorded even if the platform write itself fails.
-    if status in ('failed', 'flow_redo_queued'):
-        _record_clip_failure(clip_id, status, error_message)
     for attempt in range(retries):
         result, code = api_request_ex("POST", f"/clips/{clip_id}/status", data)
         if result:
@@ -8839,23 +8209,20 @@ def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retrie
                     print(f"{prefix}⚠️ Frames still missing after re-click — uploading manually...", flush=True)
                     
                     if start_frame and os.path.exists(start_frame):
-                        # v799 — NEVER fall through to Generate without the start
-                        # frame. The old code caught the failure and printed
-                        # "continuing without frames", submitting a frame-less
-                        # render = silent garbage that looked "done". Any failure
-                        # here now RAISES → this attempt retries (caller requeues
-                        # the clip if attempts exhaust) per the function contract.
-                        upload_ok, rejected_which = upload_both_frames_with_policy_check(
-                            page, start_frame, end_frame, context=f"{prefix}Clip {clip_num} reuse-fallback")
-                        if upload_ok:
-                            print(f"{prefix}✓ Frames uploaded manually as fallback", flush=True)
-                            # CRITICAL: Re-fill prompt — upload_both_frames clears the input
-                            fill_prompt_textarea(page, prompt)
-                            print(f"{prefix}✓ Re-filled prompt after manual upload", flush=True)
-                        else:
-                            raise Exception(f"reuse-fallback frame upload failed ({rejected_which}) — refusing to submit clip {clip_num} without its start frame")
+                        try:
+                            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+                                page, start_frame, end_frame, context=f"{prefix}Clip {clip_num} reuse-fallback")
+                            if upload_ok:
+                                print(f"{prefix}✓ Frames uploaded manually as fallback", flush=True)
+                                # CRITICAL: Re-fill prompt — upload_both_frames clears the input
+                                fill_prompt_textarea(page, prompt)
+                                print(f"{prefix}✓ Re-filled prompt after manual upload", flush=True)
+                            else:
+                                print(f"{prefix}⚠️ Frame upload rejected ({rejected_which}) — continuing without frames", flush=True)
+                        except Exception as upload_err:
+                            print(f"{prefix}⚠️ Frame upload error: {upload_err} — continuing", flush=True)
                     else:
-                        raise Exception(f"reuse-fallback: no frame file available for clip {clip_num} — refusing to submit without start frame")
+                        print(f"{prefix}⚠️ No frame files available for manual upload", flush=True)
             else:
                 print(f"{prefix}✓ Frames included in reuse", flush=True)
             
@@ -9535,7 +8902,6 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
             let hasGenerating = false;
             let failedCount = 0;
             let unusualActivityCount = 0;
-            const failedTexts = [];
 
             tiles.forEach(t => {
                 // Check for completed video
@@ -9560,37 +8926,9 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
 
                 if (hasRefresh) {
                     failedCount++;
-                    // record the tile's text for diagnostics (collapse whitespace, cap len)
-                    failedTexts.push(text.replace(/\s+/g, ' ').trim().slice(0, 200));
-                    // v758.26 — Google account-block detection, LANGUAGE-AGNOSTIC.
-                    // The Flow UI localizes the block card, so English-only matching
-                    // (v737: 'unusual activity' / 'Help Center') missed it whenever
-                    // Chrome rendered another locale — e.g. Spanish "Detectamos
-                    // actividad inusual" / "Centro de ayuda" — so unusualActivityCount
-                    // stayed 0, FailCheck returned a generic failure, and the worker
-                    // golden-restore-looped instead of routing to the block handler.
-                    // Match a normalized (lowercased, accent- + curly-apostrophe-
-                    // stripped) copy against every known localization.
-                    const norm = text.toLowerCase()
-                        .normalize('NFD').replace(/[̀-ͯ]/g, '')
-                        .replace(/[‘’]/g, "'");
-                    const UNUSUAL = [
-                        'unusual activity',        // en
-                        'actividad inusual',       // es
-                        'activite inhabituelle',   // fr
-                        'ungewohnliche aktivitat', // de
-                        'attivita insolita',       // it
-                        'atividade incomum',       // pt
-                    ];
-                    const HELP = [
-                        'help center',             // en
-                        'centro de ayuda',         // es
-                        "centre d'aide",           // fr
-                        'hilfecenter',             // de
-                        'centro assistenza',       // it
-                        'central de ajuda',        // pt
-                    ];
-                    if (UNUSUAL.some(s => norm.includes(s)) || HELP.some(s => norm.includes(s))) {
+                    // v737 — Google account-block detection. Signature text on the
+                    // failed tile is "unusual activity" / "Help Center".
+                    if (text.includes('unusual activity') || text.includes('Help Center')) {
                         unusualActivityCount++;
                     }
                     return;
@@ -9605,7 +8943,6 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                 hasGenerating: hasGenerating,
                 failedCount: failedCount,
                 unusualActivityCount: unusualActivityCount,
-                failedTexts: failedTexts,
                 allFailed: tiles.length > 0 && failedCount === tiles.length && !hasGenerating && !hasVideo
             };
         }
@@ -9625,14 +8962,6 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         
         print(f"[FailCheck] data-index={data_index}: {tiles} tiles, {failed_count} failed, generating={has_generating}, video={has_video}", flush=True)
 
-        # v758.26 — dump the actual failed-tile text so the on-screen block reason
-        # (e.g. localized "unusual activity" card) is visible in logs. Without this
-        # we only saw "N failed" and could not tell a block from a transient render
-        # fail — the gap that hid the Spanish-locale detection miss.
-        _ft = result.get('failedTexts', [])
-        if _ft:
-            print(f"[FailCheck] failed-tile text: {_ft}", flush=True)
-
         # v758.20 — detect 'We noticed some unusual activity' on the FIRST read,
         # BEFORE clicking Retry. Retry can't clear an account block, and worse:
         # it flips the blocked tile to a transient 'generating %' state, so the
@@ -9643,116 +8972,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         # once-per-job gate); otherwise fall through to the retry + strike path.
         _first_unusual = result.get('unusualActivityCount', 0)
         if _first_unusual > 0 and job_id:
-            # v758.32/33 — the operator's manual fix for Flow's known "unusual
-            # activity" error: delete the labs.google cookies, the Flow tab
-            # re-auths (reauth_flow_session = the worker's auto-refresh equivalent:
-            # delete all labs cookies -> NextAuth OAuth via the intact google SSO
-            # -> fresh session, lands back on this project), then RE-GENERATE the
-            # failed tile in the SAME project.
-            #
-            # v758.33 — VERIFY the recovery STICKS. After re-auth the blocked tile
-            # can flash a transient 'generating %' and then fail again — the worker
-            # thought it recovered (operator: "i still get the error but we don't
-            # see it"), queued a download for a clip that never rendered, and it
-            # stuck. So do NOT trust an immediate 'generating'. Re-generate, then
-            # poll: success only on a real <video> or sustained generating WITHOUT
-            # re-showing the block; a re-shown block => re-auth again; escalate
-            # after a few tries.
-            print(f"[FailCheck] ⚠ unusual-activity on FIRST check ({_first_unusual}/{tiles} tiles) — v758.33 re-auth + verify-retry (operator's manual fix)", flush=True)
-
-            def _click_retry_failed_tiles():
-                try:
-                    container = page.locator(f"div[data-index='{data_index}']").first
-                    all_raw = container.locator("[data-tile-id]").all()
-                    seen_ids, uniq = set(), []
-                    for t in all_raw:
-                        try:
-                            tid = t.get_attribute("data-tile-id")
-                            if tid and tid not in seen_ids:
-                                seen_ids.add(tid); uniq.append(t)
-                        except Exception:
-                            pass
-                    _n = 0
-                    for _i, tile in enumerate(uniq):
-                        try:
-                            rb = tile.locator("button:has(i:text('refresh'))").first
-                            if rb.count() > 0 and rb.is_visible(timeout=2000):
-                                human_click_element(page, rb, f"Retry tile {_i+1}")
-                                _n += 1; time.sleep(1)
-                        except Exception:
-                            pass
-                    if _n:
-                        print(f"[FailCheck] v758.33 clicked Retry on {_n} failed tile(s)", flush=True)
-                except Exception as _e:
-                    print(f"[FailCheck] v758.33 retry-click error: {_e}", flush=True)
-
-            _MAX_REAUTH = 2
-            for _att in range(1, _MAX_REAUTH + 1):
-                # v758.38 — inject the operator's working labs cookies IN PLACE —
-                # do NOT reload. A page reload makes the in-progress/failed tile
-                # DISAPPEAR (operator: "when we refresh the page and it's not done
-                # the tile disappears, and if failed it disappears too"), which
-                # destroyed the retry target + made verify see an empty slot and
-                # wrongly call rendered clips 'failed'. We inject a VALID session
-                # (not a logout like the operator's manual delete), so the next API
-                # call — the Retry click — just uses the fresh session cookie; no
-                # reload needed. Fall back to NextAuth re-auth only if there is no
-                # working cookie file.
-                # v804 — INJECT-FIRST (operator's choice). Inject a FRESH working
-                # cookie set from working_cookies.txt: it needs NO page navigation,
-                # so it KEEPS the in-progress tiles and avoids the re-mint "ghost"
-                # desync (the v802 delete+re-mint navigates → reload mid-submit →
-                # 'Generate click had no effect' ghosts → redo storm). Re-mint is
-                # now the FALLBACK ONLY — used when there is no working set (attempt
-                # 1) or the injected set has gone stale and the block survives into
-                # attempt 2. The operator refreshes working_cookies.txt each session
-                # so the injected token is valid.
-                if _att == 1:
-                    _injected = False
-                    try:
-                        _injected = inject_working_labs_cookies(page, "FailCheck")
-                    except Exception as _ie:
-                        print(f"[FailCheck] inject raised: {_ie}", flush=True)
-                    if not _injected:
-                        print("[FailCheck] v804: no working cookie set to inject — re-minting a fresh session", flush=True)
-                        try:
-                            reauth_flow_session(page, "FailCheck")
-                        except Exception as _re:
-                            print(f"[FailCheck] re-auth raised: {_re}", flush=True)
-                else:
-                    print("[FailCheck] v804: injected set did not lift the block (stale?) — falling back to delete + re-mint", flush=True)
-                    try:
-                        reauth_flow_session(page, "FailCheck")
-                    except Exception as _re:
-                        print(f"[FailCheck] re-auth raised: {_re}", flush=True)
-                time.sleep(2)            # let the re-mint settle
-                _click_retry_failed_tiles()
-                # VERIFY — the ONLY real failure is the unusual-activity block
-                # RE-APPEARING. A 4s clip takes 30-90s to render and a ready clip
-                # shows a POSTER (no <video> tag yet), so "no video" is NOT failure
-                # (that false-negative marked already-rendered clips 2 & 4 failed).
-                # Watch ~30s: block re-appears => re-inject; otherwise (video /
-                # generating / poster / idle) => recovered, let it render + download.
-                _blocked = False
-                _video = False
-                _deadline = time.time() + 30
-                while time.time() < _deadline:
-                    time.sleep(5)
-                    try:
-                        rc = page.evaluate(TILE_CHECK_JS.replace("DATA_INDEX_PLACEHOLDER", str(data_index)))
-                    except Exception:
-                        continue
-                    if rc.get('unusualActivityCount', 0) > 0:
-                        _blocked = True; break
-                    if rc.get('hasVideo'):
-                        _video = True; break
-                if _blocked:
-                    _next = "next: delete + re-mint" if _att < _MAX_REAUTH else "recovery exhausted — escalating to handler"
-                    print(f"[FailCheck] v804 attempt {_att}/{_MAX_REAUTH}: block RE-APPEARED — {_next}", flush=True)
-                    continue
-                print(f"[FailCheck] ✓ v758.38 recovery verified ({'video' if _video else 'no re-block'}) — clip rendering, letting it download", flush=True)
-                return False
-            print(f"[FailCheck] ⚠ v758.38 recovery x{_MAX_REAUTH} did not stick — escalating to handler", flush=True)
+            print(f"[FailCheck] ⚠ unusual-activity on FIRST check ({_first_unusual}/{tiles} tiles) — routing to cookie-clear before retry (retry would mask it) (v758.20)", flush=True)
             return "abort_unusual_activity"
 
         # Click Retry on truly failed tiles (ones with 'refresh' button)
@@ -9810,9 +9030,6 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
             rc_failed = recheck.get('failedCount', 0)
             rc_tiles = recheck.get('tiles', 0)
             print(f"[FailCheck] Re-check: {rc_tiles} tiles, {rc_failed} failed, generating={rc_generating}, video={rc_video}", flush=True)
-            _rcft = recheck.get('failedTexts', [])
-            if _rcft:
-                print(f"[FailCheck] re-check failed-tile text: {_rcft}", flush=True)
             
             if rc_generating:
                 print(f"[FailCheck] ✓ Clip generating after retry (has percentage)", flush=True)
@@ -14513,77 +13730,31 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
 
 
 def find_dialog_upload_button(dialog):
-    """Find the 'Upload media' control inside a Flow frame dialog.
-
-    v799 — LANGUAGE-AGNOSTIC + STRUCTURE-AGNOSTIC. The dialog has several
-    controls (date dropdown, Images tab, Drive uploads, Upload-media, a 'Recent'
-    dropdown). The OLD selectors mixed two broken assumptions:
-      1. English UI TEXT ('Upload image' / has-text('Upload')) — these MISS on a
-         Spanish (es-419) account where the button reads 'Cargar medios'. The
-         worker's accounts run localized Flow, so every text selector failed.
-      2. ':text(\"upload\")' is a SUBSTRING match, so the icon selector also
-         matched the DRIVE button whose ligature is 'drive_folder_upload'.
-    When all five missed, the caller fell back to dialog.locator('button').first
-    = the DATE DROPDOWN, which set no file → the clip was submitted with NO
-    start frame (silent garbage render).
-
-    The only reliable cross-locale signal is the material-icon ligature, which
-    Google does NOT translate and which renders here as visible text:
-        upload               -> the Upload-media control we want
-        drive_folder_upload  -> Drive uploads (DIFFERENT button, must NOT match)
-        image                -> Images tab
-    So match the icon by EXACT text 'upload' (text-is, not substring → excludes
-    drive_folder_upload), on a DESCENDANT <i>/<span> (descendant, not a brittle
-    direct-child chain). Localized visible-label text is only a fallback.
+    """Find the actual 'Upload image' button inside a Flow frame dialog.
+    
+    The dialog contains multiple buttons (date dropdown, upload, 'Recently Used' dropdown).
+    The upload element is identified by its <i> icon with text 'upload' or text 'Upload image'.
+    
+    NOTE: As of April 2025, Google changed the upload button from <button> to <div>,
+    so we check both element types.
     """
-    # v803 — JS SCAN (replaces the v799 CSS approach, which was too strict: its
-    # ':is(button, [role=button], [tabindex], [aria-haspopup])' host filter
-    # EXCLUDED the bare <div> Google now uses for the upload control, so the
-    # Spanish 'Cargar medios' / icon never matched → fell to button.first =
-    # the date dropdown). This scans every element for the material-icon
-    # ligature 'upload' (EXACT — excludes Drive's 'drive_folder_upload') OR a
-    # localized upload label, skips Drive/Recents/Images, then climbs to the
-    # nearest clickable ancestor and tags it. Locale + DOM-structure agnostic.
-    try:
-        found = dialog.evaluate("""(root) => {
-            const norm = s => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-            const iconExactUpload = el => {
-                for (const ic of el.querySelectorAll('i, span, [class*=symbol], [class*=icon]')) {
-                    if (norm(ic.textContent) === 'upload') return true;
-                }
-                return false;
-            };
-            const labelRe = /(upload media|upload image|^upload$|cargar medios|cargar archivos|subir archivos|carregar|t[e\\u00e9]l[e\\u00e9]verser|importer|hochladen|carica|\\u8f7d|\\u4e0a\\u4f20)/i;
-            const skipRe = /(drive|cargas|recient|recent|im[a\\u00e1]genes|images|galer|gallery)/i;
-            const cands = root.querySelectorAll('button, [role=button], [tabindex], div, span, label');
-            for (const el of cands) {
-                const t = el.textContent || '';
-                if (skipRe.test(t)) continue;
-                if (iconExactUpload(el) || labelRe.test(t)) {
-                    let n = el;
-                    for (let i = 0; i < 5 && n && n !== root; i++) {
-                        if (n.tagName === 'BUTTON' || n.getAttribute('role') === 'button' || n.hasAttribute('tabindex') || n.hasAttribute('aria-haspopup')) break;
-                        n = n.parentElement;
-                    }
-                    (n || el).setAttribute('data-kv-upload', '1');
-                    return true;
-                }
-            }
-            return false;
-        }""")
-        if found:
-            return dialog.locator('[data-kv-upload="1"]').first
-    except Exception as _e:
-        print(f"[find_dialog_upload_button] JS scan error: {_e}", flush=True)
-
-    # Diagnostic: dump the dialog's clickable HTML so the exact upload-control
-    # structure is captured if this STILL misses (fix precisely, not blind).
-    try:
-        _dump = dialog.evaluate("""(root) => Array.from(root.querySelectorAll('button, [role=button], div[tabindex], [aria-haspopup], div')).slice(0, 14).map(b => (b.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 140))""")
-        print(f"[find_dialog_upload_button] ⚠️ no upload control matched — dialog clickables: {_dump}", flush=True)
-    except Exception:
-        pass
-    print("[find_dialog_upload_button] ⚠️ falling back to button.first (last resort)", flush=True)
+    # Primary: div or button with upload icon (current Flow UI uses <div>)
+    for selector in [
+        "div:has(> div > i:text('upload'))",           # New: nested div > div > i
+        "div:has(i:text('upload')):has-text('Upload')", # New: div with icon + text
+        "button:has(i:text('upload'))",                 # Legacy: button with icon
+        "div:has-text('Upload image')",                 # Text-based div match
+        "button:has(span:text('Upload image'))",        # Legacy: button with span
+    ]:
+        try:
+            btn = dialog.locator(selector)
+            if btn.count() > 0:
+                return btn.first
+        except Exception:
+            continue
+    
+    # Last resort
+    print("[find_dialog_upload_button] ⚠️ Could not find upload button by icon/text, using button.first", flush=True)
     return dialog.locator("button").first
 
 
@@ -15458,15 +14629,11 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
             if cached_url:
                 project_url = cached_url
     
-    _redo_trigger = (clip.get('error_message') or clip.get('status') or '(unknown)')
-    if isinstance(_redo_trigger, str):
-        _redo_trigger = _redo_trigger.strip()[:160] or '(unknown)'
     print(f"\n{'='*60}", flush=True)
-    print(f"REDO ▶ clip {clip_index+1}  attempt {attempt}  acct={account_name or 'single'}", flush=True)
-    print(f"  WHY (trigger): {_redo_trigger}", flush=True)
+    print(f"REDO: Clip {clip_index+1} (Attempt {attempt})", flush=True)
     print(f"[worker-id] {WORKER_VERSION} build={WORKER_BUILD} path=redo job={str(job_id)[:8]}", flush=True)
-    print(f"  job={job_id[:8]}  project={project_url or 'unknown'}", flush=True)
-    print(f"  steps follow, each tagged [REDO]: navigate → reattach frames → resubmit → check → download", flush=True)
+    print(f"Job: {job_id[:8]}...", flush=True)
+    print(f"Project: {project_url or 'unknown'}", flush=True)
     print(f"{'='*60}", flush=True)
     
     if not project_url:
@@ -15659,22 +14826,8 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # (or any cycles carried over from the main-gen path) starts fresh.
     clear_auto_redo_cycle(clip_id)
 
-    # Check for immediate failure. v759c — pass job_id so the unusual-activity
-    # inject recovery runs here too (the redo path used to omit it, so an
-    # "actividad inusual" block fell through to the policy router below and was
-    # wrongly treated as a content-policy block → "switching model to Veo 3.1
-    # Fast" + redo loop). With job_id, check_recent_clip_failure injects the
-    # working cookies + retries inline; if it recovers it returns False (redo
-    # proceeds), else it returns "abort_unusual_activity".
-    immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None, job_id=job_id)
-    if immediate_failure == "abort_unusual_activity":
-        # v759c — unusual-activity block, NOT a content-policy block. Do NOT route
-        # to policy_gen_next_action (it wrongly swaps model + loops). Just requeue
-        # the redo so a later attempt retries with a fresh injected session.
-        print(f"[REDO] 🧹 Clip {clip_index+1} unusual-activity block (not policy) — requeueing redo, NO model swap", flush=True)
-        update_clip_status(clip_id, 'flow_redo_queued', error_message="Unusual-activity block — will retry")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return False
+    # Check for immediate failure
+    immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None)
     if immediate_failure:
         # v777 — an immediate double-tile failure right after a redo submit is
         # almost always a content-policy block (same image + same prompt that was
@@ -17985,15 +17138,6 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         
         print(f"\n--- Clip {i+1}/{len(clips)} (clip_index={clip_index}) ---")
 
-        # v758.36 — NO email-strip. The operator's working cookie export (file 6)
-        # CONTAINS the lowercase 'email' cookie, so its presence is NOT the block.
-        # The block is a stale/flagged labs session; recovery = a fresh valid
-        # session, which we get by injecting the operator's working cookie set
-        # (inject_working_labs_cookies) and/or re-auth — handled on-block in FailCheck.
-
-        # v758.29 — mild submission-rate backoff safety net (no-op when healthy).
-        _rate_backoff_wait(account_name)
-
         # Detect Chrome tab crash ("Aw, Snap!") before attempting any interaction
         if is_page_crashed(page):
             print(f"[SUBMIT] 💥 Tab crashed ('Aw, Snap!') before clip {clip_index+1} — recovering...", flush=True)
@@ -18674,12 +17818,6 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # v737 — successful submission clears unusual-activity strike counter for this job
             with _UNUSUAL_ACTIVITY_LOCK:
                 _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
-            # v758.26 — a clean submit means the block lifted; reset the per-job
-            # cookie-clear + golden-restore escalation counters so a later block
-            # on this job starts the recovery ladder fresh (cookie-clear first).
-            with _UNUSUAL_GR_LOCK:
-                _UNUSUAL_COOKIE_CLEARS.pop(job_id, None)
-                _UNUSUAL_GOLDEN_RESTORES.pop(job_id, None)
 
         # v758.21 — "unusual activity" block: replicate the operator's manual
         # fix EVERY time it appears — delete the labs.google cookies + reload
@@ -18688,141 +17826,26 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # we keep clearing. A short cooldown skips a redundant clear when
         # several clips / parallel accounts trip the same block within seconds.
         if clip_failed == "abort_unusual_activity":
-            # v758.26 — the operator's PROVEN manual fix for the Google "unusual
-            # activity" block is to delete the labs.google site cookies: Google
-            # SSO keeps the account signed in, the block lifts, generation resumes.
-            # clear_flow_site_data (v758.23) does exactly that surgically via CDP
-            # (only labs.google cookies + cache; google.com SSO and the app's
-            # localStorage route state are preserved, so the SPA stays on the
-            # editor — NOT the marketing landing page the old lossy clear hit). So
-            # replicate the manual fix automatically FIRST and retry the job
-            # WITHOUT a golden restore. The v758.24 "straight to golden restore"
-            # path was wrong on a real block: a golden restore re-applies the SAME
-            # flagged profile cookies and never clears it → the golden-restore loop
-            # the operator saw. Escalate to golden restore only if the block
-            # survives MAX_UNUSUAL_COOKIE_CLEARS surgical clears.
-            #
-            # v758.25 — refresh DB truth FIRST so the reset loops below never flip
-            # an already-COMPLETED clip (finished async by the HTTP download worker,
-            # still 'generating' in memory) back to 'pending'.
+            # v758.24 — operator decision: skip the cookie-clear and go straight
+            # to a GOLDEN RESTORE. The cookie-clear logs the account out of Flow
+            # (removing the labs.google session cookie drops the SPA to the
+            # marketing landing page on a project URL); a plain reload does NOT
+            # re-auth, so the worker stranded until a golden restore ran anyway.
+            # Golden restore re-supplies a clean signed-in profile and reliably
+            # clears the block, so trigger it directly. Reset this clip +
+            # remaining + in-flight to pending and drop the project URL so the
+            # self-resume re-submits into a fresh project after the restore. The
+            # raise string matches the existing "stopping job to trigger golden
+            # restore" branch in _process_parallel_job / _process_job_with_failover,
+            # which force-marks the account HOT so run() golden-restores + self-resumes.
+            # v758.25 — refresh DB truth FIRST. The HTTP download worker
+            # completes clips asynchronously, so the in-memory clips[].status is
+            # stale: a clip that already finished still shows 'generating'/'pending'
+            # here. Without this, the reset loops below flip an already-COMPLETED
+            # clip back to 'pending' — which shows "waiting" again in the UI and
+            # re-submits a done clip. refresh_clip_statuses patches clips[].status
+            # from the DB so the 'completed' guards work.
             refresh_clip_statuses(job)
-
-            # v758.29 — record the block so this account backs off its submission
-            # rate (the block is Google account-level rate-limiting from going too
-            # fast). _rate_backoff_wait() at the top of each clip loop enforces it.
-            _note_unusual_block(account_name)
-
-            # v800 — PARALLEL-MODE SCOPING. In parallel mode each account runs
-            # process_job_submission with only ITS clip subset (_process_parallel_job
-            # sets filtered_job['clips']=my_clips, filtered_job['_total_clips']=real
-            # total). The OTHER account is concurrently mid-flight on the rest. The
-            # old recovery flipped the SHARED job to 'pending' + wiped the cache
-            # project_url GLOBALLY, so the dispatcher re-grabbed + re-split the job
-            # while the other account was still working → both bounced the job
-            # (processing→pending→processing) and re-rendered already-done clips into
-            # duplicate projects. This account does NOT need that global flip: the
-            # raise routes to the v758.7 non-fatal handler, which self-resumes THIS
-            # account's own clips in-memory (_retry_job in _run_once) WITHOUT the
-            # dispatcher. So when we own only a SUBSET, scope the reset to our clips
-            # and leave the shared job status + project_url untouched. Single-account
-            # jobs own the whole job (len==total → False) → unchanged behavior.
-            _is_parallel_subset = len(clips) < job.get('_total_clips', len(clips))
-
-            # v758.28/29 — drain in-flight DOWNLOADS before any reset. A clip is
-            # only marked 'completed' AFTER the HTTP/download worker fetches it and
-            # uploads to R2, which lands well after the render finishes in Flow
-            # (the v700 submit-response bind alone is often LATE, 35-60s). Wait
-            # keyed on clips that have a bound mediaId (those WILL resolve +
-            # download) so done-in-Flow clips flip to 'completed' and are preserved
-            # by the != 'completed' reset guards instead of being orphaned. Unbound
-            # clips do not hold up the wait — no penalty when there is nothing to
-            # save. Used by BOTH the cookie-clear and golden-restore paths.
-            def _drain_bound_downloads(max_s=25):
-                # v759 — capped from 150s. The drain blocks the submit thread while
-                # waiting for bound clips to download, but when the bound mediaId is
-                # a poster variant they NEVER complete here, so it just stalled the
-                # worker ~2.5 min and preserved nothing. The HTTP download worker
-                # keeps downloading async regardless; a brief drain is enough.
-                _deadline = time.time() + max_s
-                while time.time() < _deadline:
-                    try:
-                        refresh_clip_statuses(job)
-                    except Exception:
-                        break  # job deleted / DB gone mid-drain — don't strand the retry
-                    with _PRIMARY_MEDIA_LOCK:
-                        _bound = {b.get('clip_index') for b in _PRIMARY_MEDIA_BINDINGS.values()
-                                  if b.get('job_id') == job_id and b.get('clip_index') is not None}
-                    _bound_incomplete = [c for c in clips
-                                         if c.get('clip_index') in _bound
-                                         and c.get('status') != 'completed']
-                    if not _bound_incomplete:
-                        break  # every bound (downloadable) clip has landed
-                    print(f"[Flow] ⏳ v758.28 drain: waiting on {len(_bound_incomplete)} bound clip(s) "
-                          f"{sorted(c['clip_index'] + 1 for c in _bound_incomplete)} to download "
-                          f"(~{int(_deadline - time.time())}s left)", flush=True)
-                    time.sleep(5)
-                _done = sorted(c['clip_index'] + 1 for c in clips if c.get('status') == 'completed')
-                print(f"[Flow] 💾 v758.28 drain: clips completed + preserved before reset: {_done}", flush=True)
-
-            # Read-check-increment ATOMICALLY under one lock hold: in parallel
-            # mode two accounts can trip the same job_id's block concurrently, so
-            # a read-then-later-increment would race past the cap.
-            with _UNUSUAL_GR_LOCK:
-                _cc_count = _UNUSUAL_COOKIE_CLEARS.get(job_id, 0)
-                _do_cookie_clear = _cc_count < MAX_UNUSUAL_COOKIE_CLEARS
-                if _do_cookie_clear:
-                    _UNUSUAL_COOKIE_CLEARS[job_id] = _cc_count + 1
-            if _do_cookie_clear:
-                # v758.31 — the operator's blocked-vs-working cookie exports show the
-                # ONLY structural difference is the lowercase 'email' labs.google
-                # cookie (present => blocked, absent => works) — "it's not timing,
-                # it's the cookies". So the recovery is simply to STRIP that cookie
-                # and retry. (NOT a re-auth: re-auth re-mints the session AND lets
-                # the app re-create the 'email' cookie, so the block persisted in
-                # the worker log even with a fresh session.) Google SSO untouched →
-                # account stays signed in + ULTRA. strip_lowercase_email_cookie also
-                # runs before every submit (clip-loop top) to hold the working shape.
-                _ra_ok = reauth_flow_session(page, account_name)
-                print(f"[Flow] 🔑 v758.32: 'unusual activity' on job {job_id[:8]} (re-auth {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}, ok={_ra_ok}) — deleted labs cookies + re-auth, retrying WITHOUT golden restore", flush=True)
-                clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, re-auth {_cc_count + 1}/{MAX_UNUSUAL_COOKIE_CLEARS}")
-                # v798 — harvest clips that DID render (dead bound mediaId would
-                # otherwise 404) via DOM <video> truth BEFORE draining, so the
-                # drain sees them complete and does NOT reset them to re-render.
-                _reaped = reap_rendered_videos_to_queue(page, clips, job_id, http_dl_queue, temp_dir, where="pre-cookie-clear")
-                if _reaped:
-                    print(f"[Flow] [v798] reaped {_reaped} rendered clip(s) before cookie-clear reset — draining so they download instead of re-rendering", flush=True)
-                _drain_bound_downloads()
-                # Reset non-completed clips to pending; drop project_url so the
-                # retry re-submits into a fresh project on the SAME (cleared)
-                # session. Completed clips are preserved by the != 'completed' guards.
-                if clip.get('status') != 'completed':
-                    update_clip_status(clip['id'], 'pending', error_message=None)
-                for rc in clips[i+1:]:
-                    if rc.get('status') != 'completed':
-                        update_clip_status(rc['id'], 'pending', error_message=None)
-                for gc in [c for c in clips[:i] if c.get('status') == 'generating']:
-                    update_clip_status(gc['id'], 'pending', error_message=None)
-                if _is_parallel_subset:
-                    # v800 — leave the SHARED job 'processing' + keep project_url so
-                    # the other account is not stomped and the dispatcher does not
-                    # re-grab/re-split; this account self-resumes its own reset clips.
-                    print(f"[Flow] [v800] parallel subset ({len(clips)}/{job.get('_total_clips', len(clips))} clips) — NOT flipping shared job to pending / NOT wiping project_url; this account self-resumes its own clips while the other account keeps working", flush=True)
-                else:
-                    update_job_status(job_id, 'pending')
-                    if job_id in cache.get('jobs', {}):
-                        cache['jobs'][job_id]['status'] = 'pending'
-                        cache['jobs'][job_id]['project_url'] = None
-                        save_cache(cache)
-                with _UNUSUAL_ACTIVITY_LOCK:
-                    _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
-                # raise string routes to the v758.7 cookie-clear recovery handler
-                # in _process_parallel_job / _process_job_with_failover, which
-                # records a MILD failure (no force_hot) → retry WITHOUT golden restore.
-                raise Exception(f"Job {job_id} unusual activity — retrying after labs.google cookie clear (v758.26)")
-
-            # Cookie-clears exhausted — block survived all of them. Escalate to a
-            # golden restore (still capped by MAX_UNUSUAL_GOLDEN_RESTORES).
-            print(f"[Flow] 🔁 v758.26: cookie-clear x{MAX_UNUSUAL_COOKIE_CLEARS} did not lift block on job {job_id[:8]} — escalating to golden restore", flush=True)
             with _UNUSUAL_GR_LOCK:
                 _gr_count = _UNUSUAL_GOLDEN_RESTORES.get(job_id, 0) + 1
                 _UNUSUAL_GOLDEN_RESTORES[job_id] = _gr_count
@@ -18851,22 +17874,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     save_cache(cache)
                 with _UNUSUAL_GR_LOCK:
                     _UNUSUAL_GOLDEN_RESTORES.pop(job_id, None)
-                    _UNUSUAL_COOKIE_CLEARS.pop(job_id, None)
                 with _UNUSUAL_ACTIVITY_LOCK:
                     _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
                 raise Exception(f"Job {job_id} aborted — unusual activity persists after {MAX_UNUSUAL_GOLDEN_RESTORES} golden restores")
-            print(f"[Flow] 🔥 v758.24: 'unusual activity' on job {job_id[:8]} (golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}) — stopping job to trigger golden restore (cookie-clear exhausted, escalating to clean profile)", flush=True)
+            print(f"[Flow] 🔥 v758.24: 'unusual activity' on job {job_id[:8]} (golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}) — stopping job to trigger golden restore (cookie-clear can't re-auth into Flow)", flush=True)
             clip_log(clip.get('id'), clip_index, "RESTORE", f"unusual-activity, golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}")
-            # v758.29 — save already-rendered clips before the golden restore tears
-            # down the project (golden restore kills the browser, orphaning the old
-            # project). The HTTP download worker is still alive here, so drain the
-            # bound/done clips to 'completed' first.
-            # v798 — reap DOM <video> truth first (dead bound mediaId 404s) so a
-            # clip that rendered downloads instead of being lost with the project.
-            _reaped = reap_rendered_videos_to_queue(page, clips, job_id, http_dl_queue, temp_dir, where="pre-golden-restore")
-            if _reaped:
-                print(f"[Flow] [v798] reaped {_reaped} rendered clip(s) before golden restore — draining so they download before the project is torn down", flush=True)
-            _drain_bound_downloads()
             if clip.get('status') != 'completed':
                 update_clip_status(clip['id'], 'pending', error_message=None)
             for rc in clips[i+1:]:
@@ -18874,16 +17886,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     update_clip_status(rc['id'], 'pending', error_message=None)
             for gc in [c for c in clips[:i] if c.get('status') == 'generating']:
                 update_clip_status(gc['id'], 'pending', error_message=None)
-            if _is_parallel_subset:
-                # v800 — see cookie-clear path. This account self-resumes its own
-                # clips after the golden rebuild; do not flip/ wipe the shared job.
-                print(f"[Flow] [v800] parallel subset ({len(clips)}/{job.get('_total_clips', len(clips))} clips) — NOT flipping shared job to pending / NOT wiping project_url before golden restore; this account self-resumes its own clips", flush=True)
-            else:
-                update_job_status(job_id, 'pending')
-                if job_id in cache.get('jobs', {}):
-                    cache['jobs'][job_id]['status'] = 'pending'
-                    cache['jobs'][job_id]['project_url'] = None
-                    save_cache(cache)
+            update_job_status(job_id, 'pending')
+            if job_id in cache.get('jobs', {}):
+                cache['jobs'][job_id]['status'] = 'pending'
+                cache['jobs'][job_id]['project_url'] = None
+                save_cache(cache)
             with _UNUSUAL_ACTIVITY_LOCK:
                 _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
             raise Exception(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
@@ -19680,29 +18687,6 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                     return null;
                                 }}""")
 
-                            # v759-diag — confirm the done-clip-not-downloaded root
-                            # cause: BOUND mediaId URL count vs the tile's actually-
-                            # rendered <video> count. If bound>0 (poster) while dom>0
-                            # (a real rendered video exists), we download the wrong
-                            # (poster) variant and the rendered one is lost.
-                            try:
-                                _b_n = len(captured_urls_for_clip(job_id, _ci, captured_media_urls))
-                                _d_n = page.evaluate(f"""() => {{
-                                    let n = 0;
-                                    for (const c of document.querySelectorAll('[data-index]')) {{
-                                        if ({repr(_dlg)} && (c.innerText||'').includes({repr(_dlg)})) {{
-                                            for (const v of c.querySelectorAll('video')) {{
-                                                const u = v.src || (v.querySelector('source')||{{}}).src || '';
-                                                if (u && !u.startsWith('blob:')) n++;
-                                            }}
-                                        }}
-                                    }}
-                                    return n;
-                                }}""")
-                                print(f"[Flow] [v759-diag] post-job clip {_ci+1}: bound_urls={_b_n} dom_rendered_videos={_d_n} fail_type={_tile_fail_type}", flush=True)
-                            except Exception:
-                                pass
-
                             if _urls and _urls != ['__blob__']:
                                 http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
                                     'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir})
@@ -19824,74 +18808,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             _cs.remove(_ci)
                             save_cache(cache)
 
-            # v759 — RENDERED-VIDEO REAPER (ground-truth download rescue).
-            # The bound-mediaId download fails when the bound variant was the
-            # BLOCKED one (its getMediaUrlRedirect URL serves a poster forever),
-            # even though the OTHER variant rendered — the clip the operator sees
-            # "done on Flow" but that never downloads. A DOM <video> with a real
-            # (non-blob) src is PROOF the clip rendered, regardless of which
-            # mediaId bound. So at job end, scan every clip NOT 'completed' and, if
-            # its tile has a rendered <video>, queue THAT src directly. Additive
-            # (the HTTP worker dedups already-completed clips); only matches by
-            # non-empty dialogue to avoid grabbing a sibling clip's tile.
-            try:
-                refresh_clip_statuses(job)
-                if http_dl_queue is not None:
-                    for _rc in clips:
-                        if _rc.get('status') == 'completed':
-                            continue
-                        _rci = _rc.get('clip_index')
-                        _rdlg = (_rc.get('dialogue_text') or '')[:20]
-                        # v795 — empty-dialogue HOOK / b-roll clips ALSO need this rescue:
-                        # their bound mediaId is the one most often DEAD (a blocked tile was
-                        # Retried, the OTHER variant re-rendered, but the stale blocked-tile
-                        # mediaId stayed bound → getMediaUrlRedirect 404). With no dialogue
-                        # to match on, match the tile by data-index (== clip_index) instead
-                        # of skipping. Only NOT-'completed' clips are scanned, so it is a
-                        # no-op once the clip lands; a real <video> src is proof it rendered.
-                        _match_by_index = not _rdlg
-                        try:
-                            if _match_by_index:
-                                _vsrcs = page.evaluate(f"""() => {{
-                                    const c = document.querySelector('[data-index="{int(_rci)}"]');
-                                    if (!c) return [];
-                                    const out = [];
-                                    for (const v of c.querySelectorAll('video')) {{
-                                        const u = v.src || (v.querySelector('source')||{{}}).src || '';
-                                        if (u && !u.startsWith('blob:')) out.push(u);
-                                    }}
-                                    return out;
-                                }}""")
-                            else:
-                                _vsrcs = page.evaluate(f"""() => {{
-                                    for (const c of document.querySelectorAll('[data-index]')) {{
-                                        if (!((c.innerText||'').includes({repr(_rdlg)}))) continue;
-                                        const out = [];
-                                        for (const v of c.querySelectorAll('video')) {{
-                                            const u = v.src || (v.querySelector('source')||{{}}).src || '';
-                                            if (u && !u.startsWith('blob:')) out.push(u);
-                                        }}
-                                        return out;
-                                    }}
-                                    return [];
-                                }}""")
-                            if _vsrcs:
-                                http_dl_queue.put({'job_id': job_id, 'clip_index': _rci,
-                                    'clip_id': _rc['id'], 'urls': _vsrcs, 'temp_dir': temp_dir})
-                                print(f"[Flow] [v759-reaper] clip {_rci+1}: rendered <video> found ({len(_vsrcs)} src, match={'index' if _match_by_index else 'dialogue'}) — queued for download (bypasses dead bound mediaId)", flush=True)
-                        except Exception:
-                            pass
-            except Exception as _reaper_err:
-                print(f"[Flow] [v759-reaper] error (non-fatal): {_reaper_err}", flush=True)
 
-            # v797 — job-end failure rollup: one categorized line so each job
-            # closes with WHAT broke + how often (detail in clip_failures.jsonl).
-            try:
-                _roll = job_failure_rollup(job_id)
-                if _roll:
-                    print(f"[Flow] 📋 Job {str(job_id)[:8]} failure rollup: {_roll}  (detail → clip_failures.jsonl)", flush=True)
-            except Exception:
-                pass
 
         return project_url
 
@@ -21119,11 +20036,6 @@ class AccountWorker(threading.Thread):
                             continue
                         if url.startswith('/'):
                             url = 'https://labs.google' + url
-                        # v759b — never download the THUMBNAIL. The mediaUrlType=
-                        # MEDIA_URL_TYPE_THUMBNAIL param redirects to /image/ (poster);
-                        # dropping it redirects to /video/ (the mp4).
-                        if 'MEDIA_URL_TYPE_THUMBNAIL' in url:
-                            url = url.replace('&mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL', '').replace('mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL&', '').replace('?mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL', '')
                         try:
                             print(f"[{account_name}-HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1}: {url[:80]}", flush=True)
                             # v794c — validate it's a real video, not a poster the
@@ -21137,15 +20049,6 @@ class AccountWorker(threading.Thread):
                                     print(f"[{account_name}-HTTP-DL] 401 — retrying with current session", flush=True)
                                     resp = session_ref[0].get(url, timeout=120, allow_redirects=True)
                                 if not resp.ok:
-                                    # v803 — 5xx/429 are TRANSIENT (Google rate-limiting the
-                                    # download endpoint, or the video not yet ready server-side).
-                                    # The SAME url succeeds seconds later (proven: the v759 reaper
-                                    # re-pulled identical 500'd URLs fine). Retry instead of an
-                                    # instant redo that re-renders a clip which already exists.
-                                    if resp.status_code in (429, 500, 502, 503, 504) and _vtry < POSTER_RETRY_MAX - 1:
-                                        print(f"[{account_name}-HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1} transient HTTP {resp.status_code} — retry {_vtry+1}/{POSTER_RETRY_MAX} in {POSTER_RETRY_DELAY}s", flush=True)
-                                        time.sleep(POSTER_RETRY_DELAY)
-                                        continue
                                     raise Exception(f"HTTP {resp.status_code}")
                                 _ct = (resp.headers.get('Content-Type') or '').lower()
                                 _b = resp.content
@@ -21157,12 +20060,7 @@ class AccountWorker(threading.Thread):
                                     print(f"[{account_name}-HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1} not ready (ct={_ct or '?'} {len(_b):,}b) — retry {_vtry+1}/{POSTER_RETRY_MAX} in {POSTER_RETRY_DELAY}s", flush=True)
                                     time.sleep(POSTER_RETRY_DELAY)
                             if body is None:
-                                # v759-diag — name the likely root cause: this URL is the
-                                # bound mediaId's; if it stays a poster, that bound variant
-                                # never rendered. When a clip had 1 of 2 tiles blocked
-                                # (unusual/prominent), the OTHER (rendered) variant's mediaId
-                                # may not have bound, so its video is never downloaded.
-                                raise Exception(f"still poster/too-small after {POSTER_RETRY_MAX} tries — bound mediaId never rendered (url=...{url[-48:]}); a rendered sibling variant may exist but be unbound")
+                                raise Exception(f"still poster/too-small after {POSTER_RETRY_MAX} tries — clip not rendered")
                             out = os.path.join(temp_dir, f"clip_{ci}_{attempt}.{vi+1}.mp4")
                             with open(out, 'wb') as f:
                                 f.write(body)
@@ -21175,7 +20073,6 @@ class AccountWorker(threading.Thread):
                             all_ok = False
                     if all_ok or any_ok:
                         update_clip_status(clip_id, 'completed')
-                        clear_auto_redo_cycle(clip_id)   # v761.1 — reset redo budget on success
                         print(f"[{account_name}-HTTP-DL] ✓ Clip {ci+1} done — marked completed", flush=True)
                         clip_log(clip_id, ci, "COMPLETED")
                         total_job_clips = item.get('total_job_clips')
@@ -21191,22 +20088,8 @@ class AccountWorker(threading.Thread):
                             except Exception:
                                 pass
                     if not all_ok and not any_ok:
-                        # v761.1 — CAP this redo path. Was bare flow_redo_queued with NO
-                        # counter → get_redo_clips() re-picked it forever → clip never
-                        # marked failed → operator never saw the error. Mirror v776/v758.19:
-                        # after MAX_AUTO_REDO_CYCLES, mark 'failed' with a visible reason so
-                        # it surfaces in the platform UI. (Message must NOT contain the
-                        # substring "file not found" — main.py poll re-queues that.)
-                        _dl_cycles = register_auto_redo_cycle(clip_id)
-                        if auto_redo_exhausted(_dl_cycles):
-                            print(f"[{account_name}-HTTP-DL] ⛔ Clip {ci+1} download failed {_dl_cycles}× (bound mediaId never rendered) — marking FAILED", flush=True)
-                            update_clip_status(clip_id, 'failed',
-                                error_message="Render produced no downloadable video after retries (a blocked sibling tile left the rendered variant unbound). Click Retry to try again.")
-                            clip_log(clip_id, ci, "FAILED", f"download exhausted {_dl_cycles}/{MAX_AUTO_REDO_CYCLES}")
-                            clear_auto_redo_cycle(clip_id)
-                        else:
-                            print(f"[{account_name}-HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo [{_dl_cycles}/{MAX_AUTO_REDO_CYCLES}]", flush=True)
-                            update_clip_status(clip_id, 'flow_redo_queued', error_message="Download failed — retrying")
+                        print(f"[{account_name}-HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo", flush=True)
+                        update_clip_status(clip_id, 'flow_redo_queued')
                     http_queue.task_done()
                 except Exception as e:
                     print(f"[{account_name}-HTTP-DL] ✗ Error: {e}", flush=True)
@@ -21820,10 +20703,7 @@ def main_multi_account(accounts_override=None):
                             target_account = idle_for_redo[_redo_idx % len(idle_for_redo)]
                             queued_redo_keys[redo_key] = time.time()  # v463: timestamp instead of set-add
                             account_job_queues[target_account].put({'type': 'redo', 'clip': clip})
-                            _rtrig = (clip.get('error_message') or clip.get('status') or '?')
-                            if isinstance(_rtrig, str):
-                                _rtrig = _rtrig.strip()[:120] or '?'
-                            print(f"  → [redo-trigger] clip {clip.get('clip_index', 0)+1} attempt {attempt} → {target_account}  ◀ WHY: {_rtrig}")
+                            print(f"  → Clip {clip.get('clip_index', 0)+1} (attempt {attempt}) assigned to {target_account}")
                             _redo_idx += 1
             
             # Re-try held jobs before fetching new ones
@@ -22395,11 +21275,6 @@ def main(account_session=None, account_download=None, account_label=None):
                             continue
                         if url.startswith('/'):
                             url = 'https://labs.google' + url
-                        # v759b — never download the THUMBNAIL. The mediaUrlType=
-                        # MEDIA_URL_TYPE_THUMBNAIL param redirects to /image/ (poster);
-                        # dropping it redirects to /video/ (the mp4).
-                        if 'MEDIA_URL_TYPE_THUMBNAIL' in url:
-                            url = url.replace('&mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL', '').replace('mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL&', '').replace('?mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL', '')
                         try:
                             print(f"[HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1}: {url[:80]}", flush=True)
                             resp = sess.get(url, timeout=120, allow_redirects=True)
@@ -22428,7 +21303,6 @@ def main(account_session=None, account_download=None, account_label=None):
                     if all_ok or any_ok:
                         # At least one variant uploaded — clip is usable
                         update_clip_status(clip_id, 'completed')
-                        clear_auto_redo_cycle(clip_id)   # v761.1 — reset redo budget on success
                         # Tell dh loop this clip is done — prevents re-download
                         _dh = dh_ref[0]
                         if hasattr(_dh, '_downloaded_clip_indices'):
@@ -22443,20 +21317,10 @@ def main(account_session=None, account_download=None, account_label=None):
                                 update_job_status(job_id, 'completed')
                                 print(f"[HTTP-DL] ✓ Job {job_id[:8]}... complete ({total_job_clips} clips done)", flush=True)
                     if not all_ok and not any_ok:
-                        # v761.1 — CAP this redo path (was uncapped → infinite redo, clip
-                        # never marked failed in the UI). Mirror v776/v758.19. Message must
-                        # NOT contain the substring "file not found" (main.py poll re-queues it).
-                        _dl_cycles = register_auto_redo_cycle(clip_id)
-                        if auto_redo_exhausted(_dl_cycles):
-                            print(f"[HTTP-DL] ⛔ Clip {ci+1} download failed {_dl_cycles}× (bound mediaId never rendered) — marking FAILED", flush=True)
-                            update_clip_status(clip_id, 'failed',
-                                error_message="Render produced no downloadable video after retries (a blocked sibling tile left the rendered variant unbound). Click Retry to try again.")
-                            clip_log(clip_id, ci, "FAILED", f"download exhausted {_dl_cycles}/{MAX_AUTO_REDO_CYCLES}")
-                            clear_auto_redo_cycle(clip_id)
-                        else:
-                            # queue as flow_redo_queued so get_redo_clips() picks it up next poll
-                            print(f"[HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo [{_dl_cycles}/{MAX_AUTO_REDO_CYCLES}]", flush=True)
-                            update_clip_status(clip_id, 'flow_redo_queued', error_message="Download failed — retrying")
+                        # All variants failed — queue as flow_redo_queued so get_redo_clips()
+                        # picks it up on the next poll cycle (seconds), not full job reprocess
+                        print(f"[HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo", flush=True)
+                        update_clip_status(clip_id, 'flow_redo_queued')
                     http_queue.task_done()
                 except Exception as e:
                     print(f"[HTTP-DL] ✗ Error processing clip: {e}", flush=True)
