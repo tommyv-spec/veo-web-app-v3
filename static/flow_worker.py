@@ -9698,17 +9698,38 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                 # call — the Retry click — just uses the fresh session cookie; no
                 # reload needed. Fall back to NextAuth re-auth only if there is no
                 # working cookie file.
-                _injected = False
-                try:
-                    _injected = inject_working_labs_cookies(page, "FailCheck")
-                except Exception as _ie:
-                    print(f"[FailCheck] inject raised: {_ie}", flush=True)
-                if not _injected:
+                # v801 — INJECT-FIRST, RE-MINT FALLBACK. The operator has TWO proven
+                # working states: a valid SAVED set, OR a fresh delete+re-mint. A
+                # saved session-token eventually goes stale/flagged — when that
+                # happens the injected set no longer lifts the block, so re-injecting
+                # the SAME set (old behavior) just burned both attempts. Now:
+                #   attempt 1 → inject the saved working set IN PLACE (no reload,
+                #               keeps the in-progress tiles) — cheap + non-destructive
+                #   attempt 2 → the operator's manual fix: delete ALL labs.google
+                #               cookies + re-mint a FRESH session via Google SSO
+                #               (reauth_flow_session). This navigates (drops
+                #               in-progress tiles) but is the proven block-lifter;
+                #               v798 reaper + v800 scoped reset cushion the tile loss.
+                # No working cookie file at all → re-mint straight away on attempt 1.
+                if _att == 1:
+                    _injected = False
+                    try:
+                        _injected = inject_working_labs_cookies(page, "FailCheck")
+                    except Exception as _ie:
+                        print(f"[FailCheck] inject raised: {_ie}", flush=True)
+                    if not _injected:
+                        print("[FailCheck] v801: no working cookie set to inject — re-minting a fresh session", flush=True)
+                        try:
+                            reauth_flow_session(page, "FailCheck")
+                        except Exception as _re:
+                            print(f"[FailCheck] re-auth raised: {_re}", flush=True)
+                else:
+                    print("[FailCheck] v801: injected set did not lift the block (stale/flagged token) — falling back to delete + re-mint", flush=True)
                     try:
                         reauth_flow_session(page, "FailCheck")
                     except Exception as _re:
                         print(f"[FailCheck] re-auth raised: {_re}", flush=True)
-                time.sleep(2)            # let the injected cookies commit (no reload — keep the tiles)
+                time.sleep(2)            # let cookies commit (inject = no reload; re-mint navigates)
                 _click_retry_failed_tiles()
                 # VERIFY — the ONLY real failure is the unusual-activity block
                 # RE-APPEARING. A 4s clip takes 30-90s to render and a ready clip
@@ -9730,7 +9751,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                     if rc.get('hasVideo'):
                         _video = True; break
                 if _blocked:
-                    print(f"[FailCheck] v758.38 attempt {_att}/{_MAX_REAUTH}: block RE-APPEARED — re-injecting", flush=True)
+                    print(f"[FailCheck] v801 attempt {_att}/{_MAX_REAUTH}: block RE-APPEARED — escalating recovery (next: delete + re-mint)", flush=True)
                     continue
                 print(f"[FailCheck] ✓ v758.38 recovery verified ({'video' if _video else 'no re-block'}) — clip rendering, letting it download", flush=True)
                 return False
