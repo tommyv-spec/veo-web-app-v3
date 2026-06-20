@@ -18679,6 +18679,22 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # fast). _rate_backoff_wait() at the top of each clip loop enforces it.
             _note_unusual_block(account_name)
 
+            # v800 — PARALLEL-MODE SCOPING. In parallel mode each account runs
+            # process_job_submission with only ITS clip subset (_process_parallel_job
+            # sets filtered_job['clips']=my_clips, filtered_job['_total_clips']=real
+            # total). The OTHER account is concurrently mid-flight on the rest. The
+            # old recovery flipped the SHARED job to 'pending' + wiped the cache
+            # project_url GLOBALLY, so the dispatcher re-grabbed + re-split the job
+            # while the other account was still working → both bounced the job
+            # (processing→pending→processing) and re-rendered already-done clips into
+            # duplicate projects. This account does NOT need that global flip: the
+            # raise routes to the v758.7 non-fatal handler, which self-resumes THIS
+            # account's own clips in-memory (_retry_job in _run_once) WITHOUT the
+            # dispatcher. So when we own only a SUBSET, scope the reset to our clips
+            # and leave the shared job status + project_url untouched. Single-account
+            # jobs own the whole job (len==total → False) → unchanged behavior.
+            _is_parallel_subset = len(clips) < job.get('_total_clips', len(clips))
+
             # v758.28/29 — drain in-flight DOWNLOADS before any reset. A clip is
             # only marked 'completed' AFTER the HTTP/download worker fetches it and
             # uploads to R2, which lands well after the render finishes in Flow
@@ -18753,11 +18769,17 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         update_clip_status(rc['id'], 'pending', error_message=None)
                 for gc in [c for c in clips[:i] if c.get('status') == 'generating']:
                     update_clip_status(gc['id'], 'pending', error_message=None)
-                update_job_status(job_id, 'pending')
-                if job_id in cache.get('jobs', {}):
-                    cache['jobs'][job_id]['status'] = 'pending'
-                    cache['jobs'][job_id]['project_url'] = None
-                    save_cache(cache)
+                if _is_parallel_subset:
+                    # v800 — leave the SHARED job 'processing' + keep project_url so
+                    # the other account is not stomped and the dispatcher does not
+                    # re-grab/re-split; this account self-resumes its own reset clips.
+                    print(f"[Flow] [v800] parallel subset ({len(clips)}/{job.get('_total_clips', len(clips))} clips) — NOT flipping shared job to pending / NOT wiping project_url; this account self-resumes its own clips while the other account keeps working", flush=True)
+                else:
+                    update_job_status(job_id, 'pending')
+                    if job_id in cache.get('jobs', {}):
+                        cache['jobs'][job_id]['status'] = 'pending'
+                        cache['jobs'][job_id]['project_url'] = None
+                        save_cache(cache)
                 with _UNUSUAL_ACTIVITY_LOCK:
                     _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
                 # raise string routes to the v758.7 cookie-clear recovery handler
@@ -18819,11 +18841,16 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     update_clip_status(rc['id'], 'pending', error_message=None)
             for gc in [c for c in clips[:i] if c.get('status') == 'generating']:
                 update_clip_status(gc['id'], 'pending', error_message=None)
-            update_job_status(job_id, 'pending')
-            if job_id in cache.get('jobs', {}):
-                cache['jobs'][job_id]['status'] = 'pending'
-                cache['jobs'][job_id]['project_url'] = None
-                save_cache(cache)
+            if _is_parallel_subset:
+                # v800 — see cookie-clear path. This account self-resumes its own
+                # clips after the golden rebuild; do not flip/ wipe the shared job.
+                print(f"[Flow] [v800] parallel subset ({len(clips)}/{job.get('_total_clips', len(clips))} clips) — NOT flipping shared job to pending / NOT wiping project_url before golden restore; this account self-resumes its own clips", flush=True)
+            else:
+                update_job_status(job_id, 'pending')
+                if job_id in cache.get('jobs', {}):
+                    cache['jobs'][job_id]['status'] = 'pending'
+                    cache['jobs'][job_id]['project_url'] = None
+                    save_cache(cache)
             with _UNUSUAL_ACTIVITY_LOCK:
                 _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
             raise Exception(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
