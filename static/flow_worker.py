@@ -1169,6 +1169,72 @@ def resolve_clip_download_urls(page, job_id, clip_index, dialogue_key, captured_
         return []
 
 
+# --- fail-reason diagnostic (read-only, temporary) ---------------------------
+# d0b69c0 baseline detects a failed tile purely from the DOM (refresh button, no
+# <video>) — that tells us THAT a clip failed but never WHY. The only place the
+# real reason lives (RAI/policy filter, content moderation, internal error code)
+# is the Flow status-poll response body `batchCheckAsyncVideoGenerationStatus`,
+# which the baseline never reads. This scans that body (and submit responses)
+# READ-ONLY and logs any reason-bearing fields when a failure marker is present.
+# No behavior change — pure observability so the next failing run shows the cause.
+_FAIL_MARKER_RE = re.compile(
+    r'fail|error|\brai\b|filter|block|reject|moderat|unsafe|violat|denied|forbidden|sensitive',
+    re.I,
+)
+_REASON_KEY_RE = re.compile(
+    r'status|reason|error|rai|filter|message|code|block|reject|moderat|safety|unsafe|violat|detail',
+    re.I,
+)
+
+
+def _scan_failure_reason(resp, url, buf_key=''):
+    """Read-only: if a Flow status/submit response carries a failure, log the
+    reason-bearing fields. Never raises."""
+    ep = url.rsplit('/', 1)[-1].split('?', 1)[0]
+    try:
+        st = resp.status
+    except Exception:
+        return
+    if st != 200:
+        print(f"[fail-reason-diag] {ep} HTTP {st} buf={buf_key}", flush=True)
+        return
+    try:
+        data = resp.json()
+    except Exception:
+        return
+    try:
+        blob = json.dumps(data)
+    except Exception:
+        return
+    if not _FAIL_MARKER_RE.search(blob):
+        return  # healthy / pending / succeeded — stay quiet
+    hits = []
+
+    def _walk(node, path):
+        if len(hits) >= 40:
+            return
+        if isinstance(node, dict):
+            for k, v in node.items():
+                kp = f"{path}.{k}" if path else str(k)
+                if isinstance(v, (str, int, float)) and not isinstance(v, bool) and _REASON_KEY_RE.search(str(k)):
+                    sval = str(v).strip()
+                    if sval and sval.lower() not in ('false', '0', 'none', 'ok'):
+                        hits.append(f"{kp}={sval[:160]}")
+                _walk(v, kp)
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                _walk(v, f"{path}[{i}]")
+
+    try:
+        _walk(data, '')
+    except Exception:
+        pass
+    if hits:
+        print(f"[fail-reason-diag] {ep} buf={buf_key} — " + " | ".join(hits[:40]), flush=True)
+    else:
+        print(f"[fail-reason-diag] {ep} buf={buf_key} marker-but-no-keyed-reason; raw[:1500]={blob[:1500]}", flush=True)
+
+
 def _install_submit_response_listener(page, account_label=""):
     """v700 — install a one-shot Playwright `response` handler on `page`
     that captures `batchAsyncGenerateVideoStartImage` 200 responses into
@@ -1187,6 +1253,15 @@ def _install_submit_response_listener(page, account_label=""):
     def _on_response(resp):
         try:
             url = resp.url
+            # fail-reason diagnostic (read-only) — runs on the status-poll
+            # endpoint (skipped by the strict bind filter below) AND submits.
+            try:
+                _u_lc = url.lower()
+                if ('batchcheckasyncvideogenerationstatus' in _u_lc
+                        or _SUBMIT_BIND_URL_SUBSTR.lower() in _u_lc):
+                    _scan_failure_reason(resp, url, buf_key)
+            except Exception:
+                pass
             if _SUBMIT_BIND_URL_SUBSTR not in url:
                 # v729 diagnostic — capture responses that LOOK like the Flow
                 # generate API but miss the strict filter. Catches endpoint
