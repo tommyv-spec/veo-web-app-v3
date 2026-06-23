@@ -787,6 +787,15 @@ def _fa_init_project_best_effort(page, project_id, context=""):
         "PATCH", _bearer(),
         {"agentToggleState": "AGENT_TOGGLE_STATE_DISABLED"},
     ))
+    # 24. USER-LEVEL agent toggle OFF (account-wide). HAR-proven 2026-06-23: THIS
+    # is the lever that makes the editor + Settings gear render. The per-project
+    # PATCH (#23) alone does NOT override the user setting, so projects kept opening
+    # in Agent mode (no gear → "Settings button not found" → clip skipped). Persists
+    # per account, so it sticks for every later project too.
+    best_effort("videoFx.updateUserSettings isAgentModeToggled=false", lambda: _fa_trpc_fetch(
+        page, f"{TRPC}/videoFx.updateUserSettings", "POST",
+        {"json": {"isAgentModeToggled": False}},
+    ))
 
     elapsed = time.time() - _replay_t0
     print(f"{pfx}[flow_api] HAR replay END project={project_id[:8]} ({elapsed:.1f}s)", flush=True)
@@ -820,32 +829,49 @@ def force_agent_off(page, context=""):
     if the PATCH was attempted."""
     pfx = f"[{context}] " if context else ""
     try:
+        _fa_attach_token_listener(page)  # idempotent
+        print(f"{pfx}[agent-off] Settings gear missing → forcing Agent OFF (user-level + per-project)", flush=True)
+        # 1. USER-LEVEL (account-wide) agent toggle — THE real lever. HAR-proven
+        #    2026-06-23: manually flipping THIS is what makes the editor + Settings
+        #    gear appear. The per-project agentInfo PATCH alone does NOT override the
+        #    user setting, so every new project kept opening in Agent mode (no gear
+        #    → clip skipped/failed). tRPC mutation, cookie-auth, persists per account.
+        try:
+            _r = _fa_trpc_fetch(
+                page,
+                "https://labs.google/fx/api/trpc/videoFx.updateUserSettings",
+                "POST",
+                {"json": {"isAgentModeToggled": False}},
+            )
+            _ok = isinstance(_r, dict) and not _fa_is_error(_r)
+            print(f"{pfx}[agent-off] user-level isAgentModeToggled=false "
+                  f"({'ok' if _ok else 'non-blocking: ' + _fa_error_reason(_r)})", flush=True)
+        except Exception as _ue:
+            print(f"{pfx}[agent-off] user-level toggle raised (non-blocking): {_ue}", flush=True)
+        # 2. PER-PROJECT agentInfo PATCH (belt-and-suspenders for the current project)
         _u = page.url or ""
         m = re.search(r'/project/([A-Za-z0-9_\-]+)', _u)
-        if not m:
-            print(f"{pfx}[agent-off] no project id in URL — skip", flush=True)
-            return False
-        project_id = m.group(1)
-        _fa_attach_token_listener(page)  # idempotent
-        AISBX = "https://aisandbox-pa.googleapis.com"
-        token = _FA_TOKEN_STORE.token or ""
-        print(f"{pfx}[agent-off] Settings gear missing → Agent likely ON; forcing Agent OFF for project {project_id[:8]}", flush=True)
-        try:
-            _fa_api_fetch(
-                page,
-                f"{AISBX}/v1/projects/{project_id}/agentInfo?updateMask=agent_toggle_state",
-                "PATCH", token,
-                {"agentToggleState": "AGENT_TOGGLE_STATE_DISABLED"},
-            )
-        except Exception as _pe:
-            print(f"{pfx}[agent-off] PATCH raised (non-blocking): {_pe}", flush=True)
+        if m:
+            project_id = m.group(1)
+            token = _FA_TOKEN_STORE.token or ""
+            try:
+                _fa_api_fetch(
+                    page,
+                    f"https://aisandbox-pa.googleapis.com/v1/projects/{project_id}/agentInfo?updateMask=agent_toggle_state",
+                    "PATCH", token,
+                    {"agentToggleState": "AGENT_TOGGLE_STATE_DISABLED"},
+                )
+                print(f"{pfx}[agent-off] per-project agent_toggle_state=DISABLED for {project_id[:8]}", flush=True)
+            except Exception as _pe:
+                print(f"{pfx}[agent-off] per-project PATCH raised (non-blocking): {_pe}", flush=True)
+        # 3. reload so the SPA re-fetches user settings + re-renders the editor
         try:
             page.reload(wait_until="domcontentloaded", timeout=30000)
             try:
                 page.wait_for_load_state("networkidle", timeout=10000)
             except Exception:
                 time.sleep(2)
-            print(f"{pfx}[agent-off] reload done — editor should now show the Settings gear (Agent OFF)", flush=True)
+            print(f"{pfx}[agent-off] reload done — editor should now show the Settings gear", flush=True)
         except Exception as _re:
             print(f"{pfx}[agent-off] reload failed (non-blocking): {_re}", flush=True)
         return True
@@ -6238,10 +6264,40 @@ def select_frames_to_video_mode(page, context="", **kwargs):
 
             if settings_btn is None:
                 print(f"{prefix}⚠ Settings button not found", flush=True)
-                # The gear is missing because Flow's Agent mode is ON (chat panel
-                # replaces the editor). Force Agent OFF + reload once, then retry —
-                # blindly re-looking-up the same DOM just burns the 3 attempts.
                 if not _agent_off_tried:
+                    # DIAGNOSTIC — dump the real page state ONCE so we can see WHY
+                    # the gear is missing: agent landing still showing, an
+                    # unhydrated editor, or a stale variant-button selector (Google
+                    # UI change). Drives the next live failure to reveal the cause.
+                    try:
+                        _diag = page.evaluate("""() => {
+                            const body = (document.body && document.body.innerText) || '';
+                            const btns = Array.from(document.querySelectorAll('button'))
+                                .map(b => (b.innerText||'').trim()).filter(Boolean).slice(0, 30);
+                            const tabs = Array.from(document.querySelectorAll('[role=tab], button'))
+                                .map(b => (b.innerText||'').trim())
+                                .filter(t => /video|frame|ingredient|portrait|scene/i.test(t)).slice(0, 12);
+                            const sc = {};
+                            for (const el of document.querySelectorAll('button')) {
+                                for (const c of el.classList) if (c.indexOf('sc-') === 0) sc[c] = (sc[c]||0)+1;
+                            }
+                            const xn = Array.from(document.querySelectorAll('button'))
+                                .map(b => (b.innerText||'').trim())
+                                .filter(t => /^x?\\s*[1-4]\\s*x?$/i.test(t)).slice(0, 6);
+                            return {
+                                url: location.href,
+                                agentLanding: /start creating|drop media|create with flow|describe your/i.test(body),
+                                bodyHead: body.slice(0, 200),
+                                nButtons: document.querySelectorAll('button').length,
+                                btns, tabs, variantLike: xn,
+                                scClasses: Object.entries(sc).slice(0, 10),
+                            };
+                        }""")
+                        print(f"{prefix}[settings-diag] {json.dumps(_diag)[:900]}", flush=True)
+                    except Exception as _de:
+                        print(f"{prefix}[settings-diag] dump failed: {_de}", flush=True)
+                    # Keep the agent-off attempt (cheap, best-effort) in case it IS
+                    # the agent on some runs — but the diag above is the real signal.
                     _agent_off_tried = True
                     force_agent_off(page, context)
                 continue
