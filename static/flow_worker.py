@@ -305,12 +305,19 @@ _SUBMIT_RESPONSE_BUFFERS_LOCK = threading.Lock()
 # records the reject here keyed by the page's submit buffer_key + timestamp; the
 # immediate-failure handlers consume it and route to the EXISTING prominent-people
 # terminal handler (replace-image card, NO swap, NO restore).
-_VIDEO_POLICY_TERMINAL = {}                 # buf_key -> dict(reason, ts)
+# Keyed by the FAILED media's UUID (NOT the account). The status poll
+# (batchCheckAsyncVideoGenerationStatus) is a BATCH covering every media in the
+# project, so a SIBLING clip's prominent-people reject must NOT be attributed to a
+# different clip whose real error is something else (e.g. "unusual activity").
+# _scan_failure_reason extracts the specific failed media uuid + records it here;
+# a clip only fail-fasts when ITS OWN bound mediaId carries the reject.
+_VIDEO_POLICY_TERMINAL = {}                 # media_uuid (lower) -> dict(reason, ts)
 _VIDEO_POLICY_TERMINAL_LOCK = threading.Lock()
 # Substrings (case-insensitive) in the status-poll error that mean a TERMINAL
 # content reject — model-swap-proof AND restore-proof. Extend as observed.
 _VIDEO_POLICY_TERMINAL_REASONS = ('PROMINENT_PEOPLE',)
-_VIDEO_POLICY_TERMINAL_WINDOW_S = 90.0      # how recent a reject counts for a DOM fail
+_VIDEO_POLICY_TERMINAL_WINDOW_S = 180.0     # how recent a reject counts (media-keyed, so safe to keep longer)
+_UUID_RE = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
 
 # v729 — late-bind ledger for responses that arrive AFTER _bind_pending_submits
 # times out. Flow's batchAsyncGenerateVideoStartImage now responds in 11-15s
@@ -332,40 +339,103 @@ def _submit_buffer_key(account_label):
     return f"tid:{threading.get_ident()}"
 
 
-def _record_video_policy_terminal(buf_key, reason):
-    """Record a terminal video-gen content-filter reject (face/identity filter)
-    for this account's submit buffer. Consumed by the immediate-failure handlers
-    to fail-fast instead of model-swapping + golden-restoring."""
-    if not buf_key:
+def _iter_strings(node):
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for v in node.values():
+            yield from _iter_strings(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _iter_strings(v)
+
+
+def _failed_media_ids_in_status(data, reason):
+    """UUIDs of the media entries in a batchCheckAsyncVideoGenerationStatus
+    response whose OWN status subtree carries `reason` (e.g. PROMINENT_PEOPLE) +
+    a FAILED generation status. Targets the `media` array entry-by-entry so a
+    sibling clip's reject isn't grabbed. Returns lowercased uuids (may be empty
+    if the entry has no uuid — caller then records nothing = safe no-attribution)."""
+    found = set()
+    reason_u = (reason or "").upper()
+
+    def scan(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == 'media' and isinstance(v, list):
+                    for entry in v:
+                        try:
+                            eb = json.dumps(entry).upper()
+                        except Exception:
+                            continue
+                        if reason_u in eb and 'FAIL' in eb:
+                            for s in _iter_strings(entry):
+                                mm = _UUID_RE.search(s)
+                                if mm:
+                                    found.add(mm.group(0).lower())
+                scan(v)
+        elif isinstance(node, list):
+            for v in node:
+                scan(v)
+
+    try:
+        scan(data)
+    except Exception:
+        pass
+    return found
+
+
+def _record_video_policy_terminal(media_id, reason):
+    """Record a terminal video-gen content-filter reject keyed by the FAILED
+    media's UUID. A clip only fail-fasts when its OWN bound mediaId is recorded
+    here — so a sibling clip's reject in the same batch poll can't mis-flag a
+    different clip. Prunes entries older than the window on each write."""
+    if not media_id:
+        return
+    now = time.time()
+    with _VIDEO_POLICY_TERMINAL_LOCK:
+        _VIDEO_POLICY_TERMINAL[media_id.lower()] = {'reason': reason, 'ts': now}
+        if len(_VIDEO_POLICY_TERMINAL) > 256:
+            for k in [k for k, v in _VIDEO_POLICY_TERMINAL.items()
+                      if now - v.get('ts', 0) > _VIDEO_POLICY_TERMINAL_WINDOW_S]:
+                _VIDEO_POLICY_TERMINAL.pop(k, None)
+
+
+def _consume_video_policy_terminal_for_clip(job_id, clip_index):
+    """If THIS clip's own bound mediaId carries a terminal content reject within
+    the window, return its reason and clear it. Returns None otherwise — including
+    when the clip's media isn't bound yet (safe: fall back to normal handling
+    rather than mis-attributing a sibling's reject)."""
+    try:
+        mids = bound_media_ids_for_clip(job_id, clip_index)
+    except Exception:
+        return None
+    if not mids:
+        return None
+    now = time.time()
+    with _VIDEO_POLICY_TERMINAL_LOCK:
+        for mid in mids:
+            rec = _VIDEO_POLICY_TERMINAL.get(mid)
+            if rec and (now - rec['ts']) <= _VIDEO_POLICY_TERMINAL_WINDOW_S:
+                _VIDEO_POLICY_TERMINAL.pop(mid, None)
+                return rec['reason']
+            if rec:
+                _VIDEO_POLICY_TERMINAL.pop(mid, None)  # stale — drop
+    return None
+
+
+def _clear_video_policy_terminal_for_clip(job_id, clip_index):
+    """Drop any terminal record for THIS clip's bound mediaIds. Called when the
+    clip PASSES its check so a stale record can't linger."""
+    try:
+        mids = bound_media_ids_for_clip(job_id, clip_index)
+    except Exception:
+        return
+    if not mids:
         return
     with _VIDEO_POLICY_TERMINAL_LOCK:
-        _VIDEO_POLICY_TERMINAL[buf_key] = {'reason': reason, 'ts': time.time()}
-
-
-def _consume_video_policy_terminal(buf_key):
-    """If a terminal video-gen content-filter reject was recorded for this
-    account within the recency window, return its reason and clear it (so the
-    next clip's own status poll re-arms it). Returns None otherwise."""
-    if not buf_key:
-        return None
-    with _VIDEO_POLICY_TERMINAL_LOCK:
-        rec = _VIDEO_POLICY_TERMINAL.pop(buf_key, None)
-    if not rec:
-        return None
-    if (time.time() - rec['ts']) > _VIDEO_POLICY_TERMINAL_WINDOW_S:
-        return None
-    return rec['reason']
-
-
-def _clear_video_policy_terminal(buf_key):
-    """Drop any pending terminal-policy record for this account. Called when a
-    clip PASSES its failure check so a stale record (e.g. a late status poll that
-    landed after its own clip's handler ran) can't be consumed by a LATER,
-    unrelated clip's transient failure on the same account."""
-    if not buf_key:
-        return
-    with _VIDEO_POLICY_TERMINAL_LOCK:
-        _VIDEO_POLICY_TERMINAL.pop(buf_key, None)
+        for mid in mids:
+            _VIDEO_POLICY_TERMINAL.pop(mid, None)
 
 
 def _page_buffer_key(page):
@@ -1377,9 +1447,15 @@ def _scan_failure_reason(resp, url, buf_key=''):
         _up = blob.upper()
         for _r in _VIDEO_POLICY_TERMINAL_REASONS:
             if _r in _up:
-                _record_video_policy_terminal(buf_key, _r)
+                # Attribute to the SPECIFIC failed media uuid(s), NOT the account —
+                # the batch poll covers every media, and a sibling's reject must not
+                # flag a different clip (operator 2026-06-23: a clip whose tiles read
+                # "unusual activity" got the wrong "prominent people" message).
+                _mids = _failed_media_ids_in_status(data, _r)
+                for _mid in _mids:
+                    _record_video_policy_terminal(_mid, _r)
                 print(f"[fail-reason-diag] {ep} buf={buf_key} TERMINAL content filter ({_r}) "
-                      f"recorded — clip will fail-fast (no model-swap, no restore)", flush=True)
+                      f"recorded for media {sorted(_mids) if _mids else 'NONE (no uuid in failed entry — not attributing)'}", flush=True)
                 break
     except Exception:
         pass
@@ -15129,7 +15205,7 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # Retry click masks the tile to a transient 'generating %'). Without this the
     # redo grinds the full 50s wait + 15-scan loop before the PolicyScan finally
     # gives up — the 8-minute grind seen in the 2026-06-23 logs.
-    _term_reason = _consume_video_policy_terminal(_page_buffer_key(page))
+    _term_reason = _consume_video_policy_terminal_for_clip(job_id, clip_index)
     if _term_reason:
         print(f"[REDO] ⛔ Clip {clip_index+1} terminal content filter ({_term_reason}) — "
               f"replace-image card, NOT requeueing (face filter is model-swap + restore proof)", flush=True)
@@ -16406,9 +16482,9 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         
         # Submission confirmed — NOW mark as generating + submitted in cache
         if not clip_failed:
-            # Clip passed — drop any stale terminal-policy record on this account
-            # so it can't be mis-consumed by a later clip's transient failure.
-            _clear_video_policy_terminal(_page_buffer_key(page))
+            # Clip passed — drop any stale terminal record for THIS clip's media
+            # so it can't linger.
+            _clear_video_policy_terminal_for_clip(job_id, clip_index)
             update_clip_status(clip['id'], 'generating')
             mark_clip_submitted(cache, job_id, clip_index)
         
@@ -18141,9 +18217,9 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # (only if FailCheck also passed — if clip_failed, the failure handler below
         # will set the correct status)
         if not clip_failed:
-            # Clip passed — drop any stale terminal-policy record on this account
-            # so it can't be mis-consumed by a later clip's transient failure.
-            _clear_video_policy_terminal(_page_buffer_key(page))
+            # Clip passed — drop any stale terminal record for THIS clip's media
+            # so it can't linger.
+            _clear_video_policy_terminal_for_clip(job_id, clip_index)
             update_clip_status(clip['id'], 'generating')
             mark_clip_submitted(cache, job_id, clip_index)
             # v737 — successful submission clears unusual-activity strike counter for this job
@@ -18233,7 +18309,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # re-blocks. Route to the EXISTING prominent-people handler (replace-
             # image card, no swap), fail THIS clip, and continue. Do NOT golden-
             # restore or reset remaining/generating clips (that re-submits done ones).
-            _term_reason = _consume_video_policy_terminal(_page_buffer_key(page))
+            _term_reason = _consume_video_policy_terminal_for_clip(job_id, clip_index)
             if _term_reason:
                 print(f"[Flow] ⛔ Clip {clip_index+1} hit terminal content filter ({_term_reason}) — "
                       f"failing clip (replace-image card), NOT restoring (model-swap + golden "
@@ -19069,7 +19145,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                     # filter is model-swap + restore proof; redoing just grinds the
                                     # scan loop (8-min grind, 2026-06-23 logs). Catch it here so the
                                     # clip never even enters the redo queue.
-                                    _pj_term = _consume_video_policy_terminal(_page_buffer_key(page))
+                                    _pj_term = _consume_video_policy_terminal_for_clip(job_id, _ci)
                                     if _pj_term:
                                         print(f"[Flow] ⛔ Post-job: clip {_ci+1} terminal content filter ({_pj_term}) — replace-image card, NOT redoing", flush=True)
                                         try:
