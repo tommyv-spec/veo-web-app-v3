@@ -314,8 +314,10 @@ _SUBMIT_RESPONSE_BUFFERS_LOCK = threading.Lock()
 _VIDEO_POLICY_TERMINAL = {}                 # media_uuid (lower) -> dict(reason, ts)
 _VIDEO_POLICY_TERMINAL_LOCK = threading.Lock()
 # Substrings (case-insensitive) in the status-poll error that mean a TERMINAL
-# content reject — model-swap-proof AND restore-proof. Extend as observed.
-_VIDEO_POLICY_TERMINAL_REASONS = ('PROMINENT_PEOPLE',)
+# content reject — model-swap-proof AND restore-proof. From the API as
+# PUBLIC_ERROR_<X> (e.g. PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED,
+# PUBLIC_ERROR_SEXUAL). Extend as new ones surface in [fail-reason-diag].
+_VIDEO_POLICY_TERMINAL_REASONS = ('PROMINENT_PEOPLE', 'SEXUAL', 'CSAM')
 _VIDEO_POLICY_TERMINAL_WINDOW_S = 180.0     # how recent a reject counts (media-keyed, so safe to keep longer)
 _UUID_RE = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
 
@@ -4648,6 +4650,37 @@ def route_generation_policy(clip_id, current_model, is_prominent, account_name="
               f"→ replace-image card (no model swap)", flush=True)
         return ('fail_prominent', 'prominent-people — replace-image card shown')
     return policy_gen_next_action(clip_id, current_model, generation_attempt=generation_attempt)
+
+
+# Reason-specific messages for TERMINAL video-gen content rejects. Each shows the
+# replace-image card — NEVER model-swap / redo / golden-restore (deterministic
+# content, swap can't help). PROMINENT_PEOPLE says "change the face"; SEXUAL says
+# "sexual content"; etc. Avoids the old bug of telling the user "change the face"
+# when the real reject was sexual content.
+_TERMINAL_CONTENT_MESSAGES = {
+    'PROMINENT_PEOPLE': ("⚠️ Flow flagged a prominent person. Upload a different face image "
+                         "(switching the model won't fix a flagged face)."),
+    'SEXUAL': ("⚠️ Flow flagged this image/scene as sexual content. Upload a different image "
+               "or change the pose/prompt (switching the model won't fix it)."),
+    'CSAM': "⚠️ Flow blocked this image for safety. Upload a different image.",
+}
+
+
+def route_terminal_content_reject(clip_id, reason, account_name=""):
+    """A TERMINAL video-gen content reject (PROMINENT_PEOPLE / SEXUAL / CSAM):
+    deterministic, model-swap-proof AND restore-proof. Show the replace-image card
+    with a REASON-SPECIFIC message; NEVER model-swap, redo, or golden-restore.
+    Returns ('fail_terminal', msg)."""
+    prefix = f"[{account_name}] " if account_name else ""
+    msg = _TERMINAL_CONTENT_MESSAGES.get(
+        reason, f"⚠️ Flow blocked this generation ({reason}). Upload a different image / change the prompt.")
+    try:
+        report_policy_violation(clip_id, rejected_image_key=None, detail=msg)
+        print(f"{prefix}[policy] terminal content reject ({reason}) on clip {clip_id} → replace-image card (no model swap)", flush=True)
+    except Exception as e:
+        print(f"{prefix}[policy] terminal-content report failed ({e}) — marking general policy", flush=True)
+        fail_clip_general_policy(clip_id, msg)
+    return ('fail_terminal', msg)
 
 
 def clear_flow_site_data(page, label=""):
@@ -15210,9 +15243,7 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
         print(f"[REDO] ⛔ Clip {clip_index+1} terminal content filter ({_term_reason}) — "
               f"replace-image card, NOT requeueing (face filter is model-swap + restore proof)", flush=True)
         try:
-            route_generation_policy(clip_id, getattr(page, '_veo_model', '') or '',
-                                    is_prominent=True, account_name="",
-                                    generation_attempt=clip.get('generation_attempt', 1))
+            route_terminal_content_reject(clip_id, _term_reason, account_name="")
         except Exception as _rpe:
             print(f"[REDO] ⚠ prominent-people route failed ({_rpe}) — marking general policy", flush=True)
             fail_clip_general_policy(clip_id, f"Blocked by Flow's {_term_reason} filter — change the avatar face.")
@@ -16497,9 +16528,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
             if _term_reason:
                 print(f"[{account_name}] ⛔ Clip {clip_index+1} terminal content filter ({_term_reason}) — replace-image card, NOT failing over", flush=True)
                 try:
-                    route_generation_policy(clip['id'], getattr(page, '_veo_model', '') or '',
-                                            is_prominent=True, account_name=account_name,
-                                            generation_attempt=clip.get('generation_attempt', 1))
+                    route_terminal_content_reject(clip['id'], _term_reason, account_name=account_name)
                 except Exception as _rpe:
                     print(f"[{account_name}] ⚠ prominent-people route failed ({_rpe}) — marking general policy", flush=True)
                     fail_clip_general_policy(clip['id'], f"Blocked by Flow's {_term_reason} filter — change the avatar face.")
@@ -18332,11 +18361,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 clip_log(clip.get('id'), clip_index, "FAILED",
                          f"terminal content filter {_term_reason} — change the avatar face/start frame")
                 try:
-                    route_generation_policy(
-                        clip['id'], getattr(page, '_veo_model', '') or '',
-                        is_prominent=True, account_name=account_name,
-                        generation_attempt=clip.get('generation_attempt', 1),
-                    )
+                    route_terminal_content_reject(clip['id'], _term_reason, account_name=account_name)
                 except Exception as _rpe:
                     print(f"[Flow] ⚠ prominent-people route failed ({_rpe}) — marking general policy", flush=True)
                     fail_clip_general_policy(clip['id'], f"Blocked by Flow's {_term_reason} filter — change the avatar face.")
@@ -18569,6 +18594,17 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             'clip_id': _df_clip['id'], 'urls': _v774c, 'temp_dir': temp_dir})
                         print(f"[Flow] ✓ clip {_dfc+1} recovered via bound mediaId — false policy-block averted → HTTP worker (v774c)", flush=True)
                         clip_log(_df_clip['id'], _dfc, "COMPLETED", "recovered via mediaId (false policy)")
+                        continue
+                    # Media-keyed TERMINAL content reject (PROMINENT_PEOPLE / SEXUAL /
+                    # CSAM) for THIS clip's own bound media → fail-fast replace-image
+                    # card. The DOM only says generic "violate policies", so without
+                    # this a SEXUAL reject (deterministic, swap-proof) would retry_swap
+                    # + requeue a redo it can never win (2026-06-24 logs, clip 7).
+                    _df_term = _consume_video_policy_terminal_for_clip(job_id, _dfc)
+                    if _df_term:
+                        route_terminal_content_reject(_df_clip['id'], _df_term, account_name="")
+                        print(f"[Flow] ⛔ clip {_dfc+1} terminal content filter ({_df_term}) — replace-image card, NOT requeueing; job continues", flush=True)
+                        clip_log(_df_clip['id'], _dfc, "FAILED", f"terminal content filter {_df_term}")
                         continue
                     _is_prom = _dfc in _prom_killed
                     _pa, _pmsg = route_generation_policy(_df_clip['id'], getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_df_clip.get('generation_attempt', 1))
@@ -19164,9 +19200,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                     if _pj_term:
                                         print(f"[Flow] ⛔ Post-job: clip {_ci+1} terminal content filter ({_pj_term}) — replace-image card, NOT redoing", flush=True)
                                         try:
-                                            route_generation_policy(_clip_obj['id'], getattr(page, '_veo_model', '') or '',
-                                                                    is_prominent=True, account_name="",
-                                                                    generation_attempt=_clip_obj.get('generation_attempt', 1))
+                                            route_terminal_content_reject(_clip_obj['id'], _pj_term, account_name="")
                                         except Exception as _pje:
                                             print(f"[Flow] ⚠ Post-job prominent-people route failed ({_pje}) — marking general policy", flush=True)
                                             fail_clip_general_policy(_clip_obj['id'], f"Blocked by Flow's {_pj_term} filter — change the avatar face.")
