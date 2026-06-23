@@ -14988,6 +14988,25 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
 
     # Check for immediate failure
     immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None)
+    # Definitive API terminal (PROMINENT_PEOPLE) on this resubmit's status poll —
+    # a deterministic face-content reject (operator confirmed: same frame is ALWAYS
+    # blocked). Act on it even when the DOM check returns "no clear failure" (a
+    # Retry click masks the tile to a transient 'generating %'). Without this the
+    # redo grinds the full 50s wait + 15-scan loop before the PolicyScan finally
+    # gives up — the 8-minute grind seen in the 2026-06-23 logs.
+    _term_reason = _consume_video_policy_terminal(_page_buffer_key(page))
+    if _term_reason:
+        print(f"[REDO] ⛔ Clip {clip_index+1} terminal content filter ({_term_reason}) — "
+              f"replace-image card, NOT requeueing (face filter is model-swap + restore proof)", flush=True)
+        try:
+            route_generation_policy(clip_id, getattr(page, '_veo_model', '') or '',
+                                    is_prominent=True, account_name="",
+                                    generation_attempt=clip.get('generation_attempt', 1))
+        except Exception as _rpe:
+            print(f"[REDO] ⚠ prominent-people route failed ({_rpe}) — marking general policy", flush=True)
+            fail_clip_general_policy(clip_id, f"Blocked by Flow's {_term_reason} filter — change the avatar face.")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return False
     if immediate_failure:
         # v777 — an immediate double-tile failure right after a redo submit is
         # almost always a content-policy block (same image + same prompt that was
@@ -15000,22 +15019,6 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
         # (policy_gen_next_action records the swap in _POLICY_SWAP_DONE, so the next
         # redo uses the other model); the n>=2 / attempt>=POLICY_FAIL_ATTEMPT guards
         # then cap it. Fixes the clip-3-stuck-forever case (2026-06-04 logs).
-        # Terminal video-gen content filter (e.g. PROMINENT_PEOPLE) seen on this
-        # account's status poll: face-content reject, model-swap-proof. Route to
-        # the replace-image card and STOP — skip the swap dance entirely.
-        _term_reason = _consume_video_policy_terminal(_page_buffer_key(page))
-        if _term_reason:
-            print(f"[REDO] ⛔ Clip {clip_index+1} terminal content filter ({_term_reason}) — "
-                  f"replace-image card, NOT requeueing (model-swap can't clear a face filter)", flush=True)
-            try:
-                route_generation_policy(clip_id, getattr(page, '_veo_model', '') or '',
-                                        is_prominent=True, account_name="",
-                                        generation_attempt=clip.get('generation_attempt', 1))
-            except Exception as _rpe:
-                print(f"[REDO] ⚠ prominent-people route failed ({_rpe}) — marking general policy", flush=True)
-                fail_clip_general_policy(clip_id, f"Blocked by Flow's {_term_reason} filter — change the avatar face.")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return False
         _action, _msg = policy_gen_next_action(clip_id, getattr(page, '_veo_model', '') or '', attempt)
         if _action == 'fail':
             print(f"[REDO] ⛔ Clip {clip_index+1} failed immediately on "
@@ -18926,11 +18929,28 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                     _pending_left.discard(_ci)
                                     print(f"[Flow] ✓ Post-job: clip {_ci+1} recovered via bound mediaId — false hard-failure averted → HTTP worker (v774b)", flush=True)
                                 else:
-                                    # Flow killed this clip — don't retry, queue for redo immediately
-                                    print(f"[Flow] ⚠ Post-job: clip {_ci+1} HARD FAILURE (refresh button) — queuing for redo", flush=True)
-                                    update_clip_status(_clip_obj['id'], 'flow_redo_queued',
-                                        error_message="Flow delayed failure — clip generated then killed by Flow")
-                                    _pending_left.discard(_ci)
+                                    # Deterministic content filter (PROMINENT_PEOPLE) on this
+                                    # clip's status poll → replace-image card, never redo. A face
+                                    # filter is model-swap + restore proof; redoing just grinds the
+                                    # scan loop (8-min grind, 2026-06-23 logs). Catch it here so the
+                                    # clip never even enters the redo queue.
+                                    _pj_term = _consume_video_policy_terminal(_page_buffer_key(page))
+                                    if _pj_term:
+                                        print(f"[Flow] ⛔ Post-job: clip {_ci+1} terminal content filter ({_pj_term}) — replace-image card, NOT redoing", flush=True)
+                                        try:
+                                            route_generation_policy(_clip_obj['id'], getattr(page, '_veo_model', '') or '',
+                                                                    is_prominent=True, account_name="",
+                                                                    generation_attempt=_clip_obj.get('generation_attempt', 1))
+                                        except Exception as _pje:
+                                            print(f"[Flow] ⚠ Post-job prominent-people route failed ({_pje}) — marking general policy", flush=True)
+                                            fail_clip_general_policy(_clip_obj['id'], f"Blocked by Flow's {_pj_term} filter — change the avatar face.")
+                                        _pending_left.discard(_ci)
+                                    else:
+                                        # Flow killed this clip — don't retry, queue for redo immediately
+                                        print(f"[Flow] ⚠ Post-job: clip {_ci+1} HARD FAILURE (refresh button) — queuing for redo", flush=True)
+                                        update_clip_status(_clip_obj['id'], 'flow_redo_queued',
+                                            error_message="Flow delayed failure — clip generated then killed by Flow")
+                                        _pending_left.discard(_ci)
 
                             elif _tile_fail_type == 'soft':
                                 print(f"[Flow] ⚠ Post-job: clip {_ci+1} tile failed — retrying in-place...", flush=True)
