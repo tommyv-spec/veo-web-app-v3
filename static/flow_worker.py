@@ -9123,10 +9123,17 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         # cookie-clear never fires. So short-circuit straight to the cookie-clear
         # recovery here. Only when the job hasn't already cleared once (the
         # once-per-job gate); otherwise fall through to the retry + strike path.
+        # Operator request: golden-restore ONLY when ALL tiles fail. A partial
+        # unusual-activity (e.g. 1/2 tiles) is not worth a full-account restore —
+        # let it fall through to the normal retry path; if it recovers, no
+        # restore. If it's a real block, the other tile(s) go unusual too and the
+        # post-retry recheck below (already gated on all-failed) catches it.
         _first_unusual = result.get('unusualActivityCount', 0)
-        if _first_unusual > 0 and job_id:
-            print(f"[FailCheck] ⚠ unusual-activity on FIRST check ({_first_unusual}/{tiles} tiles) — routing to cookie-clear before retry (retry would mask it) (v758.20)", flush=True)
+        if tiles > 0 and _first_unusual >= tiles and job_id:
+            print(f"[FailCheck] ⚠ unusual-activity on FIRST check (ALL {_first_unusual}/{tiles} tiles) — routing to cookie-clear before retry (retry would mask it) (v758.20)", flush=True)
             return "abort_unusual_activity"
+        if _first_unusual > 0 and job_id:
+            print(f"[FailCheck] ⓘ unusual-activity on {_first_unusual}/{tiles} tiles (partial) — NOT restoring; falling through to retry (operator: restore only when ALL tiles fail)", flush=True)
 
         # Click Retry on truly failed tiles (ones with 'refresh' button)
         if failed_count > 0:
