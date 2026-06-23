@@ -20287,6 +20287,41 @@ class AccountWorker(threading.Thread):
                         except Exception as ve:
                             print(f"[{account_name}-HTTP-DL] ✗ Clip {ci+1} variant {attempt}.{vi+1} failed: {ve}", flush=True)
                             all_ok = False
+                    if not any_ok:
+                        # One tile may have rendered under a mediaId that LATE-BOUND
+                        # (v729) AFTER this clip was enqueued, so its URL wasn't in
+                        # `urls` and only the poster variant was tried. Re-resolve the
+                        # clip's bound mediaIds now and grab any rendered URL we
+                        # haven't tried — use the good tile instead of a full redo.
+                        try:
+                            _cap = getattr(self, '_captured_media_urls', None) or {}
+                            _tried = set(urls)
+                            _extra = [_cap[_m] for _m in bound_media_ids_for_clip(job_id, ci)
+                                      if _cap.get(_m) and _cap[_m] not in _tried]
+                            if _extra:
+                                print(f"[{account_name}-HTTP-DL] Clip {ci+1}: {len(_extra)} late-bound variant URL(s) not yet tried — checking before redo", flush=True)
+                            for _xurl in _extra:
+                                try:
+                                    _r = sess.get(_xurl, timeout=120, allow_redirects=True)
+                                    if _r.status_code == 401 and sess is not session_ref[0] and session_ref[0] is not None:
+                                        _r = session_ref[0].get(_xurl, timeout=120, allow_redirects=True)
+                                    if not _r.ok:
+                                        continue
+                                    _xct = (_r.headers.get('Content-Type') or '').lower()
+                                    _xb = _r.content
+                                    if 'image' in _xct or len(_xb) < MIN_VIDEO_BYTES:
+                                        continue  # still a poster — not the rendered tile
+                                    _xout = os.path.join(temp_dir, f"clip_{ci}_{attempt}.late.mp4")
+                                    with open(_xout, 'wb') as f:
+                                        f.write(_xb)
+                                    print(f"[{account_name}-HTTP-DL] ✓ Clip {ci+1} recovered from late-bound rendered tile ({len(_xb):,} bytes) — NOT redoing", flush=True)
+                                    upload_video(_xout, job_id, ci, attempt=attempt, variant=1)
+                                    any_ok = True
+                                    break
+                                except Exception:
+                                    continue
+                        except Exception as _lbe:
+                            print(f"[{account_name}-HTTP-DL] late-bound recovery error (continuing to redo): {_lbe}", flush=True)
                     if all_ok or any_ok:
                         update_clip_status(clip_id, 'completed')
                         print(f"[{account_name}-HTTP-DL] ✓ Clip {ci+1} done — marked completed", flush=True)
