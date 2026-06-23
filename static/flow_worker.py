@@ -808,6 +808,52 @@ def _fa_init_project_best_effort(page, project_id, context=""):
         print(f"{pfx}[flow_api] page.reload() failed (non-blocking): {e}", flush=True)
 
 
+def force_agent_off(page, context=""):
+    """Flow's AGENT mode replaces the editor with a chat panel, so the Settings
+    (variant 'xN') gear vanishes — select_frames_to_video_mode can't configure the
+    clip and the clip gets SKIPPED/FAILED ("Settings button not found", 2026-06-23).
+    Project-init replays an agentInfo agent_toggle_state=DISABLED PATCH + reload to
+    force the editor layout, but on the submit/new-project path it sometimes doesn't
+    stick (agent re-enabled, or init skipped on a resumed project). Re-apply it on
+    demand: PATCH agent_toggle_state=DISABLED for THIS project, then reload so the
+    SPA re-renders the editor (Agent OFF). Best-effort; never raises. Returns True
+    if the PATCH was attempted."""
+    pfx = f"[{context}] " if context else ""
+    try:
+        _u = page.url or ""
+        m = re.search(r'/project/([A-Za-z0-9_\-]+)', _u)
+        if not m:
+            print(f"{pfx}[agent-off] no project id in URL — skip", flush=True)
+            return False
+        project_id = m.group(1)
+        _fa_attach_token_listener(page)  # idempotent
+        AISBX = "https://aisandbox-pa.googleapis.com"
+        token = _FA_TOKEN_STORE.token or ""
+        print(f"{pfx}[agent-off] Settings gear missing → Agent likely ON; forcing Agent OFF for project {project_id[:8]}", flush=True)
+        try:
+            _fa_api_fetch(
+                page,
+                f"{AISBX}/v1/projects/{project_id}/agentInfo?updateMask=agent_toggle_state",
+                "PATCH", token,
+                {"agentToggleState": "AGENT_TOGGLE_STATE_DISABLED"},
+            )
+        except Exception as _pe:
+            print(f"{pfx}[agent-off] PATCH raised (non-blocking): {_pe}", flush=True)
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                time.sleep(2)
+            print(f"{pfx}[agent-off] reload done — editor should now show the Settings gear (Agent OFF)", flush=True)
+        except Exception as _re:
+            print(f"{pfx}[agent-off] reload failed (non-blocking): {_re}", flush=True)
+        return True
+    except Exception as e:
+        print(f"{pfx}[agent-off] failed (non-blocking): {e}", flush=True)
+        return False
+
+
 def _fa_try_create_new_project_api(page, context=""):
     """Try API project create. Returns full project URL on success, None on failure.
     HAR-confirmed sequence (2026-05-30):
@@ -6146,6 +6192,7 @@ def select_frames_to_video_mode(page, context="", **kwargs):
     """
     prefix = f"{context} " if context else ""
     variants_count = kwargs.get('variants_count', 2)
+    _agent_off_tried = False  # only force Agent OFF once (it reloads the page)
 
     for full_attempt in range(3):
         try:
@@ -6191,6 +6238,12 @@ def select_frames_to_video_mode(page, context="", **kwargs):
 
             if settings_btn is None:
                 print(f"{prefix}⚠ Settings button not found", flush=True)
+                # The gear is missing because Flow's Agent mode is ON (chat panel
+                # replaces the editor). Force Agent OFF + reload once, then retry —
+                # blindly re-looking-up the same DOM just burns the 3 attempts.
+                if not _agent_off_tried:
+                    _agent_off_tried = True
+                    force_agent_off(page, context)
                 continue
 
             # ---- Wait for Radix hydration before clicking ----
@@ -6549,10 +6602,16 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                 pass
             continue
 
-    # All 3 attempts failed — try a page refresh and one more attempt
-    print(f"{prefix}⚠ Settings not configured after 3 attempts — refreshing page and retrying...", flush=True)
+    # All 3 attempts failed — Agent mode is the usual culprit (chat panel hides the
+    # gear). Force Agent OFF (reloads into the editor) if not already tried this
+    # call; otherwise a plain reload.
+    print(f"{prefix}⚠ Settings not configured after 3 attempts — forcing Agent OFF + refreshing...", flush=True)
     try:
-        page.reload(wait_until="domcontentloaded", timeout=30000)
+        if not _agent_off_tried:
+            _agent_off_tried = True
+            force_agent_off(page, context)
+        else:
+            page.reload(wait_until="domcontentloaded", timeout=30000)
         time.sleep(3)
         check_and_dismiss_popup(page)
     except Exception as reload_err:
