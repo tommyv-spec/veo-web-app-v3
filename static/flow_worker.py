@@ -310,7 +310,7 @@ _VIDEO_POLICY_TERMINAL_LOCK = threading.Lock()
 # Substrings (case-insensitive) in the status-poll error that mean a TERMINAL
 # content reject — model-swap-proof AND restore-proof. Extend as observed.
 _VIDEO_POLICY_TERMINAL_REASONS = ('PROMINENT_PEOPLE',)
-_VIDEO_POLICY_TERMINAL_WINDOW_S = 150.0     # how recent a reject counts for a DOM fail
+_VIDEO_POLICY_TERMINAL_WINDOW_S = 90.0      # how recent a reject counts for a DOM fail
 
 # v729 — late-bind ledger for responses that arrive AFTER _bind_pending_submits
 # times out. Flow's batchAsyncGenerateVideoStartImage now responds in 11-15s
@@ -355,6 +355,17 @@ def _consume_video_policy_terminal(buf_key):
     if (time.time() - rec['ts']) > _VIDEO_POLICY_TERMINAL_WINDOW_S:
         return None
     return rec['reason']
+
+
+def _clear_video_policy_terminal(buf_key):
+    """Drop any pending terminal-policy record for this account. Called when a
+    clip PASSES its failure check so a stale record (e.g. a late status poll that
+    landed after its own clip's handler ran) can't be consumed by a LATER,
+    unrelated clip's transient failure on the same account."""
+    if not buf_key:
+        return
+    with _VIDEO_POLICY_TERMINAL_LOCK:
+        _VIDEO_POLICY_TERMINAL.pop(buf_key, None)
 
 
 def _page_buffer_key(page):
@@ -16250,6 +16261,9 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         
         # Submission confirmed — NOW mark as generating + submitted in cache
         if not clip_failed:
+            # Clip passed — drop any stale terminal-policy record on this account
+            # so it can't be mis-consumed by a later clip's transient failure.
+            _clear_video_policy_terminal(_page_buffer_key(page))
             update_clip_status(clip['id'], 'generating')
             mark_clip_submitted(cache, job_id, clip_index)
         
@@ -17982,6 +17996,9 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # (only if FailCheck also passed — if clip_failed, the failure handler below
         # will set the correct status)
         if not clip_failed:
+            # Clip passed — drop any stale terminal-policy record on this account
+            # so it can't be mis-consumed by a later clip's transient failure.
+            _clear_video_policy_terminal(_page_buffer_key(page))
             update_clip_status(clip['id'], 'generating')
             mark_clip_submitted(cache, job_id, clip_index)
             # v737 — successful submission clears unusual-activity strike counter for this job
