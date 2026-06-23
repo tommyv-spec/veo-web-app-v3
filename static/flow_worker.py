@@ -6884,6 +6884,26 @@ def get_redo_clips():
     return []
 
 
+def clip_done_in_platform(clip_id):
+    """Authoritative check: does the platform ALREADY have a good render for this
+    clip (completed or approved in DB)? Used before queuing an auto-redo so we
+    NEVER regenerate a clip the platform already has. A false failure (e.g. a
+    late-bound good tile the HTTP-DL missed, or a drifted DOM tile read) was
+    flipping an already-good clip to flow_redo_queued → the server handed it back
+    as redo-pending → it regenerated → hit the policy filter → marked a GOOD clip
+    FAILED (operator: 'why redo it if we already had it in the platform', 2026-06-23).
+    The process_redo_clip guard (approval-status) only fires AFTER the status was
+    already flipped; this guards the SET side. Fail-open (False) on API error so a
+    genuine failure still redoes."""
+    if not clip_id:
+        return False
+    try:
+        _f = api_request("GET", f"/clips/{clip_id}/approval-status")
+        return bool(_f and _f.get('status') in ('completed', 'approved'))
+    except Exception:
+        return False
+
+
 def get_shm_dir():
     """Return /dev/shm on Linux, or a fast temp dir on Windows/macOS."""
     import platform, tempfile, os
@@ -18945,6 +18965,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                             print(f"[Flow] ⚠ Post-job prominent-people route failed ({_pje}) — marking general policy", flush=True)
                                             fail_clip_general_policy(_clip_obj['id'], f"Blocked by Flow's {_pj_term} filter — change the avatar face.")
                                         _pending_left.discard(_ci)
+                                    elif clip_done_in_platform(_clip_obj['id']):
+                                        # The platform already has a good render (the data-index
+                                        # tile read was a drifted/foreign tile, not this clip).
+                                        # Never redo a clip we already have.
+                                        print(f"[Flow] ↩ Post-job: clip {_ci+1} already completed/approved in platform — NOT redoing (false hard-failure)", flush=True)
+                                        _pending_left.discard(_ci)
                                     else:
                                         # Flow killed this clip — don't retry, queue for redo immediately
                                         print(f"[Flow] ⚠ Post-job: clip {_ci+1} HARD FAILURE (refresh button) — queuing for redo", flush=True)
@@ -20359,8 +20385,11 @@ class AccountWorker(threading.Thread):
                             except Exception:
                                 pass
                     if not all_ok and not any_ok:
-                        print(f"[{account_name}-HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo", flush=True)
-                        update_clip_status(clip_id, 'flow_redo_queued')
+                        if clip_done_in_platform(clip_id):
+                            print(f"[{account_name}-HTTP-DL] ↩ Clip {ci+1} already completed/approved in platform — NOT redoing (download just missed the late-bound tile)", flush=True)
+                        else:
+                            print(f"[{account_name}-HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo", flush=True)
+                            update_clip_status(clip_id, 'flow_redo_queued')
                     http_queue.task_done()
                 except Exception as e:
                     print(f"[{account_name}-HTTP-DL] ✗ Error: {e}", flush=True)
@@ -21588,10 +21617,13 @@ def main(account_session=None, account_download=None, account_label=None):
                                 update_job_status(job_id, 'completed')
                                 print(f"[HTTP-DL] ✓ Job {job_id[:8]}... complete ({total_job_clips} clips done)", flush=True)
                     if not all_ok and not any_ok:
-                        # All variants failed — queue as flow_redo_queued so get_redo_clips()
-                        # picks it up on the next poll cycle (seconds), not full job reprocess
-                        print(f"[HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo", flush=True)
-                        update_clip_status(clip_id, 'flow_redo_queued')
+                        if clip_done_in_platform(clip_id):
+                            print(f"[HTTP-DL] ↩ Clip {ci+1} already completed/approved in platform — NOT redoing (download missed the late-bound tile)", flush=True)
+                        else:
+                            # All variants failed — queue as flow_redo_queued so get_redo_clips()
+                            # picks it up on the next poll cycle (seconds), not full job reprocess
+                            print(f"[HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo", flush=True)
+                            update_clip_status(clip_id, 'flow_redo_queued')
                     http_queue.task_done()
                 except Exception as e:
                     print(f"[HTTP-DL] ✗ Error processing clip: {e}", flush=True)
