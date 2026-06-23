@@ -16489,8 +16489,23 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
             mark_clip_submitted(cache, job_id, clip_index)
         
         if clip_failed:
+            # Terminal video-gen content filter (PROMINENT_PEOPLE): face-content
+            # reject — model-swap-proof, restore-proof AND failover-proof (a flagged
+            # face fails on every account + project). Route to the replace-image card
+            # and move on; do NOT same-account-retry or cross-account failover.
+            _term_reason = _consume_video_policy_terminal_for_clip(job_id, clip_index)
+            if _term_reason:
+                print(f"[{account_name}] ⛔ Clip {clip_index+1} terminal content filter ({_term_reason}) — replace-image card, NOT failing over", flush=True)
+                try:
+                    route_generation_policy(clip['id'], getattr(page, '_veo_model', '') or '',
+                                            is_prominent=True, account_name=account_name,
+                                            generation_attempt=clip.get('generation_attempt', 1))
+                except Exception as _rpe:
+                    print(f"[{account_name}] ⚠ prominent-people route failed ({_rpe}) — marking general policy", flush=True)
+                    fail_clip_general_policy(clip['id'], f"Blocked by Flow's {_term_reason} filter — change the avatar face.")
+                continue
             print(f"[{account_name}] ⚠️ Clip {clip_index+1} FAILED immediately!", flush=True)
-            
+
             # ============================================================
             # SMART FAILOVER STRATEGY:
             # 1. Try same-account retry in new project (fast, handles project-level flags)
