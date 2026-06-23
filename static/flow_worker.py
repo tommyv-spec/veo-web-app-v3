@@ -293,6 +293,25 @@ _PRIMARY_MEDIA_LOCK = threading.Lock()
 _SUBMIT_RESPONSE_BUFFERS = {}               # buffer_key -> list[dict(data, captured_at, url)]
 _SUBMIT_RESPONSE_BUFFERS_LOCK = threading.Lock()
 
+# Video-gen TERMINAL content-filter rejects (e.g. PROMINENT_PEOPLE). The Flow
+# status-poll response (batchCheckAsyncVideoGenerationStatus) returns
+# mediaGenerationStatus=MEDIA_GENERATION_STATUS_FAILED + error.message=
+# PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED when the avatar face reads as a
+# real public figure. uploadImage PASSES (the still clears NB2's filter) but the
+# VIDEO gen then fails — so the existing uploadImage-time prominent-people guard
+# never fires, and the immediate-failure DOM path treats it as a generic block:
+# model-swap (a face filter is model-swap-PROOF) + golden-restore (restore-PROOF)
+# = infinite churn that also re-submits already-done clips. _scan_failure_reason
+# records the reject here keyed by the page's submit buffer_key + timestamp; the
+# immediate-failure handlers consume it and route to the EXISTING prominent-people
+# terminal handler (replace-image card, NO swap, NO restore).
+_VIDEO_POLICY_TERMINAL = {}                 # buf_key -> dict(reason, ts)
+_VIDEO_POLICY_TERMINAL_LOCK = threading.Lock()
+# Substrings (case-insensitive) in the status-poll error that mean a TERMINAL
+# content reject — model-swap-proof AND restore-proof. Extend as observed.
+_VIDEO_POLICY_TERMINAL_REASONS = ('PROMINENT_PEOPLE',)
+_VIDEO_POLICY_TERMINAL_WINDOW_S = 150.0     # how recent a reject counts for a DOM fail
+
 # v729 — late-bind ledger for responses that arrive AFTER _bind_pending_submits
 # times out. Flow's batchAsyncGenerateVideoStartImage now responds in 11-15s
 # but the bind wait was 10s — diagnostics confirmed strict-match responses
@@ -311,6 +330,41 @@ def _submit_buffer_key(account_label):
     if account_label:
         return f"acct:{account_label}"
     return f"tid:{threading.get_ident()}"
+
+
+def _record_video_policy_terminal(buf_key, reason):
+    """Record a terminal video-gen content-filter reject (face/identity filter)
+    for this account's submit buffer. Consumed by the immediate-failure handlers
+    to fail-fast instead of model-swapping + golden-restoring."""
+    if not buf_key:
+        return
+    with _VIDEO_POLICY_TERMINAL_LOCK:
+        _VIDEO_POLICY_TERMINAL[buf_key] = {'reason': reason, 'ts': time.time()}
+
+
+def _consume_video_policy_terminal(buf_key):
+    """If a terminal video-gen content-filter reject was recorded for this
+    account within the recency window, return its reason and clear it (so the
+    next clip's own status poll re-arms it). Returns None otherwise."""
+    if not buf_key:
+        return None
+    with _VIDEO_POLICY_TERMINAL_LOCK:
+        rec = _VIDEO_POLICY_TERMINAL.pop(buf_key, None)
+    if not rec:
+        return None
+    if (time.time() - rec['ts']) > _VIDEO_POLICY_TERMINAL_WINDOW_S:
+        return None
+    return rec['reason']
+
+
+def _page_buffer_key(page):
+    """The submit buffer_key the response listener stamped on this page at
+    install time (page._v700_submit_buffer_key). Used by the immediate-failure
+    handlers to match the terminal-policy record to the right account."""
+    try:
+        return getattr(page, '_v700_submit_buffer_key', '') or ''
+    except Exception:
+        return ''
 
 
 # ============================================================
@@ -1233,6 +1287,19 @@ def _scan_failure_reason(resp, url, buf_key=''):
         print(f"[fail-reason-diag] {ep} buf={buf_key} — " + " | ".join(hits[:40]), flush=True)
     else:
         print(f"[fail-reason-diag] {ep} buf={buf_key} marker-but-no-keyed-reason; raw[:1500]={blob[:1500]}", flush=True)
+    # Record TERMINAL content-filter rejects (face/identity) so the immediate-
+    # failure handlers fail-fast (replace-image card) instead of model-swap +
+    # golden-restore churn (which also re-submits already-done clips).
+    try:
+        _up = blob.upper()
+        for _r in _VIDEO_POLICY_TERMINAL_REASONS:
+            if _r in _up:
+                _record_video_policy_terminal(buf_key, _r)
+                print(f"[fail-reason-diag] {ep} buf={buf_key} TERMINAL content filter ({_r}) "
+                      f"recorded — clip will fail-fast (no model-swap, no restore)", flush=True)
+                break
+    except Exception:
+        pass
 
 
 def _install_submit_response_listener(page, account_label=""):
@@ -14915,6 +14982,22 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
         # (policy_gen_next_action records the swap in _POLICY_SWAP_DONE, so the next
         # redo uses the other model); the n>=2 / attempt>=POLICY_FAIL_ATTEMPT guards
         # then cap it. Fixes the clip-3-stuck-forever case (2026-06-04 logs).
+        # Terminal video-gen content filter (e.g. PROMINENT_PEOPLE) seen on this
+        # account's status poll: face-content reject, model-swap-proof. Route to
+        # the replace-image card and STOP — skip the swap dance entirely.
+        _term_reason = _consume_video_policy_terminal(_page_buffer_key(page))
+        if _term_reason:
+            print(f"[REDO] ⛔ Clip {clip_index+1} terminal content filter ({_term_reason}) — "
+                  f"replace-image card, NOT requeueing (model-swap can't clear a face filter)", flush=True)
+            try:
+                route_generation_policy(clip_id, getattr(page, '_veo_model', '') or '',
+                                        is_prominent=True, account_name="",
+                                        generation_attempt=clip.get('generation_attempt', 1))
+            except Exception as _rpe:
+                print(f"[REDO] ⚠ prominent-people route failed ({_rpe}) — marking general policy", flush=True)
+                fail_clip_general_policy(clip_id, f"Blocked by Flow's {_term_reason} filter — change the avatar face.")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False
         _action, _msg = policy_gen_next_action(clip_id, getattr(page, '_veo_model', '') or '', attempt)
         if _action == 'fail':
             print(f"[REDO] ⛔ Clip {clip_index+1} failed immediately on "
@@ -15299,6 +15382,12 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
             # v194: Cross-reference cache with DB — cache says "submitted" but only DB
             # confirms the HTTP download actually succeeded. A clip whose tile failed on
             # Flow was never downloaded, so DB still shows 'generating' or 'pending'.
+            # Map DONE from NOT-DONE off DB ground truth, not the stale in-memory
+            # clips loaded at job start. The HTTP download worker marks clips
+            # 'completed' (uploaded to the platform) asynchronously; without this
+            # refresh, completed_from_db misses those and they fall into
+            # skipped_by_db = "will re-submit" — redoing an already-uploaded clip.
+            refresh_clip_statuses(job)
             cached_submitted = cached_job.get('clips_submitted', [])
             completed_from_db = [
                 c['clip_index'] for c in clips
@@ -16720,6 +16809,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 )
         else:
             project_url = cached_job['project_url']
+        # Map DONE from NOT-DONE off DB ground truth, not the stale in-memory
+        # clips loaded at job start. Without this refresh a clip the HTTP worker
+        # already uploaded ('completed') is missed by completed_from_db and falls
+        # into skipped_by_db = "will re-submit" — redoing an already-done clip.
+        refresh_clip_statuses(job)
         cached_clips_done = cached_job.get('clips_submitted', [])
         completed_from_db = [
             c['clip_index'] for c in clips
@@ -17971,6 +18065,29 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             raise Exception(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
 
         if clip_failed:
+            # Terminal video-gen content filter (e.g. PROMINENT_PEOPLE): the avatar
+            # face trips Google's filter at GENERATION time (uploadImage already
+            # passed). Model-swap-proof AND restore-proof — retrying/restoring just
+            # re-blocks. Route to the EXISTING prominent-people handler (replace-
+            # image card, no swap), fail THIS clip, and continue. Do NOT golden-
+            # restore or reset remaining/generating clips (that re-submits done ones).
+            _term_reason = _consume_video_policy_terminal(_page_buffer_key(page))
+            if _term_reason:
+                print(f"[Flow] ⛔ Clip {clip_index+1} hit terminal content filter ({_term_reason}) — "
+                      f"failing clip (replace-image card), NOT restoring (model-swap + golden "
+                      f"restore can't clear a face filter)", flush=True)
+                clip_log(clip.get('id'), clip_index, "FAILED",
+                         f"terminal content filter {_term_reason} — change the avatar face/start frame")
+                try:
+                    route_generation_policy(
+                        clip['id'], getattr(page, '_veo_model', '') or '',
+                        is_prominent=True, account_name=account_name,
+                        generation_attempt=clip.get('generation_attempt', 1),
+                    )
+                except Exception as _rpe:
+                    print(f"[Flow] ⚠ prominent-people route failed ({_rpe}) — marking general policy", flush=True)
+                    fail_clip_general_policy(clip['id'], f"Blocked by Flow's {_term_reason} filter — change the avatar face.")
+                continue
             print(f"[Flow] ⚠️ Clip {clip_index+1} failed immediately — stopping submission and triggering restore...", flush=True)
             clip_log(clip.get('id'), clip_index, "RESTORE", "failed immediate check — re-queue + golden restore")
             # v758.25 — refresh DB truth so the 'generating' filter below excludes
