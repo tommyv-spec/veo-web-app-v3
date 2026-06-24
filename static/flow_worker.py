@@ -330,7 +330,7 @@ _UUID_RE = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 # variants are bound (then auto-clears).
 _V729_LATE_BIND_PENDING = {}                # buf_key -> dict(job_id, clip_index, clip_id, click_at, expected_min, bound_count, account_label, expires_at)
 _V729_LATE_BIND_LOCK = threading.Lock()
-_V729_LATE_BIND_MAX_AGE_S = 60.0            # response arriving >60s after click is suspect
+_V729_LATE_BIND_MAX_AGE_S = 90.0            # bumped 60→90s: the 2nd variant's response lands ~59s post-click (2026-06-24 logs), too close to a 60s window; 90s ensures the staggered 2nd variant always late-binds.
 
 
 def _submit_buffer_key(account_label):
@@ -16394,7 +16394,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
             _bind_pending_submits_for_page(
                 page, job_id, clip_index,
                 clip_id=clip.get('id'),
-                drain_timeout=20.0,   # v729 — Flow API now 11-15s; bumped from 10s. Late-bind covers >20s outliers.
+                drain_timeout=40.0,   # bumped 20→40s: Flow API responses now land ~35s post-click (2026-06-24 logs) so 20s timed out EVERY clip → per-clip "no submit response" WARN + legacy tile-position attribution (the misattribution-bug source). 40s binds synchronously; late-bind still backstops >40s.
                 expected_min=_v700_expected,
             )
         except Exception as _v700_err:
@@ -18142,7 +18142,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             _bind_pending_submits_for_page(
                 page, job_id, clip_index,
                 clip_id=clip.get('id'),
-                drain_timeout=20.0,   # v729 — Flow API now 11-15s; bumped from 10s. Late-bind covers >20s outliers.
+                drain_timeout=40.0,   # bumped 20→40s: Flow API responses now land ~35s post-click (2026-06-24 logs) so 20s timed out EVERY clip → per-clip "no submit response" WARN + legacy tile-position attribution (the misattribution-bug source). 40s binds synchronously; late-bind still backstops >40s.
                 expected_min=_v700_expected,
             )
         except Exception as _v700_err:
@@ -18880,7 +18880,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     _bind_pending_submits_for_page(
                         page, job_id, clip_index,
                         clip_id=_v700_clip_id,
-                        drain_timeout=20.0,   # v729 — Flow API now 11-15s; bumped from 10s. Late-bind covers >20s outliers.
+                        drain_timeout=40.0,   # bumped 20→40s: Flow API responses now land ~35s post-click (2026-06-24 logs) so 20s timed out EVERY clip → per-clip "no submit response" WARN + legacy tile-position attribution (the misattribution-bug source). 40s binds synchronously; late-bind still backstops >40s.
                         expected_min=_v700_expected,
                     )
                 except Exception as _v700_err:
