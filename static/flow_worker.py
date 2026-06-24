@@ -15230,8 +15230,41 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # (or any cycles carried over from the main-gen path) starts fresh.
     clear_auto_redo_cycle(clip_id)
 
-    # Check for immediate failure
-    immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None)
+    # Check for immediate failure — pass job_id so the redo DETECTS unusual-activity
+    # (account block) exactly like the main process. Without job_id the redo could
+    # never return abort_unusual_activity and mis-marked an account block as a
+    # terminal CONTENT-POLICY fail with NO golden restore (operator 2026-06-24:
+    # "kept failing for unusual activity, never restored, marked failed for policy").
+    immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None, job_id=job_id)
+
+    # Unusual-activity = account block / forbidden submit (the 403s). NOT a content
+    # or model problem (swap/replace-image can't fix it). Handle it like the main
+    # process: re-queue the clip + raise the same "stopping job to trigger golden
+    # restore" exception so the account thread golden-restores + self-resumes.
+    if immediate_failure == "abort_unusual_activity":
+        # Share the SAME per-job restore counter as the main process (module-level
+        # _UNUSUAL_GOLDEN_RESTORES) so the MAX_UNUSUAL_GOLDEN_RESTORES cap is enforced
+        # across both paths — a persistently-flagged account can't loop restores
+        # forever via the redo path.
+        with _UNUSUAL_GR_LOCK:
+            _gr_count = _UNUSUAL_GOLDEN_RESTORES.get(job_id, 0) + 1
+            _UNUSUAL_GOLDEN_RESTORES[job_id] = _gr_count
+        if _gr_count > MAX_UNUSUAL_GOLDEN_RESTORES:
+            print(f"[REDO] ⛔ Clip {clip_index+1} unusual-activity persists after {MAX_UNUSUAL_GOLDEN_RESTORES} golden restores — giving up (account flagged; retry later)", flush=True)
+            clip_log(clip_id, clip_index, "FAILED", f"unusual-activity persisted after {MAX_UNUSUAL_GOLDEN_RESTORES} golden restores (account rate-limited)")
+            update_clip_status(clip_id, 'failed', error_message=(
+                f"Account hit 'unusual activity' and stayed blocked after {MAX_UNUSUAL_GOLDEN_RESTORES} golden "
+                f"restores. The Google account is rate-limited — wait a while, then click Retry."))
+            with _UNUSUAL_GR_LOCK:
+                _UNUSUAL_GOLDEN_RESTORES.pop(job_id, None)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False
+        print(f"[REDO] 🔥 Clip {clip_index+1} unusual-activity (account block, golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}) — requeue + golden restore (NOT a policy fail)", flush=True)
+        clip_log(clip_id, clip_index, "RESTORE", f"unusual-activity (account block), golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}")
+        update_clip_status(clip_id, 'flow_redo_queued', error_message=None)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise Exception(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
+
     # Definitive API terminal (PROMINENT_PEOPLE) on this resubmit's status poll —
     # a deterministic face-content reject (operator confirmed: same frame is ALWAYS
     # blocked). Act on it even when the DOM check returns "no clear failure" (a
