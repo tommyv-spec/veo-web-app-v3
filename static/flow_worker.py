@@ -21095,14 +21095,24 @@ def main_multi_account(accounts_override=None):
     # is a substring of "chrome-session-2" so WMIC/PowerShell LIKE matches both.
     # By doing all kills and restores sequentially with no browsers running,
     # there's nothing to accidentally kill.
+    # Build EVERY enabled account's golden here — copy-mode closes the channel's
+    # Chrome to flush cookies, which MUST happen before any browser launches (else
+    # it kills a live worker). Standby accounts (beyond MAX_ACTIVE_ACCOUNTS) get
+    # their golden pre-built too, so a later failover swap-in hits the copy-once
+    # guard and never closes Beta. Session restore still only runs for active slots.
     print("\nPre-restoring golden profiles for all accounts...")
-    for account in active_accounts:
+    for account in enabled_accounts:
         session_folder = account['session_folder']
         account_label = account['name']
         golden = get_golden_folder(session_folder)
-        # Slot-1 laptop-profile pull (rebuilds golden from the laptop's trusted
-        # Chrome login). Runs here BEFORE the restore so golden exists below.
+        # Per-account laptop-profile copy-mode (rebuilds golden from the operator's
+        # trusted Chrome login). Runs BEFORE the restore so golden exists below.
         _maybe_pull_laptop_profile(session_folder, golden, label=account_label)
+        if account not in active_accounts:
+            # Standby: golden built + guarded now; its session restore happens at
+            # activation (the copy-once guard then skips the channel-close).
+            print(f"[{account_label}] Standby — golden pre-built ({'ok' if os.path.exists(golden) else 'none, will login on activation'})", flush=True)
+            continue
         if os.path.exists(golden):
             print(f"[{account_label}] Killing stale Chrome and restoring from golden...", flush=True)
             kill_chrome_using_profile(session_folder, label=account_label)
