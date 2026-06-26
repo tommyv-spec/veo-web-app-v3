@@ -4056,7 +4056,15 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
         # running yet); a mid-session slot restart hits the guard and skips the
         # close, so it never kills the other slot's live browser.
         _acct = next((a for a in ACCOUNTS if a.get("session_folder") == session_folder), None)
-        email = ((_acct.get("laptop_email", "") if _acct else "")
+        if _acct is None:
+            # Unknown slot (session_folder not in ACCOUNTS) — never guess an email
+            # or build a golden for it. Real callers always pass an ACCOUNTS slot.
+            print(f"[{label}] laptop copy: session {session_folder} not in ACCOUNTS — skip", flush=True)
+            return
+        # The slot's own laptop_email if set, else Account1's / worker_settings —
+        # operator runs the SAME account across slots, so a slot with no own email
+        # builds from Account1's profile.
+        email = (_acct.get("laptop_email", "")
                  or ACCOUNTS[0].get("laptop_email", "")
                  or _lle(os.path.join(_BASE, "worker_settings.json")))
         if not email:
