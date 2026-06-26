@@ -587,6 +587,14 @@ def _fa_is_error(result):
     s = result.get("status")
     if isinstance(s, int) and s >= 400:
         return True
+    # status 0 = the in-page fetch NEVER ran (page closed / evaluate failed).
+    # That is NOT success — treating it as ok made force_agent_off log
+    # "isAgentModeToggled=false (ok)" on a dead page, masking the real failure.
+    if s == 0:
+        return True
+    txt = result.get("text")
+    if isinstance(txt, str) and txt.startswith("evaluate failed"):
+        return True
     d = result.get("data")
     if isinstance(d, dict) and d.get("error"):
         return True
@@ -19794,6 +19802,21 @@ class AccountWorker(threading.Thread):
             )
 
             print(f"[{self.name}] ✓ Browser started", flush=True)
+
+            # TEMP DIAG (copy-mode page-death hunt, remove after evidence) — log the
+            # EXACT moment + cause the page/context dies, so we can see WHY clips fail
+            # with "Settings button not found / Target page closed". CRASH = renderer
+            # died; PAGE CLOSED with no worker close-log = external/Flow eviction (e.g.
+            # two concurrent sessions on the SAME Google account fighting).
+            try:
+                import time as _t_diag
+                _who = self.name
+                self.page.on("crash", lambda: print(f"[{_who}] ‼[PAGE-LIFECYCLE {_t_diag.strftime('%H:%M:%S')}] PAGE CRASHED", flush=True))
+                self.page.on("close", lambda: print(f"[{_who}] ‼[PAGE-LIFECYCLE {_t_diag.strftime('%H:%M:%S')}] PAGE CLOSED", flush=True))
+                self.browser.on("close", lambda: print(f"[{_who}] ‼[PAGE-LIFECYCLE {_t_diag.strftime('%H:%M:%S')}] CONTEXT/BROWSER CLOSED", flush=True))
+                print(f"[{_who}] [PAGE-LIFECYCLE] death listeners attached", flush=True)
+            except Exception as _le_diag:
+                print(f"[{self.name}] [PAGE-LIFECYCLE] attach failed: {_le_diag}", flush=True)
 
             # Slot-1 laptop login: inject the cookies decrypted from the operator's
             # real Chrome profile so this fresh (automatable) session is already
