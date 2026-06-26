@@ -4014,8 +4014,8 @@ _LAPTOP_COPIED_GOLDENS = set()  # golden paths copied this process (copy once)
 
 
 def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
-    """Slot-1 + laptop_email: COPY-MODE — build the slot golden DIRECTLY from the
-    operator's real Chrome profile logged into laptop_email, so the worker launches
+    """Per-account laptop_email: COPY-MODE — build EACH slot's golden DIRECTLY from
+    the operator's real Chrome profile logged into laptop_email, so the worker launches
     an already-logged-in session with no verification code. Copies only the durable
     file set (build_lean_golden_from_profile), rewrites Local State to a single
     `Default` profile, and reads the profile ONLY (one flush-close, never automated)
@@ -4043,14 +4043,22 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
             pass
         if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
-        if session_folder != ACCOUNTS[0]["session_folder"]:
-            return  # slot 1 only — one Google account drives the shared golden
         # Fresh-load the synced companion (updater writes it after import).
         import sys as _sys
         _sys.modules.pop("worker_profile_pull", None)
         from worker_profile_pull import (build_lean_golden_from_profile, locate_profile,
                                          close_laptop_chrome, load_laptop_email as _lle)
-        email = ACCOUNTS[0].get("laptop_email", "") or _lle(os.path.join(_BASE, "worker_settings.json"))
+        # Build EVERY slot's golden from copy-mode (not just slot 1). Email is the
+        # slot's own laptop_email if set, else Account1's / worker_settings — the
+        # operator runs the SAME Google account across slots, so each slot golden
+        # is built from that one profile. The copy-once guard (keyed per golden)
+        # closes the channel's Chrome only during pre-restore (no worker browser
+        # running yet); a mid-session slot restart hits the guard and skips the
+        # close, so it never kills the other slot's live browser.
+        _acct = next((a for a in ACCOUNTS if a.get("session_folder") == session_folder), None)
+        email = ((_acct.get("laptop_email", "") if _acct else "")
+                 or ACCOUNTS[0].get("laptop_email", "")
+                 or _lle(os.path.join(_BASE, "worker_settings.json")))
         if not email:
             return
         if golden_folder in _LAPTOP_COPIED_GOLDENS:
@@ -4067,7 +4075,7 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
                 _cf.write(_ch)
         except Exception:
             pass
-        print(f"[{label}] laptop copy (copy-mode v805): {email} in {_pf} ({_ch}) — building lean golden", flush=True)
+        print(f"[{label}] laptop copy (copy-mode v805.1 all-slots): {email} in {_pf} ({_ch}) — building lean golden", flush=True)
         ch = build_lean_golden_from_profile(
             email, golden_folder, label=label, user_data_dir=_ud,
             close_chrome=lambda _u: close_laptop_chrome(_u, log=lambda m: print(m, flush=True)),
