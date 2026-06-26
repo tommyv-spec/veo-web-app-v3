@@ -333,3 +333,137 @@ def pull_profile_from_laptop(email, golden_folder, label="",
     log(f"{tag}pulled laptop profile for {email or '(auto)'} "
         f"({profile_folder} -> golden, channel={channel})")
     return channel
+
+
+# ── Lean copy-mode (the proven ABE-off path) ───────────────────────────────
+# Copy ONLY the golden's durable file set. Excluded entries are caches Chrome
+# rebuilds, session-restore files (else it reopens the operator's tabs), and
+# lock/log/journal scratch. Everything kept carries the durable login: cookies,
+# Login Data, Preferences, Accounts, IndexedDB (Flow app session), Local Storage,
+# Network bound-session tokens, Web Data.
+_LEAN_EXCLUDE_DIRS = {
+    "Cache", "Code Cache", "GPUCache", "GrShaderCache", "ShaderCache",
+    "DawnGraphiteCache", "DawnWebGPUCache", "GPUPersistentCache",
+    "component_crx_cache", "extensions_crx_cache", "Crashpad", "blob_storage",
+    "Safe Browsing", "Safe Browsing Network", "AutofillAiModelCache",
+    "Sessions", "JumpListIconsMostVisited", "JumpListIconsRecentClosed",
+    "VideoDecodeStats",
+}
+_LEAN_EXCLUDE_FILES = {
+    "SingletonLock", "SingletonSocket", "SingletonCookie",
+    "LOCK", "LOG", "LOG.old",
+    "Current Tabs", "Current Session", "Last Tabs", "Last Session",
+}
+
+
+def _lean_ignore(dirpath, names):
+    """shutil.copytree ignore callback for the lean golden copy."""
+    drop = set()
+    for n in names:
+        if n in _LEAN_EXCLUDE_FILES or n.endswith("-journal"):
+            drop.add(n)
+            continue
+        if n in _LEAN_EXCLUDE_DIRS and os.path.isdir(os.path.join(dirpath, n)):
+            drop.add(n)
+    return drop
+
+
+def build_lean_golden_from_profile(email, golden_folder, label="",
+                                   user_data_dir=None, close_chrome=None, log=print):
+    """COPY-MODE (App-Bound Encryption must be OFF). Build `golden_folder` as a
+    clean single-profile Chrome user-data-dir from the real laptop profile logged
+    into `email`, copying ONLY the golden's durable file set (see _LEAN_EXCLUDE_*).
+    Rewrites Local State so the lone profile is `Default`=email and patches
+    Preferences for a clean exit (no tab restore). Atomic swap; never raises.
+    Returns the launch channel string on success, False on any skip.
+
+    The real profile is READ ONLY (never automated/killed beyond one flush-close),
+    so it cannot be signed out. Replaces the retired net-log capture+inject."""
+    tag = f"[{label}] " if label else ""
+
+    candidates = [user_data_dir] if user_data_dir else resolve_laptop_user_data_dirs()
+    user_data_dir, profile_folder = None, None
+    for ud in candidates:
+        if not ud or not os.path.isdir(ud) or not os.path.isfile(os.path.join(ud, "Local State")):
+            continue
+        pf = find_profile_dir_for_email(ud, email) if email else find_logged_in_profile(ud)
+        if pf:
+            user_data_dir, profile_folder = ud, pf
+            break
+    if not profile_folder:
+        log(f"{tag}lean golden: {email!r} not logged into any Chrome channel")
+        return False
+    src_profile = os.path.join(user_data_dir, profile_folder)
+    if not os.path.isdir(src_profile):
+        log(f"{tag}lean golden: profile folder missing {src_profile}")
+        return False
+    log(f"{tag}lean golden: copying profile {profile_folder!r} from {user_data_dir}")
+
+    # Close ONLY this channel's Chrome so cookie/login DBs are unlocked + flushed.
+    try:
+        if close_chrome is not None:
+            close_chrome(user_data_dir)
+        else:
+            close_laptop_chrome(user_data_dir, log=log)
+    except Exception as e:
+        log(f"{tag}lean golden: close chrome failed: {e}")
+        return False
+
+    tmp = golden_folder + ".lean_tmp"
+    try:
+        if os.path.exists(tmp):
+            shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp, exist_ok=True)
+        # 1. profile -> Default (lean)
+        shutil.copytree(src_profile, os.path.join(tmp, "Default"),
+                        ignore=_lean_ignore, ignore_dangling_symlinks=True)
+        # 2. Local State (DPAPI cookie key) -> golden root, single Default profile
+        with open(os.path.join(user_data_dir, "Local State"), "r", encoding="utf-8") as f:
+            ls = json.load(f)
+        prof = ls.setdefault("profile", {})
+        entry = (prof.get("info_cache", {}) or {}).get(profile_folder, {})
+        prof["info_cache"] = {"Default": entry}
+        prof["last_used"] = "Default"
+        prof["last_active_profiles"] = ["Default"]
+        with open(os.path.join(tmp, "Local State"), "w", encoding="utf-8") as f:
+            json.dump(ls, f)
+        # 3. Preferences: clean exit so Chrome does not reopen the operator's tabs
+        _pref = os.path.join(tmp, "Default", "Preferences")
+        try:
+            with open(_pref, "r", encoding="utf-8") as f:
+                pr = json.load(f)
+            pr.setdefault("profile", {})["exit_type"] = "Normal"
+            pr["profile"]["exited_cleanly"] = True
+            pr.setdefault("session", {})["restore_on_startup"] = 5
+            with open(_pref, "w", encoding="utf-8") as f:
+                json.dump(pr, f)
+        except (OSError, ValueError):
+            pass  # missing/unreadable -> Chrome rebuilds it
+    except Exception as e:
+        log(f"{tag}lean golden: copy failed: {e}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+
+    # Atomic swap -- never leave the worker with no golden (same volume rename).
+    backup = golden_folder + ".old"
+    try:
+        if os.path.exists(backup):
+            shutil.rmtree(backup, ignore_errors=True)
+        if os.path.exists(golden_folder):
+            os.rename(golden_folder, backup)
+        os.rename(tmp, golden_folder)
+    except Exception as e:
+        log(f"{tag}lean golden: swap failed: {e}")
+        if not os.path.exists(golden_folder) and os.path.exists(backup):
+            try:
+                os.rename(backup, golden_folder)
+            except Exception:
+                pass
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+    shutil.rmtree(backup, ignore_errors=True)
+
+    channel = _channel_for_user_data_dir(user_data_dir)
+    log(f"{tag}lean golden built for {email or '(auto)'} "
+        f"({profile_folder} -> golden/Default, channel={channel})")
+    return channel

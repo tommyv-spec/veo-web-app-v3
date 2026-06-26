@@ -4010,60 +4010,75 @@ ACCOUNTS = [
     },
 ]
 
-def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
-    """Slot-1 + laptop_email: reuse the operator's existing Google login WITHOUT
-    a manual code. Copying the profile can't work (Chrome 127+ app-bound cookie
-    encryption) and the real profile can't be automated (Chrome 136+ blocks
-    debugging on the default profile). So we DECRYPT the cookies from the real
-    profile (via Chrome's elevation service) and STAGE them; they get injected
-    into the worker's OWN fresh session (which IS automatable) right after launch.
+_LAPTOP_COPIED_GOLDENS = set()  # golden paths copied this process (copy once)
 
-    Records the Chrome channel (so the worker launches Beta if that's where the
-    account lives) and closes ONLY that channel's Chrome. Fail-safe: any error is
-    logged, never raises; if extraction fails the worker just needs a manual login
-    that run. Set LAPTOP_PULL_DISABLED=1 to turn the whole thing off."""
+
+def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
+    """Slot-1 + laptop_email: COPY-MODE — build the slot golden DIRECTLY from the
+    operator's real Chrome profile logged into laptop_email, so the worker launches
+    an already-logged-in session with no verification code. Copies only the durable
+    file set (build_lean_golden_from_profile), rewrites Local State to a single
+    `Default` profile, and reads the profile ONLY (one flush-close, never automated)
+    so the account cannot be signed out.
+
+    Requires App-Bound Encryption disabled (HKCU policy) so the copied cookies
+    decrypt under the same Windows user. Copy ONCE per process — a re-copy closes
+    the channel's Chrome and would kill the worker's own running Beta windows.
+
+    Replaces the retired net-log capture+inject (Flow rejected the reconstituted
+    session for some accounts AND repeatedly driving the real profile signed it
+    out). Fail-safe: any error logged, never raises; on failure the worker falls
+    back to a manual login that run. Set LAPTOP_PULL_DISABLED=1 to turn off.
+
+    v805 diagnostic: prints "copy-mode v805" + the build outcome so the next
+    operator-side run confirms the copy path is live (remove after evidence)."""
     cookie_marker = os.path.join(_BASE, ".worker_injected_cookies.json")
     try:
+        # Drop any stale net-log cookie marker from the retired path so the old
+        # injection block (kept as a no-op) never fires with dead cookies.
+        try:
+            if os.path.isfile(cookie_marker):
+                os.remove(cookie_marker)
+        except Exception:
+            pass
         if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
         if session_folder != ACCOUNTS[0]["session_folder"]:
-            return  # slot 1 only — one Google account, injected into its session
-        # Fresh-load the synced companions (updater writes them after import).
+            return  # slot 1 only — one Google account drives the shared golden
+        # Fresh-load the synced companion (updater writes it after import).
         import sys as _sys
-        for _m in ("worker_profile_pull", "worker_cookie_extract"):
-            _sys.modules.pop(_m, None)
-        from worker_profile_pull import locate_profile, load_laptop_email as _lle
-        from worker_cookie_extract import extract_cookies
+        _sys.modules.pop("worker_profile_pull", None)
+        from worker_profile_pull import (build_lean_golden_from_profile, locate_profile,
+                                         close_laptop_chrome, load_laptop_email as _lle)
         email = ACCOUNTS[0].get("laptop_email", "") or _lle(os.path.join(_BASE, "worker_settings.json"))
         if not email:
-            try:
-                if os.path.isfile(cookie_marker):
-                    os.remove(cookie_marker)
-            except Exception:
-                pass
+            return
+        if golden_folder in _LAPTOP_COPIED_GOLDENS:
+            print(f"[{label}] laptop copy: golden already built this session — reusing", flush=True)
             return
         loc = locate_profile(email)
         if not loc:
-            print(f"[{label}] laptop login: {email!r} not logged into any Chrome channel", flush=True)
+            print(f"[{label}] laptop copy: {email!r} not logged into any Chrome channel", flush=True)
             return
         _ud, _pf, _ch = loc
+        # Record the channel so the worker launches the right Chrome (e.g. Beta).
         try:
             with open(os.path.join(_BASE, ".worker_chrome_channel"), "w", encoding="utf-8") as _cf:
                 _cf.write(_ch)
         except Exception:
             pass
-        print(f"[{label}] laptop login: {email} in {_pf} ({_ch}); capturing live cookies via net-log", flush=True)
-        # extract_cookies launches the real profile no-debug + net-log, captures
-        # the live auth cookies, and closes it (channel-only). No decrypt needed.
-        cookies = extract_cookies(_ud, _pf, _ch, log=lambda m: print(m, flush=True))
-        if cookies:
-            with open(cookie_marker, "w", encoding="utf-8") as _f:
-                json.dump(cookies, _f)
-            print(f"[{label}] laptop login: staged {len(cookies)} cookies for injection", flush=True)
+        print(f"[{label}] laptop copy (copy-mode v805): {email} in {_pf} ({_ch}) — building lean golden", flush=True)
+        ch = build_lean_golden_from_profile(
+            email, golden_folder, label=label, user_data_dir=_ud,
+            close_chrome=lambda _u: close_laptop_chrome(_u, log=lambda m: print(m, flush=True)),
+            log=lambda m: print(m, flush=True))
+        if ch:
+            _LAPTOP_COPIED_GOLDENS.add(golden_folder)
+            print(f"[{label}] laptop copy: ✓ lean golden ready (channel={ch})", flush=True)
         else:
-            print(f"[{label}] laptop login: 0 cookies extracted — manual login needed this run", flush=True)
+            print(f"[{label}] laptop copy: build skipped/failed — manual login needed this run", flush=True)
     except Exception as _pe:
-        print(f"[{label}] laptop login error (continuing): {_pe}", flush=True)
+        print(f"[{label}] laptop copy error (continuing): {_pe}", flush=True)
 
 
 def _worker_chrome_channel():
