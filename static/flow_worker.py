@@ -19722,7 +19722,10 @@ class AccountWorker(threading.Thread):
           # accidentally kills another account's already-running browser via substring match)
             if not self.golden_restored:
                 _acct_golden = get_golden_folder(self.session_folder)
-                # Slot-1 laptop-profile pull (fallback path when not pre-restored).
+                # Per-account laptop-profile copy-mode — fallback path when this
+                # slot was not pre-restored (e.g. standby on first activation). The
+                # copy-once guard makes it a no-op if the golden was already built
+                # in main()'s pre-restore, so it won't close Beta on a live worker.
                 _maybe_pull_laptop_profile(self.session_folder, _acct_golden, label=self.name)
                 if os.path.exists(_acct_golden):
                     print(f"[{self.name}] Restoring session from golden before launch: {_acct_golden}", flush=True)
@@ -21100,6 +21103,7 @@ def main_multi_account(accounts_override=None):
     # it kills a live worker). Standby accounts (beyond MAX_ACTIVE_ACCOUNTS) get
     # their golden pre-built too, so a later failover swap-in hits the copy-once
     # guard and never closes Beta. Session restore still only runs for active slots.
+    _active_names = {a['name'] for a in active_accounts}
     print("\nPre-restoring golden profiles for all accounts...")
     for account in enabled_accounts:
         session_folder = account['session_folder']
@@ -21108,7 +21112,7 @@ def main_multi_account(accounts_override=None):
         # Per-account laptop-profile copy-mode (rebuilds golden from the operator's
         # trusted Chrome login). Runs BEFORE the restore so golden exists below.
         _maybe_pull_laptop_profile(session_folder, golden, label=account_label)
-        if account not in active_accounts:
+        if account_label not in _active_names:
             # Standby: golden built + guarded now; its session restore happens at
             # activation (the copy-once guard then skips the channel-close).
             print(f"[{account_label}] Standby — golden pre-built ({'ok' if os.path.exists(golden) else 'none, will login on activation'})", flush=True)
