@@ -4450,6 +4450,21 @@ MIN_VIDEO_BYTES = 200_000  # below this (or image content-type) = poster/partial
 POSTER_RETRY_MAX = 6       # retries on the same stable URL while it's still a poster
 POSTER_RETRY_DELAY = 20    # seconds between poster retries (6×20 = 120s ≈ an 8s clip's render time)
 
+
+def _video_media_url(url):
+    """Drop `mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL` from a getMediaUrlRedirect URL.
+    HAR-proven 2026-06-27: the SAME mediaId returns the /image/ POSTER (jpeg ~60KB)
+    with that param and the /video/ mp4 WITHOUT it. When the captured/bound URL
+    carries the thumbnail param the HTTP-DL retries a poster forever -> the rendered
+    clip gets wrongly redone. Stripping it makes the same mediaId resolve to the
+    video. Harmless on true image mediaIds (they resolve to /image/ either way)."""
+    if not url or 'MEDIA_URL_TYPE_THUMBNAIL' not in url:
+        return url
+    u = re.sub(r'(?:[?&])mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL\b', '', url)
+    if '?' not in u and '&' in u:        # stripped the first query param -> repair
+        u = u.replace('&', '?', 1)
+    return u
+
 # v737 — "We noticed some unusual activity" account-block detection.
 # Per-job strike counter. When all tiles fail with the unusual-activity Help-Center
 # notice, the page-refresh (golden restore) usually clears it. If it persists across
@@ -20621,6 +20636,7 @@ class AccountWorker(threading.Thread):
                             continue
                         if url.startswith('/'):
                             url = 'https://labs.google' + url
+                        url = _video_media_url(url)  # thumbnail param -> serves poster forever
                         try:
                             print(f"[{account_name}-HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1}: {url[:80]}", flush=True)
                             # v794c — validate it's a real video, not a poster the
@@ -20670,6 +20686,7 @@ class AccountWorker(threading.Thread):
                             if _extra:
                                 print(f"[{account_name}-HTTP-DL] Clip {ci+1}: {len(_extra)} late-bound variant URL(s) not yet tried — checking before redo", flush=True)
                             for _xurl in _extra:
+                                _xurl = _video_media_url(_xurl)
                                 try:
                                     _r = sess.get(_xurl, timeout=120, allow_redirects=True)
                                     if _r.status_code == 401 and sess is not session_ref[0] and session_ref[0] is not None:
@@ -21909,6 +21926,7 @@ def main(account_session=None, account_download=None, account_label=None):
                             continue
                         if url.startswith('/'):
                             url = 'https://labs.google' + url
+                        url = _video_media_url(url)  # thumbnail param -> serves poster forever
                         try:
                             print(f"[HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1}: {url[:80]}", flush=True)
                             resp = sess.get(url, timeout=120, allow_redirects=True)
