@@ -9226,7 +9226,8 @@ def get_tile_count_at_index0(page):
     return None
 
 
-_policy_retried_tiles = {}  # tile_id → retry_time (for time-based persistence check)
+_policy_retried_tiles = {}  # data_index → retry_time (for time-based persistence check)
+_policy_terminal_logged = set()  # data_index already logged as terminal (avoid spam)
 
 def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job_id=None):
     """
@@ -9263,11 +9264,21 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job
                     const icons = Array.from(tile.querySelectorAll('i')).map(i => i.textContent.trim());
                     if (!icons.includes('warning')) continue;
                     const tileId = tile.getAttribute('data-tile-id');
+                    // Pull any media UUID the tile carries (getMediaUrlRedirect?name=<id>
+                    // on an img/video/source) so Python can match it to the API terminal
+                    // record DIRECTLY — no fragile data-index→clip guessing.
+                    const mids = [];
+                    for (const el of tile.querySelectorAll('img,video,source')) {
+                        const s = el.getAttribute('src') || el.src || '';
+                        const m = s.match(/[?&]name=([0-9a-fA-F-]{36})/);
+                        if (m) mids.push(m[1].toLowerCase());
+                    }
                     results.push({
                         dataIndex: idx,
                         tileId: tileId,
                         hasRetryBtn: icons.includes('refresh'),
                         hasReuseBtn: icons.includes('undo'),
+                        mediaIds: mids,
                     });
                 }
             }
@@ -9284,33 +9295,45 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job
             tile_id = info.get('tileId', '')
             data_idx = info.get('dataIndex', -1)
             
-            # Already retried — check if enough time passed
-            if tile_id in _policy_retried_tiles:
-                retry_time = _policy_retried_tiles[tile_id]
-                elapsed = time.time() - retry_time
-                if elapsed < PERSISTENCE_WAIT:
-                    # Too early to call it persistent — retry is still generating
-                    continue
-                print(f"{prefix}[PolicyScan] ❌ Persistent policy failure at data-index={data_idx} ({elapsed:.0f}s since retry)", flush=True)
-                persistent.append(data_idx)
-                continue
-            
-            print(f"{prefix}[PolicyScan] ⚠ Policy failure at data-index={data_idx} (tile={tile_id[:12]}...)", flush=True)
+            _tile_mids = info.get('mediaIds') or []
 
-            # Terminal content filter (PROMINENT_PEOPLE / SEXUAL / CSAM): retrying
-            # re-runs the SAME face → fails again forever, and the tile_id changes on
-            # each retry so the dedup above never catches it → endless re-click after
-            # every clip. Map data-index → clip → peek the API terminal record; if
-            # terminal, do NOT retry — mark persistent so it routes to fail/replace.
-            if job_id is not None and clip_submit_times:
+            # TERMINAL content filter (PROMINENT_PEOPLE / SEXUAL / CSAM): the avatar
+            # face won't change on retry, so it just fails again forever. Match the
+            # tile's OWN media UUIDs to the API terminal record (definitive); fall back
+            # to the submit-time clip mapping. If terminal → NEVER click Retry.
+            _term = None
+            if _tile_mids:
+                _now = time.time()
+                with _VIDEO_POLICY_TERMINAL_LOCK:
+                    for _m in _tile_mids:
+                        _rec = _VIDEO_POLICY_TERMINAL.get(_m)
+                        if _rec and (_now - _rec.get('ts', 0)) <= _VIDEO_POLICY_TERMINAL_WINDOW_S:
+                            _term = _rec.get('reason'); break
+            if not _term and job_id is not None and clip_submit_times:
                 _subm = sorted(clip_submit_times.keys(), key=lambda k: clip_submit_times[k])
                 _rev = len(_subm) - 1 - data_idx
                 if 0 <= _rev < len(_subm):
                     _term = _peek_video_policy_terminal_for_clip(job_id, _subm[_rev])
-                    if _term:
-                        print(f"{prefix}[PolicyScan] ⛔ data-index={data_idx} terminal content filter ({_term}) — NOT retrying (face won't change); marking persistent", flush=True)
-                        persistent.append(data_idx)
-                        continue
+            if _term:
+                if data_idx not in _policy_terminal_logged:
+                    print(f"{prefix}[PolicyScan] ⛔ data-index={data_idx} terminal content filter ({_term}) — NOT retrying (face won't change); marking persistent", flush=True)
+                    _policy_terminal_logged.add(data_idx)
+                persistent.append(data_idx)
+                continue
+
+            # Dedup by DATA-INDEX (not tile_id — tile_id changes on every retry, so the
+            # old keying never matched → re-clicked Retry forever). First fail → retry
+            # once + record; still failing after PERSISTENCE_WAIT → persistent, no more
+            # clicks.
+            if data_idx in _policy_retried_tiles:
+                elapsed = time.time() - _policy_retried_tiles[data_idx]
+                if elapsed < PERSISTENCE_WAIT:
+                    continue
+                print(f"{prefix}[PolicyScan] ❌ Persistent policy failure at data-index={data_idx} ({elapsed:.0f}s since retry)", flush=True)
+                persistent.append(data_idx)
+                continue
+
+            print(f"{prefix}[PolicyScan] ⚠ Policy failure at data-index={data_idx} (tile={tile_id[:12]}...)", flush=True)
 
             # Click Retry
             if info.get('hasRetryBtn'):
@@ -9325,7 +9348,7 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job
                 }}""")
                 if clicked:
                     print(f"{prefix}[PolicyScan] ✓ Clicked Retry on tile {tile_id[:12]}...", flush=True)
-                    _policy_retried_tiles[tile_id] = time.time()
+                    _policy_retried_tiles[data_idx] = time.time()
                     retried.append(data_idx)
                     continue
             
@@ -9342,7 +9365,7 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job
                 }}""")
                 if clicked:
                     print(f"{prefix}[PolicyScan] ✓ Clicked Reuse Prompt on tile {tile_id[:12]}...", flush=True)
-                    _policy_retried_tiles[tile_id] = time.time()
+                    _policy_retried_tiles[data_idx] = time.time()
                     time.sleep(2)
                     try:
                         click_generate_button(page, f"{prefix}PolicyScan retry")
