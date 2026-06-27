@@ -19811,23 +19811,6 @@ class AccountWorker(threading.Thread):
 
             print(f"[{self.name}] ✓ Browser started", flush=True)
 
-            # TEMP DIAG (copy-mode page-death hunt, remove after evidence) — log the
-            # EXACT moment + cause the page/context dies, so we can see WHY clips fail
-            # with "Settings button not found / Target page closed". CRASH = renderer
-            # died; PAGE CLOSED with no worker close-log = external/Flow eviction (e.g.
-            # two concurrent sessions on the SAME Google account fighting).
-            try:
-                import time as _t_diag
-                _who = self.name
-                # NB: Playwright passes the Page/Context to these handlers, so they
-                # MUST accept the arg (*a) — a 0-arg lambda raises in the dispatcher.
-                self.page.on("crash", lambda *a: print(f"[{_who}] ‼[PAGE-LIFECYCLE {_t_diag.strftime('%H:%M:%S')}] PAGE CRASHED", flush=True))
-                self.page.on("close", lambda *a: print(f"[{_who}] ‼[PAGE-LIFECYCLE {_t_diag.strftime('%H:%M:%S')}] PAGE CLOSED", flush=True))
-                self.browser.on("close", lambda *a: print(f"[{_who}] ‼[PAGE-LIFECYCLE {_t_diag.strftime('%H:%M:%S')}] CONTEXT/BROWSER CLOSED", flush=True))
-                print(f"[{_who}] [PAGE-LIFECYCLE] death listeners attached", flush=True)
-            except Exception as _le_diag:
-                print(f"[{self.name}] [PAGE-LIFECYCLE] attach failed: {_le_diag}", flush=True)
-
             # Slot-1 laptop login: inject the cookies decrypted from the operator's
             # real Chrome profile so this fresh (automatable) session is already
             # logged into Google — no verification code. Fail-safe + idempotent.
