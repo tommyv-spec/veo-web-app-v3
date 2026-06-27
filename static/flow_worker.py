@@ -19083,6 +19083,24 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     if _orphaned:
         for _oc in _orphaned:
             _oci = _oc['clip_index']
+            # If this clip was actually TRIED and terminally content-filtered
+            # (PROMINENT_PEOPLE / SEXUAL / CSAM), it only looks orphaned (its tracking
+            # got dropped after the fail). A redo just re-runs the same face → fails
+            # again. Route it to a terminal fail instead of a useless redo.
+            _oterm = _peek_video_policy_terminal_for_clip(job_id, _oci)
+            if _oterm:
+                print(f"[Flow] ⛔ Clip {_oci+1} terminal content filter ({_oterm}) — was tried + failed; NOT redoing (face won't change)", flush=True)
+                try:
+                    route_terminal_content_reject(_oc['id'], _oterm, account_name="")
+                except Exception as _rte:
+                    print(f"[Flow] terminal route failed ({_rte}) — marking failed", flush=True)
+                    update_clip_status(_oc['id'], 'failed', error_message=f"Terminal content filter: {_oterm}")
+                if job_id in cache.get('jobs', {}):
+                    _cs = cache['jobs'][job_id].get('clips_submitted', [])
+                    if _oci in _cs:
+                        _cs.remove(_oci)
+                        save_cache(cache)
+                continue
             print(f"[Flow] ⚠ Clip {_oci+1} was never submitted (ghost) — queuing for redo resubmission", flush=True)
             update_clip_status(_oc['id'], 'flow_redo_queued', error_message="Ghost submission — clip never appeared in project")
             if job_id in cache.get('jobs', {}):
