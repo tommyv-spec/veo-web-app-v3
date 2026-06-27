@@ -3087,11 +3087,11 @@
                             <div class="group">
                                 <div class="lbl">Model</div>
                                 <select id="veoModel">
-                                    <option value="Omni Flash">Omni Flash</option>
+                                    <option value="Omni Flash" selected>Omni Flash</option>
                                     <option value="Veo 3.1 - Lite">Veo 3.1 - Lite</option>
                                     <option value="Veo 3.1 - Fast">Veo 3.1 - Fast</option>
                                     <option value="Veo 3.1 - Quality">Veo 3.1 - Quality</option>
-                                    <option value="Veo 3.1 - Lite [Lower Priority]" selected>Veo 3.1 - Lite [Lower Priority]</option>
+                                    <option value="Veo 3.1 - Lite [Lower Priority]">Veo 3.1 - Lite [Lower Priority]</option>
                                 </select>
                             </div>
                             <div class="group">
@@ -6078,7 +6078,7 @@ Ambient: same kitchen room tone, soft pour sound.
         }
         function getVeoModel(){
             const el=document.getElementById('veoModel');
-            return el ? el.value : 'Veo 3.1 - Lite [Lower Priority]';
+            return el ? el.value : 'Omni Flash';
         }
         function selectKling(el){ document.querySelectorAll('#klingSeg button').forEach(b=>b.classList.remove('active')); el.classList.add('active'); }
         function getVideoBackend(){
