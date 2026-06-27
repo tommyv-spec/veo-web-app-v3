@@ -19340,8 +19340,20 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                 }}""")
 
                             if _urls and _urls != ['__blob__']:
-                                http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
-                                    'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir})
+                                # Partial-fail x2: if a bound variant terminally
+                                # content-filtered (PROMINENT_PEOPLE), the clip's
+                                # binding is partly dead, so the v792 cross-attribution
+                                # guard drops the GOOD (differently-bound) variant's URL
+                                # → the good render never uploads. Trust the position so
+                                # it passes; the HTTP-DL still validates each URL is a
+                                # real video (content-type + size) before uploading, so
+                                # this can't upload a poster/wrong tile.
+                                _pf_item = {'job_id': job_id, 'clip_index': _ci,
+                                    'clip_id': _clip_obj['id'], 'urls': _urls, 'temp_dir': temp_dir}
+                                if _peek_video_policy_terminal_for_clip(job_id, _ci):
+                                    _pf_item['trust_position'] = True
+                                    print(f"[Flow] partial-fail clip {_ci+1}: trusting position so the good variant isn't cross-attribution dropped", flush=True)
+                                http_dl_queue.put(_pf_item)
                                 http_enqueued_clips.add(_ci)
                                 _pending_left.discard(_ci)
                                 print(f"[Flow] ✓ Post-job: clip {_ci+1} → HTTP worker ({_elapsed}s)", flush=True)
