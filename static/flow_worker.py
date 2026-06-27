@@ -4085,10 +4085,18 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
             print(f"[{label}] laptop copy: {email!r} not logged into any Chrome channel", flush=True)
             return
         _ud, _pf, _ch = loc
-        # Record the channel so the worker launches the right Chrome (e.g. Beta).
+        # Launch the worker on a SEPARATE Chrome channel from the one the operator's
+        # account lives in ({_ch}, e.g. Chrome Beta). Running the worker on the SAME
+        # channel killed the worker's browsers whenever the operator's real Chrome of
+        # that channel was open — both worker contexts died on the first goto (prod
+        # 2026-06-27, "closed 12 Chrome Beta" runs). Copied cookies are user-DPAPI
+        # (ABE off) so they decrypt on ANY channel; stable 'chrome' is verified to log
+        # in + ULTRA on the copied Beta profile and to coexist with a running Beta.
+        # Override with WORKER_CHROME_CHANNEL if ever needed.
+        _worker_ch = os.environ.get("WORKER_CHROME_CHANNEL", "").strip() or "chrome"
         try:
             with open(os.path.join(_BASE, ".worker_chrome_channel"), "w", encoding="utf-8") as _cf:
-                _cf.write(_ch)
+                _cf.write(_worker_ch)
         except Exception:
             pass
         print(f"[{label}] laptop copy (copy-mode v805.1 all-slots): {email} in {_pf} ({_ch}) — building lean golden", flush=True)
