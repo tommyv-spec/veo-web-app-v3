@@ -20161,6 +20161,19 @@ Ambient: same kitchen room tone, soft pour sound.
                     () => {}
                 );
             } catch (e) {}
+
+            // 9. Open the job form directly (same as clicking "➕ New Job").
+            //    Promote already switched to the Videos tab + pre-filled the
+            //    form; this reveals the create-mode surface so the user no
+            //    longer has to click "New Job" by hand. setAppMode toggles the
+            //    appContainer lifecycle class (state-create) — orthogonal to
+            //    switchMainTab's tab-videos class, so the two stack cleanly.
+            try {
+                if (typeof setAppMode === 'function') {
+                    setAppMode({ mode: 'create' });
+                    console.log('[promote] auto-opened job form (state-create)');
+                }
+            } catch (e) { console.warn('promote auto-open job form:', e); }
         }
 
 
