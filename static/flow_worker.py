@@ -440,6 +440,26 @@ def _clear_video_policy_terminal_for_clip(job_id, clip_index):
             _VIDEO_POLICY_TERMINAL.pop(mid, None)
 
 
+def _peek_video_policy_terminal_for_clip(job_id, clip_index):
+    """READ-ONLY check (does NOT consume): the terminal content-filter reason for
+    THIS clip's bound mediaIds, or None. Lets the DOM PolicyScan skip clicking
+    Retry on a PROMINENT_PEOPLE/SEXUAL/CSAM tile that can only ever fail again
+    (the avatar face won't change on retry), instead of re-clicking it forever."""
+    try:
+        mids = bound_media_ids_for_clip(job_id, clip_index)
+    except Exception:
+        return None
+    if not mids:
+        return None
+    now = time.time()
+    with _VIDEO_POLICY_TERMINAL_LOCK:
+        for mid in mids:
+            rec = _VIDEO_POLICY_TERMINAL.get(mid)
+            if rec and (now - rec.get('ts', 0)) <= _VIDEO_POLICY_TERMINAL_WINDOW_S:
+                return rec.get('reason')
+    return None
+
+
 def _page_buffer_key(page):
     """The submit buffer_key the response listener stamped on this page at
     install time (page._v700_submit_buffer_key). Used by the immediate-failure
@@ -6082,7 +6102,7 @@ class HumanPacer:
             # v196: Periodic policy failure scan — catches failures that dialogue-text matching misses
             if clip_submit_times and not is_page_crashed(page):
                 try:
-                    _retried, _persistent = scan_tiles_for_policy_failures(page, clip_submit_times, self.account_name)
+                    _retried, _persistent = scan_tiles_for_policy_failures(page, clip_submit_times, self.account_name, job_id=job_id)
                     if _retried:
                         # Reset submit times for retried clips so download worker gives them fresh time
                         for _ri in _retried:
@@ -9208,7 +9228,7 @@ def get_tile_count_at_index0(page):
 
 _policy_retried_tiles = {}  # tile_id → retry_time (for time-based persistence check)
 
-def scan_tiles_for_policy_failures(page, clip_submit_times, account_name=""):
+def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job_id=None):
     """
     Scan ALL tiles in the project for policy rejection failures (warning icon).
     
@@ -9276,7 +9296,22 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name=""):
                 continue
             
             print(f"{prefix}[PolicyScan] ⚠ Policy failure at data-index={data_idx} (tile={tile_id[:12]}...)", flush=True)
-            
+
+            # Terminal content filter (PROMINENT_PEOPLE / SEXUAL / CSAM): retrying
+            # re-runs the SAME face → fails again forever, and the tile_id changes on
+            # each retry so the dedup above never catches it → endless re-click after
+            # every clip. Map data-index → clip → peek the API terminal record; if
+            # terminal, do NOT retry — mark persistent so it routes to fail/replace.
+            if job_id is not None and clip_submit_times:
+                _subm = sorted(clip_submit_times.keys(), key=lambda k: clip_submit_times[k])
+                _rev = len(_subm) - 1 - data_idx
+                if 0 <= _rev < len(_subm):
+                    _term = _peek_video_policy_terminal_for_clip(job_id, _subm[_rev])
+                    if _term:
+                        print(f"{prefix}[PolicyScan] ⛔ data-index={data_idx} terminal content filter ({_term}) — NOT retrying (face won't change); marking persistent", flush=True)
+                        persistent.append(data_idx)
+                        continue
+
             # Click Retry
             if info.get('hasRetryBtn'):
                 clicked = page.evaluate(f"""() => {{
@@ -19148,7 +19183,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         _last_reload = time.time()
                     
                     # v196: Scan all tiles for policy failures (catches what dialogue-text matching misses)
-                    _retried, _persistent = scan_tiles_for_policy_failures(page, clip_submit_times, "Flow")
+                    _retried, _persistent = scan_tiles_for_policy_failures(page, clip_submit_times, "Flow", job_id=job_id)
                     if _retried:
                         for _ri in _retried:
                             _submitted_sorted = sorted(clip_submit_times.keys(), key=lambda k: clip_submit_times[k])
