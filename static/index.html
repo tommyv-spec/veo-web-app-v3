@@ -17264,7 +17264,11 @@ Ambient: same kitchen room tone, soft pour sound.
                     console.warn('[v805] imgFetchBatchNodes: no nodes for batch', batchId);
                     return null;
                 }
-                if (!imgState.extraNodesById) imgState.extraNodesById = {};
+                // Pin only the batch being accessed right now. Resetting
+                // first bounds growth to one old job at a time and stops
+                // previously-opened old jobs from lingering in the sidebar
+                // for the rest of the session (you view one job at a time).
+                imgState.extraNodesById = {};
                 fetched.forEach(n => { imgState.extraNodesById[n.id] = n; });
                 // Merge into the live node set + rebuild the sidebar grouping
                 // immediately (don't wait for the next poll tick).
