@@ -10881,37 +10881,33 @@ Ambient: same kitchen room tone, soft pour sound.
             if(container.dataset.exportsLoaded !== 'true'){container.dataset.exportsLoaded='true';loadExistingExports(id);}
             }catch(e){}
         }
-        // v701j — collapse multiple CONTENT_POLICY_VIOLATION clips
-        // sharing the SAME rejected image into ONE upload card.
-        // Backend cascades a single user upload to every sibling sharing
-        // that image (v701d), so showing N upload cards is duplicate
-        // noise. The first clip in each group becomes the representative;
-        // it carries `_violationGroupCount` (the group size) and
-        // `_violationGroupIds` (every clip_id covered) so the upload
-        // card can show "this affects N clips" and the cascade-success
-        // toast can mention how many were retried.
+        // v806 — KEEP each CONTENT_POLICY_VIOLATION clip as its OWN card,
+        // even when several clips share the same rejected image. Earlier
+        // (v701j) we collapsed N siblings into one card to avoid "duplicate"
+        // upload cards, but that hid the per-clip "upload video" control —
+        // the operator could only drop one finished video for the whole
+        // group. Now every clip keeps its own card (own upload-video slot),
+        // and we ONLY annotate each clip with how many clips share its
+        // image (`_violationGroupCount`) so the card can still tell the
+        // operator that uploading a NEW IMAGE here retries all of them
+        // (the image-replace cascade is backend-side, v701d/v710 — unchanged).
         function _dedupePolicyViolations(visible) {
-            const groups = {};   // key = rejected image key → first clip + count + ids
+            // First pass: count how many violation clips share each image key.
+            const shareCount = {};
+            for (const c of visible) {
+                if ((c.error_code || '') !== 'CONTENT_POLICY_VIOLATION') continue;
+                const groupKey = (c.replacement_start_frame || c.start_frame || `__clip_${c.id}`).trim();
+                shareCount[groupKey] = (shareCount[groupKey] || 0) + 1;
+            }
+            // Second pass: emit EVERY clip (no collapse), annotating each
+            // violation clip with its shared-image count.
             const out = [];
             for (const c of visible) {
-                const isPolicy = (c.error_code || '') === 'CONTENT_POLICY_VIOLATION';
-                if (!isPolicy) { out.push(c); continue; }
-                // Group by replacement_start_frame (preferred) or current
-                // start_frame. Both reflect the rejected image; a clip
-                // that just got cascade-marked may have replacement_start_frame
-                // set to the original, current-deployments use start_frame.
+                if ((c.error_code || '') !== 'CONTENT_POLICY_VIOLATION') { out.push(c); continue; }
                 const groupKey = (c.replacement_start_frame || c.start_frame || `__clip_${c.id}`).trim();
-                if (!groups[groupKey]) {
-                    const rep = Object.assign({}, c);  // shallow clone so we don't mutate cache
-                    rep._violationGroupCount = 1;
-                    rep._violationGroupIds = [c.id];
-                    rep._violationGroupKey = groupKey;
-                    groups[groupKey] = rep;
-                    out.push(rep);
-                } else {
-                    groups[groupKey]._violationGroupCount += 1;
-                    groups[groupKey]._violationGroupIds.push(c.id);
-                }
+                const rep = Object.assign({}, c);  // shallow clone so we don't mutate cache
+                rep._violationGroupCount = shareCount[groupKey] || 1;
+                out.push(rep);
             }
             return out;
         }
@@ -11719,14 +11715,15 @@ Ambient: same kitchen room tone, soft pour sound.
                 ? `<img src="${rejectedSrc}" alt="rejected frame" style="max-width:100%;max-height:240px;display:block;margin:0 auto;border-radius:6px;">`
                 : `<div style="display:flex;align-items:center;justify-content:center;aspect-ratio:9/16;max-height:240px;background:rgba(239,68,68,0.1);border-radius:6px;color:#ef4444;">⚠ image</div>`;
             const dialogueText = (c.voiceover_line || c.dialogue_text || '').trim();
-            // v701j — group count badge. When this card represents N
-            // sibling clips sharing the same rejected image (collapsed
-            // by _dedupePolicyViolations), tell the user one upload
-            // retries all N. Hide the line when group size is 1.
+            // v806 — shared-image badge. Each violation clip now keeps its
+            // own card (no collapse); _violationGroupCount tells how many
+            // clips share THIS clip's rejected image so we can warn that an
+            // image upload retries all of them while a video upload is
+            // per-clip. Hidden when the image isn't shared (count 1).
             const groupCount = (c._violationGroupCount || 1);
             const groupBadge = groupCount > 1
                 ? `<div style="margin-top:6px;font-size:11px;color:#fbbf24;background:rgba(245,158,11,0.12);padding:6px 8px;border-radius:6px;border:1px solid rgba(245,158,11,0.35);">
-                       🔁 this image is shared by <strong>${groupCount}</strong> clips — one upload retries all of them
+                       🔁 this image is shared by <strong>${groupCount}</strong> clips — uploading a new image here retries all of them. uploading your own video only replaces this clip.
                    </div>`
                 : '';
             const cascadeNotice = (groupCount === 1 && isPaired)
