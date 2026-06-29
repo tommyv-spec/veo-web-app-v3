@@ -1971,6 +1971,7 @@ def _delete_variant_files(node: ImageNode):
 def list_nodes(
     request: Request,
     since_days: int = Query(default=3, ge=0, le=3650),
+    batch_id: str | None = Query(default=None),
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -2020,7 +2021,18 @@ def list_nodes(
     # every few days. The cutoff now applies to generated nodes
     # only; uploads are always returned regardless of since_days.
     filters = [ImageNode.user_id == current_user.id]
-    if since_days > 0:
+    # v805 — direct-access escape hatch for jobs older than the since_days
+    # window. The sidebar + overview build groupsByKey ONLY from this
+    # windowed fetch (default 3 days), so a job reached directly (e.g.
+    # goToImageBatch jumping from a video job to its source image batch)
+    # rendered "No nodes in this group" once the batch aged out of the
+    # window. When batch_id is supplied we scope to THAT batch and ignore
+    # since_days entirely, so a directly-accessed old job always loads.
+    # Indexed (ImageNode.batch_id has index=True), so this is cheap.
+    if batch_id:
+        filters.append(ImageNode.batch_id == batch_id)
+        log.info(f"[v805] /nodes direct batch fetch batch_id={batch_id} user={current_user.id} (since_days ignored)")
+    elif since_days > 0:
         cutoff = datetime.utcnow() - timedelta(days=since_days)
         filters.append(or_(
             ImageNode.kind == "upload",

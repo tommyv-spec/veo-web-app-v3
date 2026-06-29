@@ -16783,6 +16783,13 @@ Ambient: same kitchen room tone, soft pour sound.
             // to 3 days; "Show older" escalates 3 → 14 → 90 → 0 (all).
             sinceDays: 3,
             totalUnfilteredHint: null,  // set by /nodes response when available
+            // v805 — nodes loaded OUT of the since_days window because a job
+            // was accessed directly (e.g. goToImageBatch from a video job to
+            // an image batch older than 3 days). Keyed by node id. The 2s
+            // poll replaces imgState.nodes wholesale with the windowed fetch,
+            // so these are re-merged on every refresh to keep the directly-
+            // accessed old job visible until the user navigates away.
+            extraNodesById: {},
         };
 
         function switchMainTab(tab) {
@@ -16843,6 +16850,13 @@ Ambient: same kitchen room tone, soft pour sound.
             for (let i = 0; i < 20 && !groupKey; i++) {
                 await new Promise(r => setTimeout(r, 200));
                 groupKey = _resolve();
+            }
+            // v805 — not in the since_days window (job older than 3 days).
+            // Load this batch's nodes directly, ignoring the window, so a
+            // directly-accessed old job still opens instead of toasting
+            // "not found".
+            if (!groupKey) {
+                groupKey = await imgFetchBatchNodes(batchId);
             }
             if (!groupKey) { showToast('Image job not found (may have been deleted)', '#f59e0b'); return; }
             if (!imgState.expandedGroups) imgState.expandedGroups = new Set();
@@ -17188,7 +17202,14 @@ Ambient: same kitchen room tone, soft pour sound.
                     }
                 }
 
-                imgState.nodes = newNodes;
+                // v805 — re-merge any directly-accessed out-of-window nodes
+                // (see imgFetchBatchNodes). The windowed fetch above does NOT
+                // include them, so without this merge the 2s poll would blank
+                // a directly-accessed old job overview on its next tick.
+                const _windowIds = new Set(newNodes.map(n => n.id));
+                const _extras = Object.values(imgState.extraNodesById || {})
+                    .filter(n => !_windowIds.has(n.id));
+                imgState.nodes = _extras.length ? newNodes.concat(_extras) : newNodes;
                 imgState.nodesById = {};
                 imgState.nodes.forEach(n => { imgState.nodesById[n.id] = n; });
                 imgRenderNodeList();
@@ -17223,6 +17244,46 @@ Ambient: same kitchen room tone, soft pour sound.
                 }
             } catch (e) {
                 if (!silent) console.error('[images] refresh failed:', e);
+            }
+        }
+
+        // v805 — load a single batch's nodes IGNORING the since_days window.
+        // Used when a job is accessed directly (goToImageBatch, job-overview
+        // self-heal) and the batch is older than the active window, so it
+        // isn't in the normal /nodes fetch. The fetched nodes are pinned in
+        // imgState.extraNodesById so the 2s poll re-merges them (see
+        // imgRefreshNodes). Returns the resolved group key, or null.
+        async function imgFetchBatchNodes(batchId) {
+            if (!batchId) return null;
+            try {
+                const res = await fetch('/api/images/nodes?batch_id=' + encodeURIComponent(batchId));
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                const fetched = data.nodes || [];
+                if (!fetched.length) {
+                    console.warn('[v805] imgFetchBatchNodes: no nodes for batch', batchId);
+                    return null;
+                }
+                if (!imgState.extraNodesById) imgState.extraNodesById = {};
+                fetched.forEach(n => { imgState.extraNodesById[n.id] = n; });
+                // Merge into the live node set + rebuild the sidebar grouping
+                // immediately (don't wait for the next poll tick).
+                const haveIds = new Set((imgState.nodes || []).map(n => n.id));
+                const adds = fetched.filter(n => !haveIds.has(n.id));
+                imgState.nodes = (imgState.nodes || []).concat(adds);
+                imgState.nodesById = imgState.nodesById || {};
+                imgState.nodes.forEach(n => { imgState.nodesById[n.id] = n; });
+                imgRenderNodeList();  // rebuilds imgState.groupsByKey
+                // Resolve the group key the batch landed in (name-prefix keys
+                // win over batch:: per keyFor, so search by batch_id).
+                const gbk = imgState.groupsByKey || {};
+                for (const k of Object.keys(gbk)) {
+                    if ((gbk[k] || []).some(n => n.batch_id === batchId)) return k;
+                }
+                return null;
+            } catch (e) {
+                console.error('[v805] imgFetchBatchNodes failed for', batchId, e);
+                return null;
             }
         }
 
@@ -19401,6 +19462,23 @@ Ambient: same kitchen room tone, soft pour sound.
             const area = document.getElementById('imgDetailArea');
             if (!area) return;
             const nodes = imgState.groupsByKey[groupKey] || [];
+
+            // v805 — self-heal: a batch:: group with zero loaded nodes means
+            // the job is older than the since_days window and was accessed
+            // directly. Pull its nodes ignoring the window, then re-render.
+            // Guard against re-fetch loops (one attempt per batch per session).
+            if (nodes.length === 0 && groupKey && groupKey.startsWith('batch::')) {
+                const _bid = groupKey.slice('batch::'.length);
+                if (!imgState._selfHealedJobs) imgState._selfHealedJobs = new Set();
+                if (!imgState._selfHealedJobs.has(_bid)) {
+                    imgState._selfHealedJobs.add(_bid);
+                    area.innerHTML = '<div class="img-detail-empty"><div class="icon">⏳</div><h3>Loading older job…</h3></div>';
+                    imgFetchBatchNodes(_bid).then(k => {
+                        if (imgState.selectedJobKey === groupKey) imgRenderJobOverview(groupKey);
+                    });
+                    return;
+                }
+            }
 
             // Derive header label from group key
             let title;
