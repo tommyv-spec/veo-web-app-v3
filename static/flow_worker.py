@@ -6084,6 +6084,47 @@ class HumanPacer:
                                                             )
                                                         except Exception as _resc_err:
                                                             print(f"[{self.account_name}] [v739] rescue enqueue failed: {_resc_err}", flush=True)
+                                                # v739b — no binding (response dropped) OR uuid didn't match:
+                                                # catch the render the SAME way the normal in-job flow does —
+                                                # by the clip's DIALOGUE text — and enqueue with trust_position.
+                                                # A finished tile exposes a real getMediaUrlRedirect src (blob
+                                                # only while rendering), so this only grabs a COMPLETED video.
+                                                # Recovers a binding-missed-but-rendered clip instead of a
+                                                # wasteful redo (the clip's video is sitting in the grid).
+                                                if not _v739_rescued:
+                                                    try:
+                                                        _dlg2 = (_clip_obj.get('dialogue_text') or '')[:20]
+                                                        _v739b = page.evaluate(f"""() => {{
+                                                            for (const c of document.querySelectorAll('[data-index]')) {{
+                                                                if ({repr(_dlg2)} && (c.innerText||'').includes({repr(_dlg2)})) {{
+                                                                    const urls = [];
+                                                                    for (const v of c.querySelectorAll('video')) {{
+                                                                        const u = v.src || ((v.querySelector('source')||{{}}).src) || '';
+                                                                        if (u && !u.startsWith('blob:')) urls.push(u);
+                                                                    }}
+                                                                    if (urls.length) return urls;
+                                                                }}
+                                                            }}
+                                                            return [];
+                                                        }}""") if _dlg2 else []
+                                                    except Exception:
+                                                        _v739b = []
+                                                    if _v739b:
+                                                        try:
+                                                            http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                                                'clip_id': _clip_obj['id'], 'urls': _v739b,
+                                                                'temp_dir': temp_dir, 'trust_position': True})
+                                                            _v739_rescued = True
+                                                            _dl_checked.add(_ci)
+                                                            clip_submit_times.pop(_ci, None)
+                                                            print(
+                                                                f"[{self.account_name}] [v739b] clip {_ci+1} RESCUED by dialogue-match "
+                                                                f"(no binding) — finished video in grid; enqueued {len(_v739b)} url(s) "
+                                                                f"with trust_position, skipping redo",
+                                                                flush=True,
+                                                            )
+                                                        except Exception as _rb_err:
+                                                            print(f"[{self.account_name}] [v739b] rescue enqueue failed: {_rb_err}", flush=True)
                                                 if not _v739_rescued:
                                                     try:
                                                         update_clip_status(
@@ -21426,10 +21467,21 @@ def main_multi_account(accounts_override=None):
                     # them until their current job finishes (could be minutes).
                     # Unassigned redos stay in DB as flow_redo_queued and get picked up
                     # on the next poll cycle when an account frees up.
+                    # Exclude accounts that are RESTORING (proactive threshold hit or
+                    # HOT) — they call set_idle() just before raising the restore
+                    # exception, so for ~10-15s (3s drain + browser close + golden
+                    # restore + relaunch) they LOOK idle but are tearing the browser
+                    # down. A redo dispatched into that window lands on a dying browser
+                    # and is lost. needs_proactive_restore/is_hot stay True until
+                    # reset_failures() runs post-relaunch, so this gates the whole
+                    # window; the redo stays flow_redo_queued and is picked up next
+                    # poll once the account is healthy again.
                     idle_for_redo = [
                         acc['name'] for acc in active_accounts
                         if not account_health.is_busy(acc['name'])
                         and account_job_queues[acc['name']].qsize() == 0
+                        and not account_health.needs_proactive_restore(acc['name'])
+                        and not account_health.is_hot(acc['name'])
                     ]
                     
                     if idle_for_redo:
