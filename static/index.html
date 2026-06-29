@@ -10892,18 +10892,41 @@ Ambient: same kitchen room tone, soft pour sound.
         // operator that uploading a NEW IMAGE here retries all of them
         // (the image-replace cascade is backend-side, v701d/v710 — unchanged).
         function _dedupePolicyViolations(visible) {
-            // First pass: count how many violation clips share each image key.
+            // v806b — a visual_pair (b-roll) and its audio twin share the
+            // SAME anchor image (v701h), so when BOTH sides are rejected the
+            // visual_pair card already covers the twin (its image replace
+            // cascades to the twin backend-side). Fold those audio twins so
+            // a single logical pair stays ONE card. We do NOT fold an audio
+            // twin whose visual sibling is fine — an anchor-only rejection
+            // must still surface its own card so the operator can replace it.
+            const foldedAudioTwinIds = new Set();
+            for (const c of visible) {
+                if ((c.clip_role || '').toLowerCase() === 'visual_pair'
+                    && c.paired_clip_id
+                    && (c.error_code || '') === 'CONTENT_POLICY_VIOLATION') {
+                    foldedAudioTwinIds.add(c.paired_clip_id);
+                }
+            }
+            const _isFoldedTwin = (c) =>
+                (c.clip_role || '').toLowerCase() === 'audio_pair'
+                && foldedAudioTwinIds.has(c.id);
+
+            // First pass: count how many emitted violation cards share each
+            // image key (for the per-card "retries all" note).
             const shareCount = {};
             for (const c of visible) {
                 if ((c.error_code || '') !== 'CONTENT_POLICY_VIOLATION') continue;
+                if (_isFoldedTwin(c)) continue;
                 const groupKey = (c.replacement_start_frame || c.start_frame || `__clip_${c.id}`).trim();
                 shareCount[groupKey] = (shareCount[groupKey] || 0) + 1;
             }
-            // Second pass: emit EVERY clip (no collapse), annotating each
-            // violation clip with its shared-image count.
+            // Second pass: emit every clip as its own card (no image-key
+            // collapse — distinct clips sharing an image stay separate),
+            // dropping only audio twins folded into their visual sibling.
             const out = [];
             for (const c of visible) {
                 if ((c.error_code || '') !== 'CONTENT_POLICY_VIOLATION') { out.push(c); continue; }
+                if (_isFoldedTwin(c)) continue;
                 const groupKey = (c.replacement_start_frame || c.start_frame || `__clip_${c.id}`).trim();
                 const rep = Object.assign({}, c);  // shallow clone so we don't mutate cache
                 rep._violationGroupCount = shareCount[groupKey] || 1;
