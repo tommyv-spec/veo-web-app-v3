@@ -6472,6 +6472,20 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                         break
                     except:
                         continue
+                # New Flow composer chip (2026-07 redesign): the per-clip settings
+                # trigger is now a menu button reading "Video · 4s [crop_9_16] 1x"
+                # (aria-haspopup=menu, variant is number-first "1x" not "x1"), so the
+                # old "xN"/hashed-class finder misses it → "Settings button not found".
+                if settings_btn is None:
+                    for _newsel in ("button[aria-haspopup='menu']:has-text('Video ·')",
+                                    "button[aria-haspopup='menu']:has-text('Video')"):
+                        try:
+                            _nc = page.locator(_newsel).first
+                            _nc.wait_for(state="visible", timeout=3000)
+                            settings_btn = _nc
+                            break
+                        except Exception:
+                            continue
                 # Fallback: hashed CSS class
                 if settings_btn is None:
                     page.locator("button.sc-46973129-1").first.wait_for(state="visible", timeout=5000)
