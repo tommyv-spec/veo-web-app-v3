@@ -300,6 +300,24 @@ _PRIMARY_MEDIA_LOCK = threading.Lock()
 from flow_attribution import RenderAttributor
 _BRACKET_ATTR_ENABLED = os.environ.get("FLOW_BRACKET_ATTRIBUTION", "on").strip().lower() != "off"
 _RENDER_ATTRIBUTOR = RenderAttributor(enabled=_BRACKET_ATTR_ENABLED)
+
+
+def _stamp_generate_click(account_label, job_id, clip_index, clip_id=None, click_at=None):
+    """v800 — record a Generate click for click-bracket attribution. Safe/no-op if
+    the attributor is disabled. Call at EVERY generate-click site (main, failover,
+    policy-retry, redo, reuse, restore-resume) so clip N owns the renders that
+    appear before the next click on this account.
+
+    click_at = the REAL click timestamp (the page's `_v700j_last_click_at`) so the
+    bracket boundary sits at the actual click, not at this (post-click) bind call —
+    otherwise a render whose response arrived before the bind would fall in the
+    previous bracket. Falls back to time.time() when the real click time is unknown
+    (e.g. the redo path, which stamps at its own submit moment)."""
+    try:
+        _RENDER_ATTRIBUTOR.stamp_click(account_label, job_id, clip_index, clip_id,
+                                       float(click_at) if click_at is not None else time.time())
+    except Exception as _e:
+        print(f"[v800] stamp_click failed (non-fatal): {_e}", flush=True)
 _SUBMIT_RESPONSE_BUFFERS = {}               # buffer_key -> list[dict(data, captured_at, url)]
 _SUBMIT_RESPONSE_BUFFERS_LOCK = threading.Lock()
 
@@ -1704,6 +1722,10 @@ def _bind_pending_submits_for_page(page, job_id, clip_index, clip_id=None,
         last_click = getattr(page, '_v700j_last_click_at', None)
     except Exception:
         last_click = None
+    # v800 — open this clip's bracket at the REAL click time (last_click) so the
+    # ledger attributes renders + status-poll entries to the right clip. Covers
+    # main + failover + policy-retry submit sites (every caller of this helper).
+    _stamp_generate_click(label, job_id, clip_index, clip_id, click_at=last_click)
     return _bind_pending_submits(
         job_id=job_id,
         clip_index=clip_index,
@@ -1749,6 +1771,12 @@ def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
             f"(job {str(job_id)[:8]}) before new submit",
             flush=True,
         )
+    # v800 — mirror the v700i purge in the click-bracket ledger so a re-submit
+    # (policy-retry / restore-resume) drops the stale bracket binding too.
+    try:
+        _RENDER_ATTRIBUTOR.purge_clip(job_id, clip_index)
+    except Exception:
+        pass
 
     bound = []
     deadline = time.time() + max(0.5, float(drain_timeout))
@@ -15246,7 +15274,17 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     
     # Immediately mark as generating so frontend shows "in progress" instead of "failed"
     update_clip_status(clip_id, 'generating')
-    
+
+    # v800 — redo attribution: drop the clip's stale bracket binding (mirrors the
+    # v700i purge) then open a fresh bracket for this redo's render. The redo runs
+    # alone on this page, so stamping here (at redo start) is unambiguous.
+    _ci_redo = clip.get('clip_index')
+    try:
+        _RENDER_ATTRIBUTOR.purge_clip(job_id, _ci_redo)
+    except Exception as _e:
+        print(f"[v800] redo purge failed (non-fatal): {_e}", flush=True)
+    _stamp_generate_click("Flow", job_id, _ci_redo, clip_id)
+
     dialogue = clip.get('dialogue_text', '').strip().strip('"').strip("'")
     
     language = clip.get('language', 'English')
