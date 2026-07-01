@@ -6523,9 +6523,16 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                     except:
                         continue
                 # New Flow composer chip (2026-07 redesign): the per-clip settings
-                # trigger is now a menu button reading "Video · 4s [crop_9_16] 1x"
-                # (aria-haspopup=menu, variant is number-first "1x" not "x1"), so the
-                # old "xN"/hashed-class finder misses it → "Settings button not found".
+                # trigger is now an aria-haspopup=menu button whose LABEL reflects
+                # the current mode. VERIFIED live 2026-07-01: a FRESH project lands in
+                # IMAGE mode, chip reads "🍌 Nano Banana 2  crop_9_16  x4" — the x-first
+                # "x4" variant IS matched by the "xN" primary finder above, which then
+                # opens the menu and the Video-tab logic converts it to video. After
+                # conversion the chip reads "Video · 8s · 1x" (variant number-first
+                # "1x", NOT matched by "xN") — the aria-haspopup 'Video ·' selector
+                # below is the fallback that re-finds it in that state. Full path
+                # (chip → Video/Frames/8s → frame upload → generate → 2/2 variants
+                # rendered SUCCESSFUL) verified end-to-end with the live golden.
                 if settings_btn is None:
                     for _newsel in ("button[aria-haspopup='menu']:has-text('Video ·')",
                                     "button[aria-haspopup='menu']:has-text('Video')"):
