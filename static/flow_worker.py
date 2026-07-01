@@ -4654,6 +4654,82 @@ def _video_media_url(url):
         u = u.replace('&', '?', 1)
     return u
 
+
+# v801 — construct-URL-from-uuid render recovery.
+# HAR-proven (2026-07-01): GET labs.google/fx/api/trpc/media.getMediaUrlRedirect
+# ?name=<uuid> 307-redirects to flow-content.google/VIDEO/<uuid> once the render
+# completes (and to /IMAGE/<uuid> = poster while it isn't). The worker BINDS every
+# render's uuid at submit time (v700 drain / v729 late-bind, in _PRIMARY_MEDIA_BINDINGS)
+# — that survives even when the page goes idle or is torn down for a golden restore.
+# The old download path only fired when the network LISTENER happened to capture the
+# URL; if the page died before the render finished, the URL was never captured and the
+# finished clip was lost ("I can see the clips but can't extract them"). This recovers
+# them: rebuild the URL from the bound uuid, confirm it resolves to a real /video/, and
+# enqueue it — no live DOM, no captured URL needed.
+FLOW_MEDIA_ORIGIN = "https://labs.google"
+
+
+def _construct_media_url(uuid):
+    """The stable getMediaUrlRedirect URL for a bound media uuid (re-resolves each
+    fetch; unlike the expiring CDN URL it carries). THUMBNAIL param never added, so
+    it resolves to the /video/ mp4, not the /image/ poster."""
+    return f"{FLOW_MEDIA_ORIGIN}/fx/api/trpc/media.getMediaUrlRedirect?name={uuid}"
+
+
+def _uuid_video_ready(page, uuid):
+    """In-page (auth-cookie) probe: True iff this uuid's getMediaUrlRedirect resolves
+    to a RENDERED video (final URL under /video/ or content-type video/*), False if
+    it's still a poster (/image/), not ready, or errors. Range bytes=0-0 so it does
+    not download the whole file."""
+    try:
+        info = page.evaluate("""async (u) => {
+            try {
+                const r = await fetch(u, {method:'GET', headers:{'Range':'bytes=0-0'}});
+                return {url: r.url || '', ct: (r.headers.get('content-type') || ''), status: r.status};
+            } catch(e) { return {err: String(e)}; }
+        }""", _construct_media_url(uuid))
+    except Exception:
+        return False
+    _final = str((info or {}).get('url') or '')
+    _ct = str((info or {}).get('ct') or '')
+    return ('/video/' in _final) or _ct.startswith('video')
+
+
+def _recover_pending_clip_downloads(page, job_id, clips, http_dl_queue,
+                                    http_enqueued_clips, temp_dir, context="Flow"):
+    """v801 — active render recovery via constructed URLs. For each clip NOT yet
+    enqueued that has a BOUND mediaId, rebuild its getMediaUrlRedirect URL and, if
+    the render is actually complete (resolves to /video/), enqueue it. Catches
+    renders the live-DOM/listener capture missed (page idle / golden restore /
+    403-recreate). Validation-before-enqueue so a still-generating clip is not
+    marked done. Returns count recovered."""
+    if http_dl_queue is None or not clips:
+        return 0
+    recovered = 0
+    for _c in clips:
+        _ci = _c.get('clip_index')
+        if _ci is None:
+            continue
+        if http_enqueued_clips and _ci in http_enqueued_clips:
+            continue
+        _uuids = bound_media_ids_for_clip(job_id, _ci)
+        if not _uuids:
+            continue
+        _ready = [_construct_media_url(_u) for _u in _uuids if _uuid_video_ready(page, _u)]
+        if not _ready:
+            continue
+        http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+            'clip_id': _c.get('id'), 'urls': _ready, 'temp_dir': temp_dir,
+            'trust_position': True})
+        if http_enqueued_clips is not None:
+            http_enqueued_clips.add(_ci)
+        recovered += 1
+        print(f"[v801-recover] clip {_ci+1} ← constructed URL from bound uuid "
+              f"{_uuids[0][:8]} (render complete; live-capture had missed it)", flush=True)
+    if recovered:
+        print(f"[v801-recover] recovered {recovered} clip(s) via constructed URLs", flush=True)
+    return recovered
+
 # v737 — "We noticed some unusual activity" account-block detection.
 # Per-job strike counter. When all tiles fail with the unusual-activity Help-Center
 # notice, the page-refresh (golden restore) usually clears it. If it persists across
@@ -19543,6 +19619,18 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     break
                 try:
                     _elapsed = int(time.time() - _poll_start)
+                    # v801 — recover any pending clip whose render is COMPLETE via its
+                    # bound uuid's constructed getMediaUrlRedirect URL. Catches renders
+                    # the live-DOM/listener capture missed (page idle / golden restore).
+                    # Validated (resolves to /video/) before enqueue, so a still-
+                    # generating clip is never marked done.
+                    if _pending_left:
+                        _clips_pending = [c for c in clips if c.get('clip_index') in _pending_left]
+                        if _recover_pending_clip_downloads(page, job_id, _clips_pending,
+                                http_dl_queue, http_enqueued_clips, temp_dir, context="Flow"):
+                            for _c in _clips_pending:
+                                if _c.get('clip_index') in http_enqueued_clips:
+                                    _pending_left.discard(_c.get('clip_index'))
                     # Reload every 30s + scroll to force virtualized tiles to render
                     if _elapsed > 0 and (time.time() - _last_reload) >= 30:
                         page.reload(wait_until='domcontentloaded', timeout=30000)
