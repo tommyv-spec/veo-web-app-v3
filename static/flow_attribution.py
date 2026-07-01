@@ -31,3 +31,18 @@ class RenderAttributor:
     def click_log_for(self, account):
         with self._lock:
             return [dict(e) for e in self._click_log.get(account, [])]
+
+    def bracket_for(self, account, when):
+        """The click-log entry whose bracket [click_at, next_click_at) contains
+        `when`. Last entry's bracket is open-ended. Returns a copy or None if
+        `when` precedes the first click / the account is unknown."""
+        when = float(when)
+        with self._lock:
+            log = self._click_log.get(account) or []
+            owner = None
+            for e in log:  # sorted ascending by click_at
+                if e["click_at"] <= when:
+                    owner = e
+                else:
+                    break
+            return dict(owner) if owner else None

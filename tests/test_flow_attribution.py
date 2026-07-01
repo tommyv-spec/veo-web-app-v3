@@ -14,3 +14,20 @@ def test_stamp_click_records_ordered_entries_per_account():
     assert [e["click_at"] for e in log1] == [100.0, 160.0]
     assert a.click_log_for("Account2")[0]["clip_id"] == "d0"
     assert a.click_log_for("Account1") is not a._click_log["Account1"]  # returns a copy
+
+
+def test_bracket_for_returns_owning_click_entry():
+    a = RenderAttributor()
+    a.stamp_click("A", "J", 0, "c0", now=100.0)
+    a.stamp_click("A", "J", 1, "c1", now=160.0)
+    a.stamp_click("A", "J", 2, "c2", now=220.0)
+    # inside clip 0's bracket [100,160)
+    assert a.bracket_for("A", 130.0)["clip_index"] == 0
+    # exactly on a boundary belongs to the later bracket (>= start)
+    assert a.bracket_for("A", 160.0)["clip_index"] == 1
+    # after the last click -> open-ended last bracket
+    assert a.bracket_for("A", 999.0)["clip_index"] == 2
+    # before the first click -> None (no owner)
+    assert a.bracket_for("A", 50.0) is None
+    # unknown account -> None
+    assert a.bracket_for("ZZ", 130.0) is None
