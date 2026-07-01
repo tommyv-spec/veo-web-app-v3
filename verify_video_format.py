@@ -172,6 +172,23 @@ def lint(path: str) -> int:
         if EMDASH in ln or " -- " in ln:
             fails.append(f"v615: em-dash in line: {ln[:50]!r}")
 
+    # --- v806: image-attached dialogue classifier tokens ---
+    # Every clip is image-attached (start frame), so the spoken line runs
+    # through Flow's stricter anti-deepfake sexual-content classifier. These
+    # tokens PASS text-only but BLOCK with any image attached (operator A/B
+    # 2026-07-02). Prompt B does NOT save a token trip (it keeps the dialogue).
+    # HARD-FAIL on evidenced tokens; WARN on same-class watch-list.
+    _V806_BANNED = ("down there", "wake up harder")
+    _V806_WATCH = ("below the waist", "morning wood", "get it up")
+    for ln in all_lines:
+        low = ln.lower()
+        for tok in _V806_BANNED:
+            if tok in low:
+                fails.append(f"v806: banned image-attached token {tok!r} in line: {ln[:50]!r} (reword keeping function; see template_reference §v806)")
+        for tok in _V806_WATCH:
+            if tok in low:
+                warns.append(f"v806: watch-list token {tok!r} in line: {ln[:50]!r} (same class as evidenced trips)")
+
     # --- Pre-Flight present (v738) ---
     if "## Pre-Flight Checklist" not in t:
         fails.append("v738: missing `## Pre-Flight Checklist` block")
