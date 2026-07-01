@@ -2468,6 +2468,10 @@ def _filename_to_ref_display_name(filename):
     stem = _os.path.splitext(_os.path.basename(filename or ""))[0]
     if not stem:
         return "(unknown reference)"
+    # v807: staged filenames carry a content-hash suffix ('__a1b2c3d4',
+    # optionally '__2' after it for in-job collisions). Strip it so the
+    # manifest still reads "the main character", not the hash.
+    stem = _re.sub(r"__[0-9a-f]{8}(?:__\d+)?$", "", stem)
     # chain_from_image_K → "the prior scene (chain from image_K)"
     m = _re.match(r"^chain_from_image_(\d+)$", stem)
     if m:
@@ -5262,6 +5266,27 @@ def _slugify_role(role, fallback=""):
     return slug or fallback
 
 
+def _content_hash8(path):
+    """First 8 hex chars of the file's sha256. Used as a filename suffix so
+    the gallery-reuse key carries CONTENT identity, not just the role name.
+
+    v807 root cause: refs were staged as '<roleslug>.png' — the same name
+    no matter WHICH image the operator selected on the platform. The
+    gallery-reuse lookup matches by alt-text (= upload basename), so when
+    the operator swapped the underlying image for a role (new variant,
+    different character pick), the worker reused the OLD gallery tile
+    under the same name and silently attached the wrong image. Suffixing
+    the content hash makes same-content reuse still hit the gallery cache
+    while changed content forces a fresh upload under a new name.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()[:8]
+
+
 def _normalize_input_images(input_images):
     """Accept v509 dict format or legacy list-of-strings.
 
@@ -5312,6 +5337,13 @@ def _stage_inputs_with_role_basename(input_dicts, work_dir):
         ext = os.path.splitext(src)[1] or ".png"
         original_stem = os.path.splitext(os.path.basename(src))[0]
         slug = _slugify_role(item.get("role", ""), original_stem)
+        # v807: suffix the content hash so a role whose underlying image
+        # changed gets a NEW gallery key (fresh upload) instead of a stale
+        # gallery-reuse hit under the same role name.
+        try:
+            slug = f"{slug}__{_content_hash8(src)}"
+        except Exception as e:
+            print(f"[WATCH] ⚠ Could not hash {src}: {e} — staging without hash", flush=True)
         candidate = f"{slug}{ext}"
         # Disambiguate collisions within this job
         n = 2
@@ -5669,10 +5701,17 @@ def _download_reference_inputs(api_key, input_images, work_dir):
                     print(f"  ⚠ {filename} [{slot}]: {last_err}", flush=True)
                     break
 
-                local_file = os.path.join(work_dir, filename)
-                with open(local_file, "wb") as f:
+                # v807: download to a temp name first, then rename with the
+                # content hash suffix. The hash makes the gallery-reuse key
+                # change whenever the underlying image changes (same role,
+                # different operator pick) — see _content_hash8.
+                tmp_file = os.path.join(work_dir, f".dl_{idx}{ext}")
+                with open(tmp_file, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=8192):
                         f.write(chunk)
+                filename = f"{slug}__{_content_hash8(tmp_file)}{ext}"
+                local_file = os.path.join(work_dir, filename)
+                os.replace(tmp_file, local_file)
                 size_kb = os.path.getsize(local_file) / 1024
                 print(f"  ⬇ {filename}  [{slot}]  ({size_kb:.0f} KB)", flush=True)
                 results.append({
