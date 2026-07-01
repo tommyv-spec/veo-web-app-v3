@@ -318,6 +318,25 @@ def _stamp_generate_click(account_label, job_id, clip_index, clip_id=None, click
                                        float(click_at) if click_at is not None else time.time())
     except Exception as _e:
         print(f"[v800] stamp_click failed (non-fatal): {_e}", flush=True)
+
+
+def _reconcile_job_attribution(job_id, clips, http_enqueued_clips=None):
+    """v800 safety net — log the attributor's final per-clip view at job end.
+    Observational: surfaces every clip the click-bracket path attributed (and any
+    it missed → the legacy/DOM path or a redo must have covered it). Never
+    overrides a clip already enqueued/downloaded. Returns the reconcile dict."""
+    try:
+        idxs = [c.get('clip_index') for c in clips if c.get('clip_index') is not None]
+        rec = _RENDER_ATTRIBUTOR.reconcile(job_id, idxs)
+        for ci, info in sorted(rec.items()):
+            already = bool(http_enqueued_clips) and ci in http_enqueued_clips
+            print(f"[v800-reconcile] clip {ci}: {info['state']} "
+                  f"renders={[r[:8] for r in info['render_ids']]} "
+                  f"{'(already handled)' if already else ''}", flush=True)
+        return rec
+    except Exception as _e:
+        print(f"[v800-reconcile] failed (non-fatal): {_e}", flush=True)
+        return {}
 _SUBMIT_RESPONSE_BUFFERS = {}               # buffer_key -> list[dict(data, captured_at, url)]
 _SUBMIT_RESPONSE_BUFFERS_LOCK = threading.Lock()
 
@@ -19277,7 +19296,10 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     print(f"Successful: {successful_submissions}/{len(clips)}")
     print(f"Failed (need retry): {len(clips_needing_retry)}")
     print(f"{'='*50}")
-    
+
+    # v800 — end-of-job reconcile safety net: log the click-bracket view per clip.
+    _reconcile_job_attribution(job_id, clips, http_enqueued_clips)
+
     # NOTE: permanently_failed_clips is defined before the loop and shared with download queue
     
     # Handle any clips that failed immediately - create retry projects for them
