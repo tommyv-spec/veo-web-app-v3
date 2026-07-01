@@ -290,6 +290,16 @@ class UuidDedupQueue(queue.Queue):
 
 _PRIMARY_MEDIA_BINDINGS = {}                # uuid (lower) -> dict(job_id, clip_index, clip_id, batch_id, workflow_id, submit_time, account)
 _PRIMARY_MEDIA_LOCK = threading.Lock()
+
+# v800 — click-bracket attribution (see docs/superpowers/specs/2026-07-01-flow-
+# render-attribution-stability-design.md). Primary, windowless render->clip
+# binding by the time bracket between consecutive Generate clicks per account.
+# Writes into _PRIMARY_MEDIA_BINDINGS above so every existing consumer is
+# unchanged; the legacy window/late-bind/DOM path stays as the fallback. Kill
+# switch: FLOW_BRACKET_ATTRIBUTION=off -> pure legacy behaviour.
+from flow_attribution import RenderAttributor
+_BRACKET_ATTR_ENABLED = os.environ.get("FLOW_BRACKET_ATTRIBUTION", "on").strip().lower() != "off"
+_RENDER_ATTRIBUTOR = RenderAttributor(enabled=_BRACKET_ATTR_ENABLED)
 _SUBMIT_RESPONSE_BUFFERS = {}               # buffer_key -> list[dict(data, captured_at, url)]
 _SUBMIT_RESPONSE_BUFFERS_LOCK = threading.Lock()
 
