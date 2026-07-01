@@ -420,6 +420,44 @@ def _failed_media_ids_in_status(data, reason):
     return found
 
 
+def _iter_status_media(data):
+    """v800 — yield (uuid, status, create_time_epoch, project_id) for each media
+    entry in a batchCheckAsyncVideoGenerationStatus body. create_time parsed from
+    ISO 'createTime' to epoch seconds (None if absent/unparseable). Feeds the
+    click-bracket ledger so dropped-response renders still attribute (by
+    create_time) and reconcile sees fresh statuses."""
+    import datetime as _dt
+
+    def _epoch(s):
+        if not s:
+            return None
+        try:
+            return _dt.datetime.fromisoformat(str(s).replace('Z', '+00:00')).timestamp()
+        except Exception:
+            return None
+
+    def _walk(node, proj):
+        if isinstance(node, dict):
+            proj = node.get('projectId', proj)
+            if 'media' in node and isinstance(node['media'], list):
+                for m in node['media']:
+                    if not isinstance(m, dict):
+                        continue
+                    uuid = m.get('name')
+                    meta = m.get('mediaMetadata') or {}
+                    st = ((meta.get('mediaStatus') or {}).get('mediaGenerationStatus'))
+                    ct = _epoch(meta.get('createTime'))
+                    if uuid:
+                        yield (uuid, st, ct, m.get('projectId', proj))
+            for v in node.values():
+                yield from _walk(v, proj)
+        elif isinstance(node, list):
+            for v in node:
+                yield from _walk(v, proj)
+
+    yield from _walk(data, None)
+
+
 def _record_video_policy_terminal(media_id, reason):
     """Record a terminal video-gen content-filter reject keyed by the FAILED
     media's UUID. A clip only fail-fasts when its OWN bound mediaId is recorded
@@ -1522,6 +1560,24 @@ def _scan_failure_reason(resp, url, buf_key=''):
                 break
     except Exception:
         pass
+
+    # v800 — feed the status poll into the click-bracket attributor: upsert status
+    # for known renders (reconcile) + attribute dropped-response renders by
+    # create_time (backstop). Only acct:-keyed buffers map to a click-log account.
+    try:
+        _acct = buf_key[len('acct:'):] if (buf_key or '').startswith('acct:') else None
+        for _uuid, _st, _ct, _proj in _iter_status_media(data):
+            _ab = _RENDER_ATTRIBUTOR.observe_render(
+                _uuid, account=_acct, create_time=_ct, status=_st, project_id=_proj)
+            if _ab and _uuid.lower() not in _PRIMARY_MEDIA_BINDINGS:
+                with _PRIMARY_MEDIA_LOCK:
+                    _PRIMARY_MEDIA_BINDINGS[_uuid.lower()] = {
+                        'job_id': _ab['job_id'], 'clip_index': _ab['clip_index'],
+                        'clip_id': _ab['clip_id'], 'submit_time': time.time(),
+                        'account': _acct, 'via': 'bracket-status'}
+                print(f"[v800] bracket-bind (status) clip {_ab['clip_index']} ← render {_uuid[:8]}", flush=True)
+    except Exception as _e:
+        print(f"[v800] status feed failed (non-fatal): {_e}", flush=True)
 
 
 def _install_submit_response_listener(page, account_label=""):
