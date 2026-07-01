@@ -6867,6 +6867,28 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                 settings_applied['Variants'] = False
                 print(f"{prefix}⚠ Variants tab missed", flush=True)
 
+            # Duration — the new Flow composer (2026-07 redesign) added a
+            # 4s/6s/8s/10s tablist to the settings menu; the old UI had no per-clip
+            # duration control so this was never set (clips came out at Flow's
+            # default, not the job's duration). Click the tab matching page._duration.
+            # Best-effort: on the old UI the tab isn't present, so a miss is harmless.
+            try:
+                _durraw = getattr(page, "_duration", "8")
+                _durn = int(float(str(_durraw).lower().rstrip('s') or "8"))
+                _dtab = page.locator(
+                    f"button.flow_tab_slider_trigger:text-is('{_durn}s'), "
+                    f"button.flow_tab_slider_trigger[aria-controls$='-content-{_durn}']"
+                ).first
+                _dtab.wait_for(state="visible", timeout=3000)
+                if _dtab.get_attribute("aria-selected") != "true":
+                    human_click_element(page, _dtab, f"{prefix}Duration {_durn}s")
+                    time.sleep(0.5)
+                settings_applied['Duration'] = True
+                print(f"{prefix}✓ Duration {_durn}s OK", flush=True)
+            except Exception:
+                settings_applied['Duration'] = False
+                print(f"{prefix}⚠ Duration tab not set (old UI has none, or {getattr(page,'_duration','?')}s tab missing)", flush=True)
+
             # ---- Close dropdown ----
             try:
                 page.keyboard.press("Escape")
@@ -15786,6 +15808,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
     veo_model = job.get('veo_model', 'Veo 3.1 - Lite [Lower Priority]')
     try:
         page._veo_model = veo_model  # read by ensure_lower_priority_model at generate time
+        page._duration = duration    # read by select_frames_to_video_mode to set the new-UI duration tab
     except Exception:
         pass
 
@@ -17208,6 +17231,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     veo_model = job.get('veo_model', 'Veo 3.1 - Lite [Lower Priority]')
     try:
         page._veo_model = veo_model  # read by ensure_lower_priority_model at generate time
+        page._duration = duration    # read by select_frames_to_video_mode to set the new-UI duration tab
     except Exception:
         pass
     voice_profile = job.get('voice_profile', '')
