@@ -1819,7 +1819,8 @@ def _drain_submit_responses(account_label=""):
 
 
 def _bind_pending_submits_for_page(page, job_id, clip_index, clip_id=None,
-                                    drain_timeout=8.0, expected_min=1):
+                                    drain_timeout=8.0, expected_min=1,
+                                    preserve_existing=False):
     """Convenience wrapper — resolves the buffer key from the page's
     `_v700_submit_buffer_key` attribute (set by
     `_install_submit_response_listener`). Use this from sites that don't
@@ -1853,12 +1854,13 @@ def _bind_pending_submits_for_page(page, job_id, clip_index, clip_id=None,
         drain_timeout=drain_timeout,
         expected_min=expected_min,
         min_captured_at=last_click,
+        preserve_existing=preserve_existing,
     )
 
 
 def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
                           drain_timeout=8.0, expected_min=1,
-                          min_captured_at=None):
+                          min_captured_at=None, preserve_existing=False):
     """v700 — drain any submit responses captured since the last call and
     bind their primaryMediaIds to (job_id, clip_index, clip_id). Wait up
     to `drain_timeout` seconds for at least `expected_min` workflows to
@@ -1875,27 +1877,33 @@ def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
     only the freshest uuids own this clip.
     """
     # v700i — clear stale bindings for this slot before the new submit lands.
-    purged = 0
-    with _PRIMARY_MEDIA_LOCK:
-        stale = [
-            uid for uid, b in _PRIMARY_MEDIA_BINDINGS.items()
-            if b.get('job_id') == job_id and b.get('clip_index') == clip_index
-        ]
-        for uid in stale:
-            _PRIMARY_MEDIA_BINDINGS.pop(uid, None)
-            purged += 1
-    if purged:
-        print(
-            f"[v700i] purged {purged} stale uuid binding(s) for clip {clip_index} "
-            f"(job {str(job_id)[:8]}) before new submit",
-            flush=True,
-        )
-    # v800 — mirror the v700i purge in the click-bracket ledger so a re-submit
-    # (policy-retry / restore-resume) drops the stale bracket binding too.
-    try:
-        _RENDER_ATTRIBUTOR.purge_clip(job_id, clip_index)
-    except Exception:
-        pass
+    # v804 — preserve_existing=True skips BOTH purges. Used by the FailCheck
+    # Retry re-bind (v803): there the clip's prior bindings are NOT stale —
+    # a sibling tile in the same batch rendered fine and its uuid must stay
+    # bound, or v792 later drops the good render as a "foreign tile" and the
+    # clip never downloads. The retry's new uuid binds ALONGSIDE the survivor.
+    if not preserve_existing:
+        purged = 0
+        with _PRIMARY_MEDIA_LOCK:
+            stale = [
+                uid for uid, b in _PRIMARY_MEDIA_BINDINGS.items()
+                if b.get('job_id') == job_id and b.get('clip_index') == clip_index
+            ]
+            for uid in stale:
+                _PRIMARY_MEDIA_BINDINGS.pop(uid, None)
+                purged += 1
+        if purged:
+            print(
+                f"[v700i] purged {purged} stale uuid binding(s) for clip {clip_index} "
+                f"(job {str(job_id)[:8]}) before new submit",
+                flush=True,
+            )
+        # v800 — mirror the v700i purge in the click-bracket ledger so a re-submit
+        # (policy-retry / restore-resume) drops the stale bracket binding too.
+        try:
+            _RENDER_ATTRIBUTOR.purge_clip(job_id, clip_index)
+        except Exception:
+            pass
 
     bound = []
     deadline = time.time() + max(0.5, float(drain_timeout))
@@ -10023,13 +10031,19 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                 # this clip and the normal download / v801 recovery picks it up.
                 if retried > 0 and clip_index is not None and job_id:
                     try:
-                        page._v700j_last_click_at = time.time()  # align bracket + min_captured_at to the retry click
+                        # v804 — do NOT move _v700j_last_click_at to the retry click and do
+                        # NOT purge the clip's existing bindings. The retry re-uses this
+                        # clip's original submit window: the surviving sibling's uuid (and
+                        # any of the original submit's responses still in the buffer) must
+                        # stay bound to this clip, or the GOOD render gets v792-dropped as
+                        # a foreign tile. The retry's new response binds additively.
                         _v803_expected = max(1, retried)
                         _bind_pending_submits_for_page(
                             page, job_id, clip_index, clip_id=clip_id,
-                            drain_timeout=8.0, expected_min=_v803_expected)
-                        print(f"[FailCheck] [v803] re-bound clip {clip_index} after Retry "
-                              f"(expected {_v803_expected} render(s)) — retry's render will attribute + download", flush=True)
+                            drain_timeout=8.0, expected_min=_v803_expected,
+                            preserve_existing=True)
+                        print(f"[FailCheck] [v803/v804] re-bound clip {clip_index} after Retry "
+                              f"(additive, expected {_v803_expected} render(s)) — survivor kept + retry will attribute + download", flush=True)
                     except Exception as _rbe:
                         print(f"[FailCheck] [v803] re-bind after Retry failed (non-fatal): {_rbe}", flush=True)
             except Exception as e:
