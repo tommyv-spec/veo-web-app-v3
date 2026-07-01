@@ -317,7 +317,12 @@ _VIDEO_POLICY_TERMINAL_LOCK = threading.Lock()
 # content reject — model-swap-proof AND restore-proof. From the API as
 # PUBLIC_ERROR_<X> (e.g. PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED,
 # PUBLIC_ERROR_SEXUAL). Extend as new ones surface in [fail-reason-diag].
-_VIDEO_POLICY_TERMINAL_REASONS = ('PROMINENT_PEOPLE', 'SEXUAL', 'CSAM')
+# REPUTATIONAL / MISREPRESENT = Flow's RAI reject ("Unable to generate videos
+# that might cause reputational risk or misrepresent current events"). Content-
+# deterministic like the others → model-swap-proof AND golden-restore-proof, so
+# it belongs on the terminal list (never retry/swap). Surfaces in the FAILED tile
+# text too — see tile_text_terminal_reason for the DOM-side catch.
+_VIDEO_POLICY_TERMINAL_REASONS = ('PROMINENT_PEOPLE', 'SEXUAL', 'CSAM', 'REPUTATIONAL', 'MISREPRESENT')
 _VIDEO_POLICY_TERMINAL_WINDOW_S = 180.0     # how recent a reject counts (media-keyed, so safe to keep longer)
 _UUID_RE = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
 
@@ -4704,6 +4709,41 @@ def tile_text_is_prominent(page, data_index):
         return False
 
 
+# Extra TERMINAL rejects Flow surfaces in the FAILED tile TEXT itself (no API
+# reason code needed). The RAI "reputational risk / misrepresent current events"
+# reject is deterministic — model-swap-proof AND redo-proof — so the tile text
+# alone routes it to the terminal change-prompt card, never a retry. Keyed reason
+# -> substrings to look for in the lowercased tile text. (PROMINENT_PEOPLE stays
+# on tile_text_is_prominent — this catches the reasons NOT already handled there.)
+_TILE_TEXT_TERMINAL_WORDINGS = (
+    ('REPUTATIONAL', ('reputational', 'misrepresent')),
+)
+
+
+def tile_text_terminal_reason(page, data_index):
+    """Read a failed tile's text and return the TERMINAL content-reject reason it
+    carries (e.g. 'REPUTATIONAL'), or None. A terminal reject is deterministic —
+    retry / model-swap / golden-restore can't fix it — so callers route it straight
+    to the change-prompt card instead of the swap+redo path. Returns None on any
+    error / missing tile so callers fall back to the normal generation-policy path."""
+    if page is None or data_index is None or data_index < 0:
+        return None
+    try:
+        txt = page.evaluate("""(idx) => {
+            const c = document.querySelector('[data-index="' + idx + '"]');
+            if (!c) return '';
+            return (c.textContent || '').toLowerCase();
+        }""", data_index)
+    except Exception:
+        return None
+    if not txt:
+        return None
+    for _reason, _subs in _TILE_TEXT_TERMINAL_WORDINGS:
+        if any(_s in txt for _s in _subs):
+            return _reason
+    return None
+
+
 def route_generation_policy(clip_id, current_model, is_prominent, account_name="",
                             generation_attempt=1):
     """Route a generation-time Flow policy block to the right recovery UI.
@@ -4745,6 +4785,10 @@ _TERMINAL_CONTENT_MESSAGES = {
     'SEXUAL': ("⚠️ Flow flagged this image/scene as sexual content. Upload a different image "
                "or change the pose/prompt (switching the model won't fix it)."),
     'CSAM': "⚠️ Flow blocked this image for safety. Upload a different image.",
+    'REPUTATIONAL': ("⚠️ Flow blocked this as reputational / current-events risk. Change the prompt "
+                     "(reword the scene, drop any public-figure or news framing) — retrying won't fix it."),
+    'MISREPRESENT': ("⚠️ Flow blocked this as reputational / current-events risk. Change the prompt "
+                     "(reword the scene, drop any public-figure or news framing) — retrying won't fix it."),
 }
 
 
@@ -6198,6 +6242,12 @@ class HumanPacer:
                                             # PROMINENT_PEOPLE path handles bad images → "different
                                             # image"). So fail with a try-a-different-PROMPT message
                                             # and KEEP the image; do NOT render the replace-image card.
+                                            _term_reason = tile_text_terminal_reason(page, _pi)
+                                            if _term_reason:
+                                                route_terminal_content_reject(clip_id, _term_reason, self.account_name)
+                                                print(f"[{self.account_name}] [PolicyScan] ⛔ Clip {_fail_ci+1} terminal content reject ({_term_reason}) — change-prompt card shown (no retry/swap)", flush=True)
+                                                clip_log(clip_id, _fail_ci, "FAILED", f"terminal content reject ({_term_reason})")
+                                                continue
                                             _is_prom = tile_text_is_prominent(page, _pi)
                                             _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, self.account_name, generation_attempt=_clip_obj.get('generation_attempt', 1))
                                             if _pa == 'fail_prominent':
@@ -9337,7 +9387,11 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job
                 const tiles = container.querySelectorAll('[data-tile-id]');
                 for (const tile of tiles) {
                     const text = (tile.textContent || '').toLowerCase();
-                    if (!text.includes('violate') && !text.includes('policies')) continue;
+                    // 'reputational' / 'misrepresent' = the RAI reject wording (no
+                    // 'violate'/'policies' in it) — TERMINAL, so we detect it here to
+                    // mark persistent + skip Retry (never re-click a swap-proof reject).
+                    if (!text.includes('violate') && !text.includes('policies')
+                        && !text.includes('reputational') && !text.includes('misrepresent')) continue;
                     const icons = Array.from(tile.querySelectorAll('i')).map(i => i.textContent.trim());
                     if (!icons.includes('warning')) continue;
                     const tileId = tile.getAttribute('data-tile-id');
@@ -9356,6 +9410,7 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job
                         hasRetryBtn: icons.includes('refresh'),
                         hasReuseBtn: icons.includes('undo'),
                         mediaIds: mids,
+                        text: text.slice(0, 200),
                     });
                 }
             }
@@ -9386,6 +9441,12 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job
                         _rec = _VIDEO_POLICY_TERMINAL.get(_m)
                         if _rec and (_now - _rec.get('ts', 0)) <= _VIDEO_POLICY_TERMINAL_WINDOW_S:
                             _term = _rec.get('reason'); break
+            # Tile-text terminal signal (RAI reputational / misrepresent) — no API
+            # reason code needed; the FAILED tile carries the wording itself.
+            if not _term:
+                _ttxt = (info.get('text') or '')
+                if 'reputational' in _ttxt or 'misrepresent' in _ttxt:
+                    _term = 'REPUTATIONAL'
             if not _term and job_id is not None and clip_submit_times:
                 _subm = sorted(clip_submit_times.keys(), key=lambda k: clip_submit_times[k])
                 _rev = len(_subm) - 1 - data_idx
@@ -15674,16 +15735,21 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                         # are caught at uploadImage (→ "different image"). Fail with a
                         # try-a-different-PROMPT message; keep the image.
                         # REDO runs in a fresh project — the retried tile sits at data-index 0.
-                        _is_prom = tile_text_is_prominent(page, 0)
-                        _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=clip.get('generation_attempt', 1))
-                        if _pa == 'fail_prominent':
-                            print(f"[REDO] 🖼 Clip {clip_index+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
-                        elif _pa == 'fail':
-                            print(f"[REDO] ❌ Clip {clip_index+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
-                            fail_clip_general_policy(clip_id, _pmsg)
+                        _term_reason = tile_text_terminal_reason(page, 0)
+                        if _term_reason:
+                            route_terminal_content_reject(clip_id, _term_reason)
+                            print(f"[REDO] ⛔ Clip {clip_index+1} terminal content reject ({_term_reason}) — change-prompt card shown (no retry/swap)", flush=True)
                         else:
-                            print(f"[REDO] 🔀 Clip {clip_index+1} policy-blocked — {_pa} + requeuing redo", flush=True)
-                            update_clip_status(clip_id, 'flow_redo_queued', error_message=_pmsg)
+                            _is_prom = tile_text_is_prominent(page, 0)
+                            _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=clip.get('generation_attempt', 1))
+                            if _pa == 'fail_prominent':
+                                print(f"[REDO] 🖼 Clip {clip_index+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
+                            elif _pa == 'fail':
+                                print(f"[REDO] ❌ Clip {clip_index+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
+                                fail_clip_general_policy(clip_id, _pmsg)
+                            else:
+                                print(f"[REDO] 🔀 Clip {clip_index+1} policy-blocked — {_pa} + requeuing redo", flush=True)
+                                update_clip_status(clip_id, 'flow_redo_queued', error_message=_pmsg)
                         shutil.rmtree(temp_dir, ignore_errors=True)
                         return False
                 
@@ -19354,6 +19420,13 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                             # image already passed uploadImage (bad images are
                                             # caught there → "different image"). Fail with a
                                             # try-a-different-PROMPT message; keep the image.
+                                            _term_reason = tile_text_terminal_reason(page, _pi)
+                                            if _term_reason:
+                                                route_terminal_content_reject(clip_id, _term_reason)
+                                                permanently_failed_clips.add(_fail_ci)
+                                                _pending_left.discard(_fail_ci)
+                                                print(f"[Flow] [PolicyScan] ⛔ Clip {_fail_ci+1} terminal content reject ({_term_reason}) — change-prompt card shown (no retry/swap)", flush=True)
+                                                continue
                                             _is_prom = tile_text_is_prominent(page, _pi)
                                             _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_clip_obj.get('generation_attempt', 1))
                                             if _pa == 'fail_prominent':
