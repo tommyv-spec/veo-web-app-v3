@@ -297,9 +297,32 @@ _PRIMARY_MEDIA_LOCK = threading.Lock()
 # Writes into _PRIMARY_MEDIA_BINDINGS above so every existing consumer is
 # unchanged; the legacy window/late-bind/DOM path stays as the fallback. Kill
 # switch: FLOW_BRACKET_ATTRIBUTION=off -> pure legacy behaviour.
-from flow_attribution import RenderAttributor
-_BRACKET_ATTR_ENABLED = os.environ.get("FLOW_BRACKET_ATTRIBUTION", "on").strip().lower() != "off"
-_RENDER_ATTRIBUTOR = RenderAttributor(enabled=_BRACKET_ATTR_ENABLED)
+# Import must be resilient: a deployed worker that hasn't downloaded the new
+# flow_attribution.py sidecar must NOT hard-crash — it falls back to a no-op
+# attributor (pure legacy behaviour) instead. Same-dir import via sys.path so the
+# worker finds the sibling file regardless of CWD.
+try:
+    import sys as _sys, os as _os
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    if _here not in _sys.path:
+        _sys.path.insert(0, _here)
+    from flow_attribution import RenderAttributor
+    _BRACKET_ATTR_ENABLED = os.environ.get("FLOW_BRACKET_ATTRIBUTION", "on").strip().lower() != "off"
+    _RENDER_ATTRIBUTOR = RenderAttributor(enabled=_BRACKET_ATTR_ENABLED)
+except Exception as _attr_imp_err:
+    print(f"[v800] flow_attribution unavailable ({_attr_imp_err}) — running pure legacy attribution", flush=True)
+
+    class _NoopAttributor:
+        enabled = False
+        def stamp_click(self, *a, **k): pass
+        def observe_render(self, *a, **k): return None
+        def renders_for_clip(self, *a, **k): return []
+        def reconcile(self, *a, **k): return {}
+        def purge_clip(self, *a, **k): pass
+        def click_log_for(self, *a, **k): return []
+        def bracket_for(self, *a, **k): return None
+    _RENDER_ATTRIBUTOR = _NoopAttributor()
+    _BRACKET_ATTR_ENABLED = False
 
 
 def _stamp_generate_click(account_label, job_id, clip_index, clip_id=None, click_at=None):
@@ -23692,7 +23715,7 @@ if __name__ == "__main__":
             # fetch the helper modules it imports next to it every launch. Done
             # BEFORE the flow_worker hash/restart below so they are present even
             # when flow_worker.py itself restarts.
-            for _comp in ("worker_profile_pull.py", "worker_cookie_extract.py"):
+            for _comp in ("worker_profile_pull.py", "worker_cookie_extract.py", "flow_attribution.py"):
                 try:
                     _comp_url = f"{WEB_APP_URL}/api/user-worker/download/{_comp}"
                     _creq = _urllib.Request(_comp_url, headers={"User-Agent": f"flow-worker/{WORKER_BUILD}"})

@@ -13308,6 +13308,18 @@ async def serve_worker_cookie_extract():
     return Response(content=mod_path.read_text(), media_type="text/x-python")
 
 
+@app.get("/api/user-worker/download/flow_attribution.py")
+async def serve_flow_attribution():
+    """Serve the v800 click-bracket attribution companion module. flow_worker.py
+    imports it; the worker's auto-updater fetches it next to flow_worker.py every
+    launch. flow_worker's import is resilient (falls back to legacy) if this is
+    ever missing, but the updater fetches it so the feature actually runs."""
+    mod_path = Path(__file__).parent / "static" / "flow_attribution.py"
+    if not mod_path.exists():
+        raise HTTPException(404, "Module not found")
+    return Response(content=mod_path.read_text(), media_type="text/x-python")
+
+
 @app.get("/api/user-worker/version")
 async def worker_version():
     """Return current worker version (content hash) for auto-update checks."""
