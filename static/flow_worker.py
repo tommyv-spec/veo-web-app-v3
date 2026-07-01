@@ -1814,6 +1814,30 @@ def _bind_pending_submits(job_id, clip_index, clip_id=None, account_label="",
                         }
                         bound.append(media_id)
                         seen_workflows += 1
+                        # v800 — record the render in the click-bracket ledger (for
+                        # reconcile + the status-poll backstop). The legacy line above
+                        # already bound this media to THIS clip's filtered drain, so the
+                        # guarded write below is a no-op here; it only fires when the
+                        # legacy path didn't set a binding.
+                        _attr_binding = _RENDER_ATTRIBUTOR.observe_render(
+                            media_id, account=account_label,
+                            captured_at=(cap_at or None),
+                            batch_id=_b.get('batch_id'),
+                            workflow_id=_b.get('workflow_name'),
+                        )
+                        if _attr_binding and media_id not in _PRIMARY_MEDIA_BINDINGS:
+                            _PRIMARY_MEDIA_BINDINGS[media_id] = {
+                                'job_id': _attr_binding['job_id'],
+                                'clip_index': _attr_binding['clip_index'],
+                                'clip_id': _attr_binding['clip_id'],
+                                'batch_id': _b.get('batch_id'),
+                                'workflow_id': _b.get('workflow_name'),
+                                'submit_time': cap_at or time.time(),
+                                'account': account_label,
+                                'via': 'bracket',
+                            }
+                            print(f"[v800] bracket-bind clip {_attr_binding['clip_index']} "
+                                  f"← render {media_id[:8]} (captured_at bracket)", flush=True)
         if seen_workflows >= expected_min:
             break
         if time.time() >= deadline:
