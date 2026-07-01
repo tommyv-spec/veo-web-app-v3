@@ -31,3 +31,41 @@ def test_bracket_for_returns_owning_click_entry():
     assert a.bracket_for("A", 50.0) is None
     # unknown account -> None
     assert a.bracket_for("ZZ", 130.0) is None
+
+
+def test_observe_render_attributes_by_captured_at_bracket():
+    a = RenderAttributor()
+    a.stamp_click("A", "J", 0, "c0", now=100.0)
+    a.stamp_click("A", "J", 1, "c1", now=160.0)
+    # render captured at 135 -> clip 0's bracket
+    b = a.observe_render("RID1", account="A", captured_at=135.0)
+    assert b == {"job_id": "J", "clip_index": 0, "clip_id": "c0"}
+    # a second variant of the same clip, captured later but still < next click
+    b2 = a.observe_render("RID2", account="A", captured_at=155.0)
+    assert b2["clip_index"] == 0
+    # render for clip 1
+    b3 = a.observe_render("RID3", account="A", captured_at=170.0)
+    assert b3["clip_index"] == 1
+    # ledger recorded all three with account + status default
+    assert set(a.renders_for_clip("J", 0)) == {"rid1", "rid2"}
+    assert a.renders_for_clip("J", 1) == ["rid3"]
+
+
+def test_observe_render_uses_create_time_when_no_captured_at():
+    a = RenderAttributor()
+    a.stamp_click("A", "J", 0, "c0", now=100.0)
+    a.stamp_click("A", "J", 1, "c1", now=160.0)
+    # status-poll-only render: no captured_at, fall back to create_time epoch
+    b = a.observe_render("RID9", account="A", create_time=150.0)
+    assert b["clip_index"] == 0
+
+
+def test_observe_render_returns_none_when_disabled_or_unbracketed():
+    a = RenderAttributor(enabled=False)
+    a.stamp_click("A", "J", 0, "c0", now=100.0)
+    assert a.observe_render("RID", account="A", captured_at=130.0) is None  # disabled
+    a2 = RenderAttributor()
+    a2.stamp_click("A", "J", 0, "c0", now=100.0)
+    assert a2.observe_render("RID", account="A", captured_at=50.0) is None  # pre-first-click
+    # but the ledger still recorded it (for reconcile/backstop), even if unbound
+    assert "rid" in a2._ledger
