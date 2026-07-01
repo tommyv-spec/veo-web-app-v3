@@ -1496,9 +1496,26 @@ def _open_settings_dropdown(page, prefix=""):
                 settings_btn = candidate
             except:
                 pass
+
+        # New Flow composer chip (2026-07 redesign): the per-generation settings
+        # trigger is now a menu button reading "Image · [aspect] 1x" (aria-haspopup=
+        # menu, number-first variant), so the old "xN"/model-name finders miss it →
+        # "Settings button not found". Same fix as the video worker's chip; the
+        # menu internals (flow_tab_slider_trigger tabs) are unchanged.
+        if settings_btn is None:
+            for _newsel in ("button[aria-haspopup='menu']:has-text('Image ·')",
+                            "button[aria-haspopup='menu']:has-text('Image')",
+                            "button[aria-haspopup='menu']:has-text('Video')"):
+                try:
+                    _nc = page.locator(_newsel).first
+                    _nc.wait_for(state="visible", timeout=3000)
+                    settings_btn = _nc
+                    break
+                except Exception:
+                    continue
     except:
         pass
-    
+
     if settings_btn is None:
         print(f"{prefix}⚠ Settings button not found", flush=True)
         return None
