@@ -1,0 +1,33 @@
+"""Pure (browser-free) render attribution for the Flow worker.
+
+Clip N owns exactly the renders that appear between its own Generate click and
+the next Generate click on the SAME account (submits are sequential per account).
+This module holds that state (click log + render ledger) and the bracket math.
+flow_worker.py feeds it submit responses + status-poll bodies and writes the
+resolved (render_id -> clip) into its existing _PRIMARY_MEDIA_BINDINGS map.
+
+No imports from flow_worker — keep this unit-testable without booting Patchright.
+"""
+import threading
+
+
+class RenderAttributor:
+    def __init__(self, enabled=True):
+        self.enabled = enabled
+        self._click_log = {}   # account -> list[{click_at, job_id, clip_index, clip_id}]
+        self._ledger = {}      # render_id -> {account, captured_at, create_time, status, batch_id, workflow_id, project_id}
+        self._lock = threading.RLock()
+
+    def stamp_click(self, account, job_id, clip_index, clip_id, now):
+        """Record a Generate click. `now` = local wall-clock (time.time()) at click."""
+        if not account:
+            return
+        entry = {"click_at": float(now), "job_id": job_id,
+                 "clip_index": clip_index, "clip_id": clip_id}
+        with self._lock:
+            self._click_log.setdefault(account, []).append(entry)
+            self._click_log[account].sort(key=lambda e: e["click_at"])
+
+    def click_log_for(self, account):
+        with self._lock:
+            return [dict(e) for e in self._click_log.get(account, [])]
