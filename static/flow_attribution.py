@@ -80,6 +80,34 @@ class RenderAttributor:
             row["bound"] = binding
             return dict(binding)
 
+    # Flow mediaGenerationStatus -> coarse state
+    _SUCCESS = "MEDIA_GENERATION_STATUS_SUCCESSFUL"
+    _FAILED = "MEDIA_GENERATION_STATUS_FAILED"
+
+    def reconcile(self, job_id, clip_indices):
+        """Per-clip final view for the end-of-job safety net. For each clip index:
+        {state: successful|failed|pending|missing, render_ids: [...]}. 'missing' =
+        no render ever attributed (the new path saw nothing — caller falls back to
+        the legacy path / redo)."""
+        with self._lock:
+            out = {}
+            for ci in clip_indices:
+                rids = [rid for rid, row in self._ledger.items()
+                        if (row.get("bound") or {}).get("job_id") == job_id
+                        and (row.get("bound") or {}).get("clip_index") == ci]
+                if not rids:
+                    out[ci] = {"state": "missing", "render_ids": []}
+                    continue
+                statuses = [self._ledger[r].get("status") for r in rids]
+                if any(s == self._SUCCESS for s in statuses):
+                    state = "successful"
+                elif all(s == self._FAILED for s in statuses):
+                    state = "failed"
+                else:
+                    state = "pending"
+                out[ci] = {"state": state, "render_ids": rids}
+            return out
+
     def renders_for_clip(self, job_id, clip_index):
         """All render ids the ledger has attributed to this (job, clip)."""
         with self._lock:

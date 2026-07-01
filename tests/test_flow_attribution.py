@@ -69,3 +69,24 @@ def test_observe_render_returns_none_when_disabled_or_unbracketed():
     assert a2.observe_render("RID", account="A", captured_at=50.0) is None  # pre-first-click
     # but the ledger still recorded it (for reconcile/backstop), even if unbound
     assert "rid" in a2._ledger
+
+
+def test_reconcile_reports_per_clip_status():
+    a = RenderAttributor()
+    a.stamp_click("A", "J", 0, "c0", now=100.0)
+    a.stamp_click("A", "J", 1, "c1", now=160.0)
+    a.observe_render("RID0", account="A", captured_at=130.0, status="MEDIA_GENERATION_STATUS_SCHEDULED")
+    a.observe_render("RID1", account="A", captured_at=170.0, status="MEDIA_GENERATION_STATUS_SCHEDULED")
+    # later status poll flips clip 0 -> SUCCESSFUL, clip 1 -> FAILED
+    a.observe_render("RID0", account="A", status="MEDIA_GENERATION_STATUS_SUCCESSFUL")
+    a.observe_render("RID1", account="A", status="MEDIA_GENERATION_STATUS_FAILED")
+    rec = a.reconcile("J", [0, 1])
+    assert rec[0]["state"] == "successful" and rec[0]["render_ids"] == ["rid0"]
+    assert rec[1]["state"] == "failed"
+
+
+def test_reconcile_flags_clip_with_no_render():
+    a = RenderAttributor()
+    a.stamp_click("A", "J", 0, "c0", now=100.0)
+    rec = a.reconcile("J", [0, 1])
+    assert rec[1]["state"] == "missing" and rec[1]["render_ids"] == []
