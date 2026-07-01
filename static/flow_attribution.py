@@ -117,3 +117,13 @@ class RenderAttributor:
                 if b and b["job_id"] == job_id and b["clip_index"] == clip_index:
                     out.append(rid)
             return out
+
+    def purge_clip(self, job_id, clip_index):
+        """Drop bindings for a clip before it is re-submitted (redo / golden-restore
+        resume), mirroring flow_worker's v700i purge so a fresh render wins. Ledger
+        rows stay (for history) but lose their `bound` tag."""
+        with self._lock:
+            for row in self._ledger.values():
+                b = row.get("bound")
+                if b and b["job_id"] == job_id and b["clip_index"] == clip_index:
+                    row.pop("bound", None)

@@ -90,3 +90,17 @@ def test_reconcile_flags_clip_with_no_render():
     a.stamp_click("A", "J", 0, "c0", now=100.0)
     rec = a.reconcile("J", [0, 1])
     assert rec[1]["state"] == "missing" and rec[1]["render_ids"] == []
+
+
+def test_redo_click_opens_new_bracket_and_old_binding_is_dropped():
+    a = RenderAttributor()
+    a.stamp_click("A", "J", 0, "c0", now=100.0)
+    a.stamp_click("A", "J", 1, "c1", now=160.0)
+    a.observe_render("OLD", account="A", captured_at=130.0)      # clip 0, first attempt
+    assert a.renders_for_clip("J", 0) == ["old"]
+    # redo of clip 0 much later: purge its prior bindings, stamp a new click
+    a.purge_clip("J", 0)
+    a.stamp_click("A", "J", 0, "c0", now=300.0)
+    assert a.renders_for_clip("J", 0) == []                       # old dropped
+    a.observe_render("NEW", account="A", captured_at=305.0)       # redo render
+    assert a.renders_for_clip("J", 0) == ["new"]
