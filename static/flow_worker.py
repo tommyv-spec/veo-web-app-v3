@@ -573,6 +573,23 @@ def _peek_video_policy_terminal_for_clip(job_id, clip_index):
     return None
 
 
+def _terminal_reason_for_uuids(uuids):
+    """The terminal content-reject reason (SEXUAL / PROMINENT_PEOPLE / CSAM /
+    REPUTATIONAL) recorded (by the status-poll feed) for ANY of these media uuids,
+    or None. Position-independent: match the FAILED tile's OWN media uuid, so a
+    terminal reject is distinguished from a plain 'unusual activity' / generic fail
+    without needing the clip's binding."""
+    if not uuids:
+        return None
+    now = time.time()
+    with _VIDEO_POLICY_TERMINAL_LOCK:
+        for u in uuids:
+            rec = _VIDEO_POLICY_TERMINAL.get((u or '').lower())
+            if rec and (now - rec.get('ts', 0)) <= _VIDEO_POLICY_TERMINAL_WINDOW_S:
+                return rec.get('reason')
+    return None
+
+
 def _page_buffer_key(page):
     """The submit buffer_key the response listener stamped on this page at
     install time (page._v700_submit_buffer_key). Used by the immediate-failure
@@ -9810,6 +9827,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
             let hasGenerating = false;
             let failedCount = 0;
             let unusualActivityCount = 0;
+            const failedUuids = [];
 
             tiles.forEach(t => {
                 // Check for completed video
@@ -9839,6 +9857,14 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                     if (text.includes('unusual activity') || text.includes('Help Center')) {
                         unusualActivityCount++;
                     }
+                    // v802 — collect this failed tile's OWN media uuid so Python can
+                    // match it to the API terminal record (SEXUAL/PROMINENT/...) and
+                    // distinguish a content reject from a plain unusual-activity block.
+                    for (const el of t.querySelectorAll('img,video,source')) {
+                        const s = el.getAttribute('src') || el.src || '';
+                        const m = s.match(/[?&]name=([0-9a-fA-F-]{36})/);
+                        if (m) failedUuids.push(m[1].toLowerCase());
+                    }
                     return;
                 }
 
@@ -9851,6 +9877,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                 hasGenerating: hasGenerating,
                 failedCount: failedCount,
                 unusualActivityCount: unusualActivityCount,
+                failedUuids: failedUuids,
                 allFailed: tiles.length > 0 && failedCount === tiles.length && !hasGenerating && !hasVideo
             };
         }
@@ -9869,6 +9896,28 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         all_failed = result.get('allFailed', False)
         
         print(f"[FailCheck] data-index={data_index}: {tiles} tiles, {failed_count} failed, generating={has_generating}, video={has_video}", flush=True)
+
+        _failed_uuids = result.get('failedUuids') or []
+
+        # v802 (partial-done) — if a variant already rendered a video, TAKE IT. Don't
+        # retry / fail the whole clip because a sibling variant errored. Returns
+        # before the retry-click so no retry is wasted on the failed sibling; the
+        # download path picks up the good video.
+        if has_video:
+            print(f"[FailCheck] ✓ Clip has a rendered video (partial-ok even if a sibling failed) — taking it, not retrying", flush=True)
+            return False
+
+        # v802 (distinguish errors) — a TERMINAL content reject (SEXUAL / PROMINENT_
+        # PEOPLE / CSAM / REPUTATIONAL) is retry-proof AND restore-proof. The status-
+        # poll feed records the reason keyed by the FAILED media uuid; match the
+        # failed tiles' OWN uuids. If found → mark the clip with the correct policy
+        # error (caller routes route_terminal_content_reject); do NOT retry, do NOT
+        # golden-restore. This stops a SEXUAL fail being mis-read as unusual-activity.
+        _term_reason = _terminal_reason_for_uuids(_failed_uuids)
+        if _term_reason:
+            print(f"[FailCheck] ⛔ TERMINAL content reject ({_term_reason}) on clip {clip_num} "
+                  f"media {[u[:8] for u in _failed_uuids]} — marking policy error, NOT retrying/restoring", flush=True)
+            return f"terminal_content:{_term_reason}"
 
         # v758.20 — detect 'We noticed some unusual activity' on the FIRST read,
         # BEFORE clicking Retry. Retry can't clear an account block, and worse:
@@ -15764,6 +15813,23 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # "kept failing for unusual activity, never restored, marked failed for policy").
     immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None, job_id=job_id)
 
+    # v802 — TERMINAL content reject (SEXUAL / PROMINENT_PEOPLE / CSAM / REPUTATIONAL):
+    # deterministic, retry/redo/restore-proof. Mark the clip with the correct policy
+    # error (change-prompt / replace-image card) and stop — re-generating the same
+    # content just fails again.
+    if isinstance(immediate_failure, str) and immediate_failure.startswith("terminal_content:"):
+        _tc_reason = immediate_failure.split(":", 1)[1]
+        try:
+            route_terminal_content_reject(clip_id, _tc_reason)
+        except Exception:
+            fail_clip_general_policy(clip_id, f"content policy ({_tc_reason})")
+        clip_log(clip_id, clip_index, "FAILED", f"terminal content reject ({_tc_reason})")
+        print(f"[REDO] ⛔ Clip {clip_index+1} terminal content reject ({_tc_reason}) — policy card, no re-redo", flush=True)
+        try: clear_auto_redo_cycle(clip_id)
+        except Exception: pass
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return False
+
     # Unusual-activity = account block / forbidden submit (the 403s). NOT a content
     # or model problem (swap/replace-image can't fix it). Handle it like the main
     # process: re-queue the clip + raise the same "stopping job to trigger golden
@@ -18836,6 +18902,24 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # v737 — successful submission clears unusual-activity strike counter for this job
             with _UNUSUAL_ACTIVITY_LOCK:
                 _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
+
+        # v802 — TERMINAL content reject (SEXUAL / PROMINENT_PEOPLE / CSAM /
+        # REPUTATIONAL) that FailCheck distinguished via the failed tile's OWN media
+        # uuid. Deterministic → mark the clip with the correct policy error (change-
+        # prompt / replace-image card); do NOT retry, redo, or golden-restore. This
+        # is what stops a SEXUAL fail being mis-handled as unusual-activity.
+        if isinstance(clip_failed, str) and clip_failed.startswith("terminal_content:"):
+            _tc_reason = clip_failed.split(":", 1)[1]
+            try:
+                route_terminal_content_reject(clip['id'], _tc_reason, "Flow")
+            except Exception as _tce:
+                print(f"[Flow] terminal-content route failed ({_tce}) — marking general policy", flush=True)
+                fail_clip_general_policy(clip['id'], f"content policy ({_tc_reason})")
+            clip_log(clip.get('id'), clip_index, "FAILED", f"terminal content reject ({_tc_reason})")
+            print(f"[Flow] ⛔ Clip {clip_index+1} terminal content reject ({_tc_reason}) "
+                  f"— policy card shown, no retry/restore", flush=True)
+            clip_submit_times.pop(clip_index, None)
+            continue
 
         # v758.21 — "unusual activity" block: replicate the operator's manual
         # fix EVERY time it appears — delete the labs.google cookies + reload
