@@ -6515,6 +6515,9 @@ class HumanPacer:
                                 if _retry_ci in _dl_checked:
                                     _dl_checked.discard(_retry_ci)
                                 # v700 — re-bind primaryMediaId after policy retry
+                                # v804 — additive: the PolicyScan Retry hits ONE failed tile;
+                                # a sibling tile in the same batch may have rendered fine and
+                                # its binding must survive (else v792 drops the good render).
                                 try:
                                     _v700_clip_obj = next((c for c in clips if c.get('clip_index') == _retry_ci), None)
                                     _v700_clip_id = _v700_clip_obj.get('id') if _v700_clip_obj else None
@@ -6523,10 +6526,11 @@ class HumanPacer:
                                         clip_id=_v700_clip_id,
                                         drain_timeout=6.0,
                                         expected_min=1,
+                                        preserve_existing=True,
                                     )
                                 except Exception as _v700_err:
                                     print(f"[v700] bind failed for policy retry {_retry_ci}: {_v700_err}", flush=True)
-                                print(f"[{self.account_name}] [PolicyScan] Reset timer for clip {_retry_ci+1} after policy retry", flush=True)
+                                print(f"[{self.account_name}] [PolicyScan] Reset timer for clip {_retry_ci+1} after policy retry (v804 additive re-bind)", flush=True)
                     if _persistent:
                         for _pi in _persistent:
                             _submitted_sorted = sorted(clip_submit_times.keys(), key=lambda k: clip_submit_times[k])
@@ -19835,6 +19839,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                 if _retry_ci in http_enqueued_clips:
                                     http_enqueued_clips.discard(_retry_ci)
                                 # v700 — re-bind primaryMediaId after policy retry
+                                # v804 — additive: keep a surviving sibling's binding (see main scan site)
                                 try:
                                     _v700_clip_obj = next((c for c in clips if c.get('clip_index') == _retry_ci), None)
                                     _v700_clip_id = _v700_clip_obj.get('id') if _v700_clip_obj else None
@@ -19843,10 +19848,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                         clip_id=_v700_clip_id,
                                         drain_timeout=6.0,
                                         expected_min=1,
+                                        preserve_existing=True,
                                     )
                                 except Exception as _v700_err:
                                     print(f"[v700] bind failed for policy retry {_retry_ci}: {_v700_err}", flush=True)
-                                print(f"[Flow] [PolicyScan] Reset timer for clip {_retry_ci+1} after policy retry", flush=True)
+                                print(f"[Flow] [PolicyScan] Reset timer for clip {_retry_ci+1} after policy retry (v804 additive re-bind)", flush=True)
                     if _persistent:
                         for _pi in _persistent:
                             _submitted_sorted = sorted(clip_submit_times.keys(), key=lambda k: clip_submit_times[k])
