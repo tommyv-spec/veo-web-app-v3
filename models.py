@@ -367,6 +367,10 @@ class Clip(Base):
     
     # Generation parameters (for regeneration)
     prompt_text = Column(Text, nullable=True)
+    # v805 — operator-authored policy-fallback prompt (Prompt B, voice-only).
+    # Shipped verbatim to the worker; used only when the primary prompt trips
+    # a generation-policy block (flow_worker retries same-model with this).
+    prompt_text_b = Column(Text, nullable=True)
     
     # Output
     output_filename = Column(String(500), nullable=True)
@@ -985,6 +989,8 @@ def _run_migrations_postgresql(engine):
         # Storyboard/Scene mode fields
         ("clips", "clip_mode", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS clip_mode TEXT DEFAULT 'fresh'"),  # v782 default fresh
         ("clips", "scene_index", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS scene_index INTEGER DEFAULT 0"),
+        # v805 — Prompt B policy fallback (voice-only), shipped verbatim to the worker
+        ("clips", "prompt_text_b", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS prompt_text_b TEXT"),
         # User Worker Token table
         ("user_worker_tokens", "_create_table_", """
             CREATE TABLE IF NOT EXISTS user_worker_tokens (

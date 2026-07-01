@@ -182,6 +182,11 @@ class DialogueLineInput(BaseModel):
     # clips. Leaving them None preserves pre-v572 behavior.
     veo_prompt_override: Optional[str] = None
     veo_negative_prompt_override: Optional[str] = None
+    # v805 — per-clip Prompt B (policy fallback, voice-only). Stored
+    # verbatim on the clip (never composed by build_prompt); the flow
+    # worker retries a generation-policy-blocked clip with this text on
+    # the SAME model before swapping models.
+    veo_prompt_b: Optional[str] = None
     # v644 — per-line audio-padding suffix. When set, the Veo prompt
     # builder appends `" " + dialogue_pad` after the line so Veo's
     # experimental audio path has enough text to reliably synthesize
@@ -2597,6 +2602,10 @@ async def _setup_job_background(
                 # = fall through to the auto-build path.
                 _veo_prompt_override = (line_data.get("veo_prompt_override") or "").strip() or None
                 _veo_negative_override = (line_data.get("veo_negative_prompt_override") or "").strip() or None
+                # v805 — Prompt B policy fallback. Ships VERBATIM (no
+                # build_prompt pass, no negative trailer): it is the
+                # operator's authored voice-only fallback.
+                _veo_prompt_b = (line_data.get("veo_prompt_b") or "").strip() or None
                 # v537 — explicit speaker_mode from markdown overrides the
                 # auto-detection in build_prompt. Empty string or 'auto' →
                 # leave as None so build_prompt's _detect_voiceover_only()
@@ -2794,6 +2803,8 @@ async def _setup_job_background(
                 clip = db.query(Clip).filter(Clip.job_id == job_id, Clip.clip_index == idx).first()
                 if clip:
                     clip.prompt_text = prompt
+                    # v805 — Prompt B verbatim (policy fallback; worker-side use).
+                    clip.prompt_text_b = _veo_prompt_b
                     clip.start_frame = start_frame_key
                     clip.end_frame = end_frame_key
                     clip.status = ClipStatus.PENDING.value
@@ -11055,6 +11066,7 @@ async def local_worker_get_pending_job(
             "clip_index": clip.clip_index,
             "dialogue_text": clip.dialogue_text,
             "prompt": clip.prompt_text,  # Generated prompt
+            "prompt_b": clip.prompt_text_b,  # v805 — policy-fallback prompt (voice-only)
             "start_frame_key": start_frame_key,  # R2 key for frame
             "end_frame_key": end_frame_key,
             "status": clip.status,
@@ -11286,6 +11298,7 @@ async def local_worker_get_redo_clips(
             "clip_index": clip.clip_index,
             "dialogue_text": clip.dialogue_text,
             "prompt": clip.prompt_text,
+            "prompt_b": clip.prompt_text_b,  # v805 — policy-fallback prompt (voice-only)
             "language": job_config.get("language", "English"),
             "duration": job_config.get("duration", "8"),
             "voice_profile": job_config.get("voice_profile", "") or job_config.get("user_context", ""),
@@ -12383,6 +12396,7 @@ async def user_worker_get_pending_job(
             "clip_index": clip.clip_index,
             "dialogue_text": clip.dialogue_text,
             "prompt": clip.prompt_text,
+            "prompt_b": clip.prompt_text_b,  # v805 — policy-fallback prompt (voice-only)
             "start_frame_key": start_frame_key,
             "end_frame_key": end_frame_key,
             "status": clip.status,
@@ -12574,6 +12588,7 @@ async def user_worker_get_redo_clips(
         clips_data.append({
             "id": clip.id, "job_id": job.id, "clip_index": clip.clip_index,
             "dialogue_text": clip.dialogue_text, "prompt": clip.prompt_text,
+            "prompt_b": clip.prompt_text_b,  # v805 — policy-fallback prompt (voice-only)
             "language": job_config.get("language", "English"),
             "duration": job_config.get("duration", "8"),
             "voice_profile": job_config.get("voice_profile", "") or job_config.get("user_context", ""),
