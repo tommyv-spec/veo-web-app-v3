@@ -9792,7 +9792,8 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job
         return [], []
 
 
-def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None, job_id=None):
+def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None, job_id=None,
+                              clip_index=None, clip_id=None):
     """
     Check if the most recently submitted clip has failed.
     
@@ -9970,6 +9971,24 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                     except Exception as retry_err:
                         print(f"[FailCheck] Could not retry tile {tile_idx + 1}: {retry_err}", flush=True)
                 print(f"[FailCheck] Retried {retried}/{failed_count} failed tiles", flush=True)
+                # v803 — RE-BIND after Retry. The DOM Retry button generates a NEW
+                # render with a NEW uuid, but (unlike a normal submit) it never went
+                # through _bind_pending_submits — so the retry's render was orphaned:
+                # unbound → not attributed → never downloaded even when it succeeded.
+                # Re-stamp the click (bracket + late-bind pending slot) at the retry
+                # moment so the retry's submit response (arriving ~55s later) binds to
+                # this clip and the normal download / v801 recovery picks it up.
+                if retried > 0 and clip_index is not None and job_id:
+                    try:
+                        page._v700j_last_click_at = time.time()  # align bracket + min_captured_at to the retry click
+                        _v803_expected = max(1, retried)
+                        _bind_pending_submits_for_page(
+                            page, job_id, clip_index, clip_id=clip_id,
+                            drain_timeout=8.0, expected_min=_v803_expected)
+                        print(f"[FailCheck] [v803] re-bound clip {clip_index} after Retry "
+                              f"(expected {_v803_expected} render(s)) — retry's render will attribute + download", flush=True)
+                    except Exception as _rbe:
+                        print(f"[FailCheck] [v803] re-bind after Retry failed (non-fatal): {_rbe}", flush=True)
             except Exception as e:
                 print(f"[FailCheck] Error clicking Retry buttons: {e}", flush=True)
         
@@ -15811,7 +15830,7 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # never return abort_unusual_activity and mis-marked an account block as a
     # terminal CONTENT-POLICY fail with NO golden restore (operator 2026-06-24:
     # "kept failing for unusual activity, never restored, marked failed for policy").
-    immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None, job_id=job_id)
+    immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None, job_id=job_id, clip_index=clip_index, clip_id=clip_id)
 
     # v802 — TERMINAL content reject (SEXUAL / PROMINENT_PEOPLE / CSAM / REPUTATIONAL):
     # deterministic, retry/redo/restore-proof. Mark the clip with the correct policy
@@ -17035,7 +17054,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         # Wait 3 seconds then check for immediate failure
         # IMPORTANT: We do this BEFORE queuing for download on first clip
         time.sleep(FAILURE_CHECK_DELAY)
-        clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1, job_id=job_id)
+        clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1, job_id=job_id, clip_index=clip_index, clip_id=clip.get('id'))
         
         # v700h — ghost detection with THREE-signal cross-check.
         # Signals (in order of confidence):
@@ -18783,7 +18802,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
 
         # Wait 3 seconds then check for immediate failure
         time.sleep(FAILURE_CHECK_DELAY)
-        clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1, job_id=job_id)
+        clip_failed = check_recent_clip_failure(page, data_index=0, clip_num=clip_index+1, job_id=job_id, clip_index=clip_index, clip_id=clip.get('id'))
 
         # v700g — ghost detection with uuid-binding cross-check (mirror
         # of the parallel-mode site at ~12962). Two-signal check:
