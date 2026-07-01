@@ -1588,13 +1588,17 @@ def _scan_failure_reason(resp, url, buf_key=''):
         for _uuid, _st, _ct, _proj in _iter_status_media(data):
             _ab = _RENDER_ATTRIBUTOR.observe_render(
                 _uuid, account=_acct, create_time=_ct, status=_st, project_id=_proj)
-            if _ab and _uuid.lower() not in _PRIMARY_MEDIA_BINDINGS:
+            if _ab:
+                _lk = _uuid.lower()
+                # Check-and-write atomically under the lock (no TOCTOU): only ADD
+                # a binding the legacy path lacked, never overwrite an existing one.
                 with _PRIMARY_MEDIA_LOCK:
-                    _PRIMARY_MEDIA_BINDINGS[_uuid.lower()] = {
-                        'job_id': _ab['job_id'], 'clip_index': _ab['clip_index'],
-                        'clip_id': _ab['clip_id'], 'submit_time': time.time(),
-                        'account': _acct, 'via': 'bracket-status'}
-                print(f"[v800] bracket-bind (status) clip {_ab['clip_index']} ← render {_uuid[:8]}", flush=True)
+                    if _lk not in _PRIMARY_MEDIA_BINDINGS:
+                        _PRIMARY_MEDIA_BINDINGS[_lk] = {
+                            'job_id': _ab['job_id'], 'clip_index': _ab['clip_index'],
+                            'clip_id': _ab['clip_id'], 'submit_time': time.time(),
+                            'account': _acct, 'via': 'bracket-status'}
+                        print(f"[v800] bracket-bind (status) clip {_ab['clip_index']} ← render {_uuid[:8]}", flush=True)
     except Exception as _e:
         print(f"[v800] status feed failed (non-fatal): {_e}", flush=True)
 
@@ -15377,12 +15381,18 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # v800 — redo attribution: drop the clip's stale bracket binding (mirrors the
     # v700i purge) then open a fresh bracket for this redo's render. The redo runs
     # alone on this page, so stamping here (at redo start) is unambiguous.
+    # Account key MUST match what the status-poll feed resolves from the page's
+    # submit buffer key (`acct:<label>`), NOT the literal "Flow" — else the redo's
+    # render brackets under a different account than the feed queries and never
+    # attributes. Resolve it identically to the T9 status feed.
     _ci_redo = clip.get('clip_index')
+    _redo_rk = getattr(page, '_v700_submit_buffer_key', '') or ''
+    _redo_acct = _redo_rk[len('acct:'):] if _redo_rk.startswith('acct:') else None
     try:
         _RENDER_ATTRIBUTOR.purge_clip(job_id, _ci_redo)
     except Exception as _e:
         print(f"[v800] redo purge failed (non-fatal): {_e}", flush=True)
-    _stamp_generate_click("Flow", job_id, _ci_redo, clip_id)
+    _stamp_generate_click(_redo_acct, job_id, _ci_redo, clip_id)
 
     dialogue = clip.get('dialogue_text', '').strip().strip('"').strip("'")
     
