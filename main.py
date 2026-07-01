@@ -13667,6 +13667,7 @@ echo   [3/5] Downloading worker...
 mkdir "%WORKER_DIR%" 2>nul
 {folder_cmds}
 powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%APP_URL%/api/user-worker/download/flow_worker.py' -OutFile '%WORKER_DIR%\\flow_worker.py' -UseBasicParsing" >nul 2>nul
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%APP_URL%/api/user-worker/download/flow_attribution.py' -OutFile '%WORKER_DIR%\\flow_attribution.py' -UseBasicParsing" >nul 2>nul
 echo         OK
 
 echo   [4/5] Writing config...
@@ -13799,6 +13800,7 @@ echo "        OK"
 echo "  [3/5] Downloading worker..."
 # Download worker
 curl -sL "{app_url}/api/user-worker/download/flow_worker.py" -o "$DIR/flow_worker.py"
+curl -sL "{app_url}/api/user-worker/download/flow_attribution.py" -o "$DIR/flow_attribution.py"
 log "Worker downloaded"
 echo "        OK"
 
