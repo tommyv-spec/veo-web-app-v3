@@ -4707,25 +4707,31 @@ def _recover_pending_clip_downloads(page, job_id, clips, http_dl_queue,
         return 0
     recovered = 0
     for _c in clips:
-        _ci = _c.get('clip_index')
-        if _ci is None:
+        # Per-clip guard: a dead page / evaluate timeout during a golden restore
+        # must not abort the whole recovery (or the poll loop that calls it).
+        try:
+            _ci = _c.get('clip_index')
+            if _ci is None:
+                continue
+            if http_enqueued_clips and _ci in http_enqueued_clips:
+                continue
+            _uuids = bound_media_ids_for_clip(job_id, _ci)
+            if not _uuids:
+                continue
+            _ready = [_construct_media_url(_u) for _u in _uuids if _uuid_video_ready(page, _u)]
+            if not _ready:
+                continue
+            http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                'clip_id': _c.get('id'), 'urls': _ready, 'temp_dir': temp_dir,
+                'trust_position': True})
+            if http_enqueued_clips is not None:
+                http_enqueued_clips.add(_ci)
+            recovered += 1
+            print(f"[v801-recover] clip {_ci+1} ← constructed URL from bound uuid "
+                  f"{_uuids[0][:8]} (render complete; live-capture had missed it)", flush=True)
+        except Exception as _e:
+            print(f"[v801-recover] clip {_c.get('clip_index')} recovery skipped (non-fatal): {_e}", flush=True)
             continue
-        if http_enqueued_clips and _ci in http_enqueued_clips:
-            continue
-        _uuids = bound_media_ids_for_clip(job_id, _ci)
-        if not _uuids:
-            continue
-        _ready = [_construct_media_url(_u) for _u in _uuids if _uuid_video_ready(page, _u)]
-        if not _ready:
-            continue
-        http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
-            'clip_id': _c.get('id'), 'urls': _ready, 'temp_dir': temp_dir,
-            'trust_position': True})
-        if http_enqueued_clips is not None:
-            http_enqueued_clips.add(_ci)
-        recovered += 1
-        print(f"[v801-recover] clip {_ci+1} ← constructed URL from bound uuid "
-              f"{_uuids[0][:8]} (render complete; live-capture had missed it)", flush=True)
     if recovered:
         print(f"[v801-recover] recovered {recovered} clip(s) via constructed URLs", flush=True)
     return recovered
