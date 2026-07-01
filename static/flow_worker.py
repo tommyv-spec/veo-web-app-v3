@@ -4782,6 +4782,32 @@ COOKIE_CLEAR_COOLDOWN = 30  # seconds — skip a redundant clear within this win
 _POLICY_FALLBACK_VEO_MODEL = "Veo 3.1 - Fast"  # the "lite/fast (frames)" target when leaving Omni
 _POLICY_SWAP_DONE = {}  # clip_id -> swapped-to model string
 
+# v805 — per-clip Prompt B (policy fallback). The clip payload carries an
+# operator-authored voice-only fallback prompt ('prompt_b'). On the FIRST
+# generation-policy block we retry the SAME model with Prompt B (the prompt
+# CHANGES, so v763's "same prompt re-blocks" rationale doesn't apply); only
+# if Prompt B is ALSO blocked do we fall through to the v763 model swap,
+# then the terminal GENERATION_POLICY fail. Ladder with Prompt B:
+#   block 1 -> retry_prompt_b (same model, Prompt B text)
+#   block 2 -> retry_swap    (other model; Prompt B text stays active)
+#   block 3 -> fail
+# Clips without prompt_b keep the pre-v805 ladder (swap -> fail) unchanged.
+_CLIP_PROMPT_B = {}     # clip_id -> prompt_b text (registered whenever a clip dict is seen)
+_PROMPT_B_TRIED = {}    # clip_id -> True once the Prompt B rung fired (redo substitutes the text)
+
+
+def register_clip_prompt_b(clip):
+    """Record a clip's Prompt B fallback (if any) so policy_gen_next_action
+    and process_redo_clip can find it by clip_id alone. Call wherever a clip
+    dict from the API is first handled (submit loop + redo poll)."""
+    try:
+        cid = clip.get('id')
+        pb = (clip.get('prompt_b') or '').strip()
+        if cid and pb:
+            _CLIP_PROMPT_B[cid] = pb
+    except Exception:
+        pass
+
 # v758.19 — cap the worker auto-redo loop for DELAYED HARD FAILURES (a clip
 # that generated then got killed by Flow — refresh button + no video on
 # re-verify). Today such a clip is marked flow_redo_queued (NOT failed) and
@@ -4915,14 +4941,28 @@ def policy_gen_next_action(clip_id, current_model, generation_attempt=1):
       3. in-memory n >= 2 (fast path within one process) => fail.
     Only when ALL are below threshold AND still on the primary Omni model do we
     swap once. _model_known guards is_omni('') (empty page._veo_model) from
-    being misread as 'already swapped' (which would fail on the FIRST block)."""
+    being misread as 'already swapped' (which would fail on the FIRST block).
+
+    v805 — Prompt B rung. When the clip carries an operator-authored Prompt B
+    (voice-only fallback, registered in _CLIP_PROMPT_B), the FIRST block
+    retries the SAME model with Prompt B — the prompt CHANGES, so the v763
+    same-prompt-re-blocks rationale doesn't apply. Ladder becomes
+    prompt_b -> swap -> fail; the fail thresholds shift by one (n>=3,
+    generation_attempt >= POLICY_FAIL_ATTEMPT+1) ONLY for clips that have a
+    Prompt B. Clips without one keep the exact pre-v805 ladder."""
     _model_known = bool(current_model)
     _already_swapped = _model_known and not is_omni(current_model)
+    _has_pb = bool(_CLIP_PROMPT_B.get(clip_id))
     with _POLICY_GEN_LOCK:
         n = _POLICY_GEN_ATTEMPTS.get(clip_id, 0) + 1
         _POLICY_GEN_ATTEMPTS[clip_id] = n
-    if _already_swapped or (generation_attempt or 1) >= POLICY_FAIL_ATTEMPT or n >= 2:
+    _extra = 1 if _has_pb else 0
+    if _already_swapped or (generation_attempt or 1) >= (POLICY_FAIL_ATTEMPT + _extra) or n >= (2 + _extra):
         return ('fail', "⚠️ Generation blocked by Flow content policy (also failed after switching the model) — change the prompt.")
+    if _has_pb and clip_id not in _PROMPT_B_TRIED:
+        _PROMPT_B_TRIED[clip_id] = True
+        print(f"[promptB] clip {clip_id}: policy block — retrying SAME model with Prompt B (voice-only fallback)", flush=True)
+        return ('retry_prompt_b', "Policy block — retrying with Prompt B (voice-only fallback prompt)")
     swap = _swap_model_for_policy(current_model)
     _POLICY_SWAP_DONE[clip_id] = swap
     return ('retry_swap', f"Policy block — switching model to {swap}")
@@ -4943,6 +4983,9 @@ def fail_clip_general_policy(clip_id, message):
     with _POLICY_GEN_LOCK:
         _POLICY_GEN_ATTEMPTS.pop(clip_id, None)
     _POLICY_SWAP_DONE.pop(clip_id, None)
+    # v805 — fresh Prompt B budget on a later user Retry. The registered
+    # _CLIP_PROMPT_B text itself stays (still valid for the retry).
+    _PROMPT_B_TRIED.pop(clip_id, None)
 
 
 # v769 — split generation-time policy blocks into TWO kinds, treated differently:
@@ -15513,7 +15556,8 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     """
     clip_id = clip['id']
     job_id = clip['job_id']
-    
+    register_clip_prompt_b(clip)  # v805 — make Prompt B findable by clip_id
+
     # Check DB first — clip may have been completed by HTTP worker before
     # this redo was retried (e.g. after proactive restore self-resume)
     try:
@@ -15589,6 +15633,14 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
             prefix_short_word=clip.get('prefix_short_word', 'only'),
             prefix_short_threshold=clip.get('prefix_short_threshold', 15),
         )
+    # v805 — a policy block already fired the Prompt B rung for this clip:
+    # rebuild with the operator's voice-only fallback text instead. Stays
+    # active through a subsequent model swap (block 2) — the safer text is
+    # never traded back for the one that tripped. Dialogue-based tile
+    # attribution is unaffected (Prompt B contains the same dialogue line).
+    if _PROMPT_B_TRIED.get(clip_id) and _CLIP_PROMPT_B.get(clip_id):
+        prompt = _CLIP_PROMPT_B[clip_id]
+        print(f"[promptB] [REDO] clip {clip_id}: using Prompt B (voice-only) for this rebuild", flush=True)
     
     # NOTE: redo feedback is now baked into the prompt at redo time (main.py regenerates
     # the full prompt with redo_feedback parameter). No prepending needed here.
@@ -16536,6 +16588,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
           f"job={str(job_id)[:8]} clips={len(clips)}", flush=True)
 
     for i, clip in enumerate(clips):
+        register_clip_prompt_b(clip)  # v805 — make Prompt B findable by clip_id
         # v700d — abort checkpoint at the TOP of each clip iteration.
         # Catches deletes signalled via /pending poll OR via a 404 on a
         # prior clip's update_clip_status (which now propagates the
@@ -18180,6 +18233,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
           f"job={str(job_id)[:8]} clips={len(clips)} path=process_job_submission", flush=True)
 
     for i, clip in enumerate(clips):
+        register_clip_prompt_b(clip)  # v805 — make Prompt B findable by clip_id
         # v455: abort checkpoint. If the user deleted this job, the
         # /pending poll (which runs every few seconds) stamped it in
         # the module-global abort set. Bailing here avoids spending
