@@ -56,7 +56,7 @@ class RenderAttributor:
         upsert; the binding, once found, is stable)."""
         if not render_id:
             return None
-        rid = render_id.lower()
+        rid = str(render_id).lower()
         when = captured_at if captured_at is not None else create_time
         with self._lock:
             row = self._ledger.get(rid, {})

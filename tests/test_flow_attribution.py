@@ -85,6 +85,18 @@ def test_reconcile_reports_per_clip_status():
     assert rec[1]["state"] == "failed"
 
 
+def test_reconcile_mixed_success_and_failed_variant_is_successful():
+    a = RenderAttributor()
+    a.stamp_click("A", "J", 0, "c0", now=100.0)
+    a.stamp_click("A", "J", 1, "c1", now=160.0)
+    # clip 0 has two variants in its bracket: one SUCCESSFUL, one FAILED
+    a.observe_render("ROK", account="A", captured_at=120.0, status="MEDIA_GENERATION_STATUS_SUCCESSFUL")
+    a.observe_render("RBAD", account="A", captured_at=140.0, status="MEDIA_GENERATION_STATUS_FAILED")
+    rec = a.reconcile("J", [0])
+    assert rec[0]["state"] == "successful"          # one good variant wins
+    assert set(rec[0]["render_ids"]) == {"rok", "rbad"}
+
+
 def test_reconcile_flags_clip_with_no_render():
     a = RenderAttributor()
     a.stamp_click("A", "J", 0, "c0", now=100.0)
