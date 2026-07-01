@@ -112,6 +112,19 @@ _NEGATIVE_PROMPT_LABEL_RE = re.compile(
     r"\*\*Negative(?:\s+prompt)?\s*:\*\*",
     re.IGNORECASE,
 )
+# v805 — per-clip policy-fallback prompt. Authored in the build as a second
+# bolded label + fence under the same `### Clip S.L` block:
+#   **Prompt B (policy fallback — ...):**
+#   ```
+#   The main AI generated character says ...: "<line>"
+#   ```
+# Voice-only (no IMMEDIATE ACTION action sentence). The worker retries a
+# generation-policy-blocked clip with this text on the SAME model before
+# swapping models (flow_worker policy_gen_next_action, v805 rung).
+_PROMPT_B_LABEL_RE = re.compile(
+    r"\*\*\s*Prompt\s+B\b[^*]*:\s*\*\*",
+    re.IGNORECASE,
+)
 # v757 — decode-style 3-field format puts `**Voice:**` (the spoken-line /
 # voice-profile sub-section) BETWEEN Text and Negative, inline on the same
 # physical line. The Voice content MUST stay folded INTO the text prompt body
@@ -220,6 +233,7 @@ _NEXT_CLIP_HEADER_RE = re.compile(
 # NOT include `**Voice:**` — voice/dialogue folds into the text prompt body.
 _TEXT_BODY_BOUNDARY_RE = re.compile(
     r"\*\*Negative(?:\s+prompt)?\s*:\*\*"
+    r"|\*\*\s*Prompt\s+B\b[^*]*:\s*\*\*"  # v805 — Prompt B label ends an unfenced Text body
     r"|\*\*(?:Start|End)\s+frame\s*:\*\*"
     r"|^###\s+Clip\s+\d+(?:\.\d+)?\b",
     re.IGNORECASE | re.MULTILINE,
@@ -371,9 +385,17 @@ def parse_veo_prompts_block(md_text: str) -> Dict[Tuple[int, int], Dict[str, Opt
         # side, the auto-built negative defaults still apply downstream).
         if negative_prompt == "":
             negative_prompt = None
+        # v805 — optional per-clip policy-fallback prompt (its own bolded
+        # label + fence after the Text prompt fence; the authoring shape
+        # always fences it). None when absent. Extracted here AFTER both
+        # branches (labeled + bare-fence) so either format can carry it.
+        prompt_b = _extract_fenced_content(block, _PROMPT_B_LABEL_RE)
+        if prompt_b is not None and not prompt_b.strip():
+            prompt_b = None
         out[(scene_idx, line_idx)] = {
             "text_prompt": text_prompt,
             "negative_prompt": negative_prompt,
+            "prompt_b": prompt_b,  # v805
         }
     return out
 
