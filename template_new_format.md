@@ -954,6 +954,10 @@ The main AI generated character says in a [voice qualifier] voice, "[exact dialo
 Ambient: no music, no background noise (clean isolated voice).
 (no subtitles, no captions)
 ```
+**Prompt B (policy fallback — use ONLY if Prompt A trips a Veo policy/SEXUAL violation; voice-only, the start frame carries the visual):**
+```
+The main AI generated character says in a [voice qualifier] voice (American accent): "[exact same dialogue]".
+```
 
 ### Clip 2.1 — Scene 2, Line 1 (<block tag>)
 **Start frame:** Image 2
@@ -970,3 +974,5 @@ Ambient: no music, no background noise (clean isolated voice).
 ```
 
 *(Repeat one Clip block per `- **line:**` in the Storyboard section. Multi-line scenes get one Clip block per line, sharing the same Start frame. NO Negative prompt block on any clip — standing rule 2026-06-04. When the source has a known failure mode, bake the guard into the positive Text prompt as an affirmative sentence — e.g. "the scene stays in the clinic for the full clip" for clinic-only videos, "he is alone in frame for the full clip" for solo videos.)*
+
+*(v805 — EVERY clip also carries a `**Prompt B (policy fallback ...):**` label + fence directly under its Text-prompt fence: the dialogue sentence ALONE, voice-only, NO action/IMMEDIATE-ACTION prose. The platform renders Prompt A; the worker auto-retries a generation-policy-blocked clip with Prompt B on the same model before swapping models. Deep-dive: template_reference.md §v805.)*

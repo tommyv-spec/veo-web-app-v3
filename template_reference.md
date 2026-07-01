@@ -14724,6 +14724,28 @@ The <speaker> says in a <register> voice (American accent): "<verbatim line>"
 
 **Touched**: `code/template_reference.md` §v798 (canonical), `wiki/concepts/prompting/veo-prompting.md` (§Content-filter bypass), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (note), root `CLAUDE.md` (gotcha quickref), memory `feedback_cta-split-two-clips`, `wiki/log.md` (timeline). Operator 2026-06-22.
 
+## v805 — Prompt B policy fallback per clip (authoring shape + worker auto-retry)
+
+**What broke**: the SAME dialogue line rendered fine as a voice-only prompt but tripped a Veo policy/SEXUAL violation when paired with the `IMMEDIATE ACTION: <action> ... as she delivers the line.` sentence (operator evidence 2026-07-01, cloves builds). The action+voice COMBO is the trigger; the dialogue alone passes. Before v805 the only automatic recovery was the v763 model swap — same prompt on the other model, which often re-blocks — then terminal fail; the safe voice-only variant was a manual operator paste.
+
+**The authoring rule**: every `### Clip N.M` block carries TWO prompts:
+- **Prompt A (primary)** — the normal `**Text prompt:**` fence (v750): `IMMEDIATE ACTION: ...` + the dialogue sentence. The platform always renders this first.
+- **Prompt B (policy fallback)** — a second bolded label + fence directly under Prompt A's fence: `**Prompt B (policy fallback — use ONLY if Prompt A trips a Veo policy/SEXUAL violation; voice-only, the start frame carries the visual):**` followed by a fenced block containing ONLY the dialogue sentence (`The main AI generated character says in a <register> voice (American accent): "<line>"`). Voice-only — NO `IMMEDIATE ACTION` sentence, no action prose. The start frame carries the visual; Veo still animates the talk.
+
+**Platform behavior (the auto-retry)**: the parser (`veo_prompt_overrides.py`) extracts `prompt_b` per clip; it rides the v572 override pipeline (`veo_prompts_json` → prepare-flatten → `veo_prompt_b` line field → `clips.prompt_text_b` verbatim, never composed by build_prompt) → `prompt_b` on the worker clip payload (both local + user endpoint copies). The worker's generation-policy ladder (`policy_gen_next_action`) becomes, for clips WITH a Prompt B:
+1. **block 1 → retry SAME model with Prompt B** (the prompt CHANGES, so the v763 "same prompt re-blocks" rationale doesn't apply),
+2. **block 2 → model swap** (v763; the Prompt B text stays active through the swap),
+3. **block 3 → terminal `GENERATION_POLICY` fail** ("change the prompt").
+Clips WITHOUT a Prompt B keep the exact pre-v805 ladder (swap → fail). Fail thresholds shift by one only when a Prompt B exists (in-memory n≥3; DB `generation_attempt` ≥ POLICY_FAIL_ATTEMPT+1). A terminal fail clears the per-clip tried-flag so a user Retry starts the ladder fresh. `[promptB]` log lines mark the rung firing + the redo substitution.
+
+**Parser-safety**: Prompt B lives under its OWN label — the `**Text prompt:**` extraction takes the first fence after ITS label, so Prompt A is untouched; the unfenced-Text-body boundary regex stops at the Prompt B label so an unfenced Prompt A cannot swallow it.
+
+**Decision tree for a policy trip** (extends v796/v798): action+voice combo trips → Prompt B handles it automatically (v805). The DIALOGUE vocabulary itself trips → reword the line (v796). Combined comment+follow CTA trips → split the CTA (v798). A prominent-people/image block → replace the image (v769) — Prompt B does NOT fire for image-attributable blocks.
+
+**Scope / gates**: GENERATE-side authoring (every clip of every new build ships A + B) + platform-internal ladder. Forward-only. First applied: the 3 cloves builds 2026-07-01/02 (`videos/nuri-korella-ed-cloves-*-v1.md`).
+
+**Touched**: `code/veo_prompt_overrides.py` (parse), `code/image_platform.py` (flat-row denorm ×2), `code/static/index.html` (job POST + clone + veoOverridesObj), `code/main.py` (DialogueLineInput + stamp + 4 payload sites), `code/models.py` (`clips.prompt_text_b` + migration), `code/static/flow_worker.py` (registries + ladder rung + redo substitution), `code/template_new_format.md` (skeleton), `wiki/concepts/prompting/veo-prompting.md` §Prompt B, `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (note), root `CLAUDE.md` (gotcha quickref), memory `feedback_veo-prompt-b-policy-fallback`, `wiki/log.md`. Operator directive 2026-07-02.
+
 ## v786 — Fully-silent builds: storyboard pre-fill + scene-level action_note (no dialogue lines anywhere)
 
 **What broke**: the Rovellaro grandma build (2026-06-12) is fully silent — `speaker: silent` on all 19 scenes, ZERO `- **line:**` bullets, natural sounds only, captions in CapCut. Import parsed fine, but on promote-to-video the storyboard editor collapsed to ONE mega-scene ("Scene 1 (Image 1) Clips #1-19", default blend) AND the note chips showed a DIFFERENT build's beats. Cause: the frontend pre-fill gate (`static/index.html`, prepare flow step 6.5) required `hasAnyVoiceover` — meant to skip legacy pre-v432 no-metadata batches — so a zero-line build skipped the whole pre-fill: `sceneBreaks` never assigned, and the previous batch's `window._actionNotes` / `_veoPromptOverrides` leaked into the new editor render. Second gap: the markdown bullet parser attached `action_note` only to a preceding `line:` bullet, so a silent scene's note was silently dropped ("malformed") — empty chips even with pre-fill fixed.
