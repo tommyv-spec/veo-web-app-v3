@@ -9624,6 +9624,15 @@ Ambient: same kitchen room tone, soft pour sound.
                                 && window._veoPromptOverrides[i]
                                 && window._veoPromptOverrides[i].negative_prompt)
                             || null,
+                        // v805 — per-clip Prompt B (policy fallback, voice-only).
+                        // Stored verbatim on the clip; the flow worker retries a
+                        // generation-policy-blocked clip with this text (same
+                        // model) before swapping models.
+                        veo_prompt_b:
+                            (window._veoPromptOverrides
+                                && window._veoPromptOverrides[i]
+                                && window._veoPromptOverrides[i].prompt_b)
+                            || null,
                         // v644 — per-line audio-padding suffix from
                         // `- **pad:**` storyboard bullet. When non-null,
                         // the Veo prompt builder appends this AFTER the
@@ -15638,8 +15647,9 @@ Ambient: same kitchen room tone, soft pour sound.
                         if (!l || typeof l !== 'object') return null;
                         const tp = l.veo_prompt_override || null;
                         const np = l.veo_negative_prompt_override || null;
-                        if (!tp && !np) return null;
-                        return { text_prompt: tp, negative_prompt: np };
+                        const pb = l.veo_prompt_b || null;  // v805 — Prompt B carries through clone
+                        if (!tp && !np && !pb) return null;
+                        return { text_prompt: tp, negative_prompt: np, prompt_b: pb };
                     });
                     window._dialoguePads = dialogueLines.map(l =>
                         (l && typeof l === 'object' && l.dialogue_pad) ? l.dialogue_pad : null
@@ -20215,10 +20225,12 @@ Ambient: same kitchen room tone, soft pour sound.
                     scenesMeta.forEach((sm, idx) => {
                         const tp = sm.veo_prompt_override;
                         const np = sm.veo_negative_prompt_override;
-                        if (tp || np) {
+                        const pb = sm.veo_prompt_b;  // v805 — Prompt B policy fallback
+                        if (tp || np || pb) {
                             veoOverridesObj[idx] = {
                                 text_prompt: tp || null,
                                 negative_prompt: np || null,
+                                prompt_b: pb || null,
                             };
                         }
                         const pad = sm.dialogue_pad;

@@ -7430,6 +7430,7 @@ def prepare_batch_for_video(
                 "action_note": (notes[0] if notes else "") or "",
                 "veo_prompt_override": (silent_vp or {}).get("text_prompt") if silent_vp else None,
                 "veo_negative_prompt_override": (silent_vp or {}).get("negative_prompt") if silent_vp else None,
+                "veo_prompt_b": (silent_vp or {}).get("prompt_b") if silent_vp else None,  # v805
                 "dialogue_pad": None,
                 # v667/v668 — silent scenes typically use cut_mode=timeline
                 # so the clip is anchor-trimmed to a fixed duration.
@@ -7482,6 +7483,9 @@ def prepare_batch_for_video(
                 # so the UI can read it without cross-referencing scene_assignments.
                 "veo_prompt_override": (vp or {}).get("text_prompt") if vp else None,
                 "veo_negative_prompt_override": (vp or {}).get("negative_prompt") if vp else None,
+                # v805 — denorm the Prompt B policy fallback the same way; the
+                # frontend veoOverridesObj builder reads it off this flat row.
+                "veo_prompt_b": (vp or {}).get("prompt_b") if vp else None,
                 # v644 — denorm pad onto flat row.
                 "dialogue_pad": pad,
                 # v667/v668 — denorm cut_mode + anchor-derived durations onto
