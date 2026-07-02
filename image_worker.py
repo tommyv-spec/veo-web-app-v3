@@ -1768,51 +1768,81 @@ def configure_image_settings(page, aspect_ratio="16:9", resolution="1K",
         ).first
         model_btn.wait_for(state="visible", timeout=3000)
         
-        current_model_text = model_btn.inner_text().lower()
-        
+        current_model_text = _normalize_model_label(model_btn.inner_text())
+
         # Determine target model text
         if model == "nano_banana_pro":
             target_text = "Nano Banana Pro"
-            target_search = "pro"
         elif model == "nano_banana":
             target_text = "Nano Banana"  # 2.5 Flash (the basic one)
-            target_search = "nano banana"
         elif model == "imagen_4":
             target_text = "Imagen 4"
-            target_search = "imagen"
         else:
             target_text = "Nano Banana 2"
-            target_search = "nano banana 2"
-        
-        # Check if already correct
-        if target_search in current_model_text and (
-            # Ensure "Nano Banana 2" doesn't match "Nano Banana 2.5" etc.
-            model != "nano_banana_pro" or "pro" in current_model_text
-        ):
+
+        # Check if already correct. v807.1: the menu now lists
+        # "Nano Banana 2" AND "Nano Banana 2 Lite" — plain substring
+        # matching would accept Lite as NB2 and silently keep the wrong
+        # model, so NB2 needs negative guards.
+        if model == "nano_banana_pro":
+            already = "nano banana pro" in current_model_text
+        elif model == "nano_banana":
+            already = ("nano banana" in current_model_text
+                       and "2" not in current_model_text
+                       and "pro" not in current_model_text)
+        elif model == "imagen_4":
+            already = "imagen" in current_model_text
+        else:
+            already = ("nano banana 2" in current_model_text
+                       and "lite" not in current_model_text
+                       and "2.5" not in current_model_text)
+
+        if already:
             settings_applied['Model'] = True
             print(f"{prefix}✓ Model already {target_text}", flush=True)
         else:
             # Open model sub-dropdown
             human_click_locator(page, model_btn, f"{prefix}Model dropdown")
             time.sleep(1)
-            
-            # Find and click target model option
+
+            # Find and click target model option.
+            # v807.1: exact (emoji-stripped) label match FIRST — the old
+            # substring selectors match both "Nano Banana 2" and
+            # "Nano Banana 2 Lite" and picked whichever came first in
+            # the DOM. Substring selectors kept only as fallback.
             model_found = False
-            for sel in [
-                f"[role='menuitem']:has-text('{target_text}')",
-                f"[role='menuitemradio']:has-text('{target_text}')",
-                f"button:has-text('{target_text}')",
-                f"text={target_text}",
-            ]:
-                try:
-                    opt = page.locator(sel).first
-                    if opt.is_visible(timeout=2000):
-                        human_click_locator(page, opt, f"{prefix}{target_text}")
-                        model_found = True
-                        time.sleep(0.5)
-                        break
-                except:
-                    continue
+            try:
+                target_norm = _normalize_model_label(target_text)
+                items = page.locator("[role='menuitem'], [role='menuitemradio']")
+                for _mi in range(items.count()):
+                    it = items.nth(_mi)
+                    try:
+                        if _normalize_model_label(it.inner_text()) == target_norm \
+                                and it.is_visible(timeout=500):
+                            human_click_locator(page, it, f"{prefix}{target_text}")
+                            model_found = True
+                            time.sleep(0.5)
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            if not model_found:
+                for sel in [
+                    f"[role='menuitem']:has-text('{target_text}')",
+                    f"[role='menuitemradio']:has-text('{target_text}')",
+                    f"button:has-text('{target_text}')",
+                    f"text={target_text}",
+                ]:
+                    try:
+                        opt = page.locator(sel).first
+                        if opt.is_visible(timeout=2000):
+                            human_click_locator(page, opt, f"{prefix}{target_text}")
+                            model_found = True
+                            time.sleep(0.5)
+                            break
+                    except:
+                        continue
             
             if model_found:
                 settings_applied['Model'] = True
@@ -1839,6 +1869,19 @@ def configure_image_settings(page, aspect_ratio="16:9", resolution="1K",
     aspect_ok = settings_applied.get('AspectRatio', False)
     variants_ok = settings_applied.get('Variants', True)  # default True if not attempted
     return aspect_ok and variants_ok
+
+
+def _normalize_model_label(s):
+    """Lowercase a Flow model label and collapse emoji/punctuation to
+    spaces so '🍌 Nano Banana 2' normalizes to 'nano banana 2'.
+
+    v807.1: the model menu lists 'Nano Banana 2' AND 'Nano Banana 2 Lite';
+    menu picks must compare EXACT normalized labels, not substrings, or
+    Lite can satisfy an NB2 target.
+    """
+    import re as _r
+    s = _r.sub(r"[^a-z0-9.]+", " ", (s or "").lower())
+    return _r.sub(r"\s+", " ", s).strip()
 
 
 def upload_reference_images(page, image_paths, context="", already_uploaded=None):
