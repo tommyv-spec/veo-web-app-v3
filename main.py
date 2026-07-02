@@ -10838,10 +10838,14 @@ def _v812_audio_anchor_fallback(db, clip, rejected_key):
             _ip.ImageEdge.child_node_id == anchor_node_id,
             _ip.ImageEdge.kind == 'character').first()
         if char_edge:
+            # order_by(id) — the chain index (anchor_fbN) is parsed across
+            # separate violation calls, so candidate order MUST be stable
+            # even if new edges appear in between (v812.1).
             for e in db.query(_ip.ImageEdge).filter(
                     _ip.ImageEdge.parent_node_id == char_edge.parent_node_id,
                     _ip.ImageEdge.kind == 'character',
-                    _ip.ImageEdge.child_node_id != anchor_node_id).all():
+                    _ip.ImageEdge.child_node_id != anchor_node_id
+            ).order_by(_ip.ImageEdge.id).all():
                 n = db.query(_ip.ImageNode).filter(
                     _ip.ImageNode.id == e.child_node_id).first()
                 if n and n.chosen_variant_id:
@@ -10865,7 +10869,9 @@ def _v812_audio_anchor_fallback(db, clip, rejected_key):
             return None
 
         # Where are we in the chain? The rejected frame's name says.
-        cur = os.path.basename(rejected_key or clip.start_frame or '')
+        # split('/') not os.path.basename — R2 keys always use forward
+        # slashes regardless of host OS (v812.1).
+        cur = (rejected_key or clip.start_frame or '').split('/')[-1]
         m = _re.match(r'anchor_fb(\d+)_', cur)
         next_idx = (int(m.group(1)) + 1) if m else 0
         if next_idx >= len(candidates):
@@ -10907,13 +10913,23 @@ def _v812_apply_swap(db, clip, rejected_key, new_key):
     clip.claimed_by_worker = None
     clip.claimed_at = None
     db.commit()
-    add_job_log(
-        db, clip.job_id,
-        f"Clip {clip.clip_index + 1}: audio-twin anchor rejected — auto-swapped to "
-        f"fallback image ({os.path.basename(new_key)}) and requeued (v812)",
-        "WARNING", "policy",
-    )
-    db.commit()
+    # v812.1 — the swap is already committed above; a job-log hiccup must not
+    # turn the response into a 500 (the worker's error fallback would mark the
+    # clip failed and clobber the requeue).
+    try:
+        add_job_log(
+            db, clip.job_id,
+            f"Clip {clip.clip_index + 1}: audio-twin anchor rejected — auto-swapped to "
+            f"fallback image ({new_key.split('/')[-1]}) and requeued (v812)",
+            "WARNING", "policy",
+        )
+        db.commit()
+    except Exception as _log_err:
+        print(f"[v812] job-log write failed (swap already committed, non-fatal): {_log_err}", flush=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
     return {
         "ok": True,
         "clip_id": clip.id,
