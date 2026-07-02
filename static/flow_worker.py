@@ -7806,8 +7806,22 @@ def _flush_status_replays():
                 except ValueError:
                     pass
             if result:
-                _LAST_STATUS_OK[clip_id] = time.time()
+                # v810.1 — do NOT stamp _LAST_STATUS_OK here. A replay-success
+                # stamp would mark the SAME clip's later-queued entry (e.g.
+                # 'generating' then 'flow_redo_queued', both queued during the
+                # outage) as stale and drop it. Only LIVE updates stamp; queued
+                # entries replay in FIFO order so the last one wins correctly.
                 print(f"[API] [v810] ✓ replayed clip {clip_id} status → {entry['status']} (backend recovered)", flush=True)
+            else:
+                # v810.1 — mirror live update_clip_status's v700d 404 handling:
+                # the job was deleted while this entry sat in the queue.
+                print(f"[API] [v810] clip {clip_id} 404 on replay — job may be deleted, dropping entry", flush=True)
+                try:
+                    _jid = lookup_job_for_clip(clip_id)
+                    if _jid and not is_job_aborted(_jid):
+                        mark_job_aborted(_jid)
+                except Exception:
+                    pass
         else:
             # Backend still down — keep FIFO order, retry whole queue next cycle.
             return
