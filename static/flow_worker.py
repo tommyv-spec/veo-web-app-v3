@@ -6222,10 +6222,30 @@ class HumanPacer:
                                             # marking a good clip failed (operator: clips were
                                             # created in the UI yet marked content-policy-failed).
                                             _v774_urls = captured_urls_for_clip(job_id, _ci, captured_media_urls)
+                                            # v807 — second recovery layer before hard-failing: probe the
+                                            # clip's BOUND uuids directly (v801 constructed URL). The v774
+                                            # check needs the live listener to have CAPTURED a CDN URL; when
+                                            # it missed (idle page / late render), a finished render still
+                                            # resolves via getMediaUrlRedirect → /video/. Catches "the done
+                                            # video is visible in the UI but the worker aborted the job".
+                                            _v807_urls = []
+                                            if not _v774_urls:
+                                                try:
+                                                    for _v807_u in bound_media_ids_for_clip(job_id, _ci):
+                                                        if _uuid_video_ready(page, _v807_u):
+                                                            _v807_urls.append(_construct_media_url(_v807_u))
+                                                except Exception:
+                                                    _v807_urls = []
                                             if _v774_urls and http_dl_queue is not None:
                                                 http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
                                                     'clip_id': _clip_obj['id'], 'urls': _v774_urls, 'temp_dir': temp_dir})
                                                 print(f"[{self.account_name}] ✓ clip {_ci+1} recovered via bound mediaId — false hard-failure averted (data-index re-verify read the wrong tile) → HTTP worker", flush=True)
+                                                _dl_checked.add(_ci)
+                                            elif _v807_urls and http_dl_queue is not None:
+                                                http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
+                                                    'clip_id': _clip_obj['id'], 'urls': _v807_urls, 'temp_dir': temp_dir,
+                                                    'trust_position': True})
+                                                print(f"[{self.account_name}] ✓ [v807] clip {_ci+1} recovered via constructed URL from bound uuid — render complete, hard-failure averted → HTTP worker", flush=True)
                                                 _dl_checked.add(_ci)
                                             else:
                                                 print(f"[{self.account_name}] ⚠ HARD FAILURE: clip {_ci+1} failed after generating (refresh button + no video after re-verify) — aborting job", flush=True)
@@ -6274,6 +6294,10 @@ class HumanPacer:
                                             # Reset submit time so the 70s wait starts fresh
                                             clip_submit_times[_ci] = datetime.now()
                                             # v700 — re-bind primaryMediaId after resubmit
+                                            # v804.2 — additive: this Reuse-Prompt retry fires on ONE
+                                            # failed tile; a sibling render (e.g. the FailCheck-retry
+                                            # survivor) may be rendering or done and its binding must
+                                            # survive, or v792 drops the good render as a foreign tile.
                                             try:
                                                 _v700_clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
                                                 _v700_clip_id = _v700_clip_obj.get('id') if _v700_clip_obj else None
@@ -6282,10 +6306,11 @@ class HumanPacer:
                                                     clip_id=_v700_clip_id,
                                                     drain_timeout=8.0,
                                                     expected_min=1,
+                                                    preserve_existing=True,
                                                 )
                                             except Exception as _v700_err:
                                                 print(f"[v700] bind failed for between-clip retry {_ci}: {_v700_err}", flush=True)
-                                            print(f"[{self.account_name}] ✓ Between-clip: clip {_ci+1} resubmitted via Reuse Prompt", flush=True)
+                                            print(f"[{self.account_name}] ✓ Between-clip: clip {_ci+1} resubmitted via Reuse Prompt (v804.2 additive re-bind)", flush=True)
                                         else:
                                             print(f"[{self.account_name}] ⚠ Between-clip: could not find Reuse Prompt for clip {_ci}", flush=True)
                                 except Exception:
