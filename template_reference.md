@@ -14772,6 +14772,23 @@ Clips WITHOUT a Prompt B keep the exact pre-v805 ladder (swap → fail). Fail th
 
 **Touched**: `code/template_reference.md` §v806 (canonical), the 3 cloves builds (line + action_note + Prompt A + Prompt B), `wiki/entities/niches/ed.md` §banned-words (v806 token list), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (note), root `CLAUDE.md` (gotcha quickref), `wiki/concepts/prompting/veo-prompting.md` (decision tree), memory `feedback_image-attached-dialogue-vocab`, `wiki/log.md`. Operator evidence via Gemini triage 2026-07-02.
 
+## v807 — Veo clip prompts describe ONLY what happens inside that clip (no editing/transition language)
+
+**What broke**: Veo prompts in shipped builds opened with editor language — *"Hard cut: the same monkey is now comically buff..."*, *"Hard cut to the warm home kitchen: ..."*, *"Hard cut back to..."* (operator caught it on `nuri-korella-ed-experiment-vs-product-d1d90-saffron-salesy-v1.md`, 2026-07-02; a grep found the pattern in 31 builds). This reads like instructions for connecting two clips — but **Veo renders each clip in ISOLATION from its start frame; it never sees the previous clip and doesn't care what came before**. The transition between clips is the EDITOR's job (the platform stitches clips per the storyboard `transition:` field), never the prompt's.
+
+**Why it's harmful, not just noise**: (a) "hard cut" in the prompt can make Veo render a cut INSIDE the 8s clip (a mid-clip scene jump); (b) cross-clip references — "the SAME man", "is NOW", "no longer X" — describe a change Veo can't see, so the tokens either get ignored or pull the render toward the wrong (previous) state; (c) wasted prompt budget.
+
+**The rule**: a Veo Text prompt describes ONLY what exists and happens WITHIN that clip, starting from its start frame.
+- BAN in any clip prompt: `hard cut`, `cut to`, `cut back`, `cut away`, `cut from`, `transition to/from` — and the softer cross-clip forms: "the same X as before", "X is now Y", "no longer".
+- REPLACE by describing the subject's CURRENT state directly: "Hard cut: the same man now stands fit..." → "The fit confident man stands with a broad smile...". The start frame + image reference chains carry identity/continuity — the prompt doesn't need to.
+- Cross-clip continuity lives in: the start-frame image (identity), `reference_image:` chains (authoring side), and the storyboard `transition:` field (stitching side). Never in Veo prompt text.
+
+**Lint**: `verify_video_format.py` hard-FAILs any `hard cut` / `cut to|back|away|from` / `transition to|from` inside the `## Veo 3.1 Final Prompts` section (v807 check).
+
+**Scope / gates**: GENERATE-side, every `### Clip N.M` Text prompt (Prompt A AND Prompt B AND audio twins). Forward-only — the 31 pre-v807 builds keep their text; only the actively-rendering build (`experiment-vs-product-d1d90`) was fixed on the spot. Related: v750 (prompt format), v794 (in-clip concurrency), `feedback_veo-prompt-action-only` (prompt = action, start frame = scene).
+
+**Touched**: `code/template_reference.md` §v807 (canonical), `code/verify_video_format.py` (lint gate), `videos/nuri-korella-ed-experiment-vs-product-d1d90-saffron-salesy-v1.md` (3 prompts fixed), `wiki/patterns/conventions.md` (row), `wiki/meta/generate-video-checklist.md` (note), `wiki/meta/build-rule-index.md` §A (row), root `CLAUDE.md` (quickref), memory `feedback_veo-no-transition-language`, `wiki/log.md`. Operator 2026-07-02.
+
 ## v786 — Fully-silent builds: storyboard pre-fill + scene-level action_note (no dialogue lines anywhere)
 
 **What broke**: the Rovellaro grandma build (2026-06-12) is fully silent — `speaker: silent` on all 19 scenes, ZERO `- **line:**` bullets, natural sounds only, captions in CapCut. Import parsed fine, but on promote-to-video the storyboard editor collapsed to ONE mega-scene ("Scene 1 (Image 1) Clips #1-19", default blend) AND the note chips showed a DIFFERENT build's beats. Cause: the frontend pre-fill gate (`static/index.html`, prepare flow step 6.5) required `hasAnyVoiceover` — meant to skip legacy pre-v432 no-metadata batches — so a zero-line build skipped the whole pre-fill: `sceneBreaks` never assigned, and the previous batch's `window._actionNotes` / `_veoPromptOverrides` leaked into the new editor render. Second gap: the markdown bullet parser attached `action_note` only to a preceding `line:` bullet, so a silent scene's note was silently dropped ("malformed") — empty chips even with pre-fill fixed.

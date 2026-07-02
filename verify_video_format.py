@@ -207,6 +207,13 @@ def lint(path: str) -> int:
         beats = re.findall(r"\[(?:Start|Mid-clip|End)\s+beat[^\]]*\]", veo)
         if beats:
             fails.append(f"v750: {len(beats)} beat-bracket(s) in Veo prompts (banned; beats live in action_note)")
+        # v807 — Veo renders each clip in ISOLATION from its start frame; it
+        # never sees the previous clip. Editing/transition language in a clip
+        # prompt is noise at best and can make Veo render a cut INSIDE the
+        # clip. Describe only what happens within the clip.
+        cuts = re.findall(r"\bhard cut\b|\bcuts?\s+(?:to|back|away|from)\b|\btransitions?\s+(?:to|from)\b", veo, re.I)
+        if cuts:
+            fails.append(f"v807: {len(cuts)} editing/transition phrase(s) in Veo prompts ('hard cut'/'cut to'/...) — describe only what happens INSIDE the clip; the cut between clips is the editor's job, not Veo's")
         if "```" in veo:
             # v750.1 (veo_prompt_overrides.py _extract_prompt_content) tries fenced
             # extraction first, falls back to unfenced — so fences still render.
