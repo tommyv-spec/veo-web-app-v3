@@ -14789,6 +14789,24 @@ Clips WITHOUT a Prompt B keep the exact pre-v805 ladder (swap → fail). Fail th
 
 **Touched**: `code/template_reference.md` §v807 (canonical), `code/verify_video_format.py` (lint gate), `videos/nuri-korella-ed-experiment-vs-product-d1d90-saffron-salesy-v1.md` (3 prompts fixed), `wiki/patterns/conventions.md` (row), `wiki/meta/generate-video-checklist.md` (note), `wiki/meta/build-rule-index.md` §A (row), root `CLAUDE.md` (quickref), memory `feedback_veo-no-transition-language`, `wiki/log.md`. Operator 2026-07-02.
 
+## v808 — NO MINORS anywhere in a build (kids/teens/children/babies)
+
+**What broke**: the AFTER→BEFORE inversion build (and its v5 parent, plus 8 other corpus builds) rendered the "family restored" payoff with two teenagers in the after-shot — ported from the Salvora reel-5 family-after pattern. Operator 2026-07-02: remove any kids reference.
+
+**Why**: our content is adult sexual-health. A minor ANYWHERE in the frame — on camera, in a background photo prop, in a cast list — is ad-policy + anti-CSAM-classifier risk with zero conversion upside. The restored-family payoff works exactly as well as a restored-COUPLE payoff.
+
+**The rule** (compliance-class, lives in root `CLAUDE.md` §8):
+- NO kids, teens, children, sons/daughters, babies, minors — not in Ingredients, cast lists, image prompts, Veo prompts, or storyboard prose.
+- Background PHOTO props count: "framed family photo" can render kids inside the photo → "framed photo of the couple".
+- NO negative mentions either ("no children" can seed the render) — describe the couple + "no one else in the frame".
+- Adult wording stays fine: "keep up with these girls" (adult women, proven line) — the linter WARNs on bare boy/girl for a human check, hard-FAILs explicit minor tokens (teen/child/kid/baby/son/daughter/`<18`-year-old).
+
+**Lint**: `verify_video_format.py` v808 — FAIL on minor tokens anywhere in the file; WARN on boy/girl (verify adults). Age regex fails only 1-17-year-old (55-year-old fine).
+
+**Scope / gates**: every build, whole file. Forward-only — 9 pre-v808 builds carry teen/family-after text (storytelling v1/v5/selfimage, d1-dx bedroom ×2, grandfather-misattribution, fiber-98yo, rovellaro-granddaughter, photog); strip on re-render, don't retro-edit. First applied: `videos/nuri-korella-ed-after-before-inversion-storytelling-marcus-saffron-v1.md` (teens ingredient + casts + prompts + "family photo" prop all scrubbed to couple-only).
+
+**Touched**: root `CLAUDE.md` §8 (canonical ban), `code/verify_video_format.py` (v808 gate), `code/template_reference.md` §v808, `wiki/patterns/conventions.md` (row), `wiki/meta/generate-video-checklist.md` (note), `wiki/meta/build-rule-index.md` §A (row), the inversion build, memory `feedback_no-minors-in-builds`, `wiki/log.md`. Operator 2026-07-02.
+
 ## v786 — Fully-silent builds: storyboard pre-fill + scene-level action_note (no dialogue lines anywhere)
 
 **What broke**: the Rovellaro grandma build (2026-06-12) is fully silent — `speaker: silent` on all 19 scenes, ZERO `- **line:**` bullets, natural sounds only, captions in CapCut. Import parsed fine, but on promote-to-video the storyboard editor collapsed to ONE mega-scene ("Scene 1 (Image 1) Clips #1-19", default blend) AND the note chips showed a DIFFERENT build's beats. Cause: the frontend pre-fill gate (`static/index.html`, prepare flow step 6.5) required `hasAnyVoiceover` — meant to skip legacy pre-v432 no-metadata batches — so a zero-line build skipped the whole pre-fill: `sceneBreaks` never assigned, and the previous batch's `window._actionNotes` / `_veoPromptOverrides` leaked into the new editor render. Second gap: the markdown bullet parser attached `action_note` only to a preceding `line:` bullet, so a silent scene's note was silently dropped ("malformed") — empty chips even with pre-fill fixed.

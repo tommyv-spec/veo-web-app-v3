@@ -189,6 +189,24 @@ def lint(path: str) -> int:
             if tok in low:
                 warns.append(f"v806: watch-list token {tok!r} in line: {ln[:50]!r} (same class as evidenced trips)")
 
+    # --- v808: NO MINORS anywhere in a build (kids/teens/children/babies) ---
+    # Adult sexual-health content + a minor anywhere in frame = ad-policy +
+    # classifier risk with zero upside (CLAUDE.md §8). Scan the WHOLE build
+    # (Ingredients, image prompts, storyboard, Veo prompts). Word-boundary
+    # tokens so "cowboy"/"girlfriend" don't trip; "girl(s)"/"boy(s)" alone are
+    # WARN (can mean adults — "keep up with these girls"); explicit minor
+    # tokens are FAIL. Negative mentions ("no children") also fail — they can
+    # seed the render; describe the couple + "no one else in the frame".
+    _minor_fail = re.findall(
+        r"\b(?:teen(?:ager)?s?|child(?:ren)?|kids?|toddlers?|bab(?:y|ies)|minors?|"
+        r"sons?|daughters?|(?:[1-9]|1[0-7])-year-old)\b", t, re.I)
+    if _minor_fail:
+        _uniq = sorted({m.lower() for m in _minor_fail})
+        fails.append(f"v808: minor-reference token(s) in build: {_uniq} — NO kids/teens anywhere (CLAUDE.md §8); family payoff = the COUPLE only")
+    _minor_warn = re.findall(r"\b(?:boys?|girls?)\b", t, re.I)
+    if _minor_warn:
+        warns.append(f"v808: {len(_minor_warn)} 'boy/girl' token(s) — verify they mean ADULTS (e.g. 'these girls' = adult women is fine)")
+
     # --- Pre-Flight present (v738) ---
     if "## Pre-Flight Checklist" not in t:
         fails.append("v738: missing `## Pre-Flight Checklist` block")
