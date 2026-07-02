@@ -9931,6 +9931,26 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                     return;
                 }
 
+                // v809 — "This generation was cancelled / N credits will be refunded":
+                // terminal for that variant, but the tile carries NO refresh (Retry)
+                // button (only undo + delete) so the refresh-based check below read it
+                // as "still starting up" — a fully-dead batch (1 unusual-failed +
+                // 1 cancelled) never counted as all-failed and sat unhandled. Count it
+                // as failed. Past-tense/refund phrasing only, so a live tile's
+                // "Cancel" BUTTON can never match. The Retry-click loop skips it
+                // naturally (no refresh button to click).
+                const lowerText = text.toLowerCase();
+                if (lowerText.includes('was cancelled') || lowerText.includes('was canceled') ||
+                    lowerText.includes('refunded')) {
+                    failedCount++;
+                    for (const el of t.querySelectorAll('img,video,source')) {
+                        const s = el.getAttribute('src') || el.src || '';
+                        const m = s.match(/[?&]name=([0-9a-fA-F-]{36})/);
+                        if (m) failedUuids.push(m[1].toLowerCase());
+                    }
+                    return;
+                }
+
                 // Truly failed = has a refresh (Retry) button
                 // Starting up tiles have "undo" (Reuse Prompt) but NOT "refresh"
                 const hasRefresh = t.querySelector("i") &&
