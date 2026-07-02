@@ -10003,6 +10003,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
             let hasGenerating = false;
             let failedCount = 0;
             let unusualActivityCount = 0;
+            let prominentCount = 0;  // v811 — failed tiles carrying prominent-people text
             const failedUuids = [];
 
             tiles.forEach(t => {
@@ -10053,6 +10054,14 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                     if (text.includes('unusual activity') || text.includes('Help Center')) {
                         unusualActivityCount++;
                     }
+                    // v811 — prominent-people PROMPT block ("This prompt might violate
+                    // our policies about generating prominent people"). Terminal:
+                    // deterministic on this prompt+image, retry/redo-proof. The tile
+                    // usually has NO media uuid (blocked before any render), so the
+                    // v802 uuid→API-record match misses it — detect by TEXT.
+                    if (lowerText.includes('prominent people')) {
+                        prominentCount++;
+                    }
                     // v802 — collect this failed tile's OWN media uuid so Python can
                     // match it to the API terminal record (SEXUAL/PROMINENT/...) and
                     // distinguish a content reject from a plain unusual-activity block.
@@ -10073,6 +10082,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                 hasGenerating: hasGenerating,
                 failedCount: failedCount,
                 unusualActivityCount: unusualActivityCount,
+                prominentCount: prominentCount,
                 failedUuids: failedUuids,
                 allFailed: tiles.length > 0 && failedCount === tiles.length && !hasGenerating && !hasVideo
             };
@@ -10114,6 +10124,21 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
             print(f"[FailCheck] ⛔ TERMINAL content reject ({_term_reason}) on clip {clip_num} "
                   f"media {[u[:8] for u in _failed_uuids]} — marking policy error, NOT retrying/restoring", flush=True)
             return f"terminal_content:{_term_reason}"
+
+        # v811 — tile-TEXT terminal (prominent people). The prompt-level block fires
+        # BEFORE any render exists, so the failed tile carries no media uuid and the
+        # v802 uuid→API-record match above can never see it — the clip fell through
+        # to generic failure and got REDO-queued (pointless: same prompt+image trips
+        # the same filter every time). When EVERY failed tile carries the
+        # prominent-people text and nothing else is rendering, mark the clip FAILED
+        # with the real reason instead (caller routes route_terminal_content_reject
+        # → change-avatar/replace-image card). Operator: no redo on prominent-people.
+        _prom_count = result.get('prominentCount', 0)
+        if (failed_count > 0 and _prom_count >= failed_count
+                and not has_generating and not has_video):
+            print(f"[FailCheck] ⛔ TERMINAL prompt block (PROMINENT_PEOPLE, tile text) on clip {clip_num} "
+                  f"— all {failed_count} failed tile(s) carry it; marking policy error, NOT retrying/redoing (v811)", flush=True)
+            return "terminal_content:PROMINENT_PEOPLE"
 
         # v758.20 — detect 'We noticed some unusual activity' on the FIRST read,
         # BEFORE clicking Retry. Retry can't clear an account block, and worse:
