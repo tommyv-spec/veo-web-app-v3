@@ -9070,7 +9070,23 @@ async def export_final_video(
                         print(f"[v633] post-speed diag failed (non-fatal): {_e}", flush=True)
                     _os.replace(sped_path, output_path)
                     stats["playback_speed"] = speed
-                    print(f"[Export] Speed applied: {speed}×", flush=True)
+                    # v813 — final_duration used to stay at the PRE-speed
+                    # value after the speed pass, so the export card (and
+                    # the saved card metadata) showed the unsped duration.
+                    # A 1.1× export looked like speed never applied. Keep
+                    # the pre-speed value under its own key and re-probe
+                    # the sped file for the real final_duration.
+                    stats["pre_speed_duration"] = _final_dur_safe
+                    try:
+                        from video_processor import ffprobe_json as _fpj, get_duration as _gd
+                        stats["final_duration"] = _gd(_fpj(output_path))
+                    except Exception:
+                        stats["final_duration"] = round(_final_dur_safe / speed, 3)
+                    print(
+                        f"[Export] Speed applied: {speed}× "
+                        f"({_final_dur_safe:.2f}s → {stats['final_duration']:.2f}s)",
+                        flush=True,
+                    )
                 else:
                     print(f"[Export] Speed change failed: {result.stderr.decode()[:200]}", flush=True)
             except Exception as e:

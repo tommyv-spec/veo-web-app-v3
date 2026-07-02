@@ -13191,7 +13191,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                                 this.classList.toggle('active');
                                                 const on=this.classList.contains('active');
                                                 document.getElementById('speedSliderSection').style.display=on?'block':'none';
-                                                if(on){document.getElementById('modalSpeed').value=110;document.getElementById('speedValue').textContent='1.10×';}
+                                                if(on){const sv=document.getElementById('modalSpeed');document.getElementById('speedValue').textContent=(sv.value/100).toFixed(2)+'×';}
                                             "></div>
                                         </div>
                                         <div id="speedSliderSection" style="display:none;margin-top:10px;">
