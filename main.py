@@ -10790,6 +10790,140 @@ async def local_worker_health():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
 
+def _v812_audio_anchor_fallback(db, clip, rejected_key):
+    """v812 — audio-twin anchor auto-swap on image policy reject.
+
+    An audio_pair clip's visual is DISCARDED at export (only its voice track
+    is used), so when Flow rejects its anchor image there is no reason to
+    stop and ask the operator for a replacement — ANY image of the main
+    character lip-syncs fine. Fallback chain (operator 2026-07-02):
+      1. other variants of the SAME anchor ImageNode (same image batch)
+      2. chosen variants of OTHER nodes character-linked to the same
+         character upload (any other main-character image)
+      3. LAST RESORT: the character reference upload itself (always exists,
+         already passed policy as an upload)
+    Progress across rejections is encoded statelessly in the frame name
+    (anchor_fb<N>_...): each swap uploads the next candidate as N+1.
+
+    Returns the new jobs/<job>/frames/... R2 key, or None (no candidates /
+    chain exhausted / storage off) — caller falls through to the normal
+    FAILED + replace-image card.
+    """
+    try:
+        if (clip.clip_role or '') != 'audio_pair':
+            return None
+        from backends.storage import get_storage, is_storage_configured
+        if not is_storage_configured():
+            return None
+        import re as _re
+        import image_platform as _ip
+
+        anchor_node_id = clip.voiceover_anchor_image_node_id
+        if not anchor_node_id:
+            return None
+        anchor_node = db.query(_ip.ImageNode).filter(
+            _ip.ImageNode.id == anchor_node_id).first()
+        if anchor_node is None:
+            return None
+
+        candidates = []
+        # (1) same-batch sibling variants of the anchor image
+        for v in db.query(_ip.ImageVariant).filter(
+                _ip.ImageVariant.node_id == anchor_node_id
+        ).order_by(_ip.ImageVariant.variant_index).all():
+            if v.id != anchor_node.chosen_variant_id:
+                candidates.append(v)
+        # (2) any other main-character image + (3) the character upload itself
+        char_edge = db.query(_ip.ImageEdge).filter(
+            _ip.ImageEdge.child_node_id == anchor_node_id,
+            _ip.ImageEdge.kind == 'character').first()
+        if char_edge:
+            for e in db.query(_ip.ImageEdge).filter(
+                    _ip.ImageEdge.parent_node_id == char_edge.parent_node_id,
+                    _ip.ImageEdge.kind == 'character',
+                    _ip.ImageEdge.child_node_id != anchor_node_id).all():
+                n = db.query(_ip.ImageNode).filter(
+                    _ip.ImageNode.id == e.child_node_id).first()
+                if n and n.chosen_variant_id:
+                    v = db.query(_ip.ImageVariant).filter(
+                        _ip.ImageVariant.id == n.chosen_variant_id).first()
+                    if v:
+                        candidates.append(v)
+            up = db.query(_ip.ImageNode).filter(
+                _ip.ImageNode.id == char_edge.parent_node_id).first()
+            if up:
+                v = None
+                if up.chosen_variant_id:
+                    v = db.query(_ip.ImageVariant).filter(
+                        _ip.ImageVariant.id == up.chosen_variant_id).first()
+                if v is None:
+                    v = db.query(_ip.ImageVariant).filter(
+                        _ip.ImageVariant.node_id == up.id).first()
+                if v:
+                    candidates.append(v)
+        if not candidates:
+            return None
+
+        # Where are we in the chain? The rejected frame's name says.
+        cur = os.path.basename(rejected_key or clip.start_frame or '')
+        m = _re.match(r'anchor_fb(\d+)_', cur)
+        next_idx = (int(m.group(1)) + 1) if m else 0
+        if next_idx >= len(candidates):
+            print(f"[v812] clip {clip.id}: fallback chain exhausted "
+                  f"({len(candidates)} candidates) — falling through to replace-image card", flush=True)
+            return None
+
+        pick = candidates[next_idx]
+        local = _ip.images_root() / pick.image_path
+        if not local.exists():
+            _ip._storage_download_to_local(pick.image_path)
+        if not local.exists():
+            print(f"[v812] clip {clip.id}: candidate variant {pick.id} file missing "
+                  f"locally + no R2 restore — skipping swap", flush=True)
+            return None
+
+        frame_name = f"anchor_fb{next_idx}_v{pick.id}{local.suffix or '.png'}"
+        new_key = get_storage().upload_job_frame(clip.job_id, frame_name, local)
+        print(f"[v812] clip {clip.id}: anchor auto-swap #{next_idx} → variant {pick.id} "
+              f"({new_key})", flush=True)
+        return new_key
+    except Exception as _e:
+        import traceback
+        print(f"[v812] anchor-fallback lookup failed for clip {getattr(clip, 'id', '?')}: {_e}", flush=True)
+        traceback.print_exc()
+        return None
+
+
+def _v812_apply_swap(db, clip, rejected_key, new_key):
+    """v812 — apply the anchor swap: new frame on start_frame, rejected key
+    kept for audit, clip requeued for redo (same gate the replace-image card
+    uses). Returns the endpoint response dict."""
+    if rejected_key:
+        clip.replacement_start_frame = rejected_key
+    clip.start_frame = new_key
+    clip.status = ClipStatus.FLOW_REDO_QUEUED.value
+    clip.error_code = None
+    clip.error_message = None
+    clip.claimed_by_worker = None
+    clip.claimed_at = None
+    db.commit()
+    add_job_log(
+        db, clip.job_id,
+        f"Clip {clip.clip_index + 1}: audio-twin anchor rejected — auto-swapped to "
+        f"fallback image ({os.path.basename(new_key)}) and requeued (v812)",
+        "WARNING", "policy",
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "clip_id": clip.id,
+        "auto_swapped": True,   # v812
+        "new_start_frame": new_key,
+        "rejected_image_key": rejected_key or None,
+        "cascaded_sibling_count": 0,
+    }
+
+
 # v701 — policy-violation worker endpoint. Defined here (rather than next
 # to the user-auth /replace-image endpoint at ~line 3525) because
 # `verify_local_worker_key` is declared above. Putting the Depends call
@@ -10821,6 +10955,14 @@ async def local_worker_report_policy_violation(
             if request.rejected_image_key
             else (clip.start_frame or "").strip()
         )
+
+        # v812 — audio-twin anchor auto-swap: an audio_pair clip's visual is
+        # discarded at export, so swap in the next fallback persona image and
+        # requeue instead of failing + waiting for a manual replacement.
+        _v812_key = _v812_audio_anchor_fallback(db, clip, rejected_key)
+        if _v812_key:
+            return _v812_apply_swap(db, clip, rejected_key, _v812_key)
+
         if rejected_key:
             clip.replacement_start_frame = rejected_key
 
@@ -10865,6 +11007,10 @@ async def local_worker_report_policy_violation(
                     # something to clobber). Don't clobber a non-policy
                     # error_code (e.g. CELEBRITY_FILTER) either.
                     if sib.error_code and sib.error_code != "CONTENT_POLICY_VIOLATION":
+                        continue
+                    # v812 — never pre-fail an audio twin: it self-heals via
+                    # its OWN violation report (anchor auto-swap + requeue).
+                    if (sib.clip_role or '') == 'audio_pair':
                         continue
                     sib.status = ClipStatus.FAILED.value
                     sib.error_code = "CONTENT_POLICY_VIOLATION"
@@ -12816,6 +12962,12 @@ async def user_worker_report_policy_violation(
         if request.rejected_image_key
         else (clip.start_frame or "").strip()
     )
+
+    # v812 — audio-twin anchor auto-swap (see local-worker copy for rationale).
+    _v812_key = _v812_audio_anchor_fallback(db, clip, rejected_key)
+    if _v812_key:
+        return _v812_apply_swap(db, clip, rejected_key, _v812_key)
+
     if rejected_key:
         clip.replacement_start_frame = rejected_key
 
@@ -12848,6 +13000,10 @@ async def user_worker_report_policy_violation(
                 # already-rendered siblings are never touched. Don't
                 # clobber non-policy error_code (e.g. CELEBRITY_FILTER).
                 if sib.error_code and sib.error_code != "CONTENT_POLICY_VIOLATION":
+                    continue
+                # v812 — never pre-fail an audio twin: it self-heals via
+                # its OWN violation report (anchor auto-swap + requeue).
+                if (sib.clip_role or '') == 'audio_pair':
                     continue
                 sib.status = ClipStatus.FAILED.value
                 sib.error_code = "CONTENT_POLICY_VIOLATION"
