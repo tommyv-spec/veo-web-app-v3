@@ -7743,6 +7743,76 @@ def update_job_status(job_id, status, error_message=None, retries=3):
     return None
 
 
+# v810 — dead-letter replay for clip-status updates lost during a backend
+# outage. Prod 2026-07-02: kavenobuilder.com 502'd for ~1 min; the worker's
+# update_clip_status gives up after 3 retries (~3s) and the transition is
+# gone forever — clip 11505's 'flow_redo_queued' never reached the server,
+# so when the API recovered there was nothing pending and the worker idled
+# forever ("stuck"). Fix: final-failure writes go into a replay queue; a
+# lazy daemon thread re-POSTs them every 15s until the backend accepts (or
+# 404s = job deleted). A newer SUCCESSFUL live update for the same clip
+# marks queued older entries stale so a replay can never regress status.
+_STATUS_REPLAY_LOCK = threading.Lock()
+_STATUS_REPLAY_Q = []          # ordered oldest-first
+_STATUS_REPLAY_MAX = 200
+_LAST_STATUS_OK = {}           # clip_id -> epoch of last successful live update
+_STATUS_FLUSHER_STARTED = [False]
+
+
+def _enqueue_status_replay(clip_id, status, output_url, error_message):
+    with _STATUS_REPLAY_LOCK:
+        if len(_STATUS_REPLAY_Q) >= _STATUS_REPLAY_MAX:
+            _STATUS_REPLAY_Q.pop(0)
+        _STATUS_REPLAY_Q.append({'ts': time.time(), 'clip_id': clip_id, 'status': status,
+                                 'output_url': output_url, 'error_message': error_message})
+        _start = not _STATUS_FLUSHER_STARTED[0]
+        _STATUS_FLUSHER_STARTED[0] = True
+    if _start:
+        threading.Thread(target=_status_replay_loop, daemon=True,
+                         name="v810-status-replay").start()
+    print(f"[API] [v810] queued clip {clip_id} status '{status}' for replay when the backend recovers", flush=True)
+
+
+def _status_replay_loop():
+    while True:
+        time.sleep(15)
+        try:
+            _flush_status_replays()
+        except Exception:
+            pass
+
+
+def _flush_status_replays():
+    with _STATUS_REPLAY_LOCK:
+        pending = list(_STATUS_REPLAY_Q)
+    for entry in pending:
+        clip_id = entry['clip_id']
+        # A newer live update already landed for this clip — replaying the old
+        # status would REGRESS it (e.g. back from 'completed' to 'generating').
+        if _LAST_STATUS_OK.get(clip_id, 0) > entry['ts']:
+            with _STATUS_REPLAY_LOCK:
+                try:
+                    _STATUS_REPLAY_Q.remove(entry)
+                except ValueError:
+                    pass
+            continue
+        result, code = api_request_ex("POST", f"/clips/{clip_id}/status", {
+            'status': entry['status'], 'output_url': entry['output_url'],
+            'error_message': entry['error_message']})
+        if result or code == 404:
+            with _STATUS_REPLAY_LOCK:
+                try:
+                    _STATUS_REPLAY_Q.remove(entry)
+                except ValueError:
+                    pass
+            if result:
+                _LAST_STATUS_OK[clip_id] = time.time()
+                print(f"[API] [v810] ✓ replayed clip {clip_id} status → {entry['status']} (backend recovered)", flush=True)
+        else:
+            # Backend still down — keep FIFO order, retry whole queue next cycle.
+            return
+
+
 def update_clip_status(clip_id, status, output_url=None, error_message=None, retries=3):
     """Update clip status via API with retry on failure.
 
@@ -7765,6 +7835,7 @@ def update_clip_status(clip_id, status, output_url=None, error_message=None, ret
         result, code = api_request_ex("POST", f"/clips/{clip_id}/status", data)
         if result:
             print(f"[API] Clip {clip_id} status → {status}")
+            _LAST_STATUS_OK[clip_id] = time.time()  # v810 — stales older queued replays
             return result
         if code == 404:
             print(f"[API] 🛑 Clip {clip_id} returned 404 on status update — job may be deleted", flush=True)
@@ -7781,6 +7852,11 @@ def update_clip_status(clip_id, status, output_url=None, error_message=None, ret
             print(f"[API] ⚠ update_clip_status failed (attempt {attempt+1}/{retries}), retrying in {wait}s...", flush=True)
             time.sleep(wait)
     print(f"[API] ❌ update_clip_status({status}) failed after {retries} attempts for clip {clip_id}", flush=True)
+    # v810 — don't lose the transition: replay it when the backend recovers.
+    try:
+        _enqueue_status_replay(clip_id, status, output_url, error_message)
+    except Exception:
+        pass
     return None
 
 
