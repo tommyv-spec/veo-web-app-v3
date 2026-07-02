@@ -6166,8 +6166,13 @@ class HumanPacer:
                                         const hasDelete = icons.includes('delete_forever');
                                         const hasVideocam = icons.includes('videocam');
                                         const hasVideo = c.querySelectorAll('video').length > 0;
+                                        // v808 — a rendering % anywhere in the group means a sibling
+                                        // variant is still generating: not a failure, leave it alone
+                                        // (one variant is enough; retrying churns 403s + cancels).
+                                        const genPct = /\d+%/.test(c.textContent||'');
+                                        if (genPct && !hasVideo) return null;
                                         if (hasRefresh && !hasVideo) return 'hard';
-                                        if (hasFailed && !hasVideocam && !hasVideo && !/\d+%/.test(c.textContent||'')) return 'hard';
+                                        if (hasFailed && !hasVideocam && !hasVideo) return 'hard';
                                         if (hasUndo && hasDelete && !hasRefresh && !hasVideocam && !hasVideo) return 'soft';
                                         return null;
                                     }}""")
@@ -10019,6 +10024,18 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
             return "abort_unusual_activity"
         if _first_unusual > 0 and job_id:
             print(f"[FailCheck] ⓘ unusual-activity on {_first_unusual}/{tiles} tiles (partial) — NOT restoring; falling through to retry (operator: restore only when ALL tiles fail)", flush=True)
+
+        # v808 — a sibling variant is STILL GENERATING: do NOT retry the failed
+        # tile. The worker uses ONE variant per clip; the survivor provides it.
+        # Prod evidence 2026-07-02: retrying the failed sibling re-submitted into
+        # the same 403/unusual-activity throttle (every retry 403'd again), spawned
+        # cancelled generations, and kicked off the between-clip retry cascade that
+        # aborted a clip whose good variant was already rendering. Wait instead —
+        # if the survivor also dies, the next check sees all-failed and retries then.
+        if failed_count > 0 and has_generating:
+            print(f"[FailCheck] ⓘ [v808] {failed_count} tile(s) failed but a sibling variant is still "
+                  f"generating — NOT retrying (one variant is enough; survivor will provide it)", flush=True)
+            return False
 
         # Click Retry on truly failed tiles (ones with 'refresh' button)
         if failed_count > 0:
