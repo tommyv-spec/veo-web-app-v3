@@ -14807,6 +14807,22 @@ Clips WITHOUT a Prompt B keep the exact pre-v805 ladder (swap → fail). Fail th
 
 **Touched**: root `CLAUDE.md` §8 (canonical ban), `code/verify_video_format.py` (v808 gate), `code/template_reference.md` §v808, `wiki/patterns/conventions.md` (row), `wiki/meta/generate-video-checklist.md` (note), `wiki/meta/build-rule-index.md` §A (row), the inversion build, memory `feedback_no-minors-in-builds`, `wiki/log.md`. Operator 2026-07-02.
 
+## v809 — Fast-paced line delivery in every Veo dialogue prompt
+
+**Why**: Veo/Omni render spoken lines at a slow, deliberate default cadence. Slow delivery wastes clip seconds (the clip budget is fixed ~8s), pads the video, and reads low-energy against the fast-cut viral register. Operator directive 2026-07-02: every line has to be delivered FAST. AI video models weight descriptive words placed next to the action/dialogue — so the pacing cue goes INTO the prompt, adjacent to the dialogue sentence, front-loaded.
+
+**The rule (authoring shape — every Veo dialogue clip, Prompt A AND Prompt B AND audio twins):**
+1. **Voice qualifier carries the pace**: the dialogue sentence's voice qualifier includes a pacing token FIRST — `says in a rapid, fast-paced <register> voice (American accent), speaking quickly and barely pausing for breath: "<line>"`. The pacing tokens sit inside the existing v642 qualifier slot; the effect clause ("speaking quickly and barely pausing for breath") rides between the accent parenthetical and the v797 colon. The colon still lands directly before the quote (v797 intact).
+2. **Front-load the IMMEDIATE ACTION** when the clip is action-led: open with a pacing frame (`IMMEDIATE ACTION: in a fast-paced sequence, ...`) and keep the v794 concurrency tail (`...as she delivers the line`).
+3. **Synonym bank** (rotate, don't always use the same pair): rapid · fast-paced · hurried · quick-fire · brisk · staccato cadence · rushed. "Describe the reaction" variant: "she speaks so quickly she barely takes a breath."
+4. **What NOT to do**: don't put pacing words inside the quoted line itself (the line text is what gets spoken); don't stack more than ~2 pacing tokens + 1 effect clause (prompt bloat); don't use "frantic/panicked" on warm-teaching registers (pace ≠ panic — keep the register word).
+
+**Interplay**: v642 subject form + v644 pad suffix unchanged. v797 colon unchanged (lint tell `voice (American accent), "` still means a MISSING colon — the v809 clause form is `(American accent), speaking quickly and barely pausing for breath: "` which keeps the colon). v708 zero word-loss: fast delivery makes long lines FIT — it does not license exceeding the word budget.
+
+**Scope / gates**: every Veo dialogue prompt (A + B + `.audio` twins) on new builds. Forward-only per `feedback_rule-changes-forward-only`. First applied: `videos/nuri-korella-ed-day0-day7-banana-signs-bear-turmeric-recipe-saffron-salesy-v1.md` (all 9 clips).
+
+**Touched**: this deep-dive, `wiki/patterns/conventions.md` (row), `wiki/meta/build-rule-index.md` §A (row), `wiki/meta/generate-video-checklist.md` (note), root `CLAUDE.md` (quickref row), memory `feedback_veo-fast-line-delivery`, `wiki/log.md`. Operator 2026-07-02 (with the Veo pacing-keyword instruction set).
+
 ## v786 — Fully-silent builds: storyboard pre-fill + scene-level action_note (no dialogue lines anywhere)
 
 **What broke**: the Rovellaro grandma build (2026-06-12) is fully silent — `speaker: silent` on all 19 scenes, ZERO `- **line:**` bullets, natural sounds only, captions in CapCut. Import parsed fine, but on promote-to-video the storyboard editor collapsed to ONE mega-scene ("Scene 1 (Image 1) Clips #1-19", default blend) AND the note chips showed a DIFFERENT build's beats. Cause: the frontend pre-fill gate (`static/index.html`, prepare flow step 6.5) required `hasAnyVoiceover` — meant to skip legacy pre-v432 no-metadata batches — so a zero-line build skipped the whole pre-fill: `sceneBreaks` never assigned, and the previous batch's `window._actionNotes` / `_veoPromptOverrides` leaked into the new editor render. Second gap: the markdown bullet parser attached `action_note` only to a preceding `line:` bullet, so a silent scene's note was silently dropped ("malformed") — empty chips even with pre-fill fixed.
