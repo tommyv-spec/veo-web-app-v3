@@ -14819,7 +14819,7 @@ Clips WITHOUT a Prompt B keep the exact pre-v805 ladder (swap → fail). Fail th
 
 **Interplay**: v642 subject form + v644 pad suffix unchanged. v797 colon unchanged (lint tell `voice (American accent), "` still means a MISSING colon — the v809 clause form is `(American accent), speaking quickly and barely pausing for breath: "` which keeps the colon). v708 zero word-loss: fast delivery makes long lines FIT — it does not license exceeding the word budget.
 
-**Scope / gates**: every Veo dialogue prompt (A + B + `.audio` twins) on new builds. Forward-only per `feedback_rule-changes-forward-only`. First applied: `videos/nuri-korella-ed-day0-day7-banana-signs-bear-turmeric-recipe-saffron-salesy-v1.md` (all 9 clips).
+**Scope / gates**: every Veo dialogue prompt (A + B + `.audio` twins) on new builds. Forward-only per `feedback_rule-changes-forward-only`. First applied: `videos/nuri-korella-ed-day0-day7-geoduck-signs-bear-turmeric-recipe-saffron-salesy-v1.md` (all 9 clips).
 
 **Touched**: this deep-dive, `wiki/patterns/conventions.md` (row), `wiki/meta/build-rule-index.md` §A (row), `wiki/meta/generate-video-checklist.md` (note), root `CLAUDE.md` (quickref row), memory `feedback_veo-fast-line-delivery`, `wiki/log.md`. Operator 2026-07-02 (with the Veo pacing-keyword instruction set).
 
