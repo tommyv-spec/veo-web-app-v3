@@ -2823,16 +2823,6 @@
                         <div class="user-dropdown-item" onclick="document.getElementById('userDropdown').classList.remove('show');openTutorial();">
                             <span>📖</span> Tutorial
                         </div>
-                        <!-- v815 — auto-retry mode when an image is rejected for prominent people -->
-                        <div class="user-dropdown-item" style="cursor:default;flex-direction:column;align-items:flex-start;gap:4px;">
-                            <label for="autoImageRetryMode" style="font-size:11px;color:var(--text-muted);">Auto-retry when an image is rejected for prominent people</label>
-                            <select id="autoImageRetryMode" onchange="saveAutoImageRetryMode(this.value)" style="width:100%;padding:4px 6px;background:var(--bg-elevated);color:var(--text-primary);border:1px solid var(--border-color);border-radius:var(--radius-sm);font-size:12px;">
-                                <option value="batch">All other images in the batch (default)</option>
-                                <option value="next">Next image</option>
-                                <option value="prev">Previous image</option>
-                                <option value="off">Off — I'll upload manually</option>
-                            </select>
-                        </div>
                         <div class="user-dropdown-item logout" onclick="logout()">
                             <span>🚪</span> Sign Out
                         </div>
@@ -4045,30 +4035,7 @@ Ambient: same kitchen room tone, soft pour sound.
             } catch (e) { }
             window.location.href = '/login';
         }
-
-        // v815 — account auto-image-retry mode (prominent-people rejections).
-        async function loadAutoImageRetryMode() {
-            try {
-                const r = await fetch(`${API}/user/settings`);
-                if (!r.ok) return;
-                const j = await r.json();
-                const sel = document.getElementById('autoImageRetryMode');
-                if (sel && j.auto_image_retry && j.auto_image_retry.mode) sel.value = j.auto_image_retry.mode;
-            } catch (_) {}
-        }
-        async function saveAutoImageRetryMode(mode) {
-            try {
-                const r = await fetch(`${API}/user/settings`, {
-                    method: 'PUT', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({auto_image_retry_mode: mode}),
-                });
-                if (!r.ok) throw new Error('HTTP ' + r.status);
-                if (typeof showToast === 'function') showToast('auto-retry setting saved', '#10b981');
-            } catch (e) {
-                if (typeof showToast === 'function') showToast('save failed: ' + e.message, '#ef4444');
-            }
-        }
-
+        
         // Check auth on page load
         checkAuth();
         
@@ -5688,8 +5655,6 @@ Ambient: same kitchen room tone, soft pour sound.
         });
 
         window.addEventListener("DOMContentLoaded", async () => {
-          // v815 — reflect saved auto-image-retry mode in the account menu.
-          if (typeof loadAutoImageRetryMode === 'function') loadAutoImageRetryMode();
           _kanbanOriginalHTML = document.getElementById("jobsList")?.innerHTML || null;
           const params = parseModeFromURL();
           if (params.q) {
@@ -17935,6 +17900,7 @@ Ambient: same kitchen room tone, soft pour sound.
             // silently drop the next AUTOMATIC download (iframe.src) — so the
             // old iframe installer did nothing while/after an export. The server
             // sets Content-Disposition, so the filename comes from the header.
+            console.log('[imgDownloadInstaller/v813] user-gesture download', url);
             const a = document.createElement('a');
             a.href = url;
             a.download = '';  // let server Content-Disposition name the file
