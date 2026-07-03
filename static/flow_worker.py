@@ -5081,6 +5081,10 @@ def route_generation_policy(clip_id, current_model, is_prominent, account_name="
             detail=("⚠️ Flow flagged a prominent person. Upload a different "
                     "face image to retry (switching the model won't fix a "
                     "flagged face)."),
+            # v815 — this branch fires ONLY under `if is_prominent:` (a
+            # detected prominent-people block), so forward the reason for
+            # backend auto-retry.
+            error_reason="PROMINENT_PEOPLE",
         )
         print(f"{prefix}[policy] prominent-people block on clip {clip_id} "
               f"→ replace-image card (no model swap)", flush=True)
@@ -5115,7 +5119,11 @@ def route_terminal_content_reject(clip_id, reason, account_name=""):
     msg = _TERMINAL_CONTENT_MESSAGES.get(
         reason, f"⚠️ Flow blocked this generation ({reason}). Upload a different image / change the prompt.")
     try:
-        report_policy_violation(clip_id, rejected_image_key=None, detail=msg)
+        # v815 — `reason` is the ACTUAL detected terminal reason (PROMINENT_PEOPLE
+        # / SEXUAL / CSAM / REPUTATIONAL / ...). Forward it verbatim; the backend
+        # only auto-retries when it contains PROMINENT/CELEBRITY, so SEXUAL/CSAM/
+        # etc still route to the manual replace-image card.
+        report_policy_violation(clip_id, rejected_image_key=None, detail=msg, error_reason=reason)
         print(f"{prefix}[policy] terminal content reject ({reason}) on clip {clip_id} → replace-image card (no model swap)", flush=True)
     except Exception as e:
         print(f"{prefix}[policy] terminal-content report failed ({e}) — marking general policy", flush=True)
@@ -7874,7 +7882,7 @@ def update_clip_status(clip_id, status, output_url=None, error_message=None, ret
     return None
 
 
-def report_policy_violation(clip_id, rejected_image_key=None, detail=None):
+def report_policy_violation(clip_id, rejected_image_key=None, detail=None, error_reason=None):
     """v701 — POST to /api/<prefix>/clips/{id}/policy-violation when Flow's
     PolicyScan persistently flags a tile (image content rejected, no
     Retry button). Backend stamps error_code = CONTENT_POLICY_VIOLATION
@@ -7892,6 +7900,13 @@ def report_policy_violation(clip_id, rejected_image_key=None, detail=None):
     payload = {
         "rejected_image_key": rejected_image_key,
         "detail": detail or "⚠️ Flow rejected this image's content. Upload a replacement to retry.",
+        # v815 — worker's detected rejection reason. Backend auto-retries the
+        # clip with a substitute image ONLY when this uppercased string CONTAINS
+        # "PROMINENT" or "CELEBRITY"; any other value (or None) keeps the manual
+        # replace-image card. Send a reason ONLY when the code path genuinely
+        # detected a prominent-people/celebrity/face reject (conservative — a
+        # false positive triggers unwanted image swaps + Veo credits).
+        "error_reason": error_reason,
     }
     try:
         result, code = api_request_ex(
