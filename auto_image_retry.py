@@ -1,4 +1,4 @@
-"""v807 — pure, dependency-free helpers for prominent-people image
+"""v815 — pure, dependency-free helpers for prominent-people image
 auto-retry. Kept out of main.py so the logic is unit-testable locally
 (import main fails in dev on a Starlette version mismatch)."""
 import json as _json
@@ -20,7 +20,7 @@ def parse_auto_image_retry_mode(settings_json):
 
 
 def order_distinct_frames(clips):
-    """v807 — distinct start_frame keys in clip_index order. Accepts dicts
+    """v815 — distinct start_frame keys in clip_index order. Accepts dicts
     or Clip objects (duck-typed on .get / attribute)."""
     def _idx(c): return c["clip_index"] if isinstance(c, dict) else c.clip_index
     def _sf(c):  return c["start_frame"] if isinstance(c, dict) else c.start_frame
@@ -33,7 +33,7 @@ def order_distinct_frames(clips):
 
 
 def pick_substitute(mode, frames, original, tried):
-    """v807 — choose the next substitute frame. A/B are single-step
+    """v815 — choose the next substitute frame. A/B are single-step
     neighbors; batch (C) returns the first untried OTHER frame (caller loops
     it as a bounded sweep). Returns None when no candidate is available."""
     if mode == "off" or not frames or original not in frames:

@@ -1325,7 +1325,7 @@ async def auth_me(request: Request, db: DBSession = Depends(get_db_session)):
 
 @app.get("/api/user/settings")
 async def get_user_settings(current_user: User = Depends(get_current_user)):
-    """v807 — return the account's auto-image-retry mode (defaults to 'batch')."""
+    """v815 — return the account's auto-image-retry mode (defaults to 'batch')."""
     return {"auto_image_retry": {"mode": parse_auto_image_retry_mode(current_user.settings_json)}}
 
 
@@ -1339,7 +1339,7 @@ async def put_user_settings(
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """v807 — update the account's auto-image-retry mode."""
+    """v815 — update the account's auto-image-retry mode."""
     if req.auto_image_retry_mode not in VALID_RETRY_MODES:
         raise HTTPException(status_code=400, detail=f"invalid mode {req.auto_image_retry_mode!r}")
     try:

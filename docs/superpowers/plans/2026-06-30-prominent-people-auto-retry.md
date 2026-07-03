@@ -21,7 +21,7 @@
 
 1. **Attempt cap does NOT limit the sweep.** `_swap_clip_start_frame` (and the existing `replace-image` it's factored from, L4877-4892) sets `FLOW_REDO_QUEUED` + `approval_status='pending_review'` but does **not** bump `generation_attempt`. The 3-attempt `max_attempts` gate (L6156) lives only in the *manual user-redo* path (L6031-6196). So image-substitution retries are uncapped by attempts — C can sweep all N images even when N > 3. Resetting `approval_status` to `pending_review` in the swap also clears any prior `max_attempts` flag.
 2. **The sweep is event-driven, not a blocking loop.** Each render the worker attempts on a substitute that is *also* rejected fires another `policy-violation` report → `_auto_image_retry` runs again → picks the next untried frame → swaps → `FLOW_REDO_QUEUED`. The `tried` list persists in `Clip.auto_image_retry_json` across reports, so no frame is reused and the loop terminates when `pick_substitute` returns `None` (all tried). One Veo render per substitute.
-3. **Credit cost is the operator's explicit choice.** A full C sweep where every image trips prominent-people will burn one Veo render per image before yielding to the manual card. Acceptable per "try all the images"; the `[v807]` diagnostic logs each substitution so the cost is visible.
+3. **Credit cost is the operator's explicit choice.** A full C sweep where every image trips prominent-people will burn one Veo render per image before yielding to the manual card. Acceptable per "try all the images"; the `[v815]` diagnostic logs each substitution so the cost is visible.
 4. **No donor-clobber.** The prominent-people branch (Task 5 Step 3) returns BEFORE the generic `CONTENT_POLICY_VIOLATION` + v701e preemptive sibling cascade, so swapping to an image shared by other clips never marks those siblings; each clip sweeps independently.
 
 ---
@@ -38,9 +38,9 @@
 
 New constants (define once in `main.py`, near `IMAGE_ATTRIBUTABLE_ERROR_CODES` ~L4387):
 ```python
-# v807 — prominent-people / celebrity codes that trigger image auto-retry.
+# v815 — prominent-people / celebrity codes that trigger image auto-retry.
 PROMINENT_PEOPLE_ERROR_CODES = frozenset({
-    "PROMINENT_PEOPLE_FILTER",   # v807 — distinct code stamped when the worker
+    "PROMINENT_PEOPLE_FILTER",   # v815 — distinct code stamped when the worker
                                  # reports a PROMINENT_PEOPLE upload rejection
     "CELEBRITY_FILTER",
     "CELEBRITY_RAI_FILTER",
@@ -77,7 +77,7 @@ Account setting shape (`User.settings_json`, JSON string):
 
 In `models.py`, in the `User` class (~L30-64), add after the existing columns:
 ```python
-    # v807 — per-account settings JSON blob. Currently holds
+    # v815 — per-account settings JSON blob. Currently holds
     # {"auto_image_retry": {"mode": "off|next|prev|batch"}}. Nullable;
     # absent = defaults applied in code.
     settings_json = Column(Text, nullable=True)
@@ -101,7 +101,7 @@ Expected: `models OK` (no ImportError, no SQLAlchemy mapper error).
 
 ```bash
 git add models.py
-git commit -m "v807: add User.settings_json for per-account settings"
+git commit -m "v815: add User.settings_json for per-account settings"
 ```
 
 ---
@@ -139,14 +139,14 @@ Expected: FAIL — `ImportError: cannot import name 'parse_auto_image_retry_mode
 
 - [ ] **Step 3: Implement the parser + endpoints**
 
-In `main.py` add the pure helper (near the v807 constants):
+In `main.py` add the pure helper (near the v815 constants):
 ```python
 import json as _json807
 
 _VALID_RETRY_MODES = {"off", "next", "prev", "batch"}
 
 def parse_auto_image_retry_mode(settings_json: str | None) -> str:
-    """v807 — extract the account's auto-image-retry mode. Defaults to
+    """v815 — extract the account's auto-image-retry mode. Defaults to
     'batch' (mode C) when missing/invalid. Never raises."""
     if not settings_json:
         return "batch"
@@ -193,7 +193,7 @@ Expected: 3 passed.
 
 ```bash
 git add main.py tests/test_auto_image_retry.py
-git commit -m "v807: account settings endpoints + auto-retry mode parser"
+git commit -m "v815: account settings endpoints + auto-retry mode parser"
 ```
 
 ---
@@ -207,7 +207,7 @@ git commit -m "v807: account settings endpoints + auto-retry mode parser"
 
 In `models.py` Clip class (~L277-410), after `replacement_start_frame`:
 ```python
-    # v807 — auto-image-retry audit. JSON: {original_frame, used_frame,
+    # v815 — auto-image-retry audit. JSON: {original_frame, used_frame,
     # tried:[...], count, mode}. Set when prominent-people auto-retry swaps
     # the start_frame. Drives the "image rejected -> used image X" card mark.
     auto_image_retry_json = Column(Text, nullable=True)
@@ -239,7 +239,7 @@ Expected: `models OK`.
 
 ```bash
 git add models.py
-git commit -m "v807: add Clip.auto_image_retry_json audit column + serialization"
+git commit -m "v815: add Clip.auto_image_retry_json audit column + serialization"
 ```
 
 ---
@@ -303,7 +303,7 @@ Expected: FAIL — `ImportError` for `order_distinct_frames` / `pick_substitute`
 In `main.py`:
 ```python
 def order_distinct_frames(clips: list) -> list:
-    """v807 — distinct start_frame keys in clip_index order. Accepts dicts
+    """v815 — distinct start_frame keys in clip_index order. Accepts dicts
     or Clip objects (duck-typed on .get / attribute)."""
     def _idx(c): return c["clip_index"] if isinstance(c, dict) else c.clip_index
     def _sf(c):  return c["start_frame"] if isinstance(c, dict) else c.start_frame
@@ -315,7 +315,7 @@ def order_distinct_frames(clips: list) -> list:
     return out
 
 def pick_substitute(mode: str, frames: list, original: str, tried: list) -> str | None:
-    """v807 — choose the next substitute frame for the given mode.
+    """v815 — choose the next substitute frame for the given mode.
     A/B are single-step neighbors; batch (C) returns the first untried OTHER
     frame (caller loops it as a bounded sweep). Returns None when no
     candidate is available (auto-retry then yields to the manual card)."""
@@ -345,7 +345,7 @@ Expected: all passed.
 
 ```bash
 git add main.py tests/test_auto_image_retry.py
-git commit -m "v807: candidate-frame ordering + substitute picker helpers"
+git commit -m "v815: candidate-frame ordering + substitute picker helpers"
 ```
 
 ---
@@ -360,7 +360,7 @@ git commit -m "v807: candidate-frame ordering + substitute picker helpers"
 In `main.py`, factor the `Clip.start_frame` swap + status reset (currently inline in `replace_clip_image` ~L4877-4891) into:
 ```python
 def _swap_clip_start_frame(clip, new_key: str):
-    """v807 — point a clip at a new start_frame R2 key and re-queue it for
+    """v815 — point a clip at a new start_frame R2 key and re-queue it for
     the worker redo poll. Shared by manual replace-image + auto-retry."""
     clip.start_frame = new_key
     clip.error_code = None
@@ -377,7 +377,7 @@ Then have `replace_clip_image` call `_swap_clip_start_frame(clip, new_key)` afte
 In `main.py`:
 ```python
 def _auto_image_retry(db, clip, rejected_key: str) -> dict | None:
-    """v807 — attempt a prominent-people auto-substitution. Returns a dict
+    """v815 — attempt a prominent-people auto-substitution. Returns a dict
     {used_frame, mode, count} when a substitute was applied (clip is now
     FLOW_REDO_QUEUED), or None to fall through to the manual replace card.
 
@@ -425,7 +425,7 @@ def _auto_image_retry(db, clip, rejected_key: str) -> dict | None:
     _swap_clip_start_frame(clip, cand)
     _persist_retry_audit(clip, original, cand, tried, new_count, mode)
     db.commit()
-    print(f"[v807] auto-image-retry clip {clip.id} mode={mode} eff={eff_mode} "
+    print(f"[v815] auto-image-retry clip {clip.id} mode={mode} eff={eff_mode} "
           f"original={original} -> used={cand} count={new_count}", flush=True)
     return {"used_frame": cand, "mode": mode, "count": new_count}
 
@@ -480,7 +480,7 @@ Expected: `main OK` (if a pre-existing unrelated import error appears, confirm v
 
 ```bash
 git add main.py
-git commit -m "v807: prominent-people auto-substitute trigger in worker policy-violation"
+git commit -m "v815: prominent-people auto-substitute trigger in worker policy-violation"
 ```
 
 ---
@@ -508,7 +508,7 @@ Expected: `OK`.
 
 ```bash
 git add static/flow_worker.py
-git commit -m "v807: worker forwards prominent-people reason to policy-violation"
+git commit -m "v815: worker forwards prominent-people reason to policy-violation"
 ```
 
 ---
@@ -562,7 +562,7 @@ Call `loadAutoImageRetryMode()` on page init (next to other initial fetches).
 
 ```bash
 git add static/index.html
-git commit -m "v807: account settings UI for image auto-retry mode"
+git commit -m "v815: account settings UI for image auto-retry mode"
 ```
 
 ---
@@ -599,7 +599,7 @@ There is no DOM unit test harness here; verification is operator-side (Task 9).
 
 ```bash
 git add static/index.html
-git commit -m "v807: clip card marks auto-substituted image + shows original intended"
+git commit -m "v815: clip card marks auto-substituted image + shows original intended"
 ```
 
 ---
@@ -610,7 +610,7 @@ git commit -m "v807: clip card marks auto-substituted image + shows original int
 
 - [ ] **Step 1: Confirm the diagnostic log lines are present**
 
-`[v807] auto-image-retry clip ...` (Task 5). This is the runtime evidence line per `CLAUDE.md` §2.
+`[v815] auto-image-retry clip ...` (Task 5). This is the runtime evidence line per `CLAUDE.md` §2.
 
 - [ ] **Step 2: Run the unit suite once more**
 
@@ -621,17 +621,17 @@ Expected: all passed.
 
 ```bash
 cd code && git push origin main
-cd .. && git add code && git commit -m "bump code pointer: v807 prominent-people auto-retry"
+cd .. && git add code && git commit -m "bump code pointer: v815 prominent-people auto-retry"
 ```
 
 - [ ] **Step 4: Spawn reviewer**
 
-Spawn `caveman:cavecrew-reviewer` on the v807 commit range.
+Spawn `caveman:cavecrew-reviewer` on the v815 commit range.
 
 - [ ] **Step 5: Operator evidence (do NOT claim done before this)**
 
 Operator triggers a build with a known prominent-people-tripping frame:
-- mode = batch: card shows "auto-used <X> (mode: batch)" + original thumbnail; clip re-renders; log shows `[v807] auto-image-retry ... mode=batch`.
+- mode = batch: card shows "auto-used <X> (mode: batch)" + original thumbnail; clip re-renders; log shows `[v815] auto-image-retry ... mode=batch`.
 - mode = next/prev: single substitute; if it also trips, card flips to the manual replace-image card.
 - mode = off: behaves exactly as today (manual card immediately).
 Capture the log line + a screenshot. Only then mark the feature complete.
