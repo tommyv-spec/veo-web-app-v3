@@ -153,60 +153,99 @@ def _sync_companion_modules(base_url):
             print(f"[IMAGE] ⚠ Could not sync {_comp} ({_ce})", flush=True)
 
 
-def _laptop_pull_companions():
-    """Import worker_profile_pull + worker_cookie_extract, searching both the
-    worker dir (deploy: companions sit next to image_worker.py) and ./static
-    (dev: code/static/). Returns (locate_profile, load_laptop_email,
-    extract_cookies) or None when the modules aren't available."""
-    for _p in (BASE_DIR, os.path.join(BASE_DIR, "static")):
-        if os.path.isdir(_p) and _p not in sys.path:
-            sys.path.insert(0, _p)
-    # Fresh-load (the updater rewrites these companions after download).
-    for _m in ("worker_profile_pull", "worker_cookie_extract"):
-        sys.modules.pop(_m, None)
-    try:
-        from worker_profile_pull import locate_profile, load_laptop_email
-        from worker_cookie_extract import extract_cookies
-        return locate_profile, load_laptop_email, extract_cookies
-    except Exception:
-        return None
+# v814 — the retired net-log cookie path's import helper is gone; copy-mode
+# imports worker_profile_pull directly inside _maybe_pull_laptop_profile.
+
+# v814 — copy-once guard (keyed per golden folder, one copy per process),
+# same as flow_worker._LAPTOP_COPIED_GOLDENS.
+_LAPTOP_COPIED_GOLDENS = set()
 
 
-def _maybe_pull_laptop_login(label="IMAGE"):
-    """Stage the operator's live Google-login cookies for injection after
-    launch. Fail-safe: any error is logged, never raises. Mirrors
-    flow_worker._maybe_pull_laptop_profile (cookie-staging half)."""
+def _maybe_pull_laptop_profile(session_folder, golden_folder, label="IMAGE"):
+    """v814 — COPY-MODE laptop login, EXACTLY like flow_worker's startup: build
+    the golden DIRECTLY from the operator's real Chrome profile logged into
+    laptop_email (ACCOUNT1_LAPTOP_EMAIL env / worker_settings.json), so the
+    worker launches an already-logged-in session with no verification code.
+    Copies only the durable file set (build_lean_golden_from_profile), rewrites
+    Local State to a single `Default` profile, and reads the profile ONLY.
+
+    Replaces the retired net-log capture+inject (Flow rejected the
+    reconstituted session for some accounts AND repeatedly driving the real
+    profile signed it out — same reason flow_worker retired it). Requires
+    App-Bound Encryption disabled (HKCU policy). Copy ONCE per process.
+    Fail-safe: any error logged, never raises; on failure the worker falls
+    back to a manual login that run. LAPTOP_PULL_DISABLED=1 turns it off."""
     try:
+        # Drop any stale net-log cookie marker from the retired path so the old
+        # injection block (kept as a no-op) never fires with dead cookies.
+        try:
+            if os.path.isfile(_COOKIE_MARKER):
+                os.remove(_COOKIE_MARKER)
+        except Exception:
+            pass
         if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
-        comp = _laptop_pull_companions()
-        if not comp:
-            return  # companions not deployed alongside this worker — no-op
-        locate_profile, load_laptop_email, extract_cookies = comp
+        for _p in (BASE_DIR, os.path.join(BASE_DIR, "static")):
+            if os.path.isdir(_p) and _p not in sys.path:
+                sys.path.insert(0, _p)
+        sys.modules.pop("worker_profile_pull", None)  # fresh-load after companion sync
+        from worker_profile_pull import (build_lean_golden_from_profile, locate_profile,
+                                         close_laptop_chrome, load_laptop_email as _lle)
         # load_laptop_email reads ACCOUNT1_LAPTOP_EMAIL env first, then the file.
-        email = load_laptop_email(os.path.join(BASE_DIR, "worker_settings.json"))
+        email = _lle(os.path.join(BASE_DIR, "worker_settings.json"))
         if not email:
-            try:
-                if os.path.isfile(_COOKIE_MARKER):
-                    os.remove(_COOKIE_MARKER)
-            except Exception:
-                pass
+            return
+        if golden_folder in _LAPTOP_COPIED_GOLDENS:
+            print(f"[{label}] laptop copy: golden already built this session — reusing", flush=True)
             return
         loc = locate_profile(email)
         if not loc:
-            print(f"[{label}] laptop login: {email!r} not logged into any Chrome channel", flush=True)
+            print(f"[{label}] laptop copy: {email!r} not logged into any Chrome channel", flush=True)
             return
         _ud, _pf, _ch = loc
-        print(f"[{label}] laptop login: {email} in {_pf} ({_ch}); capturing live cookies via net-log", flush=True)
-        cookies = extract_cookies(_ud, _pf, _ch, log=lambda m: print(m, flush=True))
-        if cookies:
-            with open(_COOKIE_MARKER, "w", encoding="utf-8") as _f:
-                json.dump(cookies, _f)
-            print(f"[{label}] laptop login: staged {len(cookies)} cookies for injection", flush=True)
+        # Launch the worker on a SEPARATE Chrome channel from the one the
+        # operator's account lives in (copied cookies are user-DPAPI with ABE
+        # off, so they decrypt on ANY channel). Record it in the sidecar so
+        # every launch site uses the same channel. WORKER_CHROME_CHANNEL
+        # overrides. Same discipline as flow_worker (prod 2026-06-27: same-
+        # channel runs killed the worker's own browsers).
+        _worker_ch = os.environ.get("WORKER_CHROME_CHANNEL", "").strip() or "chrome"
+        try:
+            with open(os.path.join(BASE_DIR, ".worker_chrome_channel"), "w", encoding="utf-8") as _cf:
+                _cf.write(_worker_ch)
+        except Exception:
+            pass
+        print(f"[{label}] laptop copy (copy-mode v814): {email} in {_pf} ({_ch}) — building lean golden", flush=True)
+        ch = build_lean_golden_from_profile(
+            email, golden_folder, label=label, user_data_dir=_ud,
+            close_chrome=lambda _u: close_laptop_chrome(_u, log=lambda m: print(m, flush=True)),
+            log=lambda m: print(m, flush=True))
+        if ch:
+            _LAPTOP_COPIED_GOLDENS.add(golden_folder)
+            print(f"[{label}] laptop copy: ✓ lean golden ready (channel={ch})", flush=True)
         else:
-            print(f"[{label}] laptop login: 0 cookies extracted — manual login needed this run", flush=True)
+            print(f"[{label}] laptop copy: build skipped/failed — manual login needed this run", flush=True)
     except Exception as _pe:
-        print(f"[{label}] laptop login error (continuing): {_pe}", flush=True)
+        print(f"[{label}] laptop copy error (continuing): {_pe}", flush=True)
+
+
+def _worker_chrome_channel():
+    """v814 — Chrome channel for the worker browser (parity with flow_worker):
+    WORKER_CHROME_CHANNEL env override, else the sidecar written by the
+    laptop-profile pull, else stable 'chrome'."""
+    ch = os.environ.get("WORKER_CHROME_CHANNEL", "").strip()
+    if ch:
+        return ch
+    try:
+        sidecar = os.path.join(BASE_DIR, ".worker_chrome_channel")
+        if os.path.isfile(sidecar):
+            with open(sidecar, "r", encoding="utf-8") as _f:
+                v = _f.read().strip()
+            if v:
+                return v
+    except Exception:
+        pass
+    return "chrome"
 
 
 def _inject_laptop_cookies(browser, label="IMAGE"):
@@ -9225,13 +9264,14 @@ def launch_browser(session_folder=SESSION_FOLDER):
     # Ensure session folder exists
     os.makedirs(session_folder, exist_ok=True)
 
-    # Laptop-login pull (parity with flow_worker startup): stage the operator's
-    # live Google cookies BEFORE golden restore, so they're ready to inject into
-    # the fresh session right after launch. No-op when no email is configured.
-    _maybe_pull_laptop_login("IMAGE")
+    # v814 — laptop-login COPY-MODE (exact parity with flow_worker startup):
+    # build the golden directly from the operator's real logged-in Chrome
+    # profile BEFORE the golden restore below, so the restored session is
+    # already signed in. No-op when no email is configured.
+    golden = get_golden_folder(session_folder)
+    _maybe_pull_laptop_profile(session_folder, golden, label="IMAGE")
 
     # Restore from golden if available
-    golden = get_golden_folder(session_folder)
     if os.path.exists(golden):
         print(f"[IMAGE] Restoring session from golden: {golden}", flush=True)
         try:
@@ -9258,7 +9298,7 @@ def launch_browser(session_folder=SESSION_FOLDER):
     
     browser = pw.chromium.launch_persistent_context(
         user_data_dir=session_folder,
-        channel='chrome',
+        channel=_worker_chrome_channel(),  # v814 — sidecar/env, parity with flow_worker
         ignore_default_args=['--enable-automation'],
         headless=False,
         viewport={"width": 1280, "height": 720},
@@ -9446,7 +9486,7 @@ Examples:
                 time.sleep(2)
                 browser = pw.chromium.launch_persistent_context(
                     user_data_dir=args.session,
-                    channel='chrome',
+                    channel=_worker_chrome_channel(),  # v814
                     ignore_default_args=['--enable-automation'],
                     headless=False,
                     viewport={"width": 1280, "height": 720},
