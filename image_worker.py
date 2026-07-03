@@ -3756,11 +3756,8 @@ def _fa_try_create_new_project_api(page, context=""):
     pfx = f"[{context}] " if context else ""
     if not _flow_api_mode_enabled():
         return None
-    try:
-        if getattr(page, "_flow_api_disabled_this_session", False):
-            return None
-    except Exception:
-        pass
+    if _fa_api_on_cooldown(page, pfx):
+        return None
 
     try:
         title = datetime.now().strftime("%b %d, %I:%M %p").lstrip("0")
@@ -4157,6 +4154,49 @@ def _flow_api_mode_enabled():
     return os.environ.get("FLOW_API_MODE", "on").strip().lower() not in ("off", "0", "false", "no")
 
 
+def _fa_api_retry_cooldown_s():
+    """How long the API path stays paused after a structural failure before
+    it is re-tried. v807.2: the old behavior latched the API off for the
+    ENTIRE page session — the worker keeps one page alive for hours, so one
+    bad moment (stale token, single 404, captcha hiccup at the wrong time)
+    demoted the whole run to the slow DOM path permanently. Default 15 min;
+    tune with FLOW_API_RETRY_COOLDOWN_S."""
+    try:
+        return max(60, int(os.environ.get("FLOW_API_RETRY_COOLDOWN_S", "900")))
+    except Exception:
+        return 900
+
+
+def _fa_api_on_cooldown(page, pfx=""):
+    """True while the API path is paused. Re-arms automatically when the
+    cooldown expires. Migrates the legacy permanent-latch boolean if a
+    stale one is set on the page."""
+    try:
+        until = getattr(page, "_flow_api_disabled_until", 0) or 0
+        if getattr(page, "_flow_api_disabled_this_session", False) and not until:
+            until = time.time() + _fa_api_retry_cooldown_s()
+            page._flow_api_disabled_until = until
+            page._flow_api_disabled_this_session = False
+        if until:
+            if time.time() < until:
+                return True
+            page._flow_api_disabled_until = 0
+            print(f"{pfx}[flow_api] cooldown expired — re-arming API path", flush=True)
+    except Exception:
+        pass
+    return False
+
+
+def _fa_api_start_cooldown(page, reason, pfx=""):
+    """Pause the API path for the cooldown window (NOT the page lifetime)."""
+    cd = _fa_api_retry_cooldown_s()
+    try:
+        page._flow_api_disabled_until = time.time() + cd
+    except Exception:
+        pass
+    print(f"{pfx}[flow_api] API path paused {cd // 60} min (will auto-retry): {reason}", flush=True)
+
+
 def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_path):
     """Try the flow_api (private-API) path for one image generation.
 
@@ -4170,18 +4210,11 @@ def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_p
     """
     if not _flow_api_mode_enabled():
         return False
-    try:
-        if getattr(page, "_flow_api_disabled_this_session", False):
-            return False
-    except Exception:
-        pass
+    if _fa_api_on_cooldown(page):
+        return False
 
     def _latch_off(reason: str) -> bool:
-        try:
-            page._flow_api_disabled_this_session = True
-        except Exception:
-            pass
-        print(f"[flow_api] disabling API path for this page session: {reason}", flush=True)
+        _fa_api_start_cooldown(page, reason)
         return False
     project_id = ""
     try:
@@ -4247,22 +4280,15 @@ def _flow_api_image_multi_try(page, input_paths, prompt, aspect_ratio, model,
     falls through to the DOM path); latches API off for the rest of this page's
     life so the next job skips the API attempt entirely.
     """
-    if not _flow_api_mode_enabled():
-        return []
-    try:
-        if getattr(page, "_flow_api_disabled_this_session", False):
-            return []
-    except Exception:
-        pass
-
     pfx = f"[{context}] " if context else ""
 
+    if not _flow_api_mode_enabled():
+        return []
+    if _fa_api_on_cooldown(page, pfx):
+        return []
+
     def _latch_off(reason: str):
-        try:
-            page._flow_api_disabled_this_session = True
-        except Exception:
-            pass
-        print(f"{pfx}[flow_api] disabling API path for this page session: {reason}", flush=True)
+        _fa_api_start_cooldown(page, reason, pfx)
         return []
 
     project_id = ""
@@ -4353,22 +4379,15 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
     DOM path. Latches off for the page session on first failure so subsequent
     jobs skip the API attempt.
     """
-    if not _flow_api_mode_enabled():
-        return False
-    try:
-        if getattr(page, "_flow_api_disabled_this_session", False):
-            return False
-    except Exception:
-        pass
-
     pfx = f"[{ctx}] " if ctx else ""
 
+    if not _flow_api_mode_enabled():
+        return False
+    if _fa_api_on_cooldown(page, pfx):
+        return False
+
     def _latch_off(reason: str):
-        try:
-            page._flow_api_disabled_this_session = True
-        except Exception:
-            pass
-        print(f"{pfx}[flow_api] disabling API path for this page session: {reason}", flush=True)
+        _fa_api_start_cooldown(page, reason, pfx)
         return False
 
     def _fall_back_one(reason: str):
