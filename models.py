@@ -40,7 +40,12 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True)
-    
+
+    # v807 — per-account settings JSON blob. Currently holds
+    # {"auto_image_retry": {"mode": "off|next|prev|batch"}}. Nullable;
+    # absent = defaults applied in code.
+    settings_json = Column(Text, nullable=True)
+
     # Relationships
     jobs = relationship("Job", back_populates="user", cascade="all, delete-orphan")
     sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
@@ -1021,6 +1026,8 @@ def _run_migrations_postgresql(engine):
         ("jobs", "instagram_video_id", "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS instagram_video_id INTEGER"),
         # 2026-06-01: drive-watch lifecycle path
         ("jobs", "published_via",      "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS published_via VARCHAR(20)"),
+        # v807 — per-account settings JSON blob (auto_image_retry mode, etc.)
+        ("users", "settings_json", "ALTER TABLE users ADD COLUMN IF NOT EXISTS settings_json TEXT"),
     ]
 
     with engine.connect() as conn:
@@ -1157,6 +1164,8 @@ def _run_migrations_sqlite(engine):
         ("instagram_videos", "video_url", "ALTER TABLE instagram_videos ADD COLUMN video_url TEXT"),
         # 2026-06-01: drive-watch lifecycle path
         ("jobs", "published_via",      "ALTER TABLE jobs ADD COLUMN published_via TEXT"),
+        # v807 — per-account settings JSON blob (auto_image_retry mode, etc.)
+        ("users", "settings_json", "ALTER TABLE users ADD COLUMN settings_json TEXT"),
     ]
 
     with engine.connect() as conn:
