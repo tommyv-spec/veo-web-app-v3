@@ -11112,11 +11112,26 @@ async def local_worker_report_policy_violation(
             clip.error_message = request.detail or "Rejected (prominent people). Auto-retry in progress."
             if rejected_key:
                 clip.replacement_start_frame = rejected_key
-            db.commit()
-            applied = _auto_image_retry(db, clip, rejected_key)
+            # v815 — NO commit here: let the outcome commit atomically so a
+            # retry failure can't leave the clip stamped-but-not-swapped.
+            applied = None
+            try:
+                applied = _auto_image_retry(db, clip, rejected_key)
+            except Exception as _ar_err:
+                import traceback
+                print(f"[v815] auto-image-retry FAILED for clip {clip_id}: "
+                      f"{type(_ar_err).__name__}: {_ar_err}", flush=True)
+                traceback.print_exc()
+                db.rollback()
+                applied = None
             if applied:
                 return {"ok": True, "clip_id": clip_id, "auto_retry": applied}
-            # exhausted / disabled -> leave clip FAILED with the distinct code for the manual card
+            # disabled / exhausted / errored -> manual card, single atomic
+            # commit. Re-stamp: db.rollback() discarded the in-memory fields.
+            clip.error_code = "PROMINENT_PEOPLE_FILTER"
+            clip.error_message = request.detail or "Rejected (prominent people). Upload a replacement to retry."
+            if rejected_key:
+                clip.replacement_start_frame = rejected_key
             clip.status = ClipStatus.FAILED.value
             db.commit()
             return {"ok": True, "clip_id": clip_id, "auto_retry": None,
@@ -13137,11 +13152,26 @@ async def user_worker_report_policy_violation(
         clip.error_message = request.detail or "Rejected (prominent people). Auto-retry in progress."
         if rejected_key:
             clip.replacement_start_frame = rejected_key
-        db.commit()
-        applied = _auto_image_retry(db, clip, rejected_key)
+        # v815 — NO commit here: let the outcome commit atomically so a
+        # retry failure can't leave the clip stamped-but-not-swapped.
+        applied = None
+        try:
+            applied = _auto_image_retry(db, clip, rejected_key)
+        except Exception as _ar_err:
+            import traceback
+            print(f"[v815] auto-image-retry FAILED for clip {clip_id}: "
+                  f"{type(_ar_err).__name__}: {_ar_err}", flush=True)
+            traceback.print_exc()
+            db.rollback()
+            applied = None
         if applied:
             return {"ok": True, "clip_id": clip_id, "auto_retry": applied}
-        # exhausted / disabled -> leave clip FAILED with the distinct code for the manual card
+        # disabled / exhausted / errored -> manual card, single atomic
+        # commit. Re-stamp: db.rollback() discarded the in-memory fields.
+        clip.error_code = "PROMINENT_PEOPLE_FILTER"
+        clip.error_message = request.detail or "Rejected (prominent people). Upload a replacement to retry."
+        if rejected_key:
+            clip.replacement_start_frame = rejected_key
         clip.status = ClipStatus.FAILED.value
         db.commit()
         return {"ok": True, "clip_id": clip_id, "auto_retry": None,
