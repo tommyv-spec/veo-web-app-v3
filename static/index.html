@@ -17893,16 +17893,21 @@ Ambient: same kitchen room tone, soft pour sound.
                 + '&reset=' + (st.reset ? 1 : 0)
                 + '&parallel=' + (parseInt(st.parallel, 10) || 2)  // v571: pass user-selected parallel slots;
                 + '&laptop_email=' + encodeURIComponent(laptopEmail);
-            // Use a hidden iframe so the browser triggers a download without
-            // navigating away from the current page (same trick as my-worker.html).
-            let iframe = document.getElementById('imgDlFrame');
-            if (!iframe) {
-                iframe = document.createElement('iframe');
-                iframe.id = 'imgDlFrame';
-                iframe.style.display = 'none';
-                document.body.appendChild(iframe);
-            }
-            iframe.src = url;
+            // v813: trigger via a user-gesture <a> click, NOT iframe.src.
+            // The button onclick IS a user gesture; user-initiated downloads
+            // bypass Chrome's "Automatic downloads" block. An export fires a
+            // BURST of <a> clip downloads, which flags the site and makes Chrome
+            // silently drop the next AUTOMATIC download (iframe.src) — so the
+            // old iframe installer did nothing while/after an export. The server
+            // sets Content-Disposition, so the filename comes from the header.
+            console.log('[imgDownloadInstaller/v813] user-gesture download', url);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = '';  // let server Content-Disposition name the file
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
         }
 
         function imgUpdateTabCount() {
