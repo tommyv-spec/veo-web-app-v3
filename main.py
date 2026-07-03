@@ -365,6 +365,8 @@ class ClipResponse(BaseModel):
     # rejected start_frame R2 key is exposed here so the frontend can
     # render the offending image inside the "upload replacement" card.
     replacement_start_frame: Optional[str] = None
+    # v815 — auto-image-retry audit: {original_frame, used_frame, tried, count, mode}
+    auto_image_retry: Optional[Dict[str, Any]] = None
 
 
 class RedoRequest(BaseModel):
@@ -4624,6 +4626,9 @@ async def get_job_clips(
             # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding
             end_frame_image_node_id=c.end_frame_image_node_id,
             replacement_start_frame=c.replacement_start_frame,  # v701
+            auto_image_retry=(
+                json.loads(c.auto_image_retry_json) if c.auto_image_retry_json else None
+            ),  # v815
         )
         for c in clips
     ]
@@ -4715,6 +4720,9 @@ async def get_job_clips_active(
             # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding
             end_frame_image_node_id=c.end_frame_image_node_id,
             replacement_start_frame=c.replacement_start_frame,
+            auto_image_retry=(
+                json.loads(c.auto_image_retry_json) if c.auto_image_retry_json else None
+            ),  # v815
         )
         for c in clips
     ]

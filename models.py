@@ -365,7 +365,12 @@ class Clip(Base):
     # `start_frame` is rewritten to the new key and `replacement_start_frame`
     # carries the audit trail of the previous rejected frame(s).
     replacement_start_frame = Column(String(512), nullable=True)
-    
+
+    # v815 — auto-image-retry audit. JSON: {original_frame, used_frame,
+    # tried:[...], count, mode}. Set when prominent-people auto-retry swaps
+    # the start_frame. Drives the "image rejected -> used image X" card mark.
+    auto_image_retry_json = Column(Text, nullable=True)
+
     # === Storyboard/Scene Mode Fields ===
     clip_mode = Column(String(20), default="fresh")  # v782 default fresh (was blend) | 'blend' | 'continue' | 'fresh'
     scene_index = Column(Integer, default=0)  # Which scene this clip belongs to
@@ -1028,6 +1033,9 @@ def _run_migrations_postgresql(engine):
         ("jobs", "published_via",      "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS published_via VARCHAR(20)"),
         # v815 — per-account settings JSON blob (auto_image_retry mode, etc.)
         ("users", "settings_json", "ALTER TABLE users ADD COLUMN IF NOT EXISTS settings_json TEXT"),
+        # v815 — auto-image-retry audit trail per clip
+        ("clips", "auto_image_retry_json",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS auto_image_retry_json TEXT"),
     ]
 
     with engine.connect() as conn:
@@ -1166,6 +1174,9 @@ def _run_migrations_sqlite(engine):
         ("jobs", "published_via",      "ALTER TABLE jobs ADD COLUMN published_via TEXT"),
         # v815 — per-account settings JSON blob (auto_image_retry mode, etc.)
         ("users", "settings_json", "ALTER TABLE users ADD COLUMN settings_json TEXT"),
+        # v815 — auto-image-retry audit trail per clip
+        ("clips", "auto_image_retry_json",
+         "ALTER TABLE clips ADD COLUMN auto_image_retry_json TEXT"),
     ]
 
     with engine.connect() as conn:
