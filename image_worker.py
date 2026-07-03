@@ -5807,12 +5807,20 @@ def _download_reference_inputs(api_key, input_images, work_dir):
                 # change whenever the underlying image changes (same role,
                 # different operator pick) — see _content_hash8.
                 tmp_file = os.path.join(work_dir, f".dl_{idx}{ext}")
-                with open(tmp_file, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                filename = f"{slug}__{_content_hash8(tmp_file)}{ext}"
-                local_file = os.path.join(work_dir, filename)
-                os.replace(tmp_file, local_file)
+                try:
+                    with open(tmp_file, "wb") as f:
+                        for chunk in resp.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    filename = f"{slug}__{_content_hash8(tmp_file)}{ext}"
+                    local_file = os.path.join(work_dir, filename)
+                    os.replace(tmp_file, local_file)
+                except Exception:
+                    # don't orphan the temp file on hash/rename/write failure
+                    try:
+                        os.remove(tmp_file)
+                    except Exception:
+                        pass
+                    raise
                 size_kb = os.path.getsize(local_file) / 1024
                 print(f"  ⬇ {filename}  [{slot}]  ({size_kb:.0f} KB)", flush=True)
                 results.append({
