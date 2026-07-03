@@ -148,6 +148,7 @@ from models import (
     get_job_logs_since, add_job_log, User, UserAPIKey, UserWorkerToken
 )
 from lifecycle import apply_lifecycle_change, compute_stuck_days, apply_jobs_filters, _maybe_auto_enter_lifecycle, derive_effective_stage, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
+from auto_image_retry import parse_auto_image_retry_mode, VALID_RETRY_MODES
 from worker import worker, WORKER_VERSION
 from error_handler import ErrorCode
 
@@ -1320,6 +1321,35 @@ async def auth_me(request: Request, db: DBSession = Depends(get_db_session)):
         "authenticated": True,
         "user": user.to_dict()
     }
+
+
+@app.get("/api/user/settings")
+async def get_user_settings(current_user: User = Depends(get_current_user)):
+    """v807 — return the account's auto-image-retry mode (defaults to 'batch')."""
+    return {"auto_image_retry": {"mode": parse_auto_image_retry_mode(current_user.settings_json)}}
+
+
+class UserSettingsRequest(BaseModel):
+    auto_image_retry_mode: str  # off | next | prev | batch
+
+
+@app.put("/api/user/settings")
+async def put_user_settings(
+    req: UserSettingsRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v807 — update the account's auto-image-retry mode."""
+    if req.auto_image_retry_mode not in VALID_RETRY_MODES:
+        raise HTTPException(status_code=400, detail=f"invalid mode {req.auto_image_retry_mode!r}")
+    try:
+        data = json.loads(current_user.settings_json) if current_user.settings_json else {}
+    except Exception:
+        data = {}
+    data.setdefault("auto_image_retry", {})["mode"] = req.auto_image_retry_mode
+    current_user.settings_json = json.dumps(data)
+    db.commit()
+    return {"ok": True, "auto_image_retry": {"mode": req.auto_image_retry_mode}}
 
 
 @app.post("/auth/logout")
