@@ -9048,7 +9048,7 @@ def click_generate_with_crash_handler(page, account_name, clip_index, clips, cli
                     actual_start = start_frame if (start_frame and os.path.exists(start_frame)) else None
                     
                     if actual_start and actual_end:
-                        upload_ok, rejected = upload_both_frames_with_policy_check(page, actual_start, actual_end, context=f"[{account_name}-Rebuild]")
+                        upload_ok, rejected, _ = upload_both_frames_with_policy_check(page, actual_start, actual_end, context=f"[{account_name}-Rebuild]")  # v815 — 3-tuple (reason unused here)
                         if not upload_ok:
                             print(f"[{account_name}] ⚠️ Frame rejected during rebuild", flush=True)
                     elif actual_start:
@@ -9276,7 +9276,7 @@ def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retrie
                     
                     if start_frame and os.path.exists(start_frame):
                         try:
-                            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+                            upload_ok, rejected_which, rejected_reason = upload_both_frames_with_policy_check(  # v815 — 3-tuple: capture reject reason
                                 page, start_frame, end_frame, context=f"{prefix}Clip {clip_num} reuse-fallback")
                             if upload_ok:
                                 print(f"{prefix}✓ Frames uploaded manually as fallback", flush=True)
@@ -14297,7 +14297,7 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
         if frames_busy_flag is not None:
             frames_busy_flag.set()
         try:
-            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+            upload_ok, rejected_which, rejected_reason = upload_both_frames_with_policy_check(  # v815 — 3-tuple: capture reject reason
                 page, start_frame, end_frame, context=context,
                 gallery_cache=gallery_cache, start_key=start_frame_key, end_key=end_frame_key,
                 extra_images=_all_unique_images)
@@ -14353,7 +14353,8 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
             end_frame_key = clip.get('end_frame_key')
             
             if start_frame_key in blacklisted_images or end_frame_key in blacklisted_images:
-                report_policy_violation(clip['id'], rejected_image_key=(end_frame_key if end_frame_key in blacklisted_images else start_frame_key), detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
+                # v815 — forward the surfaced reject reason; PROMINENT auto-retries at backend, None (generic hard-400) stays manual card.
+                report_policy_violation(clip['id'], rejected_image_key=(end_frame_key if end_frame_key in blacklisted_images else start_frame_key), detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.", error_reason=rejected_reason)
                 permanently_failed_clips.add(clip_index)
                 return (False, start_frame, end_frame, start_frame_key, end_frame_key)
             
@@ -14361,7 +14362,7 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
             if rejected_which == 'start':
                 for retry_attempt in range(len(ordered_image_keys)):
                     print(f"{context}[Flow] Retrying (attempt {retry_attempt+1}): START={os.path.basename(start_frame)} + END={os.path.basename(end_frame)}", flush=True)
-                    upload_ok2, rejected2 = upload_both_frames_with_policy_check(page, start_frame, end_frame, context=context)
+                    upload_ok2, rejected2, rejected_reason = upload_both_frames_with_policy_check(page, start_frame, end_frame, context=context)  # v815 — 3-tuple
                     if upload_ok2:
                         retry_success = True
                         break
@@ -14392,7 +14393,8 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
                         break
             
             if not retry_success:
-                report_policy_violation(clip['id'], rejected_image_key=end_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
+                # v815 — forward the surfaced reject reason (PROMINENT → backend auto-retry; None → manual card).
+                report_policy_violation(clip['id'], rejected_image_key=end_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.", error_reason=rejected_reason)
                 permanently_failed_clips.add(clip_index)
                 return (False, start_frame, end_frame, start_frame_key, end_frame_key)
     
@@ -14420,7 +14422,7 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
         if frames_busy_flag is not None:
             frames_busy_flag.set()
         try:
-            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+            upload_ok, rejected_which, rejected_reason = upload_both_frames_with_policy_check(  # v815 — 3-tuple: capture reject reason
                 page, start_frame, None, context=context,
                 gallery_cache=gallery_cache, start_key=start_frame_key, end_key=None,
                 extra_images=_all_unique_images_s)
@@ -14461,7 +14463,7 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
                     start_frame_key = clip.get('start_frame_key')
                     if start_frame_key in blacklisted_images:
                         break
-                    upload_ok2, rejected2 = upload_both_frames_with_policy_check(
+                    upload_ok2, rejected2, rejected_reason = upload_both_frames_with_policy_check(  # v815 — 3-tuple
                         page, start_frame, None, context=context,
                         gallery_cache=gallery_cache, start_key=start_frame_key, end_key=None)
                     if upload_ok2:
@@ -14472,7 +14474,8 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
                     else:
                         break
                 if not retry_success:
-                    report_policy_violation(clip['id'], rejected_image_key=start_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
+                    # v815 — forward the surfaced reject reason (PROMINENT → backend auto-retry; None → manual card).
+                    report_policy_violation(clip['id'], rejected_image_key=start_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.", error_reason=rejected_reason)
                     permanently_failed_clips.add(clip_index)
                     return (False, start_frame, end_frame, start_frame_key, end_frame_key)
     
@@ -14482,7 +14485,7 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
         if frames_busy_flag is not None:
             frames_busy_flag.set()
         try:
-            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+            upload_ok, rejected_which, rejected_reason = upload_both_frames_with_policy_check(  # v815 — 3-tuple: capture reject reason
                 page, None, end_frame, context=context,
                 gallery_cache=gallery_cache, start_key=None, end_key=end_frame_key)
         finally:
@@ -14498,7 +14501,7 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
                     end_frame_key = clip.get('end_frame_key')
                     if end_frame_key in blacklisted_images:
                         break
-                    upload_ok2, rejected2 = upload_both_frames_with_policy_check(
+                    upload_ok2, rejected2, rejected_reason = upload_both_frames_with_policy_check(  # v815 — 3-tuple
                         page, None, end_frame, context=context,
                         gallery_cache=gallery_cache, start_key=None, end_key=end_frame_key)
                     if upload_ok2:
@@ -14509,7 +14512,8 @@ def upload_frames_with_retry(page, clip, clip_index, clips, i, start_frame, end_
                     else:
                         break
                 if not retry_success:
-                    report_policy_violation(clip['id'], rejected_image_key=end_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.")
+                    # v815 — forward the surfaced reject reason (PROMINENT → backend auto-retry; None → manual card).
+                    report_policy_violation(clip['id'], rejected_image_key=end_frame_key, detail="⚠️ Flow rejected this image's content (e.g. a prominent person). Upload a replacement to retry.", error_reason=rejected_reason)
                     permanently_failed_clips.add(clip_index)
                     return (False, start_frame, end_frame, start_frame_key, end_frame_key)
     
@@ -14532,10 +14536,18 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
     AND uploadImage returns 200. Policy check (200) is the primary signal; button
     disappearance is secondary. We never proceed unless BOTH are confirmed.
 
-    Returns:
-        (True, None)      — both frames confirmed
-        (False, 'start')  — start frame rejected by policy
-        (False, 'end')    — end frame rejected by policy
+    Returns (v815 — 3-tuple; 3rd element = reject reason):
+        (True, None, None)                — both frames confirmed
+        (False, 'start', reason)          — start frame rejected
+        (False, 'end', reason)            — end frame rejected
+        (False, 'extra'|'*_glitch', None) — batch/attach failure (not content)
+
+    v815 — `reason` is the FramePolicyMonitor.error_reason captured at the
+    reject: 'PUBLIC_ERROR_PROMINENT_PEOPLE_UPLOAD' on a prominent-people
+    upload reject, and None for the v787 generic hard-400 reject. This lets
+    callers forward a PROMINENT reason to report_policy_violation (→ backend
+    auto-retry) while staying None — manual replace-image card — for any
+    non-prominent reject. No caller-side guessing needed.
     """
     prefix = f"{context} " if context else ""
     frame_selector = 'div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]'
@@ -14881,15 +14893,15 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
                 # Upload fresh
                 result = _upload_one_frame("START", start_image, _start_hash, _start_basename,
                                            btn_getter=lambda: page.locator(frame_selector).first)
-                if result == 'rejected': return (False, 'start')
-                if result == 'extra_rejected': return (False, 'extra')
-                if result == 'failed':   return (False, 'start_glitch')
+                if result == 'rejected': return (False, 'start', monitor.error_reason)  # v815 — surface reject reason
+                if result == 'extra_rejected': return (False, 'extra', None)  # v815 — batch fail, not content-reason
+                if result == 'failed':   return (False, 'start_glitch', None)  # v815 — attach glitch, no reason
         else:
             result = _upload_one_frame("START", start_image, _start_hash, _start_basename,
                                        btn_getter=lambda: page.locator(frame_selector).first)
-            if result == 'rejected': return (False, 'start')
-            if result == 'extra_rejected': return (False, 'extra')
-            if result == 'failed':   return (False, 'start_glitch')
+            if result == 'rejected': return (False, 'start', monitor.error_reason)  # v815 — surface reject reason
+            if result == 'extra_rejected': return (False, 'extra', None)  # v815 — batch fail, not content-reason
+            if result == 'failed':   return (False, 'start_glitch', None)  # v815 — attach glitch, no reason
 
         time.sleep(random.uniform(1.0, 2.5))
         human_look_around(page)
@@ -14906,7 +14918,7 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
         if remaining == 0:
             print(f"{prefix}⚠️ No frame buttons remaining for END — assuming both already set", flush=True)
             print(f"{prefix}✓ Both frames uploaded", flush=True)
-            return (True, None)
+            return (True, None, None)  # v815 — 3-tuple
 
         time.sleep(random.uniform(0.5, 1.2))
 
@@ -14948,13 +14960,13 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
             if not gallery_ok:
                 result = _upload_one_frame("END", end_image, _end_hash, _end_basename,
                                            btn_getter=lambda: page.locator(frame_selector).first)
-                if result == 'rejected': return (False, 'end')
-                if result == 'failed':   return (False, 'end_glitch')
+                if result == 'rejected': return (False, 'end', monitor.error_reason)  # v815 — surface reject reason
+                if result == 'failed':   return (False, 'end_glitch', None)  # v815 — attach glitch, no reason
         else:
             result = _upload_one_frame("END", end_image, _end_hash, _end_basename,
                                        btn_getter=lambda: page.locator(frame_selector).first)
-            if result == 'rejected': return (False, 'end')
-            if result == 'failed':   return (False, 'end_glitch')
+            if result == 'rejected': return (False, 'end', monitor.error_reason)  # v815 — surface reject reason
+            if result == 'failed':   return (False, 'end_glitch', None)  # v815 — attach glitch, no reason
 
         time.sleep(random.uniform(0.5, 1.5))
         # Cache by R2 key for precise lookup
@@ -14962,7 +14974,7 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
             gallery_cache[end_key] = _end_basename
 
     print(f"{prefix}✓ Both frames uploaded", flush=True)
-    return (True, None)
+    return (True, None, None)  # v815 — 3-tuple
 
 
 def find_dialog_upload_button(dialog):
@@ -15623,6 +15635,7 @@ def rebuild_clip(page, start_frame_path, end_frame_path, prompt, is_first_clip=F
     - Waits for Generate button to be enabled before clicking
     """
     _frame_rejection_tls.which = None  # v787 — reset before this attempt
+    _frame_rejection_tls.reason = None  # v815 — reset surfaced reject reason too
     try:
         check_and_dismiss_popup(page)
         
@@ -15653,12 +15666,13 @@ def rebuild_clip(page, start_frame_path, end_frame_path, prompt, is_first_clip=F
                     _gallery_cache[_fh] = os.path.basename(_fp)
         
         if s_path and e_path:
-            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+            upload_ok, rejected_which, rejected_reason = upload_both_frames_with_policy_check(  # v815 — 3-tuple: capture reject reason
                 page, s_path, e_path, context=context, gallery_cache=_gallery_cache)
             if not upload_ok:
                 print(f"{context} ⚠️ Frame upload failed (rejected: {rejected_which})", flush=True)
                 if rejected_which in ('start', 'end', 'extra'):
                     _frame_rejection_tls.which = rejected_which  # v787
+                    _frame_rejection_tls.reason = rejected_reason  # v815 — surface reason to the redo report site (16069)
                 return False
         elif s_path:
             # v758.10: route single-start (the redo case) through the SAME robust
@@ -15668,12 +15682,13 @@ def rebuild_clip(page, start_frame_path, end_frame_path, prompt, is_first_clip=F
             # The old single-frame path false-positived on a leftover chip in the
             # reused project (chip "attached" in 1s) and its simple upload_frame
             # times out in the ingredient dialog without binding.
-            upload_ok, rejected_which = upload_both_frames_with_policy_check(
+            upload_ok, rejected_which, rejected_reason = upload_both_frames_with_policy_check(  # v815 — 3-tuple: capture reject reason
                 page, s_path, None, context=context, gallery_cache=_gallery_cache)
             if not upload_ok:
                 print(f"{context} ⚠️ START frame upload failed (rejected: {rejected_which})", flush=True)
                 if rejected_which in ('start', 'end', 'extra'):
                     _frame_rejection_tls.which = rejected_which  # v787
+                    _frame_rejection_tls.reason = rejected_reason  # v815 — surface reason to the redo report site (16069)
                 return False
         elif e_path:
             result, reason = click_frame_and_upload_with_policy_check(page, e_path, is_end_frame=True, context=context)
@@ -16055,11 +16070,13 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
         # blocked image forever (clip 10609, 2026-06-11: 2 accounts + redo
         # cycles burned on an image Flow 400-blocks every time).
         _rej_which = getattr(_frame_rejection_tls, 'which', None)
+        _rej_reason = getattr(_frame_rejection_tls, 'reason', None)  # v815 — reason surfaced by rebuild_clip
         if _rej_which in ('start', 'end', 'extra'):
             _rej_key = clip.get('end_frame_key') if _rej_which == 'end' else clip.get('start_frame_key')
             print(f"[REDO] ❌ clip {clip_index+1} frame REJECTED ({_rej_which}) — replace-image card, not re-queuing", flush=True)
             report_policy_violation(clip_id, rejected_image_key=_rej_key,
-                                    detail="⚠️ Flow keeps rejecting this image upload. Upload a replacement to retry.")
+                                    detail="⚠️ Flow keeps rejecting this image upload. Upload a replacement to retry.",
+                                    error_reason=_rej_reason)  # v815 — PROMINENT → backend auto-retry; None → manual card
             clear_auto_redo_cycle(clip_id)
             shutil.rmtree(temp_dir, ignore_errors=True)
             return False
