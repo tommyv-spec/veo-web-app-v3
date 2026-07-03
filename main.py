@@ -148,7 +148,7 @@ from models import (
     get_job_logs_since, add_job_log, User, UserAPIKey, UserWorkerToken
 )
 from lifecycle import apply_lifecycle_change, compute_stuck_days, apply_jobs_filters, _maybe_auto_enter_lifecycle, derive_effective_stage, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
-from auto_image_retry import parse_auto_image_retry_mode, VALID_RETRY_MODES
+from auto_image_retry import parse_auto_image_retry_mode, VALID_RETRY_MODES, order_distinct_frames, pick_substitute
 from worker import worker, WORKER_VERSION
 from error_handler import ErrorCode
 
@@ -4427,8 +4427,16 @@ async def resume_job(
 # `replace_clip_image` (main.py) accept gate and the v710 image-shared
 # cascade lookup gate to this set. Frontend mirrors the same set in
 # `IMAGE_ATTRIBUTABLE_CODES` (static/index.html).
+# v815 — prominent-people / celebrity codes that trigger image auto-retry.
+PROMINENT_PEOPLE_ERROR_CODES = frozenset({
+    "PROMINENT_PEOPLE_FILTER",
+    "CELEBRITY_FILTER",
+    "CELEBRITY_RAI_FILTER",
+})
+
 IMAGE_ATTRIBUTABLE_ERROR_CODES = frozenset({
     "CONTENT_POLICY_VIOLATION",
+    "PROMINENT_PEOPLE_FILTER",  # v815 — manual replace card still works when auto-retry off/exhausted
     "CELEBRITY_FILTER",
     "CELEBRITY_RAI_FILTER",
     "SAFETY_FILTER",
@@ -4837,6 +4845,77 @@ class PolicyViolationRequest(BaseModel):
     show it back to the user inside the replace-image card."""
     rejected_image_key: Optional[str] = None
     detail: Optional[str] = None  # Worker-side description if any
+    error_reason: Optional[str] = None  # v815 — worker-supplied reason (PROMINENT_PEOPLE / CELEBRITY)
+
+
+def _swap_clip_start_frame(clip, new_key):
+    """v815 — point a clip at a new start_frame R2 key and re-queue it for
+    the worker redo poll. Shared by manual replace-image + auto-retry.
+    Does NOT bump generation_attempt (image substitution is not a same-image
+    retry), so the 3-attempt cap does not limit a sweep."""
+    clip.start_frame = new_key
+    clip.error_code = None
+    clip.error_message = None
+    clip.status = ClipStatus.FLOW_REDO_QUEUED.value
+    clip.approval_status = "pending_review"
+    clip.claimed_by_worker = None
+    clip.claimed_at = None
+
+
+def clip_owner_user_id(db, clip):
+    """v815 — resolve the account that owns a clip (via its job)."""
+    job = db.query(Job).filter(Job.id == clip.job_id).first()
+    return job.user_id if job else None
+
+
+def _persist_retry_audit(clip, original, used, tried, count, mode):
+    clip.auto_image_retry_json = json.dumps({
+        "original_frame": original, "used_frame": used,
+        "tried": tried, "count": count, "mode": mode,
+    })
+
+
+def _auto_image_retry(db, clip, rejected_key):
+    """v815 — attempt a prominent-people auto-substitution. Returns
+    {used_frame, mode, count} when a substitute was applied (clip now
+    FLOW_REDO_QUEUED), or None to fall through to the manual replace card.
+    A/B = single-shot; C ('batch') = bounded sweep (one substitute per call;
+    the next worker rejection report calls this again for the next untried
+    frame). 'tried' history persists in clip.auto_image_retry_json."""
+    owner_id = clip_owner_user_id(db, clip)
+    user = db.query(User).filter(User.id == owner_id).first() if owner_id else None
+    mode = parse_auto_image_retry_mode(user.settings_json if user else None)
+    if mode == "off":
+        return None
+    try:
+        audit = json.loads(clip.auto_image_retry_json) if clip.auto_image_retry_json else {}
+    except Exception:
+        audit = {}
+    original = audit.get("original_frame") or rejected_key
+    tried = list(audit.get("tried") or [])
+    if rejected_key and rejected_key not in tried:
+        tried.append(rejected_key)
+    # A/B single-shot: already substituted once -> yield to manual.
+    if mode in ("next", "prev") and audit.get("count", 0) >= 1:
+        _persist_retry_audit(clip, original, audit.get("used_frame"), tried, audit.get("count", 0), mode)
+        return None
+    job_clips = db.query(Clip).filter(Clip.job_id == clip.job_id).all()
+    frames = order_distinct_frames(job_clips)
+    # C with no other image -> fall back to A (next) per operator decision.
+    eff_mode = mode
+    if mode == "batch" and len([f for f in frames if f != original]) == 0:
+        eff_mode = "next"
+    cand = pick_substitute(eff_mode, frames, original, tried)
+    if not cand:
+        _persist_retry_audit(clip, original, audit.get("used_frame"), tried, audit.get("count", 0), mode)
+        return None  # exhausted -> manual card
+    new_count = audit.get("count", 0) + 1
+    _swap_clip_start_frame(clip, cand)
+    _persist_retry_audit(clip, original, cand, tried, new_count, mode)
+    db.commit()
+    print(f"[v815] auto-image-retry clip {clip.id} mode={mode} eff={eff_mode} "
+          f"original={original} -> used={cand} count={new_count}", flush=True)
+    return {"used_frame": cand, "mode": mode, "count": new_count}
 
 
 @app.post("/api/clips/{clip_id}/replace-image")
@@ -4923,21 +5002,12 @@ async def replace_clip_image(
         # Audit: keep PREVIOUS rejected key in error_message tail; bump
         # start_frame to the fresh key so the worker's redo flow uses it.
         previous_rejected = clip.replacement_start_frame
-        clip.start_frame = new_key
+        # v815 — swap via shared helper (manual replace + auto-retry both use
+        # it). v701h — the helper sets status = flow_redo_queued so the
+        # worker's /local-worker/clips/redo-pending poll picks the clip up
+        # (PENDING would sit forever; redo-pending filters on FLOW_REDO_QUEUED).
+        _swap_clip_start_frame(clip, new_key)
         clip.replacement_start_frame = previous_rejected  # keep audit
-        clip.error_code = None
-        clip.error_message = None
-        # v701h — status MUST be flow_redo_queued so the worker's
-        # /local-worker/clips/redo-pending poll picks the clip up. PENDING
-        # status only gets re-submitted by the main /jobs/pending poll
-        # which doesn't run for jobs already past initial submission. The
-        # symptom: user uploaded replacement, clips sat in PENDING forever
-        # because redo-pending query filters on FLOW_REDO_QUEUED.
-        clip.status = ClipStatus.FLOW_REDO_QUEUED.value
-        clip.approval_status = "pending_review"
-        # Reset claim so worker picks it up.
-        clip.claimed_by_worker = None
-        clip.claimed_at = None
         db.commit()
 
         # v701d — anchor cascade.
@@ -11033,6 +11103,26 @@ async def local_worker_report_policy_violation(
         if _v812_key:
             return _v812_apply_swap(db, clip, rejected_key, _v812_key)
 
+        # v815 — prominent-people / celebrity auto-retry branch. Scoped to
+        # this reason ONLY; generic content-policy keeps the manual card path.
+        is_prominent = (request.error_reason or "").upper()
+        is_prominent = ("PROMINENT" in is_prominent) or ("CELEBRITY" in is_prominent)
+        if is_prominent:
+            clip.error_code = "PROMINENT_PEOPLE_FILTER"
+            clip.error_message = request.detail or "Rejected (prominent people). Auto-retry in progress."
+            if rejected_key:
+                clip.replacement_start_frame = rejected_key
+            db.commit()
+            applied = _auto_image_retry(db, clip, rejected_key)
+            if applied:
+                return {"ok": True, "clip_id": clip_id, "auto_retry": applied}
+            # exhausted / disabled -> leave clip FAILED with the distinct code for the manual card
+            clip.status = ClipStatus.FAILED.value
+            db.commit()
+            return {"ok": True, "clip_id": clip_id, "auto_retry": None,
+                    "rejected_image_key": rejected_key or None}
+        # (existing generic CONTENT_POLICY_VIOLATION path continues unchanged below)
+
         if rejected_key:
             clip.replacement_start_frame = rejected_key
 
@@ -13037,6 +13127,26 @@ async def user_worker_report_policy_violation(
     _v812_key = _v812_audio_anchor_fallback(db, clip, rejected_key)
     if _v812_key:
         return _v812_apply_swap(db, clip, rejected_key, _v812_key)
+
+    # v815 — prominent-people / celebrity auto-retry branch. Scoped to
+    # this reason ONLY; generic content-policy keeps the manual card path.
+    is_prominent = (request.error_reason or "").upper()
+    is_prominent = ("PROMINENT" in is_prominent) or ("CELEBRITY" in is_prominent)
+    if is_prominent:
+        clip.error_code = "PROMINENT_PEOPLE_FILTER"
+        clip.error_message = request.detail or "Rejected (prominent people). Auto-retry in progress."
+        if rejected_key:
+            clip.replacement_start_frame = rejected_key
+        db.commit()
+        applied = _auto_image_retry(db, clip, rejected_key)
+        if applied:
+            return {"ok": True, "clip_id": clip_id, "auto_retry": applied}
+        # exhausted / disabled -> leave clip FAILED with the distinct code for the manual card
+        clip.status = ClipStatus.FAILED.value
+        db.commit()
+        return {"ok": True, "clip_id": clip_id, "auto_retry": None,
+                "rejected_image_key": rejected_key or None}
+    # (existing generic CONTENT_POLICY_VIOLATION path continues unchanged below)
 
     if rejected_key:
         clip.replacement_start_frame = rejected_key
