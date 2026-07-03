@@ -2192,6 +2192,58 @@ def upload_reference_images(page, image_paths, context="", already_uploaded=None
 
             return None
 
+        # v807.4 — the ONLY click method that reliably attaches. Operator
+        # logs showed a fixed pattern: the tile click fired immediately
+        # after the dialog opens NEVER grows the chip ("✓ Reused" then
+        # "Chip didn't grow 0 → 0"), while the recovery path's identical
+        # click — after a settle + re-find — attaches every time. Flow
+        # binds the tile click handlers a beat after render. So: settle,
+        # click, VERIFY the chip actually grew, one internal re-click;
+        # only report "Reused" on a confirmed chip.
+        def _click_tile_and_verify(dialog_loc, item, chips_before):
+            expected = chips_before + 1
+            for attempt in range(2):
+                if attempt > 0:
+                    print(f"{prefix}  ↻ tile click didn't attach — settling and re-clicking", flush=True)
+                    # Re-acquire dialog + tile; the failed click may have
+                    # closed the dialog or re-rendered the grid.
+                    try:
+                        if not dialog_loc.is_visible(timeout=500):
+                            reopen = page.locator(
+                                f"{frame_selector}:has(i:text('add_2'))").first
+                            reopen.click(timeout=3000)
+                            time.sleep(1.0)
+                            dialog_loc = page.locator('[role="dialog"]').first
+                            dialog_loc.wait_for(state="visible", timeout=3000)
+                        item = dialog_loc.locator(f"img[alt='{filename}']").first
+                        if item.count() == 0 or not item.is_visible(timeout=1000):
+                            return False
+                    except Exception:
+                        return False
+                time.sleep(1.5)  # the settle IS the fix — handlers bind late
+                container = item.locator("xpath=..").first
+                try:
+                    container.scroll_into_view_if_needed(timeout=2000)
+                    time.sleep(0.3)
+                except Exception:
+                    pass
+                try:
+                    container.click(timeout=3000)
+                except Exception:
+                    try:
+                        item.click(timeout=3000, force=True)
+                    except Exception:
+                        continue
+                try:
+                    dialog_loc.wait_for(state="hidden", timeout=5000)
+                except Exception:
+                    pass
+                for _ in range(8):
+                    if _count_attached_chips() >= expected:
+                        return True
+                    time.sleep(1)
+            return False
+
         try:
             if expect_in_gallery:
                 # Scroll-search the full gallery — this is the "trust the
@@ -2199,47 +2251,35 @@ def upload_reference_images(page, image_paths, context="", already_uploaded=None
                 # file genuinely isn't there do we re-upload.
                 gallery_item = _find_gallery_item_scrolling(dialog, filename)
                 if gallery_item is not None:
-                    container = gallery_item.locator("xpath=..").first
-                    try:
-                        container.scroll_into_view_if_needed(timeout=2000)
-                        time.sleep(0.3)
-                    except Exception:
-                        pass
-                    try:
-                        container.click(timeout=3000)
-                    except Exception:
-                        try:
-                            gallery_item.click(timeout=3000, force=True)
-                        except Exception:
-                            pass
-                    print(f"{prefix}  ✓ Reused from gallery: {filename}", flush=True)
-                    selected_from_gallery = True
-                    time.sleep(1)
+                    if _click_tile_and_verify(dialog, gallery_item, chips_before_this):
+                        print(f"{prefix}  ✓ Reused from gallery: {filename}", flush=True)
+                        selected_from_gallery = True
+                    else:
+                        print(f"{prefix}  ⚠ Gallery tile wouldn't attach — falling back to upload", flush=True)
             else:
                 # Fresh upload path — quick check only. If the alt matches
                 # by coincidence we can still reuse; otherwise proceed to
                 # upload.
                 gallery_item = dialog.locator(f"img[alt='{filename}']").first
-                if gallery_item.count() > 0:
-                    try:
-                        if gallery_item.is_visible(timeout=1000):
-                            container = gallery_item.locator("xpath=..").first
-                            container.scroll_into_view_if_needed(timeout=2000)
-                            time.sleep(0.3)
-                            try:
-                                container.click(timeout=3000)
-                            except Exception:
-                                gallery_item.click(timeout=3000, force=True)
-                            print(f"{prefix}  ✓ Reused from gallery: {filename}", flush=True)
-                            selected_from_gallery = True
-                            time.sleep(1)
-                    except Exception:
-                        pass
+                if gallery_item.count() > 0 and gallery_item.is_visible(timeout=1000):
+                    if _click_tile_and_verify(dialog, gallery_item, chips_before_this):
+                        print(f"{prefix}  ✓ Reused from gallery: {filename}", flush=True)
+                        selected_from_gallery = True
         except Exception:
             pass
 
         if expect_in_gallery and not selected_from_gallery:
-            print(f"{prefix}  ⚠ Expected {filename} in gallery but not found after scroll — will re-upload", flush=True)
+            print(f"{prefix}  ⚠ Expected {filename} in gallery but couldn't reuse — will re-upload", flush=True)
+            # A failed tile click can leave the dialog closed; the upload
+            # step below needs it open. Reopen if necessary.
+            try:
+                if not dialog.is_visible(timeout=500):
+                    page.locator(f"{frame_selector}:has(i:text('add_2'))").first.click(timeout=3000)
+                    time.sleep(1.0)
+                    dialog = page.locator('[role="dialog"]').first
+                    dialog.wait_for(state="visible", timeout=3000)
+            except Exception:
+                pass
 
         # --- Step 2b: If not reusing, upload exactly like flow_worker.upload_frame ---
         if not selected_from_gallery:
