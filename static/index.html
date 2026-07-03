@@ -11068,6 +11068,24 @@ Ambient: same kitchen room tone, soft pour sound.
                 // card / undefined whenever an earlier clip was filtered out.
                 card.outerHTML=renderClip(clip,jobId);
             }
+            // v815 — refresh/add the auto-substituted-image badge idempotently.
+            // Marker class lets us find + replace it without duplicating on
+            // repeated polls; simplest correct approach is innerHTML replace.
+            if (clip && clip.auto_image_retry) {
+                const badgeHtml = autoRetryBadgeHtml(clip, jobId);
+                let badgeWrap = card.querySelector('.v815-auto-retry-badge');
+                if (!badgeWrap) {
+                    badgeWrap = document.createElement('div');
+                    badgeWrap.className = 'v815-auto-retry-badge';
+                    const frames = card.querySelector('.clip-frames');
+                    const clipText = card.querySelector('.clip-text');
+                    const content = card.querySelector('.clip-content');
+                    if (frames && frames.parentNode) frames.insertAdjacentElement('afterend', badgeWrap);
+                    else if (clipText && clipText.parentNode) clipText.insertAdjacentElement('beforebegin', badgeWrap);
+                    else if (content) content.appendChild(badgeWrap);
+                }
+                if (badgeWrap.innerHTML !== badgeHtml) badgeWrap.innerHTML = badgeHtml;
+            }
         }
         
         async function updateBanner(jobId,clips){
@@ -11143,6 +11161,19 @@ Ambient: same kitchen room tone, soft pour sound.
             }
         }
         
+        // v815 — badge shown on any clip whose image was auto-substituted for a
+        // prominent-people rejection: what was used + the originally-intended image.
+        function autoRetryBadgeHtml(clip, jid) {
+            const a = clip && clip.auto_image_retry;
+            if (!a || !a.used_frame || a.used_frame === a.original_frame) return '';
+            const origBase = (a.original_frame || '').split('/').pop();
+            const usedBase = (a.used_frame || '').split('/').pop();
+            const origThumb = origBase ? `${API}/jobs/${jid}/images/${encodeURIComponent(origBase)}` : '';
+            return `<div style="margin-top:6px;font-size:11px;color:#fbbf24;background:rgba(245,158,11,0.12);padding:6px 8px;border-radius:6px;border:1px solid rgba(245,158,11,0.35);">
+                  ⚠ image rejected (prominent people) — auto-used <strong>${usedBase}</strong> (mode: ${a.mode || '?'})
+                  ${origThumb ? `<div style="margin-top:4px;opacity:0.85;">originally intended:<br><img src="${origThumb}" style="max-width:80px;border-radius:4px;margin-top:2px;" onerror="this.style.display='none'"></div>` : ''}
+                </div>`;
+        }
         function renderClip(c,jid){
             // v701 + v740 — image-attributable-failure card. Surfaces the
             // rejected frame back to the user with an "upload replacement"
@@ -11376,7 +11407,11 @@ Ambient: same kitchen room tone, soft pour sound.
                 ? `<span style="color:#818cf8;font-size:11px;" title="Audio twin lip-syncs this line">🎙 ${c.voiceover_line}</span>`
                 : c.dialogue_text;
 
-            return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}<div class="clip-upload-own" style="margin-top:6px;text-align:center;">${uploadVideoCtl}</div></div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${_v698aPairedBadge}${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}<div class="clip-text">${_v698aDisplayText}</div><div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
+            // v815 — auto-substituted-image badge (prominent-people rejection).
+            // Wrapped in a marker div so patchClipUI can find/refresh it on later polls.
+            const _v815AutoRetryBadge = `<div class="v815-auto-retry-badge">${autoRetryBadgeHtml(c, jid)}</div>`;
+
+            return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}<div class="clip-upload-own" style="margin-top:6px;text-align:center;">${uploadVideoCtl}</div></div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${_v698aPairedBadge}${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}${_v815AutoRetryBadge}<div class="clip-text">${_v698aDisplayText}</div><div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
 
         }
 
