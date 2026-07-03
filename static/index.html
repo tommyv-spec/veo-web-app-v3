@@ -17900,7 +17900,6 @@ Ambient: same kitchen room tone, soft pour sound.
             // silently drop the next AUTOMATIC download (iframe.src) — so the
             // old iframe installer did nothing while/after an export. The server
             // sets Content-Disposition, so the filename comes from the header.
-            console.log('[imgDownloadInstaller/v813] user-gesture download', url);
             const a = document.createElement('a');
             a.href = url;
             a.download = '';  // let server Content-Disposition name the file
