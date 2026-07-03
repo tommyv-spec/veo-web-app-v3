@@ -16258,6 +16258,7 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                     let hasGenerating = false;
                     let hasFailed = false;
                     const videoUrls = [];
+                    const failedUuids = [];  // v816
                     
                     tiles.forEach(t => {
                         if (t.querySelector("video")) {
@@ -16277,7 +16278,17 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                         }
                         const hasRefresh = t.querySelector("i") &&
                             Array.from(t.querySelectorAll("i")).some(i => i.textContent.trim() === 'refresh');
-                        if (hasRefresh) { hasFailed = true; }
+                        if (hasRefresh) {
+                            hasFailed = true;
+                            // v816 — collect the failed tile's OWN media uuid so
+                            // Python can match it to the API terminal record
+                            // (SEXUAL/PROMINENT/...) — same as FailCheck v802.
+                            for (const el of t.querySelectorAll('img,video,source')) {
+                                const s = el.getAttribute('src') || el.src || '';
+                                const m = s.match(/[?&]name=([0-9a-fA-F-]{36})/);
+                                if (m) failedUuids.push(m[1].toLowerCase());
+                            }
+                        }
                     });
                     
                     // Fallback: if no data-tile-id children, scan container directly
@@ -16303,7 +16314,8 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                     return {
                         exists: true, tiles: tiles.length || 1,
                         hasVideo: hasVideo, hasGenerating: hasGenerating, hasFailed: hasFailed,
-                        blobOnly: blobOnly, videoUrls: videoUrls
+                        blobOnly: blobOnly, videoUrls: videoUrls,
+                        failedUuids: failedUuids
                     };
                 }""")
                 
@@ -16339,6 +16351,21 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                 
                 # FAILED: tile failed → click Reuse Prompt to retry in-place
                 if _has_failed and not _has_generating and not _has_video:
+                    # v816 — consult the API terminal registry FIRST (same as
+                    # FailCheck v802). A SEXUAL/CSAM/REPUTATIONAL reject is
+                    # deterministic on this prompt+image: the in-place
+                    # Reuse-Prompt retry AND the retry_swap requeue can only
+                    # fail again. Route the change-prompt card immediately —
+                    # no retry, no requeue. (Operator: "this last redo is not
+                    # needed".)
+                    _failed_uuids = _tile_info.get('failedUuids') or []
+                    _term_api = _terminal_reason_for_uuids(_failed_uuids)
+                    if _term_api:
+                        route_terminal_content_reject(clip_id, _term_api)
+                        print(f"[REDO] ⛔ Clip {clip_index+1} terminal content reject ({_term_api}, API record, "
+                              f"media {[u[:8] for u in _failed_uuids]}) — no in-place retry, no requeue (v816)", flush=True)
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        return False
                     if not _retried_in_place:
                         print(f"[REDO] ⚠ data-index=0 failed — clicking Reuse Prompt to retry...", flush=True)
                         try:
