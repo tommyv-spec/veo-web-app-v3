@@ -16,6 +16,57 @@ class HikerAPIError(Exception):
     pass
 
 
+def ig_thumb_key(account_id, shortcode: str) -> str:
+    """R2 object key for a cached Instagram thumbnail. Stable per (account, reel)."""
+    return f"instagram/thumbs/{account_id}/{shortcode}.jpg"
+
+
+def _default_thumb_fetch(url: str, timeout: int):
+    """Download thumb bytes from an IG CDN url. Returns (bytes, content_type)."""
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    return resp.content, resp.headers.get("Content-Type", "image/jpeg")
+
+
+def cache_thumb_bytes(thumb_url, remote_key: str, storage, *, fetch=None, timeout: int = 10):
+    """Download an IG thumbnail and upload the bytes to object storage.
+
+    Returns `remote_key` on success, or None on any failure (missing url,
+    no storage, download error, empty body). NEVER raises — a failed thumb
+    cache must never break the sync request.
+
+    `fetch` is injectable for tests: a callable (url, timeout) -> (bytes, content_type).
+    """
+    if not thumb_url or storage is None:
+        return None
+    fetch = fetch or _default_thumb_fetch
+    try:
+        data, content_type = fetch(thumb_url, timeout)
+        if not data:
+            return None
+        storage.upload_bytes(
+            data,
+            remote_key,
+            content_type=content_type or "image/jpeg",
+        )
+        return remote_key
+    except Exception as e:  # noqa: BLE001 — best-effort cache, log + move on
+        print(f"[IG thumb cache] failed {remote_key}: {e}", flush=True)
+        return None
+
+
+def thumb_public_url(video_id, thumb_r2_key, raw_thumb_url):
+    """URL the frontend should use for a video's thumbnail.
+
+    Prefer the cached same-origin route (never expires); fall back to the raw
+    IG url (may be dead, but harmless — the frontend has an onerror placeholder);
+    None if neither exists.
+    """
+    if thumb_r2_key:
+        return f"/api/instagram/videos/{video_id}/thumb"
+    return raw_thumb_url or None
+
+
 def _get(path: str, params: dict, api_key: str, _retry: int = 1) -> dict:
     headers = {"x-access-key": api_key, "accept": "application/json"}
     resp = requests.get(f"{HIKER_BASE}{path}", headers=headers, params=params, timeout=20)
