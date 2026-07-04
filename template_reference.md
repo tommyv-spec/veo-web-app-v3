@@ -14868,3 +14868,27 @@ Prompt B (voice-only) = the dialogue sentence + the post-speech sentence, no IMM
 - `verify_video_format.py` linter: `speaker: silent` scenes exempt from the v696 line gate; clips regex also counts non-dotted `### Clip N` headers.
 
 **Touched**: `code/static/index.html` + `code/image_platform.py` (commit ab1b694), `code/verify_video_format.py` (commit ed332e9, first tracked), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline). Operator-verified working 2026-06-12.
+
+## v822 — Local-folder watcher never-miss hardening (platform-internal)
+
+**Problem**: the Local-folder tab (browser watches a picked folder, uploads new final cuts, auto-matches against Finishing jobs) had 9 known ways to lose a video. Operator directive 2026-07-05: "never — and I say never — miss a video."
+
+**The 9 miss-paths + fixes** (frontend = `static/index.html` watcher block; backend = `main.py` local-videos endpoints + `local_transcribe.py`):
+
+| # | Miss path | Fix |
+|---|---|---|
+| 1 | Export still writing → partial file hashed + uploaded; partial can auto-match; the finished file gets a different hash and its job is already taken → "done — no match" forever | **Stability gate**: a file must show the same size+mtime on 2 consecutive scans before it is read |
+| 2 | `failed` row (transient ffmpeg/whisper error) returned as-is by the idempotent upload → hash marked seen → never retried | **Reprocess path**: `should_reprocess()` — failed rows and pending/running rows older than 10 min re-run the pipeline on re-upload; the browser excludes those rows from its seen-set |
+| 3 | Match runs once, at upload, vs `awaiting_finishing` only → video uploaded before its job reaches Finishing stays unmatched forever | **Rematch sweep**: `POST /api/local-videos/rematch` re-scores every done-but-unmatched row; the browser calls it after every scan |
+| 4 | One hung fetch (no timeout) left the in-flight flag stuck → watcher silently dead until reload | `_fetchT()` timeout on every watcher fetch (180s upload / 20s rest) + 5-min in-flight watchdog |
+| 5 | Permission lost → scans silently no-op while the status still said "watching" | Poll path checks permission NON-interactively; on loss: RED "PERMISSION LOST" status + `⚠` tab-title prefix |
+| 6 | Transient file lock (AV scan / sync client) → hash missing for one scan → DELETE fired → matched job reverted | **Delete debounce**: hash must be missing 2 consecutive scans |
+| 7 | Switching watched folders made every old hash "missing" → mass revert of recent matches | **Delete-eligible set**: only hashes actually observed in THIS folder this session may trigger DELETE |
+| 8 | Every scan re-read + re-hashed EVERY file (multi-GB folder = minutes/scan) | **Hash cache** keyed `name|size|mtime` — unchanged files are never re-read |
+| 9 | >500MB / unreadable / settling files skipped silently (console only) | Skip list surfaces in the status line ("N skipped" + hover for reasons) |
+
+**Still not fixable in-browser**: tab closed or discarded = no polling. Mitigations: `visibilitychange` → immediate scan when the tab returns, "last scan Xs ago" in the status line (orange past 90s), existing install-as-PWA hint for persistent permission.
+
+**Diagnostics (temporary, remove after operator evidence)**: `[local] v822 reprocess hash=…` (main.py) + `[local] rematch sweep … checked=N matched=M` (local_transcribe.py).
+
+**Touched**: `code/static/index.html` (watcher block rewrite; dead `_uploadLocalFile` removed), `code/main.py` (upload reprocess path + rematch endpoint), `code/local_transcribe.py` (`should_reprocess` + `rematch_unmatched`), `code/tests/test_local_watch_never_miss.py` (11 tests), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline). Plan: `code/docs/superpowers/plans/2026-07-05-local-watch-never-miss.md`. No videos/*.md format change — platform-internal only.
