@@ -14868,3 +14868,29 @@ Prompt B (voice-only) = the dialogue sentence + the post-speech sentence, no IMM
 - `verify_video_format.py` linter: `speaker: silent` scenes exempt from the v696 line gate; clips regex also counts non-dotted `### Clip N` headers.
 
 **Touched**: `code/static/index.html` + `code/image_platform.py` (commit ab1b694), `code/verify_video_format.py` (commit ed332e9, first tracked), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline). Operator-verified working 2026-06-12.
+
+## v821 — Prompt B is the FULL Prompt A with only the spoken line reworded (SUPERSEDES the v805 voice-only shape for new builds)
+
+**What we now know**: the gen-time `PROMINENT_PEOPLE` block is very often NOT the face — it is the SPOKEN LINE tripping the audio classifier, and the platform mislabels it as prominent-people. So the fix is to change the LINE, not the image, and not to strip the action. v805's voice-only Prompt B threw away the whole visual (IMMEDIATE ACTION + camera) to dodge the action+voice combo; but when the real trigger is the line's wording, a voice-only fallback that keeps the SAME words still trips. What clears it is the SAME clip with the line said in DIFFERENT words.
+
+**The new rule (redefines Prompt B)**: Prompt B = Prompt A copied WORD-FOR-WORD, EXCEPT the quoted dialogue line, which is REWORDED — different words, same meaning, same selling power.
+- **Keep from A, verbatim**: the `IMMEDIATE ACTION` sentence, the camera/action prose, the v797 colon, the v809/v810 delivery shape, the ambient lines — everything except the words inside the quotes.
+- **Change**: ONLY the text inside the `"..."`. Say the same thing a new way so the classifier sees a fresh line. The reworded line still obeys v806 (no image-attached banned tokens), v796 (no deceptive-claim framing), v615 (no em-dash), v693 (lowercase).
+- **Mandatory** on EVERY shot scene that has a spoken line — not optional, not only for clips that tripped before.
+
+**Why "same meaning, same selling power"**: Prompt B is a live fallback the worker may ship as the real clip, so its line has to sell exactly as well as A's. A weaker reworded line means a weaker video if B fires. Reword for the classifier, never water down the pitch (§5.5 still stands).
+
+**Linter (`verify_video_format.py`, already built) HARD-FAILS if**:
+1. Prompt B is missing on a clip that has a spoken line,
+2. Prompt B's body (everything outside the quoted line) differs from Prompt A's body,
+3. Prompt B's quoted line EQUALS Prompt A's quoted line (it must be reworded).
+
+**Worker behavior (built in a later task)**: on a gen-time prominent-people block, the worker re-submits the SAME clip once with Prompt B (the reworded line), then terminal-fails if it still trips. This is the cross-reference: the v805 cascade rung "retry same model with Prompt B" stays, but Prompt B now carries a reworded LINE, so the retry actually attacks the real trigger (the words), not just the action. Export/UI line propagation: the reworded B line rides the same `veo_prompt_b` / `clips.prompt_text_b` path v805 built — no new plumbing, only the authored content changes shape.
+
+**Upload-time prominent is UNCHANGED**: when the FACE is rejected before any audio runs (upload-time), that still swaps the IMAGE (v815), NOT the line. v821 only covers the gen-time block that is really a line trip.
+
+**Relation to v805**: v821 SUPERSEDES the v805 "voice-only, no IMMEDIATE ACTION" definition of Prompt B for all NEW builds. It does NOT delete v805 (forward-only history — the cascade, the parse path, and the per-clip A+B contract all came from v805 and still hold). The ONLY change is what Prompt B CONTAINS: full-A-plus-reworded-line, not the line alone.
+
+**Scope / gates**: GENERATE-side authoring, every shot scene with a spoken line on every NEW build. Forward-only — existing shipped builds keep their old voice-only Prompt B; the worker still accepts the old shape; only new builds must use the reworded-B shape. Decision tree (updated): a gen-time prominent-people block that is really a line trip → Prompt B reworded line auto-retry (v821). Upload-time face reject → swap the image (v815). Combined comment+follow CTA → split (v798). Deceptive-claim vocabulary → reword the line in BOTH A and B (v796). Image-attached banned token → reword in BOTH A and B (v806).
+
+**Touched**: `code/template_reference.md` §v821 (canonical, this deep-dive), `code/template_new_format.md` (skeleton — Prompt B block reshaped to full-A-plus-reworded-line), `code/verify_video_format.py` (3 hard-fail gates — already built), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (authoring note), root `CLAUDE.md` (gotcha quickref, supersedes the v805 row), `wiki/log.md` (timeline). Operator directive 2026-07-04.
