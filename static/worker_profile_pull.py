@@ -220,8 +220,8 @@ def close_laptop_chrome(user_data_dir, profile_folder=None, log=print):
 
     Kept as a near no-op so injected close_chrome hooks and older callers stay
     valid. Non-Windows unchanged (the copy path handles locks; nothing to do)."""
-    log("close chrome: skipped (v819.2 — per-file cookie-lock release during copy; "
-        "Chrome stays open)")
+    log("cookie unlock: deferred to the copy step (Restart Manager releases only "
+        "the cookie file's locker; the whole Chrome is NOT closed)")
     return
 
 
@@ -494,12 +494,28 @@ def _read_unlocked_bytes(path, timeout=2.0):
     return None
 
 
+def _cookie_count(cookies_db):
+    """Number of rows in a Chrome cookies SQLite, or -1 if unreadable."""
+    if not cookies_db or not os.path.isfile(cookies_db):
+        return -1
+    try:
+        import sqlite3
+        con = sqlite3.connect(cookies_db, timeout=3)
+        try:
+            return con.execute("SELECT COUNT(*) FROM cookies").fetchone()[0]
+        finally:
+            con.close()
+    except Exception:
+        return -1
+
+
 def _lean_copy2(src, dst):
     """shutil.copytree copy_function that survives Chrome's cookie-DB lock
     WITHOUT closing any window. Normal copy first; on a lock, the cookie store is
-    read via the Restart Manager (Network Service only) + tight read; any other
-    locked file is skipped (not needed for Flow auth). NEVER raises on a lock, so
-    a single locked file can't abort the whole profile copy."""
+    read via the Restart Manager (Network Service only) + tight read, retried a
+    few times to win the re-lock race; any other locked file is skipped (not
+    needed for Flow auth). NEVER raises on a lock, so a single locked file can't
+    abort the whole profile copy."""
     try:
         shutil.copy2(src, dst)
         return
@@ -507,16 +523,29 @@ def _lean_copy2(src, dst):
         if getattr(e, "winerror", None) not in (32, 33):  # not a sharing/lock error
             raise
     base = os.path.basename(src).lower()
-    if base in _RM_SAFE_FILES and _rm_force_unlock(src):
-        data = _read_unlocked_bytes(src)
+    if base not in _RM_SAFE_FILES:
+        # Login Data / Web Data etc. — held by the main browser, not needed for
+        # Flow auth. Skip rather than risk closing Chrome.
+        return
+    # The cookie store IS locked by Chrome. Force the Network Service to release
+    # it and grab the bytes before it re-locks. Retry the whole cycle — one
+    # RmShutdown sometimes loses the race on a busy machine.
+    for _attempt in range(5):
+        if not _rm_force_unlock(src):
+            break  # guard refused (main-browser lock) or RM unavailable → give up
+        data = _read_unlocked_bytes(src, timeout=1.0)
         if data is not None:
             try:
                 with open(dst, "wb") as f:
                     f.write(data)
+                print(f"  [cookies] released lock via Restart Manager + copied "
+                      f"({len(data)} bytes) — Chrome stayed open (attempt {_attempt + 1})",
+                      flush=True)
                 return
             except Exception:
                 pass
-    # Couldn't get it, or not safe to unlock → skip this file (best-effort).
+    print("  [cookies] ⚠ could not copy the locked cookie DB after 5 Restart-Manager "
+          "attempts — golden build will fall back to the existing golden", flush=True)
     return
 
 
@@ -571,6 +600,16 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
         shutil.copytree(src_profile, os.path.join(tmp, "Default"),
                         ignore=_lean_ignore, ignore_dangling_symlinks=True,
                         copy_function=_lean_copy2)
+        # 1b. VERIFY the cookie DB actually landed — it's the whole point of the
+        # pull, and it's the file Chrome locks. If it's missing/empty the golden
+        # would log the operator out, so fail here and keep the existing golden.
+        _ck = os.path.join(tmp, "Default", "Network", "Cookies")
+        _nck = _cookie_count(_ck)
+        if _nck <= 0:
+            raise RuntimeError(
+                "cookie DB not copied (Chrome held the lock and the Restart-Manager "
+                "release lost the race) — keeping existing golden")
+        log(f"{tag}lean golden: ✓ cookies copied ({_nck}) — Chrome NOT closed")
         # 2. Local State (DPAPI cookie key) -> golden root, single Default profile
         with open(os.path.join(user_data_dir, "Local State"), "r", encoding="utf-8") as f:
             ls = json.load(f)
