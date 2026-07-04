@@ -22,11 +22,11 @@ def test_prominent_with_untried_b_retries_b():
 def test_prominent_after_b_is_terminal():
     cid="c2"; _reset(cid); fw._CLIP_PROMPT_B[cid]="reworded B text"; fw._PROMPT_B_TRIED[cid]=True
     action,_ = fw.route_generation_policy(cid,"omni",is_prominent=True)
-    assert action in ("fail_terminal","fail")
+    assert action == "fail_terminal"
     assert cid in _FAILED
 
 def test_prominent_no_b_is_terminal():
     cid="c3"; _reset(cid)
     action,_ = fw.route_generation_policy(cid,"omni",is_prominent=True)
-    assert action in ("fail_terminal","fail")
+    assert action == "fail_terminal"
     assert cid in _FAILED

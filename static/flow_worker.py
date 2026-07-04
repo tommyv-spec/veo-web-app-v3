@@ -6618,6 +6618,7 @@ class HumanPacer:
                                                 continue
                                             _is_prom = tile_text_is_prominent(page, _pi)
                                             _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, self.account_name, generation_attempt=_clip_obj.get('generation_attempt', 1))
+                                            # v821 — unreachable for gen-time prominent (route_generation_policy now returns retry_prompt_b / fail_terminal, never fail_prominent). Kept as a defensive no-op.
                                             if _pa == 'fail_prominent':
                                                 print(f"[{self.account_name}] [PolicyScan] 🖼 Clip {_fail_ci+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
                                                 clip_log(clip_id, _fail_ci, "FAILED", "prominent-people policy — replace-image card")
@@ -16498,6 +16499,7 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                         else:
                             _is_prom = tile_text_is_prominent(page, 0)
                             _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=clip.get('generation_attempt', 1))
+                            # v821 — unreachable for gen-time prominent (route_generation_policy now returns retry_prompt_b / fail_terminal, never fail_prominent). Kept as a defensive no-op.
                             if _pa == 'fail_prominent':
                                 print(f"[REDO] 🖼 Clip {clip_index+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
                             elif _pa == 'fail_terminal':
@@ -19653,6 +19655,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         continue
                     _is_prom = _dfc in _prom_killed
                     _pa, _pmsg = route_generation_policy(_df_clip['id'], getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_df_clip.get('generation_attempt', 1))
+                    # v821 — unreachable for gen-time prominent (route_generation_policy now returns retry_prompt_b / fail_terminal, never fail_prominent). Kept as a defensive no-op.
                     if _pa == 'fail_prominent':
                         print(f"[Flow] 🖼 clip {_dfc+1} prominent-people block — replace-image card shown (no model swap); job continues", flush=True)
                         clip_log(_df_clip['id'], _dfc, "FAILED", "prominent-people policy — replace-image card")
@@ -20198,6 +20201,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                                 continue
                                             _is_prom = tile_text_is_prominent(page, _pi)
                                             _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_clip_obj.get('generation_attempt', 1))
+                                            # v821 — unreachable for gen-time prominent (route_generation_policy now returns retry_prompt_b / fail_terminal, never fail_prominent). Kept as a defensive no-op.
                                             if _pa == 'fail_prominent':
                                                 permanently_failed_clips.add(_fail_ci)
                                                 _pending_left.discard(_fail_ci)
