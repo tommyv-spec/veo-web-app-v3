@@ -14823,6 +14823,35 @@ Clips WITHOUT a Prompt B keep the exact pre-v805 ladder (swap → fail). Fail th
 
 **Touched**: this deep-dive, `wiki/patterns/conventions.md` (row), `wiki/meta/build-rule-index.md` §A (row), `wiki/meta/generate-video-checklist.md` (note), root `CLAUDE.md` (quickref row), memory `feedback_veo-fast-line-delivery`, `wiki/log.md`. Operator 2026-07-02 (with the Veo pacing-keyword instruction set).
 
+**SUPERSEDED 2026-07-04 by v810** — the pacing phrasing below ("rapid, fast-paced … speaking quickly and barely pausing for breath" + "in a fast-paced sequence") BACKFIRES: it makes the model stretch/repeat the line to fill the fixed clip → speech duplication + filler + panicked audio. Use the v810 form instead. v809's GOAL (line fits the clip, no cutoff) is now met by say-exactly + post-speech-silence, not by pace tokens.
+
+## v810 — Say-exactly + post-speech silence (Veo dialogue anti-duplication; supersedes v809 pacing)
+
+**Why**: Veo/Omni generate native audio for the whole ~8s clip. When the dialogue is SHORT relative to the clip, or the prompt over-specifies speed ("rapid", "fast-paced sequence", "barely pausing for breath"), the model tries to FILL the remaining time — it stretches the line, repeats words, or invents filler ("panicked-sounding" audio). The v809 pacing cue made this WORSE. Operator 2026-07-04: the reliable fix is two prompt changes — (1) anchor the EXACT words with `saying exactly:`, and (2) give an explicit END-OF-SPEECH behavioral cue so the model has something to do after the line instead of looping.
+
+**The rule (authoring shape — every Veo dialogue clip, Prompt A AND Prompt B AND `.audio` twins):**
+1. **Drop the v809 pacing phrasing.** No "rapid, fast-paced", no "speaking quickly and barely pausing for breath", no "in a fast-paced sequence" in the IMMEDIATE ACTION opener. These trigger the loop/stretch. Keep the REGISTER word + American accent.
+2. **Say exactly** (the anchor). Dialogue sentence: `The <speaker> speaks clearly in a warm <register> American accent, saying exactly: "<line>".` The colon lands directly before the quote (v797 preserved, now after `saying exactly:`).
+3. **Post-speech silence** (the load-bearing new sentence). Immediately after the dialogue sentence: `Immediately after finishing the line, <she/he> stops speaking, holds a <warm / inviting / knowing> expression, and stays silent for the rest of the clip.` This is the behavioral end-cue that kills the fill-time looping.
+4. **Concurrency unchanged (v794).** IMMEDIATE ACTION keeps the concurrency tail (`…as <she/he> delivers the line`); just drop the "in a fast-paced sequence" pacing opener → `IMMEDIATE ACTION: <action>, as she delivers the line.`
+5. **Pronoun**: `she` for Nuri / female personas; `he` for male speakers (testimonial men, the anchor if male). Match the visible speaker.
+
+**Full worked clip (Prompt A):**
+```
+IMMEDIATE ACTION: Nuri holds the Korella saffron bottle squared to the lens with a warm inviting nod, as she delivers the line.
+
+The main AI generated character speaks clearly in a warm inviting American accent, saying exactly: "but you have to follow me first." Immediately after finishing the line, she stops speaking, holds a warm friendly smile, and stays silent for the rest of the clip.
+```
+Prompt B (voice-only) = the dialogue sentence + the post-speech sentence, no IMMEDIATE ACTION.
+
+**Interplay**: v797 colon KEPT (after `saying exactly:`). v794 concurrency KEPT. v809 pacing phrasing SUPERSEDED (do NOT use rapid/barely-pausing/fast-paced-sequence anymore). v642/v644 subject+pad unchanged. The format linter does NOT enforce dialogue phrasing (verified — `verify_video_format.py` has no pacing/colon check) and `veo_prompt_overrides.py` keys only on `**Text prompt:**` + one `IMMEDIATE ACTION`, so the new phrasing parses unchanged.
+
+**Lint tell**: a clip still carrying "barely pausing for breath" / "rapid, fast-paced" / "in a fast-paced sequence", OR missing the "stays silent for the rest of the clip" post-speech sentence = pre-v810 form → update.
+
+**Scope / gates**: every Veo dialogue prompt (A + B + `.audio` twins) on new builds. Forward-only per `feedback_rule-changes-forward-only` (don't retro-edit shipped/rendered builds; apply on re-render). First applied: `videos/nuri-korella-ed-organ-shock-man-cinnamon-turmeric-cortisol-saffron-salesy-v1.md` (all 12 clips).
+
+**Touched**: this deep-dive, `wiki/patterns/conventions.md` (row), `wiki/meta/build-rule-index.md` §A (row), root `CLAUDE.md` (quickref row), the build-video skill Step-5, memory `feedback_veo-fast-line-delivery` (amended → say-exactly+silence), `wiki/log.md`. Operator 2026-07-04.
+
 ## v786 — Fully-silent builds: storyboard pre-fill + scene-level action_note (no dialogue lines anywhere)
 
 **What broke**: the Rovellaro grandma build (2026-06-12) is fully silent — `speaker: silent` on all 19 scenes, ZERO `- **line:**` bullets, natural sounds only, captions in CapCut. Import parsed fine, but on promote-to-video the storyboard editor collapsed to ONE mega-scene ("Scene 1 (Image 1) Clips #1-19", default blend) AND the note chips showed a DIFFERENT build's beats. Cause: the frontend pre-fill gate (`static/index.html`, prepare flow step 6.5) required `hasAnyVoiceover` — meant to skip legacy pre-v432 no-metadata batches — so a zero-line build skipped the whole pre-fill: `sceneBreaks` never assigned, and the previous batch's `window._actionNotes` / `_veoPromptOverrides` leaked into the new editor render. Second gap: the markdown bullet parser attached `action_note` only to a preceding `line:` bullet, so a silent scene's note was silently dropped ("malformed") — empty chips even with pre-fill fixed.
