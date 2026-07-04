@@ -5062,33 +5062,45 @@ def route_generation_policy(clip_id, current_model, is_prominent, account_name="
                             generation_attempt=1):
     """Route a generation-time Flow policy block to the right recovery UI.
 
-    is_prominent True  -> image-attributable: report_policy_violation stamps
-                          CONTENT_POLICY_VIOLATION so the frontend shows the
-                          replace-image card. NO model swap (a flagged face is
-                          not fixed by Veo<->Omni). Returns ('fail_prominent', msg).
+    is_prominent True  -> v821: gen-time prominent is often a MASKED dialogue
+                          trip (Flow scans the native TTS of the line). Retry the
+                          SAME clip ONCE with the reworded line (Prompt B) if one
+                          is registered and not yet tried -> ('retry_prompt_b', msg).
+                          Otherwise (no Prompt B, or already tried) terminal-fail
+                          with a "rework the line" message and return
+                          ('fail_terminal', msg). NO model swap / replace-image
+                          card here — a face is not fixed by Veo<->Omni, and the
+                          real trip is the line wording.
     is_prominent False -> delegate to policy_gen_next_action: swap model once,
                           then GENERATION_POLICY 'change the prompt'.
-                          Returns ('retry_swap'|'fail', msg).
+                          Returns ('retry_prompt_b'|'retry_swap'|'fail', msg).
 
     v772 — generation_attempt (DB-persisted) is forwarded so the durable
     terminal-fail backstop works across worker restarts / dispatch re-queues.
     """
     prefix = f"[{account_name}] " if account_name else ""
     if is_prominent:
-        report_policy_violation(
+        # v821 — gen-time prominent is often a MASKED dialogue trip (Flow scans
+        # the native TTS of the line). Try the reworded line (Prompt B) ONCE
+        # before giving up; only if it STILL trips do we terminal-fail. This
+        # branch is GENERATION-time prominent only — upload-time prominent keeps
+        # the v815 image path (report_policy_violation elsewhere).
+        # No lock: policy_gen_next_action reads/writes _CLIP_PROMPT_B /
+        # _PROMPT_B_TRIED lock-free too — match that, don't add a new discipline.
+        _has_pb = bool(_CLIP_PROMPT_B.get(clip_id))
+        if _has_pb and clip_id not in _PROMPT_B_TRIED:
+            _PROMPT_B_TRIED[clip_id] = True
+            print(f"{prefix}[v821] prominent-people on A for clip {clip_id} "
+                  f"-> retrying SAME clip with reworded line (Prompt B)", flush=True)
+            return ('retry_prompt_b',
+                    'prominent-people on A - retrying with reworded line (Prompt B)')
+        print(f"{prefix}[v821] prominent persists after reworded line on clip {clip_id} "
+              f"-> terminal fail (rework the line)", flush=True)
+        fail_clip_general_policy(
             clip_id,
-            rejected_image_key=None,
-            detail=("⚠️ Flow flagged a prominent person. Upload a different "
-                    "face image to retry (switching the model won't fix a "
-                    "flagged face)."),
-            # v815 — this branch fires ONLY under `if is_prominent:` (a
-            # detected prominent-people block), so forward the reason for
-            # backend auto-retry.
-            error_reason="PROMINENT_PEOPLE",
-        )
-        print(f"{prefix}[policy] prominent-people block on clip {clip_id} "
-              f"→ replace-image card (no model swap)", flush=True)
-        return ('fail_prominent', 'prominent-people — replace-image card shown')
+            "Flow still flagged this as a prominent person after the reworded line (Prompt B). "
+            "Rework the dialogue line - the current wording keeps tripping the filter.")
+        return ('fail_terminal', 'prominent persists after reworded line (Prompt B)')
     return policy_gen_next_action(clip_id, current_model, generation_attempt=generation_attempt)
 
 
@@ -6609,6 +6621,11 @@ class HumanPacer:
                                             if _pa == 'fail_prominent':
                                                 print(f"[{self.account_name}] [PolicyScan] 🖼 Clip {_fail_ci+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
                                                 clip_log(clip_id, _fail_ci, "FAILED", "prominent-people policy — replace-image card")
+                                            elif _pa == 'fail_terminal':
+                                                # v821 — prominent persisted after the reworded line (Prompt B);
+                                                # route_generation_policy already terminal-failed the clip. Log only.
+                                                print(f"[{self.account_name}] [PolicyScan] ❌ Clip {_fail_ci+1} prominent persists after reworded line (Prompt B) — terminal fail (rework the line)", flush=True)
+                                                clip_log(clip_id, _fail_ci, "FAILED", "prominent persists after Prompt B — terminal")
                                             elif _pa == 'fail':
                                                 fail_clip_general_policy(clip_id, _pmsg)
                                                 print(f"[{self.account_name}] [PolicyScan] ❌ Clip {_fail_ci+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
@@ -16483,6 +16500,10 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                             _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=clip.get('generation_attempt', 1))
                             if _pa == 'fail_prominent':
                                 print(f"[REDO] 🖼 Clip {clip_index+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
+                            elif _pa == 'fail_terminal':
+                                # v821 — prominent persisted after the reworded line (Prompt B);
+                                # route_generation_policy already terminal-failed the clip. Log only.
+                                print(f"[REDO] ❌ Clip {clip_index+1} prominent persists after reworded line (Prompt B) — terminal fail (rework the line)", flush=True)
                             elif _pa == 'fail':
                                 print(f"[REDO] ❌ Clip {clip_index+1} policy-blocked after retrying both models — failed (general policy error)", flush=True)
                                 fail_clip_general_policy(clip_id, _pmsg)
@@ -19635,6 +19656,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     if _pa == 'fail_prominent':
                         print(f"[Flow] 🖼 clip {_dfc+1} prominent-people block — replace-image card shown (no model swap); job continues", flush=True)
                         clip_log(_df_clip['id'], _dfc, "FAILED", "prominent-people policy — replace-image card")
+                    elif _pa == 'fail_terminal':
+                        # v821 — prominent persisted after the reworded line (Prompt B);
+                        # route_generation_policy already terminal-failed the clip. Log only.
+                        print(f"[Flow] ❌ clip {_dfc+1} prominent persists after reworded line (Prompt B) — terminal fail (rework the line); job continues", flush=True)
+                        clip_log(_df_clip['id'], _dfc, "FAILED", "prominent persists after Prompt B — terminal")
                     elif _pa == 'fail':
                         fail_clip_general_policy(_df_clip['id'], _pmsg)
                         print(f"[Flow] ❌ clip {_dfc+1} content-policy killed, both models tried — failed (general policy error); job continues", flush=True)
@@ -20176,6 +20202,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                                 permanently_failed_clips.add(_fail_ci)
                                                 _pending_left.discard(_fail_ci)
                                                 print(f"[Flow] [PolicyScan] 🖼 Clip {_fail_ci+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
+                                            elif _pa == 'fail_terminal':
+                                                # v821 — prominent persisted after the reworded line (Prompt B);
+                                                # route_generation_policy already terminal-failed the clip. Log + mark permanent.
+                                                permanently_failed_clips.add(_fail_ci)
+                                                _pending_left.discard(_fail_ci)
+                                                print(f"[Flow] [PolicyScan] ❌ Clip {_fail_ci+1} prominent persists after reworded line (Prompt B) — terminal fail (rework the line)", flush=True)
                                             elif _pa == 'fail':
                                                 fail_clip_general_policy(clip_id, _pmsg)
                                                 permanently_failed_clips.add(_fail_ci)
