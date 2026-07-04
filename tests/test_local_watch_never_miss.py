@@ -66,3 +66,31 @@ def test_rematch_helper_defined_and_scoped():
     assert "def rematch_unmatched(user_id, db" in src
     assert 'transcription_status == "done"' in src
     assert "matched_job_id == None" in src
+
+
+# ---- Layer 2: frontend markers --------------------------------------------
+def test_frontend_stability_gate_and_cache():
+    src = open(_INDEX, encoding="utf-8").read()
+    assert "_localPendingStability" in src
+    assert "_localStatCache" in src
+    assert "_localMissingStreak" in src
+    assert "_localDeleteEligible" in src
+
+
+def test_frontend_timeout_and_rematch_wiring():
+    src = open(_INDEX, encoding="utf-8").read()
+    assert "function _fetchT(" in src
+    assert '"/api/local-videos/rematch"' in src
+    assert "_localRowRetryable" in src
+    assert "visibilitychange" in src
+
+
+def test_frontend_poll_path_noninteractive_permission():
+    src = open(_INDEX, encoding="utf-8").read()
+    assert "_verifyDirPermission(_localDirHandle, false)" in src
+    assert "_localPermissionLost" in src
+
+
+def test_frontend_dead_upload_helper_removed():
+    src = open(_INDEX, encoding="utf-8").read()
+    assert "_uploadLocalFile" not in src
