@@ -9720,9 +9720,18 @@ Examples:
                             chrome_warmup(page)
                     except Exception:
                         pass
-                    page.goto(FLOW_HOME_URL)
-                    human_delay(2, 4)
-                    ensure_logged_into_flow(page, "IMAGE")
+                    # v818.1 — a relaunch that can't reach Flow / re-login means
+                    # the block hasn't cleared (or the network is down). Stop the
+                    # relaunch loop cleanly instead of crashing with an unhandled
+                    # traceback; the operator restarts the worker later.
+                    try:
+                        page.goto(FLOW_HOME_URL)
+                        human_delay(2, 4)
+                        ensure_logged_into_flow(page, "IMAGE")
+                    except Exception as _rl_e:
+                        print(f"[IMAGE] ⛔ Relaunch couldn't reach/verify Flow ({_rl_e}) — "
+                              f"stopping worker (restart it later when the block clears).", flush=True)
+                        break
                     print("[IMAGE] ✓ Relaunched from golden — resuming API poll (API stays primary)", flush=True)
             else:
                 print(f"[IMAGE] Sequential mode (legacy — --parallel 1)", flush=True)
