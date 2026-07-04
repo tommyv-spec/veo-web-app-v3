@@ -3801,7 +3801,7 @@ def sync_instagram_account(
     from backends.storage import is_storage_configured, get_storage
     from instagram_client import ig_thumb_key, cache_thumb_bytes
     _ig_storage = get_storage() if is_storage_configured() else None
-    _thumbs_cached = 0  # temporary diagnostic — see code/CLAUDE.md deploy discipline
+    _thumbs_cached = 0  # count of thumbs cached this sync; returned to the caller
     for c in clips:
         if not c.get("shortcode"):
             continue
@@ -3850,9 +3850,6 @@ def sync_instagram_account(
     acc.last_synced_at = datetime.utcnow()
     db.commit()
     total = db.query(InstagramVideo).filter_by(account_id=acc.id).count()
-    # Temporary diagnostic (code/CLAUDE.md): confirms the next operator sync
-    # actually cached bytes. Remove in a follow-up once evidence lands.
-    print(f"[IG sync] account={acc.id} added={added} thumbs_cached={_thumbs_cached} storage={'on' if _ig_storage else 'off'}", flush=True)
     return {"added": added, "total": total, "thumbs_cached": _thumbs_cached}
 
 
@@ -3892,9 +3889,6 @@ async def get_instagram_thumb(
         # Mirrors the try/except degrade in download_output.
         print(f"[IG thumb] presign failed video={video_id} key={v.thumb_r2_key}: {e}", flush=True)
         raise HTTPException(status_code=404, detail="Thumbnail unavailable")
-    # Temporary diagnostic (code/CLAUDE.md deploy discipline): confirms the serve
-    # route redirects on the next operator-side run. Remove once evidence lands.
-    print(f"[IG thumb] redirect video={video_id} -> presigned R2 (no-store 302)", flush=True)
     return RedirectResponse(url=presigned, status_code=302, headers={"Cache-Control": "no-store"})
 
 
