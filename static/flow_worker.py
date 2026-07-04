@@ -4316,7 +4316,7 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
         print(f"[{label}] laptop copy (copy-mode v805.1 all-slots): {email} in {_pf} ({_ch}) — building lean golden", flush=True)
         ch = build_lean_golden_from_profile(
             email, golden_folder, label=label, user_data_dir=_ud,
-            close_chrome=lambda _u, _pf=None: close_laptop_chrome(_u, profile_folder=_pf, log=lambda m: print(m, flush=True)),
+            close_chrome=lambda _u: close_laptop_chrome(_u, log=lambda m: print(m, flush=True)),
             log=lambda m: print(m, flush=True))
         if ch:
             _LAPTOP_COPIED_GOLDENS.add(golden_folder)
