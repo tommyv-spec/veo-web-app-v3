@@ -289,6 +289,12 @@ def pull_profile_from_laptop(email, golden_folder, label="",
         shutil.copytree(src_profile, os.path.join(tmp, "Default"),
                         ignore=ignore, ignore_dangling_symlinks=True,
                         copy_function=_lean_copy2)
+        # Decided cookie set: drop stale next-auth handshake cookies (keep the
+        # session token + Google SSO) so Flow mints a fresh handshake.
+        _pruned = _prune_handshake_cookies(
+            os.path.join(tmp, "Default", "Network", "Cookies"), log=log)
+        if _pruned >= 0:
+            log(f"{tag}laptop pull: dropped {_pruned} stale next-auth handshake cookie(s)")
         shutil.copy2(os.path.join(user_data_dir, "Local State"),
                      os.path.join(tmp, "Local State"))
     except Exception as e:
@@ -509,6 +515,41 @@ def _cookie_count(cookies_db):
         return -1
 
 
+# The decided cookie SET (from worker_cookie_extract._parse_netlog_cookies):
+# next-auth OAuth-HANDSHAKE cookies are single-use for ONE sign-in. A stale one
+# baked into the golden collides with Flow's fresh handshake -> error=Callback /
+# "unusual activity". KEEP __Secure-next-auth.session-token; DROP the handshake
+# cookies. The whole-DB lean copy doesn't filter, so we prune them here.
+_HANDSHAKE_SUBSTR = ("csrf-token", "callback-url", ".state", "pkce", "nonce")
+
+
+def _prune_handshake_cookies(cookies_db, log=print):
+    """Delete stale next-auth handshake cookies from a copied golden Cookies DB
+    (keeps the session token + Google SSO). Returns count deleted, -1 on error."""
+    if not cookies_db or not os.path.isfile(cookies_db):
+        return -1
+    try:
+        import sqlite3
+        con = sqlite3.connect(cookies_db, timeout=5)
+        try:
+            rows = con.execute("SELECT rowid, name FROM cookies").fetchall()
+            kill = [rid for (rid, name) in rows
+                    if "next-auth" in (name or "").lower()
+                    and any(s in (name or "").lower() for s in _HANDSHAKE_SUBSTR)]
+            for rid in kill:
+                con.execute("DELETE FROM cookies WHERE rowid=?", (rid,))
+            con.commit()
+            return len(kill)
+        finally:
+            con.close()
+    except Exception as e:
+        try:
+            log(f"  prune handshake cookies failed: {e}")
+        except Exception:
+            pass
+        return -1
+
+
 def _lean_copy2(src, dst):
     """shutil.copytree copy_function that survives Chrome's cookie-DB lock
     WITHOUT closing any window. Normal copy first; on a lock, the cookie store is
@@ -609,7 +650,11 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
             raise RuntimeError(
                 "cookie DB not copied (Chrome held the lock and the Restart-Manager "
                 "release lost the race) — keeping existing golden")
-        log(f"{tag}lean golden: ✓ cookies copied ({_nck}) — Chrome NOT closed")
+        # Apply the decided cookie set: drop stale next-auth handshake cookies so
+        # the worker mints a fresh Flow handshake (else -> 'unusual activity').
+        _pruned = _prune_handshake_cookies(_ck, log=log)
+        log(f"{tag}lean golden: ✓ cookies copied ({_nck}), dropped {_pruned} stale "
+            f"next-auth handshake cookie(s) — Chrome NOT closed")
         # 2. Local State (DPAPI cookie key) -> golden root, single Default profile
         with open(os.path.join(user_data_dir, "Local State"), "r", encoding="utf-8") as f:
             ls = json.load(f)
