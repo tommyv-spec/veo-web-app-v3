@@ -16232,9 +16232,10 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
         # the same dialogue (from the original generation). Scanning all tiles
         # would return the OLD tile's videos instead of the new redo's.
         # This mirrors check_recent_clip_failure() which also targets data-index=0.
-        _max_scan_attempts = 15
+        _max_scan_attempts = 20  # v817: waiting for the FULL batch (+ a sibling retry) needs headroom
         _urls_found = False
         _retried_in_place = False
+        _sibling_retried = False  # v817: one retry for a failed sibling variant
         for _scan_attempt in range(_max_scan_attempts):
             try:
                 ensure_videos_tab_selected(page)
@@ -16257,12 +16258,16 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                     let hasVideo = false;
                     let hasGenerating = false;
                     let hasFailed = false;
+                    let videoCount = 0;      // v817 — per-tile counts so Python
+                    let generatingCount = 0; // can tell a settled batch from a
+                    let failedCount = 0;     // partially-rendered one
                     const videoUrls = [];
                     const failedUuids = [];  // v816
-                    
+
                     tiles.forEach(t => {
                         if (t.querySelector("video")) {
                             hasVideo = true;
+                            videoCount++;
                             const videos = t.querySelectorAll("video");
                             for (const v of videos) {
                                 let url = v.src || '';
@@ -16274,12 +16279,14 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                         const tText = t.textContent || '';
                         if (tText.includes('videocam') || /\\d+%/.test(tText)) {
                             hasGenerating = true;
+                            generatingCount++;
                             return;
                         }
                         const hasRefresh = t.querySelector("i") &&
                             Array.from(t.querySelectorAll("i")).some(i => i.textContent.trim() === 'refresh');
                         if (hasRefresh) {
                             hasFailed = true;
+                            failedCount++;
                             // v816 — collect the failed tile's OWN media uuid so
                             // Python can match it to the API terminal record
                             // (SEXUAL/PROMINENT/...) — same as FailCheck v802.
@@ -16315,7 +16322,9 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                         exists: true, tiles: tiles.length || 1,
                         hasVideo: hasVideo, hasGenerating: hasGenerating, hasFailed: hasFailed,
                         blobOnly: blobOnly, videoUrls: videoUrls,
-                        failedUuids: failedUuids
+                        failedUuids: failedUuids,
+                        videoCount: videoCount, generatingCount: generatingCount,
+                        failedCount: failedCount
                     };
                 }""")
                 
@@ -16330,8 +16339,64 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                 _blob_only = _tile_info.get('blobOnly', False)
                 _video_urls = _tile_info.get('videoUrls', [])
                 _tile_count = _tile_info.get('tiles', 0)
-                
-                # SUCCESS: data-index=0 has downloadable video URLs
+                _video_count = _tile_info.get('videoCount', 0)
+                _failed_count = _tile_info.get('failedCount', 0)
+
+                # v817 — take URLs only when the batch is SETTLED. Previously
+                # the FIRST finished variant was taken while its sibling was
+                # still ACTIVE → clip completed with 1/N variants and the
+                # sibling's errors were never handled (operator report: "redo
+                # doesn't catch the errors and all the variants like the
+                # normal process does").
+                if _video_urls and _has_generating:
+                    print(f"[REDO] Scan {_scan_attempt + 1}/{_max_scan_attempts}: "
+                          f"{_video_count} video(s) ready but a sibling variant is still "
+                          f"generating — waiting for the full batch (v817)", flush=True)
+                    time.sleep(15)
+                    continue
+
+                if _video_urls and _has_failed:
+                    # Batch settled with some videos + some failed siblings.
+                    # Terminal sibling (SEXUAL/... API record) → retrying is
+                    # pointless, take the good videos. Otherwise retry the
+                    # failed sibling once, then take what's there.
+                    _sib_uuids = _tile_info.get('failedUuids') or []
+                    _sib_term = _terminal_reason_for_uuids(_sib_uuids)
+                    if _sib_term:
+                        print(f"[REDO] ⛔ Sibling variant terminal ({_sib_term}) — taking the "
+                              f"{_video_count} good video(s) (v817)", flush=True)
+                    elif not _sibling_retried:
+                        _clicked = 0
+                        try:
+                            _clicked = page.evaluate("""() => {
+                                const c = document.querySelector("div[data-index='0']");
+                                if (!c) return 0;
+                                let clicked = 0;
+                                const seen = new Set();
+                                c.querySelectorAll('[data-tile-id]').forEach(t => {
+                                    const id = t.getAttribute('data-tile-id');
+                                    if (!id || seen.has(id)) return;
+                                    seen.add(id);
+                                    if (t.querySelector('video')) return;
+                                    const btn = Array.from(t.querySelectorAll('button')).find(b =>
+                                        Array.from(b.querySelectorAll('i')).some(i => i.textContent.trim() === 'refresh'));
+                                    if (btn) { btn.click(); clicked++; }
+                                });
+                                return clicked;
+                            }""")
+                        except Exception as _sre:
+                            print(f"[REDO] ⚠ Sibling retry click failed: {_sre}", flush=True)
+                        _sibling_retried = True
+                        if _clicked:
+                            print(f"[REDO] ↻ Retried {_clicked} failed sibling variant(s) — "
+                                  f"waiting for regeneration (v817)", flush=True)
+                            time.sleep(15)
+                            continue
+                    else:
+                        print(f"[REDO] ⚠ Sibling variant still failed after retry — taking the "
+                              f"{_video_count} good video(s) (v817)", flush=True)
+
+                # SUCCESS: batch settled — queue ALL downloadable URLs
                 if _video_urls:
                     http_dl_queue.put({
                         'job_id': job_id,
