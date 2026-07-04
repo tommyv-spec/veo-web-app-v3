@@ -27,6 +27,11 @@ from config import (
 Base = declarative_base()
 
 
+def _ig_thumb_public_url(video_id, thumb_r2_key, raw_thumb_url):
+    from instagram_client import thumb_public_url
+    return thumb_public_url(video_id, thumb_r2_key, raw_thumb_url)
+
+
 class User(Base):
     """User table - stores Google OAuth users"""
     __tablename__ = "users"
@@ -582,6 +587,7 @@ class InstagramVideo(Base):
     shortcode       = Column(String(32), nullable=False)
     url             = Column(String(500), nullable=False)
     thumb_url       = Column(Text, nullable=True)
+    thumb_r2_key    = Column(Text, nullable=True)  # R2 key of the cached thumb jpg; None = not cached yet
     video_url       = Column(Text, nullable=True)
     caption         = Column(Text, nullable=True)
     views           = Column(Integer, default=0)
@@ -607,7 +613,7 @@ class InstagramVideo(Base):
             "id": self.id,
             "shortcode": self.shortcode,
             "url": self.url,
-            "thumb_url": self.thumb_url,
+            "thumb_url": _ig_thumb_public_url(self.id, self.thumb_r2_key, self.thumb_url),
             "video_url": self.video_url,
             "caption": self.caption,
             "views": self.views,
@@ -1072,6 +1078,7 @@ def _run_migrations_postgresql(engine):
     alter_migrations = [
         "ALTER TABLE instagram_videos ALTER COLUMN thumb_url TYPE TEXT",
         "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS video_url TEXT",
+        "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS thumb_r2_key TEXT",
     ]
     with engine.connect() as conn:
         for sql in alter_migrations:
