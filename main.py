@@ -3781,7 +3781,7 @@ async def delete_instagram_account(
 
 
 @app.post("/api/instagram/accounts/{account_id}/sync")
-async def sync_instagram_account(
+def sync_instagram_account(
     account_id: int,
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
