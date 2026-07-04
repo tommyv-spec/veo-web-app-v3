@@ -211,89 +211,18 @@ def _chrome_proc_uses_dir(cmdline, target_user_data_dir):
 
 
 def close_laptop_chrome(user_data_dir, profile_folder=None, log=print):
-    """Close ONLY the Chrome process tree for the SPECIFIC profile we're copying
-    (matched by --profile-directory), sparing every OTHER profile in the same
-    Chrome — and every other channel. Operator: 'don't close all the chrome
-    profiles, only the one related to the profile we need to copy.'
+    """v819.2 — NO LONGER closes any Chrome window/process. The cookie DB lock is
+    now released per-file DURING the copy via the Windows Restart Manager (see
+    _lean_copy2 / _rm_force_unlock), which force-restarts ONLY the shared Network
+    Service that holds Network\\Cookies — Chrome respawns it instantly, so nothing
+    the operator sees closes. Operator: 'we just need to close the associated
+    [locker], not the whole chrome.'
 
-    v819 — was channel-scoped (needle '\\Chrome\\'), which matched EVERY process
-    of EVERY profile under that channel's User Data (the operator saw 67 killed).
-    Now: require the channel folder AND, when profile_folder is given, the
-    matching --profile-directory. If the profile-scoped match finds nothing we
-    close nothing rather than nuking the whole channel — a failed cookie-DB
-    unlock only skips the lean-golden rebuild (existing golden is reused), which
-    is far better than killing all the operator's tabs.
-
-    Windows-only via PowerShell CIM (`wmic` is removed on Win11). On enumerate
-    failure it closes nothing (safer than killing the wrong Chrome). Sleeps after
-    so the cookie DB file lock is released before we read it."""
-    if sys.platform != "win32":
-        try:
-            subprocess.run(["pkill", "-f", "chrome"], capture_output=True)
-            time.sleep(1.0)
-        except Exception as e:
-            log(f"close chrome: pkill failed: {e}")
-        return
-    # ...\Google\Chrome Beta\User Data -> folder "Chrome Beta" -> needle "\chrome beta\"
-    folder = os.path.basename(os.path.dirname(os.path.normpath(user_data_dir)))
-    needle = (os.sep + folder + os.sep).lower()
-    prof = (profile_folder or "").strip()
-    prof_l = prof.lower()
-    try:
-        ps = ("Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
-              "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-            capture_output=True, text=True, timeout=30).stdout
-        # Enumerate this channel's chrome.exe once, tagging each by profile.
-        chan_pids = []          # (pid, profile_dir_or_None) for this channel
-        for row in out.splitlines():
-            row = row.strip()
-            if not row:
-                continue
-            pid, _, cmd = row.partition("\t")
-            pid = pid.strip()
-            if not pid or needle not in (cmd or "").lower():
-                continue
-            chan_pids.append((pid, _parse_profile_directory_from_cmdline(cmd)))
-
-        def _kill(pids):
-            n = 0
-            for _p in pids:
-                try:
-                    subprocess.run(["taskkill", "/F", "/PID", _p], capture_output=True)
-                    n += 1
-                except Exception:
-                    pass
-            return n
-
-        # Pass 1 — profile-scoped: kill ONLY processes carrying our
-        # --profile-directory, sparing other profiles in the same channel.
-        killed = 0
-        if prof:
-            own = [p for (p, pd) in chan_pids if pd is not None and pd.strip().lower() == prof_l]
-            spared = sum(1 for (_p, pd) in chan_pids if pd is not None and pd.strip().lower() != prof_l)
-            killed = _kill(own)
-            if killed:
-                log(f"close chrome: closed {killed} profile {prof!r} process(es); "
-                    f"spared {spared} other-profile process(es); other Chrome left running")
-
-        # Pass 2 — fallback: profile-scoping couldn't isolate it (the default/
-        # last-used profile's browser + shared network process carry NO
-        # --profile-directory yet hold the cookie-DB lock). Chrome locks cookies
-        # at the INSTANCE level, so the only way to unlock is to close this
-        # channel's Chrome. Do it so the golden can build — better than a broken
-        # login. Other CHANNELS (the operator's main Chrome) are still spared.
-        if not killed and chan_pids:
-            killed = _kill([p for (p, _pd) in chan_pids])
-            log(f"close chrome: couldn't isolate profile {prof!r} (cookie DB is locked "
-                f"instance-wide) — closed {killed} '{folder}' channel process(es) to unlock; "
-                f"other Chrome channels left running")
-        elif not chan_pids:
-            log(f"close chrome: no '{folder}' Chrome running; nothing to close")
-    except Exception as e:
-        log(f"close chrome: enumerate failed ({e}); closed nothing (safe)")
-    time.sleep(2.0)  # let Windows release the cookie DB file lock
+    Kept as a near no-op so injected close_chrome hooks and older callers stay
+    valid. Non-Windows unchanged (the copy path handles locks; nothing to do)."""
+    log("close chrome: skipped (v819.2 — per-file cookie-lock release during copy; "
+        "Chrome stays open)")
+    return
 
 
 def pull_profile_from_laptop(email, golden_folder, label="",
@@ -358,7 +287,8 @@ def pull_profile_from_laptop(email, golden_folder, label="",
             shutil.rmtree(tmp, ignore_errors=True)
         os.makedirs(tmp, exist_ok=True)
         shutil.copytree(src_profile, os.path.join(tmp, "Default"),
-                        ignore=ignore, ignore_dangling_symlinks=True)
+                        ignore=ignore, ignore_dangling_symlinks=True,
+                        copy_function=_lean_copy2)
         shutil.copy2(os.path.join(user_data_dir, "Local State"),
                      os.path.join(tmp, "Local State"))
     except Exception as e:
@@ -426,6 +356,170 @@ def _lean_ignore(dirpath, names):
     return drop
 
 
+# ── v819.2: copy a Chrome-locked cookie DB WITHOUT closing any window ─────────
+# Chrome exclusively locks Network\Cookies, so a plain copy fails (WinError 32).
+# The Windows Restart Manager can shut down ONLY the process holding a lock on
+# THAT specific file — for the cookie store that is the shared Network Service
+# (a `chrome.exe --type=utility` child), which Chrome respawns instantly. So no
+# window closes: we just read the file in the sub-second gap before it re-locks.
+# We NEVER RM a file locked by the MAIN browser process (a locker with no
+# `--type=`), so we can't accidentally close the operator's Chrome.
+
+_RM_SAFE_FILES = {"cookies"}  # only the Network Service holds this
+
+
+def _pid_cmdline(pid):
+    """Best-effort command line for a PID (Windows). '' on failure."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        ps = (f"(Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\")"
+              ".CommandLine")
+        return (subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, timeout=10).stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def _rm_lockers(path):
+    """Return the list of PIDs holding a lock on `path` via the Restart Manager,
+    or None on failure. Empty list = not locked."""
+    if sys.platform != "win32":
+        return None
+    try:
+        from ctypes import (windll, byref, create_unicode_buffer, c_wchar_p, cast,
+                             Structure, sizeof, c_uint, c_int)
+        from ctypes.wintypes import DWORD, WCHAR, FILETIME, BOOL
+    except Exception:
+        return None
+
+    class RM_UNIQUE_PROCESS(Structure):
+        _fields_ = [("dwProcessId", DWORD), ("ProcessStartTime", FILETIME)]
+
+    class RM_PROCESS_INFO(Structure):
+        _fields_ = [("Process", RM_UNIQUE_PROCESS), ("strAppName", WCHAR * 256),
+                    ("strServiceShortName", WCHAR * 64), ("ApplicationType", c_int),
+                    ("AppStatus", c_uint), ("TSSessionId", DWORD), ("bRestartable", BOOL)]
+
+    ERROR_SUCCESS, ERROR_MORE_DATA = 0, 234
+    try:
+        rm = windll.LoadLibrary("Rstrtmgr")
+    except Exception:
+        return None
+    sh = DWORD(0)
+    key = (WCHAR * 256)()
+    if rm.RmStartSession(byref(sh), 0, key) != ERROR_SUCCESS:
+        return None
+    try:
+        buf = create_unicode_buffer(path)
+        arr = (c_wchar_p * 1)(cast(buf, c_wchar_p))
+        if rm.RmRegisterResources(sh, 1, arr, 0, None, 0, None) != ERROR_SUCCESS:
+            return None
+        need = DWORD(0)
+        got = DWORD(0)
+        rea = DWORD(0)
+        r = rm.RmGetList(sh, byref(need), byref(got), None, byref(rea))
+        if r not in (ERROR_SUCCESS, ERROR_MORE_DATA):
+            return None
+        if not need.value:
+            return []
+        infos = (RM_PROCESS_INFO * need.value)()
+        got = DWORD(need.value)
+        if rm.RmGetList(sh, byref(need), byref(got), infos, byref(rea)) != ERROR_SUCCESS:
+            return None
+        return [int(infos[i].Process.dwProcessId) for i in range(got.value)]
+    finally:
+        rm.RmEndSession(sh)
+
+
+def _rm_force_unlock(path, log=print):
+    """Force-release the lock on `path` by shutting down its lockers — but ONLY
+    if every locker is a Chrome child process (`--type=`), never the main
+    browser. Returns True if a shutdown ran. Safe no-op on any failure."""
+    if sys.platform != "win32":
+        return False
+    pids = _rm_lockers(path)
+    if not pids:  # None (failure) or [] (not locked)
+        return False
+    # Guard: refuse to shut down the MAIN browser process (no --type=) so we can
+    # never close the operator's Chrome window. The cookie store's locker is the
+    # Network Service (--type=utility); if anything else holds it, bail.
+    for pid in pids:
+        cl = _pid_cmdline(pid).lower()
+        if "chrome.exe" in cl and "--type=" not in cl:
+            log(f"  cookie lock held by a main Chrome process (pid {pid}) — "
+                f"NOT force-closing (would close the window); skipping")
+            return False
+    try:
+        from ctypes import windll, byref, create_unicode_buffer, WINFUNCTYPE, c_wchar_p, cast
+        from ctypes.wintypes import DWORD, WCHAR, UINT
+        ERROR_SUCCESS, RmForceShutdown = 0, 1
+        rm = windll.LoadLibrary("Rstrtmgr")
+
+        @WINFUNCTYPE(None, UINT)
+        def _cb(_p):
+            return None
+
+        sh = DWORD(0)
+        key = (WCHAR * 256)()
+        if rm.RmStartSession(byref(sh), 0, key) != ERROR_SUCCESS:
+            return False
+        try:
+            buf = create_unicode_buffer(path)
+            arr = (c_wchar_p * 1)(cast(buf, c_wchar_p))
+            if rm.RmRegisterResources(sh, 1, arr, 0, None, 0, None) != ERROR_SUCCESS:
+                return False
+            return rm.RmShutdown(sh, RmForceShutdown, _cb) == ERROR_SUCCESS
+        finally:
+            rm.RmEndSession(sh)
+    except Exception as e:
+        try:
+            log(f"  RM unlock error on {os.path.basename(path)}: {e}")
+        except Exception:
+            pass
+        return False
+
+
+def _read_unlocked_bytes(path, timeout=2.0):
+    """Grab a file's bytes in a tight no-sleep loop right after its lock is
+    released, before Chrome re-locks it. Returns bytes or None."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        except (PermissionError, OSError):
+            continue  # still locked — keep hammering (no sleep = win the race)
+    return None
+
+
+def _lean_copy2(src, dst):
+    """shutil.copytree copy_function that survives Chrome's cookie-DB lock
+    WITHOUT closing any window. Normal copy first; on a lock, the cookie store is
+    read via the Restart Manager (Network Service only) + tight read; any other
+    locked file is skipped (not needed for Flow auth). NEVER raises on a lock, so
+    a single locked file can't abort the whole profile copy."""
+    try:
+        shutil.copy2(src, dst)
+        return
+    except (PermissionError, OSError) as e:
+        if getattr(e, "winerror", None) not in (32, 33):  # not a sharing/lock error
+            raise
+    base = os.path.basename(src).lower()
+    if base in _RM_SAFE_FILES and _rm_force_unlock(src):
+        data = _read_unlocked_bytes(src)
+        if data is not None:
+            try:
+                with open(dst, "wb") as f:
+                    f.write(data)
+                return
+            except Exception:
+                pass
+    # Couldn't get it, or not safe to unlock → skip this file (best-effort).
+    return
+
+
 def build_lean_golden_from_profile(email, golden_folder, label="",
                                    user_data_dir=None, close_chrome=None, log=print):
     """COPY-MODE (App-Bound Encryption must be OFF). Build `golden_folder` as a
@@ -475,7 +569,8 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
         os.makedirs(tmp, exist_ok=True)
         # 1. profile -> Default (lean)
         shutil.copytree(src_profile, os.path.join(tmp, "Default"),
-                        ignore=_lean_ignore, ignore_dangling_symlinks=True)
+                        ignore=_lean_ignore, ignore_dangling_symlinks=True,
+                        copy_function=_lean_copy2)
         # 2. Local State (DPAPI cookie key) -> golden root, single Default profile
         with open(os.path.join(user_data_dir, "Local State"), "r", encoding="utf-8") as f:
             ls = json.load(f)
