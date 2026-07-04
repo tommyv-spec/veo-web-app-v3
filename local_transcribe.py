@@ -26,6 +26,27 @@ from instagram_transcribe import _model as _whisper_model
 
 _AUTO_MATCH_THRESHOLD = float(os.environ.get("IG_AUTO_MATCH_THRESHOLD", "0.70"))
 
+# v822: pending/running rows older than this are considered stuck (dyno
+# restart mid-transcribe) and get re-run when the browser re-uploads.
+_STUCK_AFTER_S = 600
+
+
+def should_reprocess(status, created_at, now=None):
+    """True when an existing LocalVideo row should be re-run on re-upload.
+
+    failed -> always (transient ffmpeg/whisper errors were permanent misses).
+    pending/running -> only when older than _STUCK_AFTER_S; a live request
+    may still be transcribing.  done -> never.
+    """
+    if status == "failed":
+        return True
+    if status in ("pending", "running"):
+        if not created_at:
+            return True
+        now = now or datetime.utcnow()
+        return (now - created_at).total_seconds() > _STUCK_AFTER_S
+    return False
+
 
 def _extract_audio(src_path: str, wav_path: str) -> tuple:
     """Run ffmpeg, mono 16kHz WAV. Returns (ok, error_msg)."""

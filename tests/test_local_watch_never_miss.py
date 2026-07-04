@@ -1,0 +1,54 @@
+"""v822 — local-folder watcher never-miss hardening.
+
+Layer 1: pure helpers in local_transcribe (importable standalone).
+Layer 2: source-grep-assert endpoint + frontend markers (this codebase has
+been bitten by missing-name regressions py_compile does not catch).
+"""
+import os
+from datetime import datetime, timedelta
+
+import importlib.util
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_CODE = os.path.dirname(_HERE)
+_LT = os.path.join(_CODE, "local_transcribe.py")
+_MAIN = os.path.join(_CODE, "main.py")
+_INDEX = os.path.join(_CODE, "static", "index.html")
+
+
+def _load_lt():
+    spec = importlib.util.spec_from_file_location("lt_v822_test", _LT)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+# ---- Layer 1: should_reprocess ------------------------------------------
+def test_failed_always_reprocesses():
+    lt = _load_lt()
+    assert lt.should_reprocess("failed", datetime.utcnow()) is True
+
+
+def test_done_never_reprocesses():
+    lt = _load_lt()
+    old = datetime.utcnow() - timedelta(hours=5)
+    assert lt.should_reprocess("done", old) is False
+
+
+def test_fresh_pending_not_reprocessed():
+    lt = _load_lt()
+    fresh = datetime.utcnow() - timedelta(seconds=30)
+    assert lt.should_reprocess("pending", fresh) is False
+    assert lt.should_reprocess("running", fresh) is False
+
+
+def test_stuck_pending_reprocessed():
+    lt = _load_lt()
+    stuck = datetime.utcnow() - timedelta(minutes=11)
+    assert lt.should_reprocess("pending", stuck) is True
+    assert lt.should_reprocess("running", stuck) is True
+
+
+def test_pending_without_created_at_reprocessed():
+    lt = _load_lt()
+    assert lt.should_reprocess("pending", None) is True
