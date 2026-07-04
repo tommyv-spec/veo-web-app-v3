@@ -7853,6 +7853,18 @@ def _flush_status_replays():
             return
 
 
+def _rendered_variant_for(clip_id):
+    """v821 — which prompt variant produced this clip's render: "B" if the
+    Prompt B rung fired for it (reworded voice-only line), else "A".
+    _PROMPT_B_TRIED is set when Prompt B is submitted and only popped on a
+    terminal fail / user retry (fail_clip_general_policy) — never on the
+    success path — so it is still True at completion-report time.
+    Guards a missing/None clip_id → "A"."""
+    if not clip_id:
+        return "A"
+    return "B" if clip_id in _PROMPT_B_TRIED else "A"
+
+
 def update_clip_status(clip_id, status, output_url=None, error_message=None, retries=3):
     """Update clip status via API with retry on failure.
 
@@ -7871,6 +7883,9 @@ def update_clip_status(clip_id, status, output_url=None, error_message=None, ret
         "output_url": output_url,
         "error_message": error_message
     }
+    # v821 — stamp which prompt variant produced the render at completion time.
+    if status == 'completed':
+        data["rendered_prompt_variant"] = _rendered_variant_for(clip_id)
     for attempt in range(retries):
         result, code = api_request_ex("POST", f"/clips/{clip_id}/status", data)
         if result:

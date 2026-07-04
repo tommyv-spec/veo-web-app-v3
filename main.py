@@ -11790,6 +11790,10 @@ class LocalWorkerClipUpdate(BaseModel):
     # the frontend still sees CONTENT_POLICY_VIOLATION and renders the
     # upload-replacement card. Optional to preserve backwards-compat.
     error_code: Optional[str] = None
+    # v821 — worker reports which prompt variant produced the render
+    # ("A" = original, "B" = reworded voice-only fallback). Optional so
+    # older workers / non-completion updates leave the stored value alone.
+    rendered_prompt_variant: Optional[str] = None
 
 
 @app.post("/api/local-worker/clips/{clip_id}/status")
@@ -11879,7 +11883,11 @@ async def local_worker_update_clip_status(
         clip.error_message = update.error_message
     if update.error_code:  # v701-cleanup
         clip.error_code = update.error_code
-    
+    # v821 — persist the prompt variant that produced this render. Only when
+    # the worker sends a value (don't clobber the stored A/B default with None).
+    if update.rendered_prompt_variant is not None:
+        clip.rendered_prompt_variant = update.rendered_prompt_variant
+
     # v761f — clear stale redo pre-set rejection on completion. The redo
     # flow sets approval_status='rejected' (old variant shows rejected
     # while regenerating); the gated reset below only fires when old_status
