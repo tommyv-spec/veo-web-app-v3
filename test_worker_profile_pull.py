@@ -132,7 +132,7 @@ def test_pull_builds_golden_with_default_and_local_state(tmp_path):
     calls = []
     ok = wpp.pull_profile_from_laptop(
         "me@gmail.com", golden, label="Account1",
-        user_data_dir=ud, close_chrome=lambda _ud: calls.append("closed"),
+        user_data_dir=ud, close_chrome=lambda _ud, _pf=None: calls.append("closed"),
         log=lambda m: None,
     )
     assert ok == "chrome"   # success returns the channel string
@@ -158,7 +158,7 @@ def test_pull_email_not_found_fails_keeps_golden(tmp_path):
     os.makedirs(os.path.join(golden, "Default"))
     open(os.path.join(golden, "Default", "marker"), "w").close()
     ok = wpp.pull_profile_from_laptop("me@gmail.com", golden, user_data_dir=ud,
-                                      close_chrome=lambda _ud: None, log=lambda m: None)
+                                      close_chrome=lambda _ud, _pf=None: None, log=lambda m: None)
     assert ok is False
     assert os.path.isfile(os.path.join(golden, "Default", "marker"))
 
@@ -216,7 +216,7 @@ def test_pull_auto_detect_no_email(tmp_path):
     ud = _fake_laptop(tmp_path, email="me@gmail.com", folder="Default")
     golden = str(tmp_path / "chrome-golden")
     ok = wpp.pull_profile_from_laptop("", golden, user_data_dir=ud,
-                                      close_chrome=lambda _ud: None, log=lambda m: None)
+                                      close_chrome=lambda _ud, _pf=None: None, log=lambda m: None)
     assert ok == "chrome"
     assert os.path.isfile(os.path.join(golden, "Default", "Network", "Cookies"))
 
@@ -226,7 +226,7 @@ def test_pull_no_email_no_signin_returns_false(tmp_path):
     _write_local_state(ud, {"Default": {}})
     golden = str(tmp_path / "chrome-golden")
     ok = wpp.pull_profile_from_laptop("", golden, user_data_dir=ud,
-                                      close_chrome=lambda _ud: None, log=lambda m: None)
+                                      close_chrome=lambda _ud, _pf=None: None, log=lambda m: None)
     assert ok is False
 
 
@@ -246,3 +246,21 @@ def test_chrome_proc_targets_laptop_ud_only():
     # Chrome quotes paths containing spaces (default User Data path has one)
     assert g(rf'chrome.exe --user-data-dir="{target}"', target) is True
     assert g(r'chrome.exe --user-data-dir=C:\veo\chrome-session-2', target) is False
+
+
+# --- v819: profile-directory cmdline parsing + profile-scoped close ---------
+
+def test_parse_profile_directory_from_cmdline():
+    q = r'"C:\chrome.exe" --user-data-dir="C:\U\Chrome\User Data" --profile-directory="Profile 1" --type=renderer'
+    assert wpp._parse_profile_directory_from_cmdline(q) == "Profile 1"
+    unq = r'chrome.exe --profile-directory=Default --type=gpu-process'
+    assert wpp._parse_profile_directory_from_cmdline(unq) == "Default"
+    assert wpp._parse_profile_directory_from_cmdline("chrome.exe --type=renderer") is None
+    assert wpp._parse_profile_directory_from_cmdline("") is None
+
+
+def test_close_laptop_chrome_signature_accepts_profile_folder():
+    # non-win32 path returns immediately; just assert the new kwarg is accepted
+    import inspect
+    sig = inspect.signature(wpp.close_laptop_chrome)
+    assert "profile_folder" in sig.parameters

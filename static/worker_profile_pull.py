@@ -186,6 +186,20 @@ def _parse_user_data_dir_from_cmdline(cmdline):
     return None
 
 
+def _parse_profile_directory_from_cmdline(cmdline):
+    """Extract the --profile-directory value from a Chrome commandline, or None.
+    Chrome quotes values containing spaces ('Profile 1' -> "Profile 1")."""
+    if not cmdline:
+        return None
+    m = _re.search(r'--profile-directory=("([^"]*)"|(\S+))', cmdline)
+    if m:
+        return (m.group(2) if m.group(2) is not None else m.group(3))
+    m = _re.search(r'--profile-directory\s+(?:"([^"]*)"|(\S+))', cmdline)
+    if m:
+        return (m.group(1) if m.group(1) is not None else m.group(2))
+    return None
+
+
 def _chrome_proc_uses_dir(cmdline, target_user_data_dir):
     """True if this Chrome process belongs to target_user_data_dir (explicit
     flag match) OR uses the default profile (no flag) -> which is the laptop
@@ -196,10 +210,20 @@ def _chrome_proc_uses_dir(cmdline, target_user_data_dir):
     return udd.rstrip("\\/").lower() == os.path.abspath(target_user_data_dir).rstrip("\\/").lower()
 
 
-def close_laptop_chrome(user_data_dir, log=print):
-    """Close ONLY the Chrome channel that owns user_data_dir (e.g. Chrome Beta),
-    sparing the operator's OTHER Chrome (stable stays open). Matches processes
-    whose command line contains the channel's app folder, e.g. '\\Chrome Beta\\'.
+def close_laptop_chrome(user_data_dir, profile_folder=None, log=print):
+    """Close ONLY the Chrome process tree for the SPECIFIC profile we're copying
+    (matched by --profile-directory), sparing every OTHER profile in the same
+    Chrome — and every other channel. Operator: 'don't close all the chrome
+    profiles, only the one related to the profile we need to copy.'
+
+    v819 — was channel-scoped (needle '\\Chrome\\'), which matched EVERY process
+    of EVERY profile under that channel's User Data (the operator saw 67 killed).
+    Now: require the channel folder AND, when profile_folder is given, the
+    matching --profile-directory. If the profile-scoped match finds nothing we
+    close nothing rather than nuking the whole channel — a failed cookie-DB
+    unlock only skips the lean-golden rebuild (existing golden is reused), which
+    is far better than killing all the operator's tabs.
+
     Windows-only via PowerShell CIM (`wmic` is removed on Win11). On enumerate
     failure it closes nothing (safer than killing the wrong Chrome). Sleeps after
     so the cookie DB file lock is released before we read it."""
@@ -213,7 +237,10 @@ def close_laptop_chrome(user_data_dir, log=print):
     # ...\Google\Chrome Beta\User Data -> folder "Chrome Beta" -> needle "\chrome beta\"
     folder = os.path.basename(os.path.dirname(os.path.normpath(user_data_dir)))
     needle = (os.sep + folder + os.sep).lower()
+    prof = (profile_folder or "").strip()
+    prof_l = prof.lower()
     killed = 0
+    skipped_other_profiles = 0
     try:
         ps = ("Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
               "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
@@ -226,13 +253,30 @@ def close_laptop_chrome(user_data_dir, log=print):
                 continue
             pid, _, cmd = row.partition("\t")
             pid = pid.strip()
-            if pid and needle in (cmd or "").lower():
-                try:
-                    subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
-                    killed += 1
-                except Exception:
-                    pass
-        log(f"close chrome: closed {killed} '{folder}' process(es); other Chrome left running")
+            cmdl = (cmd or "").lower()
+            if not pid or needle not in cmdl:
+                continue
+            if prof:
+                # Only kill processes belonging to THIS profile. A process with
+                # a DIFFERENT --profile-directory is another profile -> spare it.
+                # A process with NO --profile-directory (shared GPU/util that
+                # isn't profile-scoped) is left alone too, so other profiles keep
+                # working; the profile's own browser+renderers carry the flag and
+                # releasing them flushes its cookie DB.
+                pdir = _parse_profile_directory_from_cmdline(cmd)
+                if pdir is None:
+                    continue
+                if pdir.strip().lower() != prof_l:
+                    skipped_other_profiles += 1
+                    continue
+            try:
+                subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+                killed += 1
+            except Exception:
+                pass
+        _scope = f"profile {prof!r}" if prof else f"'{folder}' channel"
+        _spared = f"; spared {skipped_other_profiles} other-profile process(es)" if prof else ""
+        log(f"close chrome: closed {killed} {_scope} process(es){_spared}; other Chrome left running")
     except Exception as e:
         log(f"close chrome: enumerate failed ({e}); closed nothing (safe)")
     time.sleep(2.0)  # let Windows release the cookie DB file lock
@@ -281,13 +325,13 @@ def pull_profile_from_laptop(email, golden_folder, label="",
         return False
     log(f"{tag}laptop pull: using profile {profile_folder!r} from {user_data_dir}")
 
-    # Unlock cookie/login SQLite DBs by closing the laptop Chrome that owns this
-    # profile (the channel we matched).
+    # Unlock cookie/login SQLite DBs by closing ONLY this profile's Chrome tree
+    # (v819 — profile-scoped, not the whole channel).
     try:
         if close_chrome is not None:
-            close_chrome(user_data_dir)
+            close_chrome(user_data_dir, profile_folder)
         else:
-            close_laptop_chrome(user_data_dir, log=log)
+            close_laptop_chrome(user_data_dir, profile_folder=profile_folder, log=log)
     except Exception as e:
         log(f"{tag}laptop pull: close chrome failed: {e}")
         return False
@@ -399,12 +443,13 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
         return False
     log(f"{tag}lean golden: copying profile {profile_folder!r} from {user_data_dir}")
 
-    # Close ONLY this channel's Chrome so cookie/login DBs are unlocked + flushed.
+    # Close ONLY this profile's Chrome so its cookie/login DBs are unlocked +
+    # flushed (v819 — profile-scoped, not the whole channel).
     try:
         if close_chrome is not None:
-            close_chrome(user_data_dir)
+            close_chrome(user_data_dir, profile_folder)
         else:
-            close_laptop_chrome(user_data_dir, log=log)
+            close_laptop_chrome(user_data_dir, profile_folder=profile_folder, log=log)
     except Exception as e:
         log(f"{tag}lean golden: close chrome failed: {e}")
         return False
