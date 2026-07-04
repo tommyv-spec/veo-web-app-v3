@@ -368,6 +368,43 @@ def _lean_ignore(dirpath, names):
     return drop
 
 
+# next-auth OAuth-HANDSHAKE cookie name fragments. These are single-use for ONE
+# sign-in flow; a stale one carried into the golden makes Flow's next-auth
+# callback replay a dead handshake -> "unusual activity". We KEEP
+# __Secure-next-auth.session-token (the durable login) + Google SSO and drop
+# only these. (The decided cookie set, from worker_cookie_extract analysis.)
+_HANDSHAKE_SUBSTR = ("csrf-token", "callback-url", ".state", "pkce", "nonce")
+
+
+def _prune_handshake_cookies(cookies_db, log=print):
+    """Delete stale next-auth handshake cookies from a copied golden Cookies DB
+    (keeps the session token + Google SSO). Returns count deleted, -1 on error.
+
+    Operates on the GOLDEN's copied Cookies DB only — never the real profile."""
+    if not cookies_db or not os.path.isfile(cookies_db):
+        return -1
+    try:
+        import sqlite3
+        con = sqlite3.connect(cookies_db, timeout=5)
+        try:
+            rows = con.execute("SELECT rowid, name FROM cookies").fetchall()
+            kill = [rid for (rid, name) in rows
+                    if "next-auth" in (name or "").lower()
+                    and any(s in (name or "").lower() for s in _HANDSHAKE_SUBSTR)]
+            for rid in kill:
+                con.execute("DELETE FROM cookies WHERE rowid=?", (rid,))
+            con.commit()
+            return len(kill)
+        finally:
+            con.close()
+    except Exception as e:
+        try:
+            log(f"  prune handshake cookies failed: {e}")
+        except Exception:
+            pass
+        return -1
+
+
 def build_lean_golden_from_profile(email, golden_folder, label="",
                                    user_data_dir=None, close_chrome=None, log=print):
     """COPY-MODE (App-Bound Encryption must be OFF). Build `golden_folder` as a
@@ -439,6 +476,18 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
                 json.dump(pr, f)
         except (OSError, ValueError):
             pass  # missing/unreadable -> Chrome rebuilds it
+        # 4. Drop the stale next-auth HANDSHAKE cookies (csrf-token / callback-url
+        #    / .state / pkce / nonce). They are single-use for ONE sign-in; a
+        #    stale one carried into the golden makes Flow's next-auth callback
+        #    replay an old handshake -> "unusual activity" 403. Keep the
+        #    __Secure-next-auth.session-token + Google SSO so the golden stays
+        #    logged in (reinstated from the reverted v819.4, isolated — cookie
+        #    prune only, none of the v819 Restart-Manager copy rework).
+        _pruned = _prune_handshake_cookies(
+            os.path.join(tmp, "Default", "Network", "Cookies"), log=log)
+        if _pruned > 0:
+            log(f"{tag}lean golden: dropped {_pruned} stale next-auth handshake cookie(s) "
+                f"(kept session-token + Google SSO)")
     except Exception as e:
         log(f"{tag}lean golden: copy failed: {e}")
         shutil.rmtree(tmp, ignore_errors=True)
