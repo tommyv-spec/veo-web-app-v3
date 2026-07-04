@@ -52,3 +52,17 @@ def test_stuck_pending_reprocessed():
 def test_pending_without_created_at_reprocessed():
     lt = _load_lt()
     assert lt.should_reprocess("pending", None) is True
+
+
+# ---- Layer 2: endpoint + wiring symbols -----------------------------------
+def test_upload_endpoint_uses_should_reprocess():
+    src = open(_MAIN, encoding="utf-8").read()
+    assert "should_reprocess(" in src
+    assert "/api/local-videos/rematch" in src
+
+
+def test_rematch_helper_defined_and_scoped():
+    src = open(_LT, encoding="utf-8").read()
+    assert "def rematch_unmatched(user_id, db" in src
+    assert 'transcription_status == "done"' in src
+    assert "matched_job_id == None" in src

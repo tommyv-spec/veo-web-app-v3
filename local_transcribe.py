@@ -123,6 +123,40 @@ def _maybe_auto_match(video, db: Session) -> None:
         print(f"[local] auto-match error on hash={video.file_hash[:8]}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 
 
+def rematch_unmatched(user_id, db: Session) -> dict:
+    """Re-score every done-but-unmatched LocalVideo for this user against the
+    CURRENT awaiting_finishing pool.  Called by the browser after each scan.
+    Closes the race: video uploaded before its job reached Finishing used to
+    stay 'done - no match' forever (match ran once, at upload time).
+    """
+    from models import LocalVideo, Job
+    pool = (
+        db.query(Job.id)
+        .filter(Job.user_id == user_id, Job.lifecycle_stage == "awaiting_finishing")
+        .first()
+    )
+    if not pool:
+        return {"checked": 0, "matched": 0}
+    vids = (
+        db.query(LocalVideo)
+        .filter(
+            LocalVideo.user_id == user_id,
+            LocalVideo.transcription_status == "done",
+            LocalVideo.matched_job_id == None,  # noqa: E711
+        )
+        .all()
+    )
+    matched = 0
+    for v in vids:
+        _maybe_auto_match(v, db)
+        if v.matched_job_id:
+            matched += 1
+    if vids:
+        # v822 diagnostic - remove after operator-side evidence lands.
+        print(f"[local] rematch sweep user={str(user_id)[:8]} checked={len(vids)} matched={matched}", flush=True)
+    return {"checked": len(vids), "matched": matched}
+
+
 def transcribe_local(video, file_bytes: bytes, db: Session) -> None:
     """Process an uploaded LocalVideo: ffmpeg + Whisper + match + advance.
 

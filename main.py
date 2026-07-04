@@ -4225,13 +4225,30 @@ async def upload_local_video(
         raise HTTPException(400, detail="file_hash must be a 64-char SHA-256 hex string")
 
     # Idempotency: re-uploads of the same hash for the same user reuse the
-    # existing row + skip re-processing.
+    # existing row + skip re-processing — UNLESS the row is failed/stuck
+    # (v822): those were permanent misses, now they re-run the pipeline.
     existing = (
         db.query(LocalVideo)
         .filter_by(user_id=current_user.id, file_hash=file_hash)
         .first()
     )
     if existing:
+        from local_transcribe import should_reprocess
+        if should_reprocess(existing.transcription_status, existing.created_at):
+            blob = await file.read()
+            if not blob or len(blob) < 1024:
+                raise HTTPException(400, detail=f"file too small ({len(blob)}B)")
+            if len(blob) > 500 * 1024 * 1024:
+                raise HTTPException(413, detail="file > 500MB")
+            print(f"[local] v822 reprocess hash={file_hash[:8]} (was {existing.transcription_status})", flush=True)
+            existing.file_name = file_name
+            existing.size_bytes = len(blob)
+            existing.transcription_status = "pending"
+            existing.transcription_error = None
+            existing.transcription = None
+            db.commit()
+            transcribe_local(existing, blob, db)
+            db.refresh(existing)
         return existing.to_dict()
 
     blob = await file.read()
@@ -4303,6 +4320,17 @@ async def delete_local_video_by_hash(
     db.delete(v)
     db.commit()
     return {"deleted_hash": file_hash, "reverted_job_id": reverted_job_id}
+
+
+@app.post("/api/local-videos/rematch")
+async def rematch_local_videos(
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v822: sweep done-but-unmatched local videos against the current
+    awaiting_finishing pool.  Browser calls this once per poll cycle."""
+    from local_transcribe import rematch_unmatched
+    return rematch_unmatched(current_user.id, db)
 
 
 @app.post("/api/drive/accounts/{account_id}/sync")
