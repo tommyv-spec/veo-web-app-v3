@@ -349,6 +349,10 @@ class ClipResponse(BaseModel):
     scene_index: Optional[int] = 0
     # Prompt
     prompt_text: Optional[str] = None
+    # v805/v821 — Prompt B policy fallback + its reworded line + active variant
+    prompt_text_b: Optional[str] = None
+    dialogue_text_b: Optional[str] = None
+    rendered_prompt_variant: Optional[str] = "A"
     # Lineup
     in_lineup: bool = True
     # v698A — clip-pair metadata for paired-card UI rendering. clip_role
@@ -2638,6 +2642,9 @@ async def _setup_job_background(
                 # build_prompt pass, no negative trailer): it is the
                 # operator's authored voice-only fallback.
                 _veo_prompt_b = (line_data.get("veo_prompt_b") or "").strip() or None
+                # v821 — reworded dialogue line inside Prompt B (the spoken
+                # line only). Carried onto clip.dialogue_text_b below.
+                _veo_prompt_b_line = (line_data.get("veo_prompt_b_line") or "").strip() or None
                 # v537 — explicit speaker_mode from markdown overrides the
                 # auto-detection in build_prompt. Empty string or 'auto' →
                 # leave as None so build_prompt's _detect_voiceover_only()
@@ -2837,6 +2844,8 @@ async def _setup_job_background(
                     clip.prompt_text = prompt
                     # v805 — Prompt B verbatim (policy fallback; worker-side use).
                     clip.prompt_text_b = _veo_prompt_b
+                    # v821 — reworded dialogue line inside Prompt B.
+                    clip.dialogue_text_b = _veo_prompt_b_line
                     clip.start_frame = start_frame_key
                     clip.end_frame = end_frame_key
                     clip.status = ClipStatus.PENDING.value
@@ -4686,6 +4695,9 @@ async def get_job_clips(
             clip_mode=c.clip_mode or "fresh",
             scene_index=c.scene_index or 0,
             prompt_text=c.prompt_text or None,
+            prompt_text_b=c.prompt_text_b or None,  # v805/v821
+            dialogue_text_b=c.dialogue_text_b or None,  # v821
+            rendered_prompt_variant=c.rendered_prompt_variant or "A",  # v821
             in_lineup=c.id in lineup_set if lineup_set else True,
             # v698A
             clip_role=c.clip_role,
@@ -4781,6 +4793,9 @@ async def get_job_clips_active(
             clip_mode=c.clip_mode or "fresh",
             scene_index=c.scene_index or 0,
             prompt_text=c.prompt_text or None,
+            prompt_text_b=c.prompt_text_b or None,  # v805/v821
+            dialogue_text_b=c.dialogue_text_b or None,  # v821
+            rendered_prompt_variant=c.rendered_prompt_variant or "A",  # v821
             in_lineup=c.id in lineup_set if lineup_set else True,
             clip_role=c.clip_role,
             paired_clip_id=c.paired_clip_id,
@@ -11681,6 +11696,8 @@ async def local_worker_get_redo_clips(
             "dialogue_text": clip.dialogue_text,
             "prompt": clip.prompt_text,
             "prompt_b": clip.prompt_text_b,  # v805 — policy-fallback prompt (voice-only)
+            "dialogue_text_b": clip.dialogue_text_b,  # v821 — reworded Prompt B line
+            "rendered_prompt_variant": clip.rendered_prompt_variant,  # v821 — A/B variant
             "language": job_config.get("language", "English"),
             "duration": job_config.get("duration", "8"),
             "voice_profile": job_config.get("voice_profile", "") or job_config.get("user_context", ""),
