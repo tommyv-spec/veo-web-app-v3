@@ -19425,63 +19425,28 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     print(f"[Flow] ⚠ prominent-people route failed ({_rpe}) — marking general policy", flush=True)
                     fail_clip_general_policy(clip['id'], f"Blocked by Flow's {_term_reason} filter — change the avatar face.")
                 continue
-            print(f"[Flow] ⚠️ Clip {clip_index+1} failed immediately — stopping submission and triggering restore...", flush=True)
-            clip_log(clip.get('id'), clip_index, "RESTORE", "failed immediate check — re-queue + golden restore")
-            # v758.25 — refresh DB truth so the 'generating' filter below excludes
-            # clips the HTTP worker already completed (stale in-memory status would
-            # otherwise reset a done clip to pending = "waiting" again in the UI).
-            refresh_clip_statuses(job)
-            # Record failure so golden restore triggers
-            # Mark this clip pending (NOT failed) — it will be retried after restore
-            update_clip_status(clip['id'], 'pending', error_message=None)
-            # Reset remaining (not-yet-submitted) clips to pending
-            remaining = clips[i+1:]
-            if remaining:
-                print(f"[Flow] ⛔ {len(remaining)} remaining clip(s) reset to pending for retry after restore", flush=True)
-                for rc in remaining:
-                    update_clip_status(rc['id'], 'pending', error_message=None)
-            # Also reset clips that are still 'generating' in the old project.
-            # The old DW will be killed during restore — those clips will never be
-            # downloaded from the orphaned project. Re-submit them in the new project.
-            generating_clips = [c for c in clips[:i] if c.get('status') == 'generating']
-            if generating_clips:
-                print(f"[Flow] ⛔ {len(generating_clips)} generating clip(s) reset to pending (old project will be orphaned)", flush=True)
-                for gc in generating_clips:
-                    update_clip_status(gc['id'], 'pending', error_message=None)
-            # Tell download worker which clips are actually available — exclude failed + remaining
-            if download_queued:
-                allowed = set(c['clip_index'] for c in clips[:i])  # only clips before the failure
-                print(f"[Flow] Notifying download worker: only clips {sorted(allowed)} are available", flush=True)
-                download_queue.put({'type': 'limit_clips', 'job_id': job_id, 'allowed_clips': allowed})
-                download_queue.put({'type': 'shutdown_after_complete', 'job_id': job_id})
-            # Reset job to pending so it gets picked up after golden restore
-            update_job_status(job_id, 'pending')
-            # Fix clips_submitted cache: only keep clips confirmed completed in DB.
-            # The failed clip was added to clips_submitted before the failure check —
-            # remove it or it will be skipped on retry instead of re-submitted.
-            # Also remove 'generating' clips: they were in the old orphaned project
-            # and will never be downloaded; they must be re-submitted in the new project.
-            if job_id in cache.get('jobs', {}):
-                # Re-fetch clip statuses from DB — the in-memory clips list has stale statuses
-                # from job load time and does NOT reflect completed updates made during this run.
-                # Using stale state gives confirmed_done=[] even when clips 0/1 are completed.
-                # confirmed_done: clips that were already submitted to Flow.
-                # We use clips_submitted from cache — this is the source of truth for what
-                # was submitted in this run. The failed clip itself is excluded below via
-                # the [ci for ci in old_submitted if ci in confirmed_done] filter.
-                # Do NOT use in-memory clip statuses — they are never updated by the download thread.
-                confirmed_done = set(cache['jobs'][job_id].get('clips_submitted', []))
-                # Exclude the clip that just failed (it was added to clips_submitted pre-check)
-                confirmed_done.discard(clip_index)
-                print(f"[Flow] Confirmed-submitted clips (excl failed {clip_index+1}): {[c+1 for c in sorted(confirmed_done)]}", flush=True)
-                old_submitted = cache['jobs'][job_id].get('clips_submitted', [])
-                cache['jobs'][job_id]['clips_submitted'] = [ci for ci in old_submitted if ci in confirmed_done]
-                cache['jobs'][job_id]['project_url'] = None
-                cache['jobs'][job_id]['status'] = 'pending'
-                save_cache(cache)
-                print(f"[Flow] Cache clips_submitted trimmed to confirmed-done only: {[c+1 for c in sorted(confirmed_done)]}", flush=True)
-            # Raise — caller (_process_job_with_failover / main) calls record_failure with correct account name
-            raise Exception(f"Clip {clip_index} failed — stopping job to trigger golden restore")
+            # v820 — generic hard-fail: ALL tiles failed with NO session/unusual signal
+            # (that path golden-restores above) and NO terminal-content signal (handled
+            # just above). Cause unknown but per-clip, NOT account-hot. Historically this
+            # golden-restored the account + re-queued the WHOLE job — a sledgehammer for
+            # what is usually a per-clip payload fault. Prod 2026-07-04 clip-3: Flow's
+            # frontend carried a STALE endImage into the request (shape=startImage+endImage
+            # while the DOM had only 1 slot) → HTTP 400 → all tiles failed → golden restore
+            # + full re-queue (~3 min wasted). A fresh-project REDO of JUST this clip clears
+            # that residual frontend state — proven: the same clip's HTTP-DL redo submitted
+            # shape=startImage cleanly. So redo this clip and CONTINUE the job. Session-hot
+            # still golden-restores via its own branch above; real browser crashes still
+            # restore via HealthTracker. Operator 2026-07-04: redo the clip, drop the restore.
+            print(f"[Flow] ⚠️ Clip {clip_index+1} generic hard-fail (no session/policy signal) — "
+                  f"redoing THIS clip in a fresh project, NOT golden-restoring (v820)", flush=True)
+            clip_log(clip.get('id'), clip_index, "REDO", "generic hard-fail — fresh-project redo (v820; was golden restore)")
+            # Mark for fresh-project redo — the SAME mechanism the HTTP-DL all-variants-404
+            # path uses (proven in the same 2026-07-04 run: that redo submitted cleanly in
+            # Account2's own fresh project). The redo dispatcher picks up flow_redo_queued
+            # clips and runs them in a fresh project; the job's other clips keep going here.
+            update_clip_status(clip['id'], 'flow_redo_queued',
+                               error_message="generic hard-fail — fresh-project redo (v820)")
+            continue
         
         # Clip passed — record success for proactive restore counter
         account_health.record_success(account_name)
