@@ -3797,6 +3797,11 @@ async def sync_instagram_account(
     except HikerAPIError as he:
         raise HTTPException(status_code=502, detail=str(he))
     added = 0
+    # Best-effort thumb byte-cache: resolve storage once; None if unconfigured.
+    from backends.storage import is_storage_configured, get_storage
+    from instagram_client import ig_thumb_key, cache_thumb_bytes
+    _ig_storage = get_storage() if is_storage_configured() else None
+    _thumbs_cached = 0  # temporary diagnostic — see code/CLAUDE.md deploy discipline
     for c in clips:
         if not c.get("shortcode"):
             continue
@@ -3810,12 +3815,29 @@ async def sync_instagram_account(
                 existing.video_url = c.get("video_url")
             if c.get("thumb_url"):
                 existing.thumb_url = c.get("thumb_url")
+            # Cache the thumb bytes if not already cached (stale rows self-heal:
+            # the line above just refreshed the dead url to a live one).
+            if not existing.thumb_r2_key and existing.thumb_url:
+                _k = cache_thumb_bytes(
+                    existing.thumb_url, ig_thumb_key(acc.id, existing.shortcode), _ig_storage
+                )
+                if _k:
+                    existing.thumb_r2_key = _k
+                    _thumbs_cached += 1
             continue
+        _thumb_key = None
+        if c.get("thumb_url"):
+            _thumb_key = cache_thumb_bytes(
+                c.get("thumb_url"), ig_thumb_key(acc.id, c["shortcode"]), _ig_storage
+            )
+            if _thumb_key:
+                _thumbs_cached += 1
         v = InstagramVideo(
             account_id=acc.id,
             shortcode=c["shortcode"],
             url=c.get("url") or f"https://www.instagram.com/reel/{c['shortcode']}/",
             thumb_url=c.get("thumb_url"),
+            thumb_r2_key=_thumb_key,
             video_url=c.get("video_url"),
             caption=c.get("caption"),
             views=c.get("views") or 0,
@@ -3828,7 +3850,10 @@ async def sync_instagram_account(
     acc.last_synced_at = datetime.utcnow()
     db.commit()
     total = db.query(InstagramVideo).filter_by(account_id=acc.id).count()
-    return {"added": added, "total": total}
+    # Temporary diagnostic (code/CLAUDE.md): confirms the next operator sync
+    # actually cached bytes. Remove in a follow-up once evidence lands.
+    print(f"[IG sync] account={acc.id} added={added} thumbs_cached={_thumbs_cached} storage={'on' if _ig_storage else 'off'}", flush=True)
+    return {"added": added, "total": total, "thumbs_cached": _thumbs_cached}
 
 
 @app.get("/api/instagram/accounts/{account_id}/videos")
