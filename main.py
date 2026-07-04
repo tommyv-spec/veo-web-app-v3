@@ -3154,6 +3154,14 @@ async def _setup_job_background(
     finally:
         db.close()
 
+def active_dialogue_line(c):
+    """v821 — the line that was actually SPOKEN: B's line if variant B rendered and a
+    B line exists, else A's line. Used for export word-timing + captions."""
+    if (c.get("rendered_prompt_variant") == "B") and (c.get("dialogue_text_b") or "").strip():
+        return c["dialogue_text_b"]
+    return c.get("dialogue_text")
+
+
 def _build_job_response(job, first_dialogue=None, first_frame_url=None, approved_clips=0):
     """Shared JobResponse serializer. Used by list_jobs, get_job, patch_lifecycle, patch_archive.
 
@@ -8492,6 +8500,11 @@ async def export_final_video(
                 "clip_index": clip.clip_index,
                 "skip_start_trim": skip_start_trim,
                 "dialogue_text": clip.dialogue_text or "",
+                # v821 — carry the reworded Prompt B line + which variant
+                # actually rendered, so export word-timing aligns against the
+                # line that was SPOKEN (B when the clip rendered with Prompt B).
+                "dialogue_text_b": clip.dialogue_text_b or None,
+                "rendered_prompt_variant": clip.rendered_prompt_variant or "A",
                 # v667/v668 — propagate cut_mode + target_duration_s so the
                 # video_processor can branch trim/VAD strategy per clip.
                 "cut_mode": clip.cut_mode,
@@ -8754,7 +8767,7 @@ async def export_final_video(
                     transition=settings.transition,
                     transition_duration=settings.transition_duration,
                     dialogue_texts=[
-                        c.get("dialogue_text", "") or "" for c in _speaker_clip_info
+                        active_dialogue_line(c) or "" for c in _speaker_clip_info
                     ],
                     language=(
                         json.loads(job.config_json).get("language", "English")
@@ -9081,7 +9094,7 @@ async def export_final_video(
                     silence_keep=settings.silence_keep,
                     transition=settings.transition,
                     transition_duration=settings.transition_duration,
-                    dialogue_texts=[c.get("dialogue_text", "") or "" for c in clip_info],
+                    dialogue_texts=[active_dialogue_line(c) or "" for c in clip_info],
                     language=json.loads(job.config_json).get("language", "English") if job.config_json else "English",
                     cut_prefix_audio=False,
                     prefix_word=_prefix_word,
