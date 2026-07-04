@@ -386,7 +386,11 @@ class Clip(Base):
     # Shipped verbatim to the worker; used only when the primary prompt trips
     # a generation-policy block (flow_worker retries same-model with this).
     prompt_text_b = Column(Text, nullable=True)
-    
+    # v821 — reworded line spoken if Prompt B (policy fallback) rendered.
+    dialogue_text_b = Column(Text, nullable=True)
+    # v821 — "A"|"B": which prompt produced the downloaded render.
+    rendered_prompt_variant = Column(String(1), default="A")
+
     # Output
     output_filename = Column(String(500), nullable=True)
     
@@ -1042,6 +1046,11 @@ def _run_migrations_postgresql(engine):
         # v815 — auto-image-retry audit trail per clip
         ("clips", "auto_image_retry_json",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS auto_image_retry_json TEXT"),
+        # v821 — reworded Prompt B line + which prompt variant produced the render
+        ("clips", "dialogue_text_b",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS dialogue_text_b TEXT"),
+        ("clips", "rendered_prompt_variant",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS rendered_prompt_variant VARCHAR(1) DEFAULT 'A'"),
     ]
 
     with engine.connect() as conn:
@@ -1184,6 +1193,11 @@ def _run_migrations_sqlite(engine):
         # v815 — auto-image-retry audit trail per clip
         ("clips", "auto_image_retry_json",
          "ALTER TABLE clips ADD COLUMN auto_image_retry_json TEXT"),
+        # v821 — reworded Prompt B line + which prompt variant produced the render
+        ("clips", "dialogue_text_b",
+         "ALTER TABLE clips ADD COLUMN dialogue_text_b TEXT"),
+        ("clips", "rendered_prompt_variant",
+         "ALTER TABLE clips ADD COLUMN rendered_prompt_variant TEXT DEFAULT 'A'"),
     ]
 
     with engine.connect() as conn:
