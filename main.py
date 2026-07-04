@@ -8669,7 +8669,16 @@ async def export_final_video(
             # actually spoken in the rendered Veo audio.
             dialogue_lines = []
             for clip in clips:
-                dialogue_lines.append(_apply_prefix(clip.dialogue_text or ""))
+                # v821 — fingerprint against the line that was actually SPOKEN
+                # (Prompt B's reworded line when the clip rendered with B).
+                # clips are Clip ORM rows, so wrap in a dict for the shared
+                # active_dialogue_line() helper (logic lives in ONE place).
+                _spoken = active_dialogue_line({
+                    "dialogue_text": clip.dialogue_text,
+                    "dialogue_text_b": clip.dialogue_text_b,
+                    "rendered_prompt_variant": clip.rendered_prompt_variant,
+                })
+                dialogue_lines.append(_apply_prefix(_spoken or ""))
             
             print(f"[Export] Master audio alignment: {settings.master_audio_filename}")
             print(f"[Export] Dialogue lines: {len(dialogue_lines)}")

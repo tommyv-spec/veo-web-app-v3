@@ -47,3 +47,7 @@ def test_variant_b_missing_bline_falls_back_to_a():
 
 def test_missing_variant_defaults_a():
     assert active_dialogue_line({"dialogue_text": "A line"}) == "A line"
+
+
+def test_variant_b_whitespace_bline_falls_back_to_a():
+    assert active_dialogue_line({"dialogue_text": "A line", "dialogue_text_b": "   ", "rendered_prompt_variant": "B"}) == "A line"
