@@ -3856,6 +3856,36 @@ def sync_instagram_account(
     return {"added": added, "total": total, "thumbs_cached": _thumbs_cached}
 
 
+@app.get("/api/instagram/videos/{video_id}/thumb")
+async def get_instagram_thumb(
+    video_id: int,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Redirect to a presigned R2 url for a cached IG thumbnail.
+
+    The bytes were downloaded + stored at sync time, so unlike the raw IG CDN
+    url this never expires. The 302 itself is no-store (a presign is short-lived
+    and must not be cached past expiry); R2/browser cache the bytes via the
+    presigned response's own headers.
+    """
+    from models import InstagramVideo, InstagramAccount
+    v = (
+        db.query(InstagramVideo)
+        .join(InstagramAccount, InstagramVideo.account_id == InstagramAccount.id)
+        .filter(InstagramVideo.id == video_id, InstagramAccount.user_id == current_user.id)
+        .first()
+    )
+    if not v or not v.thumb_r2_key:
+        raise HTTPException(status_code=404, detail="No cached thumbnail")
+    from backends.storage import is_storage_configured, get_storage
+    if not is_storage_configured():
+        raise HTTPException(status_code=404, detail="Storage not configured")
+    storage = get_storage()
+    presigned = storage.get_presigned_url(v.thumb_r2_key, expires_in=86400)
+    return RedirectResponse(url=presigned, status_code=302, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/instagram/accounts/{account_id}/videos")
 async def list_instagram_videos(
     account_id: int,
