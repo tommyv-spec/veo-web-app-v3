@@ -239,44 +239,58 @@ def close_laptop_chrome(user_data_dir, profile_folder=None, log=print):
     needle = (os.sep + folder + os.sep).lower()
     prof = (profile_folder or "").strip()
     prof_l = prof.lower()
-    killed = 0
-    skipped_other_profiles = 0
     try:
         ps = ("Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
               "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
         out = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
             capture_output=True, text=True, timeout=30).stdout
+        # Enumerate this channel's chrome.exe once, tagging each by profile.
+        chan_pids = []          # (pid, profile_dir_or_None) for this channel
         for row in out.splitlines():
             row = row.strip()
             if not row:
                 continue
             pid, _, cmd = row.partition("\t")
             pid = pid.strip()
-            cmdl = (cmd or "").lower()
-            if not pid or needle not in cmdl:
+            if not pid or needle not in (cmd or "").lower():
                 continue
-            if prof:
-                # Only kill processes belonging to THIS profile. A process with
-                # a DIFFERENT --profile-directory is another profile -> spare it.
-                # A process with NO --profile-directory (shared GPU/util that
-                # isn't profile-scoped) is left alone too, so other profiles keep
-                # working; the profile's own browser+renderers carry the flag and
-                # releasing them flushes its cookie DB.
-                pdir = _parse_profile_directory_from_cmdline(cmd)
-                if pdir is None:
-                    continue
-                if pdir.strip().lower() != prof_l:
-                    skipped_other_profiles += 1
-                    continue
-            try:
-                subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
-                killed += 1
-            except Exception:
-                pass
-        _scope = f"profile {prof!r}" if prof else f"'{folder}' channel"
-        _spared = f"; spared {skipped_other_profiles} other-profile process(es)" if prof else ""
-        log(f"close chrome: closed {killed} {_scope} process(es){_spared}; other Chrome left running")
+            chan_pids.append((pid, _parse_profile_directory_from_cmdline(cmd)))
+
+        def _kill(pids):
+            n = 0
+            for _p in pids:
+                try:
+                    subprocess.run(["taskkill", "/F", "/PID", _p], capture_output=True)
+                    n += 1
+                except Exception:
+                    pass
+            return n
+
+        # Pass 1 — profile-scoped: kill ONLY processes carrying our
+        # --profile-directory, sparing other profiles in the same channel.
+        killed = 0
+        if prof:
+            own = [p for (p, pd) in chan_pids if pd is not None and pd.strip().lower() == prof_l]
+            spared = sum(1 for (_p, pd) in chan_pids if pd is not None and pd.strip().lower() != prof_l)
+            killed = _kill(own)
+            if killed:
+                log(f"close chrome: closed {killed} profile {prof!r} process(es); "
+                    f"spared {spared} other-profile process(es); other Chrome left running")
+
+        # Pass 2 — fallback: profile-scoping couldn't isolate it (the default/
+        # last-used profile's browser + shared network process carry NO
+        # --profile-directory yet hold the cookie-DB lock). Chrome locks cookies
+        # at the INSTANCE level, so the only way to unlock is to close this
+        # channel's Chrome. Do it so the golden can build — better than a broken
+        # login. Other CHANNELS (the operator's main Chrome) are still spared.
+        if not killed and chan_pids:
+            killed = _kill([p for (p, _pd) in chan_pids])
+            log(f"close chrome: couldn't isolate profile {prof!r} (cookie DB is locked "
+                f"instance-wide) — closed {killed} '{folder}' channel process(es) to unlock; "
+                f"other Chrome channels left running")
+        elif not chan_pids:
+            log(f"close chrome: no '{folder}' Chrome running; nothing to close")
     except Exception as e:
         log(f"close chrome: enumerate failed ({e}); closed nothing (safe)")
     time.sleep(2.0)  # let Windows release the cookie DB file lock
