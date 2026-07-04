@@ -5038,11 +5038,6 @@ def download_all_generated_images(page, output_dir, variants=1, context="", skip
 # actionable error instead of hammering Google.
 IMG_UNUSUAL_COOLDOWN = 30        # s — skip a redundant recovery within this window
 IMG_UNUSUAL_MAX_STRIKES = 3      # per (worker,label) before giving up
-# v818 — SESSION-level label (constant, not per-node) so unusual-activity strikes
-# accumulate across the whole API run. When cheap cookie-clear recovery hits the
-# cap on this label, the worker escalates to a full golden-profile restore +
-# browser relaunch (like the video worker). Reset on any clean API submit.
-_API_UA_LABEL = "api-unusual"
 _IMG_UNUSUAL_LAST = {}           # label -> last recovery epoch
 _IMG_UNUSUAL_STRIKES = {}        # label -> cumulative recoveries
 _IMG_UNUSUAL_LOCK = threading.Lock()
@@ -8190,40 +8185,29 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 in_flight, out_dir, input_items, job,
             ):
                 _save_state()
-                # v818 — clean API submit clears the session-level unusual-activity
-                # strike streak so a later independent block starts fresh.
-                reset_unusual_activity_strikes(label=_API_UA_LABEL)
                 print(f"[API:submit] ✓ Node {node_id} submitted via flow_api (in_flight={len([j for j in in_flight.values() if j.status=='submitted'])})", flush=True)
                 return True
 
-            # v818 — API hit an account-level 'unusual activity' block. Do NOT fall
-            # to the DOM path (it hits the same session block — a DOM redo of an
-            # unusual-blocked node failed all 4 tiles). Re-queue this node so it is
-            # not lost, then recover the SESSION: cheap cookie-clear + reload first
-            # (re-mints Flow's reCAPTCHA on this page, no relaunch); if that keeps
-            # failing, signal main() for a full golden-profile restore + relaunch.
+            # v818.2 — API hit an account-level 'unusual activity' block. Do NOT
+            # fall to the DOM path (it hits the same session block — a DOM redo of
+            # an unusual-blocked node failed all 4 tiles) and do NOT bother with a
+            # cookie-clear reload (operator observed it does NOT clear Flow's
+            # reCAPTCHA block — every following node re-hit it and was lost).
+            # Restore DIRECTLY from the golden profile: signal main() to relaunch.
+            # The in-flight node(s) are re-queued by the /release-claims call in
+            # this function's finally block (the per-node /jobs/<id>/release
+            # endpoint 400s; the worker-level release is the one that works), so
+            # the block'd node goes back to pending and is RE-CLAIMED + RETRIED on
+            # the clean session after relaunch — not marked failed, not lost.
             _ua_reason = getattr(page, "_flow_api_unusual_reason", "")
             if _ua_reason:
                 try:
                     page._flow_api_unusual_reason = ""
                 except Exception:
                     pass
-                # Re-queue (release the claim) so nothing in flight is lost.
-                try:
-                    _api_request(api_url, api_key, "POST", f"/jobs/{node_id}/release", timeout=10)
-                    print(f"[{ctx}] ↩ node re-queued (released claim) — will retry via API after session recovery", flush=True)
-                except Exception as _rel_e:
-                    print(f"[{ctx}] ⚠ node release failed ({_rel_e}) — server stale-claim sweep will re-queue it", flush=True)
-                try:
-                    in_flight.pop(node_id, None)
-                    _gc_pending_submission(node_id)
-                except Exception:
-                    pass
-                if recover_unusual_activity(page, label=_API_UA_LABEL):
-                    print(f"[{ctx}] ↩ session recovered (cookie-clear + reload) — API stays primary", flush=True)
-                else:
-                    print(f"[{ctx}] 🔥 unusual-activity persists after {IMG_UNUSUAL_MAX_STRIKES} cookie-clear recoveries — requesting golden-profile restore + browser relaunch", flush=True)
-                    _restore_signal["golden"] = True
+                print(f"[{ctx}] 🔁 unusual-activity — restoring directly from golden profile + relaunch "
+                      f"(node stays claimed → re-queued by /release-claims → retried after restore)", flush=True)
+                _restore_signal["golden"] = True
                 return False
 
             if not select_image_mode(page, context=ctx):
@@ -9137,6 +9121,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     # can do it).
     _restore_signal = {"golden": False}
     _exit_action = None
+    _session_start = time.time()  # v818.2 — for the relaunch-budget reset in main()
     try:
         while not stop_flag.is_set():
             # 1. Harvest completions from the HTTP worker
@@ -9340,6 +9325,12 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     if _restore_signal["golden"]:
                         print("[API] 🔁 Golden-restore requested — draining + stopping loop for browser relaunch", flush=True)
                         _exit_action = "RELAUNCH_GOLDEN"
+                        # v818.2 — how long this session ran before the block, so
+                        # main() can reset the relaunch budget after a healthy run.
+                        try:
+                            api_pull_mode_parallel._last_session_secs = time.time() - _session_start
+                        except Exception:
+                            pass
                         stop_flag.set()
                         break
 
@@ -9688,6 +9679,7 @@ Examples:
                 # poll loop. Bounded so a hard-flagged account eventually stops
                 # instead of relaunch-looping forever.
                 MAX_GOLDEN_RELAUNCHES = 3
+                HEALTHY_SESSION_SECS = 180  # a run this long before a block = healthy → reset budget
                 _relaunch_n = 0
                 while True:
                     _action = api_pull_mode_parallel(page, args.api_url, api_key,
@@ -9696,6 +9688,12 @@ Examples:
                                                      cross_batch=cross_batch_mode)
                     if _action != "RELAUNCH_GOLDEN":
                         break
+                    # v818.2 — a session that ran healthy for a while before the
+                    # block shouldn't spend the relaunch budget reserved for
+                    # back-to-back blocks. Reset the counter for a productive run.
+                    _sess_secs = getattr(api_pull_mode_parallel, "_last_session_secs", 0)
+                    if _sess_secs > HEALTHY_SESSION_SECS:
+                        _relaunch_n = 0
                     _relaunch_n += 1
                     if _relaunch_n > MAX_GOLDEN_RELAUNCHES:
                         print(f"[IMAGE] ⛔ Golden restore requested {_relaunch_n}x — account likely flagged; "
