@@ -392,10 +392,18 @@ def parse_veo_prompts_block(md_text: str) -> Dict[Tuple[int, int], Dict[str, Opt
         prompt_b = _extract_fenced_content(block, _PROMPT_B_LABEL_RE)
         if prompt_b is not None and not prompt_b.strip():
             prompt_b = None
+        # v821 — pull the reworded dialogue line out of Prompt B (last quoted
+        # span, which sits after the "(American accent):" colon in quotes),
+        # so it can be stored as dialogue_text_b.
+        prompt_b_line = None
+        if prompt_b:
+            _m = re.findall(r'"([^"]+)"', prompt_b)
+            prompt_b_line = _m[-1].strip() if _m else None
         out[(scene_idx, line_idx)] = {
             "text_prompt": text_prompt,
             "negative_prompt": negative_prompt,
             "prompt_b": prompt_b,  # v805
+            "prompt_b_line": prompt_b_line,  # v821
         }
     return out
 
