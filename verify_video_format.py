@@ -15,6 +15,45 @@ import sys
 EMDASH = "—"
 
 
+def lint_promptb_gate(clips):
+    """v821 — reworded Prompt B mandatory on every dialogue clip.
+
+    Prompt B = Prompt A verbatim EXCEPT the quoted dialogue line, which is
+    reworded (different words, same meaning). Pure helper: `clips` is a list
+    of dicts with keys a_prompt / a_line / b_prompt / b_line. Returns a list
+    of error strings (empty = all clips pass).
+
+    - No a_line (silent / non-dialogue clip) → no B required, skip.
+    - a_line present, b_prompt missing → "Prompt B missing".
+    - b_prompt present, b_line missing → "Prompt B has no quoted dialogue line".
+    - b_line == a_line (stripped) → "Prompt B line identical to A".
+    - A-body (a_line blanked) != B-body (b_line blanked) →
+      "Prompt B body must match A except the line".
+    """
+    errs = []
+    for i, c in enumerate(clips, 1):
+        a_prompt = c.get("a_prompt")
+        a_line = c.get("a_line")
+        b_prompt = c.get("b_prompt")
+        b_line = c.get("b_line")
+        if not (a_line and a_line.strip()):
+            continue  # silent / non-dialogue — no B required
+        if not (b_prompt and b_prompt.strip()):
+            errs.append(f"Clip #{i}: Prompt B missing")
+            continue
+        if not (b_line and b_line.strip()):
+            errs.append(f"Clip #{i}: Prompt B has no quoted dialogue line")
+            continue
+        if b_line.strip() == a_line.strip():
+            errs.append(f"Clip #{i}: Prompt B line identical to A")
+            continue
+        a_body = (a_prompt or "").replace('"' + a_line + '"', '"<LINE>"')
+        b_body = (b_prompt or "").replace('"' + b_line + '"', '"<LINE>"')
+        if a_body != b_body:
+            errs.append(f"Clip #{i}: Prompt B body must match A except the line")
+    return errs
+
+
 def _flat(token: str) -> str:
     return "".join(ch for ch in token if ch.isalpha())
 
@@ -252,6 +291,31 @@ def lint(path: str) -> int:
                 warns.append(f"v750: Clip {n}.{m} missing IMMEDIATE ACTION:")
             if "TERMINAL STATE:" not in blk:
                 warns.append(f"v750: Clip {n}.{m} missing TERMINAL STATE:")
+
+    # --- v821: reworded Prompt B mandatory on every dialogue clip ---
+    # Prompt B (v821) = Prompt A verbatim EXCEPT the quoted dialogue line,
+    # reworded (different words, same meaning). Reuse the SAME per-clip parse
+    # the platform import uses (parse_veo_prompts_block) so the linter sees
+    # exactly what the importer sees. a_line = last quoted span of the A
+    # text_prompt; b_line = prompt_b_line (parser-extracted).
+    try:
+        from veo_prompt_overrides import parse_veo_prompts_block
+        _clip_map = parse_veo_prompts_block(t)
+    except Exception as _e:  # pragma: no cover — defensive; missing dep never blocks
+        _clip_map = {}
+        warns.append(f"v821: could not parse Veo clips ({_e}) — Prompt B gate skipped")
+    _pb_clips = []
+    for (_si, _li), _cd in sorted(_clip_map.items()):
+        _a = _cd.get("text_prompt")
+        _q = re.findall(r'"([^"]+)"', _a or "")
+        _pb_clips.append({
+            "a_prompt": _a,
+            "a_line": _q[-1].strip() if _q else None,
+            "b_prompt": _cd.get("prompt_b"),
+            "b_line": _cd.get("prompt_b_line"),
+        })
+    for _e in lint_promptb_gate(_pb_clips):
+        fails.append(f"v821: {_e} — reworded Prompt B mandatory on every dialogue clip (see template_reference §v821)")
 
     # --- report ---
     print(f"FILE: {path}")
