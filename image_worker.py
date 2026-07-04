@@ -4585,15 +4585,19 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
     # rapid-fire pattern that tripped PUBLIC_ERROR_UNUSUAL_ACTIVITY in the
     # previous iteration and (b) let captcha tokens be minted cleanly. Total
     # ~6s for x4 — still well faster than the DOM path's ~25s.
-    # v818.3 — each variant's submit retries the API on a transient server 5xx
-    # (INTERNAL 500 etc.) instead of falling to DOM. An account block still
-    # short-circuits to golden restore; a genuinely non-retryable error still
-    # falls back / latches. If SOME variants succeed and a later one keeps
-    # 5xx'ing, we ship what we captured (partial-ok) rather than DOM-redoing
-    # the whole clip.
+    # v818.4 — PER-VARIANT retry. Each of the N variant submits is retried on
+    # BOTH a transient server 5xx AND an 'unusual activity' 403 (operator saw a
+    # x4 batch where only ONE variant's submit 403'd yet 3 rendered fine — a
+    # single variant's block must NOT nuke the whole node). Decision AFTER the
+    # loop, based on what actually landed:
+    #   - any variant captured  → ship what we got (partial-ok), no restore
+    #   - zero captured, all blocked with unusual-activity → real account block
+    #     → golden restore (_signal_unusual)
+    #   - zero captured, other transient → DOM fall-back; else latch.
     _SUBMIT_API_RETRIES = 3
     captured_fife_urls = []
     _last_fail_reason = None
+    _saw_unusual = False
     try:
         for v in range(int(variants or 1)):
             if v > 0:
@@ -4614,12 +4618,16 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
                 except Exception as e:
                     reason = f"submit_image raised: {e}"
                     _maybe_invalidate_token(reason)
-                    if _is_unusual(reason):
-                        return _signal_unusual(reason)
-                    if _is_server_5xx(reason) and _att < _SUBMIT_API_RETRIES:
+                    _unusual = _is_unusual(reason)
+                    if _unusual:
+                        _saw_unusual = True
+                    # retry the SAME variant on a transient 5xx OR a 403 block
+                    # (each submit_image mints a fresh reCAPTCHA token).
+                    if (_unusual or _is_server_5xx(reason)) and _att < _SUBMIT_API_RETRIES:
                         _w = 2 * (_att + 1)
-                        print(f"{pfx}[flow_api] server error ({reason[-48:]}) — API retry "
-                              f"{_att + 1}/{_SUBMIT_API_RETRIES} in {_w}s", flush=True)
+                        _kind = "unusual-activity" if _unusual else "server error"
+                        print(f"{pfx}[flow_api] {_kind} on variant {v + 1}/{variants} "
+                              f"({reason[-44:]}) — API retry {_att + 1}/{_SUBMIT_API_RETRIES} in {_w}s", flush=True)
                         time.sleep(_w)
                         continue
                     _last_fail_reason = reason
@@ -4627,13 +4635,22 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
     except Exception as e:
         _last_fail_reason = f"submit loop raised: {e}"
 
-    if not captured_fife_urls:
-        # Nothing landed. Route the last failure the normal way.
-        if _last_fail_reason is None:
-            return _latch_off("API responses carried no fife URLs (unexpected response shape)")
+    if captured_fife_urls:
+        # At least one variant landed. A single variant's transient 403/500 does
+        # NOT block the node — ship what we captured rather than aborting.
+        if _last_fail_reason:
+            print(f"{pfx}[flow_api] {len(captured_fife_urls)}/{variants} variant(s) captured; "
+                  f"some failed transiently ({_last_fail_reason[-44:]}) — shipping what landed", flush=True)
+    elif _saw_unusual:
+        # EVERY variant blocked with unusual-activity after retries → genuine
+        # account block → golden restore.
+        return _signal_unusual(_last_fail_reason or "unusual-activity on all variants")
+    elif _last_fail_reason is not None:
         if _is_transient(_last_fail_reason):
             return _fall_back_one(_last_fail_reason)
         return _latch_off(_last_fail_reason)
+    else:
+        return _latch_off("API responses carried no fife URLs (unexpected response shape)")
 
     # Write URLs DIRECTLY to the scanner's captured pool. Bypasses the v624
     # response listener entirely — page.on("request") fires unreliably for
