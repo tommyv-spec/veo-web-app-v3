@@ -2458,6 +2458,15 @@
         .clip-frames .frame-icon { font-size: 10px; }
         .clip-frames .frame-names { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .clip-text { font-size: 11px; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 10px; line-height: 1.4; }
+        /* v821 — reworded-line (Prompt B) A/B display */
+        .clip-ab-lines { display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px; }
+        .clip-line { font-size: 11px; color: var(--text-secondary); line-height: 1.4; opacity: 0.55; display: flex; gap: 5px; align-items: baseline; }
+        .clip-line.active { opacity: 1; color: var(--text-primary); border-left: 2px solid var(--accent); padding-left: 5px; }
+        .clip-text-b { color: var(--text-secondary); opacity: 0.65; }
+        .clip-text-b.active { opacity: 1; }
+        .line-tag { display: inline-block; font-size: 8px; font-weight: 700; letter-spacing: 0.5px; background: var(--bg-input); color: var(--text-muted); border-radius: 4px; padding: 1px 4px; flex-shrink: 0; }
+        .clip-line.active .line-tag { background: var(--accent); color: #fff; }
+        .badge-variant { display: inline-block; background: var(--bg-input); color: var(--text-muted); font-size: 9px; font-weight: 600; text-transform: none; letter-spacing: 0; padding: 2px 6px; border-radius: 8px; margin-left: 4px; }
         .clip-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
         .clip-actions .btn { flex: 1; padding: 6px; font-size: 11px; min-width: 36px; }
         
@@ -11411,7 +11420,19 @@ Ambient: same kitchen room tone, soft pour sound.
             // Wrapped in a marker div so patchClipUI can find/refresh it on later polls.
             const _v815AutoRetryBadge = `<div class="v815-auto-retry-badge">${autoRetryBadgeHtml(c, jid)}</div>`;
 
-            return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}<div class="clip-upload-own" style="margin-top:6px;text-align:center;">${uploadVideoCtl}</div></div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${_v698aPairedBadge}${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}${_v815AutoRetryBadge}<div class="clip-text">${_v698aDisplayText}</div><div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
+            // v821 — reworded-line (Prompt B) display. When a clip carries a B
+            // line, show BOTH lines, badge which variant actually rendered, and
+            // highlight the spoken one. Renders nothing when there's no B line.
+            const _v821HasB = !!c.dialogue_text_b;
+            const _v821Variant = c.rendered_prompt_variant || 'A';
+            const _v821VariantBadge = _v821HasB
+                ? `<span class="badge badge-variant" title="v821 — which line actually rendered (A = original, B = reworded Prompt B)">rendered: ${_v821Variant}</span>`
+                : '';
+            const _v821AbLines = _v821HasB
+                ? `<div class="clip-ab-lines"><div class="clip-line clip-text-a ${_v821Variant!=='B'?'active':''}"><span class="line-tag">A</span>${escapeHtml(c.dialogue_text||'')}</div><div class="clip-line clip-text-b ${_v821Variant==='B'?'active':''}"><span class="line-tag">B</span>${escapeHtml(c.dialogue_text_b)}</div></div>`
+                : '';
+
+            return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}<div class="clip-upload-own" style="margin-top:6px;text-align:center;">${uploadVideoCtl}</div></div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${_v698aPairedBadge}${_v821VariantBadge}${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}${_v815AutoRetryBadge}<div class="clip-text">${_v698aDisplayText}</div>${_v821AbLines}<div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
 
         }
 
@@ -11550,11 +11571,21 @@ Ambient: same kitchen room tone, soft pour sound.
             const _fEnd=clip.end_frame?_frameDl(clip.end_frame,'end'):'';
             const _frames=(_fStart||_fEnd)?`${_fStart}${_fEnd}`:'';
 
+            // v821 — reworded-line (Prompt B) display for a paired side. Same
+            // both-lines + rendered-variant badge treatment as renderClip. The
+            // paired side has no status badge of its own, so the variant chip
+            // rides inside the A/B block. Renders nothing when there's no B line.
+            const _v821HasB = !!clip.dialogue_text_b;
+            const _v821Variant = clip.rendered_prompt_variant || 'A';
+            const _v821AbLines = _v821HasB
+                ? `<div class="clip-ab-lines"><div class="clip-line clip-text-a ${_v821Variant!=='B'?'active':''}"><span class="line-tag">A</span>${escapeHtml(clip.dialogue_text||'')}</div><div class="clip-line clip-text-b ${_v821Variant==='B'?'active':''}"><span class="line-tag">B</span>${escapeHtml(clip.dialogue_text_b)}</div><span class="badge badge-variant" title="v821 — which line actually rendered (A = original, B = reworded Prompt B)">rendered: ${_v821Variant}</span></div>`
+                : '';
+
             // v782 — clean grouped toolbar: REVIEW row (approve/redo) then a
             // FILES row (copy + upload) below a hairline, then the frame thumbs.
             // Replaces the old flat row where copy/upload/download all looked
             // identical (gray btn-secondary).
-            return `<div class="clip-video">${vid}</div>${variantNav}`
+            return `<div class="clip-video">${vid}</div>${variantNav}${_v821AbLines}`
                 + `<div class="clip-toolbar">`
                 + (acts ? `<div class="clip-toolbar-row review">${acts}</div>` : '')
                 + `<div class="clip-toolbar-row files">${copyPromptCtl}${uploadOwnCtl}</div>`
