@@ -3881,8 +3881,20 @@ async def get_instagram_thumb(
     from backends.storage import is_storage_configured, get_storage
     if not is_storage_configured():
         raise HTTPException(status_code=404, detail="Storage not configured")
-    storage = get_storage()
-    presigned = storage.get_presigned_url(v.thumb_r2_key, expires_in=86400)
+    try:
+        storage = get_storage()
+        presigned = storage.get_presigned_url(v.thumb_r2_key, expires_in=86400)
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Storage-layer failure (bad creds / boto error) → clean 404, not a 500;
+        # the frontend already has an onerror placeholder for a missing thumb.
+        # Mirrors the try/except degrade in download_output.
+        print(f"[IG thumb] presign failed video={video_id} key={v.thumb_r2_key}: {e}", flush=True)
+        raise HTTPException(status_code=404, detail="Thumbnail unavailable")
+    # Temporary diagnostic (code/CLAUDE.md deploy discipline): confirms the serve
+    # route redirects on the next operator-side run. Remove once evidence lands.
+    print(f"[IG thumb] redirect video={video_id} -> presigned R2 (no-store 302)", flush=True)
     return RedirectResponse(url=presigned, status_code=302, headers={"Cache-Control": "no-store"})
 
 
