@@ -4448,6 +4448,17 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
         return ("UNUSUAL_ACTIVITY" in r
                 or ("RECAPTCHA" in r and ("PERMISSION_DENIED" in r or " 403" in r or "CODE=403" in r)))
 
+    def _is_server_5xx(reason: str) -> bool:
+        """Transient server-side error (INTERNAL 500 / 502 / 503 / 504 /
+        UNAVAILABLE / DEADLINE). Same prompt + same session will very likely
+        succeed on a retry, so v818.3 retries the API submit in-place instead of
+        falling to the DOM path (operator: 'on error 500 retry via API')."""
+        r = (reason or "").upper()
+        return any(s in r for s in (
+            " 500", " 502", " 503", " 504",
+            "CODE=500", "CODE=502", "CODE=503", "CODE=504",
+            "INTERNAL", "UNAVAILABLE", "DEADLINE"))
+
     def _signal_unusual(reason: str):
         """v818 — flag an account-level block on the page so the caller recovers
         the SESSION (cookie-clear → golden restore) instead of falling through
@@ -4574,31 +4585,55 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
     # rapid-fire pattern that tripped PUBLIC_ERROR_UNUSUAL_ACTIVITY in the
     # previous iteration and (b) let captcha tokens be minted cleanly. Total
     # ~6s for x4 — still well faster than the DOM path's ~25s.
+    # v818.3 — each variant's submit retries the API on a transient server 5xx
+    # (INTERNAL 500 etc.) instead of falling to DOM. An account block still
+    # short-circuits to golden restore; a genuinely non-retryable error still
+    # falls back / latches. If SOME variants succeed and a later one keeps
+    # 5xx'ing, we ship what we captured (partial-ok) rather than DOM-redoing
+    # the whole clip.
+    _SUBMIT_API_RETRIES = 3
     captured_fife_urls = []
+    _last_fail_reason = None
     try:
         for v in range(int(variants or 1)):
             if v > 0:
                 time.sleep(1.5)
-            media_id, fife_url = cli.submit_image(
-                prompt=api_prompt,
-                image_model_name=image_model,
-                reference_media_ids=ref_ids or None,
-                aspect=api_aspect,
-                cooldown=(v == 0),  # only first call pays the 10s cooldown
-            )
-            if fife_url:
-                captured_fife_urls.append(fife_url)
+            for _att in range(_SUBMIT_API_RETRIES + 1):
+                try:
+                    media_id, fife_url = cli.submit_image(
+                        prompt=api_prompt,
+                        image_model_name=image_model,
+                        reference_media_ids=ref_ids or None,
+                        aspect=api_aspect,
+                        cooldown=(v == 0 and _att == 0),  # only first call pays the 10s cooldown
+                    )
+                    if fife_url:
+                        captured_fife_urls.append(fife_url)
+                    _last_fail_reason = None
+                    break  # this variant is done
+                except Exception as e:
+                    reason = f"submit_image raised: {e}"
+                    _maybe_invalidate_token(reason)
+                    if _is_unusual(reason):
+                        return _signal_unusual(reason)
+                    if _is_server_5xx(reason) and _att < _SUBMIT_API_RETRIES:
+                        _w = 2 * (_att + 1)
+                        print(f"{pfx}[flow_api] server error ({reason[-48:]}) — API retry "
+                              f"{_att + 1}/{_SUBMIT_API_RETRIES} in {_w}s", flush=True)
+                        time.sleep(_w)
+                        continue
+                    _last_fail_reason = reason
+                    break  # non-retryable, or API retries exhausted for this variant
     except Exception as e:
-        reason = f"submit_image raised: {e}"
-        _maybe_invalidate_token(reason)
-        if _is_unusual(reason):
-            return _signal_unusual(reason)
-        if _is_transient(reason):
-            return _fall_back_one(reason)
-        return _latch_off(reason)
+        _last_fail_reason = f"submit loop raised: {e}"
 
     if not captured_fife_urls:
-        return _latch_off("API responses carried no fife URLs (unexpected response shape)")
+        # Nothing landed. Route the last failure the normal way.
+        if _last_fail_reason is None:
+            return _latch_off("API responses carried no fife URLs (unexpected response shape)")
+        if _is_transient(_last_fail_reason):
+            return _fall_back_one(_last_fail_reason)
+        return _latch_off(_last_fail_reason)
 
     # Write URLs DIRECTLY to the scanner's captured pool. Bypasses the v624
     # response listener entirely — page.on("request") fires unreliably for
