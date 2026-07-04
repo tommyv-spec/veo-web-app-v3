@@ -9149,7 +9149,7 @@ def is_generate_button_enabled(page):
         return False
 
 
-def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retries=3, wait_timeout=60, start_frame=None, end_frame=None):
+def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retries=3, wait_timeout=60, start_frame=None, end_frame=None, gallery_cache=None, start_frame_key=None, end_frame_key=None):
     """
     Click reuse button, fill prompt, and click Generate with retry logic.
     
@@ -9276,8 +9276,17 @@ def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retrie
                     
                     if start_frame and os.path.exists(start_frame):
                         try:
+                            # v819 — pass gallery_cache + keys so the manual fallback can
+                            # gallery-SELECT an already-uploaded image instead of re-uploading
+                            # through the (stale-selector) file-upload path. Without this the
+                            # reuse-fallback ghosted the first has_new_frames=False clip:
+                            # attempt-1 upload bound-glitched, retries said "not in gallery
+                            # cache" → file-upload → find_dialog_upload_button miss → start_glitch
+                            # → no-frame Generate → ghost tile → redo (2026-07-04 clip-5 logs).
+                            print(f"{prefix}[v819] reuse-fallback upload: gallery_cache={'set' if gallery_cache is not None else 'None'} start_key={start_frame_key}", flush=True)
                             upload_ok, rejected_which, rejected_reason = upload_both_frames_with_policy_check(  # v815 — 3-tuple: capture reject reason
-                                page, start_frame, end_frame, context=f"{prefix}Clip {clip_num} reuse-fallback")
+                                page, start_frame, end_frame, context=f"{prefix}Clip {clip_num} reuse-fallback",
+                                gallery_cache=gallery_cache, start_key=start_frame_key, end_key=end_frame_key)
                             if upload_ok:
                                 print(f"{prefix}✓ Frames uploaded manually as fallback", flush=True)
                                 # CRITICAL: Re-fill prompt — upload_both_frames clears the input
@@ -14987,10 +14996,15 @@ def find_dialog_upload_button(dialog):
     so we check both element types.
     """
     # Primary: div or button with upload icon (current Flow UI uses <div>)
+    # v819 — Flow relabelled the button "Upload media" (was "Upload image"); the
+    # icon-only selectors silently missed it → button.first fallback → wrong element
+    # → "upload button not visible" → reuse-fallback start_glitch → ghost (2026-07-04).
     for selector in [
         "div:has(> div > i:text('upload'))",           # New: nested div > div > i
         "div:has(i:text('upload')):has-text('Upload')", # New: div with icon + text
         "button:has(i:text('upload'))",                 # Legacy: button with icon
+        "div:has-text('Upload media')",                 # v819: current label
+        "button:has-text('Upload media')",              # v819: current label (button variant)
         "div:has-text('Upload image')",                 # Text-based div match
         "button:has(span:text('Upload image'))",        # Legacy: button with span
     ]:
@@ -17321,7 +17335,8 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
             # and retries with page refresh if it gets stuck
             try:
                 click_reuse_and_generate(page, prompt, i+1, account_name, max_retries=3, wait_timeout=60,
-                                        start_frame=start_frame, end_frame=end_frame)
+                                        start_frame=start_frame, end_frame=end_frame,
+                                        gallery_cache=gallery_cache, start_frame_key=start_frame_key, end_frame_key=end_frame_key)  # v819
             except Exception as e:
                 # v195: Reuse failed — fall back to fresh submission (clear + upload frames + prompt)
                 print(f"[{account_name}] ⚠ Reuse failed for clip {clip_index+1}: {e}", flush=True)
@@ -19094,7 +19109,8 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # and retries with page refresh if it gets stuck
             try:
                 click_reuse_and_generate(page, prompt, i+1, "Flow", max_retries=3, wait_timeout=60,
-                                        start_frame=start_frame, end_frame=end_frame)
+                                        start_frame=start_frame, end_frame=end_frame,
+                                        gallery_cache=gallery_cache, start_frame_key=start_frame_key, end_frame_key=end_frame_key)  # v819
             except Exception as e:
                 # v195: Reuse failed — fall back to fresh submission (clear + upload frames + prompt)
                 print(f"[Flow] ⚠ Reuse failed for clip {clip_index+1}: {e}", flush=True)
