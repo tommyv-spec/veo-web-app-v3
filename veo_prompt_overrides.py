@@ -398,7 +398,8 @@ def parse_veo_prompts_block(md_text: str) -> Dict[Tuple[int, int], Dict[str, Opt
         prompt_b_line = None
         if prompt_b:
             _m = re.findall(r'"([^"]+)"', prompt_b)
-            prompt_b_line = _m[-1].strip() if _m else None
+            _pbl = _m[-1].strip() if _m else ""
+            prompt_b_line = _pbl or None  # v821 — whitespace-only → None, consistent with no-B
         out[(scene_idx, line_idx)] = {
             "text_prompt": text_prompt,
             "negative_prompt": negative_prompt,
