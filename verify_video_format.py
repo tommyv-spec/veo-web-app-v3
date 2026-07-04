@@ -29,6 +29,10 @@ def lint_promptb_gate(clips):
     - b_line == a_line (stripped) → "Prompt B line identical to A".
     - A-body (a_line blanked) != B-body (b_line blanked) →
       "Prompt B body must match A except the line".
+
+    NOTE: the body-blanking assumes the dialogue line appears EXACTLY ONCE as a
+    quoted span in the prompt. If the exact line text also appears elsewhere
+    quoted, the body-match can false-negative (rare in the v797 format).
     """
     errs = []
     for i, c in enumerate(clips, 1):
@@ -298,24 +302,28 @@ def lint(path: str) -> int:
     # the platform import uses (parse_veo_prompts_block) so the linter sees
     # exactly what the importer sees. a_line = last quoted span of the A
     # text_prompt; b_line = prompt_b_line (parser-extracted).
+    # A raised exception HARD-FAILS (a broken parse must never let a build slip
+    # past the gate). An EMPTY dict is legitimate (a build with no Veo /
+    # dialogue clips = nothing to check) and PASSES.
+    _clip_map = None
     try:
         from veo_prompt_overrides import parse_veo_prompts_block
         _clip_map = parse_veo_prompts_block(t)
-    except Exception as _e:  # pragma: no cover — defensive; missing dep never blocks
-        _clip_map = {}
-        warns.append(f"v821: could not parse Veo clips ({_e}) — Prompt B gate skipped")
-    _pb_clips = []
-    for (_si, _li), _cd in sorted(_clip_map.items()):
-        _a = _cd.get("text_prompt")
-        _q = re.findall(r'"([^"]+)"', _a or "")
-        _pb_clips.append({
-            "a_prompt": _a,
-            "a_line": _q[-1].strip() if _q else None,
-            "b_prompt": _cd.get("prompt_b"),
-            "b_line": _cd.get("prompt_b_line"),
-        })
-    for _e in lint_promptb_gate(_pb_clips):
-        fails.append(f"v821: {_e} — reworded Prompt B mandatory on every dialogue clip (see template_reference §v821)")
+    except Exception as _e:
+        fails.append(f"v821 Prompt B gate could not parse Veo clips: {_e}")
+    if _clip_map is not None:
+        _pb_clips = []
+        for (_si, _li), _cd in sorted(_clip_map.items()):
+            _a = _cd.get("text_prompt")
+            _q = re.findall(r'"([^"]+)"', _a or "")
+            _pb_clips.append({
+                "a_prompt": _a,
+                "a_line": _q[-1].strip() if _q else None,
+                "b_prompt": _cd.get("prompt_b"),
+                "b_line": _cd.get("prompt_b_line"),
+            })
+        for _e in lint_promptb_gate(_pb_clips):
+            fails.append(f"v821: {_e} — reworded Prompt B mandatory on every dialogue clip (see template_reference §v821)")
 
     # --- report ---
     print(f"FILE: {path}")
