@@ -94,3 +94,14 @@ def test_frontend_poll_path_noninteractive_permission():
 def test_frontend_dead_upload_helper_removed():
     src = open(_INDEX, encoding="utf-8").read()
     assert "_uploadLocalFile" not in src
+
+
+def test_frontend_review_fixes_v822_1():
+    """Post-review fixes: UTC parse (naive isoformat read as local time broke
+    stuck-row retry east of UTC), retry cap, scan-generation guard."""
+    src = open(_INDEX, encoding="utf-8").read()
+    assert "function _localParseUtc(" in src
+    assert "LOCAL_MAX_RETRY_ATTEMPTS" in src
+    assert "_localRetryAttempts" in src
+    assert "_localScanGen" in src
+    assert "gen !== _localScanGen" in src

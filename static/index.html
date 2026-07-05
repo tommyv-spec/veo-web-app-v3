@@ -4735,6 +4735,8 @@ Ambient: same kitchen room tone, soft pour sound.
         let _localLastScanAt = 0;
         let _localScanStartedAt = 0;
         let _localPermissionLost = false;
+        let _localScanGen = 0;                  // scan generation - stale scans must not touch shared state
+        let _localRetryAttempts = new Map();    // hash -> re-upload attempts this session
 
         function _fetchT(url, opts = {}, timeoutMs = 20000) {
           // v822: every watcher fetch gets a timeout - one hung request used
@@ -4846,13 +4848,27 @@ Ambient: same kitchen room tone, soft pour sound.
         }
 
         const LOCAL_RETRY_STUCK_AFTER_MS = 10 * 60 * 1000;
+        const LOCAL_MAX_RETRY_ATTEMPTS = 3;
+
+        function _localParseUtc(s) {
+          // Server isoformat is naive UTC (no tz suffix); bare Date.parse
+          // reads that as LOCAL time (UTC+2 here -> stuck rows look 2h in
+          // the future and never retry). Force UTC when no tz is present.
+          if (!s) return 0;
+          const hasTz = /Z$|[+-]\d\d:?\d\d$/.test(s);
+          const t = Date.parse(hasTz ? s : s + "Z");
+          return isNaN(t) ? 0 : t;
+        }
+
         function _localRowRetryable(v) {
           // Mirror of server-side should_reprocess (v822): failed and stuck
           // pending/running rows are NOT "seen" - the next scan re-uploads
-          // them and the server re-runs the pipeline.
+          // them and the server re-runs the pipeline. Capped per session so a
+          // truly broken file can't re-upload forever every 30s.
+          if ((_localRetryAttempts.get(v.file_hash) || 0) >= LOCAL_MAX_RETRY_ATTEMPTS) return false;
           if (v.transcription_status === "failed") return true;
           if (v.transcription_status === "pending" || v.transcription_status === "running") {
-            const t = v.created_at ? Date.parse(v.created_at) : 0;
+            const t = _localParseUtc(v.created_at);
             return !t || (Date.now() - t > LOCAL_RETRY_STUCK_AFTER_MS);
           }
           return false;
@@ -4900,6 +4916,9 @@ Ambient: same kitchen room tone, soft pour sound.
           }
           _localPollInFlight = true;
           _localScanStartedAt = Date.now();
+          // Generation token: if the watchdog starts a newer scan while this
+          // one is still draining, this one must stop touching shared state.
+          const gen = ++_localScanGen;
           try {
             const newOnes = [];
             // Track every video hash present in folder THIS scan. Used for
@@ -4957,7 +4976,18 @@ Ambient: same kitchen room tone, soft pour sound.
                 }, 180000);
                 if (r.ok) {
                   const data = await r.json();
-                  _localSeenHashes.add(hash);
+                  if (_localRowRetryable(data)) {
+                    // Row came back failed/stuck - leave it out of the
+                    // seen-set so the next scan retries, up to the cap.
+                    const n = (_localRetryAttempts.get(hash) || 0) + 1;
+                    _localRetryAttempts.set(hash, n);
+                    if (n >= LOCAL_MAX_RETRY_ATTEMPTS) {
+                      _localSeenHashes.add(hash);
+                      console.warn(`[local] hash=${hash.slice(0, 8)} still ${data.transcription_status} after ${n} attempts - giving up (✕ the card + Force rescan to retry)`);
+                    }
+                  } else {
+                    _localSeenHashes.add(hash);
+                  }
                   newOnes.push(data);
                 } else {
                   console.warn("[local] upload failed:", r.status, await r.text());
@@ -4966,6 +4996,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 console.warn("[local] upload exception:", e);
               }
             }
+            if (gen !== _localScanGen) return; // superseded by a newer scan
             _localLastSkipped = skipped;
 
             // Delete pass (v822): debounced 2 scans + only hashes actually
@@ -5014,7 +5045,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 rematched = d.matched || 0;
                 if (rematched) console.log(`[local] rematch sweep matched ${rematched} video(s)`);
               }
-            } catch (e) { /* sweep is best-effort */ }
+            } catch (e) { console.warn("[local] rematch sweep failed:", e); }
 
             if (newOnes.length || deletedJobIds.length || rematched) {
               await refreshLocalPanel();
@@ -5027,8 +5058,11 @@ Ambient: same kitchen room tone, soft pour sound.
               }
             }
           } finally {
-            _localPollInFlight = false;
-            _localLastScanAt = Date.now();
+            if (gen === _localScanGen) {
+              // A superseded scan must not clear the NEWER scan's flag.
+              _localPollInFlight = false;
+              _localLastScanAt = Date.now();
+            }
           }
         }
 
@@ -5172,6 +5206,7 @@ Ambient: same kitchen room tone, soft pour sound.
               const data = await r.json().catch(() => ({}));
               // Drop from seen-set so re-adding the file later triggers a fresh upload.
               _localSeenHashes.delete(hash);
+              _localRetryAttempts.delete(hash); // manual ✕ = fresh retry budget (v822)
               await refreshLocalPanel();
               if (typeof refreshLifecycle === "function") {
                 refreshLifecycle({ force: true });
