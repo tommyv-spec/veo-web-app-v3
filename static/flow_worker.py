@@ -5178,10 +5178,20 @@ def handle_terminal_reject(clip_id, reason, account_name="", job_id=None, clip_i
     if reason and 'PROMINENT' in reason.upper():
         d = prominent_promptb_decision(clip_id)
         if d == 'retry_prompt_b' and requeue:
-            update_clip_status(clip_id, 'flow_redo_queued',
-                               error_message='v821 prominent -> retry reworded line (Prompt B)')
-            print(f"[v821] API-reason prominent on clip {clip_id} -> requeue with Prompt B", flush=True)
-            return 'requeued'
+            # prominent_promptb_decision already marked _PROMPT_B_TRIED. If the requeue
+            # write fails, roll that mark back (so a later retry can still use Prompt B)
+            # and fall through to the terminal card — never strand the clip marked-tried
+            # but not queued (would be neither retried nor failed).
+            try:
+                update_clip_status(clip_id, 'flow_redo_queued',
+                                   error_message='v821 prominent -> retry reworded line (Prompt B)')
+            except Exception as _requeue_err:
+                _PROMPT_B_TRIED.pop(clip_id, None)
+                print(f"[v821] requeue write failed for clip {clip_id} ({_requeue_err}) "
+                      f"-> falling back to replace-image card", flush=True)
+            else:
+                print(f"[v821] API-reason prominent on clip {clip_id} -> requeue with Prompt B", flush=True)
+                return 'requeued'
         if d == 'terminal_line':
             fail_clip_general_policy(
                 clip_id,
@@ -6134,6 +6144,12 @@ class HumanPacer:
         # v769 — subset of _last_policy_killed whose tile text mentions
         # "prominent people" (image problem → replace-image card, not prompt).
         self._last_policy_prominent = set()
+        # v823 — subset of _last_policy_killed whose kill is a TERMINAL RAI
+        # reject: tile text says "reputational"/"misrepresent", or the clip's
+        # own bound media carries a media-keyed API terminal record. Retry /
+        # model-swap / golden-restore can never win these — the caller routes
+        # them straight to the replace-image card instead of requeueing.
+        self._last_policy_terminal = set()
         delay = self._calculate_delay(clip_number, total_clips)
         is_break = self.clips_this_session >= self._next_break_at
         if is_break:
@@ -6332,22 +6348,48 @@ class HumanPacer:
                                                     # v769 — capture BOTH the generic
                                                     # policy flag AND whether it's the
                                                     # "prominent people" (image) kind.
+                                                    # v823 — also the terminal RAI wording
+                                                    # ("reputational"/"misrepresent"): those
+                                                    # tiles never say "violate...policies",
+                                                    # so they fell into the blind hard-fail
+                                                    # redo lane (job e03e939c clip 1).
                                                     _pk = page.evaluate(f"""() => {{
                                                         const c = document.querySelector('[data-index="{_data_idx}"]');
-                                                        if (!c) return {{policy:false, prominent:false}};
+                                                        if (!c) return {{policy:false, prominent:false, rai:false}};
                                                         const t = (c.textContent || '').toLowerCase();
-                                                        return {{policy: t.includes('violate') && t.includes('policies'), prominent: t.includes('prominent')}};
+                                                        return {{policy: t.includes('violate') && t.includes('policies'),
+                                                                 prominent: t.includes('prominent'),
+                                                                 rai: t.includes('reputational') || t.includes('misrepresent')}};
                                                     }}""")
-                                                    _is_policy_kill = bool(_pk and _pk.get('policy'))
+                                                    _is_policy_kill = bool(_pk and (_pk.get('policy') or _pk.get('rai')))
                                                     _is_prom_kill = bool(_pk and _pk.get('prominent'))
+                                                    _is_rai_kill = bool(_pk and _pk.get('rai'))
                                                 except Exception:
                                                     _is_policy_kill = False
                                                     _is_prom_kill = False
+                                                    _is_rai_kill = False
+                                                # v823 — media-keyed API terminal record
+                                                # (REPUTATIONAL / SEXUAL / CSAM / ...) for
+                                                # THIS clip's own bound media = policy kill
+                                                # even when the tile wording matched nothing.
+                                                # The status-poll feed records it and the
+                                                # PolicyScan already reads it; this classifier
+                                                # must too, or the clip is requeued into a
+                                                # redo it can never win.
+                                                if not _is_rai_kill:
+                                                    try:
+                                                        if _peek_video_policy_terminal_for_clip(job_id, _ci):
+                                                            _is_policy_kill = True
+                                                            _is_rai_kill = True
+                                                    except Exception:
+                                                        pass
                                                 if _is_policy_kill:
                                                     self._last_policy_killed.add(_ci)
                                                     if _is_prom_kill:
                                                         self._last_policy_prominent.add(_ci)
-                                                    print(f"[{self.account_name}] ⚠ clip {_ci+1} hard failure carries content-policy text ('violate...policies'{', prominent-people' if _is_prom_kill else ''}) — routing to policy handling", flush=True)
+                                                    if _is_rai_kill:
+                                                        self._last_policy_terminal.add(_ci)
+                                                    print(f"[{self.account_name}] ⚠ clip {_ci+1} hard failure carries content-policy text ('violate...policies'{', prominent-people' if _is_prom_kill else ''}{', terminal-RAI' if _is_rai_kill else ''}) — routing to policy handling (v823)", flush=True)
                                                 delayed_failures.append(_ci)
                                                 _dl_checked.add(_ci)
                                     elif _fail_info == 'soft':
@@ -19698,6 +19740,10 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # re-submitting it. Only a GENUINE hard failure (no policy text)
                 # means Flow may be broken → then we abort + golden restore.
                 _prom_killed = getattr(_pacer, '_last_policy_prominent', set())
+                # v823 — clips whose kill the classifier proved terminal-RAI
+                # (tile text or media-keyed record). Used below as a fallback
+                # when the consume call finds no record (media never bound).
+                _rai_killed = getattr(_pacer, '_last_policy_terminal', set())
                 for _dfc in _policy_fails:
                     _df_clip = next((c for c in clips if c.get('clip_index') == _dfc), None)
                     if not _df_clip:
@@ -19720,6 +19766,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     # this a SEXUAL reject (deterministic, swap-proof) would retry_swap
                     # + requeue a redo it can never win (2026-06-24 logs, clip 7).
                     _df_term = _consume_video_policy_terminal_for_clip(job_id, _dfc)
+                    # v823 — tile-text RAI kill with no API record (e.g. the
+                    # media never bound): still terminal — a redo or model swap
+                    # can never win an RAI reject, so fail-fast the same way.
+                    if not _df_term and _dfc in _rai_killed:
+                        _df_term = 'REPUTATIONAL'
                     if _df_term:
                         # v821b — prominent with an un-tried Prompt B -> requeue with reworded line.
                         if handle_terminal_reject(_df_clip['id'], _df_term, job_id=job_id, clip_index=_dfc) == 'requeued':
@@ -19760,6 +19811,21 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     for _dfc in _hard_fails:
                         _df_clip = next((c for c in clips if c.get('clip_index') == _dfc), None)
                         if not _df_clip:
+                            continue
+                        # v823 — last-chance terminal check (mirror of the policy
+                        # lane above): a terminal record for THIS clip's bound
+                        # media means a redo can never win → replace-image card,
+                        # NOT flow_redo_queued. Catches a record that landed after
+                        # the wait-cycle classifier already ran.
+                        _df_term = _consume_video_policy_terminal_for_clip(job_id, _dfc)
+                        if _df_term:
+                            # v821b — prominent with an un-tried Prompt B -> requeue with reworded line.
+                            if handle_terminal_reject(_df_clip['id'], _df_term, job_id=job_id, clip_index=_dfc) == 'requeued':
+                                print(f"[Flow] 🔁 clip {_dfc+1} gen-time prominent (v823 hard-fail lane) — retry reworded line (Prompt B)", flush=True)
+                                clip_log(_df_clip['id'], _dfc, "REDO", "gen-time prominent -> retry reworded line (Prompt B) (v823)")
+                                continue
+                            print(f"[Flow] ⛔ clip {_dfc+1} terminal content filter ({_df_term}) — replace-image card, NOT requeueing (v823 hard-fail lane)", flush=True)
+                            clip_log(_df_clip['id'], _dfc, "FAILED", f"terminal content filter {_df_term} (v823)")
                             continue
                         _df_cycles = register_auto_redo_cycle(_df_clip['id'])
                         if auto_redo_exhausted(_df_cycles):
