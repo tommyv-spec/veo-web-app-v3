@@ -4735,6 +4735,33 @@ Ambient: same kitchen room tone, soft pour sound.
         let _localSeenHashes = new Set();
         let _localPollTimer = null;
         let _localPollInFlight = false;
+        // v822 never-miss state
+        let _localStatCache = new Map();        // "name|size|mtime" -> sha256 (skip re-reads)
+        let _localPendingStability = new Map(); // name -> "size|mtime" from last scan (settling files)
+        let _localMissingStreak = new Map();    // hash -> consecutive scans missing
+        let _localDeleteEligible = new Set();   // hashes OBSERVED in this folder this session
+        let _localLastSkipped = [];             // [{name, reason}] from last scan
+        let _localLastScanAt = 0;
+        let _localScanStartedAt = 0;
+        let _localPermissionLost = false;
+        let _localScanGen = 0;                  // scan generation - stale scans must not touch shared state
+        let _localRetryAttempts = new Map();    // hash -> re-upload attempts this session
+
+        function _fetchT(url, opts = {}, timeoutMs = 20000) {
+          // v822: every watcher fetch gets a timeout - one hung request used
+          // to leave _localPollInFlight=true forever (watcher silently dead).
+          const ctl = new AbortController();
+          const t = setTimeout(() => ctl.abort(), timeoutMs);
+          return fetch(url, { ...opts, signal: ctl.signal }).finally(() => clearTimeout(t));
+        }
+
+        function _localResetFolderState() {
+          _localStatCache = new Map();
+          _localPendingStability = new Map();
+          _localMissingStreak = new Map();
+          _localDeleteEligible = new Set();
+          _localLastSkipped = [];
+        }
 
         function _idbOpen() {
           return new Promise((resolve, reject) => {
@@ -4808,6 +4835,8 @@ Ambient: same kitchen room tone, soft pour sound.
           try {
             const handle = await window.showDirectoryPicker({ id: "kavenoWatch", mode: "read" });
             _localDirHandle = handle;
+            _localResetFolderState(); // v822: new folder = fresh observation state
+            _localPermissionLost = false;
             await _idbSet(LOCAL_IDB_KEY, handle);
             await localStartPolling();
             await refreshLocalPanel();
@@ -4821,96 +4850,153 @@ Ambient: same kitchen room tone, soft pour sound.
         async function localUnpickFolder() {
           if (_localPollTimer) { clearInterval(_localPollTimer); _localPollTimer = null; }
           _localDirHandle = null;
+          _localResetFolderState(); // v822
+          _localPermissionLost = false;
           await _idbDelete(LOCAL_IDB_KEY);
           await refreshLocalPanel();
         }
 
+        const LOCAL_RETRY_STUCK_AFTER_MS = 10 * 60 * 1000;
+        const LOCAL_MAX_RETRY_ATTEMPTS = 3;
+
+        function _localParseUtc(s) {
+          // Server isoformat is naive UTC (no tz suffix); bare Date.parse
+          // reads that as LOCAL time (UTC+2 here -> stuck rows look 2h in
+          // the future and never retry). Force UTC when no tz is present.
+          if (!s) return 0;
+          const hasTz = /Z$|[+-]\d\d:?\d\d$/.test(s);
+          const t = Date.parse(hasTz ? s : s + "Z");
+          return isNaN(t) ? 0 : t;
+        }
+
+        function _localRowRetryable(v) {
+          // Mirror of server-side should_reprocess (v822): failed and stuck
+          // pending/running rows are NOT "seen" - the next scan re-uploads
+          // them and the server re-runs the pipeline. Capped per session so a
+          // truly broken file can't re-upload forever every 30s.
+          if ((_localRetryAttempts.get(v.file_hash) || 0) >= LOCAL_MAX_RETRY_ATTEMPTS) return false;
+          if (v.transcription_status === "failed") return true;
+          if (v.transcription_status === "pending" || v.transcription_status === "running") {
+            const t = _localParseUtc(v.created_at);
+            return !t || (Date.now() - t > LOCAL_RETRY_STUCK_AFTER_MS);
+          }
+          return false;
+        }
+
         async function _refreshSeenHashesFromServer() {
-          // Server is the source of truth for "already processed". Pull the
-          // list + populate the local seen-set so we skip re-uploading on
-          // each session.
+          // Server is the source of truth for "already processed". Rows that
+          // failed or got stuck are EXCLUDED so they retry (v822).
           try {
-            const r = await fetch("/api/local-videos", { credentials: "include" });
+            const r = await _fetchT("/api/local-videos", { credentials: "include" });
             if (!r.ok) return;
             const arr = await r.json();
-            _localSeenHashes = new Set(arr.map(v => v.file_hash));
+            _localSeenHashes = new Set(arr.filter(v => !_localRowRetryable(v)).map(v => v.file_hash));
           } catch (e) { /* no-op */ }
         }
 
-        async function _uploadLocalFile(fileHandle) {
-          let file;
-          try { file = await fileHandle.getFile(); }
-          catch (e) { console.warn("[local] getFile failed:", e); return null; }
-          if (!file || file.size < 1024) return null;
-          if (file.size > 500 * 1024 * 1024) {
-            console.warn(`[local] skipping ${file.name}: >500MB`);
-            return null;
-          }
-          const buf = await file.arrayBuffer();
-          const hash = await _sha256Hex(buf);
-          if (_localSeenHashes.has(hash)) return null;
-
-          const fd = new FormData();
-          fd.append("file", new Blob([buf], { type: file.type || "video/mp4" }), file.name);
-          fd.append("file_hash", hash);
-          try {
-            const r = await fetch("/api/local-videos/upload", {
-              method: "POST", credentials: "include", body: fd,
-            });
-            if (r.ok) {
-              const data = await r.json();
-              _localSeenHashes.add(hash);
-              return data;
-            }
-            console.warn("[local] upload failed:", r.status, await r.text());
-          } catch (e) {
-            console.warn("[local] upload exception:", e);
-          }
-          return null;
-        }
-
         async function _scanAndUpload() {
-          if (_localPollInFlight) return;
+          if (_localPollInFlight) {
+            // v822 watchdog: a scan stuck >5min means a hung await slipped
+            // through - clear the flag so polling resumes.
+            if (_localScanStartedAt && Date.now() - _localScanStartedAt > 5 * 60 * 1000) {
+              console.warn("[local] v822 watchdog: clearing stuck in-flight flag");
+              _localPollInFlight = false;
+            } else {
+              return;
+            }
+          }
           if (!_localDirHandle) return;
-          const ok = await _verifyDirPermission(_localDirHandle);
-          if (!ok) {
-            console.warn("[local] folder permission lost");
+          // Non-interactive check: requestPermission from a timer has no user
+          // gesture and throws - only the CLICK paths may prompt (v822).
+          let permOk = false;
+          try { permOk = await _verifyDirPermission(_localDirHandle, false); } catch (e) { permOk = false; }
+          if (!permOk) {
+            if (!_localPermissionLost) {
+              _localPermissionLost = true;
+              console.warn("[local] folder permission lost - surfacing");
+              document.title = "⚠ " + document.title.replace(/^⚠ /, "");
+              refreshLocalPanel();
+            }
             return;
           }
+          if (_localPermissionLost) {
+            _localPermissionLost = false;
+            document.title = document.title.replace(/^⚠ /, "");
+          }
           _localPollInFlight = true;
+          _localScanStartedAt = Date.now();
+          // Generation token: if the watchdog starts a newer scan while this
+          // one is still draining, this one must stop touching shared state.
+          const gen = ++_localScanGen;
           try {
             const newOnes = [];
             // Track every video hash present in folder THIS scan. Used for
             // delete-detection: hash in _localSeenHashes but missing from
             // currentScanHashes after the loop = file was deleted by user.
             const currentScanHashes = new Set();
+            const skipped = [];
             let fileCount = 0;
             for await (const entry of _localDirHandle.values()) {
               if (entry.kind !== "file") continue;
               if (!_localIsVideo(entry.name)) continue;
               fileCount++;
-              // Read + hash every present file (need every hash for diff,
-              // not just unseen ones).
               let file;
               try { file = await entry.getFile(); }
-              catch (e) { console.warn("[local] getFile failed:", e); continue; }
-              if (!file || file.size < 1024) continue;
-              if (file.size > 500 * 1024 * 1024) continue;
+              catch (e) { skipped.push({ name: entry.name, reason: "unreadable (locked?)" }); continue; }
+              if (!file || file.size < 1024) { if (file) skipped.push({ name: entry.name, reason: "<1KB (still writing?)" }); continue; }
+              if (file.size > 500 * 1024 * 1024) { skipped.push({ name: entry.name, reason: ">500MB" }); continue; }
+
+              const statKey = `${entry.name}|${file.size}|${file.lastModified}`;
+              const cachedHash = _localStatCache.get(statKey);
+              if (cachedHash) {
+                // Unchanged since a previous scan - no re-read, no re-hash.
+                currentScanHashes.add(cachedHash);
+                _localDeleteEligible.add(cachedHash);
+                _localMissingStreak.delete(cachedHash);
+                _localPendingStability.delete(entry.name);
+                continue;
+              }
+
+              // v822 stability gate: a file must show the SAME size+mtime on
+              // two consecutive scans before we read it. Kills the
+              // partial-file-upload -> wrong-match -> full-file-orphaned chain.
+              const sig = `${file.size}|${file.lastModified}`;
+              if (_localPendingStability.get(entry.name) !== sig) {
+                _localPendingStability.set(entry.name, sig);
+                skipped.push({ name: entry.name, reason: "settling (new/changed - next scan)" });
+                continue;
+              }
+              _localPendingStability.delete(entry.name);
+
               const buf = await file.arrayBuffer();
               const hash = await _sha256Hex(buf);
+              _localStatCache.set(statKey, hash);
               currentScanHashes.add(hash);
+              _localDeleteEligible.add(hash);
+              _localMissingStreak.delete(hash);
               if (_localSeenHashes.has(hash)) continue;
               // New file → upload.
               const fd = new FormData();
               fd.append("file", new Blob([buf], { type: file.type || "video/mp4" }), file.name);
               fd.append("file_hash", hash);
               try {
-                const r = await fetch("/api/local-videos/upload", {
+                const r = await _fetchT("/api/local-videos/upload", {
                   method: "POST", credentials: "include", body: fd,
-                });
+                }, 180000);
                 if (r.ok) {
                   const data = await r.json();
-                  _localSeenHashes.add(hash);
+                  if (_localRowRetryable(data)) {
+                    // Row came back failed/stuck - leave it out of the
+                    // seen-set so the next scan retries, up to the cap.
+                    const n = (_localRetryAttempts.get(hash) || 0) + 1;
+                    _localRetryAttempts.set(hash, n);
+                    if (n >= LOCAL_MAX_RETRY_ATTEMPTS) {
+                      _localSeenHashes.add(hash);
+                      console.warn(`[local] hash=${hash.slice(0, 8)} still ${data.transcription_status} after ${n} attempts - giving up (✕ the card + Force rescan to retry)`);
+                    }
+                  } else {
+                    _localSeenHashes.add(hash);
+                  }
                   newOnes.push(data);
                 } else {
                   console.warn("[local] upload failed:", r.status, await r.text());
@@ -4919,24 +5005,34 @@ Ambient: same kitchen room tone, soft pour sound.
                 console.warn("[local] upload exception:", e);
               }
             }
+            if (gen !== _localScanGen) return; // superseded by a newer scan
+            _localLastSkipped = skipped;
 
-            // Delete-detection pass. Guard against bulk-unmatch on a 0-file
-            // scan when seen-set is non-empty — likely a permission / mount
-            // blip, not the user emptying the folder in one tick.
+            // Delete pass (v822): debounced 2 scans + only hashes actually
+            // observed in THIS folder (folder-switch must not mass-revert).
+            // Guard against bulk-unmatch on a 0-file scan when seen-set is
+            // non-empty — likely a permission / mount blip.
             const deletedJobIds = [];
             if (fileCount > 0 || _localSeenHashes.size === 0) {
               for (const seenHash of Array.from(_localSeenHashes)) {
-                if (currentScanHashes.has(seenHash)) continue;
+                if (currentScanHashes.has(seenHash)) { _localMissingStreak.delete(seenHash); continue; }
+                if (!_localDeleteEligible.has(seenHash)) continue; // never observed here
+                const streak = (_localMissingStreak.get(seenHash) || 0) + 1;
+                _localMissingStreak.set(seenHash, streak);
+                if (streak < 2) continue; // transient lock / AV scan blip
                 try {
-                  const r = await fetch(`/api/local-videos/by-hash/${seenHash}`, {
+                  const r = await _fetchT(`/api/local-videos/by-hash/${seenHash}`, {
                     method: "DELETE", credentials: "include",
                   });
                   if (r.ok) {
                     const data = await r.json().catch(() => ({}));
                     _localSeenHashes.delete(seenHash);
+                    _localDeleteEligible.delete(seenHash);
+                    _localMissingStreak.delete(seenHash);
                     if (data.reverted_job_id) deletedJobIds.push(data.reverted_job_id);
                   } else if (r.status === 404) {
                     _localSeenHashes.delete(seenHash);
+                    _localMissingStreak.delete(seenHash);
                   }
                 } catch (e) {
                   console.warn("[local] delete exception:", e);
@@ -4946,7 +5042,21 @@ Ambient: same kitchen room tone, soft pour sound.
               console.warn(`[local] scan returned 0 files but seen-set has ${_localSeenHashes.size} — skipping delete pass (likely permission blip)`);
             }
 
-            if (newOnes.length || deletedJobIds.length) {
+            // v822: server-side re-match sweep - catches videos uploaded
+            // before their job reached Finishing ("done - no match" race).
+            let rematched = 0;
+            try {
+              const rr = await _fetchT("/api/local-videos/rematch", {
+                method: "POST", credentials: "include",
+              });
+              if (rr.ok) {
+                const d = await rr.json();
+                rematched = d.matched || 0;
+                if (rematched) console.log(`[local] rematch sweep matched ${rematched} video(s)`);
+              }
+            } catch (e) { console.warn("[local] rematch sweep failed:", e); }
+
+            if (newOnes.length || deletedJobIds.length || rematched) {
               await refreshLocalPanel();
               // Kanban — published count changed (additions OR reverts).
               if (typeof refreshLifecycle === "function") {
@@ -4957,7 +5067,11 @@ Ambient: same kitchen room tone, soft pour sound.
               }
             }
           } finally {
-            _localPollInFlight = false;
+            if (gen === _localScanGen) {
+              // A superseded scan must not clear the NEWER scan's flag.
+              _localPollInFlight = false;
+              _localLastScanAt = Date.now();
+            }
           }
         }
 
@@ -5016,9 +5130,18 @@ Ambient: same kitchen room tone, soft pour sound.
           }
 
           if (statusEl) {
-            if (_localDirHandle && _localPollTimer) {
+            if (_localDirHandle && _localPermissionLost) {
+              statusEl.innerHTML = `<strong style="color:#f66;">PERMISSION LOST</strong> — watching <strong>${escapeHtml(_localDirHandle.name)}</strong> stopped. Click <strong>Pick local folder</strong> to re-grant.`;
+              statusEl.style.color = "#f66";
+              if (unpickBtn) unpickBtn.style.display = "";
+            } else if (_localDirHandle && _localPollTimer) {
               const persists = _localIsInstalledPWA() ? " (persists across sessions)" : "";
-              statusEl.innerHTML = `watching <strong>${escapeHtml(_localDirHandle.name)}</strong> — polling every ${Math.round(LOCAL_POLL_INTERVAL_MS / 1000)}s${persists}`;
+              const age = _localLastScanAt ? Math.round((Date.now() - _localLastScanAt) / 1000) : null;
+              const ageTxt = age == null ? "" : (age > 90 ? ` — <span style="color:#fc8;">last scan ${age}s ago</span>` : ` — last scan ${age}s ago`);
+              const skipTxt = _localLastSkipped.length
+                ? ` — <span style="color:#fc8;" title="${escapeHtml(_localLastSkipped.map(s => `${s.name}: ${s.reason}`).join("\n"))}">${_localLastSkipped.length} skipped</span>`
+                : "";
+              statusEl.innerHTML = `watching <strong>${escapeHtml(_localDirHandle.name)}</strong> — polling every ${Math.round(LOCAL_POLL_INTERVAL_MS / 1000)}s${persists}${ageTxt}${skipTxt}`;
               statusEl.style.color = "#9b9";
               if (unpickBtn) unpickBtn.style.display = "";
             } else if (_localDirHandle) {
@@ -5034,7 +5157,7 @@ Ambient: same kitchen room tone, soft pour sound.
           if (!list) return;
           list.innerHTML = `<div style="padding:8px;color:#888;font-size:11px;">Loading…</div>`;
           try {
-            const r = await fetch("/api/local-videos", { credentials: "include" });
+            const r = await _fetchT("/api/local-videos", { credentials: "include" });
             const arr = r.ok ? await r.json() : [];
             if (!arr.length) {
               list.innerHTML = `<div style="padding:8px;color:#888;font-size:12px;">No files processed yet. ${_localDirHandle ? "Drop a video into the watched folder." : "Pick a folder above to start."}</div>`;
@@ -5085,13 +5208,14 @@ Ambient: same kitchen room tone, soft pour sound.
           btn.disabled = true;
           btn.textContent = "…";
           try {
-            const r = await fetch(`/api/local-videos/by-hash/${hash}`, {
+            const r = await _fetchT(`/api/local-videos/by-hash/${hash}`, {
               method: "DELETE", credentials: "include",
             });
             if (r.ok) {
               const data = await r.json().catch(() => ({}));
               // Drop from seen-set so re-adding the file later triggers a fresh upload.
               _localSeenHashes.delete(hash);
+              _localRetryAttempts.delete(hash); // manual ✕ = fresh retry budget (v822)
               await refreshLocalPanel();
               if (typeof refreshLifecycle === "function") {
                 refreshLifecycle({ force: true });
@@ -5138,6 +5262,13 @@ Ambient: same kitchen room tone, soft pour sound.
           } finally {
             btn.disabled = false;
             btn.textContent = "🔄 Force rescan";
+          }
+        });
+
+        // v822: background tabs get throttled - scan immediately on return.
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible" && _localPollTimer) {
+            _scanAndUpload();
           }
         });
 
