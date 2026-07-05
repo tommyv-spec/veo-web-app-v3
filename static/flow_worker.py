@@ -5058,6 +5058,28 @@ def tile_text_terminal_reason(page, data_index):
     return None
 
 
+def prominent_promptb_decision(clip_id):
+    """v821b — decide how to handle a gen-time PROMINENT_PEOPLE block for this clip.
+    Returns one of:
+      'retry_prompt_b' — clip has an un-tried Prompt B (reworded line); marks it tried.
+                         Caller must requeue the clip (flow_redo_queued) so it resubmits with B.
+      'terminal_line'  — Prompt B was already tried and still tripped -> terminal, message
+                         'rework the dialogue line'.
+      'terminal_image' — no Prompt B registered (e.g. silent clip / no line) -> fall back to the
+                         OLD replace-image card (route_terminal_content_reject).
+    Uses the same lock-free access to _CLIP_PROMPT_B / _PROMPT_B_TRIED that policy_gen_next_action uses.
+    """
+    if not clip_id:
+        return 'terminal_image'
+    _has_pb = bool(_CLIP_PROMPT_B.get(clip_id))
+    if _has_pb and clip_id not in _PROMPT_B_TRIED:
+        _PROMPT_B_TRIED[clip_id] = True
+        return 'retry_prompt_b'
+    if _has_pb:              # tried already
+        return 'terminal_line'
+    return 'terminal_image'  # no B -> old replace-image behavior
+
+
 def route_generation_policy(clip_id, current_model, is_prominent, account_name="",
                             generation_attempt=1):
     """Route a generation-time Flow policy block to the right recovery UI.
@@ -5085,22 +5107,26 @@ def route_generation_policy(clip_id, current_model, is_prominent, account_name="
         # before giving up; only if it STILL trips do we terminal-fail. This
         # branch is GENERATION-time prominent only — upload-time prominent keeps
         # the v815 image path (report_policy_violation elsewhere).
-        # No lock: policy_gen_next_action reads/writes _CLIP_PROMPT_B /
-        # _PROMPT_B_TRIED lock-free too — match that, don't add a new discipline.
-        _has_pb = bool(_CLIP_PROMPT_B.get(clip_id))
-        if _has_pb and clip_id not in _PROMPT_B_TRIED:
-            _PROMPT_B_TRIED[clip_id] = True
-            print(f"{prefix}[v821] prominent-people on A for clip {clip_id} "
-                  f"-> retrying SAME clip with reworded line (Prompt B)", flush=True)
+        # v821b — one shared decision helper drives BOTH this tile-text path and
+        # the API-reason path (handle_terminal_reject). No lock:
+        # policy_gen_next_action reads/writes _CLIP_PROMPT_B / _PROMPT_B_TRIED
+        # lock-free too — match that, don't add a new discipline.
+        _decision = prominent_promptb_decision(clip_id)
+        if _decision == 'retry_prompt_b':
+            print(f"{prefix}[v821] prominent on A for clip {clip_id} "
+                  f"-> retry with reworded line (Prompt B)", flush=True)
             return ('retry_prompt_b',
                     'prominent-people on A - retrying with reworded line (Prompt B)')
-        print(f"{prefix}[v821] prominent persists after reworded line on clip {clip_id} "
-              f"-> terminal fail (rework the line)", flush=True)
-        fail_clip_general_policy(
-            clip_id,
-            "Flow still flagged this as a prominent person after the reworded line (Prompt B). "
-            "Rework the dialogue line - the current wording keeps tripping the filter.")
-        return ('fail_terminal', 'prominent persists after reworded line (Prompt B)')
+        if _decision == 'terminal_line':
+            print(f"{prefix}[v821] prominent persists after reworded line on clip {clip_id} "
+                  f"-> terminal", flush=True)
+            fail_clip_general_policy(
+                clip_id,
+                "Flow still flagged this as a prominent person after the reworded line (Prompt B). "
+                "Rework the dialogue line - the wording keeps tripping the filter.")
+            return ('fail_terminal', 'prominent persists after reworded line (Prompt B)')
+        # terminal_image — no Prompt B (silent/no line): OLD behavior, replace-image card
+        return route_terminal_content_reject(clip_id, 'PROMINENT_PEOPLE', account_name=account_name)
     return policy_gen_next_action(clip_id, current_model, generation_attempt=generation_attempt)
 
 
@@ -5141,6 +5167,30 @@ def route_terminal_content_reject(clip_id, reason, account_name=""):
         print(f"{prefix}[policy] terminal-content report failed ({e}) — marking general policy", flush=True)
         fail_clip_general_policy(clip_id, msg)
     return ('fail_terminal', msg)
+
+
+def handle_terminal_reject(clip_id, reason, account_name="", job_id=None, clip_index=None, requeue=True):
+    """v821b — if reason is prominent and the clip can retry a reworded line, requeue for
+    Prompt B and return 'requeued'; else do the normal terminal replace-image/general-policy and
+    return 'terminal'. Non-prominent reasons (SEXUAL/CSAM/REPUTATIONAL/MISREPRESENT) always
+    terminal (unchanged). Shares prominent_promptb_decision with the tile-text path so both
+    routes make the same call."""
+    if reason and 'PROMINENT' in reason.upper():
+        d = prominent_promptb_decision(clip_id)
+        if d == 'retry_prompt_b' and requeue:
+            update_clip_status(clip_id, 'flow_redo_queued',
+                               error_message='v821 prominent -> retry reworded line (Prompt B)')
+            print(f"[v821] API-reason prominent on clip {clip_id} -> requeue with Prompt B", flush=True)
+            return 'requeued'
+        if d == 'terminal_line':
+            fail_clip_general_policy(
+                clip_id,
+                "Flow still flagged a prominent person after the reworded line (Prompt B). "
+                "Rework the dialogue line.")
+            return 'terminal'
+        # d == 'terminal_image' (no Prompt B) -> fall through to the old replace-image card.
+    route_terminal_content_reject(clip_id, reason, account_name=account_name)
+    return 'terminal'
 
 
 def clear_flow_site_data(page, label=""):
@@ -16164,10 +16214,14 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # content just fails again.
     if isinstance(immediate_failure, str) and immediate_failure.startswith("terminal_content:"):
         _tc_reason = immediate_failure.split(":", 1)[1]
-        try:
-            route_terminal_content_reject(clip_id, _tc_reason)
-        except Exception:
-            fail_clip_general_policy(clip_id, f"content policy ({_tc_reason})")
+        # v821b — a gen-time PROMINENT reject on a clip with an un-tried Prompt B
+        # is often a MASKED dialogue trip; requeue with the reworded line instead
+        # of the terminal card. SEXUAL/CSAM/REPUTATIONAL stay terminal (unchanged).
+        if handle_terminal_reject(clip_id, _tc_reason, job_id=job_id, clip_index=clip_index) == 'requeued':
+            clip_log(clip_id, clip_index, "REDO", "gen-time prominent -> retry reworded line (Prompt B)")
+            print(f"[REDO] 🔁 Clip {clip_index+1} gen-time prominent — retry reworded line (Prompt B), requeued", flush=True)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False
         clip_log(clip_id, clip_index, "FAILED", f"terminal content reject ({_tc_reason})")
         print(f"[REDO] ⛔ Clip {clip_index+1} terminal content reject ({_tc_reason}) — policy card, no re-redo", flush=True)
         try: clear_auto_redo_cycle(clip_id)
@@ -16211,13 +16265,13 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # gives up — the 8-minute grind seen in the 2026-06-23 logs.
     _term_reason = _consume_video_policy_terminal_for_clip(job_id, clip_index)
     if _term_reason:
+        # v821b — prominent with an un-tried Prompt B -> requeue with reworded line.
+        if handle_terminal_reject(clip_id, _term_reason, job_id=job_id, clip_index=clip_index) == 'requeued':
+            print(f"[REDO] 🔁 Clip {clip_index+1} gen-time prominent — retry reworded line (Prompt B), requeued", flush=True)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False
         print(f"[REDO] ⛔ Clip {clip_index+1} terminal content filter ({_term_reason}) — "
               f"replace-image card, NOT requeueing (face filter is model-swap + restore proof)", flush=True)
-        try:
-            route_terminal_content_reject(clip_id, _term_reason, account_name="")
-        except Exception as _rpe:
-            print(f"[REDO] ⚠ prominent-people route failed ({_rpe}) — marking general policy", flush=True)
-            fail_clip_general_policy(clip_id, f"Blocked by Flow's {_term_reason} filter — change the avatar face.")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return False
     if immediate_failure:
@@ -16473,7 +16527,11 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                     _failed_uuids = _tile_info.get('failedUuids') or []
                     _term_api = _terminal_reason_for_uuids(_failed_uuids)
                     if _term_api:
-                        route_terminal_content_reject(clip_id, _term_api)
+                        # v821b — prominent with an un-tried Prompt B -> requeue with reworded line.
+                        if handle_terminal_reject(clip_id, _term_api, job_id=job_id, clip_index=clip_index) == 'requeued':
+                            print(f"[REDO] 🔁 Clip {clip_index+1} gen-time prominent (API record) — retry reworded line (Prompt B), requeued", flush=True)
+                            shutil.rmtree(temp_dir, ignore_errors=True)
+                            return False
                         print(f"[REDO] ⛔ Clip {clip_index+1} terminal content reject ({_term_api}, API record, "
                               f"media {[u[:8] for u in _failed_uuids]}) — no in-place retry, no requeue (v816)", flush=True)
                         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -17602,12 +17660,11 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
             # and move on; do NOT same-account-retry or cross-account failover.
             _term_reason = _consume_video_policy_terminal_for_clip(job_id, clip_index)
             if _term_reason:
-                print(f"[{account_name}] ⛔ Clip {clip_index+1} terminal content filter ({_term_reason}) — replace-image card, NOT failing over", flush=True)
-                try:
-                    route_terminal_content_reject(clip['id'], _term_reason, account_name=account_name)
-                except Exception as _rpe:
-                    print(f"[{account_name}] ⚠ prominent-people route failed ({_rpe}) — marking general policy", flush=True)
-                    fail_clip_general_policy(clip['id'], f"Blocked by Flow's {_term_reason} filter — change the avatar face.")
+                # v821b — prominent with an un-tried Prompt B -> requeue with reworded line.
+                if handle_terminal_reject(clip['id'], _term_reason, account_name=account_name, job_id=job_id, clip_index=clip_index) == 'requeued':
+                    print(f"[{account_name}] 🔁 Clip {clip_index+1} gen-time prominent — retry reworded line (Prompt B), requeued", flush=True)
+                else:
+                    print(f"[{account_name}] ⛔ Clip {clip_index+1} terminal content filter ({_term_reason}) — replace-image card, NOT failing over", flush=True)
                 continue
             print(f"[{account_name}] ⚠️ Clip {clip_index+1} FAILED immediately!", flush=True)
 
@@ -19356,14 +19413,14 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # is what stops a SEXUAL fail being mis-handled as unusual-activity.
         if isinstance(clip_failed, str) and clip_failed.startswith("terminal_content:"):
             _tc_reason = clip_failed.split(":", 1)[1]
-            try:
-                route_terminal_content_reject(clip['id'], _tc_reason, "Flow")
-            except Exception as _tce:
-                print(f"[Flow] terminal-content route failed ({_tce}) — marking general policy", flush=True)
-                fail_clip_general_policy(clip['id'], f"content policy ({_tc_reason})")
-            clip_log(clip.get('id'), clip_index, "FAILED", f"terminal content reject ({_tc_reason})")
-            print(f"[Flow] ⛔ Clip {clip_index+1} terminal content reject ({_tc_reason}) "
-                  f"— policy card shown, no retry/restore", flush=True)
+            # v821b — prominent with an un-tried Prompt B -> requeue with reworded line.
+            if handle_terminal_reject(clip['id'], _tc_reason, account_name="Flow", job_id=job_id, clip_index=clip_index) == 'requeued':
+                clip_log(clip.get('id'), clip_index, "REDO", "gen-time prominent -> retry reworded line (Prompt B)")
+                print(f"[Flow] 🔁 Clip {clip_index+1} gen-time prominent — retry reworded line (Prompt B), requeued", flush=True)
+            else:
+                clip_log(clip.get('id'), clip_index, "FAILED", f"terminal content reject ({_tc_reason})")
+                print(f"[Flow] ⛔ Clip {clip_index+1} terminal content reject ({_tc_reason}) "
+                      f"— policy card shown, no retry/restore", flush=True)
             clip_submit_times.pop(clip_index, None)
             continue
 
@@ -19452,16 +19509,16 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # restore or reset remaining/generating clips (that re-submits done ones).
             _term_reason = _consume_video_policy_terminal_for_clip(job_id, clip_index)
             if _term_reason:
-                print(f"[Flow] ⛔ Clip {clip_index+1} hit terminal content filter ({_term_reason}) — "
-                      f"failing clip (replace-image card), NOT restoring (model-swap + golden "
-                      f"restore can't clear a face filter)", flush=True)
-                clip_log(clip.get('id'), clip_index, "FAILED",
-                         f"terminal content filter {_term_reason} — change the avatar face/start frame")
-                try:
-                    route_terminal_content_reject(clip['id'], _term_reason, account_name=account_name)
-                except Exception as _rpe:
-                    print(f"[Flow] ⚠ prominent-people route failed ({_rpe}) — marking general policy", flush=True)
-                    fail_clip_general_policy(clip['id'], f"Blocked by Flow's {_term_reason} filter — change the avatar face.")
+                # v821b — prominent with an un-tried Prompt B -> requeue with reworded line.
+                if handle_terminal_reject(clip['id'], _term_reason, account_name=account_name, job_id=job_id, clip_index=clip_index) == 'requeued':
+                    clip_log(clip.get('id'), clip_index, "REDO", "gen-time prominent -> retry reworded line (Prompt B)")
+                    print(f"[Flow] 🔁 Clip {clip_index+1} gen-time prominent — retry reworded line (Prompt B), requeued", flush=True)
+                else:
+                    print(f"[Flow] ⛔ Clip {clip_index+1} hit terminal content filter ({_term_reason}) — "
+                          f"failing clip (replace-image card), NOT restoring (model-swap + golden "
+                          f"restore can't clear a face filter)", flush=True)
+                    clip_log(clip.get('id'), clip_index, "FAILED",
+                             f"terminal content filter {_term_reason} — change the avatar face/start frame")
                 continue
             # v820 — generic hard-fail: ALL tiles failed with NO session/unusual signal
             # (that path golden-restores above) and NO terminal-content signal (handled
@@ -19664,7 +19721,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     # + requeue a redo it can never win (2026-06-24 logs, clip 7).
                     _df_term = _consume_video_policy_terminal_for_clip(job_id, _dfc)
                     if _df_term:
-                        route_terminal_content_reject(_df_clip['id'], _df_term, account_name="")
+                        # v821b — prominent with an un-tried Prompt B -> requeue with reworded line.
+                        if handle_terminal_reject(_df_clip['id'], _df_term, job_id=job_id, clip_index=_dfc) == 'requeued':
+                            print(f"[Flow] 🔁 clip {_dfc+1} gen-time prominent — retry reworded line (Prompt B); job continues", flush=True)
+                            clip_log(_df_clip['id'], _dfc, "REDO", "gen-time prominent -> retry reworded line (Prompt B)")
+                            continue
                         print(f"[Flow] ⛔ clip {_dfc+1} terminal content filter ({_df_term}) — replace-image card, NOT requeueing; job continues", flush=True)
                         clip_log(_df_clip['id'], _dfc, "FAILED", f"terminal content filter {_df_term}")
                         continue
