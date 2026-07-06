@@ -26,6 +26,14 @@ from instagram_transcribe import _model as _whisper_model
 
 _AUTO_MATCH_THRESHOLD = float(os.environ.get("IG_AUTO_MATCH_THRESHOLD", "0.70"))
 
+# v822.4 LOCAL matcher (TF-IDF cosine + margin gate). Env-tunable WITHOUT a
+# deploy so the operator can calibrate from the `[local] ... s1=/s2=/margin=`
+# log lines. HIGH = min cosine for the top candidate; MARGIN = how far the top
+# must beat the runner-up to auto-publish (near-duplicate twins sit within
+# MARGIN -> deferred to manual pick, never auto-matched to the wrong one).
+_MATCH_HIGH = float(os.environ.get("LOCAL_MATCH_HIGH", "0.50"))
+_MATCH_MARGIN = float(os.environ.get("LOCAL_MATCH_MARGIN", "0.12"))
+
 # v822: pending/running rows older than this are considered stuck (dyno
 # restart mid-transcribe) and get re-run when the browser re-uploads.
 _STUCK_AFTER_S = 600
@@ -142,32 +150,36 @@ def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None) ->
         if dialogue_map is None:
             dialogue_map = _bulk_dialogue_map(db, [j.id for j in candidates])
 
-        _lookup = lambda j: dialogue_map.get(j.id, "")  # noqa: E731
-        # v822.2 DIAGNOSTIC (temporary): min_score=0 exposes the TOP score on
-        # a miss. best_matches computes every score regardless, so the low
-        # threshold only changes what is filtered, not the work done.
-        top = _ig_match.best_matches(
-            video, candidates, full_dialogue=_lookup, k=1, min_score=0.0,
-        )
-        if not top or top[0]["score"] < _AUTO_MATCH_THRESHOLD:
-            if top:
-                t = top[0]
-                print(
-                    f"[local] hash={video.file_hash[:8]} no candidate >= {_AUTO_MATCH_THRESHOLD} "
-                    f"| top_score={t['score']:.3f} top_job={str(t['job_id'])[:8]} pool={len(candidates)} "
-                    f"tlen={len(video.transcription or '')}",
-                    flush=True,
-                )
-            else:
-                print(f"[local] hash={video.file_hash[:8]} no candidate >= {_AUTO_MATCH_THRESHOLD} | pool={len(candidates)} scored 0 rows", flush=True)
+        # v822.4: TF-IDF cosine + margin gate. The old char-level score()
+        # matched near-duplicate scripts (shared ED body) as the WRONG twin
+        # at up to 1.000. TF-IDF down-weights the shared boilerplate; the
+        # margin gate auto-matches ONLY when the top candidate clearly beats
+        # the runner-up. Ambiguous (near-duplicate) -> NO auto-publish; the
+        # video stays "no match" for a manual pick instead of a wrong link.
+        cand_pairs = [(j.id, dialogue_map.get(j.id, "")) for j in candidates]
+        ranked = _ig_match.rank_tfidf(video.transcription, cand_pairs)
+        if not ranked:
+            print(f"[local] hash={video.file_hash[:8]} no ranking | pool={len(candidates)} tlen={len(video.transcription or '')}", flush=True)
             return
-        match = top[0]
-        job = next((j for j in candidates if j.id == match["job_id"]), None)
+        s1 = ranked[0]["score"]
+        s2 = ranked[1]["score"] if len(ranked) > 1 else 0.0
+        pick_id = _ig_match.auto_pick(ranked, _MATCH_HIGH, _MATCH_MARGIN)
+        print(
+            f"[local] hash={video.file_hash[:8]} top_job={str(ranked[0]['job_id'])[:8]} "
+            f"s1={s1:.3f} s2={s2:.3f} margin={s1 - s2:.3f} "
+            f"decision={'AUTO' if pick_id else 'MANUAL'} pool={len(candidates)} "
+            f"tlen={len(video.transcription or '')}",
+            flush=True,
+        )
+        if not pick_id:
+            # Ambiguous or low-confidence -> leave unmatched for manual pick.
+            return
+        job = next((j for j in candidates if j.id == pick_id), None)
         if job is None:
-            job = db.query(Job).filter_by(id=match["job_id"]).first()
+            job = db.query(Job).filter_by(id=pick_id).first()
         if not job:
             return
-        _advance_job_to_published(video, job, match.get("score"), db)
+        _advance_job_to_published(video, job, s1, db)
     except Exception as exc:
         print(f"[local] auto-match error on hash={video.file_hash[:8]}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 

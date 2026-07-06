@@ -181,3 +181,16 @@ def test_no_per_job_n_plus_one_in_sweep_source():
     assert "def _advance_job_to_published(" in src
     assert "def _full_dialogue(job):" not in src  # the N+1 shape is deleted
     assert "dialogue_map=dialogue_map" in src     # sweep shares one map
+
+
+def test_local_matcher_uses_tfidf_margin_gate_v822_4():
+    """local_transcribe must use rank_tfidf + auto_pick (not the char-level
+    best_matches) and carry env-tunable HIGH/MARGIN thresholds."""
+    src = open(_LT, encoding="utf-8").read()
+    assert "rank_tfidf(" in src
+    assert "auto_pick(" in src
+    assert "_MATCH_HIGH" in src
+    assert "_MATCH_MARGIN" in src
+    assert "LOCAL_MATCH_HIGH" in src
+    # the old char-level path must be gone from the local matcher
+    assert "best_matches(" not in src

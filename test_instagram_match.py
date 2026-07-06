@@ -70,3 +70,61 @@ def test_score_handles_empty_inputs():
     assert m.score("", "") == 0.0
     assert m.score("anything", "") == 0.0
     assert m.score("", "anything") == 0.0
+
+
+# ---- v822.4: TF-IDF cosine + margin gate (local matcher) ------------------
+def test_rank_tfidf_ranks_correct_doc_first():
+    m = _load()
+    cands = [
+        ("a", "comment saffron below your soldier blood flow every morning"),
+        ("b", "comment saffron below your soldier blood flow ginger turmeric recipe"),
+        ("c", "comment saffron below your soldier blood flow beetroot pour timing"),
+    ]
+    # query = doc c with a distinctive word; despite shared boilerplate it wins
+    ranked = m.rank_tfidf("your soldier blood flow beetroot pour timing morning", cands)
+    assert ranked[0]["job_id"] == "c"
+
+
+def test_rank_tfidf_boilerplate_does_not_dominate():
+    m = _load()
+    # Two docs share ALL the boilerplate; only the distinctive tail differs.
+    cands = [
+        ("x", "your soldier blood flow saffron ginger"),
+        ("y", "your soldier blood flow saffron beetroot"),
+    ]
+    ranked = m.rank_tfidf("your soldier blood flow saffron ginger", cands)
+    # ginger query must rank x above y (distinctive term drives it).
+    assert ranked[0]["job_id"] == "x"
+    assert ranked[0]["score"] > ranked[1]["score"]
+
+
+def test_rank_tfidf_empty():
+    m = _load()
+    assert m.rank_tfidf("", [("a", "text")]) == []
+    assert m.rank_tfidf("text", []) == []
+
+
+def test_auto_pick_requires_high_and_margin():
+    m = _load()
+    ranked = [{"job_id": "a", "score": 0.80}, {"job_id": "b", "score": 0.50}]
+    assert m.auto_pick(ranked, high=0.5, margin=0.12) == "a"
+
+
+def test_auto_pick_defers_on_small_margin():
+    m = _load()
+    # near-duplicate twins: high score but nearly tied -> MANUAL (None)
+    ranked = [{"job_id": "a", "score": 0.96}, {"job_id": "b", "score": 0.95}]
+    assert m.auto_pick(ranked, high=0.5, margin=0.12) is None
+
+
+def test_auto_pick_defers_on_low_top():
+    m = _load()
+    ranked = [{"job_id": "a", "score": 0.30}, {"job_id": "b", "score": 0.05}]
+    assert m.auto_pick(ranked, high=0.5, margin=0.12) is None
+
+
+def test_auto_pick_single_candidate_needs_high():
+    m = _load()
+    assert m.auto_pick([{"job_id": "a", "score": 0.60}], high=0.5, margin=0.12) == "a"
+    assert m.auto_pick([{"job_id": "a", "score": 0.40}], high=0.5, margin=0.12) is None
+    assert m.auto_pick([], high=0.5, margin=0.12) is None
