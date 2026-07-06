@@ -20779,6 +20779,14 @@ class AccountWorker(threading.Thread):
         self._http_dl_queue = None  # Per-account HTTP download queue — set in run()
         self._http_session_ref = [None]  # Mutable ref to requests.Session with browser cookies
         self.redispatch_queue = None  # Shared queue — put job_id here when reset to pending after restore
+        # v824 — pending self-resume job that MUST survive a v779 supervisor
+        # restart. `_retry_job` is a _run_once() local, so any raise out of the
+        # job loop (relaunch-failed escalation at v779, or any startup crash on
+        # restart) wiped it → the account never re-picked its clip slice, the
+        # job was never redispatched, and it stuck at 'processing' forever
+        # ("failed account never re-picks the failed job"). Instance-scoped so
+        # the fresh _run_once() after a restart seeds `_retry_job` from it.
+        self._pending_resume_job = None
         # v794b — uuid→getMediaUrlRedirect URL map for THIS account's page.
         # Parallel mode previously passed captured_media_urls=None to
         # process_job_submission, so captured_urls_for_clip() always returned []
@@ -21254,7 +21262,13 @@ class AccountWorker(threading.Thread):
             print(f"[{self.name}] ✓ Ready for jobs", flush=True)
             
             # Main loop - process jobs from queue
-            _retry_job = None  # v174: after golden restore, self-resume same job
+            # v824 — seed from the instance-persisted resume job so a job that
+            # was mid-restore when the v779 supervisor restarted _run_once()
+            # gets picked back up here instead of being silently dropped.
+            _retry_job = self._pending_resume_job  # v174: after golden restore, self-resume same job
+            self._pending_resume_job = None
+            if _retry_job is not None:
+                print(f"[{self.name}] ↩ v824 recovering pending job across worker restart", flush=True)
             while not self.shutdown_event.is_set():
                 try:
                     # Check for redo clips first (with short timeout)
@@ -21265,6 +21279,7 @@ class AccountWorker(threading.Thread):
                         if _retry_job is not None:
                             job = _retry_job
                             _retry_job = None
+                            self._pending_resume_job = None  # v824 — job now in hand; clear mirror so a later unrelated restart won't re-resume it
                             _from_queue = False  # Don't call task_done — already called when _retry_job was set
                             _retry_job_id = None
                             if isinstance(job, dict):
@@ -21540,6 +21555,7 @@ class AccountWorker(threading.Thread):
                                 # clip assignment instead of re-dispatching through the main loop.
                                 # This prevents parallel re-splitting and cross-account duplication.
                                 _retry_job = job
+                                self._pending_resume_job = job  # v824 — mirror so a later raise-out (this iter) still carries the job to the restarted _run_once()
                                 if _from_queue:
                                     try:
                                         self.job_queue.task_done()  # Complete the original queue task
@@ -21556,6 +21572,11 @@ class AccountWorker(threading.Thread):
                                 # the thread with no restart at all.)
                                 print(f"[{self.name}] ⚠ submit browser failed to relaunch in-place after golden restore "
                                       f"({_relaunch_err}) — escalating to full worker restart.", flush=True)
+                                # v824 — CRITICAL: the `_retry_job = job` line above is
+                                # never reached on this path (relaunch threw before it), so
+                                # without this the supervisor restart wiped the job and the
+                                # account never re-picked it. Persist on the instance first.
+                                self._pending_resume_job = job
                                 if _from_queue:
                                     try:
                                         self.job_queue.task_done()
@@ -21625,6 +21646,7 @@ class AccountWorker(threading.Thread):
 
                                     # v174: Self-resume same job after golden rebuild
                                     _retry_job = job
+                                    self._pending_resume_job = job  # v824 — mirror across supervisor restart
                                     if _from_queue:
                                         try:
                                             self.job_queue.task_done()
@@ -21660,6 +21682,7 @@ class AccountWorker(threading.Thread):
                         else:
                             print(f"[{self.name}] ↩ Non-fatal error — will retry same job (no restore needed)", flush=True)
                             _retry_job = job
+                            self._pending_resume_job = job  # v824 — mirror across supervisor restart
                         if _from_queue:
                             try:
                                 self.job_queue.task_done()
