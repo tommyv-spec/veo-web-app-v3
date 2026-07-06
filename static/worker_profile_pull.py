@@ -238,6 +238,231 @@ def close_laptop_chrome(user_data_dir, log=print):
     time.sleep(2.0)  # let Windows release the cookie DB file lock
 
 
+# ── v824 per-profile release (no whole-channel kill) ───────────────────────
+# A loaded Chrome profile's per-profile SQLite DBs (Cookies / Login Data /
+# Web Data) are locked by the SHARED processes (one Network Service + one main
+# browser per user-data-dir). When Chrome UNLOADS a profile (its last window
+# closes and no keep-alive pins it), those shared procs release THAT profile's
+# file handles in-process — the other profiles + the rest of the channel keep
+# running. So if the target profile is already unloaded we copy it live with
+# ZERO kills. Windows Restart Manager tells us exactly who (if anyone) holds
+# the profile's DBs. Verified 2026-07-06: copied Profile 61 while Profile 75
+# stayed locked/loaded in the same Beta channel, no process killed.
+def _profile_db_paths(user_data_dir, profile_folder):
+    """The per-profile files whose lock proves the profile is still loaded."""
+    base = os.path.join(user_data_dir, profile_folder)
+    return [os.path.join(base, "Network", "Cookies"),
+            os.path.join(base, "Login Data"),
+            os.path.join(base, "Web Data")]
+
+
+def _profile_lock_holders(paths):
+    """PIDs holding any of `paths` open, via Windows Restart Manager. Empty set
+    when nothing holds them (profile unloaded => safe to copy). Returns None on
+    non-Windows / RM unavailable (caller then falls back to channel close)."""
+    if sys.platform != "win32":
+        return None
+    paths = [p for p in paths if os.path.isfile(p)]
+    if not paths:
+        return set()  # no DBs on disk yet => nothing locked
+    try:
+        import ctypes
+        import ctypes.wintypes as w
+        rm = ctypes.windll.rstrtmgr
+
+        class _RUP(ctypes.Structure):
+            _fields_ = [("dwProcessId", w.DWORD), ("t", w.FILETIME)]
+
+        class _RPI(ctypes.Structure):
+            _fields_ = [("Process", _RUP), ("app", w.WCHAR * 256),
+                        ("svc", w.WCHAR * 64), ("at", ctypes.c_int),
+                        ("st", w.ULONG), ("ts", w.DWORD), ("r", w.BOOL)]
+
+        sess = w.DWORD(0)
+        key = (ctypes.c_wchar * 65)()
+        if rm.RmStartSession(ctypes.byref(sess), 0, key) != 0:
+            return None
+        try:
+            arr = (w.LPCWSTR * len(paths))(*paths)
+            rm.RmRegisterResources(sess, len(paths), arr, 0, None, 0, None)
+            need = w.UINT(0)
+            n = w.UINT(0)
+            rb = w.DWORD(0)
+            rm.RmGetList(sess, ctypes.byref(need), ctypes.byref(n), None, ctypes.byref(rb))
+            buf = (_RPI * max(need.value, 1))()
+            n = w.UINT(need.value)
+            rm.RmGetList(sess, ctypes.byref(need), ctypes.byref(n), buf, ctypes.byref(rb))
+            return {buf[i].Process.dwProcessId for i in range(n.value)}
+        finally:
+            rm.RmEndSession(sess)
+    except Exception:
+        return None
+
+
+def _wait_profile_unlocked(user_data_dir, profile_folder, wait_s=8, log=print):
+    """Poll the target profile's DBs; return True as soon as they are unlocked
+    (profile unloaded -> copyable with no kill). False if still locked after
+    wait_s, or if RM is unavailable (caller falls back to channel close)."""
+    paths = _profile_db_paths(user_data_dir, profile_folder)
+    deadline = wait_s
+    waited = 0.0
+    while True:
+        holders = _profile_lock_holders(paths)
+        if holders is None:
+            return False  # RM unavailable -> let caller channel-close
+        if not holders:
+            return True   # unloaded -> safe to copy, nothing killed
+        if waited >= deadline:
+            log(f"  {profile_folder!r} still loaded (held by {sorted(holders)}) "
+                f"after {int(waited)}s")
+            return False
+        time.sleep(1.0)
+        waited += 1.0
+
+
+def _profile_display_name(user_data_dir, profile_folder):
+    """The Chrome profile's toolbar display name (info_cache[folder].name), used
+    to match its avatar button in the UI Automation tree. '' if unknown."""
+    try:
+        with open(os.path.join(user_data_dir, "Local State"), "r", encoding="utf-8") as f:
+            ic = json.load(f).get("profile", {}).get("info_cache", {})
+        return str(ic.get(profile_folder, {}).get("name", "")).strip()
+    except (OSError, ValueError):
+        return ""
+
+
+# PowerShell UI-Automation: close ONLY the windows whose profile-avatar button
+# name matches the target profile. Depth-limited walk of the browser FRAME
+# (skips the web Document subtree) so it is fast + never hangs on a heavy page.
+# Verified 2026-07-06: closing just Profile 61's ("Kevin") window unloaded it in
+# ~4s while Profile 75 + the rest of Beta kept running.
+_UIA_CLOSE_PS = r'''
+$ErrorActionPreference='SilentlyContinue'
+Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes | Out-Null
+$sig=@"
+using System;using System.Runtime.InteropServices;using System.Text;using System.Collections.Generic;
+public class WN{
+ [DllImport("user32.dll")]public static extern bool EnumWindows(EnumWindowsProc cb,IntPtr p);
+ [DllImport("user32.dll")]public static extern bool IsWindowVisible(IntPtr h);
+ [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern int GetClassName(IntPtr h,StringBuilder s,int m);
+ [DllImport("user32.dll")]public static extern int GetWindowThreadProcessId(IntPtr h,out int pid);
+ [DllImport("user32.dll")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
+ public delegate bool EnumWindowsProc(IntPtr h,IntPtr p);
+ public static List<IntPtr> Wins(){var r=new List<IntPtr>();EnumWindows((h,p)=>{if(IsWindowVisible(h)){var sb=new StringBuilder(64);GetClassName(h,sb,64);if(sb.ToString().StartsWith("Chrome_WidgetWin")){r.Add(h);}}return true;},IntPtr.Zero);return r;}
+}
+"@
+Add-Type -TypeDefinition $sig
+$target=$env:TGT_NAME
+$needle=$env:TGT_NEEDLE
+$dry=($env:TGT_DRYRUN -eq '1')
+# pids whose cmdline belongs to the target channel
+$pids=@{}
+Get-CimInstance Win32_Process -Filter "name='chrome.exe'" | ForEach-Object { if($_.CommandLine -and $_.CommandLine.ToLower().Contains($needle)){$pids[[int]$_.ProcessId]=$true} }
+$walker=[System.Windows.Automation.TreeWalker]::ControlViewWalker
+$AE=[System.Windows.Automation.AutomationElement]
+$btnType=[System.Windows.Automation.ControlType]::Button
+$docType=[System.Windows.Automation.ControlType]::Document
+$closed=0
+foreach($h in [WN]::Wins()){
+  # NB: $pid is a read-only automatic var in PowerShell -> use $wpid.
+  $wpid=0;[WN]::GetWindowThreadProcessId($h,[ref]$wpid)|Out-Null
+  if(-not $pids.ContainsKey($wpid)){continue}
+  $match=$false
+  try{
+    $root=$AE::FromHandle($h); if($root -eq $null){continue}
+    # depth-limited BFS over the frame; skip Document (web page) subtrees
+    $q=New-Object System.Collections.Queue
+    $q.Enqueue(@($root,0))
+    while($q.Count -gt 0 -and -not $match){
+      $it=$q.Dequeue(); $el=$it[0]; $d=$it[1]
+      if($d -gt 10){continue}
+      $c=$walker.GetFirstChild($el)
+      while($c -ne $null){
+        $ct=$c.Current.ControlType
+        if($ct -ne $docType){
+          if($ct -eq $btnType){
+            $nm=$c.Current.Name
+            if($nm -eq $target -or $nm -like "$target*"){$match=$true;break}
+          }
+          $q.Enqueue(@($c,$d+1))
+        }
+        $c=$walker.GetNextSibling($c)
+      }
+    }
+  }catch{ continue }   # transient UIA/RPC fault on one window -> skip it
+  if($match){
+    $hv=[int64]$h
+    if($dry){ Write-Output "WOULD_CLOSE $hv" }
+    else{ [WN]::PostMessage($h,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null; Write-Output "CLOSED $hv"; $closed++ }
+  }
+}
+Write-Output "DONE closed=$closed dry=$dry target=$target"
+'''
+
+
+def _close_target_profile_windows(user_data_dir, profile_folder, log=print, dry_run=False):
+    """Gracefully WM_CLOSE only the target profile's Chrome windows (matched by
+    avatar-button name via UIA), sparing every other profile + the channel.
+    Windows-only. Returns the count closed (0 on any failure -> caller falls back
+    to channel close). dry_run just reports which windows WOULD close."""
+    if sys.platform != "win32":
+        return 0
+    name = _profile_display_name(user_data_dir, profile_folder)
+    if not name:
+        log(f"  no display name for {profile_folder!r} -> cannot target its window")
+        return 0
+    folder = os.path.basename(os.path.dirname(os.path.normpath(user_data_dir)))
+    needle = (os.sep + folder + os.sep).lower()
+    try:
+        import base64
+        enc = base64.b64encode(_UIA_CLOSE_PS.encode("utf-16-le")).decode("ascii")
+        env = dict(os.environ, TGT_NAME=name, TGT_NEEDLE=needle,
+                   TGT_DRYRUN=("1" if dry_run else "0"))
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
+            capture_output=True, text=True, timeout=60, env=env).stdout
+        closed = 0
+        for row in out.splitlines():
+            row = row.strip()
+            if row.startswith("CLOSED") or row.startswith("WOULD_CLOSE"):
+                log(f"  {'would close' if dry_run else 'closed'} {profile_folder!r} "
+                    f"window {row.split()[-1]} (avatar={name!r})")
+                closed += 1
+            elif row.startswith("DONE"):
+                log(f"  uia close: {row}")
+        return closed
+    except Exception as e:
+        log(f"  uia close failed ({e}); will fall back to channel close")
+        return 0
+
+
+def _release_target_profile(user_data_dir, profile_folder, close_chrome, log):
+    """Unlock the target profile for copying with the LEAST disruption:
+    1. If it is already unloaded -> copy live, kill NOTHING (common case: the
+       account is not actively open in a window).
+    2. Else gracefully close ONLY that profile's windows (UIA avatar match) and
+       wait for it to unload -> still spares every other profile + the channel.
+    3. Else (UIA unavailable, profile pinned by a keep-alive, or won't unload)
+       fall back to closing the whole Chrome channel (previous behavior).
+    Raises nothing it cannot handle; propagates close_chrome failures."""
+    if _wait_profile_unlocked(user_data_dir, profile_folder, wait_s=8, log=log):
+        log(f"  {profile_folder!r} already unloaded -> copy without channel close "
+            f"(nothing killed)")
+        return
+    # 2. targeted graceful close of just this profile's windows
+    n = _close_target_profile_windows(user_data_dir, profile_folder, log=log)
+    if n and _wait_profile_unlocked(user_data_dir, profile_folder, wait_s=12, log=log):
+        log(f"  {profile_folder!r} unloaded after closing its {n} window(s) -> "
+            f"copy without channel close (channel spared)")
+        return
+    # 3. last resort
+    log(f"  {profile_folder!r} still loaded -> closing channel (fallback)")
+    if close_chrome is not None:
+        close_chrome(user_data_dir)
+    else:
+        close_laptop_chrome(user_data_dir, log=log)
+
+
 def pull_profile_from_laptop(email, golden_folder, label="",
                              user_data_dir=None, close_chrome=None, log=print):
     """Rebuild `golden_folder` from the laptop Chrome profile logged into
@@ -281,13 +506,11 @@ def pull_profile_from_laptop(email, golden_folder, label="",
         return False
     log(f"{tag}laptop pull: using profile {profile_folder!r} from {user_data_dir}")
 
-    # Unlock cookie/login SQLite DBs by closing the laptop Chrome that owns this
-    # profile (the channel we matched).
+    # Unlock the target profile's cookie/login SQLite DBs. v824: if the profile
+    # is already unloaded, copy live with no kill; else fall back to closing the
+    # channel that owns it.
     try:
-        if close_chrome is not None:
-            close_chrome(user_data_dir)
-        else:
-            close_laptop_chrome(user_data_dir, log=log)
+        _release_target_profile(user_data_dir, profile_folder, close_chrome, log=log)
     except Exception as e:
         log(f"{tag}laptop pull: close chrome failed: {e}")
         return False
@@ -436,12 +659,10 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
         return False
     log(f"{tag}lean golden: copying profile {profile_folder!r} from {user_data_dir}")
 
-    # Close ONLY this channel's Chrome so cookie/login DBs are unlocked + flushed.
+    # v824: unlock the target profile with least disruption — copy live if it is
+    # already unloaded (no kill), else fall back to closing this channel's Chrome.
     try:
-        if close_chrome is not None:
-            close_chrome(user_data_dir)
-        else:
-            close_laptop_chrome(user_data_dir, log=log)
+        _release_target_profile(user_data_dir, profile_folder, close_chrome, log=log)
     except Exception as e:
         log(f"{tag}lean golden: close chrome failed: {e}")
         return False
