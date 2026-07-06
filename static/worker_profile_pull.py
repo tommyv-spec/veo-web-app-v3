@@ -283,15 +283,24 @@ def _profile_lock_holders(paths):
         if rm.RmStartSession(ctypes.byref(sess), 0, key) != 0:
             return None
         try:
+            _MORE_DATA = 234  # ERROR_MORE_DATA: expected on the sizing call
             arr = (w.LPCWSTR * len(paths))(*paths)
-            rm.RmRegisterResources(sess, len(paths), arr, 0, None, 0, None)
+            if rm.RmRegisterResources(sess, len(paths), arr, 0, None, 0, None) != 0:
+                return None
             need = w.UINT(0)
             n = w.UINT(0)
             rb = w.DWORD(0)
-            rm.RmGetList(sess, ctypes.byref(need), ctypes.byref(n), None, ctypes.byref(rb))
-            buf = (_RPI * max(need.value, 1))()
+            # sizing call: 0 => no holders, ERROR_MORE_DATA => `need` holders exist
+            rc = rm.RmGetList(sess, ctypes.byref(need), ctypes.byref(n), None, ctypes.byref(rb))
+            if rc not in (0, _MORE_DATA):
+                return None
+            if need.value == 0:
+                return set()
+            buf = (_RPI * need.value)()
             n = w.UINT(need.value)
-            rm.RmGetList(sess, ctypes.byref(need), ctypes.byref(n), buf, ctypes.byref(rb))
+            # data call must succeed (0) before we read buf, else it is garbage
+            if rm.RmGetList(sess, ctypes.byref(need), ctypes.byref(n), buf, ctypes.byref(rb)) != 0:
+                return None
             return {buf[i].Process.dwProcessId for i in range(n.value)}
         finally:
             rm.RmEndSession(sess)
@@ -353,6 +362,8 @@ public class WN{
 "@
 Add-Type -TypeDefinition $sig
 $target=$env:TGT_NAME
+# escape any *, ?, [ ] in the profile name so -like treats it literally (not a glob)
+$tesc=[System.Management.Automation.WildcardPattern]::Escape($target)
 $needle=$env:TGT_NEEDLE
 $dry=($env:TGT_DRYRUN -eq '1')
 # pids whose cmdline belongs to the target channel
@@ -382,7 +393,7 @@ foreach($h in [WN]::Wins()){
         if($ct -ne $docType){
           if($ct -eq $btnType){
             $nm=$c.Current.Name
-            if($nm -eq $target -or $nm -like "$target*"){$match=$true;break}
+            if($nm -eq $target -or $nm -like "$tesc*"){$match=$true;break}
           }
           $q.Enqueue(@($c,$d+1))
         }
@@ -418,9 +429,15 @@ def _close_target_profile_windows(user_data_dir, profile_folder, log=print, dry_
         enc = base64.b64encode(_UIA_CLOSE_PS.encode("utf-16-le")).decode("ascii")
         env = dict(os.environ, TGT_NAME=name, TGT_NEEDLE=needle,
                    TGT_DRYRUN=("1" if dry_run else "0"))
-        out = subprocess.run(
+        res = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
-            capture_output=True, text=True, timeout=60, env=env).stdout
+            capture_output=True, text=True, timeout=60, env=env)
+        out = res.stdout or ""
+        if res.returncode != 0 and "DONE" not in out:
+            # PS crashed before finishing -> trust nothing it printed; channel-close
+            log(f"  uia close: powershell rc={res.returncode}; "
+                f"treating as no windows closed (will fall back)")
+            return 0
         closed = 0
         for row in out.splitlines():
             row = row.strip()
