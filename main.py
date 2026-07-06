@@ -11408,6 +11408,72 @@ async def local_worker_get_pending_job(
     if active_user_ids:
         print(f"[Worker] Skipping jobs for {len(active_user_ids)} user(s) with active personal worker", flush=True)
 
+    # v825 — BULLETPROOF stuck-'processing' reaper (backstop for v824).
+    # get_pending_job only serves 'pending'/'queued_for_flow', so a Flow job
+    # left at status='processing' with completed_clips < total_clips and NO
+    # further progress is NEVER re-served → "one account failed and the whole
+    # thing got dropped". v824 recovers the common case (account self-resumes
+    # its slice across a supervisor restart); this reaper is the last-resort net
+    # for total death the worker can't recover from itself — whole worker
+    # process killed, machine reboot, or an account thread dead past
+    # MAX_WORKER_RESTARTS. It runs server-side on every poll, independent of any
+    # crashed worker's in-memory state, so recovery is driven by whichever
+    # worker polls next (this one, a restarted one, or the VPS worker).
+    #
+    # Progress signal = Job.updated_at (Clip has no updated_at column, v487).
+    # updated_at bumps whenever completed_clips changes, so a live job that is
+    # actually completing clips keeps it fresh. Two-tier stale gate avoids
+    # false-resetting a live-but-slow job mid-generation:
+    #   owner worker OFFLINE → 15 min (nothing is happening, recover fast)
+    #   owner worker ONLINE  → 45 min (give the live worker lots of room)
+    # Reset only IN-FLIGHT clips (non-terminal) back to 'pending'; completed /
+    # failed / skipped / redo-queued clips are preserved, so on re-serve the
+    # worker re-submits only unfinished clips and the job reaches a terminal
+    # state (no reap loop; worker-side v788 cap fails truly-broken clips).
+    try:
+        _now = datetime.utcnow()
+        _STUCK_OFFLINE_MIN = 15
+        _STUCK_ONLINE_MIN = 45
+        _TERMINAL_CLIP = {
+            'completed', 'approved', 'failed', 'skipped',
+            'redo_queued', 'flow_redo_queued',
+        }
+        _stuck_jobs = db.query(Job).filter(
+            Job.backend == 'flow',
+            Job.status == 'processing',
+            Job.total_clips.isnot(None),
+            Job.completed_clips.isnot(None),
+            Job.completed_clips < Job.total_clips,
+        ).all()
+        _reaped = 0
+        for _sj in _stuck_jobs:
+            _owner_online = _sj.user_id in active_user_ids
+            _limit = _STUCK_ONLINE_MIN if _owner_online else _STUCK_OFFLINE_MIN
+            _last = _sj.updated_at or _sj.created_at
+            if not _last or (_now - _last) < timedelta(minutes=_limit):
+                continue
+            _reset_clips = 0
+            for _c in db.query(Clip).filter(Clip.job_id == _sj.id).all():
+                if (_c.status or '').lower() not in _TERMINAL_CLIP:
+                    _c.status = 'pending'
+                    _c.claimed_by_worker = None
+                    _c.claimed_at = None
+                    _reset_clips += 1
+            _sj.status = 'pending'
+            _sj.claimed_by_worker = None
+            _sj.claimed_at = None
+            _sj.updated_at = _now  # bump so it isn't instantly re-reaped + refreshes the 24h window
+            _reaped += 1
+            print(f"[Worker] ⛑ v825 reaped stuck 'processing' job {_sj.id[:8]} "
+                  f"(no progress {int((_now - _last).total_seconds() // 60)}min, "
+                  f"owner_online={_owner_online}, {_sj.completed_clips}/{_sj.total_clips} done, "
+                  f"{_reset_clips} in-flight clip(s) reset) → pending for re-dispatch", flush=True)
+        if _reaped:
+            db.commit()
+    except Exception as _reap_err:
+        print(f"[Worker] v825 reaper error (non-fatal): {_reap_err}", flush=True)
+        db.rollback()
+
     # Build query for available jobs
     # Either: unclaimed, OR claimed by this same worker
     # Exclude any jobs the worker is already processing
