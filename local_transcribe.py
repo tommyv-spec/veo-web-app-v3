@@ -100,11 +100,23 @@ def _maybe_auto_match(video, db: Session) -> None:
             )
             return " ".join(((vo or dt) or "").strip() for dt, vo in rows).strip()
 
+        # v822.2 DIAGNOSTIC (temporary): score with min_score=0 so the TOP
+        # candidate is visible even on a miss - best_matches computes every
+        # score anyway, the threshold only filters, so this costs nothing.
         top = _ig_match.best_matches(
-            video, candidates, full_dialogue=_full_dialogue, k=1, min_score=_AUTO_MATCH_THRESHOLD,
+            video, candidates, full_dialogue=_full_dialogue, k=1, min_score=0.0,
         )
-        if not top:
-            print(f"[local] hash={video.file_hash[:8]} no candidate >= {_AUTO_MATCH_THRESHOLD}", flush=True)
+        if not top or top[0]["score"] < _AUTO_MATCH_THRESHOLD:
+            if top:
+                t = top[0]
+                print(
+                    f"[local] hash={video.file_hash[:8]} no candidate >= {_AUTO_MATCH_THRESHOLD} "
+                    f"| top_score={t['score']:.3f} top_job={str(t['job_id'])[:8]} pool={len(candidates)} "
+                    f"tlen={len(video.transcription or '')}",
+                    flush=True,
+                )
+            else:
+                print(f"[local] hash={video.file_hash[:8]} no candidate >= {_AUTO_MATCH_THRESHOLD} | pool={len(candidates)} scored 0 rows", flush=True)
             return
         match = top[0]
         job = db.query(Job).filter_by(id=match["job_id"]).first()
@@ -146,14 +158,22 @@ def rematch_unmatched(user_id, db: Session) -> dict:
         )
         .all()
     )
+    import time as _time
+    _t0 = _time.monotonic()
     matched = 0
     for v in vids:
         _maybe_auto_match(v, db)
         if v.matched_job_id:
             matched += 1
     if vids:
-        # v822 diagnostic - remove after operator-side evidence lands.
-        print(f"[local] rematch sweep user={str(user_id)[:8]} checked={len(vids)} matched={matched}", flush=True)
+        # v822/v822.2 diagnostic - remove after operator-side evidence lands.
+        # dur exposes whether this sweep is heavy enough to trip the gunicorn
+        # WORKER TIMEOUT (SIGABRT seen in prod logs 2026-07-06).
+        print(
+            f"[local] rematch sweep user={str(user_id)[:8]} checked={len(vids)} matched={matched} "
+            f"dur={_time.monotonic() - _t0:.1f}s",
+            flush=True,
+        )
     return {"checked": len(vids), "matched": matched}
 
 
