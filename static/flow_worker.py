@@ -16299,23 +16299,39 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise Exception(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
 
-    # Definitive API terminal (PROMINENT_PEOPLE) on this resubmit's status poll —
-    # a deterministic face-content reject (operator confirmed: same frame is ALWAYS
-    # blocked). Act on it even when the DOM check returns "no clear failure" (a
-    # Retry click masks the tile to a transient 'generating %'). Without this the
-    # redo grinds the full 50s wait + 15-scan loop before the PolicyScan finally
-    # gives up — the 8-minute grind seen in the 2026-06-23 logs.
-    _term_reason = _consume_video_policy_terminal_for_clip(job_id, clip_index)
-    if _term_reason:
-        # v821b — prominent with an un-tried Prompt B -> requeue with reworded line.
-        if handle_terminal_reject(clip_id, _term_reason, job_id=job_id, clip_index=clip_index) == 'requeued':
-            print(f"[REDO] 🔁 Clip {clip_index+1} gen-time prominent — retry reworded line (Prompt B), requeued", flush=True)
+    # v826 — MATCH THE MAIN PROCESS. The main path gates terminal-record
+    # consumption on `clip_failed` (check_recent_clip_failure): when the clip did
+    # NOT fail it CLEARS any stale record and proceeds to download; only a real
+    # failure consumes the record into a Prompt-B requeue / replace-image card
+    # (see ~L17690: `if not clip_failed: _clear_video_policy_terminal_for_clip`).
+    # The redo path used to consume the record UNCONDITIONALLY — "act on it even
+    # when the DOM check returns no clear failure" — so a STALE terminal record
+    # left by the ORIGINAL pre-redo prominent block requeued a resubmit that had
+    # actually generated a good render (operator 2026-07-07: "it was generated
+    # correctly ... match the redo download process to the main process"). Gate
+    # it on immediate_failure exactly like main. A genuinely masked re-block
+    # writes a FRESH record during the download wait, which the download-side
+    # PolicyScan still catches — same as the main process.
+    if immediate_failure:
+        # Definitive API terminal (PROMINENT_PEOPLE) that the DOM check surfaced
+        # as a real failure — deterministic face-content reject.
+        _term_reason = _consume_video_policy_terminal_for_clip(job_id, clip_index)
+        if _term_reason:
+            # v821b — prominent with an un-tried Prompt B -> requeue with reworded line.
+            if handle_terminal_reject(clip_id, _term_reason, job_id=job_id, clip_index=clip_index) == 'requeued':
+                print(f"[REDO] 🔁 Clip {clip_index+1} gen-time prominent — retry reworded line (Prompt B), requeued", flush=True)
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return False
+            print(f"[REDO] ⛔ Clip {clip_index+1} terminal content filter ({_term_reason}) — "
+                  f"replace-image card, NOT requeueing (face filter is model-swap + restore proof)", flush=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
             return False
-        print(f"[REDO] ⛔ Clip {clip_index+1} terminal content filter ({_term_reason}) — "
-              f"replace-image card, NOT requeueing (face filter is model-swap + restore proof)", flush=True)
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return False
+    else:
+        # Resubmit landed with no detected failure — mirror main's `if not
+        # clip_failed:` branch: drop any stale terminal record (from the original
+        # pre-redo block) so it can't requeue a good render, then fall through to
+        # the download.
+        _clear_video_policy_terminal_for_clip(job_id, clip_index)
     if immediate_failure:
         # v777 — an immediate double-tile failure right after a redo submit is
         # almost always a content-policy block (same image + same prompt that was
