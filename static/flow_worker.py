@@ -5177,7 +5177,7 @@ def route_terminal_content_reject(clip_id, reason, account_name=""):
 def handle_terminal_reject(clip_id, reason, account_name="", job_id=None, clip_index=None, requeue=True):
     """v821b — if reason is prominent and the clip can retry a reworded line, requeue for
     Prompt B and return 'requeued'; else do the normal terminal replace-image/general-policy and
-    return 'terminal'. Non-prominent reasons (SEXUAL/CSAM/REPUTATIONAL/MISREPRESENT) always
+    return 'terminal'. Non-prominent reasons (SEXUAL/CSAM/REPUTATIONAL/MISREPRESENT/MINOR) always
     terminal (unchanged). Shares prominent_promptb_decision with the tile-text path so both
     routes make the same call."""
     if reason and 'PROMINENT' in reason.upper():
@@ -16255,15 +16255,15 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     # "kept failing for unusual activity, never restored, marked failed for policy").
     immediate_failure = check_recent_clip_failure(page, data_index=0, clip_num=clip_index, old_tile_ids=None, job_id=job_id, clip_index=clip_index, clip_id=clip_id)
 
-    # v802 — TERMINAL content reject (SEXUAL / PROMINENT_PEOPLE / CSAM / REPUTATIONAL):
-    # deterministic, retry/redo/restore-proof. Mark the clip with the correct policy
+    # v802 — TERMINAL content reject (SEXUAL / PROMINENT_PEOPLE / CSAM / REPUTATIONAL /
+    # MISREPRESENT / MINOR): deterministic, retry/redo/restore-proof. Mark the clip with the correct policy
     # error (change-prompt / replace-image card) and stop — re-generating the same
     # content just fails again.
     if isinstance(immediate_failure, str) and immediate_failure.startswith("terminal_content:"):
         _tc_reason = immediate_failure.split(":", 1)[1]
         # v821b — a gen-time PROMINENT reject on a clip with an un-tried Prompt B
         # is often a MASKED dialogue trip; requeue with the reworded line instead
-        # of the terminal card. SEXUAL/CSAM/REPUTATIONAL stay terminal (unchanged).
+        # of the terminal card. SEXUAL/CSAM/REPUTATIONAL/MISREPRESENT/MINOR stay terminal (unchanged).
         if handle_terminal_reject(clip_id, _tc_reason, job_id=job_id, clip_index=clip_index) == 'requeued':
             clip_log(clip_id, clip_index, "REDO", "gen-time prominent -> retry reworded line (Prompt B)")
             print(f"[REDO] 🔁 Clip {clip_index+1} gen-time prominent — retry reworded line (Prompt B), requeued", flush=True)
