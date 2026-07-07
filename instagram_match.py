@@ -92,7 +92,7 @@ def _tokens(s: str):
     return _normalize(s).split()
 
 
-def rank_tfidf(transcript: str, candidates):
+def rank_tfidf(transcript: str, candidates, idf_power: float = 1.0):
     """Rank candidates by TF-IDF cosine similarity to the transcript.
 
     Args:
@@ -100,6 +100,10 @@ def rank_tfidf(transcript: str, candidates):
         candidates: iterable of (job_id, dialogue_text).  IDF is fit on THIS
             pool, so the shared boilerplate is down-weighted relative to each
             script's distinctive words.
+        idf_power: exponent on IDF (v822.6). >1 emphasises RARE terms harder,
+            which suppresses the "generic attractor" — one long, boilerplate-
+            heavy job that otherwise tops many unrelated videos because it
+            overlaps everyone's common vocabulary.
 
     Returns:
         list of {"job_id", "score"} sorted desc; score = cosine in [0, 1].
@@ -116,7 +120,8 @@ def rank_tfidf(transcript: str, candidates):
             df[w] += 1
 
     def _idf(w):
-        return math.log((n_docs + 1) / (df.get(w, 0) + 1)) + 1.0
+        base = math.log((n_docs + 1) / (df.get(w, 0) + 1)) + 1.0
+        return base ** idf_power if idf_power != 1.0 else base
 
     def _vec(tks):
         if not tks:
@@ -135,6 +140,50 @@ def rank_tfidf(transcript: str, candidates):
         small, big = (qv, cv) if len(qv) <= len(cv) else (cv, qv)
         s = sum(x * big.get(w, 0.0) for w, x in small.items())
         out.append({"job_id": jid, "score": round(min(1.0, max(0.0, s)), 4)})
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return out
+
+
+def rank_bm25(transcript: str, candidates, k1: float = 1.5, b: float = 0.75):
+    """Rank candidates by BM25 (v822.6 candidate metric).
+
+    BM25 is asymmetric (query-driven), length-normalised (b), and saturating
+    (k1) — so a long, generic job cannot dominate just by being long. Raw BM25
+    is unbounded; we min-max normalise per query into [0, 1] so the same
+    margin gate applies (top becomes 1.0; the margin is how far the runner-up
+    trails the winner).
+    """
+    q_tokens = _tokens(transcript)
+    cand = [(jid, _tokens(d or "")) for jid, d in candidates]
+    n_docs = len(cand)
+    if not q_tokens or n_docs == 0:
+        return []
+    q_set = set(q_tokens)
+
+    df = Counter()
+    lengths = []
+    for _jid, tks in cand:
+        lengths.append(len(tks))
+        for w in set(tks):
+            df[w] += 1
+    avgdl = (sum(lengths) / n_docs) or 1.0
+
+    def _idf(w):
+        d = df.get(w, 0)
+        return math.log(1 + (n_docs - d + 0.5) / (d + 0.5))
+
+    raw = []
+    for (jid, tks), L in zip(cand, lengths):
+        tf = Counter(tks)
+        s = 0.0
+        for w in q_set:
+            f = tf.get(w, 0)
+            if not f:
+                continue
+            s += _idf(w) * (f * (k1 + 1)) / (f + k1 * (1 - b + b * L / avgdl))
+        raw.append((jid, s))
+    hi = max((s for _j, s in raw), default=0.0) or 1.0
+    out = [{"job_id": jid, "score": round(max(0.0, s / hi), 4)} for jid, s in raw]
     out.sort(key=lambda x: x["score"], reverse=True)
     return out
 

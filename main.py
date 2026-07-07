@@ -4360,6 +4360,7 @@ async def diag_local_match(
     limit: int = 20,
     only_unmatched: int = 0,
     pool: str = "pending",
+    request_compare: int = 0,
     db: DBSession = Depends(get_db_session),
 ):
     """v822.5 TEMPORARY read-only diagnostic (NO auth — gated by DIAG_TOKEN,
@@ -4422,19 +4423,38 @@ async def diag_local_match(
         s1 = ranked[0]["score"] if ranked else 0.0
         s2 = ranked[1]["score"] if len(ranked) > 1 else 0.0
 
-        # RE-CHECK a matched video: where does its STORED job rank in the pool?
-        stored_rank = None
-        stored_score = None
-        stored_line = None
-        if v.matched_job_id:
-            for i, r in enumerate(ranked_full):
+        def _stored_pos(rk):
+            if not v.matched_job_id:
+                return (None, None)
+            for i, r in enumerate(rk):
                 if r["job_id"] == v.matched_job_id:
-                    stored_rank = i + 1
-                    stored_score = r["score"]
-                    break
-            stored_line = _first_line(v.matched_job_id)
+                    return (i + 1, r["score"])
+            return (None, None)
+
+        # RE-CHECK a matched video: where does its STORED job rank in the pool?
+        stored_rank, stored_score = _stored_pos(ranked_full)
+        stored_line = _first_line(v.matched_job_id) if v.matched_job_id else None
+
+        # v822.6 metric bake-off: compare tfidf(idf^1) vs tfidf(idf^2) vs bm25
+        # on the SAME pool. Reports stored-job rank + top1/top2 per ranker so
+        # we can pick the ranker that keeps correct matches #1 with the widest
+        # margin AND suppresses the generic attractor.
+        compare = None
+        if int(request_compare):
+            r2 = _ig.rank_tfidf(v.transcription or "", pairs, idf_power=2.0)
+            rb = _ig.rank_bm25(v.transcription or "", pairs)
+            def _pack(rk):
+                sr, ss = _stored_pos(rk)
+                return {
+                    "top1": rk[0]["job_id"][:8] if rk else None,
+                    "s1": rk[0]["score"] if rk else 0.0,
+                    "s2": rk[1]["score"] if len(rk) > 1 else 0.0,
+                    "stored_rank": sr, "stored_score": ss,
+                }
+            compare = {"tfidf1": _pack(ranked_full), "tfidf2": _pack(r2), "bm25": _pack(rb)}
 
         out.append({
+            "compare": compare,
             "file_name": v.file_name,
             "hash": (v.file_hash or "")[:8],
             "status": v.transcription_status,
