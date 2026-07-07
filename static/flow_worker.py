@@ -392,7 +392,7 @@ _VIDEO_POLICY_TERMINAL_LOCK = threading.Lock()
 # deterministic like the others → model-swap-proof AND golden-restore-proof, so
 # it belongs on the terminal list (never retry/swap). Surfaces in the FAILED tile
 # text too — see tile_text_terminal_reason for the DOM-side catch.
-_VIDEO_POLICY_TERMINAL_REASONS = ('PROMINENT_PEOPLE', 'SEXUAL', 'CSAM', 'REPUTATIONAL', 'MISREPRESENT')
+_VIDEO_POLICY_TERMINAL_REASONS = ('PROMINENT_PEOPLE', 'SEXUAL', 'CSAM', 'REPUTATIONAL', 'MISREPRESENT', 'MINOR')
 _VIDEO_POLICY_TERMINAL_WINDOW_S = 180.0     # how recent a reject counts (media-keyed, so safe to keep longer)
 _UUID_RE = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
 
@@ -5145,6 +5145,11 @@ _TERMINAL_CONTENT_MESSAGES = {
                      "(reword the scene, drop any public-figure or news framing) — retrying won't fix it."),
     'MISREPRESENT': ("⚠️ Flow blocked this as reputational / current-events risk. Change the prompt "
                      "(reword the scene, drop any public-figure or news framing) — retrying won't fix it."),
+    # v827 — PUBLIC_ERROR_MINOR: Flow's classifier read a person in the frame as
+    # a minor. Deterministic on the image + a hard compliance line (§8 no-minors)
+    # — must NEVER retry/ship. Terminal replace-image card, same as SEXUAL/CSAM.
+    'MINOR': ("⚠️ Flow flagged a person in this image as a minor. Upload a different image with a "
+              "clearly adult subject (retrying / switching the model won't fix it)."),
 }
 
 
