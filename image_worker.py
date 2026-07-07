@@ -4401,6 +4401,45 @@ def _flow_api_image_multi_try(page, input_paths, prompt, aspect_ratio, model,
     return saved
 
 
+def _is_unusual(reason: str) -> bool:
+    """Account/session-level 'unusual activity' block — the signal the golden
+    restore triggers on. Covers Flow's reCAPTCHA rejection,
+    PUBLIC_ERROR_UNUSUAL_ACTIVITY / PERMISSION_DENIED 403, AND a persistent
+    reCAPTCHA-token MINT failure (a flagged account can't mint a token, so
+    submit_image raises 'captcha mint failed'). NOT a per-prompt content issue —
+    the DOM path hits the SAME block, so falling through to DOM just wastes a
+    full UI generation and never clears the block.
+
+    v828 — widened from the original (UNUSUAL_ACTIVITY only, OR RECAPTCHA *and* a
+    403 marker). That AND-ed condition missed two real flag manifestations the
+    operator hit, so the API golden-restore trigger never fired:
+      (1) reCAPTCHA MINT failure -> 'captcha mint failed' (no RECAPTCHA/UNUSUAL
+          token in the string) was misrouted by _is_transient to the DOM
+          cookie-clear (which does NOT clear Flow's reCAPTCHA block).
+      (2) a bare 403 / PERMISSION_DENIED block without the literal word
+          'RECAPTCHA' failed the AND.
+    Widening is safe against false positives because the submit retry loop +
+    zero-capture gate upstream means only a PERSISTENT block (all variants + all
+    retries failed with NOTHING captured) reaches _signal_unusual — a one-off
+    transient mint hiccup recovers on retry and captures a URL, so this does not
+    cause spurious browser relaunches. Module-level (was nested) so it is unit-
+    testable — see tests/test_image_worker_unusual_classifier.py.
+    """
+    r = (reason or "").upper()
+    if "UNUSUAL_ACTIVITY" in r:
+        return True
+    # 403 / permission block — Flow returns PERMISSION_DENIED code=403 on the
+    # reCAPTCHA rejection; the literal word 'RECAPTCHA' is not always present.
+    if "PERMISSION_DENIED" in r or " 403" in r or "CODE=403" in r or "HTTP 403" in r:
+        return True
+    # persistent reCAPTCHA-token mint failure = the account can't pass reCAPTCHA
+    if "CAPTCHA MINT FAILED" in r or "MINT FAILED" in r:
+        return True
+    if "RECAPTCHA" in r:
+        return True
+    return False
+
+
 def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, variants,
                               aspect_ratio, model, ctx,
                               listener_state, pending_submissions,
@@ -4438,15 +4477,8 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
         print(f"{pfx}[flow_api] falling back to DOM for this clip (transient): {reason}", flush=True)
         return False
 
-    def _is_unusual(reason: str) -> bool:
-        """Account/session-level 'unusual activity' block (Flow's reCAPTCHA
-        rejection, PUBLIC_ERROR_UNUSUAL_ACTIVITY / PERMISSION_DENIED 403). NOT a
-        per-prompt content issue — the DOM path hits the SAME block (observed:
-        a DOM redo of an unusual-blocked node failed all 4 tiles), so falling
-        through to DOM just wastes a full UI generation."""
-        r = (reason or "").upper()
-        return ("UNUSUAL_ACTIVITY" in r
-                or ("RECAPTCHA" in r and ("PERMISSION_DENIED" in r or " 403" in r or "CODE=403" in r)))
+    # _is_unusual is now module-level (v828) so it is unit-testable and the
+    # widened classifier is shared — see the def above _flow_api_pull_submit_try.
 
     def _is_server_5xx(reason: str) -> bool:
         """Transient server-side error (INTERNAL 500 / 502 / 503 / 504 /
@@ -4634,6 +4666,20 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
                     break  # non-retryable, or API retries exhausted for this variant
     except Exception as e:
         _last_fail_reason = f"submit loop raised: {e}"
+
+    # v828 diagnostic (TEMPORARY — remove once operator confirms the classifier
+    # catches the real block string). Logs the FULL final reason + how it
+    # classified, so any un-caught account-block manifestation is visible in the
+    # worker log and we can widen _is_unusual to match it.
+    if _last_fail_reason or _saw_unusual:
+        try:
+            print(f"{pfx}[flow_api][v828-diag] submit outcome: "
+                  f"captured={len(captured_fife_urls)}/{variants} "
+                  f"reason={(_last_fail_reason or '')!r} "
+                  f"is_unusual={_is_unusual(_last_fail_reason or '')} "
+                  f"saw_unusual={_saw_unusual}", flush=True)
+        except Exception:
+            pass
 
     if captured_fife_urls:
         # At least one variant landed. A single variant's transient 403/500 does
