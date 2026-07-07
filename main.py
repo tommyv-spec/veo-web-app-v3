@@ -4350,6 +4350,94 @@ async def rematch_local_videos(
     return rematch_unmatched(current_user.id, db)
 
 
+@app.get("/api/diag/local-match")
+async def diag_local_match(
+    token: str = "",
+    user_id: str = "",
+    limit: int = 20,
+    only_unmatched: int = 0,
+    db: DBSession = Depends(get_db_session),
+):
+    """v822.5 TEMPORARY read-only diagnostic (NO auth — gated by a shared
+    secret in DIAG_TOKEN). Disabled entirely unless DIAG_TOKEN is set, so it
+    is inert by default. For each recent local video, returns its transcript
+    + the live top-5 candidate jobs (TF-IDF score + dialogue head) + the
+    auto/manual decision, so the matching behaviour can be inspected directly
+    without a login. REMOVE after calibration lands (operator-authorized
+    2026-07-07)."""
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        # 404 (not 401) so the endpoint does not advertise itself.
+        raise HTTPException(status_code=404, detail="not found")
+
+    from models import LocalVideo, Job, Clip
+    from local_transcribe import _bulk_dialogue_map, _MATCH_HIGH, _MATCH_MARGIN
+    import instagram_match as _ig
+
+    limit = max(1, min(int(limit or 20), 100))
+    q = db.query(LocalVideo)
+    if user_id:
+        q = q.filter(LocalVideo.user_id == user_id)
+    if only_unmatched:
+        q = q.filter(LocalVideo.matched_job_id == None)  # noqa: E711
+    vids = q.order_by(LocalVideo.created_at.desc()).limit(limit).all()
+
+    def _first_line(job_id):
+        c = (
+            db.query(Clip.dialogue_text, Clip.voiceover_line)
+            .filter(Clip.job_id == job_id)
+            .order_by(Clip.clip_index.asc())
+            .first()
+        )
+        if not c:
+            return ""
+        return ((c[1] or c[0]) or "")[:70]
+
+    out = []
+    _pool_cache = {}
+    for v in vids:
+        if v.user_id not in _pool_cache:
+            cand = (
+                db.query(Job)
+                .filter(Job.user_id == v.user_id, Job.lifecycle_stage == "awaiting_finishing")
+                .all()
+            )
+            dmap = _bulk_dialogue_map(db, [j.id for j in cand])
+            _pool_cache[v.user_id] = (cand, dmap)
+        cand, dmap = _pool_cache[v.user_id]
+        pairs = [(j.id, dmap.get(j.id, "")) for j in cand]
+        ranked = _ig.rank_tfidf(v.transcription or "", pairs)[:5]
+        pick = _ig.auto_pick(ranked, _MATCH_HIGH, _MATCH_MARGIN) if ranked else None
+        s1 = ranked[0]["score"] if ranked else 0.0
+        s2 = ranked[1]["score"] if len(ranked) > 1 else 0.0
+        out.append({
+            "file_name": v.file_name,
+            "hash": (v.file_hash or "")[:8],
+            "status": v.transcription_status,
+            "matched_job_id": (v.matched_job_id or "")[:8] or None,
+            "match_score": v.match_score,
+            "transcript_len": len(v.transcription or ""),
+            "transcript": (v.transcription or "")[:500],
+            "pool": len(cand),
+            "s1": s1, "s2": s2, "margin": round(s1 - s2, 4),
+            "decision": ("AUTO->" + str(pick)[:8]) if pick else "MANUAL (ambiguous/low)",
+            "top5": [
+                {"job": r["job_id"][:8], "score": r["score"],
+                 "line1": _first_line(r["job_id"]),
+                 "dlg_head": dmap.get(r["job_id"], "")[:140]}
+                for r in ranked
+            ],
+        })
+    return {
+        "count": len(out),
+        "high": _MATCH_HIGH,
+        "margin": _MATCH_MARGIN,
+        "note": "v822.5 temporary diag; set DIAG_TOKEN in Render to enable, unset to disable",
+        "videos": out,
+    }
+
+
 @app.post("/api/drive/accounts/{account_id}/sync")
 async def sync_drive_account(
     account_id: int,
