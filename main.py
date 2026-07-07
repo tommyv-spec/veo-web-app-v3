@@ -4359,26 +4359,31 @@ async def diag_local_match(
     user_id: str = "",
     limit: int = 20,
     only_unmatched: int = 0,
+    pool: str = "pending",
     db: DBSession = Depends(get_db_session),
 ):
-    """v822.5 TEMPORARY read-only diagnostic (NO auth — gated by a shared
-    secret in DIAG_TOKEN). Disabled entirely unless DIAG_TOKEN is set, so it
-    is inert by default. For each recent local video, returns its transcript
-    + the live top-5 candidate jobs (TF-IDF score + dialogue head) + the
-    auto/manual decision, so the matching behaviour can be inspected directly
-    without a login. REMOVE after calibration lands (operator-authorized
+    """v822.5 TEMPORARY read-only diagnostic (NO auth — gated by DIAG_TOKEN,
+    inert unless that env var is set). For each local video, ranks its
+    transcript against a candidate pool and returns the top-5 + the auto/manual
+    decision. `pool=pending` (default) = the live awaiting_finishing pool (how
+    the real matcher sees it). `pool=full` = ALL of the user's completed jobs
+    (with dialogue) — this is how we RE-CHECK already-matched videos, because
+    a video's linked job leaves the pending pool once matched. For a matched
+    video it reports where its STORED job ranks in the full library
+    (stored_rank / stored_score): rank 1 = link consistent, high rank = the
+    link is probably WRONG. REMOVE after calibration (operator-authorized
     2026-07-07)."""
     import os as _os
     expected = _os.environ.get("DIAG_TOKEN", "")
     if not expected or token != expected:
-        # 404 (not 401) so the endpoint does not advertise itself.
         raise HTTPException(status_code=404, detail="not found")
 
     from models import LocalVideo, Job, Clip
     from local_transcribe import _bulk_dialogue_map, _MATCH_HIGH, _MATCH_MARGIN
     import instagram_match as _ig
 
-    limit = max(1, min(int(limit or 20), 100))
+    limit = max(1, min(int(limit or 20), 200))
+    full_pool = (pool == "full")
     q = db.query(LocalVideo)
     if user_id:
         q = q.filter(LocalVideo.user_id == user_id)
@@ -4401,25 +4406,43 @@ async def diag_local_match(
     _pool_cache = {}
     for v in vids:
         if v.user_id not in _pool_cache:
-            cand = (
-                db.query(Job)
-                .filter(Job.user_id == v.user_id, Job.lifecycle_stage == "awaiting_finishing")
-                .all()
-            )
+            jq = db.query(Job).filter(Job.user_id == v.user_id)
+            if full_pool:
+                jq = jq.filter(Job.status == "completed")
+            else:
+                jq = jq.filter(Job.lifecycle_stage == "awaiting_finishing")
+            cand = jq.all()
             dmap = _bulk_dialogue_map(db, [j.id for j in cand])
             _pool_cache[v.user_id] = (cand, dmap)
         cand, dmap = _pool_cache[v.user_id]
         pairs = [(j.id, dmap.get(j.id, "")) for j in cand]
-        ranked = _ig.rank_tfidf(v.transcription or "", pairs)[:5]
+        ranked_full = _ig.rank_tfidf(v.transcription or "", pairs)
+        ranked = ranked_full[:5]
         pick = _ig.auto_pick(ranked, _MATCH_HIGH, _MATCH_MARGIN) if ranked else None
         s1 = ranked[0]["score"] if ranked else 0.0
         s2 = ranked[1]["score"] if len(ranked) > 1 else 0.0
+
+        # RE-CHECK a matched video: where does its STORED job rank in the pool?
+        stored_rank = None
+        stored_score = None
+        stored_line = None
+        if v.matched_job_id:
+            for i, r in enumerate(ranked_full):
+                if r["job_id"] == v.matched_job_id:
+                    stored_rank = i + 1
+                    stored_score = r["score"]
+                    break
+            stored_line = _first_line(v.matched_job_id)
+
         out.append({
             "file_name": v.file_name,
             "hash": (v.file_hash or "")[:8],
             "status": v.transcription_status,
             "matched_job_id": (v.matched_job_id or "")[:8] or None,
             "match_score": v.match_score,
+            "stored_rank": stored_rank,
+            "stored_score": stored_score,
+            "stored_line": stored_line,
             "transcript_len": len(v.transcription or ""),
             "transcript": (v.transcription or "")[:500],
             "pool": len(cand),
@@ -4434,6 +4457,7 @@ async def diag_local_match(
         })
     return {
         "count": len(out),
+        "pool_mode": pool,
         "high": _MATCH_HIGH,
         "margin": _MATCH_MARGIN,
         "note": "v822.5 temporary diag; set DIAG_TOKEN in Render to enable, unset to disable",
