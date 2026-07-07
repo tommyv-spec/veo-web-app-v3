@@ -10326,6 +10326,39 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                   f"generating — NOT retrying (one variant is enough; survivor will provide it)", flush=True)
             return False
 
+        # v828 — close the terminal-reason RACE. FailCheck's DOM read (tile shows
+        # 'failed') can beat the async status-poll feed that RECORDS the terminal
+        # content reason, so the _terminal_reason_for_uuids check above returned
+        # None and we were about to generic-Retry a DETERMINISTIC reject (prominent
+        # → should route Prompt B; sexual/minor → replace-image; reputational →
+        # change-prompt). A generic retry just "recovers" nondeterministically then
+        # 404s at download → redo churn — the reason the operator "never sees Prompt
+        # B" and jobs grind for 15+ min. When ALL tiles failed with no survivor,
+        # poll briefly for the record to land. Also match the clip's BOUND media ids
+        # (a failed tile may not expose its ?name= uuid in the DOM). If a terminal
+        # reason appears → route it; else fall through to the generic Retry
+        # unchanged (transient HIGH_TRAFFIC / TIMEOUT / 403 never records a reason,
+        # so they just wait ≤2s then retry as before).
+        if failed_count > 0 and not has_generating and not has_video:
+            _reason_uuids = list(_failed_uuids)
+            try:
+                if job_id is not None and clip_index is not None:
+                    _bound = bound_media_ids_for_clip(job_id, clip_index) or []
+                    _reason_uuids += [u for u in _bound if u not in _reason_uuids]
+            except Exception:
+                pass
+            if _reason_uuids:
+                _deadline = time.time() + 2.0
+                while True:
+                    _tr = _terminal_reason_for_uuids(_reason_uuids)
+                    if _tr:
+                        print(f"[FailCheck] ⛔ [v828] terminal content reject ({_tr}) landed after the "
+                              f"DOM-fail race on clip {clip_num} — routing terminal (not generic-retrying)", flush=True)
+                        return f"terminal_content:{_tr}"
+                    if time.time() >= _deadline:
+                        break
+                    time.sleep(0.4)
+
         # Click Retry on truly failed tiles (ones with 'refresh' button)
         if failed_count > 0:
             print(f"[FailCheck] ⚠️ {failed_count} tile(s) truly failed — clicking Retry on each...", flush=True)
