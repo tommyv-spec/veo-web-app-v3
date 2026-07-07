@@ -14919,6 +14919,35 @@ Prompt B (voice-only) = the dialogue sentence + the post-speech sentence, no IMM
 
 **Touched**: `code/static/index.html` (watcher block rewrite; dead `_uploadLocalFile` removed), `code/main.py` (upload reprocess path + rematch endpoint), `code/local_transcribe.py` (`should_reprocess` + `rematch_unmatched`), `code/tests/test_local_watch_never_miss.py` (11 tests), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline). Plan: `code/docs/superpowers/plans/2026-07-05-local-watch-never-miss.md`. No videos/*.md format change — platform-internal only.
 
+## v822.3 — the rematch sweep was DoSing the platform (emergency hotfix)
+
+**Incident (prod, 2026-07-06)**: after v822 shipped, gunicorn started throwing `WORKER TIMEOUT` → `Worker was sent SIGABRT!`, and `psycopg2.OperationalError: SSL SYSCALL error: EOF detected` surfaced on unrelated requests. The whole app stalled in a crash-loop.
+
+**Root cause (found by diagnostic, not guessing)**: v822's rematch sweep (`POST /api/local-videos/rematch`, called by the browser every 30s) re-scored EVERY done-but-unmatched local video against the WHOLE `awaiting_finishing` pool, and `_maybe_auto_match`'s inner `_full_dialogue(job)` ran ONE Clip query per candidate job (an N+1). Prod state was **pool=226 jobs × ~33 unmatched videos** → ~7,500 DB queries + ~7,500 char-level `difflib.SequenceMatcher` calls on multi-KB strings, **synchronously on the web-worker thread**, every 30s. The worker blew past gunicorn's timeout → SIGABRT → its in-flight DB connections were killed mid-statement → `SSL SYSCALL EOF` on whatever else was querying → cascade stall. A temporary diagnostic (min_score=0 so the miss log prints the TOP score) confirmed all 33 scored **0.52–0.67** (genuine orphans) — so re-scoring them forever was both a DoS AND pointless.
+
+**The fix (bounded by construction)**:
+- **`_bulk_dialogue_map(db, job_ids)`** — ONE query builds `{job_id: dialogue}` for the whole pool (COALESCE(voiceover_line, dialogue_text), audio_pair excluded). Kills the N+1 on BOTH the sweep and the single-upload path (upload went 226 queries → 1).
+- **Bounded sweep** — only videos `created_at` within `_SWEEP_MAX_AGE_H=48h`, capped at `_SWEEP_MAX_VIDEOS=25`, newest-first; a per-user `_SWEEP_COOLDOWN_S=20` guard against multi-tab/burst pile-up; a hard `_SWEEP_BUDGET_S=6.0` wall-clock budget that breaks the loop and resumes next poll. The candidate list + dialogue map are built ONCE per sweep; a matched job is popped from both so it can't double-match a second video.
+
+**Tradeoff / follow-up**: the 48h bound means a local video older than 48h whose job only NOW enters Finishing won't be auto-swept (rare; upload-time match covers the common case, Force rescan covers the rest). The 0.52–0.67 orphan scores are a SEPARATE question (is 0.70 too high, or is the right job no longer in the pool) — not a platform bug, tracked for later. The v822.2 top-score diagnostic stays until that's settled.
+
+**Touched**: `code/local_transcribe.py` (`_bulk_dialogue_map` + `_advance_job_to_published` + bounded `rematch_unmatched` + shared-map `_maybe_auto_match`), `code/tests/test_local_watch_never_miss.py` (v822.3 tests → 17 total), `wiki/log.md` (incident timeline). Deployed hotfix commit `874d054` (confirmed live via `/api/health` render_commit; 8/8 health checks green post-deploy). Forward-only, platform-internal.
+
+## v822.4 — local matcher: TF-IDF cosine + margin gate (stops WRONG matches on near-duplicate scripts)
+
+**Problem**: the local-folder auto-matcher published the WRONG job. Root cause (measured offline on 100+ real builds): the shared `instagram_match.score()` is a CHAR-level `difflib.SequenceMatcher.ratio()`. The Korella/Nuri builds deliberately share the ED language bank VERBATIM (same body — "your soldier / blood flow / comment saffron / purity line"), swapping only the hook + recipe. So dozens of scripts are near-identical in spoken words, and char-similarity scored **78/100 builds ≥0.70 against the WRONG build, many at 1.000**. Raising the threshold does NOT help — the wrong matches score 1.000, not 0.71.
+
+**Fix (LOCAL matcher only — IG/drive left on the char metric, separate path, scope discipline)**:
+- **`instagram_match.rank_tfidf(transcript, candidates)`** — TF-IDF cosine, IDF fit on the candidate pool. The shared boilerplate has high document-frequency → low weight; each script's distinctive hook/recipe words drive the score. Pure-python, stdlib only.
+- **`instagram_match.auto_pick(ranked, high, margin)`** — MARGIN GATE: auto-match ONLY when the top candidate is confident (`>= high`) AND clearly beats the runner-up (`top - second >= margin`). Two near-duplicate twins sit within `margin` → returns None → the video stays "no match" for a MANUAL pick instead of a wrong auto-publish.
+- `local_transcribe._maybe_auto_match` uses these instead of `best_matches`; env-tunable `LOCAL_MATCH_HIGH` (0.50) + `LOCAL_MATCH_MARGIN` (0.12) so thresholds calibrate from the `[local] … s1=/s2=/margin= decision=AUTO|MANUAL` log line WITHOUT a deploy.
+
+**Validation (offline, real builds, 12%-word-dropped transcript vs full pool)**: **0/108 wrong auto-matches** (was 78/108 false ≥0.70 on the old metric); 69/108 distinct builds auto-match correctly; 39/108 near-duplicate twins correctly deferred to manual; right build ranks #1 for 101/108.
+
+**Known limit / follow-up (Increment 2)**: text similarity CANNOT separate two scripts that are ~90% the same words — those 39 near-twins tie (margin≈0) and defer to manual. Local videos currently have NO manual-pick UI (only the ✕/rematch), so an ambiguous video reads "no match" until the operator links it another way. The bulletproof fix the operator deferred: carry an explicit per-job code in the export filename (exact match, no guessing). A local "suggest + click-to-link" chip UI (mirrors the existing IG top-5 suggest) is the planned Increment 2.
+
+**Touched**: `code/instagram_match.py` (`rank_tfidf` + `auto_pick`), `code/local_transcribe.py` (TF-IDF + margin gate in `_maybe_auto_match` + env thresholds), `code/test_instagram_match.py` + `code/tests/test_local_watch_never_miss.py` (v822.4 tests → 32 pass), `wiki/log.md`. Commit `53ca7ec`. Forward-only, LOCAL matcher only.
+
 ## v823 — Terminal RAI reject (REPUTATIONAL/MISREPRESENT) never enters the blind redo loop
 
 **Why**: Flow's RAI reject ("reputational" / "misrepresent") is TERMINAL — retry, model swap, and golden restore can never win it (the same frame + the same line always trip it again). But the between-clip hard-failure classifier in `wait_between_clips` only knew a policy kill by the tile text "violate...policies". An RAI-killed clip carried neither of those words, so it was read as a plain hard failure → `flow_redo_queued` (cap 2) + every remaining clip reset to pending + job → pending + golden restore. One terminal clip churned the whole job, and the redo re-sent the identical frame+prompt. Evidence: job e03e939c clip 1 (2026-07-04) — 3 REPUTATIONAL records on the clip's own bound media; PolicyScan saw them and printed "NOT retrying", but the classifier didn't, so the clip was requeued anyway.

@@ -26,6 +26,14 @@ from instagram_transcribe import _model as _whisper_model
 
 _AUTO_MATCH_THRESHOLD = float(os.environ.get("IG_AUTO_MATCH_THRESHOLD", "0.70"))
 
+# v822.4 LOCAL matcher (TF-IDF cosine + margin gate). Env-tunable WITHOUT a
+# deploy so the operator can calibrate from the `[local] ... s1=/s2=/margin=`
+# log lines. HIGH = min cosine for the top candidate; MARGIN = how far the top
+# must beat the runner-up to auto-publish (near-duplicate twins sit within
+# MARGIN -> deferred to manual pick, never auto-matched to the wrong one).
+_MATCH_HIGH = float(os.environ.get("LOCAL_MATCH_HIGH", "0.50"))
+_MATCH_MARGIN = float(os.environ.get("LOCAL_MATCH_MARGIN", "0.12"))
+
 # v822: pending/running rows older than this are considered stuck (dyno
 # restart mid-transcribe) and get re-run when the browser re-uploads.
 _STUCK_AFTER_S = 600
@@ -70,91 +78,189 @@ def _transcribe_wav(wav_path: str) -> str:
     return " ".join(seg.text.strip() for seg in segments).strip()
 
 
-def _maybe_auto_match(video, db: Session) -> None:
-    """Score the transcript against awaiting_finishing jobs. On match, advance."""
+def _bulk_dialogue_map(db, job_ids) -> dict:
+    """{job_id: concatenated spoken dialogue} for MANY jobs in ONE query.
+
+    COALESCE(voiceover_line, dialogue_text) per the v698A b-roll fix; the
+    audio_pair silent twins are excluded so lines are not double-counted.
+
+    v822.3: replaces the old per-job `_full_dialogue` N+1. At pool=226 the
+    N+1 fired 226 Clip queries PER video, and the v822 rematch sweep ran that
+    for ~33 unmatched videos every 30s (~7,500 queries + 7,500 char-level
+    SequenceMatchers) synchronously on the web worker → gunicorn WORKER
+    TIMEOUT → SIGABRT → killed in-flight DB connections → SSL SYSCALL EOF
+    across the whole platform (prod incident 2026-07-06).
+    """
+    from collections import defaultdict
+    from models import Clip
+    job_ids = list(job_ids)
+    if not job_ids:
+        return {}
+    rows = (
+        db.query(Clip.job_id, Clip.dialogue_text, Clip.voiceover_line)
+        .filter(Clip.job_id.in_(job_ids))
+        .filter((Clip.clip_role == None) | (Clip.clip_role != 'audio_pair'))  # noqa: E711
+        .order_by(Clip.job_id, Clip.clip_index.asc())
+        .all()
+    )
+    acc = defaultdict(list)
+    for jid, dt, vo in rows:
+        acc[jid].append(((vo or dt) or "").strip())
+    return {jid: " ".join(parts).strip() for jid, parts in acc.items()}
+
+
+def _advance_job_to_published(video, job, score, db) -> None:
+    """Mark a LocalVideo matched + advance its Job to published/local_watch."""
+    video.matched_job_id = job.id
+    video.matched_at = datetime.utcnow()
+    video.match_score = score
+    job.lifecycle_stage = "published"
+    job.published_via = "local_watch"
+    if job.published_at is None:
+        job.published_at = datetime.utcnow()
+    db.commit()
+    print(f"[local] AUTO-MATCH hash={video.file_hash[:8]} -> job={str(job.id)[:8]} score={score:.3f}", flush=True)
+
+
+def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None) -> None:
+    """Score the transcript against awaiting_finishing jobs. On match, advance.
+
+    candidates / dialogue_map may be supplied by the sweep so a batch of
+    videos shares ONE candidate load + ONE bulk-dialogue query (v822.3).
+    When omitted (upload path) they are built here — still ONE bulk query,
+    never the old per-job N+1.
+    """
     try:
-        from models import Job, Clip
+        from models import Job
         import instagram_match as _ig_match
         if not video.transcription:
             return
-        candidates = (
-            db.query(Job)
-            .filter(
-                Job.user_id == video.user_id,
-                Job.lifecycle_stage == "awaiting_finishing",
+        if candidates is None:
+            candidates = (
+                db.query(Job)
+                .filter(
+                    Job.user_id == video.user_id,
+                    Job.lifecycle_stage == "awaiting_finishing",
+                )
+                .all()
             )
-            .all()
-        )
         if not candidates:
             print(f"[local] hash={video.file_hash[:8]} no awaiting_finishing candidates", flush=True)
             return
+        if dialogue_map is None:
+            dialogue_map = _bulk_dialogue_map(db, [j.id for j in candidates])
 
-        # COALESCE(voiceover_line, dialogue_text) per the v698A b-roll fix.
-        def _full_dialogue(job):
-            rows = (
-                db.query(Clip.dialogue_text, Clip.voiceover_line)
-                .filter(Clip.job_id == job.id)
-                .filter((Clip.clip_role == None) | (Clip.clip_role != 'audio_pair'))  # noqa: E711
-                .order_by(Clip.clip_index.asc())
-                .all()
-            )
-            return " ".join(((vo or dt) or "").strip() for dt, vo in rows).strip()
-
-        top = _ig_match.best_matches(
-            video, candidates, full_dialogue=_full_dialogue, k=1, min_score=_AUTO_MATCH_THRESHOLD,
-        )
-        if not top:
-            print(f"[local] hash={video.file_hash[:8]} no candidate >= {_AUTO_MATCH_THRESHOLD}", flush=True)
+        # v822.4: TF-IDF cosine + margin gate. The old char-level score()
+        # matched near-duplicate scripts (shared ED body) as the WRONG twin
+        # at up to 1.000. TF-IDF down-weights the shared boilerplate; the
+        # margin gate auto-matches ONLY when the top candidate clearly beats
+        # the runner-up. Ambiguous (near-duplicate) -> NO auto-publish; the
+        # video stays "no match" for a manual pick instead of a wrong link.
+        cand_pairs = [(j.id, dialogue_map.get(j.id, "")) for j in candidates]
+        ranked = _ig_match.rank_tfidf(video.transcription, cand_pairs)
+        if not ranked:
+            print(f"[local] hash={video.file_hash[:8]} no ranking | pool={len(candidates)} tlen={len(video.transcription or '')}", flush=True)
             return
-        match = top[0]
-        job = db.query(Job).filter_by(id=match["job_id"]).first()
+        s1 = ranked[0]["score"]
+        s2 = ranked[1]["score"] if len(ranked) > 1 else 0.0
+        pick_id = _ig_match.auto_pick(ranked, _MATCH_HIGH, _MATCH_MARGIN)
+        print(
+            f"[local] hash={video.file_hash[:8]} top_job={str(ranked[0]['job_id'])[:8]} "
+            f"s1={s1:.3f} s2={s2:.3f} margin={s1 - s2:.3f} "
+            f"decision={'AUTO' if pick_id else 'MANUAL'} pool={len(candidates)} "
+            f"tlen={len(video.transcription or '')}",
+            flush=True,
+        )
+        if not pick_id:
+            # Ambiguous or low-confidence -> leave unmatched for manual pick.
+            return
+        job = next((j for j in candidates if j.id == pick_id), None)
+        if job is None:
+            job = db.query(Job).filter_by(id=pick_id).first()
         if not job:
             return
-        video.matched_job_id = job.id
-        video.matched_at = datetime.utcnow()
-        video.match_score = match.get("score")
-        job.lifecycle_stage = "published"
-        job.published_via = "local_watch"
-        if job.published_at is None:
-            job.published_at = datetime.utcnow()
-        db.commit()
-        print(f"[local] AUTO-MATCH hash={video.file_hash[:8]} -> job={job.id[:8]} score={match['score']:.3f}", flush=True)
+        _advance_job_to_published(video, job, s1, db)
     except Exception as exc:
         print(f"[local] auto-match error on hash={video.file_hash[:8]}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 
 
+# v822.3 sweep guards — the rematch sweep used to re-score EVERY unmatched
+# local video against the WHOLE awaiting_finishing pool every 30s. That is an
+# unbounded O(videos × pool) job on the web worker; at 33×226 it SIGABRT'd the
+# platform. Bounds: recent videos only, capped count, per-user cooldown, hard
+# wall-clock budget. Old orphans (created before the age window) are genuine
+# non-matches — the manual ✕ / Force rescan is the escape hatch for those.
+_SWEEP_COOLDOWN_S = 20
+_SWEEP_BUDGET_S = 6.0
+_SWEEP_MAX_VIDEOS = 25
+_SWEEP_MAX_AGE_H = 48
+_last_sweep_at = {}  # user_id -> monotonic timestamp (per web-worker process)
+
+
 def rematch_unmatched(user_id, db: Session) -> dict:
-    """Re-score every done-but-unmatched LocalVideo for this user against the
-    CURRENT awaiting_finishing pool.  Called by the browser after each scan.
-    Closes the race: video uploaded before its job reached Finishing used to
-    stay 'done - no match' forever (match ran once, at upload time).
+    """Re-score RECENT done-but-unmatched LocalVideos against the CURRENT
+    awaiting_finishing pool.  Called by the browser after each scan.
+
+    Closes the race where a video was uploaded before its job reached
+    Finishing (match ran once, at upload time).  Bounded per v822.3 so it can
+    never again saturate the web worker.
     """
+    import time as _time
+    from datetime import timedelta
     from models import LocalVideo, Job
-    pool = (
-        db.query(Job.id)
+
+    now_m = _time.monotonic()
+    last = _last_sweep_at.get(user_id, 0.0)
+    if now_m - last < _SWEEP_COOLDOWN_S:
+        return {"checked": 0, "matched": 0, "skipped": "cooldown"}
+    _last_sweep_at[user_id] = now_m
+
+    candidates = (
+        db.query(Job)
         .filter(Job.user_id == user_id, Job.lifecycle_stage == "awaiting_finishing")
-        .first()
+        .all()
     )
-    if not pool:
+    if not candidates:
         return {"checked": 0, "matched": 0}
+
+    cutoff = datetime.utcnow() - timedelta(hours=_SWEEP_MAX_AGE_H)
     vids = (
         db.query(LocalVideo)
         .filter(
             LocalVideo.user_id == user_id,
             LocalVideo.transcription_status == "done",
             LocalVideo.matched_job_id == None,  # noqa: E711
+            LocalVideo.created_at >= cutoff,
         )
+        .order_by(LocalVideo.created_at.desc())
+        .limit(_SWEEP_MAX_VIDEOS)
         .all()
     )
+    if not vids:
+        return {"checked": 0, "matched": 0}
+
+    # ONE bulk dialogue query for the whole sweep (shared across all videos).
+    dialogue_map = _bulk_dialogue_map(db, [j.id for j in candidates])
+    _t0 = _time.monotonic()
     matched = 0
+    checked = 0
     for v in vids:
-        _maybe_auto_match(v, db)
+        if _time.monotonic() - _t0 > _SWEEP_BUDGET_S:
+            print(f"[local] rematch sweep budget hit after {checked}/{len(vids)} videos", flush=True)
+            break
+        checked += 1
+        _maybe_auto_match(v, db, candidates=candidates, dialogue_map=dialogue_map)
         if v.matched_job_id:
             matched += 1
-    if vids:
-        # v822 diagnostic - remove after operator-side evidence lands.
-        print(f"[local] rematch sweep user={str(user_id)[:8]} checked={len(vids)} matched={matched}", flush=True)
-    return {"checked": len(vids), "matched": matched}
+            mjid = v.matched_job_id
+            candidates = [j for j in candidates if j.id != mjid]
+            dialogue_map.pop(mjid, None)
+    print(
+        f"[local] rematch sweep user={str(user_id)[:8]} checked={checked}/{len(vids)} "
+        f"pool={len(candidates)} matched={matched} dur={_time.monotonic() - _t0:.1f}s",
+        flush=True,
+    )
+    return {"checked": checked, "matched": matched}
 
 
 def transcribe_local(video, file_bytes: bytes, db: Session) -> None:

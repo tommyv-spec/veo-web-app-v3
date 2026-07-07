@@ -1,9 +1,11 @@
 """Transcript-similarity match between an IG video and candidate Jobs.
 
-Pure-Python — stdlib only (difflib + re).
+Pure-Python — stdlib only (difflib + math + re).
 """
 import difflib
+import math
 import re
+from collections import Counter
 
 _PUNCT_RE = re.compile(r"[^\w\s]")
 _WS_RE = re.compile(r"\s+")
@@ -69,3 +71,85 @@ def best_matches(ig_video, candidate_jobs, full_dialogue, k: int = 5, min_score:
             out.append({"job_id": j.id, "score": round(s, 4)})
     out.sort(key=lambda x: x["score"], reverse=True)
     return out[:k]
+
+
+# ============================================================================
+# v822.4 — TF-IDF cosine + margin gate (LOCAL matcher only).
+#
+# WHY: the char-level `score()` above cannot separate near-duplicate scripts.
+# The Korella/Nuri builds share the ED language bank verbatim (same body —
+# "your soldier / blood flow / comment saffron / purity line"), swapping only
+# the hook + recipe.  Measured offline: 78/100 builds score >=0.70 against the
+# WRONG build on `score()`, many at 1.000 — so the auto-matcher confidently
+# published the wrong twin.  TF-IDF down-weights the shared boilerplate (every
+# build has it -> high document-frequency -> low weight) and rewards the
+# distinctive hook/recipe words, and the MARGIN GATE refuses to auto-match
+# when the top two candidates are within noise (near-duplicates) -> those go
+# to manual pick instead of a wrong auto-publish.
+# ============================================================================
+
+def _tokens(s: str):
+    return _normalize(s).split()
+
+
+def rank_tfidf(transcript: str, candidates):
+    """Rank candidates by TF-IDF cosine similarity to the transcript.
+
+    Args:
+        transcript: the whisper transcript (query).
+        candidates: iterable of (job_id, dialogue_text).  IDF is fit on THIS
+            pool, so the shared boilerplate is down-weighted relative to each
+            script's distinctive words.
+
+    Returns:
+        list of {"job_id", "score"} sorted desc; score = cosine in [0, 1].
+    """
+    q_tokens = _tokens(transcript)
+    cand = [(jid, _tokens(d or "")) for jid, d in candidates]
+    n_docs = len(cand)
+    if not q_tokens or n_docs == 0:
+        return []
+
+    df = Counter()
+    for _jid, tks in cand:
+        for w in set(tks):
+            df[w] += 1
+
+    def _idf(w):
+        return math.log((n_docs + 1) / (df.get(w, 0) + 1)) + 1.0
+
+    def _vec(tks):
+        if not tks:
+            return {}
+        tf = Counter(tks)
+        length = len(tks)
+        v = {w: (c / length) * _idf(w) for w, c in tf.items()}
+        norm = math.sqrt(sum(x * x for x in v.values())) or 1.0
+        return {w: x / norm for w, x in v.items()}
+
+    qv = _vec(q_tokens)
+    out = []
+    for jid, tks in cand:
+        cv = _vec(tks)
+        # dot over the smaller vector's keys.
+        small, big = (qv, cv) if len(qv) <= len(cv) else (cv, qv)
+        s = sum(x * big.get(w, 0.0) for w, x in small.items())
+        out.append({"job_id": jid, "score": round(min(1.0, max(0.0, s)), 4)})
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return out
+
+
+def auto_pick(ranked, high: float, margin: float):
+    """Return the job_id to AUTO-match, or None when it is ambiguous/low.
+
+    Auto-match only when the top candidate is both confident (>= high) AND
+    clearly ahead of the runner-up (top - second >= margin).  A near-duplicate
+    twin sits right behind the winner -> small margin -> None -> manual pick.
+    """
+    if not ranked:
+        return None
+    top = ranked[0]["score"]
+    second = ranked[1]["score"] if len(ranked) > 1 else 0.0
+    if top >= high and (top - second) >= margin:
+        return ranked[0]["job_id"]
+    return None

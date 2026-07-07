@@ -787,6 +787,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # design, so exposing it to anon traffic just lets the bootstrap
         # decide whether to call posthog.identify() — no PII leaks.
         "/api/posthog-config", "/api/me",
+        # v822.5 TEMPORARY: token-gated diag endpoint. Reaches its handler,
+        # which enforces DIAG_TOKEN itself (inert unless the env var is set).
+        "/api/diag/local-match",
     }
     PUBLIC_PREFIXES = {"/static/", "/auth/", "/api/local-worker/", "/api/user-worker/", "/api/images/worker/"}
     
@@ -4348,6 +4351,118 @@ async def rematch_local_videos(
     awaiting_finishing pool.  Browser calls this once per poll cycle."""
     from local_transcribe import rematch_unmatched
     return rematch_unmatched(current_user.id, db)
+
+
+@app.get("/api/diag/local-match")
+async def diag_local_match(
+    token: str = "",
+    user_id: str = "",
+    limit: int = 20,
+    only_unmatched: int = 0,
+    pool: str = "pending",
+    db: DBSession = Depends(get_db_session),
+):
+    """v822.5 TEMPORARY read-only diagnostic (NO auth — gated by DIAG_TOKEN,
+    inert unless that env var is set). For each local video, ranks its
+    transcript against a candidate pool and returns the top-5 + the auto/manual
+    decision. `pool=pending` (default) = the live awaiting_finishing pool (how
+    the real matcher sees it). `pool=full` = ALL of the user's completed jobs
+    (with dialogue) — this is how we RE-CHECK already-matched videos, because
+    a video's linked job leaves the pending pool once matched. For a matched
+    video it reports where its STORED job ranks in the full library
+    (stored_rank / stored_score): rank 1 = link consistent, high rank = the
+    link is probably WRONG. REMOVE after calibration (operator-authorized
+    2026-07-07)."""
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+
+    from models import LocalVideo, Job, Clip
+    from local_transcribe import _bulk_dialogue_map, _MATCH_HIGH, _MATCH_MARGIN
+    import instagram_match as _ig
+
+    limit = max(1, min(int(limit or 20), 200))
+    full_pool = (pool == "full")
+    q = db.query(LocalVideo)
+    if user_id:
+        q = q.filter(LocalVideo.user_id == user_id)
+    if only_unmatched:
+        q = q.filter(LocalVideo.matched_job_id == None)  # noqa: E711
+    vids = q.order_by(LocalVideo.created_at.desc()).limit(limit).all()
+
+    def _first_line(job_id):
+        c = (
+            db.query(Clip.dialogue_text, Clip.voiceover_line)
+            .filter(Clip.job_id == job_id)
+            .order_by(Clip.clip_index.asc())
+            .first()
+        )
+        if not c:
+            return ""
+        return ((c[1] or c[0]) or "")[:70]
+
+    out = []
+    _pool_cache = {}
+    for v in vids:
+        if v.user_id not in _pool_cache:
+            jq = db.query(Job).filter(Job.user_id == v.user_id)
+            if full_pool:
+                jq = jq.filter(Job.status == "completed")
+            else:
+                jq = jq.filter(Job.lifecycle_stage == "awaiting_finishing")
+            cand = jq.all()
+            dmap = _bulk_dialogue_map(db, [j.id for j in cand])
+            _pool_cache[v.user_id] = (cand, dmap)
+        cand, dmap = _pool_cache[v.user_id]
+        pairs = [(j.id, dmap.get(j.id, "")) for j in cand]
+        ranked_full = _ig.rank_tfidf(v.transcription or "", pairs)
+        ranked = ranked_full[:5]
+        pick = _ig.auto_pick(ranked, _MATCH_HIGH, _MATCH_MARGIN) if ranked else None
+        s1 = ranked[0]["score"] if ranked else 0.0
+        s2 = ranked[1]["score"] if len(ranked) > 1 else 0.0
+
+        # RE-CHECK a matched video: where does its STORED job rank in the pool?
+        stored_rank = None
+        stored_score = None
+        stored_line = None
+        if v.matched_job_id:
+            for i, r in enumerate(ranked_full):
+                if r["job_id"] == v.matched_job_id:
+                    stored_rank = i + 1
+                    stored_score = r["score"]
+                    break
+            stored_line = _first_line(v.matched_job_id)
+
+        out.append({
+            "file_name": v.file_name,
+            "hash": (v.file_hash or "")[:8],
+            "status": v.transcription_status,
+            "matched_job_id": (v.matched_job_id or "")[:8] or None,
+            "match_score": v.match_score,
+            "stored_rank": stored_rank,
+            "stored_score": stored_score,
+            "stored_line": stored_line,
+            "transcript_len": len(v.transcription or ""),
+            "transcript": (v.transcription or "")[:500],
+            "pool": len(cand),
+            "s1": s1, "s2": s2, "margin": round(s1 - s2, 4),
+            "decision": ("AUTO->" + str(pick)[:8]) if pick else "MANUAL (ambiguous/low)",
+            "top5": [
+                {"job": r["job_id"][:8], "score": r["score"],
+                 "line1": _first_line(r["job_id"]),
+                 "dlg_head": dmap.get(r["job_id"], "")[:140]}
+                for r in ranked
+            ],
+        })
+    return {
+        "count": len(out),
+        "pool_mode": pool,
+        "high": _MATCH_HIGH,
+        "margin": _MATCH_MARGIN,
+        "note": "v822.5 temporary diag; set DIAG_TOKEN in Render to enable, unset to disable",
+        "videos": out,
+    }
 
 
 @app.post("/api/drive/accounts/{account_id}/sync")

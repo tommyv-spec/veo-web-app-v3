@@ -105,3 +105,92 @@ def test_frontend_review_fixes_v822_1():
     assert "_localRetryAttempts" in src
     assert "_localScanGen" in src
     assert "gen !== _localScanGen" in src
+
+
+# ---- v822.3: sweep DoS fix (bulk dialogue + bounded sweep) ----------------
+class _FakeQuery:
+    def __init__(self, rows):
+        self._rows = list(rows)
+    def filter(self, *a, **k):
+        return self
+    def order_by(self, *a, **k):
+        return self
+    def limit(self, n):
+        self._rows = self._rows[:n]
+        return self
+    def all(self):
+        return self._rows
+    def first(self):
+        return self._rows[0] if self._rows else None
+
+
+class _FakeDB:
+    """Returns the SAME canned rows for every query() — enough for the
+    grouping + cooldown/empty-pool guards, which never depend on WHICH cols."""
+    def __init__(self, rows):
+        self._rows = rows
+    def query(self, *cols):
+        return _FakeQuery(self._rows)
+
+
+def test_bulk_dialogue_map_groups_and_coalesces():
+    lt = _load_lt()
+    rows = [
+        ("j1", "hello", None),   # dialogue_text
+        ("j1", "", "world"),     # voiceover_line preferred
+        ("j2", "solo", None),
+    ]
+    m = lt._bulk_dialogue_map(_FakeDB(rows), ["j1", "j2"])
+    assert m["j1"] == "hello world"
+    assert m["j2"] == "solo"
+
+
+def test_bulk_dialogue_map_empty_ids_no_query():
+    lt = _load_lt()
+    # empty id list short-circuits BEFORE touching db (pass a db that would
+    # raise if queried).
+    class _Boom:
+        def query(self, *a):
+            raise AssertionError("must not query on empty ids")
+    assert lt._bulk_dialogue_map(_Boom(), []) == {}
+
+
+def test_sweep_cooldown_blocks_second_immediate_call():
+    lt = _load_lt()
+    uid = "cooldown-user-xyz"
+    db = _FakeDB([])  # empty candidate pool -> first call returns checked 0
+    first = lt.rematch_unmatched(uid, db)
+    assert first.get("checked") == 0
+    second = lt.rematch_unmatched(uid, db)
+    assert second.get("skipped") == "cooldown"
+
+
+def test_sweep_guard_constants_present():
+    lt = _load_lt()
+    assert lt._SWEEP_BUDGET_S > 0
+    assert lt._SWEEP_MAX_VIDEOS > 0
+    assert lt._SWEEP_MAX_AGE_H > 0
+    assert lt._SWEEP_COOLDOWN_S > 0
+
+
+def test_no_per_job_n_plus_one_in_sweep_source():
+    """The old per-job _full_dialogue N+1 (Clip query inside the candidate
+    loop) must be gone; the bulk map + advance helper must exist."""
+    src = open(_LT, encoding="utf-8").read()
+    assert "def _bulk_dialogue_map(" in src
+    assert "def _advance_job_to_published(" in src
+    assert "def _full_dialogue(job):" not in src  # the N+1 shape is deleted
+    assert "dialogue_map=dialogue_map" in src     # sweep shares one map
+
+
+def test_local_matcher_uses_tfidf_margin_gate_v822_4():
+    """local_transcribe must use rank_tfidf + auto_pick (not the char-level
+    best_matches) and carry env-tunable HIGH/MARGIN thresholds."""
+    src = open(_LT, encoding="utf-8").read()
+    assert "rank_tfidf(" in src
+    assert "auto_pick(" in src
+    assert "_MATCH_HIGH" in src
+    assert "_MATCH_MARGIN" in src
+    assert "LOCAL_MATCH_HIGH" in src
+    # the old char-level path must be gone from the local matcher
+    assert "best_matches(" not in src
