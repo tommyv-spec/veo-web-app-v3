@@ -787,6 +787,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # design, so exposing it to anon traffic just lets the bootstrap
         # decide whether to call posthog.identify() — no PII leaks.
         "/api/posthog-config", "/api/me",
+        # v822.5 TEMPORARY: token-gated diag endpoint. Reaches its handler,
+        # which enforces DIAG_TOKEN itself (inert unless the env var is set).
+        "/api/diag/local-match",
     }
     PUBLIC_PREFIXES = {"/static/", "/auth/", "/api/local-worker/", "/api/user-worker/", "/api/images/worker/"}
     
