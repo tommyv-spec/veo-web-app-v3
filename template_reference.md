@@ -14948,6 +14948,26 @@ Prompt B (voice-only) = the dialogue sentence + the post-speech sentence, no IMM
 
 **Touched**: `code/instagram_match.py` (`rank_tfidf` + `auto_pick`), `code/local_transcribe.py` (TF-IDF + margin gate in `_maybe_auto_match` + env thresholds), `code/test_instagram_match.py` + `code/tests/test_local_watch_never_miss.py` (v822.4 tests → 32 pass), `wiki/log.md`. Commit `53ca7ec`. Forward-only, LOCAL matcher only.
 
+## v822.5 — temporary token-gated diagnostic endpoint (`/api/diag/local-match`)
+
+Read-only, NO-auth-but-`DIAG_TOKEN`-gated endpoint (inert unless the env var is set; whitelisted in the auth middleware's `PUBLIC_ROUTES` so it reaches its own token check; returns 404 on a bad token). Given the operator can't share a login and I can't browse the UI, this let me inspect real prod matching directly: per local video, transcript + top-5 candidate jobs (TF-IDF score) + auto/manual decision. `pool=full` re-checks already-matched videos against ALL 749 completed jobs and reports where each video's STORED job ranks (rank 1 = link agrees with content; high rank = probable mis-link). `request_compare=1` runs the v822.6 metric bake-off. **Temporary — remove after calibration; operator sets/unsets `DIAG_TOKEN` in Render to enable/disable.** Commits `861affb` (endpoint) + `fa30f9e` (middleware whitelist) + `f80ff5a` (pool=full/stored_rank) + `01a2a81` (compare).
+
+## v822.6 — rare-term-weighted cosine (idf_power=2) + matcher reflected platform-wide (BM25 rejected)
+
+Ran a metric bake-off on the operator's REAL prod data (92 local videos vs the 749-job library, via v822.5) to pick the best matcher — not guesswork.
+
+**Finding (full pool, correct job present = ground truth):** all three rankers tie on accuracy (stored job ranks #1 for 47–48/59, top-3 for 57/59). The differentiator is the MARGIN between the right job and #2 (wider = more confidently auto-matchable): **BM25 0.40 > idf² 0.37 > plain TF-IDF 0.32**.
+
+**But BM25 is UNSAFE — rejected.** On the PENDING pool (correct job absent — the wrong-auto danger zone), BM25 min-max-normalises the top score to 1.0, so the absolute `HIGH` floor can never reject a bad top-1: **18/33 wrong auto-matches**. Plain TF-IDF and idf² both keep absent-right-job scores low (0.28–0.41 < 0.50 HIGH) → **0/33 wrong auto-matches**.
+
+**Adopted: `rank_tfidf(idf_power=2)`.** Squaring IDF weights the query's RARE (recipe/hook) words harder, which (a) suppresses the "generic attractor" — a long, boilerplate-heavy job that otherwise tops many unrelated videos on shared common vocabulary — and (b) widens the correct-match margin, all while staying in clean [0,1] cosine space so the `HIGH=0.50 / MARGIN=0.12` gate is unchanged. Env: `LOCAL_MATCH_IDF_POWER` (default 2.0).
+
+**Reflected platform-wide:** the manual-suggest endpoint (`GET /api/instagram/videos/{id}/suggestions`) previously used the OLD char-level `best_matches` — which is exactly why suggestions "landed far off" (it scored near-duplicate scripts at ~1.000 against the wrong twin). It now uses the SAME `rank_tfidf(idf_power=2)` + one bulk dialogue query (no per-candidate N+1), so what the operator sees when linking by hand matches the auto-matcher. IG/drive AUTO-match paths still use the old `score()` (separate surface; not in scope for this change).
+
+**Match audit (v822.5 data):** of 59 matched videos, 48 are confirmed correct (linked job = content #1), 9 are near-duplicate ties to re-check, 2 are likely mis-linked (`Posted-0610 (1)`→ suggest `0eed30ba`; `0603 (1)`→ suggest `6cde1ddf`).
+
+**Touched**: `code/instagram_match.py` (`idf_power` on `rank_tfidf` + new `rank_bm25`), `code/local_transcribe.py` (`_MATCH_IDF_POWER`), `code/main.py` (suggest endpoint → TF-IDF), tests (38 pass). Commit `f93389e`. Forward-only.
+
 ## v823 — Terminal RAI reject (REPUTATIONAL/MISREPRESENT) never enters the blind redo loop
 
 **Why**: Flow's RAI reject ("reputational" / "misrepresent") is TERMINAL — retry, model swap, and golden restore can never win it (the same frame + the same line always trip it again). But the between-clip hard-failure classifier in `wait_between_clips` only knew a policy kill by the tile text "violate...policies". An RAI-killed clip carried neither of those words, so it was read as a plain hard failure → `flow_redo_queued` (cap 2) + every remaining clip reset to pending + job → pending + golden restore. One terminal clip churned the whole job, and the redo re-sent the identical frame+prompt. Evidence: job e03e939c clip 1 (2026-07-04) — 3 REPUTATIONAL records on the clip's own bound media; PolicyScan saw them and printed "NOT retrying", but the classifier didn't, so the clip was requeued anyway.
