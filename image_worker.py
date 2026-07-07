@@ -836,6 +836,84 @@ def purge_gpu_caches(session_folder, label=""):
                 pass
 
 
+def restore_from_golden(session_folder, label="IMAGE"):
+    """Restore the image-worker Chrome session profile from the golden snapshot.
+
+    v828 — ported from flow_worker.restore_from_golden (v701g). The old inline
+    restore in launch_browser was a single rmtree+copytree: on a Windows file
+    lock it printed a warning and shipped a stale/partial profile, so the account
+    'unusual activity' block never actually cleared after a golden-restore
+    relaunch. Chrome's GPU/singleton subprocess can hold memory-mapped handles
+    for several seconds past taskkill, so copytree hits a cookie/cache DB
+    mid-copy (WinError 1224 = file with a user-mapped section open, WinError 32 =
+    file in use).
+
+    Retry with backoff (0.5s, 2s, 5s); between attempts, force one more pass at
+    SingletonLock cleanup + a small sleep so any lingering chrome subprocess
+    releases handles. Returns True on success, False if the golden is missing or
+    all retries fail. Unit-tested in tests/test_image_worker_golden_restore.py.
+    """
+    golden_folder = get_golden_folder(session_folder)
+    prefix = f"[{label}] " if label else ""
+
+    if not os.path.exists(golden_folder):
+        print(f"{prefix}⚠ Golden profile not found at {golden_folder} — cannot restore.", flush=True)
+        print(f"{prefix}  Re-run setup_worker.py to create a fresh golden profile.", flush=True)
+        return False
+
+    print(f"{prefix}🔄 GOLDEN RESTORE: Restoring session profile from {golden_folder}", flush=True)
+
+    last_err = None
+    for _attempt in range(3):
+        try:
+            if os.path.exists(session_folder):
+                shutil.rmtree(session_folder, ignore_errors=True)
+            # dirs_exist_ok=True so a locked file left behind by rmtree still gets
+            # overwritten from golden rather than failing with FileExistsError.
+            shutil.copytree(
+                golden_folder, session_folder,
+                dirs_exist_ok=True,
+                ignore_dangling_symlinks=True,
+                ignore=shutil.ignore_patterns(
+                    'SingletonLock', 'SingletonSocket', 'SingletonCookie',
+                ),
+            )
+            print(f"{prefix}  ✓ Session profile restored → {session_folder}", flush=True)
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            # WinError 1224 = file mapped by another process. WinError 32 = in use.
+            if '1224' in err_str or 'WinError 32' in err_str or 'in use' in err_str.lower():
+                _wait = (0.5, 2.0, 5.0)[_attempt] if _attempt < 3 else 5.0
+                print(
+                    f"{prefix}  ⚠ Restore attempt {_attempt+1}/3 hit Windows file-lock; "
+                    f"waiting {_wait:.1f}s for handles to release",
+                    flush=True,
+                )
+                for _lock in ('SingletonLock', 'SingletonSocket', 'SingletonCookie'):
+                    _lp = os.path.join(session_folder, _lock)
+                    if os.path.exists(_lp):
+                        try:
+                            os.remove(_lp)
+                        except Exception:
+                            pass
+                time.sleep(_wait)
+                continue
+            # Non-lock error — don't waste time retrying.
+            break
+
+    if last_err is not None:
+        print(f"{prefix}  ⚠ Failed to restore session profile after retries: {last_err}", flush=True)
+        return False
+
+    # Golden may have been built on a different GPU environment — purge caches.
+    purge_gpu_caches(session_folder, label=label or "RESTORE")
+    print(f"{prefix}✅ Golden restore complete.", flush=True)
+    return True
+
+
 # ============================================================
 # CHROME WARMUP (from flow_worker.py)
 # ============================================================
@@ -9513,19 +9591,11 @@ def launch_browser(session_folder=SESSION_FOLDER):
     golden = get_golden_folder(session_folder)
     _maybe_pull_laptop_profile(session_folder, golden, label="IMAGE")
 
-    # Restore from golden if available
+    # Restore from golden if available (v828 — robust retry loop, parity with
+    # flow_worker: the old single-attempt copytree silently failed on WinError
+    # 1224/32 file locks and shipped a stale profile that kept the block alive).
     if os.path.exists(golden):
-        print(f"[IMAGE] Restoring session from golden: {golden}", flush=True)
-        try:
-            if os.path.exists(session_folder):
-                shutil.rmtree(session_folder, ignore_errors=True)
-            shutil.copytree(golden, session_folder,
-                ignore_dangling_symlinks=True,
-                ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
-            purge_gpu_caches(session_folder, label="IMAGE")
-            print("[IMAGE] ✓ Session restored from golden", flush=True)
-        except Exception as e:
-            print(f"[IMAGE] ⚠ Golden restore failed: {e}", flush=True)
+        restore_from_golden(session_folder, label="IMAGE")
     
     pw = sync_playwright().start()
     
@@ -9776,7 +9846,7 @@ Examples:
                 # the golden profile (launch_browser does this), and re-enter the
                 # poll loop. Bounded so a hard-flagged account eventually stops
                 # instead of relaunch-looping forever.
-                MAX_GOLDEN_RELAUNCHES = 3
+                MAX_GOLDEN_RELAUNCHES = 4  # v828 — parity with flow_worker MAX_UNUSUAL_GOLDEN_RESTORES
                 HEALTHY_SESSION_SECS = 180  # a run this long before a block = healthy → reset budget
                 _relaunch_n = 0
                 while True:
@@ -9794,8 +9864,16 @@ Examples:
                         _relaunch_n = 0
                     _relaunch_n += 1
                     if _relaunch_n > MAX_GOLDEN_RELAUNCHES:
-                        print(f"[IMAGE] ⛔ Golden restore requested {_relaunch_n}x — account likely flagged; "
-                              f"stopping worker (relaunch it later when the block clears).", flush=True)
+                        # v828 — account-global block persisted past the restore
+                        # budget. Stop cleanly (do NOT keep claiming new jobs into
+                        # an active block — that churns the queue and deepens the
+                        # flag). The finally-block /release-claims re-queues every
+                        # in-flight node → nothing is lost, jobs run when a later
+                        # worker starts after the block clears.
+                        print(f"[IMAGE] ⛔ Unusual-activity persisted after {MAX_GOLDEN_RELAUNCHES} golden "
+                              f"restores — the Google account is rate-limited. Stopping the worker; in-flight "
+                              f"jobs are released back to pending and will run when you relaunch after the "
+                              f"block clears. Not lost, not failed.", flush=True)
                         break
                     print(f"[IMAGE] 🔁 Golden restore + relaunch {_relaunch_n}/{MAX_GOLDEN_RELAUNCHES} "
                           f"(unusual-activity persisted)...", flush=True)
