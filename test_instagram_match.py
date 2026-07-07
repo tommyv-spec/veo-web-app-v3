@@ -128,3 +128,40 @@ def test_auto_pick_single_candidate_needs_high():
     assert m.auto_pick([{"job_id": "a", "score": 0.60}], high=0.5, margin=0.12) == "a"
     assert m.auto_pick([{"job_id": "a", "score": 0.40}], high=0.5, margin=0.12) is None
     assert m.auto_pick([], high=0.5, margin=0.12) is None
+
+
+# ---- v822.6: idf_power (rare-term weighting) + BM25 -----------------------
+def test_idf_power_suppresses_generic_attractor():
+    """A long, generic candidate that shares only COMMON words must not beat
+    the short candidate that shares the query's DISTINCTIVE recipe word."""
+    m = _load()
+    cands = [
+        ("specific", "ginger lemon honey"),
+        ("generic", "soldier blood flow morning soldier blood flow saffron soldier blood flow drive soldier"),
+    ]
+    q = "ginger lemon honey soldier blood flow"
+    r2 = m.rank_tfidf(q, cands, idf_power=2.0)
+    assert r2[0]["job_id"] == "specific"
+
+
+def test_idf_power_default_is_backward_compatible():
+    m = _load()
+    cands = [("a", "one two three"), ("b", "four five six")]
+    base = m.rank_tfidf("one two three", cands)
+    p1 = m.rank_tfidf("one two three", cands, idf_power=1.0)
+    assert base[0]["job_id"] == p1[0]["job_id"] == "a"
+
+
+def test_bm25_ranks_and_normalizes_to_unit_top():
+    m = _load()
+    cands = [("a", "ginger lemon honey drink"), ("b", "totally different words here")]
+    r = m.rank_bm25("ginger lemon honey", cands)
+    assert r[0]["job_id"] == "a"
+    assert r[0]["score"] == 1.0  # min-max normalised: top is 1.0
+    assert r[1]["score"] < r[0]["score"]
+
+
+def test_bm25_empty():
+    m = _load()
+    assert m.rank_bm25("", [("a", "x")]) == []
+    assert m.rank_bm25("x", []) == []

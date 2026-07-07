@@ -4005,29 +4005,24 @@ async def suggest_matches(
         )
         .all()
     )
-    full_dialogue = lambda j: _job_full_dialogue(db, j.id)
-    # TEMP DIAGNOSTIC (ig-suggest): dump the exact two strings being
-    # compared so we can see WHY suggestions land far off. Remove once
-    # the b-roll match root cause is confirmed from operator logs.
-    _t = v.transcription or ""
-    print(f"[ig-suggest] video={video_id} transcript_status={v.transcription_status} "
-          f"transcript_len={len(_t)} transcript_head={_t[:200]!r}", flush=True)
-    print(f"[ig-suggest] candidate_pool={len(candidates)} "
-          f"(awaiting_finishing + unlinked)", flush=True)
-    for _j in candidates:
-        _dlg = full_dialogue(_j)
-        _s = _ig_match.score(_t, _dlg)
-        print(f"[ig-suggest]   job={_j.id[:8]} score={_s:.4f} "
-              f"dlg_len={len(_dlg)} dlg_head={_dlg[:160]!r}", flush=True)
-    # min_score=0.0: return top 5 regardless of score. UI displays the
-    # percentage so operator can pick even low-confidence matches.
-    # Auto-match floor (IG_AUTO_MATCH_THRESHOLD, default 0.70) stays
-    # higher so nothing gets silently linked. Empty response = no
-    # candidates in pool (every awaiting_finishing job already matched).
-    top = _ig_match.best_matches(v, candidates, full_dialogue=full_dialogue, k=5, min_score=0.0)
-    for entry in top:
-        clip = db.query(Clip).filter(Clip.job_id == entry["job_id"], Clip.clip_index == 0).first()
-        entry["slug"] = (clip.dialogue_text or "")[:80] if clip and clip.dialogue_text else entry["job_id"][:8]
+    # v822.6: the manual suggestions now use the SAME content matcher as the
+    # local auto-matcher — rare-term-weighted TF-IDF cosine (idf_power=2),
+    # validated on the operator's real data. The old char-level `best_matches`
+    # scored near-duplicate scripts at ~1.000 against the wrong twin, which is
+    # exactly why suggestions "landed far off". One bulk dialogue query
+    # (no per-candidate N+1), top-5 regardless of score so the UI can show
+    # even low-confidence options.
+    from local_transcribe import _bulk_dialogue_map, _MATCH_IDF_POWER
+    dmap = _bulk_dialogue_map(db, [j.id for j in candidates])
+    pairs = [(j.id, dmap.get(j.id, "")) for j in candidates]
+    ranked = _ig_match.rank_tfidf(v.transcription or "", pairs, idf_power=_MATCH_IDF_POWER)[:5]
+    print(f"[ig-suggest] video={video_id} pool={len(candidates)} "
+          f"top5={[(r['job_id'][:8], r['score']) for r in ranked]}", flush=True)
+    top = []
+    for r in ranked:
+        clip = db.query(Clip).filter(Clip.job_id == r["job_id"], Clip.clip_index == 0).first()
+        slug = (clip.dialogue_text or "")[:80] if clip and clip.dialogue_text else r["job_id"][:8]
+        top.append({"job_id": r["job_id"], "score": r["score"], "slug": slug})
     return top
 
 

@@ -194,3 +194,19 @@ def test_local_matcher_uses_tfidf_margin_gate_v822_4():
     assert "LOCAL_MATCH_HIGH" in src
     # the old char-level path must be gone from the local matcher
     assert "best_matches(" not in src
+
+
+def test_local_matcher_uses_idf_power_v822_6():
+    """v822.6: the local ranker passes the tuned idf_power that won the bake-off."""
+    src = open(_LT, encoding="utf-8").read()
+    assert "_MATCH_IDF_POWER" in src
+    assert "LOCAL_MATCH_IDF_POWER" in src
+    assert "idf_power=_MATCH_IDF_POWER" in src
+
+
+def test_suggest_endpoint_uses_tfidf_not_char_v822_6():
+    """v822.6: the manual-suggest endpoint uses rank_tfidf (idf_power), not
+    the old char-level best_matches / per-candidate score() N+1 loop."""
+    src = open(_MAIN, encoding="utf-8").read()
+    assert "rank_tfidf(v.transcription" in src
+    assert "_ig_match.score(_t, _dlg)" not in src

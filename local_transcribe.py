@@ -33,6 +33,12 @@ _AUTO_MATCH_THRESHOLD = float(os.environ.get("IG_AUTO_MATCH_THRESHOLD", "0.70"))
 # MARGIN -> deferred to manual pick, never auto-matched to the wrong one).
 _MATCH_HIGH = float(os.environ.get("LOCAL_MATCH_HIGH", "0.50"))
 _MATCH_MARGIN = float(os.environ.get("LOCAL_MATCH_MARGIN", "0.12"))
+# v822.6: exponent on IDF. 2.0 (rare-term-weighted cosine) beat plain TF-IDF
+# and BM25 on the operator's real data — same #1 accuracy (48/59 stored#1,
+# 57/59 top-3), a wider margin (0.37 vs 0.32), and 0/33 wrong auto-matches
+# when the correct job was absent from the pool (BM25 gave 18/33 there — its
+# per-query normalisation destroyed the absolute-score floor).
+_MATCH_IDF_POWER = float(os.environ.get("LOCAL_MATCH_IDF_POWER", "2.0"))
 
 # v822: pending/running rows older than this are considered stuck (dyno
 # restart mid-transcribe) and get re-run when the browser re-uploads.
@@ -157,7 +163,7 @@ def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None) ->
         # the runner-up. Ambiguous (near-duplicate) -> NO auto-publish; the
         # video stays "no match" for a manual pick instead of a wrong link.
         cand_pairs = [(j.id, dialogue_map.get(j.id, "")) for j in candidates]
-        ranked = _ig_match.rank_tfidf(video.transcription, cand_pairs)
+        ranked = _ig_match.rank_tfidf(video.transcription, cand_pairs, idf_power=_MATCH_IDF_POWER)
         if not ranked:
             print(f"[local] hash={video.file_hash[:8]} no ranking | pool={len(candidates)} tlen={len(video.transcription or '')}", flush=True)
             return
