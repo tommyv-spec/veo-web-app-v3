@@ -10212,6 +10212,15 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job
         return [], []
 
 
+# v841 — operator 2026-07-09: NEVER click the failed-tile Retry button. Re-running
+# the SAME image+prompt just fails again (content rejects are deterministic;
+# transients recover on the redo path anyway) and the "recovers then 404s at
+# download" churn wastes 10s+ per clip. A truly-failed tile now reports failure
+# immediately → the caller redoes / routes terminal. The tile-Retry code is kept
+# but gated off — flip this to True to re-activate it.
+TILE_RETRY_ENABLED = False
+
+
 def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None, job_id=None,
                               clip_index=None, clip_id=None):
     """
@@ -10477,7 +10486,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                     time.sleep(0.4)
 
         # Click Retry on truly failed tiles (ones with 'refresh' button)
-        if failed_count > 0:
+        if failed_count > 0 and TILE_RETRY_ENABLED:
             print(f"[FailCheck] ⚠️ {failed_count} tile(s) truly failed — clicking Retry on each...", flush=True)
             try:
                 container = page.locator(f"div[data-index='{data_index}']").first
@@ -10533,7 +10542,12 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
                         print(f"[FailCheck] [v803] re-bind after Retry failed (non-fatal): {_rbe}", flush=True)
             except Exception as e:
                 print(f"[FailCheck] Error clicking Retry buttons: {e}", flush=True)
-        
+        elif failed_count > 0:
+            # v841 — tile-Retry disabled: don't re-click a useless Retry. The
+            # terminal / account-block / unusual routes above already handled
+            # those; a generic failure falls through to the all_failed report below.
+            print(f"[FailCheck] ⚠️ {failed_count} tile(s) failed — tile-Retry DISABLED (v841); reporting failure for redo/terminal handling", flush=True)
+
         if has_generating:
             print(f"[FailCheck] ✓ Clip generating (has percentage)", flush=True)
             return False
@@ -10542,6 +10556,15 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
             print(f"[FailCheck] ✓ Clip has video", flush=True)
             return False
         
+        if all_failed and tiles > 0 and not TILE_RETRY_ENABLED:
+            # v841 — no tile-Retry to wait for; the failure is final for this
+            # attempt. Terminal content rejects, account blocks (403/429) and
+            # unusual-activity were already routed above; a generic all-fail here
+            # → report failure so the caller redoes the clip (fresh project)
+            # instead of waiting 10s on a Retry we never clicked.
+            print(f"[FailCheck] ⚠️ ALL {tiles} tiles failed (tile-Retry disabled, v841) — reporting failure for redo", flush=True)
+            return True
+
         if all_failed and tiles > 0:
             # All tiles truly failed — retries were clicked above.
             # Wait and re-check in case retries take effect.
