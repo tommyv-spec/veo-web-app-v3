@@ -11854,7 +11854,7 @@ class DownloadHelper:
                         const text = c.innerText || '';
                         const hasVideo = c.querySelector('video') !== null;
                         const hasPercentage = /\\d+%/.test(text);
-                        const hasFailedText = (text.includes('Failed Generation') || text.includes('Failed') || text.includes('Error'));
+                        const hasFailedText = (text.includes('Failed Generation') || text.includes('Failed') || text.includes('Error') || Array.from(c.querySelectorAll('i')).some(i => (i.textContent||'').trim() === 'refresh'));  // v835 — 'refresh' Retry icon is locale-proof (es-419 "Error"/"Falló" text wouldn't match)
                         const hasFailed = hasFailedText && !hasPercentage && !hasVideo;
                         if (!hasVideo && !hasFailed) return null;
                         let promptText = '';
@@ -12464,7 +12464,7 @@ class DownloadHelper:
                         const text = c.innerText || '';
                         const hasVideo = c.querySelector('video') !== null;
                         const hasPercentage = /\\d+%/.test(text);
-                        const hasFailedText = (text.includes('Failed Generation') || text.includes('Failed') || text.includes('Error'));
+                        const hasFailedText = (text.includes('Failed Generation') || text.includes('Failed') || text.includes('Error') || Array.from(c.querySelectorAll('i')).some(i => (i.textContent||'').trim() === 'refresh'));  // v835 — 'refresh' Retry icon is locale-proof
                         const hasFailed = hasFailedText && !hasPercentage && !hasVideo;
                         let promptText = '';
                         let promptSource = 'none';
@@ -12958,7 +12958,7 @@ class DownloadHelper:
                             const text = container.innerText || '';
                             const hasPercentage = /\d+%/.test(text);
                             if (hasPercentage) return false;
-                            return (text.includes('Failed Generation') || text.includes('Failed') || text.includes('Error'));
+                            return (text.includes('Failed Generation') || text.includes('Failed') || text.includes('Error') || Array.from(container.querySelectorAll('i')).some(i => (i.textContent||'').trim() === 'refresh'));  // v835 — locale-proof Retry icon
                         }
                     """)
                     
@@ -13514,7 +13514,7 @@ class DownloadHelper:
                                         const text = container.innerText || '';
                                         const hasPercentage = /\\d+%/.test(text);
                                         if (hasPercentage) return false;
-                                        return (text.includes('Failed Generation') || text.includes('Failed') || text.includes('Error'));
+                                        return (text.includes('Failed Generation') || text.includes('Failed') || text.includes('Error') || Array.from(container.querySelectorAll('i')).some(i => (i.textContent||'').trim() === 'refresh'));  // v835 — locale-proof Retry icon
                                     }}
                                 """)
                                 if has_failed:
