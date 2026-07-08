@@ -4765,6 +4765,20 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
         if _last_fail_reason:
             print(f"{pfx}[flow_api] {len(captured_fife_urls)}/{variants} variant(s) captured; "
                   f"some failed transiently ({_last_fail_reason[-44:]}) — shipping what landed", flush=True)
+        if _saw_unusual:
+            # v829 — the node RECOVERED (captured its images on retry) but an
+            # 'unusual activity' block was SEEN along the way. Operator policy:
+            # that means the account is being flagged, so ship these images and
+            # then golden-restore the session BEFORE the next node — don't wait
+            # for a hard all-variants block. Flag it on the page; the caller reads
+            # the flag after this returns True (node ships first), sets the
+            # restore signal, and the loop drains in-flight then relaunches.
+            try:
+                page._flow_api_unusual_reason = "PUBLIC_ERROR_UNUSUAL_ACTIVITY (recovered on retry; proactive session reset)"
+            except Exception:
+                pass
+            print(f"{pfx}[flow_api] ⚠ [v829] unusual-activity seen but recovered "
+                  f"({len(captured_fife_urls)}/{variants} captured) — will golden-restore after this node ships", flush=True)
     elif _saw_unusual:
         # EVERY variant blocked with unusual-activity after retries → genuine
         # account block → golden restore.
@@ -8362,6 +8376,19 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             ):
                 _save_state()
                 print(f"[API:submit] ✓ Node {node_id} submitted via flow_api (in_flight={len([j for j in in_flight.values() if j.status=='submitted'])})", flush=True)
+                # v829 — the node shipped, but if an 'unusual activity' block was
+                # seen during submit (even though it recovered), flag a golden
+                # restore. The images are already registered/in the scanner pool;
+                # the loop drains in-flight downloads, then relaunches, resetting
+                # the flagged session before we claim the next node.
+                _ua_reason = getattr(page, "_flow_api_unusual_reason", "")
+                if _ua_reason:
+                    try:
+                        page._flow_api_unusual_reason = ""
+                    except Exception:
+                        pass
+                    print(f"[{ctx}] 🔁 [v829] unusual-activity seen (node shipped) — golden-restore after in-flight drains", flush=True)
+                    _restore_signal["golden"] = True
                 return True
 
             # v818.2 — API hit an account-level 'unusual activity' block. Do NOT
@@ -9296,6 +9323,13 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     # dir is locked while Chrome runs, so only main() — which owns the browser —
     # can do it).
     _restore_signal = {"golden": False}
+    # v829 — proactive session reset. A node that SAW an 'unusual activity' block
+    # (even one it recovered from on retry) sets _restore_signal['golden'] so the
+    # session is golden-restored before the account gets hard-flagged. We first
+    # stop claiming new nodes and DRAIN the in-flight downloads (so their already-
+    # captured images ship instead of being re-queued + redone), then relaunch.
+    _restore_requested_at = None      # epoch when the restore was first requested
+    RESTORE_DRAIN_TIMEOUT = 90.0      # force relaunch if in-flight won't drain
     _exit_action = None
     _session_start = time.time()  # v818.2 — for the relaunch-budget reset in main()
     try:
@@ -9342,12 +9376,36 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             active = sum(1 for j in in_flight.values()
                          if j.status in ("submitted", "downloading"))
 
+            # v829 — golden-restore DRAIN gate. Once a node has requested a
+            # session reset (saw 'unusual activity'), we stop claiming NEW work
+            # (the poll gate below is disabled) and let the in-flight nodes finish
+            # downloading, THEN relaunch — so their already-captured images ship
+            # instead of getting re-queued + redone. Timeout-guarded so a stuck
+            # in-flight node can't wedge the relaunch forever.
+            if _restore_signal["golden"]:
+                if _restore_requested_at is None:
+                    _restore_requested_at = time.time()
+                _drained = active == 0
+                _drain_timed_out = (time.time() - _restore_requested_at) > RESTORE_DRAIN_TIMEOUT
+                if _drained or _drain_timed_out:
+                    _why = "in-flight drained" if _drained else f"drain timeout {RESTORE_DRAIN_TIMEOUT:.0f}s (active={active})"
+                    print(f"[API] 🔁 [v829] Golden-restore requested + {_why} — stopping loop for browser relaunch", flush=True)
+                    _exit_action = "RELAUNCH_GOLDEN"
+                    try:
+                        api_pull_mode_parallel._last_session_secs = time.time() - _session_start
+                    except Exception:
+                        pass
+                    stop_flag.set()
+                    break
+
             did_work = False
             # Respect cooldown: if we recently released a cross-batch claim,
             # skip polling until the cooldown expires. Scanning still happens
             # normally so in-flight work drains.
             _poll_allowed = time.time() >= _release_cooldown_until
-            if active < parallel_slots and _poll_allowed:
+            # v829 — do NOT claim new work while a golden restore is pending; the
+            # drain gate above is waiting for in-flight to finish before relaunch.
+            if active < parallel_slots and _poll_allowed and not _restore_signal["golden"]:
                 # v456: derive prefer_batch from any in-flight node's name.
                 # The server uses this to prioritize same-batch queued nodes
                 # over cross-batch ones, avoiding the claim/release thrash
@@ -9494,21 +9552,10 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                         # thrash the DB.
                         _release_cooldown_until = time.time() + 30
 
-                    # v818 — persistent unusual-activity → break for a golden
-                    # restore + relaunch (handled by main()). The finally block
-                    # releases every claim this worker holds, so all in-flight
-                    # nodes re-queue and are re-claimed cleanly after relaunch.
-                    if _restore_signal["golden"]:
-                        print("[API] 🔁 Golden-restore requested — draining + stopping loop for browser relaunch", flush=True)
-                        _exit_action = "RELAUNCH_GOLDEN"
-                        # v818.2 — how long this session ran before the block, so
-                        # main() can reset the relaunch budget after a healthy run.
-                        try:
-                            api_pull_mode_parallel._last_session_secs = time.time() - _session_start
-                        except Exception:
-                            pass
-                        stop_flag.set()
-                        break
+                    # v829 — the RELAUNCH_GOLDEN break now lives in the DRAIN gate
+                    # near the top of the loop (after `active` is computed), so a
+                    # restore request first drains in-flight downloads before
+                    # relaunching. Nothing to do here.
 
             # 3. SCAN for completed tiles → enqueue ready images for download.
             # Normally we never scan on a tick that submitted (the submit just
