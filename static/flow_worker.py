@@ -5218,19 +5218,20 @@ def route_terminal_content_reject(clip_id, reason, account_name=""):
 
 
 def handle_terminal_reject(clip_id, reason, account_name="", job_id=None, clip_index=None, requeue=True):
-    """v838 (operator 2026-07-08, supersedes v821b) — PROMINENT_PEOPLE / SEXUAL /
-    MINOR are often a MASKED line-audio trip: Flow scans the native TTS of the
-    spoken line, and the reworded Prompt B clears them in practice ("if i use
-    prompt b it works"). So for these THREE, try Prompt B FIRST (when the clip
-    has an un-tried one) and return 'requeued'; only if Prompt B was ALREADY
-    tried and it STILL failed do we mark the clip failed in the UI (the
-    reason-specific replace-image / change-prompt card). CSAM / REPUTATIONAL /
-    MISREPRESENT stay immediate-terminal — Prompt B can't fix a CSAM image or a
-    public-figure framing. Shares prominent_promptb_decision (reason-agnostic:
-    it only checks whether the clip has an un-tried prompt_b) with the tile-text
-    path so both routes make the same call."""
+    """v842 (operator 2026-07-09, refines v838) — PROMINENT_PEOPLE / SEXUAL are
+    often a MASKED line-audio trip (Flow scans the native TTS of the spoken
+    line) and the reworded Prompt B clears them in practice, so for THOSE TWO try
+    Prompt B FIRST (when the clip has an un-tried one) and return 'requeued';
+    only if Prompt B was already tried and STILL failed do we mark the clip
+    failed in the UI (replace-image / change-prompt card). MINOR is EXCLUDED
+    (operator 2026-07-09: "when we encounter minors error stop it immediately and
+    mark it in the platform UI") — a minor-flagged IMAGE can't be fixed by
+    rewording the line, and it's a hard compliance stop (§8/v808), so MINOR (like
+    CSAM / REPUTATIONAL / MISREPRESENT) is immediate-terminal → replace-image
+    card, no Prompt B. Shares prominent_promptb_decision (reason-agnostic: it only
+    checks whether the clip has an un-tried prompt_b) with the tile-text path."""
     _r = (reason or '').upper()
-    if any(_t in _r for _t in ('PROMINENT', 'SEXUAL', 'MINOR')):
+    if any(_t in _r for _t in ('PROMINENT', 'SEXUAL')):
         d = prominent_promptb_decision(clip_id)
         if d == 'retry_prompt_b' and requeue:
             # prominent_promptb_decision already marked _PROMPT_B_TRIED. If the requeue
