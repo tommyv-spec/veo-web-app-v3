@@ -54,3 +54,40 @@ def test_upload_variant_guards_zero_total():
     body = _upload_variant_body()
     assert "total = job.total_clips or 0" in body
     assert "if total > 0:" in body
+
+
+def _get_job_body():
+    """Source of the get_job endpoint function only."""
+    src = open(_MAIN, encoding="utf-8").read()
+    start = src.index("async def get_job(")
+    rest = src[start + 1:]
+    ends = [
+        rest.find("\n@app."),
+        rest.find("\nasync def "),
+        rest.find("\ndef "),
+    ]
+    ends = [e for e in ends if e != -1]
+    end = min(ends) if ends else len(rest)
+    return rest[:end]
+
+
+def test_get_job_self_heals_completed_clips():
+    """get_job must recompute completed_clips live so a stale-low stored
+    counter (pre-v825 manual upload etc.) does not stick the DONE counter
+    below TOTAL forever. This heals already-broken jobs on the next poll."""
+    body = _get_job_body()
+    assert "Clip.status == ClipStatus.COMPLETED.value" in body
+    assert "job.completed_clips = _live_completed" in body
+
+
+def test_get_job_self_heal_only_writes_on_change():
+    """Avoid a needless commit on every poll — only persist when the live
+    count differs from the stored value."""
+    body = _get_job_body()
+    assert "if _live_completed != (job.completed_clips or 0):" in body
+
+
+def test_get_job_self_heal_does_not_override_terminal_status():
+    body = _get_job_body()
+    assert "JobStatus.CANCELLED.value" in body
+    assert "JobStatus.FAILED.value" in body

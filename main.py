@@ -3408,6 +3408,44 @@ async def get_job(
 ):
     """Get job details"""
     job = get_user_job(db, job_id, current_user)
+
+    # v825.1 — self-heal completed_clips on read. completed_clips is a
+    # denormalized cache; the DONE tri-counter binds to it (static/index.html
+    # ~L10358). It drifts stale-low whenever a clip's status changes via a path
+    # that forgets to bump it (pre-v825 manual variant upload, abandoned redo,
+    # legacy flow-worker) — so a job with every clip rendered shows "10/11 done"
+    # forever, and reloading never heals it because the poll faithfully returns
+    # the stale stored value. Recompute live from the clip rows and persist so
+    # the counter reflects reality. Single-job GET only — kept OUT of
+    # _build_job_response so list_jobs does not incur an N+1 count query.
+    _live_completed = db.query(Clip).filter(
+        Clip.job_id == job_id,
+        Clip.status == ClipStatus.COMPLETED.value,
+    ).count()
+    if _live_completed != (job.completed_clips or 0):
+        _prev = job.completed_clips
+        job.completed_clips = _live_completed
+        _total = job.total_clips or 0
+        if _total > 0:
+            job.progress_percent = int((_live_completed / _total) * 100)
+            if (
+                _live_completed >= _total
+                and job.status not in (
+                    JobStatus.COMPLETED.value,
+                    JobStatus.CANCELLED.value,
+                    JobStatus.FAILED.value,
+                )
+            ):
+                job.status = JobStatus.COMPLETED.value
+                if job.completed_at is None:
+                    job.completed_at = datetime.utcnow()
+        db.commit()
+        print(
+            f"[v825.1 get_job] {job_id[:8]} completed_clips self-healed "
+            f"{_prev} -> {_live_completed}/{_total}",
+            flush=True,
+        )
+
     resp = _build_job_response(job, approved_clips=_count_approved_clips(db, job_id))
     # v780 — surface the source image batch (if this video job was promoted from
     # an image job) so the UI can offer a "go to image job" button. Single-job
