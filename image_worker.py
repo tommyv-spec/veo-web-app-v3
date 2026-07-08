@@ -3900,6 +3900,69 @@ def _fa_trpc_fetch(page, url, method, body_obj=None):
         return {"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
 
 
+def force_agent_off(page, context=""):
+    """Force Flow's AGENT mode OFF for a freshly-opened project. Agent mode
+    replaces the editor with a chat panel, so the Settings gear vanishes and
+    configure_image_settings fails with "Settings button not found". Ported from
+    flow_worker.force_agent_off (v839).
+
+    THE real lever is the USER-LEVEL (account-wide) toggle: the per-project
+    agentInfo PATCH alone does NOT override the user setting, so every new project
+    kept opening in Agent mode. So: (1) user-level updateUserSettings
+    isAgentModeToggled=false, (2) per-project agentInfo PATCH DISABLED for the
+    current project (belt-and-suspenders), (3) reload so the SPA re-renders the
+    editor. Best-effort; never raises. Returns True if attempted."""
+    pfx = f"[{context}] " if context else ""
+    TRPC = "https://labs.google/fx/api/trpc"
+    AISBX = "https://aisandbox-pa.googleapis.com"
+    try:
+        print(f"{pfx}[agent-off] forcing Agent OFF (user-level + per-project)", flush=True)
+        # 1. USER-LEVEL account-wide toggle — THE real lever.
+        try:
+            _r = _fa_trpc_fetch(
+                page, f"{TRPC}/videoFx.updateUserSettings", "POST",
+                {"json": {"isAgentModeToggled": False}},
+            )
+            _ok = isinstance(_r, dict) and not _fa_is_error(_r)
+            print(f"{pfx}[agent-off] user-level isAgentModeToggled=false "
+                  f"({'ok' if _ok else 'non-blocking: ' + _fa_error_reason(_r)})", flush=True)
+        except Exception as _ue:
+            print(f"{pfx}[agent-off] user-level toggle raised (non-blocking): {_ue}", flush=True)
+        # 2. PER-PROJECT agentInfo PATCH for the current project.
+        try:
+            _u = page.url or ""
+        except Exception:
+            _u = ""
+        m = re.search(r'/project/([A-Za-z0-9_\-]+)', _u)
+        if m:
+            project_id = m.group(1)
+            token = _FA_TOKEN_STORE.token or ""
+            try:
+                _fa_api_fetch(
+                    page,
+                    f"{AISBX}/v1/projects/{project_id}/agentInfo?updateMask=agent_toggle_state",
+                    "PATCH", token,
+                    {"agentToggleState": "AGENT_TOGGLE_STATE_DISABLED"},
+                )
+                print(f"{pfx}[agent-off] per-project agent_toggle_state=DISABLED for {project_id[:8]}", flush=True)
+            except Exception as _pe:
+                print(f"{pfx}[agent-off] per-project PATCH raised (non-blocking): {_pe}", flush=True)
+        # 3. reload so the SPA re-fetches user settings + re-renders the editor.
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                time.sleep(2)
+            print(f"{pfx}[agent-off] reload done — editor should show the Settings gear", flush=True)
+        except Exception as _re:
+            print(f"{pfx}[agent-off] reload failed (non-blocking): {_re}", flush=True)
+        return True
+    except Exception as e:
+        print(f"{pfx}[agent-off] failed (non-blocking): {e}", flush=True)
+        return False
+
+
 def _fa_try_create_new_project_api(page, context=""):
     """Try to create a Flow project via the private tRPC API + fire best-effort
     init calls. Returns the full project URL on success, None on failure (caller
@@ -4273,6 +4336,14 @@ def _fa_init_project_best_effort(page, project_id, context=""):
         f"{AISBX}/v1/projects/{project_id}/agentInfo?updateMask=agent_toggle_state",
         "PATCH", _bearer(),
         {"agentToggleState": "AGENT_TOGGLE_STATE_DISABLED"},
+    ))
+    # v839 — USER-LEVEL (account-wide) Agent toggle. THE real lever: the
+    # per-project agentInfo PATCH above does NOT override the user setting, so
+    # without this every new project kept opening in Agent mode (Settings gear
+    # hidden → "Settings button not found"). Parity with flow_worker.force_agent_off.
+    best_effort("videoFx.updateUserSettings isAgentModeToggled=false (user-level)", lambda: _fa_trpc_fetch(
+        page, f"{TRPC}/videoFx.updateUserSettings", "POST",
+        {"json": {"isAgentModeToggled": False}},
     ))
 
     elapsed = time.time() - _replay_t0
@@ -6374,6 +6445,11 @@ def create_new_flow_project(page, context=""):
                 print(f"{prefix}✓ Created project: {project_url}", flush=True)
                 human_delay(1, 2)
                 check_and_dismiss_popup(page)
+                # v839 — the DOM create path had NO Agent-OFF (only the API create
+                # path ran the HAR-replay init). Force Agent OFF here too, or the
+                # new project opens in Agent mode → Settings gear hidden →
+                # "Settings button not found". Matches the video worker.
+                force_agent_off(page, context=context)
                 return project_url
 
             last_url = project_url
