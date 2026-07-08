@@ -1564,11 +1564,14 @@ def _scan_failure_reason(resp, url, buf_key=''):
         return
     if st != 200:
         print(f"[fail-reason-diag] {ep} HTTP {st} buf={buf_key}", flush=True)
-        # v829 — a 403 on the generate call is an ACCOUNT BLOCK (unusual activity /
-        # forbidden), locale-independent. Record it so FailCheck routes the
-        # resulting all-failed tiles to the account recovery instead of the v820
-        # per-clip fresh-project redo (the same blocked account just re-403s).
-        if st == 403 and 'batchAsyncGenerateVideoStartImage' in ep:
+        # v829 — the "unusual activity" card on the generate call is
+        # locale-independent at the HTTP layer: it returns 403 (forbidden /
+        # "Visita el Centro de ayuda") OR 429 (rate-limit / "Espera unos momentos
+        # para volver a intentarlo"). v832 — record BOTH; a 429-only card was
+        # slipping detection → generic hard-fail + v820 redo instead of the golden
+        # restore the operator wants on unusual activity (operator 2026-07-08).
+        # FailCheck routes the resulting all-failed tiles to the account recovery.
+        if st in (403, 429) and 'batchAsyncGenerateVideoStartImage' in ep:
             _record_generate_403(buf_key)
         return
     try:
