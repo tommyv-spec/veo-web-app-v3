@@ -5836,6 +5836,34 @@ async def upload_clip_variant(
                 f"Clip {clip_index + 1} variant {attempt}.{variant} uploaded by user",
                 "INFO", "user",
             )
+
+            # v825 — recompute the job's completed_clips so a MANUALLY uploaded
+            # clip is RECOGNIZED (the DONE tri-counter + progress bar + job
+            # status). Every other completion path bumps this (worker uploads
+            # @ ~12164 / ~13666, attach @ ~8134); upload_clip_variant did not,
+            # so an operator-uploaded clip stayed uncounted — DONE stuck below
+            # TOTAL and the job never flipped to completed (owner report
+            # 2026-07-08). The autoflush before .count() includes the clip.status
+            # = COMPLETED set just above (same pattern the worker paths rely on).
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if job:
+                completed = db.query(Clip).filter(
+                    Clip.job_id == job_id,
+                    Clip.status == ClipStatus.COMPLETED.value,
+                ).count()
+                job.completed_clips = completed
+                total = job.total_clips or 0
+                if total > 0:
+                    job.progress_percent = int((completed / total) * 100)
+                    if completed >= total:
+                        job.status = "completed"
+                        job.completed_at = _dt.utcnow()
+                print(
+                    f"[v825 upload-variant] job {job_id[:8]} completed_clips -> "
+                    f"{completed}/{total} after clip {clip_index + 1} user upload",
+                    flush=True,
+                )
+
             db.commit()
             clip_dict = clip.to_dict()
 
