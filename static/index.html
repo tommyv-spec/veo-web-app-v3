@@ -19730,6 +19730,39 @@ Ambient: same kitchen room tone, soft pour sound.
             if (byUpdate.length) imgSelectNode(byUpdate[0].id);
         }
 
+        // v824 — after the operator picks a variant (approves an image), jump
+        // to the NEXT image still waiting for a pick so the operator clears the
+        // whole approval queue hands-free. Order: prefer the same build (next
+        // scene by scene_index_in_batch, else an earlier skipped scene in that
+        // build); once this build is fully approved, fall back to the first
+        // waiting image in any OTHER build. Returns null only when NOTHING
+        // anywhere is still waiting (→ stay put). Pending = same test the
+        // ready-for-choice notification + imgAutoSelectIfNeeded already use.
+        function imgNextPendingNode(afterNodeId) {
+            const all = imgState.nodes || [];
+            const cur = all.find(n => n.id === afterNodeId);
+            const si = n => (n.scene_index_in_batch ?? 0);
+            const isPending = n => n && n.kind === 'generated'
+                && n.status === 'ready' && !n.chosen_variant_id
+                && n.id !== afterNodeId;
+            const pending = all.filter(isPending);
+            if (!pending.length) return null;
+            // Prefer the same build, in scene order: next scene after the one
+            // just approved, else the earliest still-waiting scene in it.
+            if (cur && cur.batch_id) {
+                const sameBatch = pending
+                    .filter(n => n.batch_id === cur.batch_id)
+                    .sort((a, b) => si(a) - si(b));
+                if (sameBatch.length) {
+                    return sameBatch.find(n => si(n) > si(cur)) || sameBatch[0];
+                }
+            }
+            // Build fully approved — first waiting image in any other build.
+            return pending.slice().sort((a, b) =>
+                String(a.batch_id || '').localeCompare(String(b.batch_id || '')) || si(a) - si(b)
+            )[0];
+        }
+
         function imgRenderJobOverview(groupKey) {
             const area = document.getElementById('imgDetailArea');
             if (!area) return;
@@ -21203,6 +21236,12 @@ Ambient: same kitchen room tone, soft pour sound.
         }
 
         async function imgChooseVariant(event, nodeId, variantId) {
+            // v824 — was this a FRESH approval (node had no pick yet) or a
+            // re-pick of an already-chosen node? Only fresh approvals
+            // auto-advance to the next pending image; re-picking an approved
+            // node keeps the operator on it so they can verify the change.
+            const _nodeBefore = (imgState.nodes || []).find(n => n.id === nodeId);
+            const _wasUnchosen = !!(_nodeBefore && !_nodeBefore.chosen_variant_id);
             // Optimistic UI: flip the chosen class immediately so the
             // green border shows up without waiting for the server round trip.
             try {
@@ -21236,6 +21275,18 @@ Ambient: same kitchen room tone, soft pour sound.
                 });
                 if (!res.ok) throw new Error('Choose failed');
                 await imgRefreshNodes();
+                // v824 — auto-advance to the next image in this build still
+                // waiting for a pick. Only on a fresh approval (not a re-pick),
+                // and only if there IS a next pending one; otherwise stay put.
+                if (_wasUnchosen) {
+                    try {
+                        const next = imgNextPendingNode(nodeId);
+                        console.log('[v824 auto-advance] chose node', nodeId, '→ next pending:', next ? next.id : 'none');
+                        if (next && next.id !== nodeId) imgSelectNode(next.id);
+                    } catch (advErr) {
+                        console.warn('[v824 auto-advance] skipped:', advErr);
+                    }
+                }
             } catch (e) {
                 alert('Error: ' + e.message);
                 // On failure, refresh to revert UI to server state

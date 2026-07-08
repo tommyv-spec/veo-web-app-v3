@@ -14983,3 +14983,20 @@ Ran a metric bake-off on the operator's REAL prod data (92 local videos vs the 7
 **Scope / gates**: worker-runtime only — no output-shape change, no skeleton change, no linter change, no build edits. Forward-only per `feedback_rule-changes-forward-only`; the worker picks the fix up on the next restart (Render re-download). The new `(v823)` log lines are the deploy diagnostics per root `CLAUDE.md` §2 — the next REPUTATIONAL hit must show them before any "works" claim.
 
 **Touched**: this deep-dive (`code/template_reference.md` §v823, canonical), `code/static/flow_worker.py` (classifier + router + last-chance guard), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline), memory `flow-rai-reputational-terminal-reject` (update pending). Operator directive 2026-07-05.
+
+## v824 — Image approval auto-advance (pick a variant → jump to the next image waiting)
+
+**What**: in the Images tab, when the operator picks a variant for an image (approves it), the app now jumps straight to the NEXT image in the same build that is still waiting for a pick. The operator no longer hunts the sidebar for the next one — they flow through the whole build's approvals hands-free.
+
+**Why**: a build has 3-6 images. Before this, after each pick the detail view just stayed on the image you already approved; you had to find and click the next unpicked one every time. The operator asked for the pick to carry them to the next pending image automatically.
+
+**Scope of "next"** (all in the frontend, `code/static/index.html`):
+- **Prefer same build, then fall back to any build.** "Next" first looks in the SAME batch (`batch_id`) as the just-approved image — the next scene by `scene_index_in_batch`, else the earliest still-waiting scene in that build (an earlier one you skipped). When the whole build is approved, it falls back to the first waiting image in ANY other build so the operator keeps clearing the queue. Returns null (stays put) only when nothing anywhere is still waiting. (v824.0 scoped to same-build-only and stopped there — that reproduced the operator's "it stays there" when the remaining waiting images were in other builds; broadened same day.)
+- **Pending = needs a pick.** `kind === 'generated' && status === 'ready' && !chosen_variant_id` — same test the ready-for-choice notification (`imgState.notifiedReadyIds`) and `imgAutoSelectIfNeeded` already use. Uploads never count.
+- **Fresh approval only, not re-picks.** If the image already had a chosen variant and the operator is CHANGING the pick, the app stays on it (so they can verify the change). Only a first-time approval advances. Captured as `_wasUnchosen` at the top of `imgChooseVariant` before the optimistic UI flip.
+
+**How**: new helper `imgNextPendingNode(afterNodeId)` (near `imgAutoSelectIfNeeded`) returns the next pending node or `null`. `imgChooseVariant` calls it after `imgRefreshNodes()` and, on a fresh approval with a next node, calls `imgSelectNode(next.id)`. Wrapped in try/catch — auto-advance is a convenience, a failure never blocks the pick. A `console.log('[v824 auto-advance] …')` diagnostic stays on the choose path per root `CLAUDE.md` §2 until operator evidence confirms the redirect fires in prod.
+
+**Scope / gates**: frontend-only (`code/static/index.html`) — no output-shape change, no skeleton change, no linter change, no build edits, no backend change (reuses the existing `/api/images/nodes/{id}/choose` POST + `imgRefreshNodes` poll). Forward-only. Verified out-of-browser: `node --check` clean + a logic harness confirmed scene-order advance, single wrap, cross-build skip, and stop-when-all-approved. The in-app redirect still needs one operator confirmation before any "works" claim.
+
+**Touched**: this deep-dive (`code/template_reference.md` §v824, canonical), `code/static/index.html` (`imgNextPendingNode` helper + `imgChooseVariant` auto-advance), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline). Operator request 2026-07-08.
