@@ -4348,13 +4348,13 @@ def _fa_api_on_cooldown(page, pfx=""):
 
 
 def _fa_api_start_cooldown(page, reason, pfx=""):
-    """Pause the API path for the cooldown window (NOT the page lifetime)."""
-    cd = _fa_api_retry_cooldown_s()
-    try:
-        page._flow_api_disabled_until = time.time() + cd
-    except Exception:
-        pass
-    print(f"{pfx}[flow_api] API path paused {cd // 60} min (will auto-retry): {reason}", flush=True)
+    """v836 — NEUTRALIZED. Operator: never GLOBALLY pause the API. A failing job
+    retries the API up to 3x (in _submit_one_job) then uses the DOM path for THAT
+    job only; the next job starts fresh on API. This used to set
+    page._flow_api_disabled_until (a shared, per-page pause) which demoted every
+    later job to the slow DOM path for ~15 min. Kept as a log-only no-op so all
+    call sites (the three _latch_off helpers) stay valid without disabling the API."""
+    print(f"{pfx}[flow_api] attempt failed (API stays armed, no global pause): {reason}", flush=True)
 
 
 def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_path):
@@ -4586,6 +4586,9 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
         return False
 
     def _latch_off(reason: str):
+        # v836 — _fa_api_start_cooldown is now a log-only no-op (never globally
+        # pauses the API); a failing job retries the API 3x then uses the DOM path
+        # for THAT job only. Kept routing through it so all latch sites are one.
         _fa_api_start_cooldown(page, reason, pfx)
         return False
 
@@ -8183,6 +8186,25 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                         create_btn.wait_for(state="visible", timeout=20000)
                     except Exception:
                         time.sleep(5)
+                    # v836 — validate we actually LANDED on the project. After a
+                    # mid-run ACCOUNT SWITCH (golden restore / relaunch) the stored
+                    # project belongs to the OLD account, so goto() silently lands
+                    # on home/login/404 with NO exception → later "Settings button
+                    # not found". Match the video worker (flow_worker): if we're
+                    # not on a /project/ page, drop the stale project + create a
+                    # fresh one on the current account.
+                    try:
+                        _landed = page.url or ""
+                    except Exception as _url_e:
+                        _landed = ""
+                        print(f"[{context}] ⚠ page.url unreadable after stored-project nav ({_url_e})", flush=True)
+                    if "/project/" not in _landed:
+                        print(f"[{context}] ⚠ Stored project didn't load (account may have switched; landed on {_landed[:60] or '<none>'}) — creating a new one", flush=True)
+                        projects.pop(project_state["current_job_key"], None)
+                        need_new = True
+                        project_state["current_project_url"] = None
+                        project_state["uploaded_in_project"] = set()
+                        _save_state()
                 except Exception as nav_e:
                     print(f"[{context}] ⚠ Stored project unreachable ({nav_e}) — creating a new one", flush=True)
                     # Drop the stale entry from the dict too.
@@ -8408,37 +8430,44 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             #
             # On any failure: latches off for the page session and falls
             # through to the DOM path below.
-            if _flow_api_pull_submit_try(
-                page, node_id, node_name, prompt, input_paths, variants,
-                aspect_ratio, model, ctx,
-                listener_state, pending_submissions, captured_urls_by_node,
-                in_flight, out_dir, input_items, job,
-            ):
-                _save_state()
-                print(f"[API:submit] ✓ Node {node_id} submitted via flow_api (in_flight={len([j for j in in_flight.values() if j.status=='submitted'])})", flush=True)
-                return True
+            # v836 — up to 3 API attempts per job (operator). Success → ship.
+            # An account-block ('unusual activity') → golden restore, NO retry/UI
+            # (the DOM hits the same block). Any other API failure → retry the
+            # API; after 3 non-unusual fails, fall to the DOM/UI path for THIS job
+            # only. The API is never globally disabled (latch neutralized), so the
+            # NEXT job starts fresh on API.
+            _API_ATTEMPTS_PER_JOB = 3
+            for _api_attempt in range(_API_ATTEMPTS_PER_JOB):
+                if _flow_api_pull_submit_try(
+                    page, node_id, node_name, prompt, input_paths, variants,
+                    aspect_ratio, model, ctx,
+                    listener_state, pending_submissions, captured_urls_by_node,
+                    in_flight, out_dir, input_items, job,
+                ):
+                    _save_state()
+                    print(f"[API:submit] ✓ Node {node_id} submitted via flow_api (in_flight={len([j for j in in_flight.values() if j.status=='submitted'])})", flush=True)
+                    return True
 
-            # v818.2 — API hit an account-level 'unusual activity' block. Do NOT
-            # fall to the DOM path (it hits the same session block — a DOM redo of
-            # an unusual-blocked node failed all 4 tiles) and do NOT bother with a
-            # cookie-clear reload (operator observed it does NOT clear Flow's
-            # reCAPTCHA block — every following node re-hit it and was lost).
-            # Restore DIRECTLY from the golden profile: signal main() to relaunch.
-            # The in-flight node(s) are re-queued by the /release-claims call in
-            # this function's finally block (the per-node /jobs/<id>/release
-            # endpoint 400s; the worker-level release is the one that works), so
-            # the block'd node goes back to pending and is RE-CLAIMED + RETRIED on
-            # the clean session after relaunch — not marked failed, not lost.
-            _ua_reason = getattr(page, "_flow_api_unusual_reason", "")
-            if _ua_reason:
-                try:
-                    page._flow_api_unusual_reason = ""
-                except Exception:
-                    pass
-                print(f"[{ctx}] 🔁 unusual-activity — restoring directly from golden profile + relaunch "
-                      f"(node stays claimed → re-queued by /release-claims → retried after restore)", flush=True)
-                _restore_signal["golden"] = True
-                return False
+                # Account-level 'unusual activity' block → golden restore. Do NOT
+                # retry the API or fall to DOM (the DOM hits the same session
+                # block). The in-flight node re-queues via /release-claims and
+                # retries on the clean session after the restore — not lost.
+                _ua_reason = getattr(page, "_flow_api_unusual_reason", "")
+                if _ua_reason:
+                    try:
+                        page._flow_api_unusual_reason = ""
+                    except Exception:
+                        pass
+                    print(f"[{ctx}] 🔁 unusual-activity — restoring directly from golden profile + relaunch "
+                          f"(node stays claimed → re-queued by /release-claims → retried after restore)", flush=True)
+                    _restore_signal["golden"] = True
+                    return False
+
+                # Non-unusual API failure — retry the API, or give up to the UI.
+                if _api_attempt < _API_ATTEMPTS_PER_JOB - 1:
+                    print(f"[{ctx}] flow_api attempt {_api_attempt + 1}/{_API_ATTEMPTS_PER_JOB} failed — retrying API", flush=True)
+                else:
+                    print(f"[{ctx}] flow_api failed {_API_ATTEMPTS_PER_JOB}x — using the DOM/UI path for THIS job (API stays on for the next)", flush=True)
 
             if not select_image_mode(page, context=ctx):
                 raise RuntimeError("Failed to switch to Image mode")
