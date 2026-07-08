@@ -18782,9 +18782,21 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # all settings: model, orientation, variants. This also initializes the gallery
         # so frame reuse works correctly on the next clip.
         try:
-            if not page.url.startswith(project_url):
+            # v839 — after a golden restore the session re-hydrates slowly (ULTRA /
+            # account info not loaded yet), so a SINGLE goto(project_url) can
+            # REDIRECT to the Flow HOME dashboard (settings-diag showed
+            # url=.../tools/flow, not /project/ → no Settings gear → ResumeCheck
+            # fails + burns retries). Re-navigate until the URL actually settles on
+            # THIS project (the session finishes hydrating between tries), up to 3
+            # attempts. (operator 2026-07-08: "just needs to renavigate to project
+            # after the restore")
+            for _nav_try in range(3):
+                if '/project/' in (page.url or '') and page.url.startswith(project_url):
+                    break
                 page.goto(project_url, timeout=30000, wait_until="domcontentloaded")
-                time.sleep(2)
+                time.sleep(3)
+                if '/project/' not in (page.url or ''):
+                    print(f"[Flow] ⚠ [v839] post-restore nav landed on {page.url} (not /project/) — re-navigating {_nav_try+1}/3", flush=True)
             # Re-apply full settings to restore model, orientation, variants after Chrome restart
             select_frames_to_video_mode(
                 page,
