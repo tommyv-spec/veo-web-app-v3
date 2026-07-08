@@ -10362,11 +10362,22 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         # route to the account recovery (cookie-clear/golden), NOT the v820 per-clip
         # fresh-project redo (the same blocked account just re-403s). Operator
         # 2026-07-08: v820 removed the golden-restore fallback that used to mask this.
-        if all_failed and job_id:
+        # v831 — restore ONLY when ALL variants failed with the account block, not
+        # when a 403 coincides with a content reject (operator 2026-07-08: "golden
+        # restore only when all the variants fail with unusual activity"). A 403
+        # blocks the SUBMIT → the failed tiles rendered NOTHING (no ?name= media
+        # uuid). A content-rejected variant RENDERED then got flagged → it carries a
+        # media uuid. So `not _failed_uuids` means every failed tile was
+        # submit-blocked = a pure account block. If any failed tile has a uuid, it
+        # rendered + failed for content (SEXUAL/etc) → that is NOT an account block;
+        # fall through so the terminal-content path handles it (replace-image / redo),
+        # never a golden restore.
+        if all_failed and not _failed_uuids and job_id:
             _bk = _page_buffer_key(page)
             if _recent_generate_403(_bk):
-                print(f"[FailCheck] ⚠ [v829] account block via generate HTTP 403 (buf={_bk}, "
-                      f"locale-independent) — routing to account recovery, NOT generic/v820 redo", flush=True)
+                print(f"[FailCheck] ⚠ [v829/v831] account block — ALL {tiles} variants submit-blocked "
+                      f"(generate HTTP 403, buf={_bk}, no rendered media) — routing to account recovery, "
+                      f"NOT generic/v820 redo", flush=True)
                 return "abort_unusual_activity"
 
         # v808 — a sibling variant is STILL GENERATING: do NOT retry the failed
