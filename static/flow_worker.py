@@ -21595,6 +21595,19 @@ class AccountWorker(threading.Thread):
                                 pass
                             continue
 
+                    # v830 — the REDO path (process_redo_clip called directly in this
+                    # loop, not via _process_parallel_job) raises "...stopping job to
+                    # trigger golden restore (v758.24)" on an account block (v829
+                    # detection). Unlike _process_parallel_job's except, this generic
+                    # handler never classified that message, so is_hot stayed False and
+                    # it fell to the "non-fatal — retry same job (no restore)" branch —
+                    # the golden folder was NEVER restored and the account stayed
+                    # blocked (operator 2026-07-08: "it doesn't restore the golden
+                    # folder"). Force HOT here so the golden-restore branch below fires,
+                    # mirroring _process_parallel_job's err_str classification.
+                    if "stopping job to trigger golden restore" in str(e):
+                        account_health.record_failure(self.name, force_hot=True)
+
                     # GOLDEN RESTORE: on definite failure (HOT_THRESHOLD consecutive failures),
                     # restore session and download profiles from the clean post-login snapshot.
                     #
