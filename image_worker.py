@@ -3764,11 +3764,25 @@ class _FaClient:
         self.tier = tier
         self._token_store = _fa_install_token_capture(page)
         self._last_call = 0.0
+        # v832 — per-node latency instrumentation. Accumulates seconds spent in
+        # each flow_api phase (cooldown / reCAPTCHA mint / fetch) so the pull path
+        # can print one [timing] line per node and show where the wait goes.
+        self._t = {"cooldown": 0.0, "mint": 0.0, "mint_n": 0, "fetch": 0.0, "fetch_n": 0}
+
+    def reset_timings(self):
+        self._t = {"cooldown": 0.0, "mint": 0.0, "mint_n": 0, "fetch": 0.0, "fetch_n": 0}
+
+    def timings_summary(self):
+        t = self._t
+        return (f"cooldown={t['cooldown']:.1f}s mint={t['mint']:.1f}s({t['mint_n']}x) "
+                f"fetch={t['fetch']:.1f}s({t['fetch_n']}x)")
 
     def _cooldown(self):
         elapsed = time.monotonic() - self._last_call
         if elapsed < _FA_API_COOLDOWN:
-            time.sleep(_FA_API_COOLDOWN - elapsed)
+            _slept = _FA_API_COOLDOWN - elapsed
+            time.sleep(_slept)
+            self._t["cooldown"] += _slept   # v832 timing
         self._last_call = time.monotonic()
 
     def _token(self):
@@ -3806,12 +3820,18 @@ class _FaClient:
         for attempt in range(_FA_CAPTCHA_MAX_RETRIES):
             if cooldown:
                 self._cooldown()
+            _m0 = time.monotonic()                                   # v832 timing
             token = _fa_mint_or_empty(self.page, _FA_CAPTCHA_IMAGE)
+            self._t["mint"] += time.monotonic() - _m0
+            self._t["mint_n"] += 1
             if not token:
                 last = {"error": "captcha mint failed"}
                 continue
             _fa_inject_captcha_token(body, token)
+            _f0 = time.monotonic()                                   # v832 timing
             res = _fa_api_fetch(self.page, url, "POST", self._token(), body)
+            self._t["fetch"] += time.monotonic() - _f0
+            self._t["fetch_n"] += 1
             if not _fa_is_error(res):
                 media_id = _fa_extract_image_media_id(res)
                 if not media_id:
@@ -4655,6 +4675,8 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
             return _latch_off(f"failed to read ref {p}: {e}")
 
     cli = _FaClient(page, project_id=project_id)
+    cli.reset_timings()                 # v832 — per-node latency timing
+    _t_wall0 = time.monotonic()         # v832 — submit wall-clock start
 
     # Upload references via private API. uploadImage has no captcha.
     try:
@@ -4744,6 +4766,16 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
                     break  # non-retryable, or API retries exhausted for this variant
     except Exception as e:
         _last_fail_reason = f"submit loop raised: {e}"
+
+    # v832 — per-node latency line: shows where the submit wall-time went
+    # (cooldown vs reCAPTCHA mint vs fetch), so "the API is slow" becomes a
+    # measured breakdown instead of a guess.
+    try:
+        print(f"{pfx}[timing] node {node_id}: {cli.timings_summary()} "
+              f"submit_wall={time.monotonic() - _t_wall0:.1f}s "
+              f"captured={len(captured_fife_urls)}/{variants}", flush=True)
+    except Exception:
+        pass
 
     # v828 diagnostic (TEMPORARY — remove once operator confirms the classifier
     # catches the real block string). Logs the FULL final reason + how it
