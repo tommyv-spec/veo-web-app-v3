@@ -8165,7 +8165,8 @@ async def attach_clips_to_job(
     ).count()
     job.completed_clips = completed
     job.progress_percent = (completed / job.total_clips * 100) if job.total_clips > 0 else 0
-    if completed >= job.total_clips:
+    # v825 — guard: never flip to completed on total_clips 0/None (false-flip / None-compare)
+    if job.total_clips and completed >= job.total_clips:
         job.status = JobStatus.COMPLETED.value
         job.completed_at = datetime.utcnow()
     
@@ -12199,8 +12200,8 @@ async def local_worker_update_clip_status(
             job.completed_clips = completed
             if job.total_clips > 0:
                 job.progress_percent = int((completed / job.total_clips) * 100)
-            # Check if all clips are completed
-            if completed >= job.total_clips:
+            # Check if all clips are completed (v825 guard: skip on total 0/None)
+            if job.total_clips and completed >= job.total_clips:
                 job.status = "completed"
                 job.completed_at = datetime.utcnow()
     
@@ -13696,7 +13697,8 @@ async def user_worker_update_clip_status(
             job.completed_clips = completed
             if job.total_clips > 0:
                 job.progress_percent = int((completed / job.total_clips) * 100)
-            if completed >= job.total_clips:
+            # v825 guard: skip status flip on total 0/None
+            if job.total_clips and completed >= job.total_clips:
                 job.status = "completed"
                 job.completed_at = datetime.utcnow()
     
