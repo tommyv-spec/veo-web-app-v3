@@ -3767,15 +3767,27 @@ class _FaClient:
         # v832 — per-node latency instrumentation. Accumulates seconds spent in
         # each flow_api phase (cooldown / reCAPTCHA mint / fetch) so the pull path
         # can print one [timing] line per node and show where the wait goes.
-        self._t = {"cooldown": 0.0, "mint": 0.0, "mint_n": 0, "fetch": 0.0, "fetch_n": 0}
+        # v833 — also bucket each submit outcome (ok / recaptcha / unusual / 5xx /
+        # mint_fail / other) so a slow node shows WHY it was slow (e.g. reCAPTCHA
+        # retries burning ~12s each), not just how long.
+        self._t = self._zero_timings()
+
+    @staticmethod
+    def _zero_timings():
+        return {"cooldown": 0.0, "mint": 0.0, "mint_n": 0, "fetch": 0.0, "fetch_n": 0,
+                "outcomes": {}}
 
     def reset_timings(self):
-        self._t = {"cooldown": 0.0, "mint": 0.0, "mint_n": 0, "fetch": 0.0, "fetch_n": 0}
+        self._t = self._zero_timings()
+
+    def _bump_outcome(self, key):
+        self._t["outcomes"][key] = self._t["outcomes"].get(key, 0) + 1
 
     def timings_summary(self):
         t = self._t
+        _oc = " ".join(f"{k}={v}" for k, v in sorted(t["outcomes"].items())) or "none"
         return (f"cooldown={t['cooldown']:.1f}s mint={t['mint']:.1f}s({t['mint_n']}x) "
-                f"fetch={t['fetch']:.1f}s({t['fetch_n']}x)")
+                f"fetch={t['fetch']:.1f}s({t['fetch_n']}x: {_oc})")
 
     def _cooldown(self):
         elapsed = time.monotonic() - self._last_call
@@ -3826,6 +3838,7 @@ class _FaClient:
             self._t["mint_n"] += 1
             if not token:
                 last = {"error": "captcha mint failed"}
+                self._bump_outcome("mint_fail")   # v833
                 continue
             _fa_inject_captcha_token(body, token)
             _f0 = time.monotonic()                                   # v832 timing
@@ -3833,6 +3846,7 @@ class _FaClient:
             self._t["fetch"] += time.monotonic() - _f0
             self._t["fetch_n"] += 1
             if not _fa_is_error(res):
+                self._bump_outcome("ok")          # v833
                 media_id = _fa_extract_image_media_id(res)
                 if not media_id:
                     raise _FaError(f"submit no media_id: {_fa_error_reason(res) or (res.get('text','') or '')[:200]}")
@@ -3841,7 +3855,15 @@ class _FaClient:
             reason = _fa_error_reason(res).lower()
             last = res
             if "captcha" in reason or "recaptcha" in reason:
+                self._bump_outcome("recaptcha")   # v833
                 continue
+            # v833 — non-captcha error: bucket it so the timing line shows the mix
+            if "permission_denied" in reason or " 403" in reason or "code=403" in reason or "unusual" in reason:
+                self._bump_outcome("unusual")
+            elif any(s in reason for s in ("500", "502", "503", "504", "internal", "unavailable", "deadline")):
+                self._bump_outcome("5xx")
+            else:
+                self._bump_outcome("other")
             break
         raise _FaError(f"submit_image failed: {_fa_error_reason(last) or 'unknown'}")
 
