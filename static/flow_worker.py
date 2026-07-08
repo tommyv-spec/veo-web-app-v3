@@ -16725,7 +16725,16 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
                     # no retry, no requeue. (Operator: "this last redo is not
                     # needed".)
                     _failed_uuids = _tile_info.get('failedUuids') or []
-                    _term_api = _terminal_reason_for_uuids(_failed_uuids)
+                    # v837 — also consult the clip's BOUND mediaIds, not just the
+                    # DOM-scraped failedUuids. A MINOR/SEXUAL-blocked tile shows the
+                    # block card with NO rendered media → failedUuids is EMPTY → the
+                    # terminal record (keyed by the bound render uuids) was missed →
+                    # the clip fell to Reuse-Prompt → policy_gen → Prompt B → requeue
+                    # LOOP forever (operator 2026-07-08: clip 2 looped on
+                    # PUBLIC_ERROR_MINOR). _peek_..._for_clip resolves clip_index →
+                    # bound uuids (read-only), same fix as FailCheck v828.
+                    _term_api = (_terminal_reason_for_uuids(_failed_uuids)
+                                 or _peek_video_policy_terminal_for_clip(job_id, clip_index))
                     if _term_api:
                         # v821b — prominent with an un-tried Prompt B -> requeue with reworded line.
                         if handle_terminal_reject(clip_id, _term_api, job_id=job_id, clip_index=clip_index) == 'requeued':
