@@ -5218,12 +5218,19 @@ def route_terminal_content_reject(clip_id, reason, account_name=""):
 
 
 def handle_terminal_reject(clip_id, reason, account_name="", job_id=None, clip_index=None, requeue=True):
-    """v821b — if reason is prominent and the clip can retry a reworded line, requeue for
-    Prompt B and return 'requeued'; else do the normal terminal replace-image/general-policy and
-    return 'terminal'. Non-prominent reasons (SEXUAL/CSAM/REPUTATIONAL/MISREPRESENT/MINOR) always
-    terminal (unchanged). Shares prominent_promptb_decision with the tile-text path so both
-    routes make the same call."""
-    if reason and 'PROMINENT' in reason.upper():
+    """v838 (operator 2026-07-08, supersedes v821b) — PROMINENT_PEOPLE / SEXUAL /
+    MINOR are often a MASKED line-audio trip: Flow scans the native TTS of the
+    spoken line, and the reworded Prompt B clears them in practice ("if i use
+    prompt b it works"). So for these THREE, try Prompt B FIRST (when the clip
+    has an un-tried one) and return 'requeued'; only if Prompt B was ALREADY
+    tried and it STILL failed do we mark the clip failed in the UI (the
+    reason-specific replace-image / change-prompt card). CSAM / REPUTATIONAL /
+    MISREPRESENT stay immediate-terminal — Prompt B can't fix a CSAM image or a
+    public-figure framing. Shares prominent_promptb_decision (reason-agnostic:
+    it only checks whether the clip has an un-tried prompt_b) with the tile-text
+    path so both routes make the same call."""
+    _r = (reason or '').upper()
+    if any(_t in _r for _t in ('PROMINENT', 'SEXUAL', 'MINOR')):
         d = prominent_promptb_decision(clip_id)
         if d == 'retry_prompt_b' and requeue:
             # prominent_promptb_decision already marked _PROMPT_B_TRIED. If the requeue
@@ -5232,21 +5239,19 @@ def handle_terminal_reject(clip_id, reason, account_name="", job_id=None, clip_i
             # but not queued (would be neither retried nor failed).
             try:
                 update_clip_status(clip_id, 'flow_redo_queued',
-                                   error_message='v821 prominent -> retry reworded line (Prompt B)')
+                                   error_message=f'v838 {reason} -> retry reworded line (Prompt B)')
             except Exception as _requeue_err:
                 _PROMPT_B_TRIED.pop(clip_id, None)
-                print(f"[v821] requeue write failed for clip {clip_id} ({_requeue_err}) "
+                print(f"[v838] requeue write failed for clip {clip_id} ({_requeue_err}) "
                       f"-> falling back to replace-image card", flush=True)
             else:
-                print(f"[v821] API-reason prominent on clip {clip_id} -> requeue with Prompt B", flush=True)
+                print(f"[v838] {reason} on clip {clip_id} -> retry reworded line (Prompt B); mark failed in UI only if B also fails", flush=True)
                 return 'requeued'
+        # d == 'terminal_line' (Prompt B already tried, still flagged) OR
+        # 'terminal_image' (clip has no Prompt B) -> fall through to the
+        # reason-specific terminal card below (marks it failed in the UI).
         if d == 'terminal_line':
-            fail_clip_general_policy(
-                clip_id,
-                "Flow still flagged a prominent person after the reworded line (Prompt B). "
-                "Rework the dialogue line.")
-            return 'terminal'
-        # d == 'terminal_image' (no Prompt B) -> fall through to the old replace-image card.
+            print(f"[v838] {reason} on clip {clip_id} persists AFTER Prompt B -> marking failed in UI (replace image / rework line)", flush=True)
     route_terminal_content_reject(clip_id, reason, account_name=account_name)
     return 'terminal'
 
