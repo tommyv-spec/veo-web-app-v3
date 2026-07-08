@@ -7015,6 +7015,7 @@ def select_frames_to_video_mode(page, context="", **kwargs):
     prefix = f"{context} " if context else ""
     variants_count = kwargs.get('variants_count', 2)
     _agent_off_tried = False  # only force Agent OFF once (it reloads the page)
+    _marketing_recovered = False  # v836 — click through the marketing landing once
 
     for full_attempt in range(3):
         try:
@@ -7081,6 +7082,30 @@ def select_frames_to_video_mode(page, context="", **kwargs):
 
             if settings_btn is None:
                 print(f"{prefix}⚠ Settings button not found", flush=True)
+                # v836 — the session sometimes drops to the PUBLIC marketing landing
+                # page on a project URL (nav Overview/Models/.../Pricing + a "Create
+                # with Google Flow" CTA + "Your AI creative studio") — no editor, no
+                # gear. force_agent_off + reload can't fix it (reload re-shows the
+                # landing). Click the CTA to re-enter the app, then re-navigate to
+                # THIS project so the editor + gear load. Tried once, before the
+                # agent-off fallback. (operator 2026-07-08)
+                if not _marketing_recovered and '/project/' in (page.url or ''):
+                    try:
+                        _cta = page.locator(
+                            "button:has-text('Create with Google Flow'), a:has-text('Create with Google Flow'), "
+                            "button:has-text('Create with Flow'), a:has-text('Create with Flow')"
+                        ).first
+                        if _cta.count() > 0:
+                            _proj_url = page.url
+                            _marketing_recovered = True
+                            print(f"{prefix}[v836] dropped to marketing landing on a project URL — clicking 'Create with Google Flow' + re-navigating to the project", flush=True)
+                            human_click_element(page, _cta, f"{prefix}Create with Google Flow (landing recovery)")
+                            human_delay(3, 5)
+                            page.goto(_proj_url, wait_until="domcontentloaded", timeout=30000)
+                            human_delay(3, 5)
+                            continue
+                    except Exception as _me:
+                        print(f"{prefix}[v836] marketing landing recovery failed: {_me}", flush=True)
                 if not _agent_off_tried:
                     # DIAGNOSTIC — dump the real page state ONCE so we can see WHY
                     # the gear is missing: agent landing still showing, an
