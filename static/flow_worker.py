@@ -1564,6 +1564,12 @@ def _scan_failure_reason(resp, url, buf_key=''):
         return
     if st != 200:
         print(f"[fail-reason-diag] {ep} HTTP {st} buf={buf_key}", flush=True)
+        # v829 — a 403 on the generate call is an ACCOUNT BLOCK (unusual activity /
+        # forbidden), locale-independent. Record it so FailCheck routes the
+        # resulting all-failed tiles to the account recovery instead of the v820
+        # per-clip fresh-project redo (the same blocked account just re-403s).
+        if st == 403 and 'batchAsyncGenerateVideoStartImage' in ep:
+            _record_generate_403(buf_key)
         return
     try:
         data = resp.json()
@@ -4768,6 +4774,40 @@ def _recover_pending_clip_downloads(page, job_id, clips, http_dl_queue,
 UNUSUAL_ACTIVITY_MAX_STRIKES = 2
 _UNUSUAL_ACTIVITY_HITS = {}  # job_id -> int
 _UNUSUAL_ACTIVITY_LOCK = threading.Lock()
+
+# v829 — LANGUAGE-INDEPENDENT account-block signal. The "unusual activity" card
+# renders in the account LOCALE (operator's Flow = es-419: "Detectamos actividad
+# inusual / Centro de ayuda"), so the DOM-text match in FailCheck is locale-
+# fragile and had regressed to English-only → the Spanish block went undetected.
+# The generate call itself returns HTTP 403 on an account block — that status is
+# locale-independent. _scan_failure_reason records the 403 per account buffer
+# here; FailCheck consumes it so an all-failed tile set with a fresh generate-403
+# routes to the account recovery (cookie-clear/golden), NOT the v820 per-clip
+# fresh-project redo (which re-403s on the same blocked account). Operator
+# 2026-07-08: v820 removed the golden-restore fallback that used to mask this.
+_GENERATE_403_TS = {}   # buf_key (acct:<name>) -> epoch of the last generate-endpoint HTTP 403
+_GENERATE_403_LOCK = threading.Lock()
+GENERATE_403_WINDOW_S = 90  # a generate 403 within this window = the account is currently blocked
+
+def _record_generate_403(buf_key):
+    """Stamp a generate-call HTTP 403 for this account buffer (account block)."""
+    if not buf_key:
+        return
+    with _GENERATE_403_LOCK:
+        _GENERATE_403_TS[buf_key] = time.time()
+
+def _recent_generate_403(buf_key, consume=True):
+    """True if a generate-call 403 landed for this account within the window.
+    Consumes the marker by default so a stale 403 can't re-trigger on a later clip."""
+    if not buf_key:
+        return False
+    now = time.time()
+    with _GENERATE_403_LOCK:
+        ts = _GENERATE_403_TS.get(buf_key, 0)
+        hit = (now - ts) <= GENERATE_403_WINDOW_S
+        if hit and consume:
+            _GENERATE_403_TS.pop(buf_key, None)
+        return hit
 
 # v758.7 — replicate the operator's manual fix for the "unusual activity"
 # block: delete the labs.google site cookies (keeping the Google SSO auth so
@@ -10313,6 +10353,21 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
             return "abort_unusual_activity"
         if _first_unusual > 0 and job_id:
             print(f"[FailCheck] ⓘ unusual-activity on {_first_unusual}/{tiles} tiles (partial) — NOT restoring; falling through to retry (operator: restore only when ALL tiles fail)", flush=True)
+
+        # v829 — LANGUAGE-INDEPENDENT account-block catch. The DOM "unusual activity"
+        # text is locale-fragile (the operator's Spanish es-419 card slipped the
+        # English-only match above). The generate call's HTTP 403 is locale-
+        # independent and was recorded by _scan_failure_reason. If ALL tiles failed
+        # AND a fresh generate-403 landed for THIS account, it is an account block →
+        # route to the account recovery (cookie-clear/golden), NOT the v820 per-clip
+        # fresh-project redo (the same blocked account just re-403s). Operator
+        # 2026-07-08: v820 removed the golden-restore fallback that used to mask this.
+        if all_failed and job_id:
+            _bk = _page_buffer_key(page)
+            if _recent_generate_403(_bk):
+                print(f"[FailCheck] ⚠ [v829] account block via generate HTTP 403 (buf={_bk}, "
+                      f"locale-independent) — routing to account recovery, NOT generic/v820 redo", flush=True)
+                return "abort_unusual_activity"
 
         # v808 — a sibling variant is STILL GENERATING: do NOT retry the failed
         # tile. The worker uses ONE variant per clip; the survivor provides it.
