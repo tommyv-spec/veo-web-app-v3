@@ -16229,10 +16229,20 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
             #   <h3>Something went wrong.</h3> + <a>Back to projects</a>
             try:
                 _state = page.evaluate("""() => {
-                    const txt = (document.body && document.body.innerText) || '';
-                    if (txt.includes('Something went wrong')) return 'err-text';
-                    if (txt.includes('Back to projects') && !txt.includes('Videos')) return 'err-link';
-                    if (/\\bVideos\\b/.test(txt) || /\\bScenes\\b/.test(txt)) return 'ok';
+                    // v834 — LOCALE-ROBUST. The es-419 UI shows "Se produjo un
+                    // error" / "Volver a los proyectos" / "Vídeos" / "Escenas", not
+                    // the English strings, so the old English-only match missed the
+                    // error page and the worker proceeded against a broken project
+                    // (operator 2026-07-08: project opened in another account →
+                    // Spanish error page undetected). Normalize (accent-strip +
+                    // lowercase), match error + ready phrases across en + es.
+                    const raw = (document.body && document.body.innerText) || '';
+                    const txt = raw.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
+                    const okMarkers = ['videos', 'scenes', 'escenas'];
+                    const hasOk = okMarkers.some(s => txt.includes(s));
+                    if (txt.includes('something went wrong') || txt.includes('se produjo un error')) return 'err-text';
+                    if ((txt.includes('back to projects') || txt.includes('volver a los proyectos')) && !hasOk) return 'err-link';
+                    if (hasOk) return 'ok';
                     return 'wait';
                 }""")
             except Exception as _e:
