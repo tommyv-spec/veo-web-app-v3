@@ -9352,7 +9352,7 @@ def is_generate_button_enabled(page):
         return False
 
 
-def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retries=3, wait_timeout=60, start_frame=None, end_frame=None, gallery_cache=None, start_frame_key=None, end_frame_key=None):
+def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retries=3, wait_timeout=60, start_frame=None, end_frame=None, gallery_cache=None, start_frame_key=None, end_frame_key=None, project_url=None):
     """
     Click reuse button, fill prompt, and click Generate with retry logic.
     
@@ -9395,7 +9395,25 @@ def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retrie
                 
                 # Human-like behavior after refresh
                 human_pre_action(page, "reuse prompt")
-            
+
+            # v840 — the reuse button + frame dialog exist ONLY on the project
+            # editor. The session can drop to the Flow home/landing (post-restore
+            # hydration), where the old code clicked into 30s locator timeouts and
+            # the retry reload()ed the WRONG page. If project_url is known and we're
+            # not on it (incl. after a reload that redirected to home), navigate to
+            # the project FIRST. (operator 2026-07-08: "we were not in the project
+            # page but it never even checked") This also leaves the page on the
+            # project for the caller's clear+upload fallback if reuse still fails.
+            if project_url and not ('/project/' in (page.url or '') and page.url.startswith(project_url)):
+                print(f"{prefix}[v840] not on project editor ({page.url}) — navigating to the project before reuse", flush=True)
+                try:
+                    page.goto(project_url, timeout=30000, wait_until="domcontentloaded")
+                    page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    time.sleep(3)
+                    check_and_dismiss_popup(page)
+                except Exception as _nv:
+                    print(f"{prefix}[v840] project nav failed: {_nv}", flush=True)
+
             # Step 1: Click reuse button
             # New UI (Feb 2025+): button with class 'reuse-prompt-bu', icon 'redo', text 'Reuse text prompt'
             # Old UI: hidden <span>Reuse prompt</span> and <i>wrap_text</i> icon
@@ -17646,7 +17664,8 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
             try:
                 click_reuse_and_generate(page, prompt, i+1, account_name, max_retries=3, wait_timeout=60,
                                         start_frame=start_frame, end_frame=end_frame,
-                                        gallery_cache=gallery_cache, start_frame_key=start_frame_key, end_frame_key=end_frame_key)  # v819
+                                        gallery_cache=gallery_cache, start_frame_key=start_frame_key, end_frame_key=end_frame_key,
+                                        project_url=project_url)  # v819 + v840 project-nav guard
             except Exception as e:
                 # v195: Reuse failed — fall back to fresh submission (clear + upload frames + prompt)
                 print(f"[{account_name}] ⚠ Reuse failed for clip {clip_index+1}: {e}", flush=True)
@@ -19431,7 +19450,8 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             try:
                 click_reuse_and_generate(page, prompt, i+1, "Flow", max_retries=3, wait_timeout=60,
                                         start_frame=start_frame, end_frame=end_frame,
-                                        gallery_cache=gallery_cache, start_frame_key=start_frame_key, end_frame_key=end_frame_key)  # v819
+                                        gallery_cache=gallery_cache, start_frame_key=start_frame_key, end_frame_key=end_frame_key,
+                                        project_url=project_url)  # v819 + v840 project-nav guard
             except Exception as e:
                 # v195: Reuse failed — fall back to fresh submission (clear + upload frames + prompt)
                 print(f"[Flow] ⚠ Reuse failed for clip {clip_index+1}: {e}", flush=True)
