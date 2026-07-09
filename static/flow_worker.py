@@ -18930,8 +18930,21 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     print(f"[worker-id] {WORKER_VERSION} build={WORKER_BUILD} file=static/flow_worker.py "
           f"job={str(job_id)[:8]} clips={len(clips)} path=process_job_submission", flush=True)
 
+    _last_cookie_refresh = time.time()  # v843 — session was just snapshotted at 18606
     for i, clip in enumerate(clips):
         register_clip_prompt_b(clip)  # v805 — make Prompt B findable by clip_id
+        # v843 — keep the HTTP-DL session FRESH. Google rotates the labs.google
+        # session-token during a long job; the once-per-job snapshot (18606) then
+        # goes stale and EVERY media.getMediaUrlRedirect download 401s → good
+        # renders get falsely queued for redo (operator 2026-07-09: "stopped
+        # recognizing well done clips"). Re-snapshot on a 45s gate so session_ref[0]
+        # stays valid for the download worker throughout the submit phase.
+        if session_refresh_callback and (time.time() - _last_cookie_refresh) > 45:
+            try:
+                session_refresh_callback()
+                _last_cookie_refresh = time.time()
+            except Exception:
+                pass
         # v455: abort checkpoint. If the user deleted this job, the
         # /pending poll (which runs every few seconds) stamped it in
         # the module-global abort set. Bailing here avoids spending
@@ -22071,9 +22084,24 @@ class AccountWorker(threading.Thread):
                             body = None
                             for _vtry in range(POSTER_RETRY_MAX):
                                 resp = sess.get(url, timeout=120, allow_redirects=True)
-                                if resp.status_code == 401 and sess is not session_ref[0] and session_ref[0] is not None:
-                                    print(f"[{account_name}-HTTP-DL] 401 — retrying with current session", flush=True)
-                                    resp = session_ref[0].get(url, timeout=120, allow_redirects=True)
+                                if resp.status_code == 401:
+                                    # v843 — the snapshot's session-token rotated → 401.
+                                    # The submit thread re-snapshots session_ref[0] on a
+                                    # 45s gate; retry with the freshest session, waiting
+                                    # for an in-flight refresh to land. Do NOT fail a GOOD
+                                    # render on a stale-cookie 401 (that falsely redoes
+                                    # every clip). Up to ~60s of grace, then give up.
+                                    for _a401 in range(6):
+                                        _fresh = session_ref[0]
+                                        if _fresh is not None and _fresh is not sess:
+                                            resp = _fresh.get(url, timeout=120, allow_redirects=True)
+                                            sess = _fresh
+                                            if resp.status_code != 401:
+                                                break
+                                        print(f"[{account_name}-HTTP-DL] 401 on clip {ci+1} — waiting for session refresh (try {_a401+1}/6)", flush=True)
+                                        time.sleep(10)
+                                        if resp.status_code != 401:
+                                            break
                                 if not resp.ok:
                                     raise Exception(f"HTTP {resp.status_code}")
                                 _ct = (resp.headers.get('Content-Type') or '').lower()
