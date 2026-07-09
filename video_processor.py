@@ -4042,6 +4042,41 @@ def find_line_in_master(master_words: list, master_text: str, dialogue_text: str
     }
 
 
+def resolve_support_spans(master_words: list, support_inserts: list) -> list:
+    """v825 — resolve each support insert's `phrase` to its [start,end] span
+    in the master audio, reusing the existing find_line_in_master matcher.
+
+    Support inserts are authored in master source order, so we match
+    SEQUENTIALLY (cursor advances past each match's end word) — this
+    disambiguates repeated words/phrases the same way v701t does for broll.
+
+    Returns [ {start, end, image_index, support_index, confidence} | None, ... ],
+    index-aligned with support_inserts. None = phrase not found (caller skips it).
+    """
+    master_norm = [_normalize(w["word"]) for w in master_words]
+    master_text = " ".join(master_norm)
+    spans = []
+    cursor = 0
+    for s in support_inserts:
+        b = find_line_in_master(
+            master_words, master_text, s["phrase"], search_from_word=cursor
+        )
+        if b is None:
+            print(f"[Support] phrase not matched: {s['phrase']!r} (support {s['support_index']})")
+            spans.append(None)
+            continue
+        end = b["end"] if b["end"] > b["start"] else b["start"] + 1.0
+        spans.append({
+            "start": b["start"],
+            "end": end,
+            "image_index": s["image_index"],
+            "support_index": s["support_index"],
+            "confidence": b.get("confidence", 1.0),
+        })
+        cursor = b.get("end_word_idx", cursor) + 1
+    return spans
+
+
 def calculate_clip_targets(master_words: list, dialogue_lines: list, master_duration: float = None, sequential: bool = False) -> list:
     """
     Given master word timestamps and ordered dialogue lines,
