@@ -748,6 +748,36 @@
 
 ---
 
+## Support Inserts (v825) + per-image framing (v826)
+
+**v825 — timed support-image inserts (talking-head videos only).** For a video that is ONE continuous talking head plus many still images that pop in over the speech (timed to the words), add a `## Support Inserts` section AFTER the Storyboard. Each `### Support N` places an EXISTING `### Image N` still on a SEPARATE silent track for the word-span `[start_word … end_word]`. It has NO `- **line:**` — it borrows the talking-head audio. Export emits TWO files: `talking_head.mp4` + `support_track.mp4` (stills on black, same length); you composite them in post.
+
+```markdown
+## Support Inserts
+
+### Support 1
+- **image:** image_7
+- **start_word:** not
+- **end_word:** turmeric
+- **phrase:** not turmeric      ← optional; disambiguates repeated words (matched against the master transcript)
+```
+
+Rules: `### Support N` = integer header (strict, like Scene). `image` must reference an image defined in `## Images`. A support still is NOT a text_card and gets NO `### Image` header of its own — it reuses one. Support stills generate in the normal Banana pass (every `### Image N` → an image render) and are never sent to Veo (no scene references them).
+
+**v826 — per-image framing + variants (optional bullets on any `### Image N`):**
+
+```markdown
+### Image 7
+- **aspect_ratio:** 16:9        ← one of 16:9 / 4:3 / 1:1 / 3:4 / 9:16. Omit → batch default (usually 9:16).
+- **variants:** x2              ← x1–x4 = how many variants to generate. Omit → batch default.
+- **Image prompt:**
+...
+```
+
+Support-image stills usually differ from the 9:16 talking head — set their real framing here (16:9 charts/food photos, 3:4 screenshots, 1:1 before/after pairs, 9:16 phone screenshots).
+
+---
+
 **Video:** 
 **Persona:** 
 **Setting:** 
