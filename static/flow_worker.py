@@ -1573,6 +1573,8 @@ def _scan_failure_reason(resp, url, buf_key=''):
         # FailCheck routes the resulting all-failed tiles to the account recovery.
         if st in (403, 429) and 'batchAsyncGenerateVideoStartImage' in ep:
             _record_generate_403(buf_key)
+        elif st == 400 and 'batchAsyncGenerateVideoStartImage' in ep:
+            _record_generate_400(buf_key)  # v847 — bad-request (e.g. stale end-frame), not a policy block
         return
     try:
         data = resp.json()
@@ -4810,6 +4812,31 @@ def _recent_generate_403(buf_key, consume=True):
         hit = (now - ts) <= GENERATE_403_WINDOW_S
         if hit and consume:
             _GENERATE_403_TS.pop(buf_key, None)
+        return hit
+
+# v847 — a generate-call HTTP 400 is a BAD-REQUEST (e.g. Flow's frontend carried a
+# stale/degenerate end-frame → shape=startImage+endImage → 400), NOT a policy
+# block. Record it so the REDO path routes it to a plain generic redo — matching
+# the MAIN path's v820 — instead of policy_gen_next_action, which would wrongly try
+# Prompt B on a 400 ("redo behaves differently from main", operator 2026-07-09).
+_GENERATE_400_TS = {}
+GENERATE_400_WINDOW_S = 90
+
+def _record_generate_400(buf_key):
+    if not buf_key:
+        return
+    with _GENERATE_403_LOCK:
+        _GENERATE_400_TS[buf_key] = time.time()
+
+def _recent_generate_400(buf_key, consume=True):
+    if not buf_key:
+        return False
+    now = time.time()
+    with _GENERATE_403_LOCK:
+        ts = _GENERATE_400_TS.get(buf_key, 0)
+        hit = (now - ts) <= GENERATE_400_WINDOW_S
+        if hit and consume:
+            _GENERATE_400_TS.pop(buf_key, None)
         return hit
 
 # v758.7 — replicate the operator's manual fix for the "unusual activity"
@@ -16540,6 +16567,18 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
         # the download.
         _clear_video_policy_terminal_for_clip(job_id, clip_index)
     if immediate_failure:
+        # v847 — MATCH THE MAIN PATH. A generate HTTP 400 is a BAD-REQUEST (e.g. a
+        # degenerate/stale end-frame → shape=startImage+endImage → 400), NOT a
+        # policy block. The main path treats it as a generic hard-fail → plain
+        # fresh redo (v820). The redo path used to funnel it into
+        # policy_gen_next_action below, which tried Prompt B on a 400 — the "redo
+        # behaves differently from main" divergence (operator 2026-07-09). If a
+        # recent generate-400 landed for this account, do the plain redo instead.
+        if _recent_generate_400(_page_buffer_key(page)):
+            print(f"[REDO] ⚠️ Clip {clip_index+1} generic hard-fail (HTTP 400 bad-request, e.g. end-frame) — plain redo, NOT policy/Prompt B (v847, matches main v820)", flush=True)
+            update_clip_status(clip_id, 'flow_redo_queued', error_message="Generic hard-fail (HTTP 400) — redo")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False
         # v777 — an immediate double-tile failure right after a redo submit is
         # almost always a content-policy block (same image + same prompt that was
         # already blocked once). Route it through the SAME durable policy decision
