@@ -23,6 +23,7 @@ stats = vp.export_support_track(support_clips, master_duration=15.0,
 assert out.exists()
 dur = vp.get_duration(vp.ffprobe_json(out))
 assert 14.7 <= dur <= 15.3, f"track duration {dur} != master 15.0"
+assert dur <= 15.05, f"overrun {dur}"
 info = vp.ffprobe_json(out)
 assert not any(s["codec_type"] == "audio" for s in info["streams"]), "track must be silent"
 print("OK support track", stats)

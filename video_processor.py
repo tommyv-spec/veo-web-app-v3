@@ -4721,13 +4721,24 @@ def export_support_track(support_clips: list, master_duration: float,
         # concat_videos (v692e) injects silent AAC into audio-less inputs, so its
         # output always carries an audio stream. This track must be SILENT (no
         # audio stream at all), so concat to a temp then strip audio into output.
+        #
+        # Length invariant: make_still_segment clamps to a 0.1s floor, so a
+        # sub-0.1s span (or one shrunk below 0.1s by the overlap-clamp) renders
+        # LONGER than its slot while the cursor advanced by the desired end ->
+        # concat can OVERRUN master_duration. Black filler only ever pads up to
+        # master_duration (can't be short), so the track is equal-or-over. The
+        # final pass adds `-t master_duration` to trim the exact overrun off, and
+        # re-encodes (not stream-copy) so the cut lands on the exact frame rather
+        # than the nearest keyframe. Still silent (-an).
         concat_tmp = tp / "concat_tmp.mp4"
         concat_videos([str(s) for s in segments], str(concat_tmp))
         code, _, err = run([FFMPEG_BIN, "-y", "-i", str(concat_tmp),
-                            "-c:v", "copy", "-an", "-movflags", "+faststart",
-                            str(output_path)])
+                            "-t", f"{master_duration:.6f}",
+                            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                            "-pix_fmt", "yuv420p", "-an",
+                            "-movflags", "+faststart", str(output_path)])
         if code != 0:
-            raise RuntimeError(f"support-track audio strip failed: {err}")
+            raise RuntimeError(f"support-track finalize (trim+strip) failed: {err}")
 
     return {
         "support_track": True,
