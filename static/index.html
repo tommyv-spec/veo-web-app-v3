@@ -14154,16 +14154,27 @@ Ambient: same kitchen room tone, soft pour sound.
                 if (!content) return;
                 
                 // Clear any existing cards (except progress cards)
-                const existingCards = content.querySelectorAll('.export-complete, .voice-swap-complete');
+                const existingCards = content.querySelectorAll('.export-complete, .voice-swap-complete, .export-group-header');
                 existingCards.forEach(card => card.remove());
-                
-                // Add cards for each export file
+
+                // Add cards for each export file, grouped by export id (v825.6)
+                let _prevTs = null;
                 for (const filename of exportFiles) {
                     const url = `${API}/jobs/${jobId}/outputs/${filename}`;
-                    
+
                     // Try to load saved metadata
                     const metadata = getExportMetadata(filename);
-                    
+
+                    // v825.6 — group header per export id so the speaker + its
+                    // broll + its overlay tracks visibly cluster under one label.
+                    const _ts = _exportTimestamp(filename);
+                    if (_ts !== _prevTs) {
+                        _prevTs = _ts;
+                        const _tm = _ts.match(/\d{4}(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+                        const _lbl = _tm ? `${_tm[1]}/${_tm[2]} ${_tm[3]}:${_tm[4]}:${_tm[5]}` : 'export';
+                        content.insertAdjacentHTML('beforeend', `<div class="export-group-header" style="margin:14px 0 6px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.5px;border-top:1px solid rgba(255,255,255,0.10);padding-top:8px;">📦 Export ${_lbl}</div>`);
+                    }
+
                     if (filename.startsWith('final_export_')) {
                         // Build subtitle from saved metadata or default
                         let subtitle = 'Final export';
@@ -14201,12 +14212,16 @@ Ambient: same kitchen room tone, soft pour sound.
                         // v825 — support-overlay track: the still overlays placed
                         // at their word-spans on black, silent, same length as the
                         // speaker. Operator composites it OVER the speaker in post.
+                        // v825.6 — one track per aspect ratio; show the ratio in the
+                        // title + nest under the speaker of the same export id.
+                        const _arM = filename.match(/support_track_(\d+x\d+)/);
+                        const _arLabel = _arM ? _arM[1].replace('x', ':') : '';
                         const cardHtml = `
-                            <div class="export-complete" data-filename="${filename}" style="background:linear-gradient(90deg, #0ea5e9 0%, #0284c7 100%);padding:12px 16px;border-radius:var(--radius-md);margin-bottom:8px;">
+                            <div class="export-complete" data-filename="${filename}" style="background:linear-gradient(90deg, #0ea5e9 0%, #0284c7 100%);padding:10px 16px;border-radius:var(--radius-md);margin:0 0 8px 20px;border-left:3px solid rgba(255,255,255,0.35);">
                                 <div style="display:flex;align-items:center;justify-content:space-between;width:100%;flex-wrap:wrap;gap:8px;">
                                     <div style="flex:1;min-width:0;">
-                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🎞️ Support overlays · ${filename}</h3>
-                                        <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">stills at word-spans on black · silent · composite over the speaker</p>
+                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🎞️ Overlays · ${_arLabel}</h3>
+                                        <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${filename} · stills at word-spans on black · silent</p>
                                     </div>
                                     <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
                                         <button onclick="downloadClip('${url}','${filename}')" style="padding:5px 8px;background:white;color:#0284c7;border:none;border-radius:var(--radius-sm);font-size:11px;font-weight:600;cursor:pointer;" title="Download support overlay track">📥</button>
@@ -14228,7 +14243,7 @@ Ambient: same kitchen room tone, soft pour sound.
                             brollSubtitle = `${metadata.duration || '?'}s • broll visuals • voice from speaker variant`;
                         }
                         const cardHtml = `
-                            <div class="export-complete" data-filename="${filename}" style="background:linear-gradient(90deg, #6366f1 0%, #4f46e5 100%);padding:12px 16px;border-radius:var(--radius-md);margin-bottom:8px;">
+                            <div class="export-complete" data-filename="${filename}" style="background:linear-gradient(90deg, #6366f1 0%, #4f46e5 100%);padding:10px 16px;border-radius:var(--radius-md);margin:0 0 8px 20px;border-left:3px solid rgba(255,255,255,0.35);">
                                 <div style="display:flex;align-items:center;justify-content:space-between;width:100%;flex-wrap:wrap;gap:8px;">
                                     <div style="flex:1;min-width:0;">
                                         <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🎬 B-roll · ${filename}</h3>

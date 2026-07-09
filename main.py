@@ -9629,10 +9629,15 @@ async def export_final_video(
                     _groups = _dd(list)
                     for _c in _sup_clips:
                         _groups[_ar_by_idx.get(_c["image_index"], "9:16")].append(_c)
+                    # v825.6 — stamp each support track with the speaker export's
+                    # id (YYYYMMDD_HHMMSS_hash) so it's unique per export (not
+                    # overwritten by the next export) and the UI can pair it with
+                    # its speaker + broll of the same export.
+                    _stem = output_filename.replace('final_export_', '').replace('.mp4', '')
                     _tracks = []
                     for _ar, _grp in _groups.items():
                         _w, _h = _canvas.get(_ar, (1080, 1920))
-                        _fn = f"support_track_{_ar.replace(':', 'x')}.mp4"
+                        _fn = f"support_track_{_ar.replace(':', 'x')}_{_stem}.mp4"
                         _sup_out = output_dir / _fn
                         _est(_grp, _mdur, _sup_out, width=_w, height=_h)
                         try:
