@@ -9616,6 +9616,17 @@ async def export_final_video(
                     _mdur = _gd(_fpj(output_path))
                     _sup_out = output_dir / "support_track.mp4"
                     _est(_sup_clips, _mdur, _sup_out)
+                    # v825.2 — upload the support track to R2 like the main
+                    # export, so it's served + appears in list-outputs. Without
+                    # this the file lives only on Render's ephemeral disk and
+                    # the operator only sees the speaker video.
+                    try:
+                        if storage is not None:
+                            _st_r2 = f"jobs/{job_id}/outputs/support_track.mp4"
+                            await asyncio.to_thread(storage.upload_file, str(_sup_out), _st_r2, 'video/mp4')
+                            print(f"[Export][v825] support_track uploaded to R2: {_st_r2}", flush=True)  # TEMP DIAG
+                    except Exception as _st_up_e:
+                        print(f"[Export][v825] support_track R2 upload failed (non-fatal): {_st_up_e}", flush=True)
                     support_track_info = {
                         "support_track_filename": "support_track.mp4",
                         "support_track_url": f"/api/jobs/{job_id}/outputs/support_track.mp4",
