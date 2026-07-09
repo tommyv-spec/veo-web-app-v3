@@ -45,3 +45,35 @@ assert s["phrase"] == "not turmeric"
 assert len(parsed["images"]) == 2
 assert len(parsed["scenes"]) == 1
 print("OK support parse")
+
+MD2 = '''
+## Images
+
+### Image 1
+- **aspect_ratio:** 9:16
+- **Image prompt:**
+```
+Talking head. Aspect ratio 9:16.
+```
+
+### Image 2
+- **aspect_ratio:** 16:9
+- **variants:** x3
+- **Image prompt:**
+```
+A declining bar chart. Aspect ratio 16:9.
+```
+
+## Storyboard
+
+### Scene 1
+- **image:** image_1
+- **line:** hello
+'''
+p2 = ip.parse_scene_table(MD2)
+by = {i["image_index"]: i for i in p2["images"]}
+assert by[1]["aspect_ratio"] == "9:16", by[1]
+assert by[2]["aspect_ratio"] == "16:9", by[2]
+assert by[2]["n_variants"] == 3, by[2]
+assert by[1].get("n_variants") is None, by[1]
+print("OK per-image framing parse")

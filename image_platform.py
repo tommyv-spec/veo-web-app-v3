@@ -3555,6 +3555,22 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
         if narrative_lens_match:
             narrative_lens = narrative_lens_match.group(1).strip()
 
+        # v826 — per-image framing (aspect ratio) + variant count. Both
+        # optional; NULL -> the ImageNode falls back to the batch req value.
+        aspect_match = _re.search(
+            r"^\s*[-*]\s*\*\*aspect_ratio:\*\*\s*([0-9]+:[0-9]+)\s*$",
+            block, flags=_re.MULTILINE,
+        )
+        img_aspect_ratio: Optional[str] = aspect_match.group(1).strip() if aspect_match else None
+
+        variants_match = _re.search(
+            r"^\s*[-*]\s*\*\*variants:\*\*\s*x?([1-4])\s*$",
+            block, flags=_re.MULTILINE | _re.IGNORECASE,
+        )
+        img_n_variants: Optional[int] = int(variants_match.group(1)) if variants_match else None
+        if img_aspect_ratio or img_n_variants:
+            print(f"[v826/parse] image_{image_index} aspect={img_aspect_ratio} variants={img_n_variants}", flush=True)
+
         if frame_anchor_s is not None or visual_delta:
             print(
                 f"[v667/parse] image_{image_index} "
@@ -3678,6 +3694,8 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
             "role": role,                      # v698A — None | 'voiceover_anchor'
             "pair_role": pair_role_value,      # v718j — None | 'start' | 'end'
             "paired_with": paired_with_md_idx, # v718j — None | int (markdown image index)
+            "aspect_ratio": img_aspect_ratio,   # v826 (None -> batch default)
+            "n_variants": img_n_variants,        # v826 (None -> batch default)
         })
 
     if not images:
