@@ -3726,6 +3726,64 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
     return images
 
 
+def _parse_support_blocks_new(md_text: str, known_indexes: set) -> list:
+    """v825 — parse `### Support N` timed support-image inserts.
+
+    Each block carries an image ref + a word-span anchor:
+        ### Support 3
+        - **image:** image_7
+        - **start_word:** called
+        - **end_word:** acid
+        - **phrase:** called chlorogenic acid   (optional; disambiguates repeats)
+
+    The insert has NO `- **line:**` — it borrows the continuous master audio.
+    `phrase` (falls back to "start_word end_word") is matched against the
+    master transcript at export time to get the [start,end] time span.
+
+    Returns [{support_index, image_index, start_word, end_word, phrase}, ...].
+    Absent `### Support` headers -> []. Strict integer header (like Scene, v696).
+    """
+    pattern = _re.compile(r"^###\s+Support\s+(\d+)\s*$", _re.MULTILINE)
+    matches = list(pattern.finditer(md_text))
+    blocks = []
+    for i, m in enumerate(matches):
+        idx = int(m.group(1))
+        body_start = m.end()
+        body_end = matches[i + 1].start() if i + 1 < len(matches) else len(md_text)
+        nxt = _re.search(r"^\s*#{2,3}\s+\S", md_text[body_start:body_end], _re.MULTILINE)
+        body = md_text[body_start: body_start + nxt.start()] if nxt else md_text[body_start:body_end]
+
+        def _field(name):
+            fm = _re.search(rf"^-\s*\*\*{name}:\*\*\s*(.+?)\s*$", body, _re.MULTILINE)
+            return fm.group(1).strip() if fm else None
+
+        img_raw = _field("image")
+        img_m = _re.search(r"\d+", img_raw) if img_raw else None
+        image_index = int(img_m.group()) if img_m else None
+        start_word = _field("start_word")
+        end_word = _field("end_word")
+        phrase = _field("phrase")
+
+        if image_index is None or not start_word or not end_word:
+            raise ValueError(
+                f"Support {idx}: requires `- **image:** image_N`, "
+                f"`- **start_word:**`, and `- **end_word:**`. "
+                f"See template_reference.md §v825."
+            )
+        if image_index not in known_indexes:
+            raise ValueError(
+                f"Support {idx}: image_{image_index} is not defined in ## Images."
+            )
+        blocks.append({
+            "support_index": idx,
+            "image_index": image_index,
+            "start_word": start_word,
+            "end_word": end_word,
+            "phrase": phrase or f"{start_word} {end_word}",
+        })
+    return blocks
+
+
 def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict[str, Any]]:
     """New format: parse ``### Scene N`` headers as storyboard scenes.
 
@@ -4337,11 +4395,13 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
                         f"binds the persona upload. "
                         f"See template_reference.md §v698A Gate 10."
                     )
+        support_inserts = _parse_support_blocks_new(md_text, known_indexes)
         return {
             "images": images,
             "scenes": scenes,
             "ingredients": ingredients,
             "format": "new",
+            "support_inserts": support_inserts,
         }
 
     # Legacy format: every ### Scene N is both image and scene (1:1)
@@ -4388,6 +4448,7 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
         "scenes": scenes,
         "ingredients": ingredients,
         "format": "legacy",
+        "support_inserts": [],
     }
 
 
