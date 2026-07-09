@@ -5168,8 +5168,15 @@ def route_generation_policy(clip_id, current_model, is_prominent, account_name="
                 "Flow still flagged this as a prominent person after the reworded line (Prompt B). "
                 "Rework the dialogue line - the wording keeps tripping the filter.")
             return ('fail_terminal', 'prominent persists after reworded line (Prompt B)')
-        # terminal_image — no Prompt B (silent/no line): OLD behavior, replace-image card
-        return route_terminal_content_reject(clip_id, 'PROMINENT_PEOPLE', account_name=account_name)
+        # v845 — terminal_image: no Prompt B to try (silent / no-line clip).
+        # Prominent is NEVER an image-swap problem (operator 2026-07-09: "prominent
+        # people don't swap image"), so fail as rework-the-line here too, not the
+        # replace-image card. Matches handle_terminal_reject's v844 branch.
+        fail_clip_general_policy(
+            clip_id,
+            "Flow flagged a prominent person and there is no reworded line (Prompt B) to try. "
+            "Rework the dialogue line - do NOT swap the image (the avatar face is not the fix).")
+        return ('fail_terminal', 'prominent (no Prompt B) - rework the line, no image swap')
     return policy_gen_next_action(clip_id, current_model, generation_attempt=generation_attempt)
 
 
@@ -20386,9 +20393,9 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # again. Route it to a terminal fail instead of a useless redo.
             _oterm = _peek_video_policy_terminal_for_clip(job_id, _oci)
             if _oterm:
-                print(f"[Flow] ⛔ Clip {_oci+1} terminal content filter ({_oterm}) — was tried + failed; NOT redoing (face won't change)", flush=True)
+                print(f"[Flow] ⛔ Clip {_oci+1} terminal content filter ({_oterm}) — routing via the single handler (v845: Prompt B for prominent/sexual, terminal otherwise)", flush=True)
                 try:
-                    route_terminal_content_reject(_oc['id'], _oterm, account_name="")
+                    handle_terminal_reject(_oc['id'], _oterm, job_id=job_id, clip_index=_oci)
                 except Exception as _rte:
                     print(f"[Flow] terminal route failed ({_rte}) — marking failed", flush=True)
                     update_clip_status(_oc['id'], 'failed', error_message=f"Terminal content filter: {_oterm}")
@@ -20706,9 +20713,9 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                     # clip never even enters the redo queue.
                                     _pj_term = _consume_video_policy_terminal_for_clip(job_id, _ci)
                                     if _pj_term:
-                                        print(f"[Flow] ⛔ Post-job: clip {_ci+1} terminal content filter ({_pj_term}) — replace-image card, NOT redoing", flush=True)
+                                        print(f"[Flow] ⛔ Post-job: clip {_ci+1} terminal content filter ({_pj_term}) — routing via the single handler (v845: Prompt B for prominent/sexual, terminal otherwise)", flush=True)
                                         try:
-                                            route_terminal_content_reject(_clip_obj['id'], _pj_term, account_name="")
+                                            handle_terminal_reject(_clip_obj['id'], _pj_term, job_id=job_id, clip_index=_ci)
                                         except Exception as _pje:
                                             print(f"[Flow] ⚠ Post-job prominent-people route failed ({_pje}) — marking general policy", flush=True)
                                             fail_clip_general_policy(_clip_obj['id'], f"Blocked by Flow's {_pj_term} filter — change the avatar face.")
