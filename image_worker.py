@@ -3854,8 +3854,17 @@ class _FaClient:
                 return media_id, gen.get("fifeUrl", gen.get("imageUri", ""))
             reason = _fa_error_reason(res).lower()
             last = res
+            # v843 — an UNUSUAL_ACTIVITY / 403 account block is NOT a transient
+            # captcha hiccup. Re-minting reCAPTCHA on a flagged account is futile
+            # (observed: 144 fetches / 77 min grinding on ONE node). Bail NOW so
+            # the caller ships what it has and triggers a golden restore, instead
+            # of retrying reCAPTCHA up to _FA_CAPTCHA_MAX_RETRIES times.
+            if ("unusual_activity" in reason or "permission_denied" in reason
+                    or " 403" in reason or "code=403" in reason):
+                self._bump_outcome("unusual")
+                break
             if "captcha" in reason or "recaptcha" in reason:
-                self._bump_outcome("recaptcha")   # v833
+                self._bump_outcome("recaptcha")   # v833 — genuine transient mint hiccup
                 continue
             # v833 — non-captcha error: bucket it so the timing line shows the mix
             if "permission_denied" in reason or " 403" in reason or "code=403" in reason or "unusual" in reason:
@@ -4851,11 +4860,13 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
                     _unusual = _is_unusual(reason)
                     if _unusual:
                         _saw_unusual = True
-                    # retry the SAME variant on a transient 5xx OR a 403 block
-                    # (each submit_image mints a fresh reCAPTCHA token).
-                    if (_unusual or _is_server_5xx(reason)) and _att < _SUBMIT_API_RETRIES:
+                    # v843 — retry only a transient 5xx. Do NOT retry on 'unusual
+                    # activity': the account is blocked, re-minting reCAPTCHA is
+                    # futile (was grinding 144 fetches / 77 min). On unusual we
+                    # bail fast + let the caller ship-and-restore.
+                    if _is_server_5xx(reason) and _att < _SUBMIT_API_RETRIES:
                         _w = 2 * (_att + 1)
-                        _kind = "unusual-activity" if _unusual else "server error"
+                        _kind = "server error"
                         print(f"{pfx}[flow_api] {_kind} on variant {v + 1}/{variants} "
                               f"({reason[-44:]}) — API retry {_att + 1}/{_SUBMIT_API_RETRIES} in {_w}s", flush=True)
                         time.sleep(_w)
@@ -4895,6 +4906,19 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
         if _last_fail_reason:
             print(f"{pfx}[flow_api] {len(captured_fife_urls)}/{variants} variant(s) captured; "
                   f"some failed transiently ({_last_fail_reason[-44:]}) — shipping what landed", flush=True)
+        if _saw_unusual:
+            # v843 — operator: restore on ANY unusual sighting. Even though some
+            # variants landed, an unusual-activity block was SEEN → the account is
+            # being flagged (partial capture masked it before, so a 1/4 node kept
+            # grinding without ever restoring). Ship what captured, then flag a
+            # golden restore so the session resets before the next node — the
+            # caller (_submit_one_job) reads page._flow_api_unusual_reason after
+            # this returns True.
+            try:
+                page._flow_api_unusual_reason = _last_fail_reason or "unusual-activity (partial capture)"
+            except Exception:
+                pass
+            print(f"{pfx}[flow_api] ⚠ [v843] unusual seen ({len(captured_fife_urls)}/{variants} captured) — shipping, then golden restore before next node", flush=True)
     elif _saw_unusual:
         # EVERY variant blocked with unusual-activity after retries → genuine
         # account block → golden restore.
@@ -8524,6 +8548,18 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 ):
                     _save_state()
                     print(f"[API:submit] ✓ Node {node_id} submitted via flow_api (in_flight={len([j for j in in_flight.values() if j.status=='submitted'])})", flush=True)
+                    # v843 — the node shipped, but if an unusual-activity block was
+                    # SEEN during submit (partial capture), flag a golden restore
+                    # before the next node (operator: restore on ANY unusual). The
+                    # in-flight node re-queues via /release-claims after the restore.
+                    _ua_ship = getattr(page, "_flow_api_unusual_reason", "")
+                    if _ua_ship:
+                        try:
+                            page._flow_api_unusual_reason = ""
+                        except Exception:
+                            pass
+                        print(f"[{ctx}] 🔁 [v843] unusual seen (node shipped) — golden restore before next node", flush=True)
+                        _restore_signal["golden"] = True
                     return True
 
                 # Account-level 'unusual activity' block → golden restore. Do NOT
