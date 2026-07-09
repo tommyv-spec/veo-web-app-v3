@@ -5645,10 +5645,10 @@ def _import_scene_table_impl(
             name=f"{_v749_name_prefix}Scene {image_index}",
             kind="generated",
             prompt=final_prompt,
-            aspect_ratio=req.aspect_ratio,
+            aspect_ratio=img.get("aspect_ratio") or req.aspect_ratio,   # v826 per-image
             resolution=req.resolution,
             model=req.model,
-            n_variants=req.n_variants,
+            n_variants=img.get("n_variants") or req.n_variants,          # v826 per-image
             status="draft",
             batch_id=batch_id,
             scene_index_in_batch=image_index,
