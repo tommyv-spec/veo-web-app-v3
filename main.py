@@ -9563,7 +9563,7 @@ async def export_final_video(
         # post-production compositing. Fully guarded — never breaks export.
         support_track_info = {}
         try:
-            from image_platform import ImageJobBatch, ImageNode, ImageVariant, parse_scene_table as _pst
+            from image_platform import ImageJobBatch, ImageNode, ImageVariant, parse_scene_table as _pst, images_root as _iroot, _storage_download_to_local as _dl2
             import re as _re2, subprocess as _sp2
             _sb = db.query(ImageJobBatch).filter(
                 ImageJobBatch.promoted_video_job_id == job_id
@@ -9597,7 +9597,11 @@ async def export_final_video(
                         continue
                     _v = db.query(ImageVariant).filter(ImageVariant.id == _n.chosen_variant_id).first()
                     if _v and _v.image_path:
-                        _idx_to_path[int(_m.group(1))] = _v.image_path
+                        _abs = _iroot() / _v.image_path
+                        if not _abs.exists():
+                            _dl2(_v.image_path)  # rehydrate from R2 if evicted
+                        if _abs.exists():
+                            _idx_to_path[int(_m.group(1))] = str(_abs)
                 # 4) assemble support clips (skip any still missing locally)
                 _sup_clips = []
                 for _sp_ in _spans:
