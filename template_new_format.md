@@ -759,7 +759,7 @@
 - **image:** image_7
 - **start_word:** not
 - **end_word:** turmeric
-- **phrase:** not turmeric      ← optional; disambiguates repeated words (matched against the master transcript)
+- **phrase:** not turmeric      ← OPTIONAL (v825.1). start_word→end_word DEFINE the overlay's span; phrase only disambiguates WHICH occurrence when a word repeats.
 ```
 
 Rules: `### Support N` = integer header (strict, like Scene). `image` must reference an image defined in `## Images`. A support still is NOT a text_card and gets NO `### Image` header of its own — it reuses one. Support stills generate in the normal Banana pass (every `### Image N` → an image render) and are never sent to Veo (no scene references them).
