@@ -14109,7 +14109,8 @@ Ambient: same kitchen room tone, soft pour sound.
                     f.endsWith('.mp4') &&
                     (f.startsWith('final_export_')
                      || f.startsWith('final_broll_')
-                     || f.startsWith('voice_cloned'))
+                     || f.startsWith('voice_cloned')
+                     || f.startsWith('support_track'))  // v825 — support-overlay track
                 );
 
                 // v701m — order exports newest-first, with speaker + broll
@@ -14133,6 +14134,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     if (fn.startsWith('final_export_')) return 0;
                     if (fn.startsWith('final_broll_')) return 1;
                     if (fn.startsWith('voice_cloned')) return 2;
+                    if (fn.startsWith('support_track')) return 3;  // v825
                     return 9;
                 };
                 exportFiles.sort((a, b) => {
@@ -14189,6 +14191,25 @@ Ambient: same kitchen room tone, soft pour sound.
                                     <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
                                         <button onclick="openVoiceSwapForFile('${jobId}', '${filename}')" style="padding:5px 8px;background:rgba(255,255,255,0.2);color:white;border:none;border-radius:var(--radius-sm);font-size:11px;cursor:pointer;" title="Clone voice">🎤</button>
                                         <button onclick="downloadClip('${url}','${filename}')" style="padding:5px 8px;background:white;color:#059669;border:none;border-radius:var(--radius-sm);font-size:11px;font-weight:600;cursor:pointer;" title="Download video">📥</button>
+                                        <button onclick="this.closest('.export-complete').remove()" style="padding:5px 8px;background:rgba(255,255,255,0.2);color:white;border:none;border-radius:var(--radius-sm);font-size:11px;cursor:pointer;" title="Remove">✕</button>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        content.insertAdjacentHTML('beforeend', cardHtml);
+                    } else if (filename.startsWith('support_track')) {
+                        // v825 — support-overlay track: the still overlays placed
+                        // at their word-spans on black, silent, same length as the
+                        // speaker. Operator composites it OVER the speaker in post.
+                        const cardHtml = `
+                            <div class="export-complete" data-filename="${filename}" style="background:linear-gradient(90deg, #0ea5e9 0%, #0284c7 100%);padding:12px 16px;border-radius:var(--radius-md);margin-bottom:8px;">
+                                <div style="display:flex;align-items:center;justify-content:space-between;width:100%;flex-wrap:wrap;gap:8px;">
+                                    <div style="flex:1;min-width:0;">
+                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🎞️ Support overlays · ${filename}</h3>
+                                        <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">stills at word-spans on black · silent · composite over the speaker</p>
+                                    </div>
+                                    <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
+                                        <button onclick="downloadClip('${url}','${filename}')" style="padding:5px 8px;background:white;color:#0284c7;border:none;border-radius:var(--radius-sm);font-size:11px;font-weight:600;cursor:pointer;" title="Download support overlay track">📥</button>
                                         <button onclick="this.closest('.export-complete').remove()" style="padding:5px 8px;background:rgba(255,255,255,0.2);color:white;border:none;border-radius:var(--radius-sm);font-size:11px;cursor:pointer;" title="Remove">✕</button>
                                     </div>
                                 </div>
