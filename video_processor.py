@@ -4043,37 +4043,82 @@ def find_line_in_master(master_words: list, master_text: str, dialogue_text: str
 
 
 def resolve_support_spans(master_words: list, support_inserts: list) -> list:
-    """v825 — resolve each support insert's `phrase` to its [start,end] span
-    in the master audio, reusing the existing find_line_in_master matcher.
+    """v825.1 — resolve each support insert to its [start,end] span in the master
+    audio. The `start_word` + `end_word` are AUTHORITATIVE: the span runs from the
+    start word's start-time to the end word's end-time. The optional `phrase` only
+    DISAMBIGUATES which occurrence to use when a word repeats (it locates the
+    region; it does NOT define the span). Matching is SEQUENTIAL — a cursor
+    advances past each resolved end word so repeats resolve in author order.
 
-    Support inserts are authored in master source order, so we match
-    SEQUENTIALLY (cursor advances past each match's end word) — this
-    disambiguates repeated words/phrases the same way v701t does for broll.
+    v825.0 (superseded) matched `phrase` as a whole line and used ITS span, so a
+    phrase that drifted from the declared start/end words timed the overlay onto
+    the wrong words. v825.1 anchors on the words themselves.
+
+    Back-compat: if start_word/end_word are missing (never for a v825-parsed
+    build — the parser requires them), fall back to the old phrase-span match.
 
     Returns [ {start, end, image_index, support_index, confidence} | None, ... ],
-    index-aligned with support_inserts. None = phrase not found (caller skips it).
+    index-aligned with support_inserts. None = words not found (caller skips it).
     """
-    master_norm = [_normalize(w["word"]) for w in master_words]
-    master_text = " ".join(master_norm)
+    norms = [_normalize(w["word"]) for w in master_words]
+    master_text = " ".join(norms)
+    n = len(master_words)
     spans = []
     cursor = 0
     for s in support_inserts:
-        b = find_line_in_master(
-            master_words, master_text, s["phrase"], search_from_word=cursor
-        )
-        if b is None:
-            print(f"[Support] phrase not matched: {s['phrase']!r} (support {s['support_index']})")
+        sw = _normalize(s.get("start_word") or "")
+        ew = _normalize(s.get("end_word") or "")
+        phrase = (s.get("phrase") or "").strip()
+
+        # Back-compat: no start/end words -> old phrase-span behavior.
+        if not sw or not ew:
+            b = find_line_in_master(master_words, master_text, phrase, search_from_word=cursor) if phrase else None
+            if b is None:
+                print(f"[Support] no start/end word and phrase unmatched (support {s.get('support_index')})")
+                spans.append(None)
+                continue
+            end = b["end"] if b["end"] > b["start"] else b["start"] + 1.0
+            spans.append({"start": b["start"], "end": end, "image_index": s["image_index"],
+                          "support_index": s["support_index"], "confidence": b.get("confidence", 1.0)})
+            cursor = b.get("end_word_idx", cursor) + 1
+            continue
+
+        # Optional phrase locates the region (disambiguates a repeated word).
+        region_lo = cursor
+        region_hi = n - 1
+        if phrase:
+            b = find_line_in_master(master_words, master_text, phrase, search_from_word=cursor)
+            if b is not None:
+                region_lo = b.get("start_word_idx", cursor)
+                region_hi = b.get("end_word_idx", n - 1)
+
+        # start_word = first match at/after the region start.
+        start_idx = next((i for i in range(region_lo, n) if norms[i] == sw), None)
+        if start_idx is None:
+            print(f"[Support] start_word {sw!r} not found (support {s.get('support_index')})")
             spans.append(None)
             continue
-        end = b["end"] if b["end"] > b["start"] else b["start"] + 1.0
+        # end_word = first match at/after start_idx, bounded by the region (or a
+        # small window if no phrase narrowed it).
+        end_hi = min(n - 1, max(region_hi, start_idx + 40))
+        end_idx = next((i for i in range(start_idx, end_hi + 1) if norms[i] == ew), None)
+        if end_idx is None:
+            print(f"[Support] end_word {ew!r} not found after start (support {s.get('support_index')})")
+            spans.append(None)
+            continue
+
+        start_t = master_words[start_idx]["start"]
+        end_t = master_words[end_idx]["end"]
+        if end_t <= start_t:
+            end_t = start_t + 1.0
         spans.append({
-            "start": b["start"],
-            "end": end,
+            "start": start_t,
+            "end": end_t,
             "image_index": s["image_index"],
             "support_index": s["support_index"],
-            "confidence": b.get("confidence", 1.0),
+            "confidence": 1.0,
         })
-        cursor = b.get("end_word_idx", cursor) + 1
+        cursor = end_idx + 1
     return spans
 
 
