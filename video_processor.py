@@ -4119,6 +4119,21 @@ def resolve_support_spans(master_words: list, support_inserts: list) -> list:
             "confidence": 1.0,
         })
         cursor = end_idx + 1
+
+    # v825.5 — minimum HOLD + TAIL so a brief single-word overlay (oysters,
+    # watermelon) doesn't flash and vanish before the word is even finished.
+    # Extend each span's END to at least start+MIN_HOLD and at least
+    # word-end+TAIL, but never into the next overlay (leave GAP). Never shorten.
+    MIN_HOLD, TAIL, GAP = 1.3, 0.35, 0.05
+    order = [i for i in sorted(range(len(spans)),
+                               key=lambda k: (spans[k]["start"] if spans[k] else 1e9))
+             if spans[i]]
+    for pos, i in enumerate(order):
+        s = spans[i]
+        want = max(s["end"] + TAIL, s["start"] + MIN_HOLD)
+        if pos + 1 < len(order):
+            want = min(want, spans[order[pos + 1]]["start"] - GAP)
+        s["end"] = max(s["end"], want)
     return spans
 
 
