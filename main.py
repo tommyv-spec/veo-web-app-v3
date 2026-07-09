@@ -9558,12 +9558,78 @@ async def export_final_video(
         _maybe_auto_enter_lifecycle(job, now=datetime.utcnow())
         db.commit()
 
+        # v825 — timed support-image inserts: emit a second SILENT track
+        # (stills at their word-spans) beside the talking-head master, for
+        # post-production compositing. Fully guarded — never breaks export.
+        support_track_info = {}
+        try:
+            from image_platform import ImageJobBatch, ImageNode, ImageVariant, parse_scene_table as _pst
+            import re as _re2, subprocess as _sp2
+            _sb = db.query(ImageJobBatch).filter(
+                ImageJobBatch.promoted_video_job_id == job_id
+            ).first()
+            _smd = _sb.source_markdown if _sb else None
+            _sup = (_pst(_smd).get("support_inserts") if _smd else []) or []
+            print(f"[Export][v825] support_inserts={len(_sup)}", flush=True)  # TEMP DIAG
+            if _sup and _sb:
+                from video_processor import (
+                    transcribe_master_audio as _tma,
+                    resolve_support_spans as _rss,
+                    export_support_track as _est,
+                    ffprobe_json as _fpj, get_duration as _gd,
+                )
+                # 1) master audio from the final talking-head mp4
+                _sup_audio = output_dir / "support_master.mp3"
+                _ac = ["ffmpeg", "-y", "-i", str(output_path), "-vn",
+                       "-acodec", "libmp3lame", "-q:a", "2", str(_sup_audio)]
+                _acr = await asyncio.to_thread(_sp2.run, _ac, capture_output=True, text=True)
+                if _acr.returncode != 0 or not _sup_audio.exists():
+                    raise RuntimeError(f"support master-audio extract failed: {(_acr.stderr or '')[-300:]}")
+                # 2) word timestamps + phrase spans
+                _mw = await asyncio.to_thread(_tma, _sup_audio)
+                _spans = _rss(_mw, _sup)
+                # 3) image_index -> approved still path (batch nodes named "... Scene N")
+                _nodes = db.query(ImageNode).filter(ImageNode.batch_id == _sb.id).all()
+                _idx_to_path = {}
+                for _n in _nodes:
+                    _m = _re2.search(r"Scene\s+(\d+)\s*$", _n.name or "")
+                    if not _m or not _n.chosen_variant_id:
+                        continue
+                    _v = db.query(ImageVariant).filter(ImageVariant.id == _n.chosen_variant_id).first()
+                    if _v and _v.image_path:
+                        _idx_to_path[int(_m.group(1))] = _v.image_path
+                # 4) assemble support clips (skip any still missing locally)
+                _sup_clips = []
+                for _sp_ in _spans:
+                    if not _sp_:
+                        continue
+                    _p = _idx_to_path.get(_sp_["image_index"])
+                    if not _p or not Path(_p).exists():
+                        print(f"[Export][v825] no local still for image_{_sp_.get('image_index')} (path={_p})", flush=True)
+                        continue
+                    _sup_clips.append({**_sp_, "path": _p})
+                if _sup_clips:
+                    _mdur = _gd(_fpj(output_path))
+                    _sup_out = output_dir / "support_track.mp4"
+                    _est(_sup_clips, _mdur, _sup_out)
+                    support_track_info = {
+                        "support_track_filename": "support_track.mp4",
+                        "support_track_url": f"/api/jobs/{job_id}/outputs/support_track.mp4",
+                        "support_stills": len(_sup_clips),
+                    }
+                    print(f"[Export][v825] support_track -> {_sup_out} ({len(_sup_clips)} stills)", flush=True)  # TEMP DIAG
+                else:
+                    print("[Export][v825] no resolvable support stills; skipping track", flush=True)
+        except Exception as _sup_e:
+            print(f"[Export][v825] support-track skipped (non-fatal): {_sup_e}", flush=True)
+
         return {
             "success": True,
             "filename": output_filename,
             "download_url": f"/api/jobs/{job_id}/outputs/{output_filename}",
             "stats": stats,
             **audio_info,
+            **support_track_info,
         }
         
     except Exception as e:
