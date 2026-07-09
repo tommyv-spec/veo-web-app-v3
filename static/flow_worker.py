@@ -22160,8 +22160,20 @@ class AccountWorker(threading.Thread):
                                 _xurl = _video_media_url(_xurl)
                                 try:
                                     _r = sess.get(_xurl, timeout=120, allow_redirects=True)
-                                    if _r.status_code == 401 and sess is not session_ref[0] and session_ref[0] is not None:
-                                        _r = session_ref[0].get(_xurl, timeout=120, allow_redirects=True)
+                                    if _r.status_code == 401:
+                                        # v846 — same stale-token retry as the main fetch (v843):
+                                        # wait for the submit thread's re-snapshot instead of
+                                        # dropping a good late-bound render to redo.
+                                        for _lx401 in range(6):
+                                            _lfresh = session_ref[0]
+                                            if _lfresh is not None and _lfresh is not sess:
+                                                _r = _lfresh.get(_xurl, timeout=120, allow_redirects=True)
+                                                sess = _lfresh
+                                                if _r.status_code != 401:
+                                                    break
+                                            if _r.status_code != 401:
+                                                break
+                                            time.sleep(10)
                                     if not _r.ok:
                                         continue
                                     _xct = (_r.headers.get('Content-Type') or '').lower()
