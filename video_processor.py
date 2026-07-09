@@ -4668,8 +4668,73 @@ def export_with_master_audio(
     print(f"[MasterAlign] Final duration: {stats['final_duration']:.2f}s")
     print(f"[MasterAlign] Methods: {stats['methods_used']}")
     print(f"[MasterAlign] Black segments: {stats['black_segments']} ({stats['total_black_duration']:.2f}s)")
-    
+
     return stats
+
+
+def export_support_track(support_clips: list, master_duration: float,
+                         output_path, width: int = 720, height: int = 1280,
+                         fps: int = 24) -> dict:
+    """v825 — build the SILENT support-image track for post-production compositing.
+
+    support_clips: [{image_index, path (still png), start, end}, ...] where
+    start/end are absolute seconds on the master timeline. Each still shows for
+    [start,end]; the rest of the timeline is black. Total length == master_duration
+    so the operator can drop it directly over the talking-head master. NO audio.
+    Overlapping spans clamped last-wins (earlier end -> next start). Returns stats.
+    """
+    clips = sorted([c for c in support_clips if c and c.get("path")], key=lambda c: c["start"])
+    for i, c in enumerate(clips):
+        c["start"] = max(0.0, min(c["start"], master_duration))
+        c["end"] = max(c["start"] + 0.1, min(c["end"], master_duration))
+        if i + 1 < len(clips):
+            c["end"] = min(c["end"], clips[i + 1]["start"])
+
+    def _black(dur, path):
+        cmd = [FFMPEG_BIN, "-y", "-f", "lavfi", "-i",
+               f"color=c=black:s={width}x{height}:r={fps}", "-t", f"{max(0.05, dur):.6f}",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+               "-pix_fmt", "yuv420p", "-an", str(path)]
+        code, _, err = run(cmd)
+        if code != 0:
+            raise RuntimeError(f"black filler failed: {err}")
+
+    with tempfile.TemporaryDirectory() as td:
+        tp = Path(td)
+        segments = []
+        cursor = 0.0
+        seg_i = 0
+        for c in clips:
+            if c["start"] - cursor > 0.03:
+                bp = tp / f"black_{seg_i:04d}.mp4"
+                _black(c["start"] - cursor, bp)
+                segments.append(bp); seg_i += 1
+            sp = tp / f"still_{seg_i:04d}.mp4"
+            make_still_segment(Path(c["path"]), c["end"] - c["start"], sp, width, height, fps)
+            segments.append(sp); seg_i += 1
+            cursor = c["end"]
+        if master_duration - cursor > 0.03:
+            bp = tp / f"black_{seg_i:04d}.mp4"
+            _black(master_duration - cursor, bp)
+            segments.append(bp)
+
+        # concat_videos (v692e) injects silent AAC into audio-less inputs, so its
+        # output always carries an audio stream. This track must be SILENT (no
+        # audio stream at all), so concat to a temp then strip audio into output.
+        concat_tmp = tp / "concat_tmp.mp4"
+        concat_videos([str(s) for s in segments], str(concat_tmp))
+        code, _, err = run([FFMPEG_BIN, "-y", "-i", str(concat_tmp),
+                            "-c:v", "copy", "-an", "-movflags", "+faststart",
+                            str(output_path)])
+        if code != 0:
+            raise RuntimeError(f"support-track audio strip failed: {err}")
+
+    return {
+        "support_track": True,
+        "stills_placed": len(clips),
+        "master_duration": master_duration,
+        "output": str(output_path),
+    }
 
 
 def export_final_video(
