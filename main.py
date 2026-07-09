@@ -3453,13 +3453,16 @@ async def get_job(
     try:
         from image_platform import ImageJobBatch
         _b = (
-            db.query(ImageJobBatch.id)
+            db.query(ImageJobBatch.id, ImageJobBatch.name)
             .filter(ImageJobBatch.promoted_video_job_id == job_id)
             .first()
         )
         if _b:
             resp.source_image_batch_id = _b[0]
-            print(f"[v780] job {job_id[:8]} promoted from image batch {str(_b[0])[:8]} (Image-job button shown)", flush=True)
+            # v780.1 — also surface the batch's human name so the video-job
+            # header can show the build title on top of the UUID.
+            resp.source_image_batch_name = _b[1]
+            print(f"[v780.1] job {job_id[:8]} promoted from image batch {str(_b[0])[:8]} name={_b[1]!r} (Image-job button + title shown)", flush=True)
     except Exception as _e:
         print(f"[v780] source_image_batch_id lookup skipped (non-fatal): {_e}", flush=True)
     return resp

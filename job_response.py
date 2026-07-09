@@ -39,3 +39,7 @@ class JobResponse(BaseModel):
     # promoted from (ImageJobBatch.promoted_video_job_id == job.id), so the UI
     # can offer a "go to image job" button. None for jobs not from an image job.
     source_image_batch_id: Optional[str] = None
+    # v780.1 — the source image batch's human name (ImageJobBatch.name), so the
+    # video job's Review & Approve header can show the build title on top instead
+    # of only the UUID. Single-job GET only; None for jobs not from an image job.
+    source_image_batch_name: Optional[str] = None

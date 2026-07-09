@@ -15000,3 +15000,18 @@ Ran a metric bake-off on the operator's REAL prod data (92 local videos vs the 7
 **Scope / gates**: frontend-only (`code/static/index.html`) — no output-shape change, no skeleton change, no linter change, no build edits, no backend change (reuses the existing `/api/images/nodes/{id}/choose` POST + `imgRefreshNodes` poll). Forward-only. Verified out-of-browser: `node --check` clean + a logic harness confirmed scene-order advance, single wrap, cross-build skip, and stop-when-all-approved. The in-app redirect still needs one operator confirmation before any "works" claim.
 
 **Touched**: this deep-dive (`code/template_reference.md` §v824, canonical), `code/static/index.html` (`imgNextPendingNode` helper + `imgChooseVariant` auto-advance), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline). Operator request 2026-07-08.
+
+## v780.1 — video-job header shows the source image job's NAME on top (extends v780)
+
+**What**: the video job's Review & Approve panel now shows the build's human name (e.g. "Nuri Korella ED Organ Shock Man Cinnamon Turmeric Protocol Growth v2") as a bold title at the top of the job-info panel, instead of only the raw UUID. The name is the source image batch's `name` (the same title shown on the image-job batch overview).
+
+**Why**: a promoted video job only displayed its UUID (`4149dd20-…`) — you couldn't tell which build you were reviewing without clicking through to the image job. v780 already linked the two (the "🖼️ Image job" button); v780.1 surfaces the batch's name so the video job is identifiable at a glance.
+
+**How**:
+- **Backend** (`code/main.py` `get_job`, the v780 block ~L3455): the single-job GET already looked up the `ImageJobBatch` whose `promoted_video_job_id == job_id` to set `source_image_batch_id`. Extended the query to `db.query(ImageJobBatch.id, ImageJobBatch.name)` and set `resp.source_image_batch_name = _b[1]`. Single-job GET only — kept out of `list_jobs` to avoid an N+1 (same discipline as v780).
+- **Response model** (`code/job_response.py`): new `source_image_batch_name: Optional[str] = None` beside `source_image_batch_id`. None for jobs not promoted from an image job.
+- **Frontend** (`code/static/index.html`): the job-info header (`#jobStatsArea`) prepends a `.job-source-name` title line when `source_image_batch_name` is set, `escapeHtml`-escaped. Rendered in all THREE sites that build that header so it can't flicker away on the 5s poll: `loadJob` (initial paint), the poll `jobStatsEl` direct-update, and the poll full-rewrite fallback. Both the initial paint and the poll fetch the single-job `/api/jobs/{id}` endpoint, so the field is always present.
+
+**Scope / gates**: additive, backwards-compatible — a null name renders nothing (the header degrades to the old UUID-only look). No output-shape/skeleton/linter/build change. Verified: `job_response` imports with the field in `model_fields`, `main.py` compiles, the frontend nested-template renders + escapes (harness). `import main` blocked locally by a pre-existing Starlette `on_startup` version skew (unrelated to this change; both new refs — `ImageJobBatch.name` and the new model field — verified present). The `[v780.1] … name=…` log line on `get_job` is the deploy diagnostic per root `CLAUDE.md` §2. Forward-only. Operator request 2026-07-09.
+
+**Touched**: this deep-dive (`code/template_reference.md` §v780.1, canonical), `code/main.py` (query + assign), `code/job_response.py` (field), `code/static/index.html` (3 header render sites), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline).
