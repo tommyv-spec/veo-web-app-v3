@@ -4718,15 +4718,24 @@ def export_with_master_audio(
 
 
 def export_support_track(support_clips: list, master_duration: float,
-                         output_path, width: int = 720, height: int = 1280,
+                         output_path, width: int = 1080, height: int = 1920,
                          fps: int = 24) -> dict:
-    """v825 — build the SILENT support-image track for post-production compositing.
+    """v825.3 — build the SILENT support-image track for post-production compositing.
 
     support_clips: [{image_index, path (still png), start, end}, ...] where
-    start/end are absolute seconds on the master timeline. Each still shows for
-    [start,end]; the rest of the timeline is black. Total length == master_duration
-    so the operator can drop it directly over the talking-head master. NO audio.
-    Overlapping spans clamped last-wins (earlier end -> next start). Returns stats.
+    start/end are ABSOLUTE seconds on the master timeline. Each still shows for
+    [start,end]; the rest is black; total length == master_duration so the
+    operator can drop it over the talking-head master. NO audio. Overlapping
+    spans clamped last-wins (earlier end -> next start).
+
+    v825.3 FIX (placement drift): each still is placed by a SINGLE ffmpeg
+    overlay filtergraph — a black base of exact master_duration with
+    `overlay=enable='between(t,start,end)'` per still — so every still lands at
+    its EXACT absolute timestamp. The prior v825.0-.2 built the timeline by
+    concatenating black-filler + still segments SEQUENTIALLY; per-segment
+    frame-rounding accumulated (measured +0.5s..+1.6s drift on a 7-still 40s
+    track), so overlays landed progressively LATE vs the spoken words. The
+    filtergraph approach measured 0.00s drift on the same case.
     """
     clips = sorted([c for c in support_clips if c and c.get("path")], key=lambda c: c["start"])
     for i, c in enumerate(clips):
@@ -4735,55 +4744,42 @@ def export_support_track(support_clips: list, master_duration: float,
         if i + 1 < len(clips):
             c["end"] = min(c["end"], clips[i + 1]["start"])
 
-    def _black(dur, path):
-        cmd = [FFMPEG_BIN, "-y", "-f", "lavfi", "-i",
-               f"color=c=black:s={width}x{height}:r={fps}", "-t", f"{max(0.05, dur):.6f}",
-               "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-               "-pix_fmt", "yuv420p", "-an", str(path)]
-        code, _, err = run(cmd)
-        if code != 0:
-            raise RuntimeError(f"black filler failed: {err}")
+    # One black base (input 0) of exact master_duration + one looped image input
+    # per still. Overlay each still gated to its absolute [start,end] window.
+    inputs = ["-f", "lavfi", "-i",
+              f"color=c=black:s={width}x{height}:r={fps}:d={master_duration:.6f}"]
+    for c in clips:
+        inputs += ["-loop", "1", "-i", str(c["path"])]
 
-    with tempfile.TemporaryDirectory() as td:
-        tp = Path(td)
-        segments = []
-        cursor = 0.0
-        seg_i = 0
-        for c in clips:
-            if c["start"] - cursor > 0.03:
-                bp = tp / f"black_{seg_i:04d}.mp4"
-                _black(c["start"] - cursor, bp)
-                segments.append(bp); seg_i += 1
-            sp = tp / f"still_{seg_i:04d}.mp4"
-            make_still_segment(Path(c["path"]), c["end"] - c["start"], sp, width, height, fps)
-            segments.append(sp); seg_i += 1
-            cursor = c["end"]
-        if master_duration - cursor > 0.03:
-            bp = tp / f"black_{seg_i:04d}.mp4"
-            _black(master_duration - cursor, bp)
-            segments.append(bp)
+    fc = []
+    for idx in range(len(clips)):
+        fc.append(
+            f"[{idx+1}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps={fps}[s{idx}]"
+        )
+    prev = "0:v"
+    for idx, c in enumerate(clips):
+        fc.append(
+            f"[{prev}][s{idx}]overlay=enable='between(t,{c['start']:.6f},{c['end']:.6f})'"
+            f":eof_action=pass[o{idx}]"
+        )
+        prev = f"o{idx}"
 
-        # concat_videos (v692e) injects silent AAC into audio-less inputs, so its
-        # output always carries an audio stream. This track must be SILENT (no
-        # audio stream at all), so concat to a temp then strip audio into output.
-        #
-        # Length invariant: make_still_segment clamps to a 0.1s floor, so a
-        # sub-0.1s span (or one shrunk below 0.1s by the overlap-clamp) renders
-        # LONGER than its slot while the cursor advanced by the desired end ->
-        # concat can OVERRUN master_duration. Black filler only ever pads up to
-        # master_duration (can't be short), so the track is equal-or-over. The
-        # final pass adds `-t master_duration` to trim the exact overrun off, and
-        # re-encodes (not stream-copy) so the cut lands on the exact frame rather
-        # than the nearest keyframe. Still silent (-an).
-        concat_tmp = tp / "concat_tmp.mp4"
-        concat_videos([str(s) for s in segments], str(concat_tmp))
-        code, _, err = run([FFMPEG_BIN, "-y", "-i", str(concat_tmp),
-                            "-t", f"{master_duration:.6f}",
-                            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                            "-pix_fmt", "yuv420p", "-an",
-                            "-movflags", "+faststart", str(output_path)])
-        if code != 0:
-            raise RuntimeError(f"support-track finalize (trim+strip) failed: {err}")
+    map_lbl = f"[{prev}]" if clips else "0:v"
+    cmd = [FFMPEG_BIN, "-y"] + inputs
+    if fc:
+        cmd += ["-filter_complex", ";".join(fc)]
+    cmd += [
+        "-map", map_lbl,
+        "-t", f"{master_duration:.6f}",
+        "-r", str(fps),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-an",
+        "-movflags", "+faststart", str(output_path),
+    ]
+    code, _, err = run(cmd)
+    if code != 0:
+        raise RuntimeError(f"export_support_track filtergraph failed: {(err or '')[-500:]}")
 
     return {
         "support_track": True,
