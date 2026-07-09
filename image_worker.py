@@ -4924,6 +4924,18 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
         # account block → golden restore.
         return _signal_unusual(_last_fail_reason or "unusual-activity on all variants")
     elif _last_fail_reason is not None:
+        # v844 — content policy reject (UNSAFE_GENERATION): deterministic, won't
+        # pass on API retry OR the DOM path. Signal the caller to FAIL the node +
+        # move on (operator: "for unsafe generations fail it and move on").
+        # Checked BEFORE _is_transient, which also lists UNSAFE_GENERATION and
+        # would otherwise send it to the (equally-doomed) DOM path.
+        if "UNSAFE_GENERATION" in (_last_fail_reason or "").upper():
+            try:
+                page._flow_api_content_reject = _last_fail_reason
+            except Exception:
+                pass
+            print(f"{pfx}[flow_api] content policy reject (UNSAFE_GENERATION) — failing node, no retry/DOM", flush=True)
+            return False
         if _is_transient(_last_fail_reason):
             return _fall_back_one(_last_fail_reason)
         return _latch_off(_last_fail_reason)
@@ -8561,6 +8573,32 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                         print(f"[{ctx}] 🔁 [v843] unusual seen (node shipped) — golden restore before next node", flush=True)
                         _restore_signal["golden"] = True
                     return True
+
+                # v844 — content policy reject (UNSAFE_GENERATION): deterministic,
+                # won't pass on API retry OR the DOM path. Fail the node now + move
+                # on (operator: "for unsafe generations fail it and move on"). No
+                # 3x API retry, no DOM grind — just mark it failed so the prompt
+                # gets fixed. Checked BEFORE the unusual/retry logic.
+                _cr = getattr(page, "_flow_api_content_reject", "")
+                if _cr:
+                    try:
+                        page._flow_api_content_reject = ""
+                    except Exception:
+                        pass
+                    print(f"[{ctx}] ⛔ content policy reject (UNSAFE_GENERATION) — failing node {node_id}, moving on (fix the prompt)", flush=True)
+                    try:
+                        _post_status(api_url, api_key, node_id, "failed",
+                                     error=f"Content policy reject (UNSAFE_GENERATION): {_cr[-160:]}")
+                    except Exception as _pe:
+                        # v844 — if the fail-status POST doesn't land, the server
+                        # still has the node pending → it gets re-claimed and
+                        # re-fails fast (no grind). Log it so the desync is visible.
+                        print(f"[{ctx}] ⚠ couldn't post 'failed' for node {node_id} ({_pe}) — will re-fail on re-claim", flush=True)
+                    try:
+                        in_flight.pop(node_id, None)
+                    except Exception:
+                        pass
+                    return False
 
                 # Account-level 'unusual activity' block → golden restore. Do NOT
                 # retry the API or fall to DOM (the DOM hits the same session
