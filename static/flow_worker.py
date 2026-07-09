@@ -5248,11 +5248,22 @@ def handle_terminal_reject(clip_id, reason, account_name="", job_id=None, clip_i
             else:
                 print(f"[v838] {reason} on clip {clip_id} -> retry reworded line (Prompt B); mark failed in UI only if B also fails", flush=True)
                 return 'requeued'
-        # d == 'terminal_line' (Prompt B already tried, still flagged) OR
-        # 'terminal_image' (clip has no Prompt B) -> fall through to the
-        # reason-specific terminal card below (marks it failed in the UI).
+        # Prompt B exhausted ('terminal_line') or the clip has no prompt_b
+        # ('terminal_image'). v844 (operator 2026-07-09: "prominent people don't
+        # swap image anymore"): for PROMINENT do NOT show the replace-image
+        # (swap-the-avatar-face) card — swapping the face is not the remedy; the
+        # trip is usually the spoken line's audio. Mark it failed as
+        # rework-the-line (change-prompt via fail_clip_general_policy), NO image
+        # swap. SEXUAL still routes to the replace-image card (pose/image issue).
+        if 'PROMINENT' in _r:
+            fail_clip_general_policy(
+                clip_id,
+                "Flow still flags a prominent person after the reworded line (Prompt B). "
+                "Rework the dialogue line — do NOT swap the image (the avatar face is not the fix).")
+            print(f"[v844] PROMINENT on clip {clip_id} persists after Prompt B -> failed as rework-the-line (no image swap)", flush=True)
+            return 'terminal'
         if d == 'terminal_line':
-            print(f"[v838] {reason} on clip {clip_id} persists AFTER Prompt B -> marking failed in UI (replace image / rework line)", flush=True)
+            print(f"[v838] {reason} on clip {clip_id} persists AFTER Prompt B -> replace-image card", flush=True)
     route_terminal_content_reject(clip_id, reason, account_name=account_name)
     return 'terminal'
 
