@@ -4194,6 +4194,29 @@ def calculate_clip_targets(master_words: list, dialogue_lines: list, master_dura
     return targets
 
 
+def make_still_segment(image_path, duration: float, output_path,
+                       width: int, height: int, fps: int = 24) -> dict:
+    """v825 — render a still image as a `duration`-second SILENT video segment,
+    letterboxed to width×height on black. Used to place a support image on the
+    support track for its word-span. CFR + explicit fps for clean concat."""
+    duration = max(0.1, float(duration))
+    vf = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+          f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps={fps}")
+    cmd = [
+        FFMPEG_BIN, "-y", "-loop", "1", "-i", str(image_path),
+        "-t", f"{duration:.6f}",
+        "-vf", vf,
+        "-r", str(fps), "-vsync", "cfr",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-an",
+        str(output_path),
+    ]
+    code, _, err = run(cmd)
+    if code != 0:
+        raise RuntimeError(f"make_still_segment failed: {err}")
+    return {"duration": duration, "path": str(output_path)}
+
+
 def process_clip_for_alignment(
     clip_path: Path,
     target_duration: float,
