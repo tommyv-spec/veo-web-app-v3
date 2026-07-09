@@ -9614,25 +9614,38 @@ async def export_final_video(
                     _sup_clips.append({**_sp_, "path": _p})
                 if _sup_clips:
                     _mdur = _gd(_fpj(output_path))
-                    _sup_out = output_dir / "support_track.mp4"
-                    _est(_sup_clips, _mdur, _sup_out)
-                    # v825.2 — upload the support track to R2 like the main
-                    # export, so it's served + appears in list-outputs. Without
-                    # this the file lives only on Render's ephemeral disk and
-                    # the operator only sees the speaker video.
-                    try:
-                        if storage is not None:
-                            _st_r2 = f"jobs/{job_id}/outputs/support_track.mp4"
-                            await asyncio.to_thread(storage.upload_file, str(_sup_out), _st_r2, 'video/mp4')
-                            print(f"[Export][v825] support_track uploaded to R2: {_st_r2}", flush=True)  # TEMP DIAG
-                    except Exception as _st_up_e:
-                        print(f"[Export][v825] support_track R2 upload failed (non-fatal): {_st_up_e}", flush=True)
-                    support_track_info = {
-                        "support_track_filename": "support_track.mp4",
-                        "support_track_url": f"/api/jobs/{job_id}/outputs/support_track.mp4",
-                        "support_stills": len(_sup_clips),
-                    }
-                    print(f"[Export][v825] support_track -> {_sup_out} ({len(_sup_clips)} stills)", flush=True)  # TEMP DIAG
+                    # v825.4 — ONE support track PER ASPECT RATIO (operator wants
+                    # the 16:9 overlays in a separate video from the 1:1 / 9:16
+                    # ones, each at its native canvas so it drops cleanly in post
+                    # with no letterboxing). Group the stills by their image's
+                    # aspect_ratio; every track is full master length so they all
+                    # align on the same timeline. Each uploaded to R2 (else the
+                    # file lives only on Render's ephemeral disk -> not served).
+                    from collections import defaultdict as _dd
+                    _ar_by_idx = {i["image_index"]: (i.get("aspect_ratio") or "9:16")
+                                  for i in _pst(_smd).get("images", [])}
+                    _canvas = {"16:9": (1920, 1080), "9:16": (1080, 1920),
+                               "1:1": (1080, 1080), "4:3": (1440, 1080), "3:4": (1080, 1440)}
+                    _groups = _dd(list)
+                    for _c in _sup_clips:
+                        _groups[_ar_by_idx.get(_c["image_index"], "9:16")].append(_c)
+                    _tracks = []
+                    for _ar, _grp in _groups.items():
+                        _w, _h = _canvas.get(_ar, (1080, 1920))
+                        _fn = f"support_track_{_ar.replace(':', 'x')}.mp4"
+                        _sup_out = output_dir / _fn
+                        _est(_grp, _mdur, _sup_out, width=_w, height=_h)
+                        try:
+                            if storage is not None:
+                                await asyncio.to_thread(storage.upload_file, str(_sup_out),
+                                                        f"jobs/{job_id}/outputs/{_fn}", 'video/mp4')
+                                print(f"[Export][v825] {_fn} uploaded to R2", flush=True)  # TEMP DIAG
+                        except Exception as _st_up_e:
+                            print(f"[Export][v825] {_fn} R2 upload failed (non-fatal): {_st_up_e}", flush=True)
+                        _tracks.append({"aspect_ratio": _ar, "filename": _fn,
+                                        "url": f"/api/jobs/{job_id}/outputs/{_fn}", "stills": len(_grp)})
+                        print(f"[Export][v825] {_fn} -> {len(_grp)} stills @ {_w}x{_h}", flush=True)  # TEMP DIAG
+                    support_track_info = {"support_tracks": _tracks}
                 else:
                     print("[Export][v825] no resolvable support stills; skipping track", flush=True)
         except Exception as _sup_e:
