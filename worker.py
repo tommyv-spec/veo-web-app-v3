@@ -2531,7 +2531,10 @@ class JobWorker:
         
         # Log last frame
         if last_frame_index is not None:
-            print(f"[Worker] Last frame index set: {last_frame_index} ({images[last_frame_index].name if last_frame_index < len(images) else 'INVALID'})", flush=True)
+            # v827 — lower bound too: a negative value would print the name of
+            # an image counted from the END of the list and read as valid.
+            _lfi_ok = 0 <= last_frame_index < len(images)
+            print(f"[Worker] Last frame index set: {last_frame_index} ({images[last_frame_index].name if _lfi_ok else 'INVALID'})", flush=True)
         
         # === BUILD SCENE-AWARE CLIP STRUCTURE ===
         num_images = len(images)

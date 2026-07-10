@@ -57,19 +57,23 @@ for v in found:
 print(f"OK v827: all {len(found)} last_frame_index literal(s) are None")
 
 
-# 3) Both resolvers must reject a negative index. `lfi < num_images` alone let
-#    a stored -1 index the last frame from the end of the list.
-for fname, needle in (
-    ("main.py", r"0 <= lfi < num_images"),
-    ("worker.py", r"0 <= lfi < num_images"),
-    ("worker.py", r"0 <= last_frame_index < len\(images\)"),
+# 3) Every site that indexes with last_frame_index must reject a negative one.
+#    `lfi < num_images` alone let a stored -1 index the last frame from the end
+#    of the list. worker.py has TWO such sites: the resolver (~L2700) and the
+#    startup log line (~L2534), which would print a real image name for -1 and
+#    so read as valid.
+for fname, needle, want in (
+    ("main.py", r"0 <= lfi < num_images", 1),
+    ("worker.py", r"0 <= lfi < num_images", 1),
+    ("worker.py", r"0 <= last_frame_index < len\(images\)", 2),
 ):
     src = _read(fname)
-    assert re.search(needle, src), (
-        f"{fname}: missing lower bound guard /{needle}/ — a negative "
-        f"last_frame_index would index from the end of the frame list"
+    got = len(re.findall(needle, src))
+    assert got >= want, (
+        f"{fname}: found {got} of {want} lower-bound guards /{needle}/ — a "
+        f"negative last_frame_index would index from the end of the frame list"
     )
-print("OK v827: both resolvers bound last_frame_index to [0, num_images)")
+print("OK v827: all resolver + log sites bound last_frame_index to [0, len)")
 
 
 # 4) The explicit-operator-pick path must survive. If someone "fixes" this by
