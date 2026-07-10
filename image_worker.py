@@ -6342,6 +6342,48 @@ def _upload_variants_to_api(api_url, api_key, node_id, variant_paths):
     )
 
 
+def _api_wait_for_health(api_url, api_key, label="API"):
+    """v845 — ride out a platform deploy instead of dying.
+
+    The webapp (Render) is briefly unreachable while it redeploys (~2-3 min). The
+    startup connectivity check was a SINGLE 10s request: one ReadTimeout during a
+    deploy killed the whole worker ("Can't reach ... Closing browser ... Done"),
+    including right after a golden-restore relaunch re-enters the pull mode. The
+    poll loop already retries with backoff; this makes startup behave the same.
+
+    Retries with backoff until the platform answers. Bounded by
+    WORKER_HEALTH_MAX_WAIT_S (default 900s = 15 min) so a genuinely-down platform
+    still exits with a clear message instead of spinning forever.
+
+    Returns True when healthy, False if the wait budget is exhausted.
+    """
+    try:
+        max_wait_s = int(os.environ.get("WORKER_HEALTH_MAX_WAIT_S", "900"))
+    except Exception:
+        max_wait_s = 900
+    _backoff = (5, 10, 15, 20, 30)
+    _t0 = time.time()
+    _attempt = 0
+    while True:
+        _attempt += 1
+        try:
+            health = _api_request(api_url, api_key, "GET", "/health", timeout=10)
+            if _attempt > 1:
+                print(f"[{label}] ✓ Platform back after {time.time() - _t0:.0f}s — resuming", flush=True)
+            print(f"[{label}] ✓ Connected: {health}", flush=True)
+            return True
+        except Exception as e:
+            _elapsed = time.time() - _t0
+            if _elapsed >= max_wait_s:
+                print(f"[{label}] ❌ Can't reach {api_url} after {_elapsed:.0f}s: {e}", flush=True)
+                print(f"[{label}] Make sure the URL is correct and the webapp is running.", flush=True)
+                return False
+            _w = _backoff[min(_attempt - 1, len(_backoff) - 1)]
+            print(f"[{label}] ⏳ Can't reach {api_url} ({type(e).__name__}) — platform may be "
+                  f"deploying; retry {_attempt} in {_w}s (waited {_elapsed:.0f}s/{max_wait_s}s)", flush=True)
+            time.sleep(_w)
+
+
 def _post_status(api_url, api_key, node_id, status, error=None):
     """POST /worker/jobs/{node_id}/status.
 
@@ -6523,13 +6565,8 @@ def api_pull_mode(page, api_url, api_key, worker_id=None):
     print(f"Ctrl+C to stop.")
     print(f"{'=' * 60}\n", flush=True)
 
-    # Connectivity check first
-    try:
-        health = _api_request(api_url, api_key, "GET", "/health", timeout=10)
-        print(f"[API] ✓ Connected: {health}", flush=True)
-    except Exception as e:
-        print(f"[API] ❌ Can't reach {api_url}: {e}", flush=True)
-        print(f"[API] Make sure the URL is correct and the webapp is running.", flush=True)
+    # Connectivity check first (v845 — waits out a platform deploy, doesn't die)
+    if not _api_wait_for_health(api_url, api_key, label="API"):
         return
 
     # Release any claims this worker owned from a previous crashed run. Without
@@ -7632,12 +7669,8 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     print(f"Ctrl+C to stop.")
     print(f"{'=' * 60}\n", flush=True)
 
-    # Connectivity check
-    try:
-        health = _api_request(api_url, api_key, "GET", "/health", timeout=10)
-        print(f"[API] ✓ Connected: {health}", flush=True)
-    except Exception as e:
-        print(f"[API] ❌ Can't reach {api_url}: {e}", flush=True)
+    # Connectivity check (v845 — waits out a platform deploy, doesn't die)
+    if not _api_wait_for_health(api_url, api_key, label="API"):
         return
 
     # Release any claims this worker owned from a previous crashed run.
