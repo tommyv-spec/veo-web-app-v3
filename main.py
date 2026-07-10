@@ -9593,7 +9593,22 @@ async def export_final_video(
                     raise RuntimeError(f"support master-audio extract failed: {(_acr.stderr or '')[-300:]}")
                 # 2) word timestamps + phrase spans
                 _mw = await asyncio.to_thread(_tma, _sup_audio)
-                _spans = _rss(_mw, _sup)
+                # v825.9 — hand the resolver each scene's spoken-line candidates
+                # (Prompt A line + the Prompt-B reworded line) so a support is
+                # placed INSIDE its owning line's master span, correct whether A
+                # or B actually shipped. Without this a Prompt-B reword drops the
+                # literal anchor word and the still lands wrong (or vanished
+                # pre-v825.8).
+                _scene_lines = []
+                for _sc in (_pst(_smd).get("scenes", []) or []):
+                    _auth = " ".join(_sc.get("lines") or []).strip()
+                    _cands = [_auth] if _auth else []
+                    for _vp in (_sc.get("veo_prompts") or []):
+                        _bl = (_vp or {}).get("prompt_b_line")
+                        if _bl and _bl.strip():
+                            _cands.append(_bl.strip())
+                    _scene_lines.append({"authored": _auth, "candidates": _cands})
+                _spans = _rss(_mw, _sup, _scene_lines if any(sl["authored"] for sl in _scene_lines) else None)
                 # 3) image_index -> approved still path (batch nodes named "... Scene N")
                 _nodes = db.query(ImageNode).filter(ImageNode.batch_id == _sb.id).all()
                 _idx_to_path = {}

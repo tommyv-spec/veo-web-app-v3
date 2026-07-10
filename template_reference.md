@@ -15199,3 +15199,48 @@ The anchors must name words that are **actually spoken in the render**, not mere
 `code/tests/check_support_fallback.py` — replays both production failures verbatim (absent `number`, transcribed `vessel` vs authored `vessels`), asserts the unanchored-and-unmatched case still drops, and asserts the exact-anchor happy path and the v825.5 no-overlap hold are unchanged.
 
 **Touched**: this deep-dive (canonical), `code/video_processor.py`, `code/tests/check_support_fallback.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
+
+---
+
+## v825.9 — support stills are placed LINE-RELATIVE (works whether Prompt A or B shipped)
+
+**Shipped 2026-07-10.** Runtime change (`code/video_processor.py` + `code/main.py`). Forward-only.
+
+### The bug it fixes
+
+v825.1 / v825.8 matched a support's `start_word` / `end_word` against the master-audio transcript directly. But the delivered audio is often **Prompt B** (v805 / v821 policy-fallback reword), which changes the very words the anchors name. On job `d4b661a8`, Prompt B shipped on every clip and **4 of 7 anchors did not survive**:
+
+| support | anchor authored (A) | Prompt B said |
+|---|---|---|
+| 1 (banana board) | `number` … | "the single best food on earth…" |
+| 5 (flow chart) | `relaxes` … | "loosens and opens" |
+| 6 (cortisol) | … `shut` | "…clamping your blood vessels closed" |
+| 7 (comment CTA) | `comment` … | "drop the word yes" |
+
+v825.8 kept these alive only by falling back to the whole-phrase span (imprecise, low confidence). The real fix is to stop matching individual words against the spoken audio at all.
+
+### The fix — associate the still to a LINE, then a position within it
+
+A support insert belongs to exactly one spoken line (its `phrase` is a substring of that line). The resolver now:
+
+1. **Aligns each scene's line to the master audio once**, using whichever candidate matches best — the Prompt-A line OR the Prompt-B reworded line (`prompt_b_line`, now passed from the parse). A line is a long string, so `find_line_in_master` locates it even when reworded. This yields the line's master word span `[lo, hi]` regardless of A/B.
+2. **Finds the owning scene** for each support by phrase-substring against the authored lines (falls back to anchor-word overlap).
+3. **Places the still inside `[lo, hi]`:**
+   - `start_word` / `end_word` that **survived** in the spoken audio → exact/fuzzy word times (most precise — this still handles the pomegranate / spinach / garlic-beets supports);
+   - an anchor that **didn't survive** → **proportional** to where it sits in the AUTHORED line (the anchor always exists in the authored text, so a Prompt-B reword still lands the still at the right moment).
+
+`confidence`: `1.0` both anchors hit exactly, `0.8` one proportional, `0.6` both proportional.
+
+**The build's support anchors are never touched.** They stay authored against Prompt A; the platform absorbs the A/B difference. (Rejected alternative: hand-editing anchors to words that survive both A and B — brittle, and it fights the author.)
+
+`main.py` builds `scene_lines` = `[{authored, candidates:[A-line, B-line]}, …]` from the parsed scenes and passes it as the new third arg to `resolve_support_spans`. When it's absent (old callers, unit tests), the resolver falls back to the v825.8 phrase/anchor path — fully back-compat.
+
+### Authoring note (updated from v825.8)
+
+Anchors may keep naming the **authored** (Prompt A) words — that is now the correct place to anchor. The platform aligns the actually-spoken line and places the still proportionally when B reworded the anchor. The `placed line-relative … Prompt-B reword tolerated` log line marks a proportional placement.
+
+### Regression guard
+
+`code/tests/check_support_line_relative.py` — reconstructs job `d4b661a8` (master audio = the 8 spoken B lines; build = the 8 A lines + 7 anchors), asserts all 7 supports resolve, each lands inside its owning line's master span, survived anchors stay exact (1.0) while reworded ones go proportional (< 1.0), no overlap after the v825.5 hold, and the no-`scene_lines` back-compat path still resolves.
+
+**Touched**: this deep-dive (canonical), `code/video_processor.py`, `code/main.py`, `code/tests/check_support_line_relative.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.

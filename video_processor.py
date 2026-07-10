@@ -4080,35 +4080,171 @@ def _find_anchor_word(norms: list, target: str, lo: int, hi: int):
     return None
 
 
-def resolve_support_spans(master_words: list, support_inserts: list) -> list:
-    """v825.1 — resolve each support insert to its [start,end] span in the master
-    audio. The `start_word` + `end_word` are AUTHORITATIVE: the span runs from the
-    start word's start-time to the end word's end-time. The optional `phrase` only
-    DISAMBIGUATES which occurrence to use when a word repeats (it locates the
-    region; it does NOT define the span). Matching is SEQUENTIAL — a cursor
-    advances past each resolved end word so repeats resolve in author order.
+def _align_scene_lines(master_words: list, master_text: str, scene_lines: list) -> list:
+    """v825.9 — align each SCENE's spoken line to the master audio ONCE, using
+    whichever candidate (Prompt A line or the Prompt-B reworded line) matches
+    best. Returns a list index-aligned with scene_lines: each entry is
+    {lo, hi, authored} (master word index range for that scene) or None.
 
-    v825.0 (superseded) matched `phrase` as a whole line and used ITS span, so a
-    phrase that drifted from the declared start/end words timed the overlay onto
-    the wrong words. v825.1 anchors on the words themselves.
+    A sequential cursor keeps the scenes monotonic in the continuous master —
+    scene i+1 is searched from scene i's end, so a short line can't backtrack
+    onto an earlier scene.
+    """
+    out = []
+    cur = 0
+    for sc in scene_lines:
+        authored = (sc.get("authored") or "").strip()
+        cands = [c for c in (sc.get("candidates") or [authored]) if c and c.strip()]
+        best = None
+        for cand in cands:
+            b = find_line_in_master(master_words, master_text, cand, search_from_word=cur)
+            if b is not None and (best is None or b.get("confidence", 0) > best.get("confidence", 0)):
+                best = b
+        if best is not None:
+            lo = best.get("start_word_idx", cur)
+            hi = best.get("end_word_idx", len(master_words) - 1)
+            out.append({"lo": lo, "hi": hi, "authored": authored})
+            cur = max(cur, lo)  # advance; allow overlap, never rewind
+        else:
+            out.append(None)
+    return out
 
-    Back-compat: if start_word/end_word are missing (never for a v825-parsed
-    build — the parser requires them), fall back to the old phrase-span match.
+
+def _authored_offset(authored_norms: list, word: str, at_or_after: int = 0):
+    """First index of `word` in the authored line words at/after `at_or_after`,
+    exact then loose (v825.8 `_word_matches`). None if absent."""
+    if not word:
+        return None
+    for i in range(max(0, at_or_after), len(authored_norms)):
+        if authored_norms[i] == word:
+            return i
+    for i in range(max(0, at_or_after), len(authored_norms)):
+        if _word_matches(authored_norms[i], word):
+            return i
+    return None
+
+
+def resolve_support_spans(master_words: list, support_inserts: list, scene_lines: list = None) -> list:
+    """v825.1 / v825.8 / v825.9 — resolve each support insert to its [start,end]
+    span in the master audio.
+
+    v825.9 — LINE-RELATIVE placement (the robust primary path). Each support
+    belongs to ONE spoken line (its `phrase` is a substring of that line). The
+    line is aligned to the master audio using whichever prompt actually shipped
+    (Prompt A or the Prompt-B reworded line — passed in `scene_lines`), so the
+    line's master span is correct regardless of A/B. The still is then placed
+    INSIDE that span:
+      - if `start_word` / `end_word` survive in the spoken audio -> exact/fuzzy
+        word times (most precise);
+      - else -> PROPORTIONAL to where the anchor sits in the AUTHORED line
+        (the anchor always exists in the authored text, so a Prompt-B rewording
+        that dropped the literal word still lands the still at the right moment).
+    This replaces the v825.8 whole-phrase fallback, which showed the still across
+    the entire line when a word missed.
+
+    `scene_lines` (optional): list, one entry per SCENE in order, each
+    {"authored": "<Prompt-A line>", "candidates": ["<A line>", "<B line>", ...]}.
+    When None (old callers / unit tests), falls back to the v825.8 phrase-region
+    matching over the whole master.
+
+    v825.1 — `start_word` / `end_word` authoritative over a drifted phrase.
+    v825.8 — anchors matched loosely (stem/fuzzy); a located support never
+    dropped for a single missing word.
 
     Returns [ {start, end, image_index, support_index, confidence} | None, ... ],
-    index-aligned with support_inserts. None = words not found (caller skips it).
+    index-aligned with support_inserts. None = not resolvable (caller skips it).
     """
     norms = [_normalize(w["word"]) for w in master_words]
     master_text = " ".join(norms)
     n = len(master_words)
+
+    # v825.9 — pre-align every scene line, and index its authored words so a
+    # support can be placed inside its owning line's span.
+    scene_spans = None
+    scene_auth_norms = None
+    if scene_lines:
+        scene_spans = _align_scene_lines(master_words, master_text, scene_lines)
+        scene_auth_norms = [
+            _normalize(sc.get("authored") or "").split() for sc in scene_lines
+        ]
+
+    def _own_scene(phrase_norm: str, sw: str, ew: str):
+        """Index of the scene whose AUTHORED line owns this support. Prefer a
+        phrase substring match; else the scene with the most anchor words."""
+        if not scene_auth_norms:
+            return None
+        pj = phrase_norm.strip()
+        # 1) phrase is a substring of exactly one authored line.
+        hits = [i for i, aw in enumerate(scene_auth_norms)
+                if pj and pj in " ".join(aw)]
+        if len(hits) == 1:
+            return hits[0]
+        cand = hits if hits else range(len(scene_auth_norms))
+        # 2) score by anchor-word presence (loose).
+        best_i, best_score = None, 0
+        for i in cand:
+            aw = scene_auth_norms[i]
+            score = sum(1 for t in (sw, ew) if _authored_offset(aw, t) is not None)
+            if score > best_score:
+                best_i, best_score = i, score
+        return best_i
+
     spans = []
     cursor = 0
     for s in support_inserts:
         sw = _normalize(s.get("start_word") or "")
         ew = _normalize(s.get("end_word") or "")
         phrase = (s.get("phrase") or "").strip()
+        phrase_norm = _normalize(phrase)
 
-        # Back-compat: no start/end words -> old phrase-span behavior.
+        # ---- v825.9 LINE-RELATIVE path (when scene_lines supplied) ----------
+        if scene_spans is not None:
+            si = _own_scene(phrase_norm, sw, ew)
+            if si is not None and scene_spans[si] is not None:
+                lo, hi = scene_spans[si]["lo"], scene_spans[si]["hi"]
+                aw = scene_auth_norms[si]
+                L = len(aw)
+                span_len = hi - lo + 1
+
+                def _prop(off, inclusive_end=False):
+                    if L <= 1:
+                        return hi if inclusive_end else lo
+                    f = (off + (1 if inclusive_end else 0)) / L
+                    idx = lo + int(round(f * span_len)) - (1 if inclusive_end else 0)
+                    return min(hi, max(lo, idx))
+
+                conf = 1.0
+                # start: exact/fuzzy in the line span, else proportional.
+                s_idx = _find_anchor_word(norms, sw, lo, hi)
+                if s_idx is None:
+                    off = _authored_offset(aw, sw)
+                    s_idx = _prop(off if off is not None else 0)
+                    conf -= 0.2
+                # end: exact/fuzzy at/after start, else proportional.
+                e_idx = _find_anchor_word(norms, ew, s_idx, hi)
+                if e_idx is None:
+                    off = _authored_offset(aw, ew, at_or_after=0)
+                    e_idx = _prop(off if off is not None else L - 1, inclusive_end=True)
+                    e_idx = max(e_idx, s_idx)
+                    conf -= 0.2
+
+                if conf < 1.0:
+                    print(f"[Support] support {s.get('support_index')} placed line-relative "
+                          f"in scene {si + 1} (words {lo}-{hi}, conf={conf:.1f}) — "
+                          f"Prompt-B reword tolerated", flush=True)
+                start_t = master_words[s_idx]["start"]
+                end_t = master_words[e_idx]["end"]
+                if end_t <= start_t:
+                    end_t = start_t + 1.0
+                spans.append({"start": start_t, "end": end_t, "image_index": s["image_index"],
+                              "support_index": s["support_index"], "confidence": round(conf, 2)})
+                cursor = e_idx + 1
+                continue
+            # else: no owning scene span -> fall through to the phrase path.
+            print(f"[Support] support {s.get('support_index')} — no owning scene span, "
+                  f"trying phrase match", flush=True)
+
+        # ---- v825.8 phrase/anchor fallback (no scene_lines, or no owner) ----
         if not sw or not ew:
             b = find_line_in_master(master_words, master_text, phrase, search_from_word=cursor) if phrase else None
             if b is None:
@@ -4121,9 +4257,6 @@ def resolve_support_spans(master_words: list, support_inserts: list) -> list:
             cursor = b.get("end_word_idx", cursor) + 1
             continue
 
-        # Optional phrase locates the region (disambiguates a repeated word).
-        # v825.8 — the located region is ALSO the fallback span when an anchor
-        # word is missing from the delivered audio.
         region_lo = cursor
         region_hi = n - 1
         phrase_span = None
@@ -4134,18 +4267,6 @@ def resolve_support_spans(master_words: list, support_inserts: list) -> list:
                 region_lo = b.get("start_word_idx", cursor)
                 region_hi = b.get("end_word_idx", n - 1)
 
-        # v825.8 — anchor words are matched LOOSELY, and a support whose phrase
-        # located a region is NEVER dropped just because an anchor word missed.
-        # Two real failures on job d4b661a8 forced this:
-        #   1. The delivered clip-1 audio said "the single best food on earth for
-        #      pushing blood..." while the build's line said "the number one food
-        #      in the world...". `start_word: number` is simply absent from the
-        #      master audio, so the banana comparison board never rendered.
-        #   2. Whisper transcribed "blood vessel" (singular) in one place and
-        #      "blood vessels" in another, so `end_word: vessels` missed.
-        # Exact match still wins; a stem/fuzzy match is second; the phrase's own
-        # span is the last resort. Only a support with NO phrase window and NO
-        # word match is dropped.
         sidx = _find_anchor_word(norms, sw, region_lo, n - 1)
         start_idx = sidx if sidx is not None else None
 
@@ -4161,8 +4282,6 @@ def resolve_support_spans(master_words: list, support_inserts: list) -> list:
             start_idx, end_idx = region_lo, region_hi
             confidence = min(0.5, phrase_span.get("confidence", 0.5))
         else:
-            # end_word = first match at/after start_idx, bounded by the region (or
-            # a small window if no phrase narrowed it).
             end_hi = min(n - 1, max(region_hi, start_idx + 40))
             end_idx = _find_anchor_word(norms, ew, start_idx, end_hi)
             if end_idx is None:
