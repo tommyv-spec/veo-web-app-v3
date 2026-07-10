@@ -20684,6 +20684,32 @@ Ambient: same kitchen room tone, soft pour sound.
             } catch (e) {}
         }
 
+        // Copy a node's FULL prompt (not the 8000-char truncated preview the
+        // <details> body renders). Reads from imgState.nodesById so nothing has
+        // to be escaped into an inline handler.
+        function imgCopyNodePrompt(nodeId, btn) {
+            const n = imgState.nodesById[nodeId];
+            const text = n && n.prompt;
+            if (!text) { showToast('No prompt available', '#f59e0b'); return; }
+            const done = () => {
+                if (btn) {
+                    const old = btn.innerHTML;
+                    btn.innerHTML = '✓ Copied';
+                    setTimeout(() => { btn.innerHTML = old; }, 1500);
+                }
+                showToast('Prompt copied');
+            };
+            navigator.clipboard.writeText(text).then(done).catch(() => {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                done();
+            });
+        }
+
         function imgRenderNodeDetail(node) {
             const area = document.getElementById('imgDetailArea');
             if (!area) return;
@@ -20745,7 +20771,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 const promptSizeNote = ` <span style="color:var(--text-muted);font-size:10px;">(${rawPrompt.length.toLocaleString()} chars)</span>`;
                 promptHtml = `
                     <details style="margin-bottom:16px;">
-                        <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary);margin-bottom:6px;font-weight:500;user-select:none;">Prompt (click to expand)${promptSizeNote}</summary>
+                        <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary);margin-bottom:6px;font-weight:500;user-select:none;">Prompt (click to expand)${promptSizeNote}<button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;margin-left:8px;vertical-align:middle;" title="Copy the full prompt" onclick="event.stopPropagation();event.preventDefault();imgCopyNodePrompt(${node.id},this)">📋 Copy</button></summary>
                         <div style="background:var(--bg-input);border:1px solid var(--border-color);border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.5;white-space:pre-wrap;margin-top:6px;max-height:600px;overflow-y:auto;">${imgEscape(previewPrompt)}</div>
                     </details>`;
             }
