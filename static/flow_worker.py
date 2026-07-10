@@ -17365,6 +17365,20 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
             prev_end_frame_key = clip.get('end_frame_key')
             continue
 
+        # v848 — the operator can UPLOAD a video for a clip MID-JOB (marking it
+        # completed). Our clips[] list is frozen at job-claim time, so without a
+        # LIVE check we regenerate that clip — burning a render and overwriting the
+        # operator's upload. Ask the platform for the clip's CURRENT state right
+        # before submitting; if it already has a good render, fold it into
+        # clips_done so the skip branch below handles it (gallery + frame-key
+        # bookkeeping included). clip_done_in_platform fails OPEN (False) on an API
+        # error, so a genuinely-pending clip is still generated. (operator 2026-07-09)
+        if clip_index not in clips_done and clip_done_in_platform(clip.get('id')):
+            print(f"[Flow] ↩ [v848] clip {clip_index+1} already has a render in the platform "
+                  f"(uploaded / completed mid-job) — not regenerating", flush=True)
+            clip_log(clip.get('id'), clip_index, "SKIP", "completed mid-job (operator upload) — not regenerating")
+            clips_done.append(clip_index)
+
         if clip_index in clips_done:
             print(f"\n--- Clip {i+1}/{len(clips)} SKIPPED (cached) ---")
             prev_start_frame_key = clip.get('start_frame_key')
@@ -19040,6 +19054,16 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             prev_start_frame_key = clip.get('start_frame_key')
             prev_end_frame_key = clip.get('end_frame_key')
             continue
+
+        # v848 — see the matching guard in the failover loop. The operator can
+        # UPLOAD a video for a clip MID-JOB (marking it completed); clips[] is
+        # frozen at job-claim time, so re-check the platform live before submitting
+        # and skip if it already has a good render. (operator 2026-07-09)
+        if clip_index not in clips_done and clip_done_in_platform(clip.get('id')):
+            print(f"[Flow] ↩ [v848] clip {clip_index+1} already has a render in the platform "
+                  f"(uploaded / completed mid-job) — not regenerating", flush=True)
+            clip_log(clip.get('id'), clip_index, "SKIP", "completed mid-job (operator upload) — not regenerating")
+            clips_done.append(clip_index)
 
         if clip_index in clips_done:
             print(f"\n--- Clip {i+1}/{len(clips)} SKIPPED (cached) ---")
