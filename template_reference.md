@@ -15143,8 +15143,12 @@ It surfaced on a v825 support-overlay build (`nuri-korella-ed-number1-food-soldi
 ```
 Paired with the existing v782 per-clip line — on a correct fresh/cut build the closing clip must now read `[v782] Clip N: clip_mode='fresh' end_fname=None (end_frame none)`. Remove both diagnostics once an operator export confirms it.
 
+### v827.1 — the log line needed the same bound
+
+`cavecrew-reviewer` on the v827 commit caught a third site: `worker.py` ~L2534 printed `images[last_frame_index].name if last_frame_index < len(images) else 'INVALID'`. A negative value indexes from the END of the list, so a bad `-1` printed a real image name and read as valid. Bounded to `0 <= last_frame_index < len(images)` like the two resolvers. Log-only path, no render impact.
+
 ### Regression guard
 
-`code/tests/check_last_frame_index.py` — AST-asserts the promote literal is `None`, greps both resolvers for the lower bound, and asserts `request.last_frame_index` is still read (so a future "fix" can't silently kill the manual picker).
+`code/tests/check_last_frame_index.py` — AST-asserts the promote literal is `None`, counts the lower-bound guard at ALL THREE index sites (`main.py` resolver, `worker.py` resolver, `worker.py` log line — matching the first occurrence would have missed v827.1), and asserts `request.last_frame_index` is still read (so a future "fix" can't silently kill the manual picker).
 
 **Touched**: this deep-dive (canonical), `code/image_platform.py`, `code/main.py`, `code/worker.py`, `code/tests/check_last_frame_index.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
