@@ -2313,8 +2313,10 @@ class JobWorker:
                                                             ):
                                                                 end_fname = uploaded_frames[ni]
                                                     elif is_last:
+                                                        # v827 — explicit operator pick only; promote
+                                                        # no longer fabricates. Reject negatives.
                                                         lfi = dialogue_data.get("last_frame_index")
-                                                        if lfi is not None and lfi < num_images:
+                                                        if lfi is not None and isinstance(lfi, int) and 0 <= lfi < num_images:
                                                             end_fname = uploaded_frames[lfi]
                                                         elif clip_mode == "blend":
                                                             end_fname = start_fname
@@ -2697,7 +2699,8 @@ class JobWorker:
                     # - Scene transition didn't handle it (same scene, or different scene with "cut")
                     # - Or it's the last clip
                     if not scene_transition_handled:
-                        if is_last_clip and last_frame_index is not None and last_frame_index < len(images):
+                        # v827 — explicit operator pick only; promote no longer fabricates.
+                        if is_last_clip and last_frame_index is not None and 0 <= last_frame_index < len(images):
                             # LAST CLIP with explicit end frame set
                             use_end_frame = True
                             actual_end_idx = last_frame_index

@@ -2732,8 +2732,14 @@ async def _setup_job_background(
                                     ):
                                         end_fname = uploaded_frames_list[next_img]
                         elif is_last_clip:
+                            # v827 — last_frame_index is the operator's explicit
+                            # "End Frame" pick from the manual storyboard editor.
+                            # The promote path no longer fabricates it, so this
+                            # only fires when a human actually chose one. Bounds
+                            # widened to reject negatives (a stored -1 used to
+                            # index the LAST frame silently).
                             lfi = dialogue_data.get("last_frame_index")
-                            if lfi is not None and lfi < num_images:
+                            if lfi is not None and isinstance(lfi, int) and 0 <= lfi < num_images:
                                 end_fname = uploaded_frames_list[lfi]
                             elif clip_mode == "blend" and start_image_idx < num_images:
                                 end_fname = uploaded_frames_list[start_image_idx]

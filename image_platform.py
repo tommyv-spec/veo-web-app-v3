@@ -9092,6 +9092,14 @@ def promote_batch_to_video(
     if batch.setting:
         config_dict["setting"] = batch.setting
 
+    # v827 TEMP DIAG — proves the promote payload no longer fabricates a last
+    # frame. Remove once an operator export confirms the closing clip logs
+    # `[v782] Clip N: ... (end_frame none)`.
+    log.info(
+        f"[v827] promote batch={batch_id}: last_frame_index=None "
+        f"(pre-v827 would have stamped {len(nodes) - 1 if nodes else 0})"
+    )
+
     job = Job(
         id=new_job_id,
         user_id=current_user.id,  # v447: image platform now has user context, propagate to video Job
@@ -9100,7 +9108,17 @@ def promote_batch_to_video(
         dialogue_json=_json.dumps({
             "lines": dialogue_list,
             "scenes": scenes_list,
-            "last_frame_index": len(nodes) - 1 if nodes else 0,
+            # v827 — never fabricate a last frame. Pre-v827 this stamped
+            # len(nodes) - 1, so main.py / worker.py attached an end frame to the
+            # LAST clip of every promoted build, contradicting v782 (a fresh/cut
+            # clip gets no end frame). When the last scene reused an earlier
+            # image the closing clip morphed into a foreign composition; when it
+            # used the last image it self-interpolated back to its opening pose.
+            # An intentional last-clip morph is authored with
+            # `- **end_frame_image:** image_K` (v718h-C -> v718i.3), which
+            # resolves BEFORE this fallback. Manual-upload jobs keep carrying the
+            # operator's explicit "End Frame" pick from the storyboard editor.
+            "last_frame_index": None,
         }),
         images_dir=str(job_images_dir),
         output_dir=str(job_output_dir),

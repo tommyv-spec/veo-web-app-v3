@@ -15080,3 +15080,71 @@ Parser (`_parse_image_blocks_new`) reads both into the image dict as `aspect_rat
 **Scope / gates**: additive, forward-only. Existing builds unchanged (fields absent → batch default). Built on branch `v825-v826-support-framing`; push pending operator go.
 
 **Touched**: this deep-dive (canonical), `code/image_platform.py`, `code/image_worker.py`, `code/template_new_format.md` (skeleton), `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
+
+---
+
+## v827 — promote never fabricates `last_frame_index` (the closing clip stops morphing)
+
+**Shipped 2026-07-10.** Runtime change (`code/image_platform.py` + `code/main.py` + `code/worker.py`). Auto-deploys to Render. Forward-only.
+
+### The bug it fixes
+
+`last_frame_index` is meant to be an OPERATOR choice: in the manual-upload storyboard editor you drag an image onto the "End Frame" target and the UI posts it (`static/index.html` ~L9914 → `main.py` ~L2106). It defaults to `null` (`index.html` ~L6108) and the Pydantic field is `Optional[int] = None` (`main.py` ~L310).
+
+The markdown-promote path invented one anyway:
+
+```python
+# image_platform.py, promote_batch_to_video — PRE-v827
+"last_frame_index": len(nodes) - 1 if nodes else 0,
+```
+
+Every promoted build therefore carried a non-null `last_frame_index` pointing at the LAST `### Image N` block. The end-frame resolver honored it on the closing clip with **no `clip_mode` / `transition` gate at all** — unlike its two siblings, which check `transition != "cut"` and `clip_mode == "blend"`:
+
+```python
+# main.py, prompt-build loop — PRE-v827
+elif is_last_clip:
+    lfi = dialogue_data.get("last_frame_index")
+    if lfi is not None and lfi < num_images:
+        end_fname = uploaded_frames_list[lfi]        # fires on fresh/cut too
+```
+
+`worker.py` (Vertex / redo path) carried the same unguarded branch twice (~L2316, ~L2700).
+
+This directly contradicts v782, which states: *"On a correct fresh/cut build, `end_fname` is `none` for every clip except explicit `end_frame_image` morphs."* v782 flipped every other default-when-absent literal and missed this site.
+
+**Two failure shapes**, measured across the 138 builds in `videos/` at fix time:
+
+| Shape | Builds | What the closing clip did |
+|---|---|---|
+| Last scene uses the LAST image | 107 | end frame == start frame → degenerate self-interpolation; Veo pulls the clip back to its opening pose |
+| Last scene uses an EARLIER image | 31 | end frame = a foreign composition → the persona morphs into a product shot / comment screenshot / overlay still |
+
+Zero builds set `clip_mode: blend`. Twenty carry an explicit `end_frame_image`, **none on the last scene** — so v718i.3 never masked this.
+
+It surfaced on a v825 support-overlay build (`nuri-korella-ed-number1-food-soldier-support-overlay-growth-v3`): all 8 scenes point at `image_1` (the talking head) and images 2-8 are overlay stills, so `len(nodes)-1` = `image_8` = the 9:16 comment screenshot. The closing clip was told to morph Nuri into a phone screenshot.
+
+### The fix
+
+1. `image_platform.py` promote → `"last_frame_index": None`. An intentional last-clip morph is authored with `- **end_frame_image:** image_K` (v718h-C → v718i.3), which resolves BEFORE this fallback. An intentional last-clip self-interpolation is authored with `clip_mode: blend`, which still reaches the `elif` below.
+2. `main.py` + `worker.py` (×2) → bound the index to `0 <= lfi < num_images`. A stored `-1` used to index the last frame from the end of the list.
+3. The resolver is NOT gated on `clip_mode == "blend"` — that would break the manual-upload End Frame picker, which is a legitimate explicit choice on `fresh` clips. The fix is one-sided by design: stop promote from *inventing* the value; keep honoring a *chosen* one.
+
+### Blast radius
+
+- **Promote-created jobs only.** Manual `POST /api/jobs` uploads never fabricated it.
+- **Forward-only.** Existing `Job.dialogue_json` rows keep their stamped value; re-promote the batch to clear it. Shipped `videos/*.md` are NOT retro-edited (per `feedback_rule-changes-forward-only`).
+- No schema change, no migration.
+
+### Diagnostic (temporary)
+
+`image_platform.py` logs at promote time:
+```
+[v827] promote batch=<id>: last_frame_index=None (pre-v827 would have stamped <N>)
+```
+Paired with the existing v782 per-clip line — on a correct fresh/cut build the closing clip must now read `[v782] Clip N: clip_mode='fresh' end_fname=None (end_frame none)`. Remove both diagnostics once an operator export confirms it.
+
+### Regression guard
+
+`code/tests/check_last_frame_index.py` — AST-asserts the promote literal is `None`, greps both resolvers for the lower bound, and asserts `request.last_frame_index` is still read (so a future "fix" can't silently kill the manual picker).
+
+**Touched**: this deep-dive (canonical), `code/image_platform.py`, `code/main.py`, `code/worker.py`, `code/tests/check_last_frame_index.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
