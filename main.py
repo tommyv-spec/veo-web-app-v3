@@ -11901,6 +11901,7 @@ async def local_worker_get_pending_job(
             "dialogue_text": clip.dialogue_text,
             "prompt": clip.prompt_text,  # Generated prompt
             "prompt_b": clip.prompt_text_b,  # v805 — policy-fallback prompt (voice-only)
+            "error_message": clip.error_message,  # v849 — durable Prompt-B requeue marker (restart-safe re-derivation in process_redo_clip)
             "start_frame_key": start_frame_key,  # R2 key for frame
             "end_frame_key": end_frame_key,
             "status": clip.status,
@@ -12143,6 +12144,7 @@ async def local_worker_get_redo_clips(
             "flow_project_url": job.flow_project_url,
             "generation_attempt": clip.generation_attempt,
             "redo_reason": clip.redo_reason,
+            "error_message": clip.error_message,  # v849 — carries the durable Prompt-B requeue marker so a restarted worker re-derives the reworded-line intent
             "claimed_by": clip.claimed_by_worker,
             # Storyboard/Scene mode fields for continue mode support
             "clip_mode": clip.clip_mode or "fresh",
@@ -13443,6 +13445,7 @@ async def user_worker_get_redo_clips(
             "flow_project_url": job.flow_project_url,
             "generation_attempt": clip.generation_attempt,
             "redo_reason": clip.redo_reason,
+            "error_message": clip.error_message,  # v849 — carries the durable Prompt-B requeue marker so a restarted worker re-derives the reworded-line intent
             "claimed_by": clip.claimed_by_worker,
             "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,

@@ -16146,6 +16146,29 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     job_id = clip['job_id']
     register_clip_prompt_b(clip)  # v805 — make Prompt B findable by clip_id
 
+    # v849 (operator 2026-07-10: "clip 12 never retried with prompt b") — the
+    # "rebuild with the reworded Prompt B" decision lived ONLY in the in-memory
+    # _PROMPT_B_TRIED flag set when the PROMINENT/SEXUAL block was first detected.
+    # The requeue DOES persist the intent to the DB error_message ("... retry
+    # reworded line (Prompt B)"), but a redo that runs in a DIFFERENT / RESTARTED
+    # worker process (the operator restarts often — a single session shows several
+    # build hashes) starts with _PROMPT_B_TRIED EMPTY, so the substitution gate
+    # further down (`if _PROMPT_B_TRIED.get(clip_id) ...`) missed and the redo
+    # rebuilt with Prompt A — re-tripping the SAME filter forever instead of using
+    # the reworded line. Re-derive the flag DURABLY from the persisted marker
+    # (carried in the redo-pending payload's error_message) so ANY process picks
+    # Prompt B directly on the first redo, no wasted Prompt-A cycle.
+    try:
+        _rb_marker = (clip.get('error_message') or '').lower()
+        if 'reworded line (prompt b)' in _rb_marker and _CLIP_PROMPT_B.get(clip_id) \
+                and clip_id not in _PROMPT_B_TRIED:
+            _PROMPT_B_TRIED[clip_id] = True
+            print(f"[v849] [REDO] clip {clip_id}: Prompt B intent recovered from the persisted "
+                  f"requeue reason — rebuilding with the reworded line (durable across restarts)",
+                  flush=True)
+    except Exception:
+        pass
+
     # Check DB first — clip may have been completed by HTTP worker before
     # this redo was retried (e.g. after proactive restore self-resume)
     try:
