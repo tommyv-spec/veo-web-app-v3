@@ -14170,8 +14170,15 @@ Ambient: same kitchen room tone, soft pour sound.
                     const _ts = _exportTimestamp(filename);
                     if (_ts !== _prevTs) {
                         _prevTs = _ts;
-                        const _tm = _ts.match(/\d{4}(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
-                        const _lbl = _tm ? `${_tm[1]}/${_tm[2]} ${_tm[3]}:${_tm[4]}:${_tm[5]}` : 'export';
+                        // The filename timestamp is server UTC (datetime.now() on
+                        // Render). Convert to the viewer's LOCAL time so the header
+                        // matches when they actually clicked export (v825.6).
+                        const _tm = _ts.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+                        let _lbl = 'export';
+                        if (_tm) {
+                            const _d = new Date(Date.UTC(+_tm[1], +_tm[2]-1, +_tm[3], +_tm[4], +_tm[5], +_tm[6]));
+                            _lbl = _d.toLocaleString([], {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit'});
+                        }
                         content.insertAdjacentHTML('beforeend', `<div class="export-group-header" style="margin:14px 0 6px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.5px;border-top:1px solid rgba(255,255,255,0.10);padding-top:8px;">📦 Export ${_lbl}</div>`);
                     }
 
