@@ -9575,7 +9575,8 @@ async def export_final_video(
                 ImageJobBatch.promoted_video_job_id == job_id
             ).first()
             _smd = _sb.source_markdown if _sb else None
-            _sup = (_pst(_smd).get("support_inserts") if _smd else []) or []
+            _parsed = _pst(_smd) if _smd else {}  # parse the build ONCE; reused below
+            _sup = (_parsed.get("support_inserts") if _smd else []) or []
             print(f"[Export][v825] support_inserts={len(_sup)}", flush=True)  # TEMP DIAG
             if _sup and _sb:
                 from video_processor import (
@@ -9600,7 +9601,7 @@ async def export_final_video(
                 # literal anchor word and the still lands wrong (or vanished
                 # pre-v825.8).
                 _scene_lines = []
-                for _sc in (_pst(_smd).get("scenes", []) or []):
+                for _sc in (_parsed.get("scenes", []) or []):
                     _auth = " ".join(_sc.get("lines") or []).strip()
                     _cands = [_auth] if _auth else []
                     for _vp in (_sc.get("veo_prompts") or []):
@@ -9644,7 +9645,7 @@ async def export_final_video(
                     # file lives only on Render's ephemeral disk -> not served).
                     from collections import defaultdict as _dd
                     _ar_by_idx = {i["image_index"]: (i.get("aspect_ratio") or "9:16")
-                                  for i in _pst(_smd).get("images", [])}
+                                  for i in _parsed.get("images", [])}
                     _canvas = {"16:9": (1920, 1080), "9:16": (1080, 1920),
                                "1:1": (1080, 1080), "4:3": (1440, 1080), "3:4": (1080, 1440)}
                     _groups = _dd(list)
