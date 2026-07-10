@@ -4042,6 +4042,44 @@ def find_line_in_master(master_words: list, master_text: str, dialogue_text: str
     }
 
 
+def _word_matches(a: str, b: str) -> bool:
+    """v825.8 — loose equality for a single normalized anchor word.
+
+    Whisper is not stable across a long take: the same script word came back as
+    "vessel" in one sentence and "vessels" in another on job d4b661a8. Exact
+    equality dropped the overlay. Order: exact, then stem (one word is a prefix
+    of the other, both >= 4 chars, differing by <= 2 trailing chars), then a
+    close fuzzy ratio. Short words (<= 3 chars) demand exact so "a"/"an"/"and"
+    never collide.
+    """
+    if a == b:
+        return True
+    if len(a) <= 3 or len(b) <= 3:
+        return False
+    lo, hi = (a, b) if len(a) <= len(b) else (b, a)
+    if hi.startswith(lo) and (len(hi) - len(lo)) <= 2:
+        return True
+    import difflib
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.87
+
+
+def _find_anchor_word(norms: list, target: str, lo: int, hi: int):
+    """v825.8 — first index in [lo, hi] matching `target`. Exact pass over the
+    whole window first, so an exact hit later always beats a fuzzy hit earlier.
+    Returns None when neither pass matches."""
+    if not target or lo > hi:
+        return None
+    hi = min(hi, len(norms) - 1)
+    lo = max(lo, 0)
+    for i in range(lo, hi + 1):
+        if norms[i] == target:
+            return i
+    for i in range(lo, hi + 1):
+        if _word_matches(norms[i], target):
+            return i
+    return None
+
+
 def resolve_support_spans(master_words: list, support_inserts: list) -> list:
     """v825.1 — resolve each support insert to its [start,end] span in the master
     audio. The `start_word` + `end_word` are AUTHORITATIVE: the span runs from the
@@ -4084,28 +4122,60 @@ def resolve_support_spans(master_words: list, support_inserts: list) -> list:
             continue
 
         # Optional phrase locates the region (disambiguates a repeated word).
+        # v825.8 — the located region is ALSO the fallback span when an anchor
+        # word is missing from the delivered audio.
         region_lo = cursor
         region_hi = n - 1
+        phrase_span = None
         if phrase:
             b = find_line_in_master(master_words, master_text, phrase, search_from_word=cursor)
             if b is not None:
+                phrase_span = b
                 region_lo = b.get("start_word_idx", cursor)
                 region_hi = b.get("end_word_idx", n - 1)
 
-        # start_word = first match at/after the region start.
-        start_idx = next((i for i in range(region_lo, n) if norms[i] == sw), None)
+        # v825.8 — anchor words are matched LOOSELY, and a support whose phrase
+        # located a region is NEVER dropped just because an anchor word missed.
+        # Two real failures on job d4b661a8 forced this:
+        #   1. The delivered clip-1 audio said "the single best food on earth for
+        #      pushing blood..." while the build's line said "the number one food
+        #      in the world...". `start_word: number` is simply absent from the
+        #      master audio, so the banana comparison board never rendered.
+        #   2. Whisper transcribed "blood vessel" (singular) in one place and
+        #      "blood vessels" in another, so `end_word: vessels` missed.
+        # Exact match still wins; a stem/fuzzy match is second; the phrase's own
+        # span is the last resort. Only a support with NO phrase window and NO
+        # word match is dropped.
+        sidx = _find_anchor_word(norms, sw, region_lo, n - 1)
+        start_idx = sidx if sidx is not None else None
+
+        confidence = 1.0
         if start_idx is None:
-            print(f"[Support] start_word {sw!r} not found (support {s.get('support_index')})")
-            spans.append(None)
-            continue
-        # end_word = first match at/after start_idx, bounded by the region (or a
-        # small window if no phrase narrowed it).
-        end_hi = min(n - 1, max(region_hi, start_idx + 40))
-        end_idx = next((i for i in range(start_idx, end_hi + 1) if norms[i] == ew), None)
-        if end_idx is None:
-            print(f"[Support] end_word {ew!r} not found after start (support {s.get('support_index')})")
-            spans.append(None)
-            continue
+            if phrase_span is None:
+                print(f"[Support] start_word {sw!r} not found and no phrase window "
+                      f"— DROPPED (support {s.get('support_index')})")
+                spans.append(None)
+                continue
+            print(f"[Support] start_word {sw!r} not found — FALLBACK to phrase span "
+                  f"words {region_lo}-{region_hi} (support {s.get('support_index')})")
+            start_idx, end_idx = region_lo, region_hi
+            confidence = min(0.5, phrase_span.get("confidence", 0.5))
+        else:
+            # end_word = first match at/after start_idx, bounded by the region (or
+            # a small window if no phrase narrowed it).
+            end_hi = min(n - 1, max(region_hi, start_idx + 40))
+            end_idx = _find_anchor_word(norms, ew, start_idx, end_hi)
+            if end_idx is None:
+                if phrase_span is not None and region_hi >= start_idx:
+                    print(f"[Support] end_word {ew!r} not found — FALLBACK to phrase end "
+                          f"word {region_hi} (support {s.get('support_index')})")
+                    end_idx = region_hi
+                    confidence = 0.7
+                else:
+                    print(f"[Support] end_word {ew!r} not found after start and no phrase "
+                          f"window — holding on start word (support {s.get('support_index')})")
+                    end_idx = start_idx
+                    confidence = 0.5
 
         start_t = master_words[start_idx]["start"]
         end_t = master_words[end_idx]["end"]
@@ -4116,7 +4186,7 @@ def resolve_support_spans(master_words: list, support_inserts: list) -> list:
             "end": end_t,
             "image_index": s["image_index"],
             "support_index": s["support_index"],
-            "confidence": 1.0,
+            "confidence": confidence,
         })
         cursor = end_idx + 1
 

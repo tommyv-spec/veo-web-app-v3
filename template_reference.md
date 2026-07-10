@@ -15152,3 +15152,50 @@ Paired with the existing v782 per-clip line — on a correct fresh/cut build the
 `code/tests/check_last_frame_index.py` — AST-asserts the promote literal is `None`, counts the lower-bound guard at ALL THREE index sites (`main.py` resolver, `worker.py` resolver, `worker.py` log line — matching the first occurrence would have missed v827.1), and asserts `request.last_frame_index` is still read (so a future "fix" can't silently kill the manual picker).
 
 **Touched**: this deep-dive (canonical), `code/image_platform.py`, `code/main.py`, `code/worker.py`, `code/tests/check_last_frame_index.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
+
+---
+
+## v825.8 — a support insert never vanishes because an anchor word missed
+
+**Shipped 2026-07-10.** Runtime change (`code/video_processor.py`). Forward-only.
+
+### The bug it fixes
+
+v825.1 made `start_word` / `end_word` authoritative and matched them with `norms[i] == sw` — **exact** string equality against the Whisper transcript. When an anchor word wasn't in the transcript, `resolve_support_spans` appended `None` and the caller silently skipped that still. The overlay just wasn't there.
+
+Job `d4b661a8` (2026-07-10) lost 2 of 7 stills this way:
+
+```
+[Support] start_word 'number' not found (support 1)
+[Support] end_word 'vessels' not found after start (support 5)
+[Export][v825] support_track_16x9_... -> 4 stills @ 1920x1080     # 6 expected (6× 16:9)
+```
+
+Two different root causes, both outside the author's control:
+
+1. **The delivered audio drifts from the build's script.** The markdown line read *"the number one food in the world to boost blood flow…"*; Whisper heard *"the single best food on earth for pushing blood…"* (a reworded / re-recorded clip 1). `start_word: number` is absent from the master audio, so the banana comparison board — the mandatory BEFORE|AFTER proxy — never rendered.
+2. **Whisper is inconsistent inside one take.** It wrote `blood vessel` in one sentence and `blood vessels` in another. `end_word: vessels` missed on an exact compare, even though the same word matched exactly 40 words later.
+
+### The fix
+
+Anchor lookup is now a two-pass, loosely-matched search, with the phrase's own span as the last resort:
+
+| Step | Behavior |
+|---|---|
+| `_find_anchor_word` pass 1 | exact scan over the whole window (an exact hit later always beats a fuzzy hit earlier) |
+| `_find_anchor_word` pass 2 | `_word_matches` — stem (one word a prefix of the other, both ≥ 4 chars, ≤ 2 trailing chars apart) then `difflib` ratio ≥ 0.87. Words ≤ 3 chars demand exact, so `a` / `an` / `and` never collide |
+| `start_word` still unresolved | fall back to the matched `phrase` span (`region_lo` → `region_hi`), `confidence ≤ 0.5`, logged as `FALLBACK` |
+| `end_word` still unresolved | fall back to the phrase's end word, `confidence 0.7`; with no phrase window, hold on the start word, `confidence 0.5` |
+| no phrase window AND no word match | **still dropped**, logged as `DROPPED` — no silent garbage span |
+
+`confidence` is now meaningful: `1.0` = both anchors resolved (exact or stem), `0.7` = end fell back, `≤ 0.5` = the whole span came from the phrase.
+
+### Authoring note
+
+The anchors must name words that are **actually spoken in the render**, not merely words in the markdown. If a clip's line is reworded in the platform (v805 / v821 Prompt B, or a manual edit), its support anchors go stale. v825.8 keeps the overlay alive via the phrase, but at low confidence and roughly timed — re-authoring the anchors is still the right fix. The `FALLBACK` log line is the tell.
+
+### Regression guard
+
+`code/tests/check_support_fallback.py` — replays both production failures verbatim (absent `number`, transcribed `vessel` vs authored `vessels`), asserts the unanchored-and-unmatched case still drops, and asserts the exact-anchor happy path and the v825.5 no-overlap hold are unchanged.
+
+**Touched**: this deep-dive (canonical), `code/video_processor.py`, `code/tests/check_support_fallback.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
