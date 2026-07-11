@@ -2718,7 +2718,14 @@ async def _setup_job_background(
                             next_scene_idx = current_scene_idx + 1
                             if next_scene_idx < len(scenes):
                                 next_scene = scenes[next_scene_idx]
-                                if next_scene.get("transition", "cut") != "cut":  # v782 default cut (was blend) — missing transition no longer triggers cross-scene end-frame interpolation
+                                # v830 — cross-scene blend is EXPLICIT opt-in (was
+                                # `!= "cut"`, which fired on None / "" / the literal
+                                # "null" too — the parser stores `transition: null`
+                                # as the string "null"). v782 set the default to cut
+                                # but kept the != "cut" test; now only an explicit
+                                # `transition: blend` interpolates. Twin of
+                                # worker.py's storyboard-mode branch.
+                                if next_scene.get("transition") == "blend":
                                     # v682e — text_card scenes have imageIndex=None.
                                     # Use .get() default of None (not 0 — defaulting
                                     # to 0 silently misroutes text_card-following

@@ -15276,3 +15276,57 @@ Anchors may keep naming the **authored** (Prompt A) words — that is now the co
 **Scope / gates**: GENERATE-side authoring, forward-only (the shipped walmart-interview-keepup build keeps its generic facade — not retro-edited). Reference build: `videos/nuri-korella-ed-5signs-bloodflow-walmart-interview-heldprops-growth-v3.md`.
 
 **Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (authoring note), `wiki/concepts/script-adaptation/us-iconic-blend-catalog.md` (Walmart-entrance row note), memory `feedback_show-brand-locations-and-name-them`, `wiki/log.md`.
+
+---
+
+## v830 — cross-scene end-frame blend is EXPLICIT opt-in (`transition: blend`), not "anything ≠ cut"
+
+**Shipped 2026-07-11.** Runtime change (`code/worker.py` ×2 + `code/main.py`). Auto-deploys to Render. Forward-only.
+
+### The bug it fixes
+
+Three server-side sites decided cross-scene end-frame interpolation with `get("transition"...) != "cut"`:
+- `worker.py` ~L2690 (storyboard render loop)
+- `worker.py` ~L2303 (the redo / alternate loop)
+- `main.py` ~L2721 (Flow prompt-build loop)
+
+`!= "cut"` blends on **any** value that isn't the exact string `"cut"` — `None`, `""`, and the literal string `"null"`. The markdown parser stores `- **transition:** null` as the string `"null"` (`image_platform.py` ~L3407 / ~L3882), not `None`. So a clean fresh/cut build got a spurious end frame: at a scene boundary the clip was bound the **next scene's image** as its Veo end frame, and Veo morphed the clip into that composition.
+
+The operator saw it as start+end frame pairs on clips that should have carried a **start frame only** — on `nuri-korella-ed-5signs-bloodflow-walmart-interview-heldprops-growth-v3` (all scenes `clip_mode: fresh`, `transition: cut`, zero `end_frame_image`), the outro/CTA clips showed bound end frames.
+
+v782 declared *"blend is now explicit opt-in only"* and flipped the `clip_mode` default to `fresh` and the missing-`transition` default to `cut` — but it kept the `!= "cut"` **comparison** at these three sites. Default-cut only helps when the field is ABSENT; a field explicitly present as `None` / `""` / `"null"` still satisfied `!= "cut"`. This is the same shape of miss as v827 (the `is_last_clip` branch v782 skipped).
+
+### The fix
+
+All three sites now test `== "blend"`:
+
+```python
+# worker.py ~2690
+if next_transition == "blend":            # was: != "cut"
+# worker.py ~2303
+if scenes[nsi].get("transition") == "blend":
+# main.py ~2721
+if next_scene.get("transition") == "blend":
+```
+
+Cross-scene interpolation now fires **only** when the next scene explicitly declares `transition: blend`. `cut` / `null` / `None` / `""` / missing → no end frame. This matches v782's stated policy exactly.
+
+### Blast radius
+
+Surveyed all 138 builds in `videos/`: transition is only ever `cut` (1262 bullets) or `null` (147) — **zero** use `blend`. Every intentional morph uses `- **end_frame_image:** image_K` (22 builds), the v718i path, which resolves separately and BEFORE this branch. So no build loses intended behavior; the fix only removes spurious blends.
+
+Forward-only: existing `Job.dialogue_json` rows are unchanged. A clip already rendered with a spurious end frame stays until re-generated; re-run/redo the clip to pick up the fix. No schema change.
+
+### Confirming it
+
+Both loops already log the decision per clip:
+- `worker.py` ~L2778: `[Worker] Clip N: <start> → <end|NONE> (mode=..., reason=<end_frame_reason>)`
+- `main.py` ~L2755: `[v782] Clip N: clip_mode=... end_fname=... (end_frame ASSIGNED|none)`
+
+On a correct fresh/cut build after v830, every clip must read `end_frame NONE` / `reason=fresh mode, no end frame` (except explicit `end_frame_image` morphs). A clip that still shows `reason=... (explicit blend to next scene)` means the build genuinely declared `transition: blend`.
+
+### Regression guard
+
+`code/tests/check_transition_blend_optin.py` — asserts no `get("transition") != "cut"` blend predicate remains in `worker.py` / `main.py` / `image_platform.py`, that the explicit `== "blend"` opt-in is present at all sites, and that both render-loop files still parse.
+
+**Touched**: this deep-dive (canonical), `code/worker.py`, `code/main.py`, `code/tests/check_transition_blend_optin.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.

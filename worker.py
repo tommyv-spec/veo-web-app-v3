@@ -2300,7 +2300,7 @@ class JobWorker:
                                                     is_last_in_scene = (idx == sc_clips[-1]) if sc_clips else False
                                                     if is_last_in_scene and not is_last:
                                                         nsi = cur_si + 1
-                                                        if nsi < len(scenes) and scenes[nsi].get("transition", "cut") != "cut":  # v782 default cut
+                                                        if nsi < len(scenes) and scenes[nsi].get("transition") == "blend":  # v830 explicit-opt-in (was != "cut")
                                                             # v682e — text_card scenes have imageIndex=None.
                                                             # Skip end-frame interpolation when next is
                                                             # text_card (defaulting to 0 silently misroutes
@@ -2685,17 +2685,28 @@ class JobWorker:
                         elif next_scene != scene_index:
                             # STORYBOARD MODE: Next clip is in DIFFERENT scene
                             next_transition = next_info["scene_transition"]
-                            
-                            # If transition is "blend" (or None), use next scene's image (scene transition priority)
-                            if next_transition != "cut":
+
+                            # v830 — cross-scene interpolation is EXPLICIT opt-in.
+                            # Was `!= "cut"`, which blended on ANY non-"cut" value:
+                            # None / "" / the literal string "null" (the parser
+                            # stores `- **transition:** null` as "null", not None)
+                            # all satisfied it, so a fresh/cut build got a spurious
+                            # end frame binding the next scene's image whenever a
+                            # boundary transition wasn't the exact string "cut".
+                            # v782 declared blend explicit-opt-in only but this site
+                            # (and main.py's twin) kept the != "cut" test. Now only
+                            # `transition: blend` triggers it; zero shipped builds
+                            # use blend (all use end_frame_image for real morphs).
+                            if next_transition == "blend":
                                 use_end_frame = True
                                 actual_end_idx = next_info["image_idx"]
-                                end_frame_reason = f"scene transition to scene {next_scene} (blend to next scene)"
+                                end_frame_reason = f"scene transition to scene {next_scene} (explicit blend to next scene)"
                                 scene_transition_handled = True
                             else:
-                                # CUT to next scene: the next scene is irrelevant to THIS clip.
-                                # Do NOT set scene_transition_handled — fall through to the clip's
-                                # own mode logic (blend → self-interpolation with same image).
+                                # CUT / null / None to next scene: the next scene is
+                                # irrelevant to THIS clip. Do NOT set
+                                # scene_transition_handled — fall through to the
+                                # clip's own mode logic.
                                 pass
                     
                     # Apply clip_mode logic if:
