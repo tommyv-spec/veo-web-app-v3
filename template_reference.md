@@ -15267,7 +15267,7 @@ Anchors may keep naming the **authored** (Prompt A) words — that is now the co
 
 **The rule**: when a build is set at a branded US retail location (Walmart, Costco, Sam's Club, Target...):
 1. **Render the REAL storefront sign** in the frames that show the location — e.g. "the store sign reading WALMART in big white capital letters and the yellow spark starburst logo beside it" on the blue facade. Start frames come from Banana 2, which renders sign text cleanly; the old "Veo garbles text" worry applied to raw Veo renders and is stale.
-2. **NAME the store in a spoken line**, preferably the hook ("be honest with me, right here outside walmart..."). The store name in audio is a counted USA script signal.
+2. **AMENDED same day (operator: "no need to mention walmart in the hook, because it's visible")**: when the sign is VISIBLE in frame, a spoken mention is OPTIONAL — the rendered sign already carries the retail signal. Speak the store name only where the sign is NOT in frame (availability/price beats like "from any walmart") or where the line wants it naturally. Never pad the hook line with the store name the viewer can already see.
 
 **Why**: the store sign IS the US signal — the wild-confirmed Walmart-review reels carry the store sign on screen 4/4 and name the store in the hook about half the time (`wiki/concepts/script-adaptation/proven-frameworks-catalog.md` L50-51, `us-audience-priming-strategy.md`). A generic facade spends the setting without collecting the signal.
 
