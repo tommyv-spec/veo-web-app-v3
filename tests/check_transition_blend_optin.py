@@ -78,4 +78,30 @@ for fname in ("worker.py", "main.py"):
     ast.parse(_read(fname))
 print("OK v830: worker.py + main.py still parse")
 
+
+# 4) v830.1 — the frontend (static/index.html) must not DEFAULT clip_mode or
+#    transition to 'blend'. The backend fix only gates None/""/"null"; a payload
+#    or state builder that fabricates the literal string 'blend' would still be
+#    honored (blend is explicit opt-in). Every fallback default and every
+#    hardcoded scene-creation default must be fresh/cut. Explicit user actions
+#    (the cut<->blend toggle, the setClipMode('blend') button, the `=== 'blend'`
+#    display checks) legitimately keep the word and use different syntax.
+index_html = _read(os.path.join("static", "index.html"))
+FE_ANTIPATTERNS = [
+    (r"\|\|\s*'blend'", "a `|| 'blend'` fallback default (should be 'fresh'/'cut')"),
+    (r"transition:\s*'blend'", "a `transition: 'blend'` object default (should be 'cut')"),
+    (r"clipMode:\s*'blend'", "a `clipMode: 'blend'` object default (should be 'fresh')"),
+    (r"\.clipMode\s*=\s*'blend'", "a `.clipMode = 'blend'` default assignment (should be 'fresh')"),
+    (r"let\s+sceneTransition\s*=\s*'blend'", "a `let sceneTransition = 'blend'` init (should be 'cut')"),
+    (r"let\s+clipMode\s*=\s*'blend'", "a `let clipMode = 'blend'` init (should be 'fresh')"),
+]
+for pat, desc in FE_ANTIPATTERNS:
+    hits = re.findall(pat, index_html)
+    assert not hits, (
+        f"static/index.html: {len(hits)} occurrence(s) of {desc} — v830.1 "
+        f"requires fresh/cut defaults so the editor never POSTs a fabricated "
+        f"'blend' the backend then honors"
+    )
+print("OK v830.1: no clip_mode/transition defaults to 'blend' in the frontend")
+
 print("ALL v830 transition-blend-optin checks pass")

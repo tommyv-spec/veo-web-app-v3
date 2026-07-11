@@ -6917,7 +6917,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     for(let li = 0; li < currentLines.length; li++){
                         for(const sb of sceneBreaks){
                             if(sb.lineIndex === li){
-                                oldSceneWordOffsets.push({ wordOffset: wordCount, imgIndex: sb.imgIndex, clipMode: sb.clipMode || 'blend', transition: sb.transition });
+                                oldSceneWordOffsets.push({ wordOffset: wordCount, imgIndex: sb.imgIndex, clipMode: sb.clipMode || 'fresh', transition: sb.transition });  // v830.1 v782-align default fresh
                             }
                         }
                         wordCount += currentLines[li].split(/\s+/).filter(w => w).length;
@@ -6925,7 +6925,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     // Catch any scene breaks beyond the last line
                     for(const sb of sceneBreaks){
                         if(sb.lineIndex >= currentLines.length && !oldSceneWordOffsets.find(o => o.imgIndex === sb.imgIndex && o.wordOffset === wordCount)){
-                            oldSceneWordOffsets.push({ wordOffset: wordCount, imgIndex: sb.imgIndex, clipMode: sb.clipMode || 'blend', transition: sb.transition });
+                            oldSceneWordOffsets.push({ wordOffset: wordCount, imgIndex: sb.imgIndex, clipMode: sb.clipMode || 'fresh', transition: sb.transition });  // v830.1 v782-align default fresh
                         }
                     }
                     
@@ -7649,7 +7649,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 sceneBreaks = sceneBreaks.filter(sb => sb.lineIndex < numLines);
             }
             if(sceneBreaks.length === 0 && numImages > 0){
-                sceneBreaks = [{ lineIndex: 0, imgIndex: 0, clipMode: 'blend' }];
+                sceneBreaks = [{ lineIndex: 0, imgIndex: 0, clipMode: 'fresh' }];  // v830.1 v782-align default fresh (was 'blend')
             }
             
             // Sort scene breaks by line index
@@ -7669,7 +7669,7 @@ Ambient: same kitchen room tone, soft pour sound.
             // Ensure all scenes have clipMode
             sceneBreaks.forEach((sb, idx) => {
                 if(!sb.clipMode){
-                    sb.clipMode = 'blend';
+                    sb.clipMode = 'fresh';  // v830.1 v782-align default fresh (was 'blend')
                     console.log(`[renderStoryboard] Set default clipMode for scene ${idx}`);
                 }
             });
@@ -7745,10 +7745,10 @@ Ambient: same kitchen room tone, soft pour sound.
                     const isFirstScene = sceneIdx === 0;
                     
                     // Scene transition (Blend to / Cut to) - how we arrive FROM previous scene
-                    const hasBlendTransition = scene.transition !== 'cut'; // Default to blend
-                    
+                    const hasBlendTransition = scene.transition === 'blend'; // v830.1 — blend is explicit opt-in (was !== 'cut', which labeled null/missing as blend)
+
                     // Clip mode (blend/continue/fresh) - how clips transition within this scene
-                    const clipMode = scene.clipMode || 'blend'; // Default to blend
+                    const clipMode = scene.clipMode || 'fresh'; // v830.1 v782-align default fresh (was 'blend')
                     console.log(`[renderStoryboard] Scene ${sceneIdx}: clipMode=${clipMode}, scene.clipMode=${scene.clipMode}, typeof=${typeof scene.clipMode}`);
                     
                     htmlContent += `<div class="scene-divider-wrapper">`;
@@ -7834,7 +7834,7 @@ Ambient: same kitchen room tone, soft pour sound.
                         ? sceneBreaks[0].imgIndex 
                         : 0;
                     const img = uploadedFilesData[firstSceneImgIdx];
-                    const clipMode = (sceneBreaks.length > 0 && sceneBreaks[0].clipMode) || 'blend';
+                    const clipMode = (sceneBreaks.length > 0 && sceneBreaks[0].clipMode) || 'fresh';  // v830.1 v782-align default fresh
                     
                     htmlContent += `
                         <div class="scene-divider-wrapper">
@@ -8552,7 +8552,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                 newSceneBreaks.push({
                                     lineIndex: lineCounter,
                                     imgIndex: sceneBreaks[sceneIdx].imgIndex,
-                                    clipMode: sceneBreaks[sceneIdx].clipMode || 'blend',
+                                    clipMode: sceneBreaks[sceneIdx].clipMode || 'fresh',  // v830.1 v782-align default fresh
                                     transition: sceneBreaks[sceneIdx].transition
                                 });
                             }
@@ -8588,7 +8588,7 @@ Ambient: same kitchen room tone, soft pour sound.
                         // Check if any scene break starts at this line
                         for(const sb of sceneBreaks){
                             if(sb.lineIndex === i){
-                                sceneWordOffsets.push({ wordOffset: wordCount, imgIndex: sb.imgIndex, clipMode: sb.clipMode || 'blend', transition: sb.transition });
+                                sceneWordOffsets.push({ wordOffset: wordCount, imgIndex: sb.imgIndex, clipMode: sb.clipMode || 'fresh', transition: sb.transition });  // v830.1 v782-align default fresh
                             }
                         }
                         wordCount += allLines[i].split(/\s+/).filter(w => w).length;
@@ -8940,7 +8940,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 sceneBreaks = newSceneBreaks.map((sb, idx) => ({
                     lineIndex: Math.min(sb.textStartIdx, Math.max(0, newLines.length - 1)),
                     imgIndex: sb.imgIndex,
-                    clipMode: sceneBreaks[idx]?.clipMode || 'blend'
+                    clipMode: sceneBreaks[idx]?.clipMode || 'fresh'  // v830.1 v782-align default fresh
                 }));
                 if(sceneBreaks.length > 0) sceneBreaks[0].lineIndex = 0;
                 
@@ -9160,14 +9160,14 @@ Ambient: same kitchen room tone, soft pour sound.
                             sceneBreaks[existingBreakIdx].imgIndex = draggedImageIndex;
                             // Ensure clipMode exists
                             if(!sceneBreaks[existingBreakIdx].clipMode){
-                                sceneBreaks[existingBreakIdx].clipMode = 'blend';
+                                sceneBreaks[existingBreakIdx].clipMode = 'fresh';  // v830.1 v782-align default fresh
                             }
                         } else {
-                            sceneBreaks.push({ 
-                                lineIndex: targetLineIndex, 
-                                imgIndex: draggedImageIndex, 
-                                clipMode: 'blend',
-                                transition: 'blend'
+                            sceneBreaks.push({
+                                lineIndex: targetLineIndex,
+                                imgIndex: draggedImageIndex,
+                                clipMode: 'fresh',   // v830.1 v782-align default fresh (was 'blend')
+                                transition: 'cut'    // v830.1 v782-align default cut (was 'blend')
                             });
                         }
                     }
@@ -9309,15 +9309,15 @@ Ambient: same kitchen room tone, soft pour sound.
                         sceneBreaks[existingBreakIdx].imgIndex = draggedImageIndex;
                         // Ensure clipMode exists
                         if(!sceneBreaks[existingBreakIdx].clipMode){
-                            sceneBreaks[existingBreakIdx].clipMode = 'blend';
+                            sceneBreaks[existingBreakIdx].clipMode = 'fresh';  // v830.1 v782-align default fresh
                         }
                     } else {
                         // Add new scene break
-                        sceneBreaks.push({ 
-                            lineIndex: targetLineIndex, 
-                            imgIndex: draggedImageIndex, 
-                            clipMode: 'blend',
-                            transition: 'blend'
+                        sceneBreaks.push({
+                            lineIndex: targetLineIndex,
+                            imgIndex: draggedImageIndex,
+                            clipMode: 'fresh',   // v830.1 v782-align default fresh (was 'blend')
+                            transition: 'cut'    // v830.1 v782-align default cut (was 'blend')
                         });
                     }
                 }
@@ -9709,8 +9709,8 @@ Ambient: same kitchen room tone, soft pour sound.
                             imageIndex: (scene.imgIndex === null || scene.imgIndex === undefined)
                                 ? null
                                 : serverImageIndex,
-                            clipMode: scene.clipMode || 'blend',      // 'blend' | 'continue' | 'fresh'
-                            transition: idx === 0 ? null : (scene.transition || 'blend'),  // 'blend' | 'cut' | null for first
+                            clipMode: scene.clipMode || 'fresh',      // v830.1 v782-align default fresh (was 'blend' — fabricated blend into the payload for any scene whose clipMode wasn't populated)
+                            transition: idx === 0 ? null : (scene.transition || 'cut'),  // v830.1 v782-align default cut (was 'blend' — a null/missing transition POSTed 'blend', so the backend interpolated a clean fresh/cut build)
                             clips: clipIndices,
                             // v682e — scene_type denorm so backend can branch
                             // on text_card without inferring from null imageIndex.
@@ -9736,8 +9736,8 @@ Ambient: same kitchen room tone, soft pour sound.
                     // Determine which scene this line belongs to
                     let imageIdx = 0;
                     let sceneIdx = 0;
-                    let clipMode = 'blend';
-                    let sceneTransition = 'blend';
+                    let clipMode = 'fresh';        // v830.1 v782-align default fresh (was 'blend')
+                    let sceneTransition = 'cut';   // v830.1 v782-align default cut (was 'blend')
                     
                     if(numImages > 1){
                         if(editorMode === 'storyboard' && sceneBreaks.length > 0){
@@ -9748,8 +9748,8 @@ Ambient: same kitchen room tone, soft pour sound.
                                     const localIdx = sceneBreaks[s].imgIndex;
                                     imageIdx = uploadedFilesData[localIdx]?.index ?? localIdx;
                                     sceneIdx = s;
-                                    clipMode = sceneBreaks[s].clipMode || 'blend';
-                                    sceneTransition = (s > 0 && i === sceneBreaks[s].lineIndex) ? (sceneBreaks[s].transition || 'blend') : null;
+                                    clipMode = sceneBreaks[s].clipMode || 'fresh';  // v830.1 v782-align default fresh
+                                    sceneTransition = (s > 0 && i === sceneBreaks[s].lineIndex) ? (sceneBreaks[s].transition || 'cut') : null;  // v830.1 v782-align default cut (was 'blend')
                                     break;
                                 }
                             }
@@ -15998,8 +15998,8 @@ Ambient: same kitchen room tone, soft pour sound.
                     sceneBreaks = data.scenes.map(s => ({
                         lineIndex: s.clips[0] || 0,
                         imgIndex: s.imageIndex,
-                        clipMode: s.clipMode || 'blend',
-                        transition: s.transition || 'blend'
+                        clipMode: s.clipMode || 'fresh',  // v830.1 v782-align default fresh
+                        transition: s.transition || 'cut'  // v830.1 v782-align default cut (was 'blend')
                     }));
                 }
                 
@@ -19393,7 +19393,7 @@ Ambient: same kitchen room tone, soft pour sound.
                         lineRows = `<div style="padding:6px 8px;background:var(--bg-input);border-radius:4px;font-size:11px;margin-top:4px;"><div style="color:var(--text-muted);font-style:italic;">${imgEscape(marker)}</div>${vp ? `<details style="margin-top:4px;"><summary style="cursor:pointer;color:#a78bfa;">veo prompt override</summary><pre style="margin-top:4px;padding:6px;background:var(--bg-elevated);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;">${imgEscape((vp.text_prompt||'') + (vp.negative_prompt ? '\n\nNegative: ' + vp.negative_prompt : ''))}</pre></details>` : ''}</div>`;
                     }
 
-                    return `<div style="padding:8px 10px;background:var(--bg-elevated);border-radius:4px;font-size:12px;"><b>Scene ${sc.scene_index}</b> · image_${sc.image_index} · ${imgEscape(sc.clip_mode||'blend')}${sc.scene_transition ? ` · ${imgEscape(sc.scene_transition)}` : ''}${sc.speaker_mode ? ` · speaker: ${imgEscape(sc.speaker_mode)}` : ''}${sc.visual_register ? ` · register: ${imgEscape(sc.visual_register)}` : ''}${lineRows}</div>`;
+                    return `<div style="padding:8px 10px;background:var(--bg-elevated);border-radius:4px;font-size:12px;"><b>Scene ${sc.scene_index}</b> · image_${sc.image_index} · ${imgEscape(sc.clip_mode||'fresh')}${sc.scene_transition ? ` · ${imgEscape(sc.scene_transition)}` : ''}${sc.speaker_mode ? ` · speaker: ${imgEscape(sc.speaker_mode)}` : ''}${sc.visual_register ? ` · register: ${imgEscape(sc.visual_register)}` : ''}${lineRows}</div>`;
                 }).join('')}</div></details>`
                 : '';
 

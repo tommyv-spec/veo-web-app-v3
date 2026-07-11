@@ -15325,8 +15325,19 @@ Both loops already log the decision per clip:
 
 On a correct fresh/cut build after v830, every clip must read `end_frame NONE` / `reason=fresh mode, no end frame` (except explicit `end_frame_image` morphs). A clip that still shows `reason=... (explicit blend to next scene)` means the build genuinely declared `transition: blend`.
 
+### v830.1 — the frontend twin (the actual end-to-end cause)
+
+`cavecrew-reviewer` on the v830 commit found the backend fix alone was insufficient: the storyboard editor (`static/index.html`) **defaults clip_mode and transition to `'blend'`** in ~13 places — payload builders, state initializers, and hardcoded scene-creation objects. So a job saved / redone through the editor POSTs the literal string `'blend'`, which the backend then **honors** (v830 gates None/""/"null", not an explicit "blend"). This — not just the null case — is what put end frames on the operator's clean fresh/cut build.
+
+Every DEFAULT flipped to v782 values (`clip_mode: fresh`, `transition: cut`):
+- payload builders (POSTed): `scene.clipMode || 'blend'` → `|| 'fresh'`, `scene.transition || 'blend'` → `|| 'cut'` (the cloneJob save path ~L9712-9713, the per-line builder ~L9739-9752, the config-load path ~L16001-16002, the word-offset builders ~L6920/8591)
+- state / scene-creation: the auto-first-scene ~L7652, the ensure-clipMode passes ~L7672/9163/9312, the two drag-to-create `sceneBreaks.push({... clipMode:'blend', transition:'blend'})` ~L9169/9319
+- display fallbacks: `hasBlendTransition = transition !== 'cut'` → `=== 'blend'` ~L7748, the summary `clip_mode||'blend'` → `'fresh'` ~L19396
+
+**Preserved (explicit user intent):** the cut↔blend toggle (~L7884), the `setClipMode(idx, 'blend')` buttons, the `=== 'blend'` active-class checks. Blend stays reachable — only the DEFAULTS changed. Verified with `node --check` on the extracted inline script.
+
 ### Regression guard
 
-`code/tests/check_transition_blend_optin.py` — asserts no `get("transition") != "cut"` blend predicate remains in `worker.py` / `main.py` / `image_platform.py`, that the explicit `== "blend"` opt-in is present at all sites, and that both render-loop files still parse.
+`code/tests/check_transition_blend_optin.py` — asserts no `get("transition") != "cut"` blend predicate remains in `worker.py` / `main.py` / `image_platform.py`, the explicit `== "blend"` opt-in is present at all backend sites, both render-loop files still parse, AND (v830.1) `static/index.html` contains no `|| 'blend'` / `transition: 'blend'` / `clipMode: 'blend'` / `let clipMode = 'blend'` default (explicit user-action blend uses different syntax and is allowed).
 
-**Touched**: this deep-dive (canonical), `code/worker.py`, `code/main.py`, `code/tests/check_transition_blend_optin.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
+**Touched**: this deep-dive (canonical), `code/worker.py`, `code/main.py`, `code/static/index.html`, `code/tests/check_transition_blend_optin.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
