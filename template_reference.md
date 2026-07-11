@@ -15244,3 +15244,35 @@ Anchors may keep naming the **authored** (Prompt A) words — that is now the co
 `code/tests/check_support_line_relative.py` — reconstructs job `d4b661a8` (master audio = the 8 spoken B lines; build = the 8 A lines + 7 anchors), asserts all 7 supports resolve, each lands inside its owning line's master span, survived anchors stay exact (1.0) while reworded ones go proportional (< 1.0), no overlap after the v825.5 hold, and the no-`scene_lines` back-compat path still resolves.
 
 **Touched**: this deep-dive (canonical), `code/video_processor.py`, `code/main.py`, `code/tests/check_support_line_relative.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
+
+## v828 — Interview builds: the patient LOOKS the symptoms + CARRIES the proxy; the interviewer + patient STOP the healer (F7 refinement)
+
+**Where it came from**: the 5-signs street-interview lane, three operator corrections in one day (2026-07-11): *"i imagine more the interviewer with a patient stopping nuri"* → *"the patient has the props showing the ED"* → *"not just the banana, but overweight and sad, etc"* + *"the interviewer and the patient stop nuri to ask her the questions"*. Each correction fixed a build that had already passed every gate — so the staging grammar itself becomes the rule.
+
+**The rule (three parts, all mandatory for any interview-format build with a sufferer on camera):**
+
+1. **The STOP is the hook, all parties IN frame.** The interviewer (visible reporter holding the foam mic — or the POV-hand mic where a reporter body doesn't fit) and the PATIENT together stop the healer mid-stride; the hook image shows the stop itself: the healer halted and turning, surprised; the patient mid-question toward HER; the mic angled between them. Never frame the hook on the questioners alone with the healer off-frame — the interview subject is the healer, so she is in frame 1. The interviewer NEVER speaks (v682 one-speaker-per-clip stays clean); the patient asks the questions.
+2. **The patient carries the symptom PROXY.** The ED/symptom props belong to the PATIENT, not the healer: he brought his own limp banana and holds it up as he asks; it stays in his hands the whole video (flat on his palm for a morning-sign beat, clutched to his chest on the recognition beat, raised on the final ask). The healer's tote supplies only the TEACHING props (socks, candle, flow card, the FIRM contrast banana). Hers-vs-his contrast beats (her firm banana next to his limp one) are the strongest form.
+3. **The patient's BODY shows the augmented symptoms.** He is the walking before-frame: visibly overweight, big soft belly straining his shirt, slumped shoulders, thinning hair, puffy pale tired face with heavy dark circles, sad and embarrassed. Calibrate to believable-exaggerated (symptom-before-after-exaggeration): worn down and unmistakable in one glance, never body-horror or disgust. A "fit" patient wastes the frame — his body must rhyme the limp proxy he holds.
+
+**Why**: the interview format converts on RECOGNITION — the viewer must see himself in the patient within one second. A fit prop-less patient asking from off-frame gives the scroll three nothing-frames; a symptomatic patient holding his own sagging proxy, stopping the healer on camera, is pain SHOWN (hook-leverage) + shame-proxy + candid-stop spectacle stacked in frame 1.
+
+**Scope / gates**: GENERATE-side authoring, forward-only. Applies to every interview-grammar build (F7 street stop, porch, superstore plaza, mall). §0 PROXY READ must name what the patient's body + prop show; the auditor's proxy/close-fill checks apply unchanged. Reference builds: `videos/nuri-korella-ed-5signs-bloodflow-street-interview-heldprops-growth-v2.md` + `...-walmart-interview-heldprops-growth-v3.md`.
+
+**Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (authoring note), `wiki/concepts/script-adaptation/street-secret-podcast-interview-framework.md` (F7 staging update), memory `feedback_patient-symptom-body-and-props`, `wiki/log.md`.
+
+## v829 — Branded US retail LOCATIONS: render the real sign + name the store in a spoken line (supersedes the no-logo armor)
+
+**Where it came from**: operator 2026-07-11 on the 5-signs Walmart v3 build — *"we actually have to show the brand and mention them"* — correcting a build that had shipped the old armor from the 2026-05-24 walmart-interview-keepup build ("Veo garbles brand text + literal logo is a brand risk" → generic big-box). That armor is SUPERSEDED.
+
+**The rule**: when a build is set at a branded US retail location (Walmart, Costco, Sam's Club, Target...):
+1. **Render the REAL storefront sign** in the frames that show the location — e.g. "the store sign reading WALMART in big white capital letters and the yellow spark starburst logo beside it" on the blue facade. Start frames come from Banana 2, which renders sign text cleanly; the old "Veo garbles text" worry applied to raw Veo renders and is stale.
+2. **NAME the store in a spoken line**, preferably the hook ("be honest with me, right here outside walmart..."). The store name in audio is a counted USA script signal.
+
+**Why**: the store sign IS the US signal — the wild-confirmed Walmart-review reels carry the store sign on screen 4/4 and name the store in the hook about half the time (`wiki/concepts/script-adaptation/proven-frameworks-catalog.md` L50-51, `us-audience-priming-strategy.md`). A generic facade spends the setting without collecting the signal.
+
+**Boundary — locations ≠ packaging**: this covers LOCATIONS/settings and availability/price mentions ("from any walmart"). Branded PRODUCT packaging in frame still comes ONLY from an uploaded reference (never respec a label from memory — `feedback_uploaded-ref-dont-respec`); competitor product packs (CVS/GNC style) stay out of the render zone.
+
+**Scope / gates**: GENERATE-side authoring, forward-only (the shipped walmart-interview-keepup build keeps its generic facade — not retro-edited). Reference build: `videos/nuri-korella-ed-5signs-bloodflow-walmart-interview-heldprops-growth-v3.md`.
+
+**Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (authoring note), `wiki/concepts/script-adaptation/us-iconic-blend-catalog.md` (Walmart-entrance row note), memory `feedback_show-brand-locations-and-name-them`, `wiki/log.md`.
