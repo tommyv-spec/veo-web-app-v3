@@ -15341,3 +15341,22 @@ Every DEFAULT flipped to v782 values (`clip_mode: fresh`, `transition: cut`):
 `code/tests/check_transition_blend_optin.py` — asserts no `get("transition") != "cut"` blend predicate remains in `worker.py` / `main.py` / `image_platform.py`, the explicit `== "blend"` opt-in is present at all backend sites, both render-loop files still parse, AND (v830.1) `static/index.html` contains no `|| 'blend'` / `transition: 'blend'` / `clipMode: 'blend'` / `let clipMode = 'blend'` default (explicit user-action blend uses different syntax and is allowed).
 
 **Touched**: this deep-dive (canonical), `code/worker.py`, `code/main.py`, `code/static/index.html`, `code/tests/check_transition_blend_optin.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
+
+## v831 — Spoken-line hard cap: 25 words; longer thoughts split into 2 clips
+
+**Where it came from**: operator 2026-07-11, on the 5-signs interview lane — *"never make any line longer than 25 words, if needed split them in 2 clips."* The lane's sign lines ran 28-38 words; v577's word budget only WARNed, so long lines kept shipping.
+
+**The rule**: no `- **line:**` field may exceed **25 words** (plain whitespace count). A thought that needs more words becomes TWO scenes / TWO clips:
+- Split at a natural sentence boundary (the sign statement | the if-you explanation; the tease | the ask).
+- Both halves reuse the SAME start image (`- **image:**` unchanged, `clip_mode: fresh`, `transition: cut`) — no new render setup needed.
+- Distribute the ACTION across the halves (pull | toss; present | tip-the-sag; blow-out | smoke-hold) so neither clip is a static hold.
+- Prompt B splits at the same boundary (each half's B = the reworded version of that half; v821 shape per clip).
+- Duration per half = ceil(words / 2.6), floor 4s (keeps v577 green).
+
+**Why**: Veo renders fixed-length clips; a 30+ word line either rushes the delivery or overruns the clip and gets trimmed mid-sentence at export. Two short clips deliver clean speech AND double the visual beats (each half opens on its own action).
+
+**Enforcement**: the authoring auditor (`~/.claude/skills/build-video/audit_build.py` `c_line_word_cap`) HARD-FAILS any line over 25 words. v577's 2.6×duration budget stays as the per-clip fit check.
+
+**Scope / gates**: GENERATE-side authoring, every spoken line on every build. Forward-only for shipped builds; the active 5-signs lane (v2/v3/v4) was split same-day (11 → 17 scenes/clips each, 6 lines split per build). Reference: `videos/nuri-korella-ed-5signs-bloodflow-walmart-sick-vs-healthy-interview-growth-v4.md`.
+
+**Touched**: this deep-dive (canonical), `~/.claude/skills/build-video/audit_build.py` (FAIL check), `wiki/patterns/conventions.md` (index row), `wiki/meta/build-rule-index.md` (§A row), `wiki/meta/generate-video-checklist.md` (authoring note), memory `feedback_line-25-word-cap`, `wiki/log.md`.
