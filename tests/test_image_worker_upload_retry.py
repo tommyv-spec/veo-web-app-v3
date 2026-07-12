@@ -45,6 +45,27 @@ def test_non_requests_error_is_not_retryable():
     assert image_worker.is_retryable_api_error(ValueError("bug in our code")) is False
 
 
+@pytest.mark.parametrize("exc", [
+    requests.exceptions.MissingSchema("api_url has no http://"),
+    requests.exceptions.InvalidSchema("ftp:// is not a thing here"),
+    requests.exceptions.InvalidURL("not a url"),
+    requests.exceptions.URLRequired("no url at all"),
+])
+def test_malformed_url_errors_are_not_retryable(exc):
+    # These are RequestException subclasses, but they come from OUR OWN broken
+    # config — a typo'd api_url fails identically on every attempt. Retrying
+    # would burn 6 attempts + ~200s of backoff per node before admitting it.
+    assert image_worker.is_retryable_api_error(exc) is False
+
+
+def test_transport_errors_are_still_retryable_after_the_carve_out():
+    # Guard: subtracting the permanent set must not cost us the real ones.
+    assert image_worker.is_retryable_api_error(
+        requests.exceptions.ChunkedEncodingError("Response ended prematurely")) is True
+    assert image_worker.is_retryable_api_error(requests.exceptions.ConnectionError()) is True
+    assert image_worker.is_retryable_api_error(requests.exceptions.Timeout()) is True
+
+
 def test_backoff_outlasts_a_render_deploy():
     # A redeploy leaves the platform unreachable for 60-180s. The old
     # [2, 5, 15] schedule gave up after ~22s.
@@ -132,3 +153,29 @@ def test_health_gate_does_not_wait_on_a_permanent_error(monkeypatch):
             "http://x", "k", 2791, ["/tmp/variant_1.png"]
         )
     assert calls["n"] == 1  # re-raised immediately, no second attempt
+
+
+def test_health_gate_surfaces_the_upload_error_when_the_health_check_itself_raises(
+    monkeypatch, capsys
+):
+    # _api_wait_for_health can RAISE instead of returning False. If that escapes,
+    # the operator sees a health-check traceback and the "binning N finished
+    # variants" line never prints — the real story (an upload that gave up) is
+    # lost. Treat a raising health check as "platform did not come back".
+    def dead_upload(api_url, api_key, node_id, paths):
+        raise requests.exceptions.ChunkedEncodingError("Response ended prematurely")
+
+    def exploding_health(*a, **kw):
+        raise RuntimeError("health check blew up")
+
+    monkeypatch.setattr(image_worker, "_upload_variants_to_api", dead_upload)
+    monkeypatch.setattr(image_worker, "_api_wait_for_health", exploding_health)
+
+    with pytest.raises(requests.exceptions.ChunkedEncodingError):
+        image_worker._upload_variants_with_health_gate(
+            "http://x", "k", 2791, ["/tmp/variant_1.png"]
+        )
+
+    logged = capsys.readouterr().out
+    assert "giving up" in logged           # the give-up line still printed
+    assert "1 finished variant(s)" in logged

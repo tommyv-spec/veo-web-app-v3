@@ -6289,6 +6289,22 @@ def is_retryable_api_error(exc) -> bool:
         if resp is not None and 400 <= resp.status_code < 500:
             return False   # client error — permanent
         return True        # 5xx / unknown — server-side, worth retrying
+
+    # Permanent RequestException subclasses: a malformed URL/schema comes from
+    # OUR OWN broken config and fails identically on every retry. Without this
+    # carve-out a typo'd api_url burns 6 attempts + ~200s of backoff on every
+    # node (and far longer once the health gate piles on) before admitting it.
+    # TooManyRedirects is deliberately NOT here: a redirect loop is a
+    # server-side condition that can clear once a deploy settles.
+    _PERMANENT_REQUEST_ERRORS = (
+        _rq.exceptions.MissingSchema,
+        _rq.exceptions.InvalidSchema,
+        _rq.exceptions.InvalidURL,
+        _rq.exceptions.URLRequired,
+    )
+    if isinstance(exc, _PERMANENT_REQUEST_ERRORS):
+        return False
+
     # ConnectionError, Timeout, ChunkedEncodingError, ContentDecodingError,
     # RemoteDisconnected-wrapped-in-RequestException, ... all transport-level.
     return isinstance(exc, _rq.exceptions.RequestException)
@@ -6314,10 +6330,23 @@ def _upload_variants_with_health_gate(api_url, api_key, node_id, saved_paths):
         print(f"[API/v851] ⏳ Node {node_id}: upload still failing ({type(e).__name__}). "
               f"{len(saved_paths)} finished variant(s) are on disk — waiting for the "
               f"platform to come back rather than binning them.", flush=True)
-        if not _api_wait_for_health(api_url, api_key):
+
+        # The health helper can RAISE rather than return False. If that escapes,
+        # the operator gets a health-check traceback and never learns that an
+        # upload gave up on finished renders. Any failure here means the same
+        # thing: the platform did not come back.
+        try:
+            healthy = _api_wait_for_health(api_url, api_key)
+        except Exception as health_err:
+            print(f"[API/v851] ⚠ Health check itself failed "
+                  f"({type(health_err).__name__}: {health_err})", flush=True)
+            healthy = False
+
+        if not healthy:
             print(f"[API/v851] ✗ Node {node_id}: platform never came back — giving up "
                   f"on {len(saved_paths)} finished variant(s).", flush=True)
-            raise
+            raise   # the ORIGINAL upload error — that is the failure that matters
+
         print(f"[API/v851] ✓ Platform healthy again — re-uploading node {node_id}", flush=True)
         return _upload_variants_to_api(api_url, api_key, node_id, saved_paths)
 
