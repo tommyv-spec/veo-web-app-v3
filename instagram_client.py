@@ -377,16 +377,20 @@ def _clip_to_dict(m: dict) -> dict:
     ts = m.get("taken_at") or m.get("taken_at_ts") or m.get("posted_at") or m.get("device_timestamp")
     posted_at = _parse_ts(ts)
     views = _first_count(m, _VIEW_KEYS)
-    # Diagnostic: a reel with zero views is nearly always a key we don't read
-    # yet, not a reel nobody watched. Dump the count-ish keys the payload DOES
-    # carry so the real name is one log line away. Remove once confirmed.
+    # Diagnostic: a zero-view reel whose payload DOES carry a play/view key we
+    # failed to read means a key name we don't know yet. Dump those keys.
+    # /v2/user/medias reports no view field at all — that's known and expected,
+    # so skip it rather than burn the log budget restating it.
     if views == 0 and _UNKNOWN_COUNT_LOGS[0] < 5:
-        _UNKNOWN_COUNT_LOGS[0] += 1
-        countish = {
+        viewish = {
             k: m[k] for k in m
-            if any(t in k.lower() for t in ("count", "view", "play", "like"))
+            if any(t in k.lower() for t in ("view", "play"))
+            and not isinstance(m[k], bool)
+            and "disabled" not in k.lower()
         }
-        print(f"[ig-client] ZERO-VIEW clip {shortcode} count-ish keys={countish}", flush=True)
+        if viewish:
+            _UNKNOWN_COUNT_LOGS[0] += 1
+            print(f"[ig-client] ZERO-VIEW clip {shortcode} unread view keys={viewish}", flush=True)
     return {
         "shortcode": shortcode,
         "url": f"https://www.instagram.com/reel/{shortcode}/" if shortcode else None,
