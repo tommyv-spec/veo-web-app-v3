@@ -103,7 +103,8 @@ def fetch_recent_clips(ig_user_id: str, api_key: str, limit: int = 0, max_pages:
 
     def _ingest(items):
         for it in items:
-            if not _looks_like_video(it):
+            it = _unwrap_media(it)
+            if not isinstance(it, dict) or not _looks_like_video(it):
                 continue
             sc = it.get("code") or it.get("shortcode")
             if not sc or sc in seen:
@@ -279,6 +280,19 @@ def _extract_items(data) -> list:
     """Back-compat wrapper for code paths that only need items."""
     items, _ = _extract_items_and_cursor(data)
     return items
+
+
+def _unwrap_media(it):
+    """/v2/user/clips returns each entry as {"media": {...}} — the clips-feed
+    shape. The other endpoints return the media dict bare. Testing the wrapper
+    against _looks_like_video always fails, which silently discarded every item
+    from the ONE endpoint that paginates through the full back-catalogue; older
+    reels then only ever arrived via /v2/user/medias, which reports no view
+    count at all, so they stored as 0 views.
+    """
+    if isinstance(it, dict) and isinstance(it.get("media"), dict):
+        return it["media"]
+    return it
 
 
 def _looks_like_video(media: dict) -> bool:
