@@ -15360,3 +15360,19 @@ Every DEFAULT flipped to v782 values (`clip_mode: fresh`, `transition: cut`):
 **Scope / gates**: GENERATE-side authoring, every spoken line on every build. Forward-only for shipped builds; the active 5-signs lane (v2/v3/v4) was split same-day (11 → 17 scenes/clips each, 6 lines split per build). Reference: `videos/nuri-korella-ed-5signs-bloodflow-walmart-sick-vs-healthy-interview-growth-v4.md`.
 
 **Touched**: this deep-dive (canonical), `~/.claude/skills/build-video/audit_build.py` (FAIL check), `wiki/patterns/conventions.md` (index row), `wiki/meta/build-rule-index.md` (§A row), `wiki/meta/generate-video-checklist.md` (authoring note), memory `feedback_line-25-word-cap`, `wiki/log.md`.
+
+## v832 — Detail-level innovation moves: PROXY-OBJECT FUSION, ROLE FLIP, MEME-GRAMMAR OPENER
+
+**Where it came from**: operator 2026-07-12, after the 5-signs banana-mic build — *"these are the type of details and type of innovation we need to add to the rules."* The step-up that worked was not a new format or a new setting: it was a PROP DETAIL (the mic is a banana) and a ROLE DETAIL (the healer joins the press side) and a QUESTION DETAIL (the meme compliment). Innovation lives in details grafted onto the proven skeleton, not in new skeletons.
+
+**The three named moves** (compose freely; each is one step-up layer per `innovation-moves.md` §"Step up vs differentiate"):
+
+1. **PROXY-OBJECT FUSION** — fuse the symptom proxy INTO a functional format object, so the proxy rides EVERY frame instead of appearing on its own beat. Worked example: the street-interview mic becomes a BANANA MIC (big firm upright banana + black foam windscreen, held like a real mic) — the firm state is now in-frame the entire interview while the patient holds his limp one; the before/after contrast needs no second prop beat. Generalizes: the proxy as the pointer she teaches with, the doorstop, the trophy on the podium — any object the format already requires.
+2. **ROLE FLIP** — invert who does what in a proven two-sided format: the patient who asked the healer becomes the one STOPPED and asked; the healer joins the interviewer's side. Same lines, same beats, radically different scene. A differentiate move ("what OTHER way can I show this script?") executed on the ROLES instead of the setting.
+3. **MEME-GRAMMAR OPENER** — borrow a live street-interview meme question shape as the hook and pivot it to the taboo: the flattering-negation compliment ("you look like a man who does not beat his wife.") followed immediately by the niche question ("do you know the five signs your blood flow is failing your soldier?"). The meme shape buys the double-take; the pivot lands the pain in line 1. Keep the meme's exact grammar; armor risky tokens in Prompt B (v821), never in A (§5.5).
+
+**Why**: after 3-4 versions of a lane, the setting/staging axis is spent (solo → street → walmart → panel all rotated the STAGE). The next viral unit comes from a detail the viewer has never seen ON that stage — the mentor's step-up ladder ("add layers... one at a time, each layer a fresh viral") applied at prop/role/question granularity.
+
+**Scope / gates**: IDEATION-side, optional moves (not a per-build gate). Declare the move used in §0 STEP-UP. All standing gates still apply to the result: v702 vocabulary (the banana-mic draft tripped "thrust" — reworded to push/extend/hold), v795 no pointing, v682 one-speaker, v831 line cap, §8. Reference build: `videos/nuri-korella-ed-5signs-bloodflow-walmart-banana-mic-interview-growth-v5.md`.
+
+**Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/concepts/script-adaptation/innovation-moves.md` (moves-layer entry), memory `feedback_detail-level-innovation-moves`, `wiki/log.md`.
