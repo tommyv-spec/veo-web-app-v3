@@ -19374,7 +19374,11 @@ Ambient: same kitchen room tone, soft pour sound.
         // the webp thumbnail the tile renders. Inverse of imgThumbUrl.
         function imgFullResUrl(url) {
             if (!url) return url;
-            return url.replace(/[?&]w=\d+/g, m => (m[0] === '?' ? '?' : '')).replace(/\?&/, '?').replace(/[?&]$/, '');
+            const i = url.indexOf('?');
+            if (i === -1) return url;
+            const base = url.slice(0, i);
+            const qs = url.slice(i + 1).split('&').filter(p => p && !/^w=\d*$/.test(p));
+            return qs.length ? base + '?' + qs.join('&') : base;
         }
 
         // v852 — filename-safe slug for a node/variant label.
@@ -19383,12 +19387,29 @@ Ambient: same kitchen room tone, soft pour sound.
                 .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'image';
         }
 
-        // v852 — download ONE image at original resolution. Fetch-to-blob (not a
-        // bare <a href>) because the served response is Content-Disposition:
-        // inline, so a plain link opens the PNG in a tab on some browsers. The
-        // blob path also lets us set the real extension from the content-type.
-        async function imgDownloadOne(ev, url, label) {
+        // v852 — download ONE image at original resolution.
+        //
+        // Takes IDs, never a URL string: the handler is inlined into an onclick=""
+        // attribute, and an image_path can carry a single quote (manual uploads are
+        // named from the user's filename), which would break out of the JS string
+        // literal. Resolving the URL from imgState here keeps the attribute free of
+        // any user-controlled text. variantId null → the node's chosen variant.
+        //
+        // Fetch-to-blob (not a bare <a href>) because /files responds
+        // Content-Disposition: inline, so a plain link opens the PNG in a tab on
+        // some browsers. The blob path also lets the real extension come from the
+        // response content-type.
+        async function imgDownloadOne(ev, nodeId, variantId, label) {
             if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+            const node = (imgState.nodesById || {})[nodeId];
+            let variant = null;
+            if (node) {
+                const vs = node.variants || [];
+                variant = variantId
+                    ? vs.find(v => v.id === variantId)
+                    : (node.chosen_variant || vs[0]);
+            }
+            const url = variant ? variant.image_url : null;
             if (!url) { imgShowToastError('Download', 'No image to download'); return; }
             const btn = ev && ev.currentTarget ? ev.currentTarget : null;
             const orig = btn ? btn.innerHTML : '';
@@ -20089,10 +20110,12 @@ Ambient: same kitchen room tone, soft pour sound.
                 // Chronological index label: "Scene N" if extractable, else sequential
                 const mm = (n.name || '').match(/Scene\s+(\d+)/i);
                 const indexLabel = mm ? `#${mm[1]}` : `#${idx + 1}`;
-                // v852 — per-tile download of the FULL-RES original (fullUrl, not thumbUrl).
+                // v852 — per-tile download of the FULL-RES original (not the ?w= thumb
+                // the tile renders). Passes IDs, not the URL — see imgDownloadOne.
+                // dlLabel is imgSlug'd to [a-z0-9-], so it is safe in the attribute.
                 const dlLabel = imgSlug(String(idx + 1).padStart(2, '0') + '-' + (n.name || ('node-' + n.id)));
                 const dlBtn = fullUrl
-                    ? `<button class="img-dl-btn" title="Download original (full size)" data-track="image_download_one" onclick="imgDownloadOne(event, '${fullUrl}', '${dlLabel}')">⬇</button>`
+                    ? `<button class="img-dl-btn" title="Download original (full size)" data-track="image_download_one" onclick="imgDownloadOne(event, ${n.id}, null, '${dlLabel}')">⬇</button>`
                     : '';
                 return `
                     <div class="img-storyboard-tile" onclick="imgSelectNode(${n.id})">
@@ -21052,9 +21075,9 @@ Ambient: same kitchen room tone, soft pour sound.
                             // click readable in PostHog (autocapture stamps data-* attrs).
                             // 14d data showed 679 empty-text clicks dominated by these
                             // icon-only cards — now they show up as 'variant_card'.
-                            // v852 — download this variant at FULL RES (v.image_url with
-                            // no ?w= bucket). imgDownloadOne stops propagation so the
-                            // click doesn't also re-select the variant.
+                            // v852 — download this variant at FULL RES (no ?w= bucket).
+                            // imgDownloadOne stops propagation so the click doesn't also
+                            // re-select the variant. IDs only — see imgDownloadOne.
                             const vLabel = imgSlug((node.name || ('node-' + node.id)) + '-v' + v.variant_index);
                             return `
                                 <div class="img-variant ${chosen ? 'chosen' : ''} ${isManual ? 'manual-variant' : ''}"
@@ -21067,7 +21090,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                     ${isManual ? '<div class="manual-icon" title="Manual upload">📁</div>' : ''}
                                     ${chosen ? '<div class="chosen-badge">✓</div>' : ''}
                                     <button class="img-dl-btn" title="Download original (full size)" data-track="image_download_one"
-                                            onclick="imgDownloadOne(event, '${v.image_url}', '${vLabel}')">⬇</button>
+                                            onclick="imgDownloadOne(event, ${node.id}, ${v.id}, '${vLabel}')">⬇</button>
                                 </div>`;
                         }).join('')}
                         <div class="img-variant img-upload-tile"
