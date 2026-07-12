@@ -14538,115 +14538,77 @@ Ambient: same kitchen room tone, soft pour sound.
                 }
                 // ─────────────────────────────────────────────────────────────
 
-                // Create AbortController for timeout (5 min normal, 10 min for master audio sync)
-                const controller = new AbortController();
-                const exportTimeout = exportSettings.master_audio_filename ? 600000 : 300000;
-                const timeoutId = setTimeout(() => controller.abort(), exportTimeout);
-
-                // v701v — Snapshot pre-export R2 file list BEFORE firing POST so
-                // we can identify a NEW final_export_*.mp4 deterministically even
-                // when the POST's response is lost to Render's proxy timeout (any
-                // export running ≥30-60s will trip it). Pattern: fire POST in
-                // background, race against a /list-outputs poll loop. Whichever
-                // observes the new file first wins; the "Export Failed" /
-                // "Server took longer than the browser waited" banners no longer
-                // surface for a successful-but-slow run.
-                let _preExportFilenames = new Set();
-                try {
-                    const _preRes = await fetch(`${API}/jobs/${jobId}/list-outputs`);
-                    if (_preRes.ok) {
-                        const _preData = await _preRes.json();
-                        for (const fn of (_preData.files || [])) _preExportFilenames.add(fn);
-                    }
-                } catch (_preErr) {
-                    console.log('[Export/v701v] pre-snapshot skipped:', _preErr);
+                // v850 — the export is now a DURABLE SERVER-SIDE JOB. The POST
+                // returns 202 immediately with an export_id; the work runs
+                // detached from the request. If Render redeploys mid-export
+                // (auto-deploy fires on every push to main) the next container
+                // re-runs it — attempts bumps and we just keep polling. The old
+                // v701v R2-file poll is gone: it could not tell "still working"
+                // apart from "the container died", so a deploy always ended in
+                // "Export polling exceeded the time cap".
+                const _queueRes = await fetch(`${API}/jobs/${jobId}/export-final`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(settings),
+                });
+                if (!_queueRes.ok) {
+                    let _qErr = 'Export could not be queued';
+                    try { _qErr = (await _queueRes.json()).detail || _qErr; }
+                    catch (e) { _qErr = `HTTP ${_queueRes.status}: ${_queueRes.statusText}`; }
+                    throw new Error(_qErr);
                 }
-                console.log(`[Export/v701v] pre-export snapshot: ${_preExportFilenames.size} files`);
+                const _queued = await _queueRes.json();
+                const _exportId = _queued.export_id;
+                console.log(`[Export/v850] queued export_id=${_exportId} state=${_queued.state}`);
 
-                let response;
-                let _fetchErrored = false;
-                try {
-                    response = await fetch(`${API}/jobs/${jobId}/export-final`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(settings),
-                        signal: controller.signal
-                    });
-                } catch (fetchError) {
-                    clearTimeout(timeoutId);
-                    _fetchErrored = true;
-                    console.log(
-                        `[Export/v701v] POST connection lost (${fetchError.name}: ${fetchError.message}); `
-                        + `backend likely still processing. Polling /list-outputs for the new export.`
-                    );
-                    // DON'T throw — fall through to the poll loop below so a
-                    // slow-but-successful run still resolves to ✅ instead of
-                    // a transient ❌. The poll has an 8-minute ceiling.
-                }
-                clearTimeout(timeoutId);
+                const _statusEl = document.getElementById('exportStatusText');
+                const _pollStart = Date.now();
+                const _pollMaxMs = 1800000;   // 30 min — a v698A dual-output run plus one deploy-restart
+                let _lastAttempt = 0;
+                let _run = null;
 
-                // v701v — If fetch failed, poll R2 for the new file rather than
-                // declaring failure. The status banner stays in "processing"
-                // mode while the poll runs.
-                if (_fetchErrored) {
-                    const _statusEl = document.getElementById('exportStatusText');
-                    if (_statusEl) _statusEl.textContent = '⏳ Server still processing — waiting for the export to land in R2...';
-                    const _pollStart = Date.now();
-                    const _pollMaxMs = exportSettings.master_audio_filename ? 900000 : 900000;  // v701x — 15min cap (was 8min default); a v698A dual-output run with 11 clips can run 10-12min on Render's cpu tier
-                    let _foundFilename = null;
-                    while (Date.now() - _pollStart < _pollMaxMs) {
-                        await new Promise(r => setTimeout(r, 3000));
-                        try {
-                            const _r = await fetch(`${API}/jobs/${jobId}/list-outputs`);
-                            if (!_r.ok) continue;
-                            const _d = await _r.json();
-                            const _newest = (_d.files || [])
-                                .filter(f => f.startsWith('final_export_') && f.endsWith('.mp4') && !_preExportFilenames.has(f));
-                            if (_newest.length > 0) {
-                                _newest.sort();
-                                _foundFilename = _newest[_newest.length - 1];
-                                console.log(`[Export/v701v] poll matched new file: ${_foundFilename}`);
-                                break;
-                            }
-                            const _elapsed = ((Date.now() - _pollStart) / 1000).toFixed(0);
-                            if (_statusEl) _statusEl.textContent = `⏳ Still processing (${_elapsed}s) — final_export not yet uploaded to R2...`;
-                        } catch (_pollErr) {
-                            console.log('[Export/v701v] poll tick error (ignored):', _pollErr);
-                        }
+                while (Date.now() - _pollStart < _pollMaxMs) {
+                    await new Promise(r => setTimeout(r, 3000));
+                    let _s;
+                    try {
+                        const _r = await fetch(`${API}/jobs/${jobId}/export-status?export_id=${_exportId}`);
+                        if (!_r.ok) continue;             // server mid-restart — keep polling
+                        _s = await _r.json();
+                    } catch (_pollErr) {
+                        // Container is being replaced right now. NOT a failure.
+                        console.log('[Export/v850] poll tick error (server restarting?):', _pollErr);
+                        if (_statusEl) _statusEl.textContent = '⏳ Server restarting — your export is saved and will resume...';
+                        continue;
                     }
-                    if (!_foundFilename) {
-                        throw new Error('Export polling exceeded the time cap with no new file in R2. Check Render logs for the actual export task; manual recovery may be needed.');
+
+                    if (_s.attempts > _lastAttempt && _lastAttempt > 0) {
+                        console.log(`[Export/v850] export restarted by the server (attempt ${_s.attempts})`);
                     }
-                    // Fake a 'response' so downstream code can read result.filename
-                    // / result.download_url. Build the R2 URL from the same
-                    // /list-outputs route the UI uses elsewhere.
-                    const _downloadUrl = `${API}/jobs/${jobId}/outputs/${_foundFilename}`;
-                    response = new Response(
-                        JSON.stringify({
-                            filename: _foundFilename,
-                            download_url: _downloadUrl,
-                            // duration / clips / etc not known from poll;
-                            // the success banner will read those from
-                            // the inserted card's denormalized text instead.
-                        }),
-                        { status: 200, headers: { 'Content-Type': 'application/json' } },
-                    );
+                    _lastAttempt = _s.attempts;
+
+                    if (_s.state === 'done')   { _run = _s; break; }
+                    if (_s.state === 'failed') { throw new Error(_s.error || 'Export failed'); }
+
+                    const _elapsed = ((Date.now() - _pollStart) / 1000).toFixed(0);
+                    if (_statusEl) {
+                        _statusEl.textContent = _s.state === 'queued'
+                            ? `⏳ Export queued — a deploy restarted it, re-running (attempt ${_s.attempts + 1})...`
+                            : `🎬 Processing (${_elapsed}s, attempt ${_s.attempts})...`;
+                    }
                 }
-                
+
+                if (!_run) {
+                    throw new Error('Export is still running after 30 minutes. It is saved on the server — reopen this job in a moment to pick up the result.');
+                }
+
+                // Same payload the old synchronous endpoint returned.
+                const response = new Response(JSON.stringify(_run.result || {}), {
+                    status: 200, headers: { 'Content-Type': 'application/json' },
+                });
+
                 clearInterval(timerInterval);
                 clearInterval(stageInterval);
-                
-                if (!response.ok) {
-                    let errMsg = 'Export failed';
-                    try {
-                        const err = await response.json();
-                        errMsg = err.detail || errMsg;
-                    } catch(parseErr) {
-                        errMsg = `HTTP ${response.status}: ${response.statusText}`;
-                    }
-                    throw new Error(errMsg);
-                }
-                
+
                 const result = await response.json();
                 console.log('[Export] Success:', result);
                 
