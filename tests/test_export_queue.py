@@ -14,10 +14,15 @@ import export_queue as eq
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CODE = os.path.dirname(_HERE)
 _MAIN = os.path.join(_CODE, "main.py")
+_INDEX = os.path.join(_CODE, "static", "index.html")
 
 
 def _main_src():
     return open(_MAIN, encoding="utf-8").read()
+
+
+def _index_src():
+    return open(_INDEX, encoding="utf-8").read()
 
 
 def test_running_with_fresh_heartbeat_is_not_stale():
@@ -166,3 +171,31 @@ def test_settings_serialized_with_pydantic_v2_api():
     full ExportSettings payload or the runner rebuilds the wrong settings."""
     src = _main_src()
     assert "settings_json=settings.model_dump_json()" in src
+
+
+# ---- static/index.html wiring (source asserts) ----------------------------
+def test_frontend_polls_export_status():
+    """The backend POST now answers 202 with only {export_id, state}. If the
+    frontend ever goes back to awaiting the POST body, nothing errors — a 202
+    passes response.ok — it just silently yields result.filename === undefined.
+    So the poll call is the guard."""
+    src = _index_src()
+    assert "/export-status?export_id=" in src, "frontend never polls /export-status"
+    assert "[Export/v850]" in src, "v850 marker missing — frontend may be the pre-v850 copy"
+
+
+def test_frontend_has_no_dead_v701v_machinery():
+    """v701v polled R2 for the output file and could not tell 'still working'
+    apart from 'the container died'. It is fully replaced by the run-state poll;
+    leftovers would race the new path."""
+    src = _index_src()
+    assert "_fetchErrored" not in src, "dead v701v _fetchErrored still present"
+    assert "_preExportFilenames" not in src, "dead v701v _preExportFilenames still present"
+
+
+def test_frontend_reads_the_run_result_payload():
+    """ExportRun.to_dict() puts the old synchronous endpoint's body under
+    `result`. The success card + the voice-clone chain both read that payload,
+    so the frontend must unwrap it (not use the status envelope directly)."""
+    src = _index_src()
+    assert "_run.result" in src, "frontend does not read the run's result payload"
