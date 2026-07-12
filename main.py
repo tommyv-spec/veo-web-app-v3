@@ -3760,6 +3760,21 @@ class MatchInstagramVideoRequest(BaseModel):
     job_id: str
 
 
+def _ig_apply_counts(row, clip: dict) -> None:
+    """Copy view/like/comment counts onto an InstagramVideo row.
+
+    A 0 from the API never overwrites a stored non-zero. The v1 chunk endpoint
+    carries play_count for the ~12 newest reels; the v2 endpoints that serve
+    everything older don't always, so an older reel comes back as 0 views —
+    and a straight assignment wipes the real number we already had. Counts on a
+    live reel don't fall to zero, so a 0 means "not reported", not "no views".
+    """
+    for field in ("views", "likes", "comments"):
+        incoming = clip.get(field) or 0
+        if incoming > 0 or not getattr(row, field):
+            setattr(row, field, incoming)
+
+
 def _get_user_ig_account(db: DBSession, account_id: int, user: User):
     from models import InstagramAccount
     acc = db.query(InstagramAccount).filter_by(id=account_id).first()
@@ -3881,9 +3896,7 @@ def sync_instagram_account(
             continue
         existing = db.query(InstagramVideo).filter_by(account_id=acc.id, shortcode=c["shortcode"]).first()
         if existing:
-            existing.views = c.get("views") or 0
-            existing.likes = c.get("likes") or 0
-            existing.comments = c.get("comments") or 0
+            _ig_apply_counts(existing, c)
             # Backfill posted_at on rows stored before the timestamp parser
             # handled string taken_at — NULL posted_at sinks the reel in the grid.
             if not existing.posted_at and c.get("posted_at"):
@@ -4046,9 +4059,7 @@ def refresh_instagram_stats(
         v = by_shortcode.pop(sc, None)
         if not v:
             continue  # clip outside the window, or not stored yet — /sync's job
-        v.views = c.get("views") or 0
-        v.likes = c.get("likes") or 0
-        v.comments = c.get("comments") or 0
+        _ig_apply_counts(v, c)
         if c.get("thumb_url"):
             v.thumb_url = c["thumb_url"]
         updated += 1

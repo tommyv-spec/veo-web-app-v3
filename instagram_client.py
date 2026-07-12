@@ -309,6 +309,36 @@ def _parse_ts(ts):
     return None
 
 
+_VIEW_KEYS = (
+    "play_count", "ig_play_count", "view_count", "video_view_count",
+    "video_play_count", "views", "reel_play_count",
+)
+_LIKE_KEYS = ("like_count", "likes", "edge_liked_by_count")
+_COMMENT_KEYS = ("comment_count", "comments", "edge_media_to_comment_count")
+
+# One-shot log budget: enough to identify the field name, not enough to flood.
+_UNKNOWN_COUNT_LOGS = [0]
+
+
+def _first_count(m: dict, keys) -> int:
+    """Counts move between keys across HikerAPI endpoints — the v1 chunk sends
+    play_count, the v2 endpoints don't always. Take the first key that carries a
+    real number rather than assuming one name."""
+    for k in keys:
+        v = m.get(k)
+        if isinstance(v, bool) or v is None:
+            continue
+        if isinstance(v, dict):  # graphql-ish {"count": N}
+            v = v.get("count")
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    return 0
+
+
 def _clip_to_dict(m: dict) -> dict:
     shortcode = m.get("code") or m.get("shortcode") or ""
     caption_obj = m.get("caption") or m.get("caption_text") or {}
@@ -332,14 +362,25 @@ def _clip_to_dict(m: dict) -> dict:
             video_url = vv[0].get("url") if isinstance(vv[0], dict) else None
     ts = m.get("taken_at") or m.get("taken_at_ts") or m.get("posted_at") or m.get("device_timestamp")
     posted_at = _parse_ts(ts)
+    views = _first_count(m, _VIEW_KEYS)
+    # Diagnostic: a reel with zero views is nearly always a key we don't read
+    # yet, not a reel nobody watched. Dump the count-ish keys the payload DOES
+    # carry so the real name is one log line away. Remove once confirmed.
+    if views == 0 and _UNKNOWN_COUNT_LOGS[0] < 5:
+        _UNKNOWN_COUNT_LOGS[0] += 1
+        countish = {
+            k: m[k] for k in m
+            if any(t in k.lower() for t in ("count", "view", "play", "like"))
+        }
+        print(f"[ig-client] ZERO-VIEW clip {shortcode} count-ish keys={countish}", flush=True)
     return {
         "shortcode": shortcode,
         "url": f"https://www.instagram.com/reel/{shortcode}/" if shortcode else None,
         "thumb_url": thumb_url,
         "video_url": video_url,
         "caption": caption[:1000],
-        "views": int(m.get("play_count") or m.get("video_view_count") or 0),
-        "likes": int(m.get("like_count") or 0),
-        "comments": int(m.get("comment_count") or 0),
+        "views": views,
+        "likes": _first_count(m, _LIKE_KEYS),
+        "comments": _first_count(m, _COMMENT_KEYS),
         "posted_at": posted_at,
     }
