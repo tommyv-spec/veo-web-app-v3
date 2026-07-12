@@ -3884,6 +3884,10 @@ def sync_instagram_account(
             existing.views = c.get("views") or 0
             existing.likes = c.get("likes") or 0
             existing.comments = c.get("comments") or 0
+            # Backfill posted_at on rows stored before the timestamp parser
+            # handled string taken_at — NULL posted_at sinks the reel in the grid.
+            if not existing.posted_at and c.get("posted_at"):
+                existing.posted_at = c["posted_at"]
             # Refresh signed URLs (they expire) so retries can re-download.
             if c.get("video_url"):
                 existing.video_url = c.get("video_url")
@@ -3980,8 +3984,70 @@ async def list_instagram_videos(
         q = q.filter(InstagramVideo.matched_job_id.isnot(None))
     elif matched is False:
         q = q.filter(InstagramVideo.matched_job_id.is_(None))
-    videos = q.order_by(InstagramVideo.posted_at.desc().nullslast()).all()
+    # Newest post first, exactly like the IG profile grid. id desc is the
+    # tiebreaker so rows with no posted_at still land in a stable order.
+    videos = q.order_by(
+        InstagramVideo.posted_at.desc().nullslast(),
+        InstagramVideo.id.desc(),
+    ).all()
     return [v.to_dict() for v in videos]
+
+
+@app.post("/api/instagram/accounts/{account_id}/refresh-stats")
+def refresh_instagram_stats(
+    account_id: int,
+    days: int = 7,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-pull view/like/comment counts for reels posted in the last `days`.
+
+    Cheap counterpart to /sync: sync walks every page of the account's history
+    (up to 50 HikerAPI calls) to discover NEW reels. This one only wants FRESH
+    NUMBERS on reels already stored, so it stops as soon as it has covered the
+    window — 1-3 calls. No new rows are created here.
+    """
+    from models import InstagramVideo
+    acc = _get_user_ig_account(db, account_id, current_user)
+    api_key = _enc_decrypt(acc.api_key_encrypted)
+    cutoff = datetime.utcnow() - timedelta(days=max(1, days))
+
+    recent = (
+        db.query(InstagramVideo)
+        .filter(
+            InstagramVideo.account_id == acc.id,
+            InstagramVideo.posted_at.isnot(None),
+            InstagramVideo.posted_at >= cutoff,
+        )
+        .all()
+    )
+    if not recent:
+        return {"updated": 0, "checked": 0, "window_days": days, "detail": "no reels in window"}
+
+    by_shortcode = {v.shortcode: v for v in recent}
+    # Fetch a bit past the window so a burst-posting day can't truncate it.
+    fetch_limit = len(recent) + 12
+    try:
+        if not acc.ig_user_id:
+            acc.ig_user_id = _ig_resolve_user_id(acc.handle, api_key)
+        clips = _ig_fetch_recent_clips(acc.ig_user_id, api_key, limit=fetch_limit, max_pages=3)
+    except HikerAPIError as he:
+        raise HTTPException(status_code=502, detail=str(he))
+
+    updated = 0
+    for c in clips:
+        v = by_shortcode.get(c.get("shortcode"))
+        if not v:
+            continue
+        v.views = c.get("views") or 0
+        v.likes = c.get("likes") or 0
+        v.comments = c.get("comments") or 0
+        if c.get("thumb_url"):
+            v.thumb_url = c["thumb_url"]
+        updated += 1
+    db.commit()
+    print(f"[ig-stats] account={acc.id} window={days}d checked={len(recent)} updated={updated}", flush=True)
+    return {"updated": updated, "checked": len(recent), "window_days": days}
 
 
 @app.post("/api/instagram/videos/{video_id}/transcribe")

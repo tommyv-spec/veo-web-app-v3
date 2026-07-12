@@ -285,6 +285,30 @@ def _looks_like_video(media: dict) -> bool:
     return media.get("media_type") == 2 or "video_versions" in media or media.get("video_url")
 
 
+def _parse_ts(ts):
+    """HikerAPI sends taken_at as a unix int on some endpoints and an ISO-8601
+    string on others. Both must land as a naive-UTC datetime, else posted_at
+    stays NULL and the reel sorts to the bottom of the grid."""
+    if ts is None or isinstance(ts, bool):
+        return None
+    if isinstance(ts, (int, float)):
+        return datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
+    if isinstance(ts, str):
+        s = ts.strip()
+        if not s:
+            return None
+        if s.isdigit():
+            return datetime.fromtimestamp(int(s), tz=timezone.utc).replace(tzinfo=None)
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    return None
+
+
 def _clip_to_dict(m: dict) -> dict:
     shortcode = m.get("code") or m.get("shortcode") or ""
     caption_obj = m.get("caption") or m.get("caption_text") or {}
@@ -306,10 +330,8 @@ def _clip_to_dict(m: dict) -> dict:
         vv = m.get("video_versions") or []
         if isinstance(vv, list) and vv:
             video_url = vv[0].get("url") if isinstance(vv[0], dict) else None
-    ts = m.get("taken_at") or m.get("posted_at")
-    posted_at = None
-    if isinstance(ts, (int, float)):
-        posted_at = datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
+    ts = m.get("taken_at") or m.get("taken_at_ts") or m.get("posted_at") or m.get("device_timestamp")
+    posted_at = _parse_ts(ts)
     return {
         "shortcode": shortcode,
         "url": f"https://www.instagram.com/reel/{shortcode}/" if shortcode else None,
