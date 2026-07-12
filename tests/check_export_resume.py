@@ -147,11 +147,49 @@ _check(n == 2, f"sweep re-fired exactly the 2 orphans (got {n})")
 _check(sorted(FIRED) == sorted([DEAD_HARD, HANDED_OVER]),
        "the re-fired ids are exactly the two orphaned runs")
 
+# --- 6. a genuinely-failed run is FINAL (FIX-2 property) --------------------
+# The runner's terminal write goes through _finish_export_run on a FRESH
+# session, precisely so the outcome lands even when the export's own 15-minute
+# session is dead. Prove the write lands AND that the sweeper then leaves the
+# row alone: if a failure could not be recorded, the row would stay 'running'
+# with a dead owner and the sweeper would re-run an export that really failed —
+# burning all MAX_ATTEMPTS on a doomed job.
+print("\n6. a run that genuinely FAILED is written on a fresh session and never reclaimed")
+REALLY_FAILED = _mk("running", NOW - timedelta(seconds=300), 1, "export raised mid-ffmpeg")
+
+ok = main._finish_export_run(
+    REALLY_FAILED, eq.STATE_FAILED, None,
+    "Export failed: ffmpeg exited with code 1 (no such file: clip_003.mp4)",
+)
+_check(ok is True, "_finish_export_run() reported the write landed")
+
+st, hb, err = _state_of(REALLY_FAILED)
+_check(st == eq.STATE_FAILED, f"DB row is 'failed' (got '{st}')")
+_check("ffmpeg exited with code 1" in (err or ""),
+       f"the error the UI shows is human-readable: {err!r}")
+with get_db() as db:
+    _row = db.query(ExportRun).filter(ExportRun.id == REALLY_FAILED).first()
+    _check(_row.finished_at is not None, "finished_at stamped")
+
+# heartbeat is 300s stale — the ONLY thing keeping the sweeper off it is the
+# terminal state.
+_check(eq.is_stale(st, hb, NOW) is False,
+       "is_stale() -> False on a terminal run even with a 300s-old heartbeat")
+FIRED.clear()
+main._sweep_stale_exports()
+_check(REALLY_FAILED not in FIRED,
+       "NOT re-fired by the sweeper — a genuinely-failed export is never retried "
+       "into the ground (the other two rows are still queued, so they do fire again)")
+st2, _, _ = _state_of(REALLY_FAILED)
+_check(st2 == eq.STATE_FAILED, f"still 'failed' after the sweep (got '{st2}')")
+
 _cleanup()
 print(
     "\nPASS — v850 deploy-resume proven against real DB rows: "
     "_sweep_stale_exports re-queues + re-fires a hard-killed run (stale heartbeat) "
     "and a gracefully-handed-over run (NULL heartbeat), FAILS a run past "
-    f"MAX_ATTEMPTS={eq.MAX_ATTEMPTS} instead of retrying forever, and leaves a "
-    "live-but-slow run (60s heartbeat) completely alone."
+    f"MAX_ATTEMPTS={eq.MAX_ATTEMPTS} instead of retrying forever, leaves a "
+    "live-but-slow run (60s heartbeat) completely alone, and a run finished via "
+    "_finish_export_run() on a FRESH session lands as 'failed' with a readable "
+    "error that the sweeper never touches again."
 )

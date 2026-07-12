@@ -139,8 +139,63 @@ def test_claim_is_compare_and_swap():
     predicate and the win is decided by rowcount."""
     src = _main_src()
     assert "UPDATE export_runs SET state='running'" in src
-    assert "WHERE id=:id AND state IN ('queued','running')" in src
+    assert "WHERE id=:id AND state=:queued" in src
     assert "rowcount != 1" in src
+
+
+def test_claim_predicate_is_queued_only():
+    """The CAS must only ever claim a QUEUED row.
+
+    Nothing hands the runner a 'running' row (POST inserts queued, sweep and
+    shutdown handover re-queue). Allowing 'running' in the WHERE would let a
+    stray second spawn win the claim on an already-running export and start a
+    SECOND 15-minute ffmpeg job. This is the backstop — never loosen it.
+    """
+    src = _main_src()
+    claim = src.split("def _claim_export_run(", 1)[1].split("\nasync def ", 1)[0]
+    assert "UPDATE export_runs" in claim
+    where = claim.split("WHERE id=:id", 1)[1].split('"', 1)[0]
+    assert "running" not in where, f"claim WHERE must not accept 'running': {where!r}"
+    assert "state=:queued" in where
+    assert '"queued": _eq.STATE_QUEUED' in claim, "queued state must be bound from export_queue"
+    # and nowhere else in main.py may a claim-style UPDATE allow 'running'
+    assert "state IN ('queued','running')" not in src
+
+
+def test_finish_export_run_uses_a_fresh_session():
+    """The runner holds ONE session for 15 minutes. If Postgres dropped it
+    mid-export, the terminal write must NOT go on that corpse — the row would
+    stay 'running' with a dead owner and the sweeper would re-run an export that
+    genuinely failed. _finish_export_run opens its own short session."""
+    src = _main_src()
+    assert "def _finish_export_run(" in src
+    fn = src.split("def _finish_export_run(", 1)[1].split("\nasync def ", 1)[0]
+    assert "with get_db() as _db:" in fn, "_finish_export_run must open its OWN session"
+    assert "_db.commit()" in fn
+    assert "row.finished_at" in fn
+    assert "json.dumps(result)" in fn
+    assert "[:2000]" in fn, "error text must be truncated"
+
+
+def test_runner_writes_both_terminal_states_via_finish_helper():
+    src = _main_src()
+    body = src.split("async def _export_runner(", 1)[1].split("\ndef _sweep_stale_exports(", 1)[0]
+    assert re.search(r"await asyncio\.to_thread\(\s*_finish_export_run,\s*export_id,\s*_eq\.STATE_DONE",
+                     body), "success path must finish on a fresh session"
+    assert re.search(r"await asyncio\.to_thread\(\s*_finish_export_run,\s*export_id,\s*_eq\.STATE_FAILED",
+                     body), "failure path must finish on a fresh session"
+    # the long-lived session must never write the outcome itself
+    assert "row.state = _eq.STATE_DONE" not in body
+    assert "row.state = _eq.STATE_FAILED" not in body
+
+
+def test_runner_error_text_prefers_httpexception_detail():
+    """_do_export_final was a route handler and still raises HTTPException. It
+    subclasses Exception so the runner catches it, but its str() is not what the
+    user should read — .detail is."""
+    src = _main_src()
+    body = src.split("async def _export_runner(", 1)[1].split("\ndef _sweep_stale_exports(", 1)[0]
+    assert 'getattr(e, "detail", None) or str(e)' in body
 
 
 def test_spawn_registers_id_before_creating_task():
@@ -191,6 +246,19 @@ def test_frontend_has_no_dead_v701v_machinery():
     src = _index_src()
     assert "_fetchErrored" not in src, "dead v701v _fetchErrored still present"
     assert "_preExportFilenames" not in src, "dead v701v _preExportFilenames still present"
+
+
+def test_frontend_fails_fast_on_a_4xx_status_poll():
+    """A 404 (run gone) or 401/403 (session gone) is PERMANENT. The old
+    `if (!_r.ok) continue;` kept polling for the full 30-minute cap and then
+    reported a misleading generic timeout. 4xx must throw at once; 5xx must keep
+    polling (that IS the container being replaced — the point of v850)."""
+    src = _index_src()
+    assert "_r.status >= 400 && _r.status < 500" in src, "no 4xx fast-fail branch on the status poll"
+    poll = src.split("/export-status?export_id=", 1)[1].split("_lastAttempt = _s.attempts", 1)[0]
+    assert "throw new Error(" in poll, "4xx branch must throw, not continue"
+    assert "if (!_r.ok) continue;" in poll, "5xx must still keep polling"
+    assert "malformed status payload" in src, "a 200 with unparseable JSON must be logged distinctly"
 
 
 def test_frontend_reads_the_run_result_payload():

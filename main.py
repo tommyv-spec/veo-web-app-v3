@@ -8594,7 +8594,16 @@ def _claim_export_run(export_id: str):
 
     The whole safety of the sweeper rests here: the sweeper is ALLOWED to be
     wrong about a run being orphaned, because the claim only wins if the row is
-    still active. Two claimants can never both flip the same row to running.
+    still QUEUED. Two claimants can never both flip the same row to running.
+
+    WHY the predicate is queued-ONLY, and why it must never be loosened:
+    nothing in this system ever hands the runner a 'running' row — the POST
+    inserts 'queued', the sweeper re-queues to 'queued', and the shutdown
+    handover re-queues to 'queued'. So allowing 'running' in the WHERE buys
+    nothing and costs everything: a stray second spawn for the same export_id
+    would WIN the CAS against an export that is already running and start a
+    SECOND 15-minute ffmpeg job on Render's single CPU. queued-only is the
+    backstop that makes a double-spawn harmless (the loser gets rowcount=0).
 
     Returns a plain dict (NOT a detached ORM object) or None if the claim lost.
     """
@@ -8608,14 +8617,14 @@ def _claim_export_run(export_id: str):
                 _sql_text(
                     "UPDATE export_runs SET state='running', attempts=attempts+1, "
                     "started_at=:now, heartbeat_at=:now "
-                    "WHERE id=:id AND state IN ('queued','running')"
+                    "WHERE id=:id AND state=:queued"
                 ),
-                {"id": export_id, "now": _now},
+                {"id": export_id, "now": _now, "queued": _eq.STATE_QUEUED},
             )
             if res.rowcount != 1:
                 _db.rollback()
                 print(f"[Export/v850] claim LOST run={export_id[:8]} "
-                      f"(rowcount={res.rowcount}) — already claimed or terminal", flush=True)
+                      f"(rowcount={res.rowcount}) — already running, claimed or terminal", flush=True)
                 return None
             _db.commit()
 
@@ -8638,6 +8647,42 @@ def _claim_export_run(export_id: str):
                 pass
             print(f"[Export/v850] claim ERROR run={export_id[:8]}: {_ce}", flush=True)
             return None
+
+
+def _finish_export_run(export_id: str, state: str, result: dict = None,
+                       error: str = None) -> bool:
+    """v850 — write an export's terminal state on a FRESH session. Sync — to_thread.
+
+    The runner holds ONE session for the whole 15-minute export. If Postgres
+    dropped that connection mid-run, writing the outcome on it fails too and
+    the row is stranded in 'running' — the sweeper would then re-run an export
+    that actually failed, burning all MAX_ATTEMPTS on a doomed job. A new short
+    session is the only way the outcome reliably lands.
+    """
+    from models import get_db, ExportRun
+
+    with get_db() as _db:
+        try:
+            row = _db.query(ExportRun).filter(ExportRun.id == export_id).first()
+            if row is None:
+                print(f"[Export/v850] finish: run={export_id[:8]} vanished", flush=True)
+                return False
+            row.state = state
+            if result is not None:
+                row.result_json = json.dumps(result)
+            if error is not None:
+                row.error = str(error)[:2000]
+            row.finished_at = datetime.utcnow()
+            _db.commit()
+            return True
+        except Exception as _fe:
+            try:
+                _db.rollback()
+            except Exception:
+                pass
+            print(f"[Export/v850] could not write terminal state "
+                  f"run={export_id[:8]} state={state}: {_fe}", flush=True)
+            return False
 
 
 async def _export_heartbeat(export_id: str):
@@ -8675,7 +8720,8 @@ async def _export_heartbeat(export_id: str):
 async def _export_runner(export_id: str):
     """Do the export, detached from any HTTP request."""
     import traceback as _tb
-    from models import get_db, ExportRun, User as _User
+    from models import get_db, User as _User   # terminal writes go through
+                                               # _finish_export_run's own session
 
     hb_task = None
     try:
@@ -8701,27 +8747,30 @@ async def _export_runner(export_id: str):
 
                 result = await _do_export_final(job_id, settings, db, user)
 
-                row = db.query(ExportRun).filter(ExportRun.id == export_id).first()
-                if row is not None:
-                    row.state = _eq.STATE_DONE
-                    row.result_json = json.dumps(result)
-                    row.finished_at = datetime.utcnow()
-                    db.commit()
+                # Terminal write goes on a FRESH session — never on `db`, which
+                # has been open for the whole export and may well be dead by now.
+                await asyncio.to_thread(
+                    _finish_export_run, export_id, _eq.STATE_DONE, result, None
+                )
                 print(f"[Export/v850] DONE run={export_id[:8]} job={job_id[:8]} "
                       f"→ {result.get('filename')}", flush=True)
             except Exception as e:
-                print(f"[Export/v850] FAILED run={export_id[:8]} job={job_id[:8]}: {e}", flush=True)
+                # _do_export_final was a route handler, so it still raises
+                # HTTPException — which subclasses Exception and lands here, but
+                # whose str() is useless ("500: ..." at best, "" at worst). The
+                # UI shows this text, so take .detail when there is one.
+                _err = getattr(e, "detail", None) or str(e) or e.__class__.__name__
+                print(f"[Export/v850] FAILED run={export_id[:8]} job={job_id[:8]}: {_err}", flush=True)
                 print(f"[Export/v850] traceback: {_tb.format_exc()}", flush=True)
                 try:
                     db.rollback()
-                    row = db.query(ExportRun).filter(ExportRun.id == export_id).first()
-                    if row is not None:
-                        row.state = _eq.STATE_FAILED
-                        row.error = str(e)[:2000]
-                        row.finished_at = datetime.utcnow()
-                        db.commit()
-                except Exception as _me:
-                    print(f"[Export/v850] could not mark run={export_id[:8]} failed: {_me}", flush=True)
+                except Exception:
+                    pass
+                # Fresh session again: if the export died BECAUSE the connection
+                # dropped, `db` cannot record its own failure.
+                await asyncio.to_thread(
+                    _finish_export_run, export_id, _eq.STATE_FAILED, None, _err
+                )
     finally:
         if hb_task is not None:
             hb_task.cancel()

@@ -14570,16 +14570,35 @@ Ambient: same kitchen room tone, soft pour sound.
                 while (Date.now() - _pollStart < _pollMaxMs) {
                     await new Promise(r => setTimeout(r, 3000));
                     let _s;
+                    let _permanent = null;
                     try {
                         const _r = await fetch(`${API}/jobs/${jobId}/export-status?export_id=${_exportId}`);
-                        if (!_r.ok) continue;             // server mid-restart — keep polling
-                        _s = await _r.json();
+                        if (_r.status >= 400 && _r.status < 500) {
+                            // PERMANENT. Polling for 30 more minutes cannot fix a
+                            // 404 (run deleted) or a 401/403 (session gone), and
+                            // ending on the generic timeout would hide the reason.
+                            _permanent = _r.status === 404
+                                ? 'This export no longer exists on the server. Please start the export again.'
+                                : `You are no longer signed in (HTTP ${_r.status}). Please refresh the page and sign in, then export again.`;
+                            throw new Error(_permanent);
+                        }
+                        if (!_r.ok) continue;             // 5xx — server mid-restart, keep polling
+                        try {
+                            _s = await _r.json();
+                        } catch (_jsonErr) {
+                            // 200 but unreadable body = a real bug, NOT a restart.
+                            console.error('[Export/v850] malformed status payload:', _jsonErr);
+                            continue;
+                        }
                     } catch (_pollErr) {
-                        // Container is being replaced right now. NOT a failure.
+                        if (_permanent) throw _pollErr;   // do not swallow the 4xx
+                        // Network exception: the container is being replaced right
+                        // now. NOT a failure — that is exactly what v850 survives.
                         console.log('[Export/v850] poll tick error (server restarting?):', _pollErr);
                         if (_statusEl) _statusEl.textContent = '⏳ Server restarting — your export is saved and will resume...';
                         continue;
                     }
+                    if (!_s) continue;                    // malformed payload — retry next tick
 
                     if (_s.attempts > _lastAttempt && _lastAttempt > 0) {
                         console.log(`[Export/v850] export restarted by the server (attempt ${_s.attempts})`);
