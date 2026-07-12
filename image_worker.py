@@ -6301,18 +6301,24 @@ def _upload_variants_with_health_gate(api_url, api_key, node_id, saved_paths):
     are still complete on local disk. Throwing them away costs a full Flow
     re-render. Wait for the platform to answer /health again (v845 already
     rides out a deploy window) and upload once more.
+
+    Called from BOTH worker paths — the [API] main-thread loop and the
+    [API:http] loop — so its log prefix is the neutral [API/v851] rather than
+    either caller's.
     """
     try:
         return _upload_variants_to_api(api_url, api_key, node_id, saved_paths)
     except Exception as e:
         if not is_retryable_api_error(e):
             raise
-        print(f"[API:http] ⏳ Node {node_id}: upload still failing ({type(e).__name__}). "
+        print(f"[API/v851] ⏳ Node {node_id}: upload still failing ({type(e).__name__}). "
               f"{len(saved_paths)} finished variant(s) are on disk — waiting for the "
               f"platform to come back rather than binning them.", flush=True)
         if not _api_wait_for_health(api_url, api_key):
+            print(f"[API/v851] ✗ Node {node_id}: platform never came back — giving up "
+                  f"on {len(saved_paths)} finished variant(s).", flush=True)
             raise
-        print(f"[API:http] ✓ Platform healthy again — re-uploading node {node_id}", flush=True)
+        print(f"[API/v851] ✓ Platform healthy again — re-uploading node {node_id}", flush=True)
         return _upload_variants_to_api(api_url, api_key, node_id, saved_paths)
 
 
@@ -7008,7 +7014,7 @@ def api_pull_mode(page, api_url, api_key, worker_id=None):
                 if success and saved_filenames:
                     variant_paths = [os.path.join(out_dir, f) for f in saved_filenames]
                     print(f"[API] ⬆ Uploading {len(variant_paths)} variant(s)...", flush=True)
-                    _upload_variants_to_api(api_url, api_key, node_id, variant_paths)
+                    _upload_variants_with_health_gate(api_url, api_key, node_id, variant_paths)
                     _post_status(api_url, api_key, node_id, "completed")
                     print(f"[API] ✓ Node {node_id} marked completed", flush=True)
                 else:

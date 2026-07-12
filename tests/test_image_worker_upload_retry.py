@@ -8,6 +8,7 @@
 #
 # Run from code/:  PYTHONUTF8=1 python -m pytest tests/test_image_worker_upload_retry.py -v
 
+import pytest
 import requests
 
 import image_worker
@@ -72,3 +73,62 @@ def test_upload_retries_a_chunked_drop_then_succeeds(monkeypatch, tmp_path):
     out = image_worker._upload_variants_to_api("http://x", "k", 2791, [str(png)])
     assert out == {"ok": True}
     assert calls["n"] == 2  # retried the chunked drop instead of giving up
+
+
+# ---------------------------------------------------------------------------
+# v851 health gate — the last line of defence for renders already on disk.
+# Both worker paths use it: the [API] main-thread loop and the [API:http] one.
+# ---------------------------------------------------------------------------
+
+def test_health_gate_reuploads_after_platform_comes_back(monkeypatch, capsys):
+    calls = {"n": 0}
+    health = {"n": 0}
+
+    def flaky_upload(api_url, api_key, node_id, paths):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.exceptions.ChunkedEncodingError("Response ended prematurely")
+        return {"ok": True}
+
+    def fake_health(api_url, api_key, **kw):
+        health["n"] += 1
+        return True
+
+    monkeypatch.setattr(image_worker, "_upload_variants_to_api", flaky_upload)
+    monkeypatch.setattr(image_worker, "_api_wait_for_health", fake_health)
+
+    out = image_worker._upload_variants_with_health_gate(
+        "http://x", "k", 2791, ["/tmp/variant_1.png"]
+    )
+    assert out == {"ok": True}
+    assert calls["n"] == 2   # waited for the platform, then re-uploaded
+    assert health["n"] == 1  # ...and it actually waited
+
+    # The gate is shared by BOTH callers now, so its log must not claim to be
+    # the http path when the main-thread path is the one calling it.
+    logged = capsys.readouterr().out
+    assert "[API:http]" not in logged
+    assert "[API/v851]" in logged
+
+
+def test_health_gate_does_not_wait_on_a_permanent_error(monkeypatch):
+    # A 4xx will fail identically forever. Don't sit in a health wait for it.
+    resp = requests.Response()
+    resp.status_code = 422
+    calls = {"n": 0}
+
+    def bad_upload(api_url, api_key, node_id, paths):
+        calls["n"] += 1
+        raise requests.exceptions.HTTPError(response=resp)
+
+    def boom_health(*a, **kw):
+        raise AssertionError("must not wait for health on a permanent 4xx")
+
+    monkeypatch.setattr(image_worker, "_upload_variants_to_api", bad_upload)
+    monkeypatch.setattr(image_worker, "_api_wait_for_health", boom_health)
+
+    with pytest.raises(requests.exceptions.HTTPError):
+        image_worker._upload_variants_with_health_gate(
+            "http://x", "k", 2791, ["/tmp/variant_1.png"]
+        )
+    assert calls["n"] == 1  # re-raised immediately, no second attempt
