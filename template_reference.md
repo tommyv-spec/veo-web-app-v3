@@ -15376,3 +15376,84 @@ Every DEFAULT flipped to v782 values (`clip_mode: fresh`, `transition: cut`):
 **Scope / gates**: IDEATION-side, optional moves (not a per-build gate). Declare the move used in §0 STEP-UP. All standing gates still apply to the result: v702 vocabulary (the banana-mic draft tripped "thrust" — reworded to push/extend/hold), v795 no pointing, v682 one-speaker, v831 line cap, §8. Reference build: `videos/nuri-korella-ed-5signs-bloodflow-walmart-banana-mic-interview-growth-v5.md`.
 
 **Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/concepts/script-adaptation/innovation-moves.md` (moves-layer entry), memory `feedback_detail-level-innovation-moves`, `wiki/log.md`.
+
+---
+
+## v850 — Durable export queue: a deploy mid-export no longer kills the export
+
+**Shipped 2026-07-12.** Runtime change (`code/main.py`, `code/models.py`, new `code/export_queue.py`, `code/static/index.html`). Auto-deploys to Render. Platform-internal — builds need no change.
+
+**Where it came from**: operator 2026-07-12 — *"an export shouldn't fail if a new version is deployed in the meantime."*
+
+### The bug it fixes
+
+`POST /api/jobs/{job_id}/export-final` ran the WHOLE final-video export inside the HTTP request: `await asyncio.to_thread(process_export, ...)` — ffmpeg concat, Whisper silence removal, the speed pass, the R2 upload. 5-15 minutes of work, and **nothing was persisted**. The request WAS the job.
+
+`code/` auto-deploys on every push to main. A deploy sends SIGTERM, the container dies, ffmpeg dies with it, no mp4 ever reaches R2. The browser then fell back to the old v701v path (poll `/list-outputs` for a new `final_export_*.mp4`), waited out its 15-minute cap and reported `Export polling exceeded the time cap`. That fallback could not tell *"the server is still working"* from *"the container is gone"* — which is why a deploy landing mid-export ALWAYS ended in a failed export.
+
+### The fix — the request is a row, the work is detached
+
+- **`export_runs` table** (`models.py`, `ExportRun`): the request itself is persisted — `settings_json`, `state` (`queued → running → done | failed`), `attempts`, `heartbeat_at`, `result_json`. `Job.exports` cascades `delete-orphan` so deleting a job doesn't trip the FK. NEW table → `Base.metadata.create_all` makes it; no migration.
+- **The endpoint is thin** (`main.py` ~L10166): validate, insert the row, spawn a detached asyncio task, return **202** with the run. A second POST for a job that already has an active run **JOINS** it — it never starts a duplicate 15-minute ffmpeg.
+- **The runner heartbeats every 30s** (`export_queue.HEARTBEAT_INTERVAL_S`, main.py ~L8689).
+- **`_sweep_stale_exports`** (`main.py` ~L8780; on boot, then every 60s) re-queues any run whose heartbeat is older than `STALE_AFTER_S = 180` — or fails it once it has burned `MAX_ATTEMPTS = 3`, so a poisoned export can't retry forever.
+- **Graceful shutdown hands work over**: `_requeue_local_exports_on_shutdown` (~L8852) NULLs the heartbeat of in-flight runs, so the NEXT container reclaims them immediately instead of waiting out the stale window. That is the deploy path. The 60s sweeper covers the hard-kill path (OOM / SIGKILL) where the shutdown hook never ran.
+- **The frontend polls `GET /api/jobs/{job_id}/export-status`** (~L10209) and reads the run's `result` field — the exact payload the old synchronous endpoint returned, so the success card and the voice-clone chain are unchanged. A 4xx fails fast; a **5xx or a dropped connection keeps polling** — that IS the container being replaced.
+
+### Load-bearing invariants (do not break these later)
+
+1. **`_claim_export_run` is queued-only, on purpose** (`main.py` ~L8592). It is a compare-and-swap: `UPDATE ... WHERE id = :id AND state = 'queued'`, checking `rowcount`. That predicate is what makes a double-spawn harmless — the second claimant matches zero rows and returns BEFORE touching ffmpeg. **Never loosen it to include `running`**; that turns every race into two ffmpeg passes over the same job.
+2. **The sweeper skips `_LOCAL_EXPORT_IDS`** (`main.py` ~L8575/L8798) — the set of runs this container is actively working. `STALE_AFTER_S = 180` is 6 missed ticks: the heartbeat writes from the event loop while ffmpeg saturates Render's single CPU, so ticks CAN be late. A false-positive reclaim would double-run a 15-minute job. Keep both guards (the local-ID skip and the wide stale window); the CAS is the backstop, not the first line.
+3. **The terminal state is written on a FRESH session** (`_finish_export_run`, `main.py` ~L8652). The runner holds one session for the whole 15-minute export. If Postgres dropped that session mid-run, writing the outcome on the SAME session would fail too and strand the row in `running` — and the sweeper would then re-run an export that genuinely failed.
+4. **A re-run is from scratch, never resumed.** The export is deterministic and mints a fresh `final_export_<ts>_<hash>.mp4` per attempt, so a partial file left by a dead container can never be mistaken for the result.
+
+### Confirming it
+
+The state machine is pure and unit-tested in `code/export_queue.py` (`is_stale`, `next_state_after_reclaim`); `code/tests/test_export_queue.py` + `code/tests/check_export_resume.py` cover it. Runtime tell: the claim log `attempt=N/3` on pickup, and a re-queued run after a deploy shows `attempts` climbing while the browser's `/export-status` poll keeps returning `running`.
+
+**Touched**: this deep-dive (canonical), `code/main.py`, `code/models.py`, `code/export_queue.py`, `code/static/index.html`, `code/tests/test_export_queue.py`, `code/tests/check_export_resume.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
+
+---
+
+## v851 — Worker API retry by exception FAMILY, and a backoff that outlasts a deploy
+
+**Shipped 2026-07-12.** Runtime change (`code/image_worker.py`). Local worker — loads on restart. Platform-internal; builds need no change.
+
+**Where it came from**: operator 2026-07-12 — *"also this one happened during a deployment."*
+
+### The bug it fixes
+
+The local image worker renders variants in Google Flow, downloads them, then uploads them to the platform API. A Render deploy landed mid-upload and `requests` raised:
+
+```
+ChunkedEncodingError: Response ended prematurely
+```
+
+The retry catch was a **hand-listed tuple** — `except (ConnectionError, Timeout)`. `ChunkedEncodingError` subclasses `RequestException`, **not** `ConnectionError`, so it missed the tuple, fell through to the bare `except Exception`, and was re-raised on **attempt 1 of 4** (the log literally said `attempt 1/4`; attempts 2-4 never ran). `_http_worker` then posted the node as `failed` — throwing away **4 finished Flow renders that were already sitting on local disk**, paid for with Flow quota.
+
+Second half of the bug: even if the retry HAD fired, the old backoff was `[2, 5, 15]` — it gives up after ~22s. A Render redeploy is unreachable for 60-180s. The retry was theatre.
+
+### The fix
+
+**Classify by exception FAMILY, never by a hand-listed tuple** — `is_retryable_api_error(exc)` (`image_worker.py` ~L6283):
+
+- an `HTTPError` carrying a **4xx** response → permanent, never retry (the request itself is wrong);
+- the malformed-config subclasses (`MissingSchema`, `InvalidSchema`, `InvalidURL`, `URLRequired`) → permanent (a typo'd URL fails identically forever);
+- **every other `RequestException`** → transport-level, retry it (this is the catch-all that `ChunkedEncodingError` needed — and every future sibling class gets it for free);
+- a non-`requests` exception → not retryable.
+
+**Size the backoff against the platform's real recovery window** — `API_RETRY_BACKOFF = [5, 15, 30, 60, 90]` (~L6279): 5 waits → 6 attempts, ~200s total, which outlasts a Render redeploy. Shared by `_upload_variants_to_api` (~L6354) and `_post_status` (~L6452).
+
+**Never bin finished work** — `_upload_variants_with_health_gate` (~L6313) wraps the upload. If the retries still exhaust, the variants are COMPLETE on disk, so wait for `_api_wait_for_health` (v845 already rides out a deploy) and upload once more, rather than discarding renders that cost Flow quota. **Both** upload call sites go through the gate (~L7046, ~L8231). If the health check itself raises, that is treated as "the platform did not come back" and the **ORIGINAL upload error is re-raised**, so the log tells the true story instead of blaming the health probe.
+
+### Load-bearing invariants (do not break these later)
+
+1. **Retryability is decided by FAMILY, not by a list of class names.** Any new catch site calls `is_retryable_api_error`. The moment someone writes `except (ConnectionError, Timeout, ChunkedEncodingError)` they have re-created the bug for the next unlisted subclass.
+2. **The backoff must outlast the platform's recovery window, not just a blip.** ~200s ≥ a Render redeploy (60-180s). Shortening it back to seconds re-arms the same failure.
+3. **Finished renders are never discarded on an upload failure.** The health gate exists so a dead platform costs a WAIT, not four Flow renders.
+
+### Confirming it
+
+`code/tests/test_image_worker_upload_retry.py` + `code/tests/test_image_worker_health_retry.py`. Runtime tell: on a deploy the worker log now shows the retry ladder (`attempt 2/6`, `3/6`, … with the 5/15/30/60/90s waits) and, in the worst case, the health-gate wait followed by a successful upload — instead of a single `attempt 1/4` and a `failed` node.
+
+**Touched**: this deep-dive (canonical), `code/image_worker.py`, `code/tests/test_image_worker_upload_retry.py`, `code/tests/test_image_worker_health_retry.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
