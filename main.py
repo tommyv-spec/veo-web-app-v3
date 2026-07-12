@@ -4025,20 +4025,27 @@ def refresh_instagram_stats(
         return {"updated": 0, "checked": 0, "window_days": days, "detail": "no reels in window"}
 
     by_shortcode = {v.shortcode: v for v in recent}
-    # Fetch a bit past the window so a burst-posting day can't truncate it.
+    # Fetch past the window so a burst-posting day can't truncate it. The page
+    # cap has to leave room for every in-window reel: a page is ~12 items, so
+    # size it off the window itself instead of a flat guess.
     fetch_limit = len(recent) + 12
+    max_pages = max(3, -(-fetch_limit // 10) + 1)  # ceil(limit/10) + 1 page of slack
     try:
         if not acc.ig_user_id:
             acc.ig_user_id = _ig_resolve_user_id(acc.handle, api_key)
-        clips = _ig_fetch_recent_clips(acc.ig_user_id, api_key, limit=fetch_limit, max_pages=3)
+        clips = _ig_fetch_recent_clips(acc.ig_user_id, api_key, limit=fetch_limit, max_pages=max_pages)
     except HikerAPIError as he:
         raise HTTPException(status_code=502, detail=str(he))
 
     updated = 0
     for c in clips:
-        v = by_shortcode.get(c.get("shortcode"))
-        if not v:
+        sc = c.get("shortcode")
+        if not sc:
+            print("[ig-stats] clip returned with no shortcode — skipped", flush=True)
             continue
+        v = by_shortcode.pop(sc, None)
+        if not v:
+            continue  # clip outside the window, or not stored yet — /sync's job
         v.views = c.get("views") or 0
         v.likes = c.get("likes") or 0
         v.comments = c.get("comments") or 0
@@ -4046,8 +4053,18 @@ def refresh_instagram_stats(
             v.thumb_url = c["thumb_url"]
         updated += 1
     db.commit()
-    print(f"[ig-stats] account={acc.id} window={days}d checked={len(recent)} updated={updated}", flush=True)
-    return {"updated": updated, "checked": len(recent), "window_days": days}
+    # Anything still in by_shortcode is an in-window reel the fetch never
+    # reached — surface it rather than reporting a clean run.
+    missed = sorted(by_shortcode.keys())
+    if missed:
+        print(f"[ig-stats] account={acc.id} MISSED {len(missed)} in-window reels: {missed[:10]}", flush=True)
+    print(f"[ig-stats] account={acc.id} window={days}d checked={len(recent)} updated={updated} missed={len(missed)}", flush=True)
+    return {
+        "updated": updated,
+        "checked": len(recent),
+        "missed": len(missed),
+        "window_days": days,
+    }
 
 
 @app.post("/api/instagram/videos/{video_id}/transcribe")

@@ -4675,10 +4675,19 @@ Ambient: same kitchen room tone, soft pour sound.
         // Newest post first, like the IG profile grid. The API already sorts
         // this way; re-sorting here keeps the grid right even if a row is
         // missing posted_at (those sink to the bottom, newest id first).
+        // The API sends naive-UTC isoformat. Date.parse() reads an offset-less
+        // string as LOCAL time, so stamp the Z on before parsing — same rule
+        // igPostedLabel uses, or a row could sort and label differently.
+        function igParsePosted(s) {
+          if (!s) return null;
+          const t = Date.parse(s + (/[Zz]|[+-]\d\d:?\d\d$/.test(s) ? "" : "Z"));
+          return isNaN(t) ? null : t;
+        }
+
         function igSortNewestFirst(videos) {
           return videos.slice().sort((a, b) => {
-            const ta = a.posted_at ? Date.parse(a.posted_at) : null;
-            const tb = b.posted_at ? Date.parse(b.posted_at) : null;
+            const ta = igParsePosted(a.posted_at);
+            const tb = igParsePosted(b.posted_at);
             if (ta && tb && ta !== tb) return tb - ta;
             if (ta && !tb) return -1;
             if (!ta && tb) return 1;
@@ -4687,9 +4696,8 @@ Ambient: same kitchen room tone, soft pour sound.
         }
 
         function igPostedLabel(posted_at) {
-          if (!posted_at) return "—";
-          const t = Date.parse(posted_at + (/[Zz+]|[+-]\d\d:\d\d$/.test(posted_at) ? "" : "Z"));
-          if (isNaN(t)) return "—";
+          const t = igParsePosted(posted_at);
+          if (t === null) return "—";
           const days = Math.floor((Date.now() - t) / 86400000);
           if (days <= 0) return "today";
           if (days === 1) return "1d ago";
@@ -5518,7 +5526,8 @@ Ambient: same kitchen room tone, soft pour sound.
               alert("Views refresh failed: " + (err.detail || r.status));
             } else {
               const data = await r.json();
-              console.log(`[ig] refreshed views on ${data.updated}/${data.checked} reels from the last ${data.window_days}d`);
+              console.log(`[ig] refreshed views on ${data.updated}/${data.checked} reels from the last ${data.window_days}d` + (data.missed ? ` — ${data.missed} NOT reached` : ""));
+              if (data.missed) alert(`${data.missed} reel(s) from the last ${data.window_days}d were not reached by the fetch — run Sync.`);
             }
             await refreshInstagramPanel();
             return;
