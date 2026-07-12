@@ -253,7 +253,10 @@ class Job(Base):
     clips = relationship("Clip", back_populates="job", cascade="all, delete-orphan")
     logs = relationship("JobLog", back_populates="job", cascade="all, delete-orphan")
     blacklist = relationship("BlacklistEntry", back_populates="job", cascade="all, delete-orphan")
-    
+    # v850 — durable export queue. delete-orphan so deleting a job doesn't
+    # trip the export_runs FK.
+    exports = relationship("ExportRun", back_populates="job", cascade="all, delete-orphan")
+
     def to_dict(self) -> Dict[str, Any]:
         # For UI display, translate internal statuses to user-friendly ones
         display_status = self.status
@@ -475,6 +478,61 @@ class Clip(Base):
             "caption": self.caption,
             "scene_type": self.scene_type,
             "bg_color": self.bg_color,
+        }
+
+
+class ExportRun(Base):
+    """v850 — one durable final-video export request.
+
+    Pre-v850 the export ran inside the POST /export-final request. A Render
+    deploy (SIGTERM) killed the ffmpeg work mid-flight: no file ever landed
+    in R2 and the browser sat there until its poll cap expired. The request
+    now lands here first, a detached task runs it, and a stale-heartbeat
+    sweep re-runs anything a dead container left behind.
+
+    State machine lives in export_queue.py (pure, unit-tested).
+    """
+    __tablename__ = "export_runs"
+
+    id = Column(String(36), primary_key=True)
+    job_id = Column(String(36), ForeignKey("jobs.id"), nullable=False, index=True)
+    user_id = Column(String(36), nullable=True)
+
+    state = Column(String(16), default="queued", nullable=False)  # queued|running|done|failed
+    settings_json = Column(Text, nullable=False)   # the ExportSettings payload, verbatim
+    result_json = Column(Text, nullable=True)      # the success payload the endpoint used to return
+    error = Column(Text, nullable=True)
+    attempts = Column(Integer, default=0, nullable=False)
+
+    # Liveness. The owning container ticks this every 30s; a stale value
+    # means that container is gone and the run is up for reclaim.
+    heartbeat_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+    job = relationship("Job", back_populates="exports")
+
+    def to_dict(self) -> Dict[str, Any]:
+        import json as _json
+        result = None
+        if self.result_json:
+            try:
+                result = _json.loads(self.result_json)
+            except Exception:
+                result = None
+        return {
+            "export_id": self.id,
+            "job_id": self.job_id,
+            "state": self.state,
+            "attempts": self.attempts,
+            "error": self.error,
+            "result": result,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "heartbeat_at": self.heartbeat_at.isoformat() if self.heartbeat_at else None,
         }
 
 

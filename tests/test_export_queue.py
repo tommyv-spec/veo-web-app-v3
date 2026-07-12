@@ -41,3 +41,34 @@ def test_next_state_retries_below_cap():
 def test_next_state_gives_up_at_cap():
     assert eq.next_state_after_reclaim(3) == "failed"
     assert eq.next_state_after_reclaim(9) == "failed"
+
+
+# ---- Model ---------------------------------------------------------------
+def test_export_run_table_and_columns_exist():
+    from models import ExportRun
+    cols = set(ExportRun.__table__.columns.keys())
+    for c in ("id", "job_id", "user_id", "state", "settings_json",
+              "result_json", "error", "attempts", "heartbeat_at",
+              "created_at", "started_at", "finished_at"):
+        assert c in cols, f"missing column {c}"
+
+
+def test_job_has_cascading_exports_relationship():
+    # Without cascade delete-orphan the FK blocks job deletion.
+    from models import Job
+    rel = Job.__mapper__.relationships["exports"]
+    assert "delete-orphan" in rel.cascade
+
+
+def test_export_run_to_dict_round_trips_result():
+    import json
+    from models import ExportRun
+    run = ExportRun(
+        id="e1", job_id="j1", state="done",
+        settings_json="{}", result_json=json.dumps({"filename": "x.mp4"}),
+        attempts=1,
+    )
+    d = run.to_dict()
+    assert d["state"] == "done"
+    assert d["attempts"] == 1
+    assert d["result"] == {"filename": "x.mp4"}
