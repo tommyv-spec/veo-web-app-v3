@@ -584,6 +584,19 @@ async def lifespan(app: FastAPI):
         except Exception as _re:
             print(f"[Deferred] stuck-job recovery: {_re}", flush=True)
 
+        # v850 — re-run exports the last container was killed mid-way through
+        # (Render deploy / OOM). Their heartbeat is stale (or NULLed by the
+        # graceful shutdown hook), so the sweep reclaims them right now instead
+        # of the operator staring at a poll that will never resolve.
+        try:
+            _n_exp = await _asyncio.to_thread(_sweep_stale_exports)
+            if _n_exp:
+                print(f"[Deferred][Export/v850] re-fired {_n_exp} export(s) orphaned by the last restart", flush=True)
+            else:
+                print("[Deferred][Export/v850] no orphaned exports to re-run", flush=True)
+        except Exception as _xe:
+            print(f"[Deferred][Export/v850] boot sweep: {_xe}", flush=True)
+
         # v564 NOTE: link rebuild deliberately NOT auto-run on startup.
         # An earlier draft of this file (briefly considered) included a
         # one-shot rebuild that would call _backfill_batch_video_links_impl
@@ -634,6 +647,12 @@ async def lifespan(app: FastAPI):
 
     _purge_task = _asyncio.create_task(_purge_old_logs())
 
+    # v850 — durable export queue: re-fire anything a dead container orphaned.
+    # Covers the hard-kill path (OOM/SIGKILL) where the shutdown hook below
+    # never ran.
+    _export_sweeper_task = _asyncio.create_task(_export_sweeper())
+    print("[App][Export/v850] stale-export sweeper started (every 60s)", flush=True)
+
     # Image platform: background poller for .done.json files from image_worker.py
     _image_stop_event = _asyncio.Event()
     _image_watch_task = _asyncio.create_task(_image_watch_done_files_loop(_image_stop_event))
@@ -643,11 +662,21 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     _purge_task.cancel()
+    _export_sweeper_task.cancel()
     _image_stop_event.set()
     try:
         await _asyncio.wait_for(_image_watch_task, timeout=3.0)
     except Exception:
         _image_watch_task.cancel()
+
+    # v850 — the deploy path. This container is about to die with ffmpeg
+    # mid-run; NULL the heartbeat so the NEXT container reclaims the export
+    # immediately instead of waiting out the stale window.
+    try:
+        await _asyncio.to_thread(_requeue_local_exports_on_shutdown)
+    except Exception as _sq:
+        print(f"[Export/v850] shutdown re-queue failed: {_sq}", flush=True)
+
     worker.stop()
     print("[App] Shutdown complete")
 
@@ -8520,19 +8549,309 @@ async def _extract_and_upload_audio(video_path: Path, job_id: str, video_filenam
         return {}
 
 
-@app.post("/api/jobs/{job_id}/export-final")
-async def export_final_video(
+# ============================================================================
+# v850 — DURABLE EXPORT QUEUE
+# ----------------------------------------------------------------------------
+# Pre-v850 the whole 5-15 min export ran inside POST /export-final. Render
+# auto-deploys on every push to main; the SIGTERM killed ffmpeg mid-run, the
+# mp4 never reached R2, and the browser's poll timed out with "Export polling
+# exceeded the time cap". Nothing on the server remembered the export had even
+# been asked for.
+#
+# Now: the POST persists an ExportRun row and returns 202. A detached task
+# does the work and heartbeats every 30s. A sweeper (on boot + every 60s)
+# re-runs any ExportRun whose heartbeat went stale — which is exactly what a
+# deploy/OOM/crash leaves behind. Re-run is from scratch: the export is
+# deterministic and mints a fresh final_export_<ts>_<hash>.mp4, so a partial
+# file from the dead container can never be mistaken for the result.
+# ============================================================================
+import export_queue as _eq
+from fastapi.responses import JSONResponse  # main.py's response imports bring in
+                                            # FileResponse/StreamingResponse/
+                                            # HTMLResponse/RedirectResponse, not this.
+
+# Export ids this container is actively running. The sweeper never touches an
+# id in here, so a slow-but-alive export is never double-started.
+_LOCAL_EXPORT_IDS: set = set()
+_EXPORT_TASKS: set = set()  # strong refs; asyncio only holds weak ones
+
+
+def _spawn_export_runner(export_id: str) -> None:
+    """Fire the runner detached from any HTTP request.
+
+    Registers the id SYNCHRONOUSLY (before the task is even scheduled) so a
+    sweeper tick landing in the gap can't decide the run is orphaned and start
+    a second copy of the same 15-minute ffmpeg job.
+    """
+    _LOCAL_EXPORT_IDS.add(export_id)
+    task = asyncio.create_task(_export_runner(export_id))
+    _EXPORT_TASKS.add(task)
+    task.add_done_callback(_EXPORT_TASKS.discard)
+
+
+def _claim_export_run(export_id: str):
+    """Compare-and-swap claim on an ExportRun. Sync — call via to_thread.
+
+    The whole safety of the sweeper rests here: the sweeper is ALLOWED to be
+    wrong about a run being orphaned, because the claim only wins if the row is
+    still active. Two claimants can never both flip the same row to running.
+
+    Returns a plain dict (NOT a detached ORM object) or None if the claim lost.
+    """
+    from models import get_db
+    from sqlalchemy import text as _sql_text
+
+    with get_db() as _db:
+        try:
+            _now = datetime.utcnow()
+            res = _db.execute(
+                _sql_text(
+                    "UPDATE export_runs SET state='running', attempts=attempts+1, "
+                    "started_at=:now, heartbeat_at=:now "
+                    "WHERE id=:id AND state IN ('queued','running')"
+                ),
+                {"id": export_id, "now": _now},
+            )
+            if res.rowcount != 1:
+                _db.rollback()
+                print(f"[Export/v850] claim LOST run={export_id[:8]} "
+                      f"(rowcount={res.rowcount}) — already claimed or terminal", flush=True)
+                return None
+            _db.commit()
+
+            from models import ExportRun
+            row = _db.query(ExportRun).filter(ExportRun.id == export_id).first()
+            if row is None:
+                print(f"[Export/v850] claim WON but row vanished run={export_id[:8]}", flush=True)
+                return None
+            return {
+                "id": row.id,
+                "job_id": row.job_id,
+                "user_id": row.user_id,
+                "settings_json": row.settings_json,
+                "attempts": row.attempts,
+            }
+        except Exception as _ce:
+            try:
+                _db.rollback()
+            except Exception:
+                pass
+            print(f"[Export/v850] claim ERROR run={export_id[:8]}: {_ce}", flush=True)
+            return None
+
+
+async def _export_heartbeat(export_id: str):
+    """Tick heartbeat_at every HEARTBEAT_INTERVAL_S while this container owns
+    the run. A missed tick is survivable (see export_queue.STALE_AFTER_S); a
+    dead loop is not, so no exception is allowed to escape."""
+    def _tick():
+        from models import get_db, ExportRun
+        with get_db() as _db:
+            try:
+                row = _db.query(ExportRun).filter(
+                    ExportRun.id == export_id,
+                    ExportRun.state == _eq.STATE_RUNNING,
+                ).first()
+                if row is not None:
+                    row.heartbeat_at = datetime.utcnow()
+                    _db.commit()
+            except Exception:
+                try:
+                    _db.rollback()
+                except Exception:
+                    pass
+                raise
+
+    while True:
+        try:
+            await asyncio.sleep(_eq.HEARTBEAT_INTERVAL_S)
+            await asyncio.to_thread(_tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception as _he:
+            print(f"[Export/v850] heartbeat error run={export_id[:8]}: {_he}", flush=True)
+
+
+async def _export_runner(export_id: str):
+    """Do the export, detached from any HTTP request."""
+    import traceback as _tb
+    from models import get_db, ExportRun, User as _User
+
+    hb_task = None
+    try:
+        claim = await asyncio.to_thread(_claim_export_run, export_id)
+        if claim is None:
+            print(f"[Export/v850] SKIP run={export_id[:8]} — claim not won", flush=True)
+            return
+
+        job_id = claim["job_id"]
+        print(f"[Export/v850] START run={export_id[:8]} job={job_id[:8]} "
+              f"attempt={claim['attempts']}/{_eq.MAX_ATTEMPTS}", flush=True)
+
+        # Its OWN long-lived session: the request-scoped one died with the POST
+        # that queued this run.
+        with get_db() as db:
+            try:
+                settings = ExportSettings(**json.loads(claim["settings_json"]))
+                user = db.query(_User).filter(_User.id == claim["user_id"]).first()
+                if user is None:
+                    raise RuntimeError(f"user {claim['user_id']} no longer exists")
+
+                hb_task = asyncio.create_task(_export_heartbeat(export_id))
+
+                result = await _do_export_final(job_id, settings, db, user)
+
+                row = db.query(ExportRun).filter(ExportRun.id == export_id).first()
+                if row is not None:
+                    row.state = _eq.STATE_DONE
+                    row.result_json = json.dumps(result)
+                    row.finished_at = datetime.utcnow()
+                    db.commit()
+                print(f"[Export/v850] DONE run={export_id[:8]} job={job_id[:8]} "
+                      f"→ {result.get('filename')}", flush=True)
+            except Exception as e:
+                print(f"[Export/v850] FAILED run={export_id[:8]} job={job_id[:8]}: {e}", flush=True)
+                print(f"[Export/v850] traceback: {_tb.format_exc()}", flush=True)
+                try:
+                    db.rollback()
+                    row = db.query(ExportRun).filter(ExportRun.id == export_id).first()
+                    if row is not None:
+                        row.state = _eq.STATE_FAILED
+                        row.error = str(e)[:2000]
+                        row.finished_at = datetime.utcnow()
+                        db.commit()
+                except Exception as _me:
+                    print(f"[Export/v850] could not mark run={export_id[:8]} failed: {_me}", flush=True)
+    finally:
+        if hb_task is not None:
+            hb_task.cancel()
+        _LOCAL_EXPORT_IDS.discard(export_id)
+
+
+def _sweep_stale_exports() -> int:
+    """Re-fire every ExportRun a dead container left behind. Sync — to_thread.
+
+    Stale == the owning container stopped heartbeating. That is precisely what
+    a Render deploy / OOM / crash looks like from the outside. Runs alive in
+    THIS container are skipped by id, so a slow export is never double-started;
+    and even if this call is wrong, _claim_export_run's CAS is the real guard.
+    """
+    from models import get_db, ExportRun
+
+    to_fire = []
+    with get_db() as _db:
+        try:
+            runs = _db.query(ExportRun).filter(
+                ExportRun.state.in_(list(_eq.ACTIVE_STATES))
+            ).all()
+            _now = datetime.utcnow()
+            for run in runs:
+                if run.id in _LOCAL_EXPORT_IDS:
+                    continue  # alive right here
+                if not _eq.is_stale(run.state, run.heartbeat_at, _now):
+                    continue  # someone is still ticking it
+                if _eq.next_state_after_reclaim(run.attempts) == _eq.STATE_FAILED:
+                    run.state = _eq.STATE_FAILED
+                    run.error = (
+                        f"Export was killed {run.attempts} time(s) before it could finish "
+                        f"(server restart / out-of-memory). Giving up after "
+                        f"{_eq.MAX_ATTEMPTS} attempts — please retry the export."
+                    )
+                    run.finished_at = _now
+                    print(f"[Export/v850] GIVE UP run={run.id[:8]} job={run.job_id[:8]} "
+                          f"after {run.attempts} attempt(s)", flush=True)
+                    continue
+                run.state = _eq.STATE_QUEUED
+                run.heartbeat_at = None
+                to_fire.append(run.id)
+                print(f"[Export/v850] RECLAIM run={run.id[:8]} job={run.job_id[:8]} "
+                      f"attempts={run.attempts} — heartbeat stale, re-queueing", flush=True)
+            _db.commit()
+        except Exception as _se:
+            try:
+                _db.rollback()
+            except Exception:
+                pass
+            print(f"[Export/v850] sweep error: {_se}", flush=True)
+            return 0
+
+    # Spawn OUTSIDE the session — the runner opens its own.
+    for _rid in to_fire:
+        _spawn_export_runner(_rid)
+    return len(to_fire)
+
+
+async def _export_sweeper():
+    """Every 60s, re-fire orphaned exports.
+
+    The graceful-shutdown hook covers the normal deploy. This loop covers the
+    hard kill (OOM / SIGKILL) where that hook never got to run — the row just
+    stops heartbeating and nothing else would ever notice.
+    """
+    while True:
+        try:
+            await asyncio.sleep(60)
+            n = await asyncio.to_thread(_sweep_stale_exports)
+            if n:
+                print(f"[Export/v850] sweeper re-fired {n} orphaned export(s)", flush=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as _e:
+            print(f"[Export/v850] sweeper error: {_e}", flush=True)
+
+
+def _requeue_local_exports_on_shutdown() -> int:
+    """Deploy path: hand this container's in-flight exports to the next one.
+
+    Setting heartbeat_at=NULL makes the row stale IMMEDIATELY, so the next
+    container's boot sweep picks it up at once instead of waiting out
+    STALE_AFTER_S. Sync — call via to_thread from the shutdown hook.
+    """
+    from models import get_db, ExportRun
+
+    ids = list(_LOCAL_EXPORT_IDS)
+    if not ids:
+        return 0
+    n = 0
+    with get_db() as _db:
+        try:
+            for run in _db.query(ExportRun).filter(
+                ExportRun.id.in_(ids),
+                ExportRun.state == _eq.STATE_RUNNING,
+            ).all():
+                run.state = _eq.STATE_QUEUED
+                run.heartbeat_at = None
+                n += 1
+                print(f"[Export/v850] HANDOVER run={run.id[:8]} job={run.job_id[:8]} "
+                      f"— shutting down, re-queued for the next container", flush=True)
+            _db.commit()
+        except Exception as _qe:
+            try:
+                _db.rollback()
+            except Exception:
+                pass
+            print(f"[Export/v850] shutdown re-queue error: {_qe}", flush=True)
+            return 0
+    print(f"[Export/v850] shutdown handed over {n} in-flight export(s)", flush=True)
+    return n
+
+
+async def _do_export_final(
     job_id: str,
     settings: ExportSettings,
-    db: DBSession = Depends(get_db_session),
-    current_user: User = Depends(get_current_user),
-):
-    """
+    db: DBSession,
+    current_user: User,
+) -> dict:
+    """v850 — the export WORK. Was the body of POST /export-final until the
+    durable queue landed. Unchanged logic; it just no longer runs inside the
+    HTTP request (a Render deploy used to kill it mid-ffmpeg). Called by
+    _export_runner() with its own long-lived DB session.
+
     Export all approved clips as a single final video.
     Optionally applies trimming and Voice Activity Detection (VAD).
-    
+
     Works even after server restart by falling back to filesystem.
-    
+
     Rules for start frame trimming:
     - Never trim start frames from the FIRST clip (clip_index 0)
     - Never trim start frames from clips that start a "cut" transition scene
@@ -9793,6 +10112,73 @@ async def export_final_video(
         print(f"[Export] ERROR: {str(e)}")
         print(f"[Export] Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
+@app.post("/api/jobs/{job_id}/export-final")
+async def export_final_video(
+    job_id: str,
+    settings: ExportSettings,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v850 — QUEUE an export. Returns immediately (202); the work runs
+    detached so a Render deploy can't kill it. Poll /export-status."""
+    from models import ExportRun
+
+    get_user_job(db, job_id, current_user)  # 404/403 if not the caller's
+
+    # Idempotent: a second click (or the browser retrying after a dropped
+    # connection) joins the export already in flight instead of starting a
+    # duplicate 15-minute ffmpeg run.
+    existing = db.query(ExportRun).filter(
+        ExportRun.job_id == job_id,
+        ExportRun.state.in_(list(_eq.ACTIVE_STATES)),
+    ).order_by(ExportRun.created_at.desc()).first()
+    if existing:
+        print(f"[Export/v850] job={job_id[:8]} already has run={existing.id[:8]} "
+              f"({existing.state}); joining it", flush=True)
+        return JSONResponse(status_code=202, content=existing.to_dict())
+
+    run = ExportRun(
+        id=str(uuid.uuid4()),
+        job_id=job_id,
+        user_id=current_user.id,
+        state=_eq.STATE_QUEUED,
+        settings_json=settings.model_dump_json(),  # pydantic v2 (2.12.5); .json() is deprecated
+        attempts=0,
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    print(f"[Export/v850] QUEUED run={run.id[:8]} job={job_id[:8]}", flush=True)
+    _spawn_export_runner(run.id)
+    return JSONResponse(status_code=202, content=run.to_dict())
+
+
+@app.get("/api/jobs/{job_id}/export-status")
+async def export_status(
+    job_id: str,
+    export_id: str = None,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v850 — poll target for the frontend. Returns the named run, or the most
+    recent one for this job. `result` carries the exact payload the old
+    synchronous endpoint used to return (filename / download_url / stats /
+    audio / support_tracks)."""
+    from models import ExportRun
+
+    get_user_job(db, job_id, current_user)
+
+    q = db.query(ExportRun).filter(ExportRun.job_id == job_id)
+    if export_id:
+        q = q.filter(ExportRun.id == export_id)
+    run = q.order_by(ExportRun.created_at.desc()).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="No export has been requested for this job")
+    return run.to_dict()
 
 
 @app.get("/api/vad-available")

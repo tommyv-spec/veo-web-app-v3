@@ -23,7 +23,14 @@ ACTIVE_STATES = (STATE_QUEUED, STATE_RUNNING)
 TERMINAL_STATES = (STATE_DONE, STATE_FAILED)
 
 HEARTBEAT_INTERVAL_S = 30
-STALE_AFTER_S = 90
+# 6 missed ticks, not 3. The heartbeat is written from the event loop while
+# ffmpeg saturates Render's single CPU, so under export load a few ticks WILL
+# land late. A false-positive reclaim is the expensive failure: it double-runs
+# a 15-minute export (two ffmpeg jobs fighting for the same CPU, two uploads).
+# The wide window costs the common path nothing — a graceful deploy NULLs the
+# heartbeat on shutdown, so the next container reclaims instantly instead of
+# waiting this out. Only a hard kill (OOM/SIGKILL) pays the delay.
+STALE_AFTER_S = 180
 MAX_ATTEMPTS = 3
 
 
