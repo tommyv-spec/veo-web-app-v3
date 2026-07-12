@@ -6259,37 +6259,81 @@ def _download_reference_inputs(api_key, input_images, work_dir):
     return results, missing
 
 
+# ============================================================================
+# v851 — API retry classification
+# ----------------------------------------------------------------------------
+# 2026-07-12: a deploy landed mid-upload and requests raised
+#   ChunkedEncodingError: Response ended prematurely
+# ChunkedEncodingError subclasses RequestException, NOT ConnectionError — so
+# the old `except (ConnectionError, Timeout)` catch missed it, the bare
+# `except Exception` re-raised on attempt 1 of 4, and _http_worker posted the
+# node as FAILED. Four already-rendered Flow variants, sitting finished on
+# disk, were thrown away because a new version shipped.
+#
+# Classify by FAMILY, not by a hand-listed tuple: every requests transport
+# error is transient except a 4xx, which will fail identically forever.
+#
+# The backoff must also outlast a deploy. The old [2, 5, 15] gave up after
+# ~22s; Render is unreachable for 60-180s while the new container boots.
+# ============================================================================
+API_RETRY_BACKOFF = [5, 15, 30, 60, 90]   # 5 waits => 6 attempts, ~200s total
+API_MAX_ATTEMPTS = len(API_RETRY_BACKOFF) + 1
+
+
+def is_retryable_api_error(exc) -> bool:
+    """True when re-sending the same request could plausibly succeed."""
+    import requests as _rq
+
+    if isinstance(exc, _rq.exceptions.HTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is not None and 400 <= resp.status_code < 500:
+            return False   # client error — permanent
+        return True        # 5xx / unknown — server-side, worth retrying
+    # ConnectionError, Timeout, ChunkedEncodingError, ContentDecodingError,
+    # RemoteDisconnected-wrapped-in-RequestException, ... all transport-level.
+    return isinstance(exc, _rq.exceptions.RequestException)
+
+
+def _upload_variants_with_health_gate(api_url, api_key, node_id, saved_paths):
+    """v851 — last line of defence for finished renders.
+
+    If the upload exhausts its retries (a long deploy / outage), the variants
+    are still complete on local disk. Throwing them away costs a full Flow
+    re-render. Wait for the platform to answer /health again (v845 already
+    rides out a deploy window) and upload once more.
+    """
+    try:
+        return _upload_variants_to_api(api_url, api_key, node_id, saved_paths)
+    except Exception as e:
+        if not is_retryable_api_error(e):
+            raise
+        print(f"[API:http] ⏳ Node {node_id}: upload still failing ({type(e).__name__}). "
+              f"{len(saved_paths)} finished variant(s) are on disk — waiting for the "
+              f"platform to come back rather than binning them.", flush=True)
+        if not _api_wait_for_health(api_url, api_key):
+            raise
+        print(f"[API:http] ✓ Platform healthy again — re-uploading node {node_id}", flush=True)
+        return _upload_variants_to_api(api_url, api_key, node_id, saved_paths)
+
+
 def _upload_variants_to_api(api_url, api_key, node_id, variant_paths):
     """POST /worker/jobs/{node_id}/variants with the variant files.
 
     v450: retries with exponential backoff on transient server drops.
-
-    The webapp endpoint reads all files into memory (FastAPI UploadFile),
-    saves them locally, then mirrors each to R2. On Render's free/starter
-    tier this can trigger short OOM windows where the container is
-    restarted; during that gap requests get RemoteDisconnected. A small
-    number of retries bridges those windows automatically rather than
-    failing the whole node.
-
-    Retries on: ConnectionError, Timeout, HTTPError with 5xx status.
-    Fails fast on: 4xx (client error — retrying won't help), unexpected
-    exceptions.
-
-    Backoff schedule: 2s, 5s, 15s between attempts (total up to ~22s of
-    waiting across 4 attempts).
+    v851: retry on the whole requests transport family (ChunkedEncodingError
+    was silently NOT retried — see is_retryable_api_error) and with a backoff
+    that outlasts a Render deploy window.
     """
     import requests
     url = f"{api_url.rstrip('/')}{API_PATH_PREFIX}/jobs/{node_id}/variants"
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    max_attempts = 4
-    backoff_schedule = [2, 5, 15]  # seconds before attempts 2, 3, 4
     last_error = None
 
-    for attempt in range(1, max_attempts + 1):
-        # Re-open file handles on each attempt. requests consumes the
-        # stream on the previous failed POST, so a reused handle reads
-        # zero bytes on retry and the server sees an empty body.
+    for attempt in range(1, API_MAX_ATTEMPTS + 1):
+        # Re-open file handles on each attempt. requests consumes the stream
+        # on the previous failed POST, so a reused handle reads zero bytes on
+        # retry and the server sees an empty body.
         files = []
         opened = []
         try:
@@ -6299,30 +6343,17 @@ def _upload_variants_to_api(api_url, api_key, node_id, variant_paths):
                 files.append(("files", (os.path.basename(p), fh, "image/png")))
 
             resp = requests.post(url, headers=headers, files=files, timeout=300)
-
-            # 4xx = permanent client error — abort, don't retry
-            if 400 <= resp.status_code < 500:
-                resp.raise_for_status()  # raises, caught below as HTTPError
-            # 5xx handled below by raise_for_status too
             resp.raise_for_status()
             return resp.json()
 
-        except requests.exceptions.HTTPError as e:
-            # HTTPError: 4xx = fail fast, 5xx = retry
-            if e.response is not None and 400 <= e.response.status_code < 500:
-                print(f"[API:http] ⚠ Upload variants returned {e.response.status_code} — no retry", flush=True)
+        except Exception as e:
+            if not is_retryable_api_error(e):
+                print(f"[API:http] ✗ Upload variants: permanent error, no retry: "
+                      f"{type(e).__name__}: {e}", flush=True)
                 raise
             last_error = e
-            print(f"[API:http] ⚠ Upload variants attempt {attempt}/{max_attempts} got {e.response.status_code if e.response else '?'} — will retry", flush=True)
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout) as e:
-            last_error = e
-            # Include error class name in log so we can tell drops from timeouts
-            print(f"[API:http] ⚠ Upload variants attempt {attempt}/{max_attempts} failed: {type(e).__name__}: {e}", flush=True)
-        except Exception as e:
-            # Unexpected — don't retry, surface immediately
-            print(f"[API:http] ✗ Upload variants attempt {attempt}/{max_attempts} unexpected error: {e}", flush=True)
-            raise
+            print(f"[API:http] ⚠ Upload variants attempt {attempt}/{API_MAX_ATTEMPTS} "
+                  f"failed: {type(e).__name__}: {e}", flush=True)
         finally:
             for fh in opened:
                 try:
@@ -6330,15 +6361,14 @@ def _upload_variants_to_api(api_url, api_key, node_id, variant_paths):
                 except Exception:
                     pass
 
-        # Sleep before the next attempt (unless this was the last one)
-        if attempt < max_attempts:
-            wait_s = backoff_schedule[attempt - 1]
-            print(f"[API:http]    waiting {wait_s}s before retry...", flush=True)
+        if attempt < API_MAX_ATTEMPTS:
+            wait_s = API_RETRY_BACKOFF[attempt - 1]
+            print(f"[API:http]    waiting {wait_s}s before retry "
+                  f"(platform may be redeploying)...", flush=True)
             time.sleep(wait_s)
 
-    # All attempts exhausted
     raise last_error if last_error else RuntimeError(
-        f"Upload variants for node {node_id} failed after {max_attempts} attempts"
+        f"Upload variants for node {node_id} failed after {API_MAX_ATTEMPTS} attempts"
     )
 
 
@@ -6388,13 +6418,15 @@ def _post_status(api_url, api_key, node_id, status, error=None):
     """POST /worker/jobs/{node_id}/status.
 
     v450: retries with exponential backoff on transient server drops.
-    Shorter backoff than variant upload because the payload is a tiny
-    JSON — if the server is healthy enough to respond at all, it should
-    respond fast. Backoff: 1s, 3s, 7s.
+    v851: shares the retry classifier + backoff schedule with the variant
+    upload path. A status POST that lands mid-deploy fails for exactly the
+    same reason an upload does (the transport drops — e.g.
+    ChunkedEncodingError — which is NOT a ConnectionError), so it gets the
+    same family-based catch and the same deploy-outlasting schedule instead
+    of its old 4-attempt / ~11s one.
 
-    Same retry class as upload: ConnectionError, Timeout, 5xx. 4xx =
-    fail fast. Unlike upload, we don't re-open streams so each attempt
-    is self-contained.
+    Unlike upload, we don't re-open streams so each attempt is
+    self-contained.
     """
     import requests
     url = f"{api_url.rstrip('/')}{API_PATH_PREFIX}/jobs/{node_id}/status"
@@ -6404,38 +6436,31 @@ def _post_status(api_url, api_key, node_id, status, error=None):
     }
     payload = {"status": status, "error": error}
 
-    max_attempts = 4
-    backoff_schedule = [1, 3, 7]
     last_error = None
 
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, API_MAX_ATTEMPTS + 1):
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=30)
-            if 400 <= resp.status_code < 500:
-                resp.raise_for_status()
             resp.raise_for_status()
             return resp.json() if resp.content else {}
 
-        except requests.exceptions.HTTPError as e:
-            if e.response is not None and 400 <= e.response.status_code < 500:
-                print(f"[API] ⚠ Post status returned {e.response.status_code} — no retry", flush=True)
+        except Exception as e:
+            if not is_retryable_api_error(e):
+                print(f"[API] ✗ Post status: permanent error, no retry: "
+                      f"{type(e).__name__}: {e}", flush=True)
                 raise
             last_error = e
-            print(f"[API] ⚠ Post status attempt {attempt}/{max_attempts} got {e.response.status_code if e.response else '?'} — will retry", flush=True)
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout) as e:
-            last_error = e
-            print(f"[API] ⚠ Post status attempt {attempt}/{max_attempts} failed: {type(e).__name__}: {e}", flush=True)
-        except Exception as e:
-            print(f"[API] ✗ Post status attempt {attempt}/{max_attempts} unexpected error: {e}", flush=True)
-            raise
+            print(f"[API] ⚠ Post status attempt {attempt}/{API_MAX_ATTEMPTS} "
+                  f"failed: {type(e).__name__}: {e}", flush=True)
 
-        if attempt < max_attempts:
-            wait_s = backoff_schedule[attempt - 1]
+        if attempt < API_MAX_ATTEMPTS:
+            wait_s = API_RETRY_BACKOFF[attempt - 1]
+            print(f"[API]    waiting {wait_s}s before retry "
+                  f"(platform may be redeploying)...", flush=True)
             time.sleep(wait_s)
 
     raise last_error if last_error else RuntimeError(
-        f"Post status for node {node_id} failed after {max_attempts} attempts"
+        f"Post status for node {node_id} failed after {API_MAX_ATTEMPTS} attempts"
     )
 
 
@@ -8168,7 +8193,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
 
                 # Upload + post status
                 print(f"[API:http] node {node_id} ⬆ uploading {len(saved_paths)} variants...", flush=True)
-                _upload_variants_to_api(api_url, api_key, node_id, saved_paths)
+                _upload_variants_with_health_gate(api_url, api_key, node_id, saved_paths)
                 _post_status(api_url, api_key, node_id, "completed")
                 print(f"[API:http] ✓ Node {node_id} completed", flush=True)
                 done_queue.put({"node_id": node_id, "outcome": "completed"})
