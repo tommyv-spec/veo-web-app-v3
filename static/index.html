@@ -528,6 +528,30 @@
             font-size: 11px; font-weight: 700;
         }
 
+        /* v852 — per-image download button. Fades in on tile hover; always
+           visible on touch (no hover). Downloads the FULL-RES original, not
+           the ?w= webp thumbnail the tile renders. */
+        .img-dl-btn {
+            position: absolute; z-index: 3;
+            background: rgba(0,0,0,0.75); color: #fff;
+            border: 1px solid rgba(255,255,255,0.25);
+            border-radius: 50%;
+            width: 30px; height: 30px; padding: 0;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 14px; line-height: 1; cursor: pointer;
+            opacity: 0; transition: opacity 0.12s, background 0.12s;
+        }
+        .img-dl-btn:hover { background: var(--accent); }
+        .img-dl-btn:disabled { cursor: default; opacity: 1 !important; }
+        .img-storyboard-tile .img-dl-btn { top: 8px; right: 8px; }
+        .img-variant .img-dl-btn { bottom: 10px; right: 10px; }
+        .img-storyboard-tile:hover .img-dl-btn,
+        .img-variant:hover .img-dl-btn { opacity: 1; }
+        @media (hover: none) {
+            .img-storyboard-tile .img-dl-btn,
+            .img-variant .img-dl-btn { opacity: 1; }
+        }
+
         @keyframes imgToastIn {
             from { opacity: 0; transform: translateX(20px); }
             to { opacity: 1; transform: translateX(0); }
@@ -19346,6 +19370,57 @@ Ambient: same kitchen room tone, soft pour sound.
             return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'w=' + (w || 256);
         }
 
+        // v852 — strip any ?w= bucket so we hit the FULL-RES original file, not
+        // the webp thumbnail the tile renders. Inverse of imgThumbUrl.
+        function imgFullResUrl(url) {
+            if (!url) return url;
+            return url.replace(/[?&]w=\d+/g, m => (m[0] === '?' ? '?' : '')).replace(/\?&/, '?').replace(/[?&]$/, '');
+        }
+
+        // v852 — filename-safe slug for a node/variant label.
+        function imgSlug(s) {
+            return String(s || 'image').toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'image';
+        }
+
+        // v852 — download ONE image at original resolution. Fetch-to-blob (not a
+        // bare <a href>) because the served response is Content-Disposition:
+        // inline, so a plain link opens the PNG in a tab on some browsers. The
+        // blob path also lets us set the real extension from the content-type.
+        async function imgDownloadOne(ev, url, label) {
+            if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+            if (!url) { imgShowToastError('Download', 'No image to download'); return; }
+            const btn = ev && ev.currentTarget ? ev.currentTarget : null;
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.innerHTML = '⏳'; btn.disabled = true; }
+            try {
+                const res = await fetch(imgFullResUrl(url));
+                if (!res.ok) throw new Error('fetch failed (' + res.status + ')');
+                const blob = await res.blob();
+                let ext = 'png';
+                const ct = res.headers.get('content-type') || '';
+                if (ct.includes('webp')) ext = 'webp';
+                else if (ct.includes('jpeg') || ct.includes('jpg')) ext = 'jpg';
+                else {
+                    const m = imgFullResUrl(url).split('?')[0].match(/\.(png|jpe?g|webp)$/i);
+                    if (m) ext = m[1].toLowerCase().replace('jpeg', 'jpg');
+                }
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = imgSlug(label) + '.' + ext;
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+            } catch (e) {
+                console.error('[v852] image download failed:', e);
+                imgShowToastError('Download failed', e.message);
+            } finally {
+                if (btn) { btn.innerHTML = orig || '⬇'; btn.disabled = false; }
+            }
+        }
+
         // v649 — find which sidebar group key a node belongs to. Used by
         // the "← Back to job" button on the node detail header. Walks
         // imgState.groupsByKey (already populated by the sidebar render).
@@ -20014,9 +20089,15 @@ Ambient: same kitchen room tone, soft pour sound.
                 // Chronological index label: "Scene N" if extractable, else sequential
                 const mm = (n.name || '').match(/Scene\s+(\d+)/i);
                 const indexLabel = mm ? `#${mm[1]}` : `#${idx + 1}`;
+                // v852 — per-tile download of the FULL-RES original (fullUrl, not thumbUrl).
+                const dlLabel = imgSlug(String(idx + 1).padStart(2, '0') + '-' + (n.name || ('node-' + n.id)));
+                const dlBtn = fullUrl
+                    ? `<button class="img-dl-btn" title="Download original (full size)" data-track="image_download_one" onclick="imgDownloadOne(event, '${fullUrl}', '${dlLabel}')">⬇</button>`
+                    : '';
                 return `
                     <div class="img-storyboard-tile" onclick="imgSelectNode(${n.id})">
                         <div class="tile-index">${indexLabel}</div>
+                        ${dlBtn}
                         <div class="tile-thumb">${thumbContent}</div>
                         <div class="tile-body">
                             <div class="tile-name" title="${nameSafe}">${nameSafe}</div>
@@ -20971,6 +21052,10 @@ Ambient: same kitchen room tone, soft pour sound.
                             // click readable in PostHog (autocapture stamps data-* attrs).
                             // 14d data showed 679 empty-text clicks dominated by these
                             // icon-only cards — now they show up as 'variant_card'.
+                            // v852 — download this variant at FULL RES (v.image_url with
+                            // no ?w= bucket). imgDownloadOne stops propagation so the
+                            // click doesn't also re-select the variant.
+                            const vLabel = imgSlug((node.name || ('node-' + node.id)) + '-v' + v.variant_index);
                             return `
                                 <div class="img-variant ${chosen ? 'chosen' : ''} ${isManual ? 'manual-variant' : ''}"
                                      data-track="variant_card"
@@ -20981,6 +21066,8 @@ Ambient: same kitchen room tone, soft pour sound.
                                     <span class="variant-label">${v.variant_index}</span>
                                     ${isManual ? '<div class="manual-icon" title="Manual upload">📁</div>' : ''}
                                     ${chosen ? '<div class="chosen-badge">✓</div>' : ''}
+                                    <button class="img-dl-btn" title="Download original (full size)" data-track="image_download_one"
+                                            onclick="imgDownloadOne(event, '${v.image_url}', '${vLabel}')">⬇</button>
                                 </div>`;
                         }).join('')}
                         <div class="img-variant img-upload-tile"
