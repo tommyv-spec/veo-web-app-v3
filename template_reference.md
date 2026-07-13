@@ -15459,3 +15459,17 @@ Second half of the bug: even if the retry HAD fired, the old backoff was `[2, 5,
 `code/tests/test_image_worker_upload_retry.py` + `code/tests/test_image_worker_health_retry.py`. Runtime tell: on a deploy the worker log now shows the retry ladder (`attempt 2/6`, `3/6`, … with the 5/15/30/60/90s waits) and, in the worst case, the health-gate wait followed by a successful upload — instead of a single `attempt 1/4` and a `failed` node.
 
 **Touched**: this deep-dive (canonical), `code/image_worker.py`, `code/tests/test_image_worker_upload_retry.py`, `code/tests/test_image_worker_health_retry.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
+
+## v833 — Transformation-meme grammar (started/going panels): full-health transform, tight crop, proxy bound to the zone
+
+**Where it came from**: the 13.07 plan Video 1 lane (day1dayx couch/bed memes, v1-v4) — three operator corrections in one exchange: *"the transformation shouldn't be only the banana, but the overall health of the man with previous symptoms"* · *"apply the classic hook prompt rules"* · (on a weak render) *"is not really powerful, his composition, compared to the original video"*.
+
+**The rule — a locked-composition transformation meme (HOW IT STARTED / HOW IT'S GOING panels) must carry all four:**
+1. **§14.2 form**: NEVER dated day stamps — the "how it started / how it's going" caption pair is the endorsed form, and the escalation axis moves to the PRODUCT (gas-station pill beat vs Korella capsule beat), not time.
+2. **FULL-HEALTH transform on the person**: the man's whole body flips between panels — cause panel = the complete symptom stack (overweight, belly straining the shirt, puffy pale face, heavy dark circles, thinning hair, grey skin — v828.3 grammar); payoff panel = the same man noticeably leaner, shirt fitting loose, warm skin, bright rested eyes, firm jawline. The proxy alone is NOT the transformation; person + proxy + scene-state (wrecked vs made bed) + partner-state (bored vs undone) stack as multiple reads.
+3. **TIGHT crop (the source memes' power)**: knees-up / waist-up, the subjects filling the frame edge to edge, heads touching the top edge, NO empty wall — a wide room shot kills the gag. Write the no-empty-wall constraint into the prompt.
+4. **Proxy BOUND to the zone**: the proxy is held/dangled AT the man's lap zone (the partner's hand pinching it there, even absently while she scrolls), never lying loose on furniture — loose proxy reads as trash; the binding IS the joke. Dead-center, large and close.
+
+**Scope / gates**: GENERATE-side authoring, every started/going or same-moment A/B transformation meme. Silent meme beats carry `speaker: silent` (no line, track + captions in post) with a Prompt B fence identical to A; the hook panel takes the v791 camera grammar adapted to the scene. Reference builds: `videos/nuri-korella-ed-how-its-going-her-state-couch-korella-saffron-selling-v2.md` (composition-corrected) + `...-hows-it-going-bed-inverted-korella-saffron-selling-v4.md`.
+
+**Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), memory `feedback_transformation-meme-grammar`, `wiki/log.md`.
