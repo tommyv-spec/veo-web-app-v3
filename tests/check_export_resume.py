@@ -93,17 +93,24 @@ HANDED_OVER = _mk("queued", None, 1, "container A graceful shutdown handover")
 BURNED_OUT = _mk("running", NOW - timedelta(seconds=300), eq.MAX_ATTEMPTS, "already retried 3x")
 ALIVE_SLOW = _mk("running", NOW - timedelta(seconds=60), 1, "live container, slow under ffmpeg")
 
-# Container B boots. It owns nothing yet, and we intercept the re-fire instead
-# of really launching a 15-min ffmpeg run (no event loop here anyway).
+# Container B boots. It owns nothing yet.
+#
+# v854 — the sweep no longer spawns; it RETURNS the ids and its async caller
+# spawns them on the event loop. That is the whole point of v854: the sweep runs
+# on a to_thread worker, and asyncio.create_task() there raises "no running
+# event loop". The old version of this check monkeypatched _spawn_export_runner
+# to a recorder, which meant it asserted the reclaim DECISION and never touched
+# the spawn — so it stayed green while both sweep paths were dead in production
+# and an export sat queued for four hours. We now assert the real contract: the
+# ids the sweep returns ARE the work list.
 main._LOCAL_EXPORT_IDS.clear()
-FIRED = []
-main._spawn_export_runner = lambda export_id: FIRED.append(export_id)
 
-print("v850 deploy-resume check — container B boots and sweeps\n")
+print("v850/v854 deploy-resume check — container B boots and sweeps\n")
 
-n = main._sweep_stale_exports()
+FIRED = main._sweep_stale_exports()   # the real return value, no stub
+n = len(FIRED)
 
-print(f"sweep re-fired {n} run(s)\n")
+print(f"sweep returned {n} run(s) for the caller to spawn\n")
 
 # --- 1. hard-killed container: stale heartbeat -> re-queued + re-fired ------
 print("1. running run, heartbeat 300s old (container A was SIGKILLed / OOMed)")
@@ -175,9 +182,8 @@ with get_db() as db:
 # terminal state.
 _check(eq.is_stale(st, hb, NOW) is False,
        "is_stale() -> False on a terminal run even with a 300s-old heartbeat")
-FIRED.clear()
-main._sweep_stale_exports()
-_check(REALLY_FAILED not in FIRED,
+FIRED2 = main._sweep_stale_exports()
+_check(REALLY_FAILED not in FIRED2,
        "NOT re-fired by the sweeper — a genuinely-failed export is never retried "
        "into the ground (the other two rows are still queued, so they do fire again)")
 st2, _, _ = _state_of(REALLY_FAILED)

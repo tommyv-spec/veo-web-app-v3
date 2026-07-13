@@ -589,9 +589,14 @@ async def lifespan(app: FastAPI):
         # graceful shutdown hook), so the sweep reclaims them right now instead
         # of the operator staring at a poll that will never resolve.
         try:
-            _n_exp = await _asyncio.to_thread(_sweep_stale_exports)
-            if _n_exp:
-                print(f"[Deferred][Export/v850] re-fired {_n_exp} export(s) orphaned by the last restart", flush=True)
+            # v854 — the sweep is DB-only and runs on a thread; spawning must
+            # happen HERE, on the event loop. Doing it inside the sweep raised
+            # "no running event loop" and silently poisoned _LOCAL_EXPORT_IDS.
+            _orphan_ids = await _asyncio.to_thread(_sweep_stale_exports)
+            for _oid in _orphan_ids:
+                _spawn_export_runner(_oid)
+            if _orphan_ids:
+                print(f"[Deferred][Export/v850] re-fired {len(_orphan_ids)} export(s) orphaned by the last restart", flush=True)
             else:
                 print("[Deferred][Export/v850] no orphaned exports to re-run", flush=True)
         except Exception as _xe:
@@ -8582,11 +8587,41 @@ def _spawn_export_runner(export_id: str) -> None:
     Registers the id SYNCHRONOUSLY (before the task is even scheduled) so a
     sweeper tick landing in the gap can't decide the run is orphaned and start
     a second copy of the same 15-minute ffmpeg job.
+
+    v854: the id is still registered BEFORE the task starts (that is the race
+    guard), but a failure to create the task now UNREGISTERS it. It used to
+    leak: callers on a worker thread hit "no running event loop" from
+    create_task, the id stayed in _LOCAL_EXPORT_IDS with no task behind it, and
+    every later sweep skipped that run forever. MUST be called from the event
+    loop.
     """
     _LOCAL_EXPORT_IDS.add(export_id)
-    task = asyncio.create_task(_export_runner(export_id))
+    try:
+        task = asyncio.create_task(_export_runner(export_id))
+    except RuntimeError as _cte:
+        # No running loop == called from a thread. Never poison the set.
+        _LOCAL_EXPORT_IDS.discard(export_id)
+        print(f"[Export/v854] CANNOT SPAWN run={export_id[:8]} — {_cte}. "
+              f"_spawn_export_runner must be called from the event loop.", flush=True)
+        raise
+
     _EXPORT_TASKS.add(task)
-    task.add_done_callback(_EXPORT_TASKS.discard)
+
+    def _on_done(_t: "asyncio.Task") -> None:
+        # Belt to the runner's own finally: if the coroutine dies BEFORE its
+        # try block (an import, a bad arg), that finally never runs and the id
+        # would leak — which is exactly how a run becomes unreclaimable.
+        _EXPORT_TASKS.discard(_t)
+        _LOCAL_EXPORT_IDS.discard(export_id)
+        if _t.cancelled():
+            return
+        _exc = _t.exception()
+        if _exc is not None:
+            # Without this, an asyncio task's exception is swallowed until GC.
+            print(f"[Export/v854] runner task DIED run={export_id[:8]}: "
+                  f"{type(_exc).__name__}: {_exc}", flush=True)
+
+    task.add_done_callback(_on_done)
 
 
 def _claim_export_run(export_id: str):
@@ -8777,8 +8812,9 @@ async def _export_runner(export_id: str):
         _LOCAL_EXPORT_IDS.discard(export_id)
 
 
-def _sweep_stale_exports() -> int:
-    """Re-fire every ExportRun a dead container left behind. Sync — to_thread.
+def _sweep_stale_exports() -> list:
+    """Re-queue every ExportRun a dead container left behind, and RETURN their
+    ids for the caller to spawn. Sync — call via to_thread.
 
     Stale == the owning container stopped heartbeating. That is precisely what
     a Render deploy / OOM / crash looks like from the outside. Runs alive in
@@ -8824,10 +8860,20 @@ def _sweep_stale_exports() -> int:
             print(f"[Export/v850] sweep error: {_se}", flush=True)
             return 0
 
-    # Spawn OUTSIDE the session — the runner opens its own.
-    for _rid in to_fire:
-        _spawn_export_runner(_rid)
-    return len(to_fire)
+    # v854 — RETURN the ids; do NOT spawn here.
+    #
+    # This function is sync and every caller runs it via asyncio.to_thread, i.e.
+    # on a worker thread with NO event loop. Calling _spawn_export_runner here
+    # (which calls asyncio.create_task) raised "RuntimeError: no running event
+    # loop" on EVERY sweep — and because the id was added to _LOCAL_EXPORT_IDS
+    # before create_task blew up, the id stuck there with no task behind it, so
+    # every later sweep skipped that run forever. A deploy-orphaned export sat
+    # queued with attempts=1 and heartbeat=NULL until someone noticed. Both
+    # sweep paths (boot + 60s) were dead from day one; only the POST path
+    # worked, because that one runs on the loop.
+    #
+    # Spawning is now the async caller's job. This function only touches the DB.
+    return to_fire
 
 
 async def _export_sweeper():
@@ -8840,9 +8886,12 @@ async def _export_sweeper():
     while True:
         try:
             await asyncio.sleep(60)
-            n = await asyncio.to_thread(_sweep_stale_exports)
-            if n:
-                print(f"[Export/v850] sweeper re-fired {n} orphaned export(s)", flush=True)
+            # v854 — sweep on a thread (DB work), spawn on the loop.
+            ids = await asyncio.to_thread(_sweep_stale_exports)
+            for _rid in ids:
+                _spawn_export_runner(_rid)
+            if ids:
+                print(f"[Export/v850] sweeper re-fired {len(ids)} orphaned export(s)", flush=True)
         except asyncio.CancelledError:
             raise
         except Exception as _e:
@@ -10186,6 +10235,15 @@ async def export_final_video(
     if existing:
         print(f"[Export/v850] job={job_id[:8]} already has run={existing.id[:8]} "
               f"({existing.state}); joining it", flush=True)
+        # v854 — RESCUE. A queued run that nothing is running is a stuck run:
+        # the sweeper's spawn was broken (see _sweep_stale_exports), so a run
+        # could sit queued forever while every re-click just re-attached to it.
+        # If we are joining a queued run that this container is NOT running,
+        # spawn it. The CAS claim makes a redundant spawn harmless.
+        if existing.state == _eq.STATE_QUEUED and existing.id not in _LOCAL_EXPORT_IDS:
+            print(f"[Export/v854] RESCUE run={existing.id[:8]} — queued with no live "
+                  f"runner; spawning it now", flush=True)
+            _spawn_export_runner(existing.id)
         return JSONResponse(status_code=202, content=existing.to_dict())
 
     run = ExportRun(
