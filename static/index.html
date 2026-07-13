@@ -528,24 +528,30 @@
             font-size: 11px; font-weight: 700;
         }
 
-        /* v852.1 — per-image download button. ALWAYS visible: the first cut
-           was hover-gated (opacity 0) and read as "the button isn't there".
-           Downloads the FULL-RES original, not the ?w= webp thumb the tile
-           renders. */
+        /* v852.2 — per-image download button. ALWAYS visible + labelled.
+           v852 was hover-gated (opacity 0) and read as "there is no button";
+           v852.1 un-gated it but a bare icon circle still wasn't obvious. Now
+           a solid labelled pill. Downloads the FULL-RES original, not the ?w=
+           webp thumb the tile renders. */
         .img-dl-btn {
             position: absolute; z-index: 5;
-            background: rgba(0,0,0,0.78); color: #fff;
-            border: 1px solid rgba(255,255,255,0.3);
-            border-radius: 50%;
-            width: 32px; height: 32px; padding: 0;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 15px; line-height: 1; cursor: pointer;
-            opacity: 1; transition: background 0.12s, transform 0.12s;
+            background: var(--accent); color: #fff;
+            border: 1px solid rgba(255,255,255,0.55);
+            border-radius: 999px;
+            padding: 7px 14px;
+            display: flex; align-items: center; gap: 6px;
+            font-size: 12px; font-weight: 700; line-height: 1;
+            white-space: nowrap; cursor: pointer;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.55);
+            opacity: 1; transition: filter 0.12s, transform 0.12s;
         }
-        .img-dl-btn:hover { background: var(--accent); transform: scale(1.1); }
-        .img-dl-btn:disabled { cursor: default; }
+        .img-dl-btn:hover { filter: brightness(1.2); transform: translateY(-1px); }
+        .img-dl-btn:active { transform: translateY(0); }
+        .img-dl-btn:disabled { cursor: default; filter: none; }
+        /* Storyboard tile keeps it TOP-right: the tile's bottom is the
+           name/status body, and a pill there would sit on top of the text. */
         .img-storyboard-tile .img-dl-btn { top: 8px; right: 8px; }
-        .img-variant .img-dl-btn { bottom: 10px; right: 10px; }
+        .img-variant .img-dl-btn { bottom: 12px; right: 12px; }
 
         @keyframes imgToastIn {
             from { opacity: 0; transform: translateX(20px); }
@@ -19414,7 +19420,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 console.error('[v852] image download failed:', e);
                 imgShowToastError('Download failed', e.message);
             } finally {
-                if (btn) { btn.innerHTML = orig || '⬇'; btn.disabled = false; }
+                if (btn) { btn.innerHTML = orig || '⬇ Download'; btn.disabled = false; }
             }
         }
 
@@ -20091,7 +20097,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 // dlLabel is imgSlug'd to [a-z0-9-], so it is safe in the attribute.
                 const dlLabel = imgSlug(String(idx + 1).padStart(2, '0') + '-' + (n.name || ('node-' + n.id)));
                 const dlBtn = fullUrl
-                    ? `<button class="img-dl-btn" title="Download original (full size)" data-track="image_download_one" onclick="imgDownloadOne(event, ${n.id}, null, '${dlLabel}')">⬇</button>`
+                    ? `<button class="img-dl-btn" title="Download the original file at full size" data-track="image_download_one" onclick="imgDownloadOne(event, ${n.id}, null, '${dlLabel}')">⬇ Download</button>`
                     : '';
                 return `
                     <div class="img-storyboard-tile" onclick="imgSelectNode(${n.id})">
@@ -21065,8 +21071,8 @@ Ambient: same kitchen room tone, soft pour sound.
                                     <span class="variant-label">${v.variant_index}</span>
                                     ${isManual ? '<div class="manual-icon" title="Manual upload">📁</div>' : ''}
                                     ${chosen ? '<div class="chosen-badge">✓</div>' : ''}
-                                    <button class="img-dl-btn" title="Download original (full size)" data-track="image_download_one"
-                                            onclick="imgDownloadOne(event, ${node.id}, ${v.id}, '${vLabel}')">⬇</button>
+                                    <button class="img-dl-btn" title="Download the original file at full size" data-track="image_download_one"
+                                            onclick="imgDownloadOne(event, ${node.id}, ${v.id}, '${vLabel}')">⬇ Download</button>
                                 </div>`;
                         }).join('')}
                         <div class="img-variant img-upload-tile"
