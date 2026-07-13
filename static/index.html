@@ -4537,29 +4537,38 @@ Ambient: same kitchen room tone, soft pour sound.
           }
         }
 
+        // v853 — the chip branches used to hide panels one by one, and the
+        // instagram branch never hid localPanel: going Local folder → Instagram
+        // left the local panel on screen covering the (now shown) instagram
+        // panel, so the view looked stuck. Hide EVERY panel here, then show the
+        // one that was asked for. Add a panel to the list, not to a branch.
+        const CHIP_PANELS = ["jobsList", "instagramPanel", "localPanel", "drivePanel"];
+        function showChipPanel(id) {
+          for (const p of CHIP_PANELS) {
+            const el = document.getElementById(p);
+            if (!el) continue;
+            // jobsList has no inline display, so "" restores its stylesheet value.
+            el.style.display = (p === id) ? (p === "jobsList" ? "" : "block") : "none";
+          }
+        }
+
         document.querySelectorAll(".lifecycle-chips .chip").forEach(c => {
           c.addEventListener("click", async () => {
             const stage = c.dataset.stage;
             if (stage === "instagram") {
-              document.getElementById("jobsList").style.display = "none";
-              document.getElementById("instagramPanel").style.display = "block";
-              const dp = document.getElementById("drivePanel"); if (dp) dp.style.display = "none";
+              showChipPanel("instagramPanel");
               if (typeof refreshInstagramPanel === "function") refreshInstagramPanel();
               _activateChipAndRefreshGuide(c);
               return;
             }
             if (stage === "local") {
-              document.getElementById("jobsList").style.display = "none";
-              document.getElementById("instagramPanel").style.display = "none";
-              const lp = document.getElementById("localPanel"); if (lp) lp.style.display = "block";
+              showChipPanel("localPanel");
               if (typeof refreshLocalPanel === "function") refreshLocalPanel();
               _activateChipAndRefreshGuide(c);
               return;
             }
             // Re-show kanban when switching to any non-instagram/local stage.
-            document.getElementById("jobsList").style.display = "";
-            document.getElementById("instagramPanel").style.display = "none";
-            { const lp = document.getElementById("localPanel"); if (lp) lp.style.display = "none"; }
+            showChipPanel("jobsList");
             if (stage === "archived") {
               setAppMode({ mode: "browse", stage: "archived" });
               const jobs = await fetchJobsForLifecycle({ archived: true });
