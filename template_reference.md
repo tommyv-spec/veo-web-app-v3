@@ -15473,3 +15473,15 @@ Second half of the bug: even if the retry HAD fired, the old backoff was `[2, 5,
 **Scope / gates**: GENERATE-side authoring, every started/going or same-moment A/B transformation meme. Silent meme beats carry `speaker: silent` (no line, track + captions in post) with a Prompt B fence identical to A; the hook panel takes the v791 camera grammar adapted to the scene. Reference builds: `videos/nuri-korella-ed-how-its-going-her-state-couch-korella-saffron-selling-v2.md` (composition-corrected) + `...-hows-it-going-bed-inverted-korella-saffron-selling-v4.md`.
 
 **Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), memory `feedback_transformation-meme-grammar`, `wiki/log.md`.
+
+## v829.1 — US elements sit in the BACKGROUND unless the beat USES them
+
+**Where it came from**: operator 2026-07-14, on the day1dayx lane's Nuri-turn frames (the WALMART paper bag standing on the counter beside her): *"the bags should be in the background if not really used — make it a general rule to apply to all the usa elements."*
+
+**The rule**: every US icon (retail bag/signage, flag, mason jar, pickup, americana props) defaults to the BACKGROUND PLANE — visible and sharp, but behind the subject, never in the foreground competing with the hero prop. An icon may enter the foreground ONLY when the beat actively USES it: held, poured from, scanned, tossed, played on. The honey jar is foreground in the beat where she dips from it; the same jar parks in the background every other frame. The Walmart bag behind the healer = background shelf, never on the counter beside the hero prop.
+
+**Why**: US signals are TEXTURE (us-iconic-blend "2-3 quiet icons per scene") — a passive icon in the foreground steals size and attention from the hero prop and reads as product placement instead of set dressing. The frame's foreground budget belongs to the hero prop + actively-used props only.
+
+**Scope / gates**: GENERATE-side authoring, every frame with US icons, forward-only (shipped builds keep their staging; new builds + new frames comply). Prompt-writing test: for each icon in the prompt, ask "does THIS beat use it?" — no → place it explicitly in the background sentence ("In the background, sharp and fully visible, ..."), never in the subject sentence.
+
+**Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (§B note), `wiki/concepts/script-adaptation/us-iconic-blend-catalog.md` (placement note), memory `feedback_us-elements-background-unless-used`, `wiki/log.md`.
