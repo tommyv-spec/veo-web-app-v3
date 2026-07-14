@@ -835,6 +835,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/refresh-reel-urls",
         "/api/diag/identify",
         "/api/diag/resolve-basename",
+        "/api/diag/backfill-basenames",
         "/api/diag/jobs-export-index",
         # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
         "/api/diag/probe-job-fp",
@@ -5234,6 +5235,56 @@ def diag_refresh_reel_urls(
     db.commit()
     print(f"[reel-urls] refreshed={refreshed} rearmed_for_fp={rearmed}", flush=True)
     return {"accounts": len(accounts), "urls_refreshed": refreshed, "rearmed_for_fingerprint": rearmed}
+
+
+@app.get("/api/diag/backfill-basenames")
+def diag_backfill_basenames(
+    token: str = "",
+    user_id: str = "",
+    limit: int = 40,
+    db: DBSession = Depends(get_db_session),
+):
+    """v853 TEMPORARY: stamp Job.export_basename from the R2 export key.
+
+    The lazy backfill in ensure_export_duration only fires during a fresh probe,
+    and every job was already probed — so it short-circuits and export_basename
+    stays NULL, which makes the filename lookup miss. This lists the export key
+    (one cheap list per job, NO download) and stamps the stem. Call with a small
+    limit until remaining hits 0.
+    """
+    import os as _os
+    from pathlib import Path as _Path
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+    from models import Job
+    from export_probe import newest_export_key
+    from backends.storage import is_storage_configured, get_storage
+    if not is_storage_configured():
+        return {"stamped": 0, "remaining": 0, "detail": "storage not configured"}
+    storage = get_storage()
+    limit = max(1, min(int(limit or 40), 100))
+    q = db.query(Job).filter(
+        Job.status == "completed", Job.archived == False,  # noqa: E712
+        Job.export_basename.is_(None), Job.has_export == True,  # noqa: E712
+    )
+    if user_id:
+        q = q.filter(Job.user_id == user_id)
+    remaining_before = q.count()
+    todo = q.order_by(Job.created_at.desc()).limit(limit).all()
+    stamped = 0
+    for j in todo:
+        try:
+            key = newest_export_key(storage, j.id)
+        except Exception as e:
+            print(f"[basename] job={j.id[:8]} list failed: {e}", flush=True)
+            key = None
+        # Stamp even a miss with "" so a job with no export is not retried forever.
+        j.export_basename = _Path(key).stem if key else ""
+        if key:
+            stamped += 1
+    db.commit()
+    return {"stamped": stamped, "checked": len(todo), "remaining": max(0, remaining_before - len(todo))}
 
 
 @app.get("/api/diag/probe-exports")
