@@ -113,17 +113,28 @@ def _download_and_extract_audio(direct_video_url: str, work_dir: str) -> tuple:
     return (wav, None)
 
 
-_AUTO_MATCH_THRESHOLD = float(os.environ.get("IG_AUTO_MATCH_THRESHOLD", "0.70"))
-
-
 def _maybe_auto_match(video, account, db: Session) -> None:
-    """After transcription, score against awaiting_finishing jobs. If the
-    top candidate is >= IG_AUTO_MATCH_THRESHOLD (default 0.85), link + advance
-    the matched job to published. Lower-confidence matches stay surfaced in
-    the manual `/suggestions` UI for operator confirmation."""
+    """After transcription, score against awaiting_finishing jobs and auto-link
+    the winner (advancing it to published) when the margin gate says the match
+    is confident. Ambiguous / low-confidence videos stay surfaced in the manual
+    `/suggestions` UI for operator confirmation.
+
+    v853: uses the CANONICAL matching stack, same as the local watcher — the
+    Prompt-B-aware, final-cut-aware `_bulk_dialogue_map` (ONE query for the
+    whole pool) + `rank_tfidf` + the `auto_pick` HIGH/MARGIN gate. It used to
+    run the char-level `best_matches` over a private `_full_dialogue` N+1,
+    which scored near-duplicate scripts at ~1.000 against the WRONG twin and
+    confidently published it.
+    """
     try:
-        from models import Job, Clip
+        from models import Job
         import instagram_match as _ig_match
+        # Imported INSIDE the function on purpose: local_transcribe imports this
+        # module for the cached Whisper model, so a module-scope import here
+        # would close the cycle.
+        from local_transcribe import (
+            _bulk_dialogue_map, _MATCH_HIGH, _MATCH_MARGIN, _MATCH_IDF_POWER,
+        )
         if not video.transcription:
             return
         # Candidate pool = any COMPLETED, unlinked, non-archived job. Not
@@ -141,34 +152,38 @@ def _maybe_auto_match(video, account, db: Session) -> None:
             .all()
         )
         if not candidates:
-            print(f"[ig-transcribe] shortcode={video.shortcode} no awaiting_finishing candidates", flush=True)
+            print(f"[ig-auto] shortcode={video.shortcode} no awaiting_finishing candidates", flush=True)
             return
 
-        def _full_dialogue(job):
-            # v698A: spoken words live by clip_role (canonical rule at broll
-            # export ~main.py:8095): single → dialogue_text, visual_pair →
-            # voiceover_line (dialogue_text is the EMPTY on-camera text),
-            # audio_pair → silent twin duplicating voiceover_line. Use
-            # COALESCE(voiceover_line, dialogue_text) and exclude audio_pair.
-            # Reading dialogue_text alone rebuilt near-empty text for b-roll
-            # jobs (blank visual_pair dialogue_text) → near-random matches.
-            rows = (
-                db.query(Clip.dialogue_text, Clip.voiceover_line)
-                .filter(Clip.job_id == job.id)
-                .filter((Clip.clip_role == None) | (Clip.clip_role != 'audio_pair'))  # noqa: E711
-                .order_by(Clip.clip_index.asc())
-                .all()
-            )
-            return " ".join(((vo or dt) or "").strip() for dt, vo in rows).strip()
-
-        top = _ig_match.best_matches(
-            video, candidates, full_dialogue=_full_dialogue, k=1, min_score=_AUTO_MATCH_THRESHOLD,
+        dialogue_map = _bulk_dialogue_map(db, [j.id for j in candidates])
+        cand_pairs = [(j.id, dialogue_map.get(j.id, "")) for j in candidates]
+        ranked = _ig_match.rank_tfidf(
+            video.transcription, cand_pairs, idf_power=_MATCH_IDF_POWER,
         )
-        if not top:
-            print(f"[ig-transcribe] shortcode={video.shortcode} no candidate >= {_AUTO_MATCH_THRESHOLD}", flush=True)
+        if not ranked:
+            print(
+                f"[ig-auto] shortcode={video.shortcode} no ranking | "
+                f"pool={len(candidates)} tlen={len(video.transcription or '')}",
+                flush=True,
+            )
             return
-        match = top[0]
-        job = db.query(Job).filter_by(id=match["job_id"]).first()
+        s1 = ranked[0]["score"]
+        s2 = ranked[1]["score"] if len(ranked) > 1 else 0.0
+        pick_id = _ig_match.auto_pick(ranked, _MATCH_HIGH, _MATCH_MARGIN)
+        print(
+            f"[ig-auto] shortcode={video.shortcode} top_job={str(ranked[0]['job_id'])[:8]} "
+            f"s1={s1:.3f} s2={s2:.3f} margin={s1 - s2:.3f} "
+            f"decision={'AUTO' if pick_id else 'MANUAL'} pool={len(candidates)} "
+            f"tlen={len(video.transcription or '')}",
+            flush=True,
+        )
+        if not pick_id:
+            # Ambiguous (near-duplicate twins) or low-confidence -> leave the
+            # video unmatched for a manual pick instead of a wrong auto-publish.
+            return
+        job = next((j for j in candidates if j.id == pick_id), None)
+        if job is None:
+            job = db.query(Job).filter_by(id=pick_id).first()
         if not job:
             return
         video.matched_job_id = job.id
@@ -179,9 +194,9 @@ def _maybe_auto_match(video, account, db: Session) -> None:
         if job.published_at is None:
             job.published_at = datetime.utcnow()
         db.commit()
-        print(f"[ig-transcribe] AUTO-MATCH shortcode={video.shortcode} -> job={job.id[:8]} score={match['score']}", flush=True)
+        print(f"[ig-auto] AUTO-MATCH shortcode={video.shortcode} -> job={str(job.id)[:8]} score={s1:.3f}", flush=True)
     except Exception as exc:
-        print(f"[ig-transcribe] auto-match error on shortcode={video.shortcode}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
+        print(f"[ig-auto] auto-match error on shortcode={video.shortcode}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 
 
 def _transcribe_audio(wav_path: str) -> str:
@@ -237,9 +252,9 @@ def transcribe_one(video, db: Session) -> None:
         video.transcription_status = "done"
         video.transcription_error = None
         db.commit()
-        # Auto-match: if top candidate >= 0.85, link + advance to published
-        # without operator click. Lower-confidence matches still surface in
-        # the suggestions popover for manual confirmation.
+        # Auto-match: link + advance to published without an operator click ONLY
+        # when the margin gate says the top candidate is confident. Ambiguous
+        # ones still surface in the suggestions popover for manual confirmation.
         _maybe_auto_match(video, account, db)
         return
     except Exception as exc:

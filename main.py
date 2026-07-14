@@ -3821,33 +3821,6 @@ def _get_user_ig_account(db: DBSession, account_id: int, user: User):
     return acc
 
 
-def _job_full_dialogue(db: DBSession, job_id: str) -> str:
-    """Concat each clip's SPOKEN line for a Job, in clip_index order.
-
-    v698A b-roll voiceover scenes store the spoken words by clip_role
-    (canonical rule at the broll export, ~L8095):
-      - single      → spoken text in dialogue_text
-      - visual_pair → spoken text in voiceover_line (dialogue_text is the
-                      EMPTY on-camera text — nobody speaks on camera)
-      - audio_pair  → silent render twin; dialogue_text duplicates the
-                      sibling's voiceover_line (clip_index = visual+100000)
-
-    So reconstruct with COALESCE(voiceover_line, dialogue_text) and keep
-    audio_pair excluded. Reading dialogue_text alone rebuilt near-EMPTY
-    text for b-roll-heavy jobs (visual_pair dialogue_text is blank),
-    making IG-transcript matches near-random and surfacing wildly wrong
-    suggestions. Excluding audio_pair avoids double-counting each line.
-    """
-    rows = (
-        db.query(Clip.dialogue_text, Clip.voiceover_line)
-        .filter(Clip.job_id == job_id)
-        .filter((Clip.clip_role == None) | (Clip.clip_role != 'audio_pair'))  # noqa: E711
-        .order_by(Clip.clip_index.asc())
-        .all()
-    )
-    return " ".join(((vo or dt) or "").strip() for dt, vo in rows).strip()
-
-
 @app.post("/api/instagram/accounts")
 async def create_instagram_account(
     req: CreateInstagramAccountRequest,
@@ -4171,7 +4144,18 @@ async def suggest_matches(
     if not acc or acc.user_id != current_user.id:
         raise HTTPException(403, detail="access denied")
     if not v.transcription or v.transcription_status != "done":
-        return []
+        # v852 — same object shape as the happy path, with a verdict the UI can
+        # tell apart. The old bare `[]` was indistinguishable from an empty pool,
+        # so the popover blamed the candidate pool ("no jobs to match against")
+        # for what is really a reel that has not finished transcribing — sending
+        # the operator hunting for a problem that does not exist.
+        return {
+            "verdict": "not_transcribed",
+            "top": 0.0,
+            "gap": 0.0,
+            "suggestions": [],
+            "transcription_status": v.transcription_status,
+        }
     # Candidate pool = jobs that actually REACHED the finishing lane. A reel on
     # IG was necessarily exported first, so a job that never exported cannot be
     # its source — matching one wrongly stamps `published` onto a job still
@@ -4201,6 +4185,19 @@ async def suggest_matches(
         )
         .all()
     )
+    # v852 — a job created AFTER the reel was posted cannot be its source. A hard
+    # fact, and it separates near-duplicate twins (same shared script, built days
+    # apart) that the WORDS alone cannot tell apart. Applied in Python, not SQL,
+    # so an absent posted_at can never silently empty the pool.
+    _before = len(candidates)
+    candidates = [
+        j for j in candidates
+        if _ig_match.job_predates_post(j.created_at, v.posted_at)
+    ]
+    if _before != len(candidates):
+        print(f"[ig-suggest] video={video_id} time-filter dropped "
+              f"{_before - len(candidates)} job(s) created after posted_at={v.posted_at}",
+              flush=True)
     # v822.6: the manual suggestions now use the SAME content matcher as the
     # local auto-matcher — rare-term-weighted TF-IDF cosine (idf_power=2),
     # validated on the operator's real data. The old char-level `best_matches`
@@ -4208,18 +4205,29 @@ async def suggest_matches(
     # exactly why suggestions "landed far off". One bulk dialogue query
     # (no per-candidate N+1), top-5 regardless of score so the UI can show
     # even low-confidence options.
-    from local_transcribe import _bulk_dialogue_map, _MATCH_IDF_POWER
+    from local_transcribe import _bulk_dialogue_map, _MATCH_IDF_POWER, _MATCH_HIGH, _MATCH_MARGIN
     dmap = _bulk_dialogue_map(db, [j.id for j in candidates])
     pairs = [(j.id, dmap.get(j.id, "")) for j in candidates]
-    ranked = _ig_match.rank_tfidf(v.transcription or "", pairs, idf_power=_MATCH_IDF_POWER)[:5]
-    print(f"[ig-suggest] video={video_id} pool={len(candidates)} (finishing-lane only) "
+    full_ranked = _ig_match.rank_tfidf(v.transcription or "", pairs, idf_power=_MATCH_IDF_POWER)
+    # v852 — verdict is judged on the FULL ranking, BEFORE the top-5 slice: the
+    # runner-up that makes a match ambiguous still counts even when it is not
+    # among the five rows we show.
+    verdict = _ig_match.match_verdict(full_ranked, _MATCH_HIGH, _MATCH_MARGIN)
+    ranked = full_ranked[:5]
+    print(f"[ig-suggest] video={video_id} pool={len(candidates)} verdict={verdict['verdict']} "
+          f"top={verdict['top']:.3f} gap={verdict['gap']:.3f} "
           f"top5={[(r['job_id'][:8], r['score']) for r in ranked]}", flush=True)
     top = []
     for r in ranked:
         clip = db.query(Clip).filter(Clip.job_id == r["job_id"], Clip.clip_index == 0).first()
         slug = (clip.dialogue_text or "")[:80] if clip and clip.dialogue_text else r["job_id"][:8]
         top.append({"job_id": r["job_id"], "score": r["score"], "slug": slug})
-    return top
+    return {
+        "verdict": verdict["verdict"],
+        "top": verdict["top"],
+        "gap": verdict["gap"],
+        "suggestions": top,
+    }
 
 
 @app.post("/api/instagram/videos/{video_id}/match")

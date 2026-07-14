@@ -2,8 +2,9 @@
 """Drive folder watcher → transcribe → match → advance to published.
 
 Mirrors instagram_transcribe.py but reads files from a Google Drive folder
-instead of HikerAPI. On match >= IG_AUTO_MATCH_THRESHOLD (reused env, default
-0.70), advances the matched Job to `published` with `published_via='drive_watch'`.
+instead of HikerAPI. On a CONFIDENT match (the shared TF-IDF + margin gate —
+`local_transcribe._MATCH_HIGH` / `_MATCH_MARGIN`), advances the matched Job to
+`published` with `published_via='drive_watch'`.
 
 Critically: does NOT touch instagram_url / instagram_video_id. The IG sync
 flow (with widened candidate filter — Slice 3) is responsible for filling
@@ -21,7 +22,12 @@ from drive_client import list_folder_videos, download_file, DriveError
 # Reuse instagram_transcribe's Whisper model + matcher path so we don't
 # load Whisper twice in the same worker process.
 from instagram_transcribe import _model as _whisper_model
-_AUTO_MATCH_THRESHOLD = float(os.environ.get("IG_AUTO_MATCH_THRESHOLD", "0.70"))
+# The CANONICAL matching stack (same one the local watcher + the suggestions
+# endpoint use). local_transcribe imports instagram_transcribe, not this
+# module, so this module-scope import closes no cycle.
+from local_transcribe import (
+    _bulk_dialogue_map, _MATCH_HIGH, _MATCH_MARGIN, _MATCH_IDF_POWER,
+)
 
 
 def _earliest_awaiting_finishing_approval(db: Session, user_id: str) -> Optional[datetime]:
@@ -64,9 +70,16 @@ def _maybe_auto_match(video, account, db: Session) -> None:
 
     Does NOT touch instagram_url / instagram_video_id — that's the IG matcher's
     job (with widened candidate filter to include drive-watch-published jobs).
+
+    v853: uses the CANONICAL matching stack, same as the local watcher — the
+    Prompt-B-aware, final-cut-aware `_bulk_dialogue_map` (ONE query for the
+    whole pool) + `rank_tfidf` + the `auto_pick` HIGH/MARGIN gate. It used to
+    run the char-level `best_matches` over a private `_full_dialogue` N+1,
+    which scored near-duplicate scripts at ~1.000 against the WRONG twin and
+    confidently published it.
     """
     try:
-        from models import Job, Clip
+        from models import Job
         import instagram_match as _ig_match
         if not video.transcription:
             return
@@ -79,41 +92,51 @@ def _maybe_auto_match(video, account, db: Session) -> None:
             .all()
         )
         if not candidates:
-            print(f"[drive] file={video.drive_file_id} no awaiting_finishing candidates", flush=True)
+            print(f"[drive-auto] file={video.drive_file_id} no awaiting_finishing candidates", flush=True)
             return
 
-        # COALESCE(voiceover_line, dialogue_text) per the v698A fix.
-        def _full_dialogue(job):
-            rows = (
-                db.query(Clip.dialogue_text, Clip.voiceover_line)
-                .filter(Clip.job_id == job.id)
-                .filter((Clip.clip_role == None) | (Clip.clip_role != 'audio_pair'))  # noqa: E711
-                .order_by(Clip.clip_index.asc())
-                .all()
-            )
-            return " ".join(((vo or dt) or "").strip() for dt, vo in rows).strip()
-
-        top = _ig_match.best_matches(
-            video, candidates, full_dialogue=_full_dialogue, k=1, min_score=_AUTO_MATCH_THRESHOLD,
+        dialogue_map = _bulk_dialogue_map(db, [j.id for j in candidates])
+        cand_pairs = [(j.id, dialogue_map.get(j.id, "")) for j in candidates]
+        ranked = _ig_match.rank_tfidf(
+            video.transcription, cand_pairs, idf_power=_MATCH_IDF_POWER,
         )
-        if not top:
-            print(f"[drive] file={video.drive_file_id} no candidate >= {_AUTO_MATCH_THRESHOLD}", flush=True)
+        if not ranked:
+            print(
+                f"[drive-auto] file={video.drive_file_id} no ranking | "
+                f"pool={len(candidates)} tlen={len(video.transcription or '')}",
+                flush=True,
+            )
             return
-        match = top[0]
-        job = db.query(Job).filter_by(id=match["job_id"]).first()
+        s1 = ranked[0]["score"]
+        s2 = ranked[1]["score"] if len(ranked) > 1 else 0.0
+        pick_id = _ig_match.auto_pick(ranked, _MATCH_HIGH, _MATCH_MARGIN)
+        print(
+            f"[drive-auto] file={video.drive_file_id} top_job={str(ranked[0]['job_id'])[:8]} "
+            f"s1={s1:.3f} s2={s2:.3f} margin={s1 - s2:.3f} "
+            f"decision={'AUTO' if pick_id else 'MANUAL'} pool={len(candidates)} "
+            f"tlen={len(video.transcription or '')}",
+            flush=True,
+        )
+        if not pick_id:
+            # Ambiguous (near-duplicate twins) or low-confidence -> leave the
+            # video unmatched for a manual pick instead of a wrong auto-publish.
+            return
+        job = next((j for j in candidates if j.id == pick_id), None)
+        if job is None:
+            job = db.query(Job).filter_by(id=pick_id).first()
         if not job:
             return
         video.matched_job_id = job.id
         video.matched_at = datetime.utcnow()
-        video.match_score = match.get("score")
+        video.match_score = s1
         job.lifecycle_stage = "published"
         job.published_via = "drive_watch"
         if job.published_at is None:
             job.published_at = datetime.utcnow()
         db.commit()
-        print(f"[drive] AUTO-MATCH file={video.drive_file_id} -> job={job.id[:8]} score={match['score']:.3f}", flush=True)
+        print(f"[drive-auto] AUTO-MATCH file={video.drive_file_id} -> job={str(job.id)[:8]} score={s1:.3f}", flush=True)
     except Exception as exc:
-        print(f"[drive] auto-match error on file={video.drive_file_id}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
+        print(f"[drive-auto] auto-match error on file={video.drive_file_id}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 
 
 def transcribe_one(video, db: Session) -> None:

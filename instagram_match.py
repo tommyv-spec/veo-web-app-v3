@@ -6,6 +6,7 @@ import difflib
 import math
 import re
 from collections import Counter
+from datetime import timedelta
 
 _PUNCT_RE = re.compile(r"[^\w\s]")
 _WS_RE = re.compile(r"\s+")
@@ -16,6 +17,128 @@ def _normalize(s: str) -> str:
     s = _PUNCT_RE.sub(" ", s)
     s = _WS_RE.sub(" ", s).strip()
     return s
+
+
+# ============================================================================
+# v852 — SPOKEN-TEXT RECONSTRUCTION.
+#
+# The matcher must compare the reel's transcript against the words that were
+# actually SAID in the render we downloaded — not against the script we first
+# wrote. Two things make those diverge:
+#
+#   1. Prompt B (v805/v821 policy fallback). When the primary prompt trips a
+#      generation-policy block, the worker re-renders with Prompt B, which
+#      speaks a REWORDED line. `rendered_prompt_variant` says which prompt
+#      produced the downloaded render; `dialogue_text_b` holds the reworded
+#      words. Reading dialogue_text alone compares against words nobody spoke.
+#
+#   2. The b-roll clip pair (v698A). `visual_pair` is a SILENT b-roll visual;
+#      the speech is rendered by its `audio_pair` twin, whose dialogue_text
+#      duplicates the visual's voiceover_line. So when the AUDIO twin fell back
+#      to Prompt B, the visual's voiceover_line is stale — the rebuild has to
+#      reach through the pair. (A Prompt-B fallback on the visual twin is
+#      irrelevant: that render is silent.)
+#
+# WHICH CLIPS COUNT — mirror what the export ACTUALLY contains, not what we
+# wish it contained. "The exported mp4 = the approved clips" is FALSE:
+#
+#   * A custom LINEUP export (main.py:9232-9241) selects clips by id where
+#     `status == completed` and applies NO approval filter at all — only the
+#     `else` branch (main.py:9250-9253) filters on approved. So a lineup job's
+#     mp4 legitimately contains pending_review clips.
+#   * A post-export REDO flips an approved clip back to pending_review
+#     (main.py:12963) while the already-posted mp4 still speaks that line, and
+#     terminal redo states (REDO_STUCK / REDO_ZOMBIE / max_attempts) leave it
+#     non-approved forever.
+#
+# Dropping such a clip DELETES a whole line's rare terms from the job's text
+# while the reel's transcript still contains them — that costs the TF-IDF
+# cosine far more than keeping one slightly stale line. A false EXCLUSION is
+# much worse than a false INCLUSION. So the rule is:
+#
+#   1. lineup present -> the final cut is exactly those clip ids.
+#   2. else           -> status == completed AND approval != rejected.
+#      (failed / skipped / not-yet-generated clips are not `completed`, so the
+#      original pollution targets still go; a pending_review clip is KEPT.)
+#   3. audio_pair rows are never filtered — they are the lookup source for
+#      their visual twin's spoken words.
+#   4. empty selection -> fall back to ALL clips. Never blank a job.
+# ============================================================================
+
+FINAL_CUT_APPROVAL = "approved"
+EXCLUDED_APPROVAL = "rejected"
+RENDERED_STATUS = "completed"
+
+
+def spoken_line(clip):
+    """The words actually heard in the render downloaded for this clip.
+
+    `clip` is a plain dict (kept DB-free so these rules stay unit-testable).
+    """
+    if ((clip.get("rendered_prompt_variant") or "A").upper() == "B"):
+        reworded = (clip.get("dialogue_text_b") or "").strip()
+        if reworded:
+            return reworded
+    return ((clip.get("voiceover_line") or clip.get("dialogue_text")) or "").strip()
+
+
+def reconstruct_dialogue(clips, final_cut_only=True, lineup_ids=None):
+    """Concatenate a job's SPOKEN words, in clip_index order.
+
+    clips: list of dicts with keys id, clip_index, clip_role, paired_clip_id,
+           dialogue_text, dialogue_text_b, rendered_prompt_variant,
+           voiceover_line, approval_status, status.
+    lineup_ids: the job's clip_order_json (list/set of clip ids) or None. When
+           present it IS the final cut — the lineup export ignores approval.
+    """
+    # The audio twin owns the speech for its visual partner.
+    audio_by_visual = {}
+    for c in clips:
+        if (c.get("clip_role") or "") == "audio_pair" and c.get("paired_clip_id"):
+            audio_by_visual[c["paired_clip_id"]] = spoken_line(c)
+
+    def _emit(pool):
+        parts = []
+        for c in sorted(pool, key=lambda x: (x.get("clip_index") or 0)):
+            role = c.get("clip_role") or "single"
+            if role == "audio_pair":
+                continue  # emitted via its visual twin; counting both double-counts
+            if role == "visual_pair":
+                text = (
+                    audio_by_visual.get(c.get("id"))
+                    or (c.get("voiceover_line") or "").strip()
+                    or (c.get("dialogue_text") or "").strip()
+                )
+            else:
+                text = spoken_line(c)
+            if text:
+                parts.append(text)
+        return " ".join(parts).strip()
+
+    if final_cut_only:
+        if lineup_ids:
+            wanted = set(lineup_ids)
+            def _in_cut(c):
+                return c.get("id") in wanted
+        else:
+            def _in_cut(c):
+                return (
+                    (c.get("status") or "") == RENDERED_STATUS
+                    and (c.get("approval_status") or "") != EXCLUDED_APPROVAL
+                )
+        kept = [
+            c for c in clips
+            if (c.get("clip_role") or "") == "audio_pair"  # lookup source, never filtered
+            or _in_cut(c)
+        ]
+        text = _emit(kept)
+        if text:
+            return text
+        # Fall through: a job whose selection came out EMPTY (legacy rows with
+        # no status, a stale lineup naming ids that no longer exist) must not
+        # reconstruct to BLANK — that would drop it from the candidate pool
+        # entirely, which is strictly worse than matching on slightly noisy text.
+    return _emit(clips)
 
 
 def _phrase_boost(a: str, b: str, n: int = 3, per_hit: float = 0.05, cap: float = 0.2) -> float:
@@ -194,11 +317,68 @@ def auto_pick(ranked, high: float, margin: float):
     Auto-match only when the top candidate is both confident (>= high) AND
     clearly ahead of the runner-up (top - second >= margin).  A near-duplicate
     twin sits right behind the winner -> small margin -> None -> manual pick.
+
+    Delegates to match_verdict so the auto-publish gate and the reported
+    verdict can never drift apart: we auto-match exactly when we would tell a
+    human the match is 'confident'.
     """
     if not ranked:
         return None
-    top = ranked[0]["score"]
-    second = ranked[1]["score"] if len(ranked) > 1 else 0.0
-    if top >= high and (top - second) >= margin:
+    if match_verdict(ranked, high, margin)["verdict"] == "confident":
         return ranked[0]["job_id"]
     return None
+
+
+# ============================================================================
+# v852 — HARD TIME CONSTRAINT.
+#
+# A reel was rendered and exported BEFORE it was posted, so a job created AFTER
+# the reel went live cannot possibly be its source. This is a hard fact, and it
+# separates near-duplicate twins (same script, built days apart) that the WORDS
+# alone cannot tell apart.
+#
+# We gate on Job.created_at, NOT Job.export_at: export_at was backfilled as
+# COALESCE(completed_at, NOW()) (models.py:1168), so on legacy rows it can be a
+# MIGRATION timestamp — later than reels posted long before — and filtering on
+# it would drop the correct old job. created_at is written at row insert and
+# never backfilled.
+# ============================================================================
+
+JOB_CREATED_SLACK_DAYS = 1.0
+
+
+def job_predates_post(job_created_at, posted_at, slack_days=JOB_CREATED_SLACK_DAYS):
+    """False only when the job was created AFTER the reel was posted (+slack).
+
+    Unknown timestamps never exclude — an absent posted_at must not silently
+    empty the candidate pool.
+    """
+    if job_created_at is None or posted_at is None:
+        return True
+    return job_created_at <= posted_at + timedelta(days=slack_days)
+
+
+def match_verdict(ranked, high, margin):
+    """Classify a ranking so the UI can refuse to present a guess as a fact.
+
+    confident — top clears `high` AND clearly beats the runner-up.
+    ambiguous — top is strong but a twin sits within `margin`: the words cannot
+                tell them apart, so a human must.
+    weak      — nothing scored well enough to trust.
+    """
+    if not ranked:
+        return {"verdict": "none", "top": 0.0, "gap": 0.0}
+    top = ranked[0]["score"]
+    second = ranked[1]["score"] if len(ranked) > 1 else 0.0
+    # Compare the UNROUNDED gap: rounding first turns a hair-thin 0.11996 into
+    # 0.12, which clears a 0.12 margin and reports a coin-flip between twins as
+    # a certainty — exactly what this gate exists to prevent. Round only for
+    # what we hand back to be displayed.
+    gap = top - second
+    if top < high:
+        verdict = "weak"
+    elif gap < margin:
+        verdict = "ambiguous"
+    else:
+        verdict = "confident"
+    return {"verdict": verdict, "top": top, "gap": round(gap, 4)}

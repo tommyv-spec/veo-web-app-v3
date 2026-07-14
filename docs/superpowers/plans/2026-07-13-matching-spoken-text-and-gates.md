@@ -55,7 +55,7 @@ Consequence: a Prompt-B rewording on an **audio_pair** makes the visual twin's `
 Append to `test_instagram_match.py`:
 
 ```python
-# ---- v823: spoken-text reconstruction (Prompt B + final cut) --------------
+# ---- v852: spoken-text reconstruction (Prompt B + final cut) --------------
 
 def _clip(**kw):
     """A Clip row as the bulk builder hands it to the pure rules."""
@@ -153,7 +153,7 @@ In `instagram_match.py`, insert after `_normalize()` (around line 19):
 
 ```python
 # ============================================================================
-# v823 — SPOKEN-TEXT RECONSTRUCTION.
+# v852 — SPOKEN-TEXT RECONSTRUCTION.
 #
 # The matcher must compare the reel's transcript against the words that were
 # actually SAID in the render we downloaded — not against the script we first
@@ -262,7 +262,7 @@ git commit -m "feat(match): reconstruct the words actually SPOKEN (Prompt B + fi
 Append to `test_instagram_match.py`:
 
 ```python
-# ---- v823: time constraint + confidence verdict ---------------------------
+# ---- v852: time constraint + confidence verdict ---------------------------
 import datetime as _dt
 
 
@@ -330,7 +330,7 @@ Add `from datetime import timedelta` to the imports at the top of `instagram_mat
 
 ```python
 # ============================================================================
-# v823 — HARD TIME CONSTRAINT.
+# v852 — HARD TIME CONSTRAINT.
 #
 # A reel was rendered and exported BEFORE it was posted, so a job created AFTER
 # the reel went live cannot possibly be its source. This is a hard fact, not a
@@ -427,7 +427,7 @@ def test_bulk_dialogue_map_groups_and_coalesces():
 
 
 def test_bulk_dialogue_map_uses_prompt_b_reworded_line():
-    """v823: a clip that rendered via Prompt B speaks dialogue_text_b."""
+    """v852: a clip that rendered via Prompt B speaks dialogue_text_b."""
     lt = _load_lt()
     rows = [
         _row("j1", clip_id=1, clip_index=0, dt="the banned wording",
@@ -438,7 +438,7 @@ def test_bulk_dialogue_map_uses_prompt_b_reworded_line():
 
 
 def test_bulk_dialogue_map_excludes_rejected_clips():
-    """v823: only clips that made the final cut are in the exported video."""
+    """v852: only clips that made the final cut are in the exported video."""
     lt = _load_lt()
     rows = [
         _row("j1", clip_id=1, clip_index=0, dt="kept", approval="approved"),
@@ -466,7 +466,7 @@ def _bulk_dialogue_map(db, job_ids) -> dict:
     in instagram_match.reconstruct_dialogue (pure + unit-tested); this function
     is only the DB glue.
 
-    v823: audio_pair rows are now FETCHED (they are the lookup source for their
+    v852: audio_pair rows are now FETCHED (they are the lookup source for their
     visual twin's spoken words — a Prompt-B fallback on the audio twin makes the
     visual's voiceover_line stale). reconstruct_dialogue drops them from the
     OUTPUT, so nothing is double-counted.
@@ -548,7 +548,7 @@ git commit -m "feat(match): one canonical B-aware dialogue builder; drop dead du
 In `suggest_matches`, immediately after the `candidates = (...).all()` block and BEFORE `dmap = _bulk_dialogue_map(...)`, insert:
 
 ```python
-    # v823 — a job created AFTER the reel was posted cannot be its source. This
+    # v852 — a job created AFTER the reel was posted cannot be its source. This
     # is a hard fact, and it separates near-duplicate twins (same script, built
     # days apart) that the WORDS alone cannot tell apart. Applied in Python, not
     # SQL, so an absent posted_at can never silently empty the pool.
@@ -597,14 +597,14 @@ Replace the ranking + return tail of `suggest_matches` (from `ranked = _ig_match
 ```python
     from local_transcribe import _bulk_dialogue_map, _MATCH_IDF_POWER, _MATCH_HIGH, _MATCH_MARGIN
     ranked_all = _ig_match.rank_tfidf(v.transcription or "", pairs, idf_power=_MATCH_IDF_POWER)
-    # v823 — the verdict is computed on the FULL ranking, before truncation:
+    # v852 — the verdict is computed on the FULL ranking, before truncation:
     # the runner-up that makes a match ambiguous must be seen even if we only
     # SHOW five. Previously this endpoint returned top-5 "regardless of score",
     # so a 0.02 guess looked exactly like a 0.95 certainty in the popover.
     verdict = _ig_match.match_verdict(ranked_all, _MATCH_HIGH, _MATCH_MARGIN)
     ranked = ranked_all[:5]
     print(f"[ig-suggest] video={video_id} pool={len(candidates)} "
-          f"verdict={verdict['verdict']} top={verdict['top']:.3f} margin={verdict['margin']:.3f} "
+          f"verdict={verdict['verdict']} top={verdict['top']:.3f} gap={verdict['gap']:.3f} "
           f"top5={[(r['job_id'][:8], r['score']) for r in ranked]}", flush=True)
     top = []
     for r in ranked:
@@ -612,7 +612,7 @@ Replace the ranking + return tail of `suggest_matches` (from `ranked = _ig_match
         slug = (clip.dialogue_text or "")[:80] if clip and clip.dialogue_text else r["job_id"][:8]
         top.append({"job_id": r["job_id"], "score": r["score"], "slug": slug})
     return {"verdict": verdict["verdict"], "top": verdict["top"],
-            "margin": verdict["margin"], "suggestions": top}
+            "gap": verdict["gap"], "suggestions": top}
 ```
 
 Also delete the now-duplicated `from local_transcribe import _bulk_dialogue_map, _MATCH_IDF_POWER` line that preceded `dmap = ...`, and move `dmap`/`pairs` above this block if they are not already there.
@@ -652,7 +652,7 @@ Replace lines 5595-5611 (from `const r = await fetch(...suggestions...)` through
             const pop = document.createElement("div");
             pop.className = "ig-suggestion-popover";
             pop.style.cssText = "position:absolute;background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;padding:6px;z-index:1000;min-width:280px;box-shadow:0 4px 12px rgba(0,0,0,.4);";
-            // v823 — say out loud how much to trust this. "ambiguous" means two
+            // v852 — say out loud how much to trust this. "ambiguous" means two
             // near-duplicate scripts scored within noise of each other: the words
             // genuinely cannot separate them, so the operator must.
             const BANNER = {

@@ -165,3 +165,206 @@ def test_bm25_empty():
     m = _load()
     assert m.rank_bm25("", [("a", "x")]) == []
     assert m.rank_bm25("x", []) == []
+
+
+# ---- v852: spoken-text reconstruction (Prompt B + final cut) --------------
+
+def _clip(**kw):
+    """A Clip row as the bulk builder hands it to the pure rules."""
+    base = {
+        "id": 1, "clip_index": 0, "clip_role": None, "paired_clip_id": None,
+        "dialogue_text": "", "dialogue_text_b": None,
+        "rendered_prompt_variant": "A", "voiceover_line": None,
+        "approval_status": "approved", "status": "completed",
+    }
+    base.update(kw)
+    return base
+
+
+def test_spoken_line_variant_a_uses_dialogue_text():
+    m = _load()
+    c = _clip(dialogue_text="your soldier wont wake up", dialogue_text_b="a reworded line")
+    assert m.spoken_line(c) == "your soldier wont wake up"
+
+
+def test_spoken_line_variant_b_uses_reworded_line():
+    m = _load()
+    c = _clip(dialogue_text="the banned wording",
+              dialogue_text_b="the reworded line that was actually said",
+              rendered_prompt_variant="B")
+    assert m.spoken_line(c) == "the reworded line that was actually said"
+
+
+def test_spoken_line_variant_b_without_b_text_falls_back():
+    m = _load()
+    c = _clip(dialogue_text="original line", dialogue_text_b=None,
+              rendered_prompt_variant="B")
+    assert m.spoken_line(c) == "original line"
+
+
+def test_reconstruct_uses_audio_twin_not_stale_voiceover_line():
+    """The audio_pair renders the speech. When IT fell back to Prompt B, the
+    visual twin's voiceover_line is stale and must NOT be used."""
+    m = _load()
+    clips = [
+        _clip(id=10, clip_index=0, clip_role="visual_pair",
+              dialogue_text="", voiceover_line="the stale original line"),
+        _clip(id=11, clip_index=100000, clip_role="audio_pair", paired_clip_id=10,
+              dialogue_text="the stale original line",
+              dialogue_text_b="the reworded line actually spoken",
+              rendered_prompt_variant="B"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "the reworded line actually spoken"
+
+
+def test_reconstruct_visual_pair_without_twin_falls_back_to_voiceover_line():
+    m = _load()
+    clips = [_clip(id=10, clip_role="visual_pair", dialogue_text="",
+                   voiceover_line="spoken over the b-roll")]
+    assert m.reconstruct_dialogue(clips) == "spoken over the b-roll"
+
+
+def test_reconstruct_drops_rejected_clips_not_in_the_final_cut():
+    m = _load()
+    clips = [
+        _clip(id=1, clip_index=0, dialogue_text="kept line", approval_status="approved"),
+        _clip(id=2, clip_index=1, dialogue_text="rejected line", approval_status="rejected"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "kept line"
+
+
+def test_reconstruct_keeps_a_pending_clip_that_is_in_the_exported_cut():
+    """A post-export redo flips an approved clip back to pending_review, but the
+    mp4 already posted still SPEAKS that line. Dropping it would delete a whole
+    line's rare terms from the job's text while the reel's transcript still has
+    them — worse than keeping a slightly stale line."""
+    m = _load()
+    clips = [
+        _clip(id=1, clip_index=0, dialogue_text="first line", approval_status="approved"),
+        _clip(id=2, clip_index=1, dialogue_text="redone line", approval_status="pending_review"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "first line redone line"
+
+
+def test_reconstruct_still_drops_an_explicitly_rejected_clip():
+    m = _load()
+    clips = [
+        _clip(id=1, clip_index=0, dialogue_text="kept", approval_status="approved"),
+        _clip(id=2, clip_index=1, dialogue_text="rejected", approval_status="rejected"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "kept"
+
+
+def test_reconstruct_drops_clips_that_never_rendered():
+    """failed / skipped / still-generating clips are not in the export."""
+    m = _load()
+    clips = [
+        _clip(id=1, clip_index=0, dialogue_text="rendered", status="completed"),
+        _clip(id=2, clip_index=1, dialogue_text="failed one", status="failed"),
+        _clip(id=3, clip_index=2, dialogue_text="skipped one", status="skipped"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "rendered"
+
+
+def test_reconstruct_honours_a_custom_lineup_over_approval():
+    """A lineup export selects by clip id and ignores approval entirely
+    (main.py:9232-9241), so the lineup IS the final cut."""
+    m = _load()
+    clips = [
+        _clip(id=1, clip_index=0, dialogue_text="in the lineup", approval_status="pending_review"),
+        _clip(id=2, clip_index=1, dialogue_text="approved but cut", approval_status="approved"),
+    ]
+    assert m.reconstruct_dialogue(clips, lineup_ids=[1]) == "in the lineup"
+
+
+def test_reconstruct_lineup_still_never_blanks():
+    m = _load()
+    clips = [_clip(id=1, clip_index=0, dialogue_text="only line")]
+    # lineup names a clip id that does not exist -> selection empty -> fall back
+    assert m.reconstruct_dialogue(clips, lineup_ids=[999]) == "only line"
+
+
+def test_reconstruct_never_blanks_a_job_with_no_approved_clips():
+    """A legacy job with nothing marked approved must still produce text —
+    blank text would silently drop it from the candidate pool entirely."""
+    m = _load()
+    clips = [
+        _clip(id=1, clip_index=0, dialogue_text="first line", approval_status="pending_review"),
+        _clip(id=2, clip_index=1, dialogue_text="second line", approval_status="pending_review"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "first line second line"
+
+
+def test_reconstruct_orders_by_clip_index():
+    m = _load()
+    clips = [
+        _clip(id=2, clip_index=1, dialogue_text="second"),
+        _clip(id=1, clip_index=0, dialogue_text="first"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "first second"
+
+
+# ---- v852: time constraint + confidence verdict ---------------------------
+import datetime as _dt
+
+
+def test_job_created_after_the_reel_was_posted_is_impossible():
+    m = _load()
+    posted = _dt.datetime(2026, 6, 1, 12, 0, 0)
+    created_after = _dt.datetime(2026, 6, 10, 12, 0, 0)   # 9 days AFTER the post
+    assert m.job_predates_post(created_after, posted) is False
+
+
+def test_job_created_before_the_reel_is_eligible():
+    m = _load()
+    posted = _dt.datetime(2026, 6, 10, 12, 0, 0)
+    created_before = _dt.datetime(2026, 6, 1, 12, 0, 0)
+    assert m.job_predates_post(created_before, posted) is True
+
+
+def test_job_created_just_after_post_survives_on_clock_skew_slack():
+    m = _load()
+    posted = _dt.datetime(2026, 6, 10, 12, 0, 0)
+    created = _dt.datetime(2026, 6, 10, 20, 0, 0)  # 8h later — within 1-day slack
+    assert m.job_predates_post(created, posted) is True
+
+
+def test_unknown_timestamps_never_exclude():
+    m = _load()
+    assert m.job_predates_post(None, _dt.datetime(2026, 6, 1)) is True
+    assert m.job_predates_post(_dt.datetime(2026, 6, 1), None) is True
+
+
+def test_verdict_confident_when_top_is_high_and_clear():
+    m = _load()
+    ranked = [{"job_id": "a", "score": 0.80}, {"job_id": "b", "score": 0.40}]
+    v = m.match_verdict(ranked, high=0.50, margin=0.12)
+    assert v["verdict"] == "confident"
+
+
+def test_verdict_ambiguous_when_twins_are_neck_and_neck():
+    m = _load()
+    ranked = [{"job_id": "a", "score": 0.80}, {"job_id": "b", "score": 0.78}]
+    v = m.match_verdict(ranked, high=0.50, margin=0.12)
+    assert v["verdict"] == "ambiguous"
+
+
+def test_verdict_weak_when_nothing_scores_well():
+    m = _load()
+    ranked = [{"job_id": "a", "score": 0.20}, {"job_id": "b", "score": 0.05}]
+    v = m.match_verdict(ranked, high=0.50, margin=0.12)
+    assert v["verdict"] == "weak"
+
+
+def test_verdict_does_not_round_a_hair_thin_gap_into_confidence():
+    """A gap of 0.11996 must stay AMBIGUOUS under a 0.12 margin — rounding it
+    to 0.12 first would report a coin-flip between twins as a certainty."""
+    m = _load()
+    ranked = [{"job_id": "a", "score": 0.81996}, {"job_id": "b", "score": 0.70000}]
+    v = m.match_verdict(ranked, high=0.50, margin=0.12)
+    assert v["verdict"] == "ambiguous"
+
+
+def test_verdict_none_on_empty_ranking():
+    m = _load()
+    assert m.match_verdict([], high=0.5, margin=0.12)["verdict"] == "none"
