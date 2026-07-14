@@ -4174,6 +4174,19 @@ async def suggest_matches(
         )
         .all()
     )
+    # v852 — a job created AFTER the reel was posted cannot be its source. A hard
+    # fact, and it separates near-duplicate twins (same shared script, built days
+    # apart) that the WORDS alone cannot tell apart. Applied in Python, not SQL,
+    # so an absent posted_at can never silently empty the pool.
+    _before = len(candidates)
+    candidates = [
+        j for j in candidates
+        if _ig_match.job_predates_post(j.created_at, v.posted_at)
+    ]
+    if _before != len(candidates):
+        print(f"[ig-suggest] video={video_id} time-filter dropped "
+              f"{_before - len(candidates)} job(s) created after posted_at={v.posted_at}",
+              flush=True)
     # v822.6: the manual suggestions now use the SAME content matcher as the
     # local auto-matcher — rare-term-weighted TF-IDF cosine (idf_power=2),
     # validated on the operator's real data. The old char-level `best_matches`
@@ -4181,18 +4194,29 @@ async def suggest_matches(
     # exactly why suggestions "landed far off". One bulk dialogue query
     # (no per-candidate N+1), top-5 regardless of score so the UI can show
     # even low-confidence options.
-    from local_transcribe import _bulk_dialogue_map, _MATCH_IDF_POWER
+    from local_transcribe import _bulk_dialogue_map, _MATCH_IDF_POWER, _MATCH_HIGH, _MATCH_MARGIN
     dmap = _bulk_dialogue_map(db, [j.id for j in candidates])
     pairs = [(j.id, dmap.get(j.id, "")) for j in candidates]
-    ranked = _ig_match.rank_tfidf(v.transcription or "", pairs, idf_power=_MATCH_IDF_POWER)[:5]
-    print(f"[ig-suggest] video={video_id} pool={len(candidates)} (finishing-lane only) "
+    full_ranked = _ig_match.rank_tfidf(v.transcription or "", pairs, idf_power=_MATCH_IDF_POWER)
+    # v852 — verdict is judged on the FULL ranking, BEFORE the top-5 slice: the
+    # runner-up that makes a match ambiguous still counts even when it is not
+    # among the five rows we show.
+    verdict = _ig_match.match_verdict(full_ranked, _MATCH_HIGH, _MATCH_MARGIN)
+    ranked = full_ranked[:5]
+    print(f"[ig-suggest] video={video_id} pool={len(candidates)} verdict={verdict['verdict']} "
+          f"top={verdict['top']:.3f} gap={verdict['gap']:.3f} "
           f"top5={[(r['job_id'][:8], r['score']) for r in ranked]}", flush=True)
     top = []
     for r in ranked:
         clip = db.query(Clip).filter(Clip.job_id == r["job_id"], Clip.clip_index == 0).first()
         slug = (clip.dialogue_text or "")[:80] if clip and clip.dialogue_text else r["job_id"][:8]
         top.append({"job_id": r["job_id"], "score": r["score"], "slug": slug})
-    return top
+    return {
+        "verdict": verdict["verdict"],
+        "top": verdict["top"],
+        "gap": verdict["gap"],
+        "suggestions": top,
+    }
 
 
 @app.post("/api/instagram/videos/{video_id}/match")
