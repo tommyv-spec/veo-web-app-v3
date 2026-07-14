@@ -4804,7 +4804,7 @@ def diag_local_match(
 class RelinkItem(BaseModel):
     shortcode: str
     from_job: Optional[str] = None   # the link we EXPECT to find; refuse if it moved
-    to_job: str
+    to_job: Optional[str] = None     # None/"" => UNLINK (see below)
     proof: Optional[str] = None
 
 
@@ -4855,6 +4855,41 @@ def diag_apply_relinks(
                 "why": f"link moved under us: expected {it.from_job}, found {v.matched_job_id}",
             })
             continue
+        # to_job empty => UNLINK. Used when another reel is PROVEN to own this
+        # reel's job: two reels cannot share one job (a confirmed repost aside),
+        # so the unproven claimant's link is false. Clearing it returns the reel
+        # to the manual queue, where the now evidence-gated matcher can decide
+        # it — that beats leaving a link we know to be wrong.
+        if not it.to_job:
+            old_job = db.query(Job).filter_by(id=v.matched_job_id).first() if v.matched_job_id else None
+            reverted_to = None
+            if not int(dry_run):
+                if old_job:
+                    if old_job.instagram_video_id == v.id:
+                        old_job.instagram_url = None
+                        old_job.instagram_video_id = None
+                    if (old_job.published_via or "ig_match") == "ig_match":
+                        old_job.lifecycle_stage = None
+                        old_job.lifecycle_stage = derive_effective_stage(
+                            old_job, _count_approved_clips(db, old_job.id)
+                        )
+                        old_job.published_via = None
+                        old_job.published_at = None
+                        reverted_to = old_job.lifecycle_stage
+                v.matched_job_id = None
+                v.matched_at = None
+                print(f"[ig-relink] UNLINK {it.shortcode} from "
+                      f"{(old_job.id[:8] if old_job else 'none')} ({it.proof})", flush=True)
+            results.append({
+                "shortcode": it.shortcode,
+                "status": "WOULD UNLINK" if int(dry_run) else "UNLINKED",
+                "old_job": old_job.id if old_job else None,
+                "old_reverted_to": reverted_to,
+                "new_job": None,
+                "proof": it.proof,
+            })
+            continue
+
         new_job = db.query(Job).filter_by(id=it.to_job).first()
         if not new_job:
             results.append({"shortcode": it.shortcode, "status": "REFUSED", "why": "target job not found"})
