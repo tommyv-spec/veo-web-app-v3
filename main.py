@@ -4163,6 +4163,7 @@ async def suggest_matches(
     current_user: User = Depends(get_current_user),
 ):
     from models import InstagramVideo, InstagramAccount, Job
+    from sqlalchemy import or_
     v = db.query(InstagramVideo).filter_by(id=video_id).first()
     if not v:
         raise HTTPException(404, detail="video not found")
@@ -4171,14 +4172,21 @@ async def suggest_matches(
         raise HTTPException(403, detail="access denied")
     if not v.transcription or v.transcription_status != "done":
         return []
-    # Candidate pool = any COMPLETED, unlinked, non-archived job. Do NOT
-    # gate on lifecycle_stage: a posted IG video's source job is always
-    # fully rendered + exported, but the stored lifecycle_stage column is
-    # derived live and persisted lazily — b-roll/twin jobs routinely sit
-    # at awaiting_export with a stale stored stage, so a stage filter
-    # silently drops the correct job and suggestions land far off.
-    # status=='completed' + instagram_video_id IS NULL is the durable
-    # signal that survives every stage-progression quirk.
+    # Candidate pool = jobs that actually REACHED the finishing lane. A reel on
+    # IG was necessarily exported first, so a job that never exported cannot be
+    # its source — matching one wrongly stamps `published` onto a job still
+    # sitting in approval/export.
+    #
+    # Gate on has_export, NOT on the stored lifecycle_stage column: the stored
+    # column is persisted lazily and goes stale (b-roll/twin jobs sit at
+    # awaiting_export long after exporting), which is why the stage filter was
+    # dropped here in the first place. has_export is the same underlying state
+    # derive_effective_stage() reads to return AWAITING_FINISHING, so it's the
+    # durable signal — it can't go stale the way the derived column does.
+    # lifecycle_stage IN (finishing, published) is OR'd in to honour an operator
+    # who manually parked a job in the lane, and to keep already-published jobs
+    # eligible for instagram_url back-fill (drive/local watch publish with
+    # instagram_video_id still NULL).
     candidates = (
         db.query(Job)
         .filter(
@@ -4186,6 +4194,10 @@ async def suggest_matches(
             Job.status == "completed",
             Job.instagram_video_id.is_(None),
             Job.archived == False,  # noqa: E712
+            or_(
+                Job.has_export == True,  # noqa: E712
+                Job.lifecycle_stage.in_(["awaiting_finishing", "published"]),
+            ),
         )
         .all()
     )
@@ -4200,7 +4212,7 @@ async def suggest_matches(
     dmap = _bulk_dialogue_map(db, [j.id for j in candidates])
     pairs = [(j.id, dmap.get(j.id, "")) for j in candidates]
     ranked = _ig_match.rank_tfidf(v.transcription or "", pairs, idf_power=_MATCH_IDF_POWER)[:5]
-    print(f"[ig-suggest] video={video_id} pool={len(candidates)} "
+    print(f"[ig-suggest] video={video_id} pool={len(candidates)} (finishing-lane only) "
           f"top5={[(r['job_id'][:8], r['score']) for r in ranked]}", flush=True)
     top = []
     for r in ranked:
@@ -4227,6 +4239,14 @@ async def match_video(
     job = db.query(Job).filter_by(id=req.job_id).first()
     if not job or job.user_id != current_user.id:
         raise HTTPException(404, detail="job not found")
+    # A reel on IG was exported before it was posted, so a job that never
+    # exported and was never parked in the finishing lane cannot be its source.
+    # Not blocked (an operator override stays possible), but loud — this is the
+    # signature of a match landing on a job from the wrong lane.
+    if not job.has_export and job.lifecycle_stage not in ("awaiting_finishing", "published"):
+        print(f"[ig-match] WARNING video={video_id} matched job={job.id[:8]} that never "
+              f"reached finishing (has_export={job.has_export} stage={job.lifecycle_stage})",
+              flush=True)
     v.matched_job_id = job.id
     v.matched_at = datetime.utcnow()
     job.instagram_url = v.url
