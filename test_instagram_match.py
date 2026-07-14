@@ -165,3 +165,90 @@ def test_bm25_empty():
     m = _load()
     assert m.rank_bm25("", [("a", "x")]) == []
     assert m.rank_bm25("x", []) == []
+
+
+# ---- v823: spoken-text reconstruction (Prompt B + final cut) --------------
+
+def _clip(**kw):
+    """A Clip row as the bulk builder hands it to the pure rules."""
+    base = {
+        "id": 1, "clip_index": 0, "clip_role": None, "paired_clip_id": None,
+        "dialogue_text": "", "dialogue_text_b": None,
+        "rendered_prompt_variant": "A", "voiceover_line": None,
+        "approval_status": "approved",
+    }
+    base.update(kw)
+    return base
+
+
+def test_spoken_line_variant_a_uses_dialogue_text():
+    m = _load()
+    c = _clip(dialogue_text="your soldier wont wake up", dialogue_text_b="a reworded line")
+    assert m.spoken_line(c) == "your soldier wont wake up"
+
+
+def test_spoken_line_variant_b_uses_reworded_line():
+    m = _load()
+    c = _clip(dialogue_text="the banned wording",
+              dialogue_text_b="the reworded line that was actually said",
+              rendered_prompt_variant="B")
+    assert m.spoken_line(c) == "the reworded line that was actually said"
+
+
+def test_spoken_line_variant_b_without_b_text_falls_back():
+    m = _load()
+    c = _clip(dialogue_text="original line", dialogue_text_b=None,
+              rendered_prompt_variant="B")
+    assert m.spoken_line(c) == "original line"
+
+
+def test_reconstruct_uses_audio_twin_not_stale_voiceover_line():
+    """The audio_pair renders the speech. When IT fell back to Prompt B, the
+    visual twin's voiceover_line is stale and must NOT be used."""
+    m = _load()
+    clips = [
+        _clip(id=10, clip_index=0, clip_role="visual_pair",
+              dialogue_text="", voiceover_line="the stale original line"),
+        _clip(id=11, clip_index=100000, clip_role="audio_pair", paired_clip_id=10,
+              dialogue_text="the stale original line",
+              dialogue_text_b="the reworded line actually spoken",
+              rendered_prompt_variant="B"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "the reworded line actually spoken"
+
+
+def test_reconstruct_visual_pair_without_twin_falls_back_to_voiceover_line():
+    m = _load()
+    clips = [_clip(id=10, clip_role="visual_pair", dialogue_text="",
+                   voiceover_line="spoken over the b-roll")]
+    assert m.reconstruct_dialogue(clips) == "spoken over the b-roll"
+
+
+def test_reconstruct_drops_clips_not_in_the_final_cut():
+    m = _load()
+    clips = [
+        _clip(id=1, clip_index=0, dialogue_text="kept line", approval_status="approved"),
+        _clip(id=2, clip_index=1, dialogue_text="rejected line", approval_status="rejected"),
+        _clip(id=3, clip_index=2, dialogue_text="pending line", approval_status="pending_review"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "kept line"
+
+
+def test_reconstruct_never_blanks_a_job_with_no_approved_clips():
+    """A legacy job with nothing marked approved must still produce text —
+    blank text would silently drop it from the candidate pool entirely."""
+    m = _load()
+    clips = [
+        _clip(id=1, clip_index=0, dialogue_text="first line", approval_status="pending_review"),
+        _clip(id=2, clip_index=1, dialogue_text="second line", approval_status="pending_review"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "first line second line"
+
+
+def test_reconstruct_orders_by_clip_index():
+    m = _load()
+    clips = [
+        _clip(id=2, clip_index=1, dialogue_text="second"),
+        _clip(id=1, clip_index=0, dialogue_text="first"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "first second"

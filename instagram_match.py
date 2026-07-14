@@ -18,6 +18,90 @@ def _normalize(s: str) -> str:
     return s
 
 
+# ============================================================================
+# v823 — SPOKEN-TEXT RECONSTRUCTION.
+#
+# The matcher must compare the reel's transcript against the words that were
+# actually SAID in the render we downloaded — not against the script we first
+# wrote. Two things make those diverge:
+#
+#   1. Prompt B (v805/v821 policy fallback). When the primary prompt trips a
+#      generation-policy block, the worker re-renders with Prompt B, which
+#      speaks a REWORDED line. `rendered_prompt_variant` says which prompt
+#      produced the downloaded render; `dialogue_text_b` holds the reworded
+#      words. Reading dialogue_text alone compares against words nobody spoke.
+#
+#   2. The b-roll clip pair (v698A). `visual_pair` is a SILENT b-roll visual;
+#      the speech is rendered by its `audio_pair` twin, whose dialogue_text
+#      duplicates the visual's voiceover_line. So when the AUDIO twin fell back
+#      to Prompt B, the visual's voiceover_line is stale — the rebuild has to
+#      reach through the pair. (A Prompt-B fallback on the visual twin is
+#      irrelevant: that render is silent.)
+#
+# Only clips that made the FINAL CUT count — the export is "all approved clips".
+# ============================================================================
+
+FINAL_CUT_APPROVAL = "approved"
+
+
+def spoken_line(clip):
+    """The words actually heard in the render downloaded for this clip.
+
+    `clip` is a plain dict (kept DB-free so these rules stay unit-testable).
+    """
+    if ((clip.get("rendered_prompt_variant") or "A").upper() == "B"):
+        reworded = (clip.get("dialogue_text_b") or "").strip()
+        if reworded:
+            return reworded
+    return ((clip.get("voiceover_line") or clip.get("dialogue_text")) or "").strip()
+
+
+def reconstruct_dialogue(clips, final_cut_only=True):
+    """Concatenate a job's SPOKEN words, in clip_index order.
+
+    clips: list of dicts with keys id, clip_index, clip_role, paired_clip_id,
+           dialogue_text, dialogue_text_b, rendered_prompt_variant,
+           voiceover_line, approval_status.
+    """
+    # The audio twin owns the speech for its visual partner.
+    audio_by_visual = {}
+    for c in clips:
+        if (c.get("clip_role") or "") == "audio_pair" and c.get("paired_clip_id"):
+            audio_by_visual[c["paired_clip_id"]] = spoken_line(c)
+
+    def _emit(pool):
+        parts = []
+        for c in sorted(pool, key=lambda x: (x.get("clip_index") or 0)):
+            role = c.get("clip_role") or "single"
+            if role == "audio_pair":
+                continue  # emitted via its visual twin; counting both double-counts
+            if role == "visual_pair":
+                text = (
+                    audio_by_visual.get(c.get("id"))
+                    or (c.get("voiceover_line") or "").strip()
+                    or (c.get("dialogue_text") or "").strip()
+                )
+            else:
+                text = spoken_line(c)
+            if text:
+                parts.append(text)
+        return " ".join(parts).strip()
+
+    if final_cut_only:
+        kept = [
+            c for c in clips
+            if (c.get("clip_role") or "") == "audio_pair"  # lookup source, never filtered
+            or (c.get("approval_status") or "") == FINAL_CUT_APPROVAL
+        ]
+        text = _emit(kept)
+        if text:
+            return text
+        # Fall through: a job with nothing marked approved (legacy rows) must
+        # not reconstruct to BLANK — that would drop it from the candidate pool
+        # entirely, which is strictly worse than matching on slightly noisy text.
+    return _emit(clips)
+
+
 def _phrase_boost(a: str, b: str, n: int = 3, per_hit: float = 0.05, cap: float = 0.2) -> float:
     """Bonus when N-grams from `a` appear verbatim in `b`. Caps at `cap`."""
     if not a or not b:
