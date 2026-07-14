@@ -20,10 +20,15 @@ import export_queue as eq
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CODE = os.path.dirname(_HERE)
 _MAIN = os.path.join(_CODE, "main.py")
+_INDEX = os.path.join(_CODE, "static", "index.html")
 
 
 def _main_src():
     return open(_MAIN, encoding="utf-8").read()
+
+
+def _index_src():
+    return open(_INDEX, encoding="utf-8").read()
 
 
 # ---- the cap --------------------------------------------------------------
@@ -95,3 +100,40 @@ def test_queue_read_is_fifo_and_skips_local_runs():
     assert "created_at.asc()" in q          # oldest first
     assert "not in _LOCAL_EXPORT_IDS" in q  # never double-start a live run
     assert "STATE_QUEUED" in q
+
+
+# ---- the frontend: the cap is useless if the UI won't let you queue -------
+# The backend queues N exports and runs them one at a time, but the operator
+# could still only ever start ONE: a global `isExporting` flag alerted
+# "Export already in progress" on the second job. These are source greps —
+# index.html has no build step and no JS test harness.
+
+def test_the_global_export_lock_is_gone():
+    src = _index_src()
+    assert "isExporting" not in src, "the global export lock is back — only one export can be queued again"
+    assert "Export already in progress" not in src, "the second-export alert is back"
+
+
+def test_the_banner_is_a_stack_with_one_row_per_export():
+    """A singleton #floatingExportBanner meant export B's status text overwrote
+    export A's — and A's completion removed B's banner."""
+    src = _index_src()
+    assert "exportBannerStack" in src
+    assert "exportRow_" in src or "data-export-id" in src
+    assert "floatingExportBanner" not in src, "the singleton banner is back"
+
+
+def test_the_run_ids_survive_a_page_reload():
+    """The export id used to be a local const. Reload = the run finishes on the
+    server and the operator never sees it."""
+    src = _index_src()
+    assert "activeExports" in src
+    assert "localStorage" in src
+    assert "resumeActiveExports" in src
+
+
+def test_the_voice_clone_error_is_per_export_not_global():
+    """Two exports finishing together used to overwrite each other's VC error."""
+    src = _index_src()
+    assert "window._vcErrorMsg" not in src
+    assert "window._masterAudioFilename" not in src

@@ -13430,11 +13430,224 @@ Ambient: same kitchen room tone, soft pour sound.
         }
         
         // ============ Export Final Video ============
-        let isExporting = false; // Prevent multiple concurrent exports
-        
+        // v855 — the export is a durable SERVER-SIDE run. The backend queues them
+        // and the dispatcher runs one at a time, so the operator may fire off
+        // several jobs and walk away. The old global export lock made that
+        // impossible — it alerted and bailed on the second job. It is gone. What
+        // replaces it:
+        //   • activeExports — one state object per in-flight export (per-JOB guard)
+        //   • #exportBannerStack — one ROW per export, never a shared singleton
+        //   • localStorage['activeExports'] — the run ids survive a page reload
+        const activeExports = new Map();          // key (exportId, or pending_N pre-202) -> export state
+        const ACTIVE_EXPORTS_KEY = 'activeExports';
+        let _exportSeq = 0;
+
+        function _loadActiveExports() {
+            try {
+                const raw = JSON.parse(localStorage.getItem(ACTIVE_EXPORTS_KEY) || '[]');
+                return Array.isArray(raw) ? raw.filter(e => e && e.jobId && e.exportId) : [];
+            } catch (e) { return []; }
+        }
+        function _saveActiveExports(list) {
+            try { localStorage.setItem(ACTIVE_EXPORTS_KEY, JSON.stringify(list)); } catch (e) {}
+        }
+        function _rememberActiveExport(exp) {
+            const list = _loadActiveExports().filter(e => e.exportId !== exp.exportId);
+            list.push({
+                jobId: exp.jobId,
+                exportId: exp.exportId,
+                jobTitle: exp.jobTitle || '',
+                settings: exp.settings || {},
+                startedAt: exp.startedAt || Date.now(),
+            });
+            _saveActiveExports(list);
+        }
+        function _forgetActiveExport(exportId) {
+            if (!exportId) return;
+            _saveActiveExports(_loadActiveExports().filter(e => e.exportId !== exportId));
+        }
+        // The per-JOB guard that replaced the global lock. A second export for the
+        // SAME job would only join the same server-side run (the POST is idempotent),
+        // so surface the row we already have instead of starting a second poll.
+        function findActiveExportForJob(jobId) {
+            for (const exp of activeExports.values()) {
+                if (exp.jobId === jobId) return exp;
+            }
+            return null;
+        }
+        function _exportJobLabel(jobId) {
+            try {
+                const card = document.querySelector(`.job-item[onclick*="${jobId}"], .lc-row[onclick*="${jobId}"], .lc-card[onclick*="${jobId}"]`);
+                const t = card?.querySelector('h3, .job-title, strong')?.textContent?.trim();
+                if (t) return t.length > 40 ? t.slice(0, 40) + '…' : t;
+            } catch (e) {}
+            return 'Job ' + String(jobId).slice(0, 8);
+        }
+
+        // ---- the banner STACK (one row per export) ----------------------------
+        function ensureExportBannerStack() {
+            let stack = document.getElementById('exportBannerStack');
+            if (!stack) {
+                stack = document.createElement('div');
+                stack.id = 'exportBannerStack';
+                document.body.appendChild(stack);
+            }
+            if (!document.getElementById('exportBannerStackStyles')) {
+                const st = document.createElement('style');
+                st.id = 'exportBannerStackStyles';
+                st.textContent = `
+                    #exportBannerStack {
+                        position: fixed;
+                        bottom: 16px;
+                        left: 50%;
+                        transform: translateX(-50%);
+                        width: min(500px, calc(100% - 32px));
+                        z-index: 9999;
+                        display: flex;
+                        flex-direction: column;
+                        gap: 8px;
+                    }
+                    #exportBannerStack .export-row { animation: exportSlideUp 0.3s ease-out; }
+                    #exportBannerStack .export-row.flash { animation: exportFlash 0.6s ease-in-out 2; }
+                    @keyframes exportSlideUp {
+                        from { transform: translateY(100%); opacity: 0; }
+                        to   { transform: translateY(0); opacity: 1; }
+                    }
+                    @keyframes exportFlash {
+                        0%, 100% { filter: brightness(1); }
+                        50%      { filter: brightness(1.6); }
+                    }
+                    .export-spinner {
+                        width: 24px;
+                        height: 24px;
+                        border: 3px solid rgba(255,255,255,0.3);
+                        border-top-color: white;
+                        border-radius: 50%;
+                        animation: spin 1s linear infinite;
+                        flex-shrink: 0;
+                    }
+                    @keyframes spin { to { transform: rotate(360deg); } }
+                `;
+                document.head.appendChild(st);
+            }
+            return stack;
+        }
+        function pruneExportBannerStack() {
+            const stack = document.getElementById('exportBannerStack');
+            if (stack && stack.children.length === 0) stack.remove();
+        }
+        function getExportRow(key) {
+            return document.getElementById('exportRow_' + key);
+        }
+        function createExportRow(exp, initialText) {
+            const stack = ensureExportBannerStack();
+            const old = getExportRow(exp.key);
+            if (old) old.remove();
+            const row = document.createElement('div');
+            row.className = 'export-row';
+            row.id = 'exportRow_' + exp.key;
+            row.dataset.exportId = exp.exportId || '';
+            row.dataset.jobId = exp.jobId;
+            row.innerHTML = `
+                <div class="export-row-body" style="background:linear-gradient(90deg, var(--accent) 0%, #6366f1 100%);padding:12px 16px;border-radius:var(--radius-md);box-shadow:0 4px 20px rgba(0,0,0,0.4);">
+                    <div style="display:flex;align-items:center;justify-content:space-between;width:100%">
+                        <div style="display:flex;align-items:center;gap:12px;min-width:0;">
+                            <div class="export-spinner"></div>
+                            <div style="min-width:0;">
+                                <h3 style="margin:0;font-size:14px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🎬 ${exp.jobTitle || _exportJobLabel(exp.jobId)}</h3>
+                                <p class="export-status-text" style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">${initialText || 'Preparing...'}</p>
+                            </div>
+                        </div>
+                        <div class="export-timer" style="font-size:12px;opacity:0.8;color:white;flex-shrink:0;margin-left:8px;">0:00</div>
+                    </div>
+                    <div style="width:100%;height:4px;background:rgba(255,255,255,0.2);border-radius:2px;margin-top:10px;overflow:hidden">
+                        <div class="export-progress-bar" style="width:5%;height:100%;background:rgba(255,255,255,0.8);border-radius:2px;transition:width 0.3s"></div>
+                    </div>
+                </div>
+            `;
+            stack.appendChild(row);
+            return row;
+        }
+        // The row is born before the 202 lands (so the operator sees feedback during
+        // the health-check), keyed on a pending id. Re-key it once we know the run id.
+        function rekeyExportRow(oldKey, exp) {
+            const row = getExportRow(oldKey);
+            if (!row) return createExportRow(exp, 'Queued...');
+            row.id = 'exportRow_' + exp.key;
+            row.dataset.exportId = exp.exportId || '';
+            return row;
+        }
+        function removeExportRow(key) {
+            const row = getExportRow(key);
+            if (row) row.remove();
+            pruneExportBannerStack();
+        }
+        function flashExportRow(key) {
+            const row = getExportRow(key);
+            if (!row) return;
+            row.classList.remove('flash');
+            void row.offsetWidth;          // restart the animation
+            row.classList.add('flash');
+        }
+        // Every status/progress/timer write goes THROUGH the row — never a global
+        // getElementById, which is what made two concurrent exports fight.
+        function setExportStatus(exp, text) {
+            const el = exp.row?.querySelector('.export-status-text');
+            if (el) el.textContent = text;
+        }
+        function setExportProgress(exp, pct) {
+            const el = exp.row?.querySelector('.export-progress-bar');
+            if (el) el.style.width = pct + '%';
+        }
+        function startExportTimer(exp) {
+            if (exp.timerInterval) clearInterval(exp.timerInterval);
+            exp.timerInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - exp.startedAt) / 1000);
+                const mins = Math.floor(elapsed / 60);
+                const secs = elapsed % 60;
+                const el = exp.row?.querySelector('.export-timer');
+                if (el) el.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+            }, 1000);
+        }
+        function stopExportTimers(exp) {
+            if (exp.timerInterval) { clearInterval(exp.timerInterval); exp.timerInterval = null; }
+            if (exp.stageInterval) { clearInterval(exp.stageInterval); exp.stageInterval = null; }
+        }
+        // Reload survival: the run keeps going on the server, so pick the poll back up.
+        function resumeActiveExports() {
+            const saved = _loadActiveExports();
+            if (!saved.length) return;
+            console.log(`[Export/v855] resuming ${saved.length} export(s) after reload`);
+            for (const s of saved) {
+                if (activeExports.has(s.exportId)) continue;
+                const exp = {
+                    key: s.exportId,
+                    exportId: s.exportId,
+                    jobId: s.jobId,
+                    jobTitle: s.jobTitle || _exportJobLabel(s.jobId),
+                    settings: s.settings || {},
+                    startedAt: s.startedAt || Date.now(),
+                    resumed: true,
+                    vcErrorMsg: null,
+                    row: null,
+                    timerInterval: null,
+                    stageInterval: null,
+                };
+                activeExports.set(exp.key, exp);
+                exp.row = createExportRow(exp, '⏳ Reconnecting to your export...');
+                startExportTimer(exp);
+                runExport(exp);                // fire and forget — it owns its own row
+                                               // (exportId already set → it skips the POST and polls)
+            }
+        }
+        window.addEventListener('load', resumeActiveExports);
+
         async function exportFinalVideo(jobId) {
-            if (isExporting) {
-                alert('Export already in progress');
+            // v855 per-JOB guard (replaces the old global export lock).
+            const _live = findActiveExportForJob(jobId);
+            if (_live) {
+                showToast('This job is already exporting — see the banner below', '#6366f1');
+                flashExportRow(_live.key);
                 return;
             }
             // v773.11.2: PostHog event — Export Final clicked (operator reaches the export step).
@@ -13783,8 +13996,16 @@ Ambient: same kitchen room tone, soft pour sound.
                 </div>
             `;
             
+            // v855 — only ONE settings modal may exist. It carries hardcoded ids
+            // (#modalFramesStart, #confirmExportBtn, ...), so a second one stacked on
+            // top made getElementById return the STALE modal's fields.
+            document.getElementById('exportSettingsModal')?.remove();
             document.body.insertAdjacentHTML('beforeend', modalHtml);
-            
+
+            // v855 — per-modal, not on window: two open exports must not stomp on
+            // each other's uploaded master-audio filename.
+            let modalMasterAudioFilename = null;
+
             // Setup toggle click handlers (use ?. to prevent chain breakage)
             document.getElementById('modalSmartTrim')?.addEventListener('click', function() { this.classList.toggle('active'); });
             document.getElementById('modalRemoveLaughter')?.addEventListener('click', function() { 
@@ -13879,9 +14100,8 @@ Ambient: same kitchen room tone, soft pour sound.
             // Master audio toggle + dropzone (only exists for import/assemble jobs)
             const masterToggle = document.getElementById('modalMasterAudioToggle');
             if (masterToggle) {
-                let _masterAudioFilename = null; // tracks uploaded filename
-                window._masterAudioFilename = null;
-                
+                modalMasterAudioFilename = null; // tracks uploaded filename (modal-scoped)
+
                 masterToggle.onclick = function() {
                     this.classList.toggle('active');
                     const controls = document.getElementById('masterAudioControls');
@@ -13912,8 +14132,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 const removeBtn = document.getElementById('masterAudioRemoveBtn');
                 if (removeBtn) {
                     removeBtn.onclick = () => {
-                        _masterAudioFilename = null;
-                        window._masterAudioFilename = null;
+                        modalMasterAudioFilename = null;
                         document.getElementById('masterAudioFileInfo').style.display = 'none';
                         document.getElementById('masterAudioDropZone').style.display = 'block';
                     };
@@ -13955,9 +14174,8 @@ Ambient: same kitchen room tone, soft pour sound.
                         progressBar.style.width = '100%';
                         statusEl.textContent = 'Uploaded!';
                         
-                        _masterAudioFilename = result.filename;
-                        window._masterAudioFilename = result.filename;
-                        
+                        modalMasterAudioFilename = result.filename;
+
                         // Show file info
                         setTimeout(() => {
                             progressDiv.style.display = 'none';
@@ -14064,7 +14282,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 document.getElementById('confirmExportBtn').onclick = async () => {
                     // Guard: master audio toggle is ON but file hasn't finished uploading
                     const masterToggle = document.getElementById('modalMasterAudioToggle');
-                    if (masterToggle && masterToggle.classList.contains('active') && !window._masterAudioFilename) {
+                    if (masterToggle && masterToggle.classList.contains('active') && !modalMasterAudioFilename) {
                         const uploadProgress = document.getElementById('masterAudioUploadProgress');
                         const isUploading = uploadProgress && uploadProgress.style.display !== 'none';
                         if (isUploading) {
@@ -14104,7 +14322,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                        document.getElementById('modalVoiceFilter').classList.contains('active') ||
                                        document.getElementById('modalLoudnorm').classList.contains('active'),
                         // Master audio alignment (assemble jobs only)
-                        master_audio_filename: (document.getElementById('modalMasterAudioToggle')?.classList.contains('active') && window._masterAudioFilename) ? window._masterAudioFilename : null,
+                        master_audio_filename: (document.getElementById('modalMasterAudioToggle')?.classList.contains('active') && modalMasterAudioFilename) ? modalMasterAudioFilename : null,
                         max_clip_speed: parseFloat(document.getElementById('modalMaxClipSpeed')?.value || 1.5),
                         min_gap_for_black: parseFloat(document.getElementById('modalMinGapForBlack')?.value || 2.0),
                         // Transitions (assemble jobs only)
@@ -14400,75 +14618,10 @@ Ambient: same kitchen room tone, soft pour sound.
             await openVoiceSwap(jobId);
         }
         
-        async function doExport(jobId, exportSettings) {
-            isExporting = true; // Set lock
-            
-            // Fire and forget: warm up voice clone server during export
-            fetch(`${API}/voice-clone-warmup`, { method: 'POST' }).catch(() => {});
-            
-            // Create FLOATING export progress banner on document.body — persists across job switches
-            const oldFloating = document.getElementById('floatingExportBanner');
-            if (oldFloating) oldFloating.remove();
-            
-            const floatingBanner = document.createElement('div');
-            floatingBanner.id = 'floatingExportBanner';
-            floatingBanner.dataset.jobId = jobId;
-            floatingBanner.innerHTML = `
-                <div style="background:linear-gradient(90deg, var(--accent) 0%, #6366f1 100%);padding:12px 16px;border-radius:var(--radius-md);box-shadow:0 4px 20px rgba(0,0,0,0.4);">
-                    <div style="display:flex;align-items:center;justify-content:space-between;width:100%">
-                        <div style="display:flex;align-items:center;gap:12px">
-                            <div class="export-spinner"></div>
-                            <div>
-                                <h3 style="margin:0;font-size:14px;color:white;">🎬 Exporting Final Video...</h3>
-                                <p id="exportStatusText" style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">Preparing clips... (Trim: ${exportSettings.frames_to_cut_start}/${exportSettings.frames_to_cut_end}${exportSettings.master_audio_filename ? ', 🎵 Audio Sync' : ''}, Audio: ${[exportSettings.remove_laughter ? '😂' : '', exportSettings.apply_deepfilter ? '🎛️' : '', exportSettings.apply_voice_filter ? '🎚️' : '', exportSettings.apply_loudnorm ? '📊' : ''].filter(Boolean).join('') || 'OFF'})</p>
-                            </div>
-                        </div>
-                        <div id="exportTimer" style="font-size:12px;opacity:0.8;color:white;">0:00</div>
-                    </div>
-                    <div style="width:100%;height:4px;background:rgba(255,255,255,0.2);border-radius:2px;margin-top:10px;overflow:hidden">
-                        <div id="exportProgressBar" style="width:5%;height:100%;background:rgba(255,255,255,0.8);border-radius:2px;transition:width 0.3s"></div>
-                    </div>
-                </div>
-                <style>
-                    #floatingExportBanner {
-                        position: fixed;
-                        bottom: 16px;
-                        left: 50%;
-                        transform: translateX(-50%);
-                        width: min(500px, calc(100% - 32px));
-                        z-index: 9999;
-                        animation: slideUp 0.3s ease-out;
-                    }
-                    @keyframes slideUp {
-                        from { transform: translateX(-50%) translateY(100%); opacity: 0; }
-                        to { transform: translateX(-50%) translateY(0); opacity: 1; }
-                    }
-                    .export-spinner {
-                        width: 24px;
-                        height: 24px;
-                        border: 3px solid rgba(255,255,255,0.3);
-                        border-top-color: white;
-                        border-radius: 50%;
-                        animation: spin 1s linear infinite;
-                    }
-                    @keyframes spin {
-                        to { transform: rotate(360deg); }
-                    }
-                </style>
-            `;
-            document.body.appendChild(floatingBanner);
-            
-            // Start timer
-            const startTime = Date.now();
-            const timerInterval = setInterval(() => {
-                const elapsed = Math.floor((Date.now() - startTime) / 1000);
-                const mins = Math.floor(elapsed / 60);
-                const secs = elapsed % 60;
-                const timerEl = document.getElementById('exportTimer');
-                if (timerEl) timerEl.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
-            }, 1000);
-            
-            // Progress stages
+        // The fake "stages" ticker. Cosmetic only — the real state comes from the
+        // poll. Skipped on a resumed export (its run is already mid-flight).
+        function startExportStages(exp) {
+            const exportSettings = exp.settings || {};
             const stages = exportSettings.master_audio_filename ? [
                 { progress: 10, text: "Transcribing master audio..." },
                 { progress: 25, text: "Matching dialogue to timestamps..." },
@@ -14483,19 +14636,94 @@ Ambient: same kitchen room tone, soft pour sound.
                 { progress: 70, text: "Encoding final video..." },
                 { progress: 85, text: exportSettings.enhance_audio ? "Enhancing audio..." : "Finalizing..." }
             ];
-            
             let stageIndex = 0;
-            const stageInterval = setInterval(() => {
+            if (exp.stageInterval) clearInterval(exp.stageInterval);
+            exp.stageInterval = setInterval(() => {
                 if (stageIndex < stages.length) {
                     const stage = stages[stageIndex];
-                    const statusEl = document.getElementById('exportStatusText');
-                    const progressBar = document.getElementById('exportProgressBar');
-                    if (statusEl) statusEl.textContent = stage.text;
-                    if (progressBar) progressBar.style.width = stage.progress + '%';
+                    setExportStatus(exp, stage.text);
+                    setExportProgress(exp, stage.progress);
                     stageIndex++;
                 }
             }, 2000);
-            
+        }
+
+        // Red row + Retry. Scoped to ONE export — a second export's failure never
+        // touches this row.
+        function renderExportFailure(exp, message) {
+            const body = exp.row?.querySelector('.export-row-body');
+            if (!body) return;
+            body.style.background = 'var(--error)';
+            body.innerHTML = `
+                <div style="display:flex;align-items:center;justify-content:space-between;width:100%;">
+                    <div style="min-width:0;">
+                        <h3 style="margin:0;font-size:14px;color:white;">❌ Export Failed — ${exp.jobTitle || exp.jobId}</h3>
+                        <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">${message}</p>
+                    </div>
+                    <div style="display:flex;gap:6px;flex-shrink:0;margin-left:8px;">
+                        <button onclick="removeExportRow('${exp.key}');exportFinalVideo('${exp.jobId}')" style="padding:6px 12px;background:rgba(255,255,255,0.2);border:none;border-radius:var(--radius-sm);color:white;cursor:pointer;font-size:11px;">
+                            Retry
+                        </button>
+                        <button onclick="removeExportRow('${exp.key}')" style="padding:6px 8px;background:rgba(255,255,255,0.2);border:none;border-radius:var(--radius-sm);color:white;cursor:pointer;font-size:11px;">✕</button>
+                    </div>
+                </div>
+            `;
+            const _k = exp.key;
+            setTimeout(() => removeExportRow(_k), 10000);   // auto-dismiss
+        }
+
+        async function doExport(jobId, exportSettings) {
+            // v855 per-JOB guard. The old global lock made a SECOND job impossible;
+            // this only stops a second poll on the SAME job (the server would hand
+            // back the same run anyway).
+            const _live = findActiveExportForJob(jobId);
+            if (_live) {
+                showToast('This job is already exporting — see the banner below', '#6366f1');
+                flashExportRow(_live.key);
+                return;
+            }
+
+            const exp = {
+                // Registered on a PENDING key before the POST goes out, so a fast
+                // double-click cannot slip a second run through the guard window.
+                key: 'pending_' + (++_exportSeq),
+                exportId: null,
+                jobId,
+                jobTitle: _exportJobLabel(jobId),
+                settings: exportSettings,
+                startedAt: Date.now(),
+                resumed: false,
+                vcErrorMsg: null,
+                row: null,
+                timerInterval: null,
+                stageInterval: null,
+            };
+            activeExports.set(exp.key, exp);
+
+            const _audioTags = [
+                exportSettings.remove_laughter ? '😂' : '',
+                exportSettings.apply_deepfilter ? '🎛️' : '',
+                exportSettings.apply_voice_filter ? '🎚️' : '',
+                exportSettings.apply_loudnorm ? '📊' : '',
+            ].filter(Boolean).join('') || 'OFF';
+            exp.row = createExportRow(exp, `Preparing clips... (Trim: ${exportSettings.frames_to_cut_start}/${exportSettings.frames_to_cut_end}${exportSettings.master_audio_filename ? ', 🎵 Audio Sync' : ''}, Audio: ${_audioTags})`);
+            startExportTimer(exp);
+
+            await runExport(exp);
+        }
+
+        // Queue (unless already queued) + poll + finish. Called fresh from doExport
+        // and again after a page reload by resumeActiveExports() — in that case
+        // exp.exportId is already set and the POST is skipped.
+        async function runExport(exp) {
+            const jobId = exp.jobId;
+            const exportSettings = exp.settings || {};
+
+            // Fire and forget: warm up voice clone server during export
+            fetch(`${API}/voice-clone-warmup`, { method: 'POST' }).catch(() => {});
+
+            if (!exp.resumed) startExportStages(exp);
+
             try {
                 // Use the settings passed from modal
                 const settings = {
@@ -14529,49 +14757,70 @@ Ambient: same kitchen room tone, soft pour sound.
                 
                 console.log('[Export] Sending request with settings:', settings);
 
-                // ── Server warm-up guard ──────────────────────────────────────
-                // After a deploy Render takes ~5s to boot. If the health check
-                // fails we wait and retry silently rather than showing a 502 error.
-                const statusEl2 = document.getElementById('exportStatus');
-                let serverReady = false;
-                for (let attempt = 0; attempt < 10; attempt++) {
-                    try {
-                        const healthRes = await fetch(`${API}/health`, { method: 'GET' });
-                        if (healthRes.ok) { serverReady = true; break; }
-                    } catch (e) { /* server still booting */ }
-                    if (attempt === 0 && statusEl2) statusEl2.textContent = '⏳ Server warming up...';
-                    await new Promise(r => setTimeout(r, 2000));
-                }
-                if (!serverReady) throw new Error('Server did not respond after 20s. Please try again.');
-                if (statusEl2 && statusEl2.textContent === '⏳ Server warming up...') {
-                    statusEl2.textContent = '🎬 Processing...';
-                }
-                // ─────────────────────────────────────────────────────────────
+                // A RESUMED export (page was reloaded) already has its run id — the
+                // work never stopped server-side, so skip straight to polling.
+                if (!exp.exportId) {
+                    // ── Server warm-up guard ──────────────────────────────────────
+                    // After a deploy Render takes ~5s to boot. If the health check
+                    // fails we wait and retry silently rather than showing a 502 error.
+                    let serverReady = false;
+                    for (let attempt = 0; attempt < 10; attempt++) {
+                        try {
+                            const healthRes = await fetch(`${API}/health`, { method: 'GET' });
+                            if (healthRes.ok) { serverReady = true; break; }
+                        } catch (e) { /* server still booting */ }
+                        if (attempt === 0) setExportStatus(exp, '⏳ Server warming up...');
+                        await new Promise(r => setTimeout(r, 2000));
+                    }
+                    if (!serverReady) throw new Error('Server did not respond after 20s. Please try again.');
+                    // ─────────────────────────────────────────────────────────────
 
-                // v850 — the export is now a DURABLE SERVER-SIDE JOB. The POST
-                // returns 202 immediately with an export_id; the work runs
-                // detached from the request. If Render redeploys mid-export
-                // (auto-deploy fires on every push to main) the next container
-                // re-runs it — attempts bumps and we just keep polling. The old
-                // v701v R2-file poll is gone: it could not tell "still working"
-                // apart from "the container died", so a deploy always ended in
-                // "Export polling exceeded the time cap".
-                const _queueRes = await fetch(`${API}/jobs/${jobId}/export-final`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(settings),
-                });
-                if (!_queueRes.ok) {
-                    let _qErr = 'Export could not be queued';
-                    try { _qErr = (await _queueRes.json()).detail || _qErr; }
-                    catch (e) { _qErr = `HTTP ${_queueRes.status}: ${_queueRes.statusText}`; }
-                    throw new Error(_qErr);
-                }
-                const _queued = await _queueRes.json();
-                const _exportId = _queued.export_id;
-                console.log(`[Export/v850] queued export_id=${_exportId} state=${_queued.state}`);
+                    // v850 — the export is now a DURABLE SERVER-SIDE JOB. The POST
+                    // returns 202 immediately with an export_id; the work runs
+                    // detached from the request. If Render redeploys mid-export
+                    // (auto-deploy fires on every push to main) the next container
+                    // re-runs it — attempts bumps and we just keep polling. The old
+                    // v701v R2-file poll is gone: it could not tell "still working"
+                    // apart from "the container died", so a deploy always ended in
+                    // "Export polling exceeded the time cap".
+                    const _queueRes = await fetch(`${API}/jobs/${jobId}/export-final`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(settings),
+                    });
+                    if (!_queueRes.ok) {
+                        let _qErr = 'Export could not be queued';
+                        try { _qErr = (await _queueRes.json()).detail || _qErr; }
+                        catch (e) { _qErr = `HTTP ${_queueRes.status}: ${_queueRes.statusText}`; }
+                        throw new Error(_qErr);
+                    }
+                    const _queued = await _queueRes.json();
+                    const _newId = _queued.export_id;
 
-                const _statusEl = document.getElementById('exportStatusText');
+                    // v855 — the POST is idempotent: an active run for this job comes
+                    // back as ITSELF. If we are already polling that run (e.g. it was
+                    // resumed after a reload), do not start a second poll for it.
+                    const _already = activeExports.get(_newId);
+                    if (_already && _already !== exp) {
+                        activeExports.delete(exp.key);
+                        stopExportTimers(exp);
+                        removeExportRow(exp.key);
+                        flashExportRow(_already.key);
+                        showToast('This export is already running', '#6366f1');
+                        return;
+                    }
+
+                    const _pendingKey = exp.key;
+                    activeExports.delete(_pendingKey);
+                    exp.exportId = _newId;
+                    exp.key = _newId;
+                    activeExports.set(exp.key, exp);
+                    exp.row = rekeyExportRow(_pendingKey, exp);
+                    _rememberActiveExport(exp);   // reload survival — persisted the moment the 202 lands
+                    console.log(`[Export/v855] queued export_id=${exp.exportId} state=${_queued.state}`);
+                }
+
+                const _exportId = exp.exportId;
                 const _pollStart = Date.now();
                 const _pollMaxMs = 1800000;   // 30 min — a v698A dual-output run plus one deploy-restart
                 let _lastAttempt = 0;
@@ -14605,7 +14854,7 @@ Ambient: same kitchen room tone, soft pour sound.
                         // Network exception: the container is being replaced right
                         // now. NOT a failure — that is exactly what v850 survives.
                         console.log('[Export/v850] poll tick error (server restarting?):', _pollErr);
-                        if (_statusEl) _statusEl.textContent = '⏳ Server restarting — your export is saved and will resume...';
+                        setExportStatus(exp, '⏳ Server restarting — your export is saved and will resume...');
                         continue;
                     }
                     if (!_s) continue;                    // malformed payload — retry next tick
@@ -14619,10 +14868,13 @@ Ambient: same kitchen room tone, soft pour sound.
                     if (_s.state === 'failed') { throw new Error(_s.error || 'Export failed'); }
 
                     const _elapsed = ((Date.now() - _pollStart) / 1000).toFixed(0);
-                    if (_statusEl) {
-                        _statusEl.textContent = _s.state === 'queued'
-                            ? `⏳ Export queued — a deploy restarted it, re-running (attempt ${_s.attempts + 1})...`
-                            : `🎬 Processing (${_elapsed}s, attempt ${_s.attempts})...`;
+                    // v855 — the backend does not send a queue position, so we do NOT
+                    // invent one. "Queued" is all we honestly know.
+                    const _attemptTag = _s.attempts > 1 ? ` (attempt ${_s.attempts})` : '';
+                    if (_s.state === 'queued') {
+                        setExportStatus(exp, `⏳ Queued — waiting for the server to pick it up${_attemptTag}...`);
+                    } else {
+                        setExportStatus(exp, `🎬 Processing (${_elapsed}s, attempt ${_s.attempts})...`);
                     }
                 }
 
@@ -14635,8 +14887,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     status: 200, headers: { 'Content-Type': 'application/json' },
                 });
 
-                clearInterval(timerInterval);
-                clearInterval(stageInterval);
+                stopExportTimers(exp);
 
                 const result = await response.json();
                 console.log('[Export] Success:', result);
@@ -14646,11 +14897,9 @@ Ambient: same kitchen room tone, soft pour sound.
                 let vcResult = null;
                 if (exportSettings.voice_clone_enabled && exportSettings.vc_api_key && exportSettings.vc_voice_id) {
                     try {
-                        const statusEl = document.getElementById('exportStatusText');
-                        const progressBar = document.getElementById('exportProgressBar');
-                        if (statusEl) statusEl.textContent = '🎤 Cloning voice (ElevenLabs)... 30-60s';
-                        if (progressBar) progressBar.style.width = '60%';
-                        
+                        setExportStatus(exp, '🎤 Cloning voice (ElevenLabs)... 30-60s');
+                        setExportProgress(exp, 60);
+
                         const vcFormData = new FormData();
                         vcFormData.append('video_filename', result.filename);
                         vcFormData.append('provider', 'elevenlabs');
@@ -14675,24 +14924,25 @@ Ambient: same kitchen room tone, soft pour sound.
                         if (vcResponse.ok) {
                             vcResult = await vcResponse.json();
                             console.log('[Export+VC] Voice clone success:', vcResult);
-                            if (statusEl) statusEl.textContent = '✓ Voice cloned!';
-                            if (progressBar) progressBar.style.width = '100%';
+                            setExportStatus(exp, '✓ Voice cloned!');
+                            setExportProgress(exp, 100);
                         } else {
                             const vcErr = await vcResponse.json().catch(() => ({}));
                             const vcErrMsg = vcErr.detail || `HTTP ${vcResponse.status}`;
                             console.warn('[Export+VC] Voice clone failed:', vcErrMsg);
-                            // Update floating banner to show VC error
-                            if (statusEl) statusEl.textContent = '⚠ Voice clone failed';
+                            // Update this export's row to show the VC error
+                            setExportStatus(exp, '⚠ Voice clone failed');
                             showToast('⚠ Voice clone failed: ' + vcErrMsg, '#ef4444');
-                            // Show error card in exports section
-                            window._vcErrorMsg = vcErrMsg;
+                            // v855 — PER-EXPORT, not a single global: two exports
+                            // finishing together used to overwrite each other's error.
+                            exp.vcErrorMsg = vcErrMsg;
                         }
                     } catch (vcError) {
                         const vcErrMsg = vcError.name === 'AbortError' ? 'Voice clone timed out (5 min)' : vcError.message;
                         console.warn('[Export+VC] Voice clone error:', vcErrMsg);
-                        if (statusEl) statusEl.textContent = '⚠ Voice clone failed';
+                        setExportStatus(exp, '⚠ Voice clone failed');
                         showToast('⚠ Voice clone failed: ' + vcErrMsg, '#ef4444');
-                        window._vcErrorMsg = vcErrMsg;
+                        exp.vcErrorMsg = vcErrMsg;
                     }
                 }
                 
@@ -14748,9 +14998,8 @@ Ambient: same kitchen room tone, soft pour sound.
                 });
                 
                 // Show success UI (download already started above)
-                // Remove floating banner
-                const floatingDone = document.getElementById('floatingExportBanner');
-                if (floatingDone) floatingDone.remove();
+                // Remove ONLY this export's row — any other export keeps its own.
+                removeExportRow(exp.key);
 
                 // v701u — pull the freshly-uploaded exports (speaker + broll)
                 // from /list-outputs so both cards show up. Inline insert
@@ -14810,14 +15059,14 @@ Ambient: same kitchen room tone, soft pour sound.
                             </div>
                         `;
                         exportsContent.insertAdjacentHTML('afterbegin', vcCardHtml);
-                    } else if (!vcResult && window._vcErrorMsg && exportsContent) {
+                    } else if (!vcResult && exp.vcErrorMsg && exportsContent) {
                         // Show VC error card so user sees why it failed
                         const vcErrCardHtml = `
                             <div class="voice-swap-error" style="background:linear-gradient(90deg, #ef4444 0%, #dc2626 100%);padding:12px 16px;border-radius:var(--radius-md);margin-bottom:8px;">
                                 <div style="display:flex;align-items:center;justify-content:space-between;width:100%">
                                     <div style="flex:1;min-width:0;">
                                         <h3 style="margin:0;font-size:13px;color:white;">❌ Voice Clone Failed</h3>
-                                        <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">${window._vcErrorMsg}</p>
+                                        <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">${exp.vcErrorMsg}</p>
                                     </div>
                                     <div style="display:flex;gap:6px;align-items:center;margin-left:12px;">
                                         <button onclick="openVoiceSwapForFile('${jobId}', '${result.filename}')" style="padding:6px 10px;background:rgba(255,255,255,0.2);color:white;border:none;border-radius:var(--radius-sm);font-size:11px;cursor:pointer;display:flex;align-items:center;gap:4px;" title="Retry with standalone Voice Clone">🎤 Retry</button>
@@ -14827,15 +15076,14 @@ Ambient: same kitchen room tone, soft pour sound.
                             </div>
                         `;
                         exportsContent.insertAdjacentHTML('afterbegin', vcErrCardHtml);
-                        window._vcErrorMsg = null;
+                        exp.vcErrorMsg = null;
                     }
                 }
                 } // end selectedJobId === jobId guard
                 
             } catch (e) {
-                clearInterval(timerInterval);
-                clearInterval(stageInterval);
-                
+                stopExportTimers(exp);
+
                 // Check if export actually succeeded despite network error
                 // by trying to find the exported file
                 let exportSucceeded = false;
@@ -14859,22 +15107,22 @@ Ambient: same kitchen room tone, soft pour sound.
                             } catch (_lerr) {
                                 console.log('[Export] hiccup-path list refresh skipped:', _lerr);
                             }
-                            const floatingOk = document.getElementById('floatingExportBanner');
-                            if (floatingOk) {
-                                floatingOk.querySelector('div').style.background = 'var(--success)';
-                                floatingOk.querySelector('div').innerHTML = `
-                                    <div style="display:flex;align-items:center;justify-content:space-between;width:100%;padding:12px 16px;">
+                            const _okBody = exp.row?.querySelector('.export-row-body');
+                            if (_okBody) {
+                                _okBody.style.background = 'var(--success)';
+                                _okBody.innerHTML = `
+                                    <div style="display:flex;align-items:center;justify-content:space-between;width:100%;">
                                         <div>
                                             <h3 style="margin:0;font-size:14px;color:white;">✅ Export Complete!</h3>
                                             <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">
                                                 Server took longer than the browser waited. File is on disk.
                                             </p>
                                         </div>
-                                        <div style="display:flex;gap:6px;">
+                                        <div style="display:flex;gap:6px;flex-shrink:0;margin-left:8px;">
                                             <button onclick="downloadClip('${exportedFile.url}','${exportedFile.filename}')" style="padding:6px 12px;background:rgba(255,255,255,0.2);border:none;border-radius:var(--radius-sm);color:white;cursor:pointer;font-size:11px;">
                                                 📥 Download
                                             </button>
-                                            <button onclick="document.getElementById('floatingExportBanner')?.remove()" style="padding:6px 8px;background:rgba(255,255,255,0.2);border:none;border-radius:var(--radius-sm);color:white;cursor:pointer;font-size:11px;">✕</button>
+                                            <button onclick="removeExportRow('${exp.key}')" style="padding:6px 8px;background:rgba(255,255,255,0.2);border:none;border-radius:var(--radius-sm);color:white;cursor:pointer;font-size:11px;">✕</button>
                                         </div>
                                     </div>
                                 `;
@@ -14884,31 +15132,18 @@ Ambient: same kitchen room tone, soft pour sound.
                 } catch (checkErr) {
                     console.log('[Export] Could not check for exported file:', checkErr);
                 }
-                
+
                 if (!exportSucceeded) {
-                    const floatingErr = document.getElementById('floatingExportBanner');
-                    if (floatingErr) {
-                        floatingErr.querySelector('div').style.background = 'var(--error)';
-                        floatingErr.querySelector('div').innerHTML = `
-                            <div style="display:flex;align-items:center;justify-content:space-between;width:100%;padding:12px 16px;">
-                                <div>
-                                    <h3 style="margin:0;font-size:14px;color:white;">❌ Export Failed</h3>
-                                    <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">${e.message}</p>
-                                </div>
-                                <div style="display:flex;gap:6px;">
-                                    <button onclick="document.getElementById('floatingExportBanner')?.remove();exportFinalVideo('${jobId}')" style="padding:6px 12px;background:rgba(255,255,255,0.2);border:none;border-radius:var(--radius-sm);color:white;cursor:pointer;font-size:11px;">
-                                        Retry
-                                    </button>
-                                    <button onclick="document.getElementById('floatingExportBanner')?.remove()" style="padding:6px 8px;background:rgba(255,255,255,0.2);border:none;border-radius:var(--radius-sm);color:white;cursor:pointer;font-size:11px;">✕</button>
-                                </div>
-                            </div>
-                        `;
-                        // Auto-dismiss after 10s
-                        setTimeout(() => document.getElementById('floatingExportBanner')?.remove(), 10000);
-                    }
+                    renderExportFailure(exp, e.message);
                 }
             } finally {
-                isExporting = false; // Always release lock
+                // v855 — the run is over (done / failed / gave up waiting). Drop it
+                // from the live registry AND from localStorage so a reload does not
+                // resurrect a finished export. The ROW is not touched here: the
+                // success path already removed it, and a failure row stays for 10s.
+                stopExportTimers(exp);
+                activeExports.delete(exp.key);
+                _forgetActiveExport(exp.exportId);
             }
         }
         
