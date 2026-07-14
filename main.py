@@ -5123,10 +5123,11 @@ def diag_identify(
         if near:
             jobs = near
 
-    # Alignment window. A cut of N seconds shifts the audio by N seconds, so the
-    # correct alignment sits OUTSIDE a narrow window and the true match scores as
-    # noise. Frames are 25ms.
-    max_lag = int(round((req.lag_s if req.lag_s is not None else 1.0) / 0.025))
+    # Alignment window. None => envelope_similarity DERIVES it from the length
+    # difference, which is exactly how much was trimmed. Passing an explicit
+    # window here would override that derivation and reintroduce the very bug
+    # this endpoint exists to expose. Only set it to probe a specific value.
+    max_lag = (int(round(req.lag_s / 0.025)) if req.lag_s is not None else None)
 
     scored = []
     for j in jobs:
