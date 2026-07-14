@@ -76,15 +76,21 @@ def _download_and_extract_audio(direct_video_url: str, work_dir: str) -> tuple:
     """Downloads the direct video URL + extracts mono 16k WAV.
 
     direct_video_url MUST be a fully-signed HikerAPI/fbcdn URL (not the
-    /reel/ permalink — that requires auth). Returns (wav_path, error_msg)
-    where wav_path is None on failure and error_msg explains why."""
+    /reel/ permalink — that requires auth). Returns (wav_path, mp4_path,
+    error_msg); wav_path is None on failure and error_msg explains why.
+
+    v855 — the mp4 path comes back too: the matcher needs the reel's OWN media
+    evidence (loudness fingerprint + true runtime), and here is the one moment
+    the file is on disk. IG video_urls expire, so re-downloading it later is not
+    a given.
+    """
     if not direct_video_url:
-        return (None, "no video_url in DB")
+        return (None, None, "no video_url in DB")
     mp4 = os.path.join(work_dir, "ig_video.mp4")
     try:
         with requests.get(direct_video_url, stream=True, timeout=60) as r:
             if r.status_code != 200:
-                return (None, f"download HTTP {r.status_code}")
+                return (None, None, f"download HTTP {r.status_code}")
             ctype = r.headers.get("content-type", "")
             with open(mp4, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 64):
@@ -93,9 +99,9 @@ def _download_and_extract_audio(direct_video_url: str, work_dir: str) -> tuple:
         size = os.path.getsize(mp4) if os.path.exists(mp4) else 0
         print(f"[ig-transcribe] downloaded {size}B content-type={ctype}", flush=True)
     except Exception as e:
-        return (None, f"download exception: {type(e).__name__}: {str(e)[:120]}")
+        return (None, None, f"download exception: {type(e).__name__}: {str(e)[:120]}")
     if not os.path.exists(mp4) or os.path.getsize(mp4) < 1024:
-        return (None, f"downloaded file too small ({os.path.getsize(mp4) if os.path.exists(mp4) else 0}B)")
+        return (None, None, f"downloaded file too small ({os.path.getsize(mp4) if os.path.exists(mp4) else 0}B)")
     wav = os.path.join(work_dir, "ig_audio.wav")
     try:
         result = subprocess.run(
@@ -105,36 +111,77 @@ def _download_and_extract_audio(direct_video_url: str, work_dir: str) -> tuple:
         )
         if result.returncode != 0:
             stderr_tail = (result.stderr or "")[-300:]
-            return (None, f"ffmpeg rc={result.returncode}: {stderr_tail}")
+            return (None, mp4, f"ffmpeg rc={result.returncode}: {stderr_tail}")
     except FileNotFoundError:
-        return (None, "ffmpeg binary not found on PATH")
+        return (None, mp4, "ffmpeg binary not found on PATH")
     except Exception as e:
-        return (None, f"ffmpeg exception: {type(e).__name__}: {str(e)[:120]}")
-    return (wav, None)
+        return (None, mp4, f"ffmpeg exception: {type(e).__name__}: {str(e)[:120]}")
+    return (wav, mp4, None)
+
+
+def fingerprint_downloaded_media(video, media_path, db) -> None:
+    """v855 — stamp a video row with the media evidence of the file we just got.
+
+    Shared by all three watchers (IG / local / drive): the posted reel or the
+    uploaded export is the ONLY copy of the render we can measure, and it is on
+    disk exactly once — during transcription.
+
+    A fingerprint failure must NEVER break transcription: the transcript is still
+    useful, the match just falls back to a manual pick. audio_fp_at is stamped on
+    every attempt (success or not) so a dead url is not retried forever; audio_fp
+    itself is only written on success, so "" never masquerades as evidence.
+    """
+    try:
+        from audio_fingerprint import fingerprint_media
+        from export_probe import probe_duration
+        if not media_path or not os.path.exists(media_path):
+            return
+        if not video.audio_fp:
+            blob = fingerprint_media(media_path)
+            if blob:
+                video.audio_fp = blob
+            video.audio_fp_at = datetime.utcnow()
+        if video.duration_s is None:
+            dur = probe_duration(media_path)
+            if dur is not None:
+                video.duration_s = dur
+        db.commit()
+        print(
+            f"[media-fp] video={getattr(video, 'shortcode', None) or getattr(video, 'id', '?')} "
+            f"fp={'yes' if video.audio_fp else 'no'} dur={video.duration_s}",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"[media-fp] fingerprint failed: {type(e).__name__}: {str(e)[:160]}", flush=True)
 
 
 def _maybe_auto_match(video, account, db: Session) -> None:
-    """After transcription, score against awaiting_finishing jobs and auto-link
-    the winner (advancing it to published) when the margin gate says the match
-    is confident. Ambiguous / low-confidence videos stay surfaced in the manual
-    `/suggestions` UI for operator confirmation.
+    """After transcription: TEXT RANKS, EVIDENCE DECIDES.
 
-    v853: uses the CANONICAL matching stack, same as the local watcher — the
-    Prompt-B-aware, final-cut-aware `_bulk_dialogue_map` (ONE query for the
-    whole pool) + `rank_tfidf` + the `auto_pick` HIGH/MARGIN gate. It used to
-    run the char-level `best_matches` over a private `_full_dialogue` N+1,
-    which scored near-duplicate scripts at ~1.000 against the WRONG twin and
-    confidently published it.
+    v855 — this used to auto-publish on the TEXT ranking alone (rank_tfidf +
+    the HIGH/MARGIN gate). That is what produced the wrong links we spent a day
+    undoing: ~787 jobs, many sharing a script VERBATIM — on the 14 disputed
+    reels the top-1 and top-2 scores came out EXACTLY equal, so the "margin"
+    the gate trusted was noise.
+
+    The words now only NARROW the field. The decision is made by the MEDIA:
+    the export's runtime and its loudness envelope, compared against the reel's
+    (see instagram_match.evidence_pick — thresholds measured on production).
+
+      * evidence decides -> auto-match THAT job, even if the text disagreed.
+        The media is the ground truth; the text is a hint.
+      * evidence does not decide -> DO NOT AUTO-PUBLISH. It goes to the manual
+        suggestions popover. Abstaining is correct behavior — an unlinked reel
+        costs one click, a wrongly-published one costs a day.
     """
     try:
         from models import Job
         import instagram_match as _ig_match
+        from export_probe import evidence_candidates
         # Imported INSIDE the function on purpose: local_transcribe imports this
         # module for the cached Whisper model, so a module-scope import here
         # would close the cycle.
-        from local_transcribe import (
-            _bulk_dialogue_map, _MATCH_HIGH, _MATCH_MARGIN, _MATCH_IDF_POWER,
-        )
+        from local_transcribe import _bulk_dialogue_map, _MATCH_IDF_POWER
         if not video.transcription:
             return
         # Candidate pool = any COMPLETED, unlinked, non-archived job. Not
@@ -151,8 +198,17 @@ def _maybe_auto_match(video, account, db: Session) -> None:
             )
             .all()
         )
+        # v855 RECENCY WINDOW — a job created after the reel was posted cannot be
+        # its source, and one built a season earlier is not what the operator just
+        # posted either (measured max job age at post time: 20.99 days). 30 days
+        # is that with headroom. A smaller pool is also a cheaper waveform search.
+        candidates = [
+            j for j in candidates
+            if _ig_match.within_recency_window(j.created_at, video.posted_at)
+        ]
         if not candidates:
-            print(f"[ig-auto] shortcode={video.shortcode} no awaiting_finishing candidates", flush=True)
+            print(f"[ig-auto] shortcode={video.shortcode} decision=MANUAL source=none "
+                  f"reason=empty-pool pool=0", flush=True)
             return
 
         dialogue_map = _bulk_dialogue_map(db, [j.id for j in candidates])
@@ -160,26 +216,30 @@ def _maybe_auto_match(video, account, db: Session) -> None:
         ranked = _ig_match.rank_tfidf(
             video.transcription, cand_pairs, idf_power=_MATCH_IDF_POWER,
         )
-        if not ranked:
-            print(
-                f"[ig-auto] shortcode={video.shortcode} no ranking | "
-                f"pool={len(candidates)} tlen={len(video.transcription or '')}",
-                flush=True,
-            )
-            return
-        s1 = ranked[0]["score"]
-        s2 = ranked[1]["score"] if len(ranked) > 1 else 0.0
-        pick_id = _ig_match.auto_pick(ranked, _MATCH_HIGH, _MATCH_MARGIN)
+        # The text ranking's only job now: name the shortlist worth PROBING. A
+        # brand-new job has no cached duration/fingerprint, and probing every
+        # candidate would download the whole pool from R2.
+        shortlist = [r["job_id"] for r in ranked[:6]]
+        cands = evidence_candidates(db, candidates, priority_ids=shortlist)
+        ev = _ig_match.evidence_pick(video.duration_s, video.audio_fp, cands)
+
+        pick_id = ev["job_id"]
+        reason = (
+            "conflict" if ev["conflict"]
+            else ("" if pick_id else ("no-reel-fp" if not video.audio_fp else "no-evidence"))
+        )
+        text_top = ranked[0]["job_id"] if ranked else None
         print(
-            f"[ig-auto] shortcode={video.shortcode} top_job={str(ranked[0]['job_id'])[:8]} "
-            f"s1={s1:.3f} s2={s2:.3f} margin={s1 - s2:.3f} "
-            f"decision={'AUTO' if pick_id else 'MANUAL'} pool={len(candidates)} "
-            f"tlen={len(video.transcription or '')}",
+            f"[ig-auto] shortcode={video.shortcode} "
+            f"decision={'AUTO' if pick_id else 'MANUAL'} "
+            f"source={ev['source'] or 'none'} job={str(pick_id or '-')[:8]} "
+            f"sim={ev['similarity']} dur_delta={ev['dur_delta']} pool={len(candidates)} "
+            f"reel_dur={video.duration_s} text_top={str(text_top or '-')[:8]} "
+            f"text_agrees={pick_id == text_top if pick_id else None}"
+            + (f" reason={reason}" if reason else ""),
             flush=True,
         )
         if not pick_id:
-            # Ambiguous (near-duplicate twins) or low-confidence -> leave the
-            # video unmatched for a manual pick instead of a wrong auto-publish.
             return
         job = next((j for j in candidates if j.id == pick_id), None)
         if job is None:
@@ -194,7 +254,8 @@ def _maybe_auto_match(video, account, db: Session) -> None:
         if job.published_at is None:
             job.published_at = datetime.utcnow()
         db.commit()
-        print(f"[ig-auto] AUTO-MATCH shortcode={video.shortcode} -> job={str(job.id)[:8]} score={s1:.3f}", flush=True)
+        print(f"[ig-auto] AUTO-MATCH shortcode={video.shortcode} -> job={str(job.id)[:8]} "
+              f"via={ev['source']} sim={ev['similarity']} dur_delta={ev['dur_delta']}", flush=True)
     except Exception as exc:
         print(f"[ig-auto] auto-match error on shortcode={video.shortcode}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 
@@ -225,17 +286,18 @@ def transcribe_one(video, db: Session) -> None:
             return
         with tempfile.TemporaryDirectory() as tmp:
             wav = None
+            mp4 = None
             err = "no video_url in DB"
             if video.video_url:
                 print(f"[ig-transcribe] shortcode={video.shortcode} attempt stored URL", flush=True)
-                wav, err = _download_and_extract_audio(video.video_url, tmp)
+                wav, mp4, err = _download_and_extract_audio(video.video_url, tmp)
             if not wav:
                 print(f"[ig-transcribe] shortcode={video.shortcode} stored URL failed ({err}) — refetching", flush=True)
                 fresh = _fetch_fresh_video_url(video, account)
                 if fresh:
                     video.video_url = fresh
                     db.commit()
-                    wav, err = _download_and_extract_audio(fresh, tmp)
+                    wav, mp4, err = _download_and_extract_audio(fresh, tmp)
                     if not wav:
                         print(f"[ig-transcribe] shortcode={video.shortcode} fresh URL also failed ({err})", flush=True)
                 else:
@@ -245,6 +307,10 @@ def transcribe_one(video, db: Session) -> None:
                 video.transcription_error = (err or "unknown")[:500]
                 db.commit()
                 return
+            # v855 — the reel's own media evidence, taken while the mp4 is here.
+            # The matcher CANNOT decide without it, and IG video_urls expire, so
+            # "we'll fetch it later" is not a plan.
+            fingerprint_downloaded_media(video, mp4, db)
             print(f"[ig-transcribe] shortcode={video.shortcode} starting Whisper", flush=True)
             text = _transcribe_audio(wav)
             print(f"[ig-transcribe] shortcode={video.shortcode} Whisper done ({len(text)}c)", flush=True)

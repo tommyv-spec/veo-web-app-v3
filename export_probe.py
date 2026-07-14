@@ -11,6 +11,7 @@ self-heals every job that already exists.
 import os
 import subprocess
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +51,124 @@ def newest_export_key(storage, job_id):
     # final_export_<timestamp>_<hash>.mp4 — timestamp-prefixed, so a lexical sort
     # puts the newest export last.
     return sorted(finals)[-1]
+
+
+# How many jobs a single match is allowed to probe from R2. Each probe is a
+# download + ffmpeg, and they CACHE on the Job row — so the cap only bounds the
+# FIRST match that meets a brand-new job. Six covers the text-ranked shortlist;
+# probing the whole pool inside a web request is what times the worker out.
+LAZY_PROBE_CAP = 6
+
+# ...and how LONG they may take in total. A COUNT cap is not a TIME cap: one
+# stalled R2 leg can hold a single probe for minutes (botocore read timeout ×
+# adaptive retries, then ffmpeg/ffprobe subprocess timeouts), so six probes can
+# still blow past gunicorn's --timeout 300 and get the worker SIGABRT'd — the
+# exact shape of the 2026-07-06 outage (see local_transcribe._bulk_dialogue_map).
+# Stopping early is SAFE: an un-probed candidate carries NULL duration/fp, and
+# evidence_pick reads a NULL as an abstention, so the match falls back to a
+# manual pick instead of guessing.
+LAZY_PROBE_BUDGET_S = float(os.environ.get("LAZY_PROBE_BUDGET_S", "20"))
+
+
+def evidence_candidates(db, jobs, priority_ids=(), max_probe=LAZY_PROBE_CAP,
+                        budget_s=LAZY_PROBE_BUDGET_S):
+    """[{job_id, export_duration_s, export_audio_fp}] — the input to evidence_pick.
+
+    A brand-new job has NULL media columns (nothing has looked at its export
+    yet), so the top `max_probe` candidates named by `priority_ids` (the text
+    ranking's shortlist) are probed lazily here. Everything else is reported
+    with whatever is already cached — a NULL simply means "this candidate brings
+    no evidence", which evidence_pick treats as an abstention, never a verdict.
+
+    Two bounds, both needed: `max_probe` (how many) and `budget_s` (how long,
+    wall-clock, checked BEFORE each probe). Pass budget_s=None to disable the
+    clock — only ever appropriate off the request path (e.g. an offline
+    backfill). A caller that already runs under its own wall-clock guard should
+    pass its REMAINING budget down, or its guard is a lie.
+    """
+    by_id = {j.id: j for j in jobs}
+    probed = 0
+    skipped_budget = 0
+    t0 = time.monotonic()
+    for jid in priority_ids:
+        if probed >= max_probe:
+            break
+        j = by_id.get(jid)
+        if j is None:
+            continue
+        needs_fp = j.export_audio_fp is None
+        needs_dur = j.export_duration_s is None and j.export_probed_at is None
+        if not (needs_fp or needs_dur):
+            continue  # already cached — costs nothing, not a probe
+        if budget_s is not None and (time.monotonic() - t0) >= budget_s:
+            skipped_budget += 1
+            continue
+        if needs_fp:
+            # Fills export_duration_s too while the mp4 is on disk — one download.
+            ensure_export_fingerprint(db, j)
+        else:
+            ensure_export_duration(db, j)
+        probed += 1
+    if skipped_budget:
+        print(
+            f"[export-probe] budget {budget_s}s exhausted after {probed} probe(s) "
+            f"({time.monotonic() - t0:.1f}s) — {skipped_budget} candidate(s) left "
+            f"un-probed; they abstain",
+            flush=True,
+        )
+    return [
+        {
+            "job_id": j.id,
+            "export_duration_s": j.export_duration_s,
+            "export_audio_fp": j.export_audio_fp,
+        }
+        for j in jobs
+    ]
+
+
+def ensure_export_fingerprint(db, job):
+    """Loudness-envelope fingerprint of the job's final export, computed at most
+    once per job. Returns the base64 blob, or "" when there is nothing to print.
+
+    v855 — THE shared helper. The diag backfill endpoint, the IG watcher, the
+    local/drive watchers and the manual suggestions popover all need the same
+    answer ("what does this job's export SOUND like"), and four copies of the
+    R2-download-then-ffmpeg dance would drift the day export naming changes.
+
+    Sentinel, same shape as export_probed_at: NULL means "never looked", ""
+    means "looked, nothing usable" — so a job with no reachable export is never
+    re-downloaded on every future match.
+    """
+    if job.export_audio_fp is not None:
+        return job.export_audio_fp
+    from audio_fingerprint import fingerprint_media
+    from backends.storage import is_storage_configured, get_storage
+    if not is_storage_configured():
+        return ""   # not a fact about the job — do NOT write the "" sentinel
+    blob = ""
+    try:
+        storage = get_storage()
+        key = newest_export_key(storage, job.id)
+        if key:
+            with tempfile.TemporaryDirectory() as td:
+                local = str(Path(td) / "export.mp4")
+                storage.download_file(key, local)
+                blob = fingerprint_media(local)
+                # The export is already on disk and ffprobe is cheap — fill the
+                # duration too rather than paying for the same download twice.
+                if job.export_duration_s is None:
+                    dur = probe_duration(local)
+                    if dur is not None:
+                        job.export_duration_s = dur
+                        job.export_probed_at = datetime.utcnow()
+        else:
+            print(f"[audio-fp] job={job.id[:8]} no final export in R2", flush=True)
+    except Exception as e:
+        print(f"[audio-fp] job={job.id[:8]} export fp failed: {e}", flush=True)
+        blob = ""
+    job.export_audio_fp = blob   # "" on failure -> not NULL -> never re-downloaded
+    db.commit()
+    return blob
 
 
 def ensure_export_duration(db, job):

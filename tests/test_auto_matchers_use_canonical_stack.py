@@ -48,13 +48,41 @@ def test_auto_matchers_use_the_canonical_dialogue_builder():
         assert "_bulk_dialogue_map" in src, f"{name} does not use _bulk_dialogue_map"
 
 
-def test_auto_matchers_use_the_margin_gate():
+def test_auto_matchers_decide_on_evidence_not_on_text():
+    """v855 — TEXT RANKS, EVIDENCE DECIDES.
+
+    The HIGH/MARGIN gate over the TF-IDF ranking is NOT allowed to publish any
+    more: many of the ~787 jobs share a script verbatim, and on the 14 disputed
+    reels the top-1 and top-2 text scores came out EXACTLY equal — so its
+    "margin" was noise, and it auto-published the wrong twin.
+
+    rank_tfidf survives, but only to name the shortlist worth probing. The pick
+    itself comes from the media (evidence_pick), or there is no pick.
+    """
     for name, path in _AUTO_MATCHERS.items():
         src = _src(path)
-        assert "auto_pick(" in src, f"{name} does not use auto_pick"
         assert "rank_tfidf(" in src, f"{name} does not use rank_tfidf"
-        assert "_MATCH_HIGH" in src, f"{name} does not use _MATCH_HIGH"
-        assert "_MATCH_MARGIN" in src, f"{name} does not use _MATCH_MARGIN"
+        assert "evidence_pick(" in src, f"{name} does not decide on evidence_pick"
+        assert "evidence_candidates(" in src, f"{name} does not build evidence candidates"
+        assert "auto_pick(" not in src, (
+            f"{name} still auto-publishes on the TEXT gate — that is the bug v855 removes"
+        )
+
+
+def test_auto_matchers_window_the_candidate_pool():
+    """A job built after the post, or a month before it, cannot be its source."""
+    for name, path in _AUTO_MATCHERS.items():
+        src = _src(path)
+        assert "within_recency_window(" in src, f"{name} does not window the pool"
+
+
+def test_auto_matchers_fingerprint_the_media_they_download():
+    """The evidence needs the video's OWN fingerprint, and the file is on disk
+    exactly once — during transcription. IG urls expire; a later fetch is not
+    guaranteed."""
+    for name, path in _AUTO_MATCHERS.items():
+        src = _src(path)
+        assert "fingerprint" in src.lower(), f"{name} never fingerprints its media"
 
 
 def test_auto_matchers_drop_the_char_level_threshold():
@@ -65,13 +93,35 @@ def test_auto_matchers_drop_the_char_level_threshold():
 
 
 def test_auto_matchers_log_the_decision():
-    """The operator calibrates the gate from the Render log — the decision line
-    must carry the scores, the margin, the verdict and the pool size."""
+    """The operator reads the Render log to see WHY a reel did or did not link —
+    the line must say what decided it, on what evidence, out of how big a pool."""
     for marker, path in (("[ig-auto]", _IG), ("[drive-auto]", _DRIVE)):
         src = _src(path)
         assert marker in src, f"{path} missing the {marker} diagnostic prefix"
-        for field in ("s1=", "s2=", "margin=", "decision=", "pool="):
+        for field in ("decision=", "source=", "sim=", "dur_delta=", "pool="):
             assert field in src, f"{path} decision log missing {field}"
+
+
+def test_watcher_media_columns_exist_on_the_models():
+    """LocalVideo/DriveVideo carry the same media evidence as InstagramVideo —
+    without the columns the watchers have nothing to decide on."""
+    import models
+    for model in (models.LocalVideo, models.DriveVideo, models.InstagramVideo):
+        cols = model.__table__.columns.keys()
+        for c in ("duration_s", "audio_fp", "audio_fp_at"):
+            assert c in cols, f"{model.__name__} is missing {c}"
+
+
+def test_watcher_media_columns_are_migrated_on_both_backends():
+    """A column that exists only in the ORM is a 500 in production. Postgres AND
+    sqlite migration lists both have to know about it."""
+    src = _src(os.path.join(_CODE, "models.py"))
+    for table in ("local_videos", "drive_videos"):
+        for col in ("duration_s", "audio_fp", "audio_fp_at"):
+            assert f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col}" in src, \
+                f"postgres migration missing {table}.{col}"
+            assert f"ALTER TABLE {table} ADD COLUMN {col}" in src, \
+                f"sqlite migration missing {table}.{col}"
 
 
 def test_no_import_cycle_local_transcribe_back_into_the_auto_matchers():

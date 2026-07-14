@@ -15572,3 +15572,44 @@ This is what Flow's own UI does — the HAR ceiling noted at the `--parallel` fl
 The submit is still **blocking** — `_submit_one_job` returns only after the batch renders. Nodes remain serial with respect to each other; `--parallel` is still inert on this path. Making the submit non-blocking (fetches into a `window.__kvImg` registry, main loop harvests) is the follow-up, and it needs a **global cap on in-flight POSTs (~5-6)**, not a per-node slot count — 3 slots × 4 variants = 12 simultaneous POSTs would blow past the HAR ceiling and buy `PUBLIC_ERROR_UNUSUAL_ACTIVITY`.
 
 Expected: ~76-98s per x4 node → **~19-22s**. Tests: `code/test_v854_parallel_variants.py` (8 cases — one round-trip, distinct seeds, one cooldown, per-slot mint failure, partial success, outcome buckets, classifier, bad-shape degradation).
+
+
+## v856 — Reference uploads are cached by content hash (and finally show up in the timing line)
+
+**Operator 2026-07-14**, live log after v854 shipped. v854 worked — 4/4 captured, no unusual-activity, `fetch` dropped from ~71s to ~41-51s — but it also exposed a bigger cost that had been invisible the whole time.
+
+### The measurement that gave it away
+Node 2928 (3 refs, v854):
+```
+[timing] node 2928: cooldown=4.1s mint=0.8s(4x) fetch=41.4s(4x: ok=4) submit_wall=98.4s
+```
+`4.1 + 0.8 + 41.4 = 46.3s`, but `submit_wall = 98.4s`. **~52 seconds unaccounted for.**
+
+The gap was the reference uploads. `upload_image` calls `_fa_api_fetch` directly and never incremented the `fetch` bucket, so the single most expensive phase of a multi-ref node never appeared in the one line we use to reason about latency. **If it isn't in the timing line, we're guessing.**
+
+What was in that 52s, straight from the log:
+```
+⬇ the_main_character__ff7bf1e7.png   (6800 KB)
+⬇ the_korella_saffron__aa63f326.webp  (717 KB)
+⬇ chain_from_image_6__8f02e27e.png    (602 KB)
+```
+A 6.8 MB PNG, base64'd to ~9 MB of JSON, pushed through `page.evaluate` — **on every node**. And it's the same file every time: the hash `ff7bf1e7` is right there in the staged filename, identical across nodes 2920 / 2928 / 2930. We re-uploaded bytes Flow already had.
+
+### What shipped
+**Cache**: `(project_id, sha256(bytes)) → media_id`, an `OrderedDict` on the page object (`_fa_ref_cache` / `_fa_ref_cache_put` / `_fa_ref_cache_drop_project`), LRU-capped at 64. Within a batch the persona ref now uploads **once**.
+
+**Keyed by project on purpose.** Flow scopes uploaded media to a project (`uploadImage` carries `projectId` in `clientContext`), so a project switch must legitimately re-upload. A global hash→id cache would hand project B a media_id minted for project A.
+
+**Lives on the page on purpose.** A golden relaunch builds a new page, so the cache dies with it — a fresh session must never reuse media_ids minted by a blocked one.
+
+**Stale-id safety valve.** If a node captures ZERO variants, and the failure is neither an account block nor a content reject, and the node reused cached refs → drop that project's cached refs so the next node re-uploads. Without this, one garbage-collected media_id would poison every subsequent node in the batch. Only fires on a node that already failed, so it costs nothing on the happy path.
+
+**Timing**: `upload=Xs(Nx, YMB, cached=M)` added to the `[timing]` line, plus `note_cached_upload()`. The phase is now visible.
+
+### Test-pollution note (bit us once, will bit again)
+`test_ultra_check.py:14` does `m.time.sleep = lambda *a, **k: None` — that stubs `time.sleep` on the **shared** `time` module for the rest of the pytest process. Any test that asserts on wall-clock passes in isolation and fails in a full-suite run depending on order. v854's cooldown test hit exactly this; it now asserts the cooldown BUDGET (`_t["cooldown"]`, the seconds `_cooldown()` decided to wait) instead of elapsed time. **Don't write wall-clock assertions in this suite.**
+
+### The ceiling v854 actually hit (recorded so nobody re-litigates it)
+Firing the 4 POSTs in parallel bought ~1.5×, not the 4× predicted. Flow **accepts** 4 concurrent `batchGenerateImages` POSTs but does **not render them concurrently** — they queue server-side. So the parallel-submit lever is spent; the remaining wins are in what we send (refs) and how many nodes are in flight, not in how hard we fire variants.
+
+Expected after v856: a 3-ref node ~98s → **~45s**. Tests: `code/test_v856_ref_cache.py` (8 cases — persistence, project scoping, LRU eviction, hot-ref survival, per-project drop, graceful disable, no-op drop, timing line).

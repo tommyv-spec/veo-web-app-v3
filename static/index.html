@@ -5625,7 +5625,17 @@ Ambient: same kitchen room tone, soft pour sound.
             // v852 — say out loud how much to trust this. "ambiguous" means two
             // near-duplicate scripts scored within noise of each other: the words
             // genuinely cannot separate them, so the operator must.
+            // v855 — "proven" is not a score, it is EVIDENCE: the reel's runtime
+            // and/or its loudness envelope match this job's exported mp4. The
+            // words only ranked the list; the media identified the render. That
+            // job is forced to the top row.
+            const ev = data.evidence || {};
+            const evBits = [
+              ev.similarity != null ? `audio ${Math.round(ev.similarity * 100)}%` : null,
+              ev.dur_delta != null ? `length ±${ev.dur_delta.toFixed(2)}s` : null,
+            ].filter(Boolean).join(", ");
             const BANNER = {
+              proven:    ["#10b981", `✓✓ PROVEN — the audio/length matches this job's export.${evBits ? ` (${evBits})` : ""}`],
               ambiguous: ["#f59e0b", "⚠ Too close to call — two builds score nearly the same. Check before picking."],
               weak:      ["#ef4444", "⚠ Weak match — nothing scored well. The right job may not be in the pool."],
               confident: ["#10b981", "✓ Clear winner."],
@@ -5633,11 +5643,12 @@ Ambient: same kitchen room tone, soft pour sound.
             const banner = BANNER
               ? `<div style="font-size:10px;color:${BANNER[0]};padding:3px 4px 5px;line-height:1.3;">${BANNER[1]}</div>`
               : "";
+            const strongTop = data.verdict === "confident" || data.verdict === "proven";
             pop.innerHTML = banner + suggestions.map((s, i) =>
               `<div class="ig-suggestion-row" data-job-id="${escapeHtml(s.job_id)}" data-video-id="${videoId}"
-                    style="padding:3px 4px;cursor:pointer;${i === 0 && data.verdict === "confident" ? "font-weight:600;" : ""}">
+                    style="padding:3px 4px;cursor:pointer;${i === 0 && strongTop ? "font-weight:600;" : ""}">
                 <span>${escapeHtml((s.slug || s.job_id).slice(0, 50))}</span>
-                <span style="float:right;color:#888;">${Math.round(s.score * 100)}%</span>
+                <span style="float:right;color:#888;">${i === 0 && data.verdict === "proven" ? "✓✓ " : ""}${Math.round(s.score * 100)}%</span>
               </div>`
             ).join("");
             const rect = matchBtn.getBoundingClientRect();

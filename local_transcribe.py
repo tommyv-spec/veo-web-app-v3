@@ -22,7 +22,10 @@ from sqlalchemy.orm import Session
 
 # Reuse instagram_transcribe's cached Whisper model — same process, single
 # load. faster-whisper is heavyweight so this matters for cold-start cost.
+# fingerprint_downloaded_media (v855) is shared for the same reason: one
+# definition of "stamp this row with the media evidence of the file on disk".
 from instagram_transcribe import _model as _whisper_model
+from instagram_transcribe import fingerprint_downloaded_media as _fingerprint_media
 
 # v822.4 matcher gate (TF-IDF cosine + margin). Env-tunable WITHOUT a deploy so
 # the operator can calibrate from the `... s1=/s2=/margin=/decision=` log lines.
@@ -183,17 +186,31 @@ def _advance_job_to_published(video, job, score, db) -> None:
     print(f"[local] AUTO-MATCH hash={video.file_hash[:8]} -> job={str(job.id)[:8]} score={score:.3f}", flush=True)
 
 
-def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None) -> None:
-    """Score the transcript against awaiting_finishing jobs. On match, advance.
+def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None,
+                      budget_s=None) -> None:
+    """TEXT RANKS, EVIDENCE DECIDES (v855). On proven evidence, advance.
 
-    candidates / dialogue_map may be supplied by the sweep so a batch of
-    videos shares ONE candidate load + ONE bulk-dialogue query (v822.3).
-    When omitted (upload path) they are built here — still ONE bulk query,
-    never the old per-job N+1.
+    The uploaded file IS the export — not a re-encoded reel — so the media
+    evidence here is the strongest we ever get: same bytes, same loudness
+    envelope, same runtime as the job's mp4 in R2.
+
+    It used to auto-publish on the TF-IDF text ranking alone. Builds share their
+    script VERBATIM, so the text regularly scored two candidates identically and
+    the "winner" was a coin flip. No evidence now means NO auto-publish: the
+    video stays unmatched for a manual pick.
+
+    candidates / dialogue_map may be supplied by the sweep so a batch of videos
+    shares ONE candidate load + ONE bulk-dialogue query (v822.3).
+
+    budget_s: wall-clock seconds this call may spend probing R2. The sweep passes
+    its REMAINING budget so a single video's probes cannot overrun the sweep's
+    guard (which is only checked BETWEEN videos). None -> the export_probe
+    default.
     """
     try:
         from models import Job
         import instagram_match as _ig_match
+        from export_probe import evidence_candidates, LAZY_PROBE_BUDGET_S
         if not video.transcription:
             return
         if candidates is None:
@@ -205,42 +222,62 @@ def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None) ->
                 )
                 .all()
             )
+        # v855 recency window. A LocalVideo has no posted_at — it is uploaded the
+        # moment the operator finishes it, so its own created_at IS the post time.
+        ref_at = video.created_at or datetime.utcnow()
+        candidates = [
+            j for j in candidates
+            if _ig_match.within_recency_window(j.created_at, ref_at)
+        ]
         if not candidates:
-            print(f"[local] hash={video.file_hash[:8]} no awaiting_finishing candidates", flush=True)
+            print(f"[local] hash={video.file_hash[:8]} decision=MANUAL source=none "
+                  f"reason=empty-pool pool=0", flush=True)
             return
         if dialogue_map is None:
             dialogue_map = _bulk_dialogue_map(db, [j.id for j in candidates])
 
-        # v822.4: TF-IDF cosine + margin gate. The old char-level score()
-        # matched near-duplicate scripts (shared ED body) as the WRONG twin
-        # at up to 1.000. TF-IDF down-weights the shared boilerplate; the
-        # margin gate auto-matches ONLY when the top candidate clearly beats
-        # the runner-up. Ambiguous (near-duplicate) -> NO auto-publish; the
-        # video stays "no match" for a manual pick instead of a wrong link.
         cand_pairs = [(j.id, dialogue_map.get(j.id, "")) for j in candidates]
         ranked = _ig_match.rank_tfidf(video.transcription, cand_pairs, idf_power=_MATCH_IDF_POWER)
-        if not ranked:
-            print(f"[local] hash={video.file_hash[:8]} no ranking | pool={len(candidates)} tlen={len(video.transcription or '')}", flush=True)
-            return
-        s1 = ranked[0]["score"]
-        s2 = ranked[1]["score"] if len(ranked) > 1 else 0.0
-        pick_id = _ig_match.auto_pick(ranked, _MATCH_HIGH, _MATCH_MARGIN)
+        # Text only names the shortlist worth probing from R2 (a brand-new job has
+        # no cached duration/fingerprint yet). It does not get a vote.
+        shortlist = [r["job_id"] for r in ranked[:6]]
+        cands = evidence_candidates(
+            db, candidates, priority_ids=shortlist,
+            budget_s=LAZY_PROBE_BUDGET_S if budget_s is None else budget_s,
+        )
+        ev = _ig_match.evidence_pick(video.duration_s, video.audio_fp, cands)
+
+        pick_id = ev["job_id"]
+        text_top = ranked[0]["job_id"] if ranked else None
+        reason = (
+            "conflict" if ev["conflict"]
+            else ("" if pick_id else ("no-file-fp" if not video.audio_fp else "no-evidence"))
+        )
         print(
-            f"[local] hash={video.file_hash[:8]} top_job={str(ranked[0]['job_id'])[:8]} "
-            f"s1={s1:.3f} s2={s2:.3f} margin={s1 - s2:.3f} "
-            f"decision={'AUTO' if pick_id else 'MANUAL'} pool={len(candidates)} "
-            f"tlen={len(video.transcription or '')}",
+            f"[local] hash={video.file_hash[:8]} "
+            f"decision={'AUTO' if pick_id else 'MANUAL'} "
+            f"source={ev['source'] or 'none'} job={str(pick_id or '-')[:8]} "
+            f"sim={ev['similarity']} dur_delta={ev['dur_delta']} pool={len(candidates)} "
+            f"file_dur={video.duration_s} text_top={str(text_top or '-')[:8]}"
+            + (f" reason={reason}" if reason else ""),
             flush=True,
         )
         if not pick_id:
-            # Ambiguous or low-confidence -> leave unmatched for manual pick.
             return
         job = next((j for j in candidates if j.id == pick_id), None)
         if job is None:
             job = db.query(Job).filter_by(id=pick_id).first()
         if not job:
             return
-        _advance_job_to_published(video, job, s1, db)
+        # match_score records the confidence we ACTUALLY decided on: the waveform
+        # similarity when the waveform decided, else the text score of the job the
+        # duration proved (so the column never reads 0.0 on a proven match).
+        # `not ev["similarity"]`, NOT `is None`: when the DURATION decides,
+        # evidence_pick can hand back a similarity of exactly 0.0 (silent audio,
+        # no overlap) — and 0.0 is not None, so an `is None` test stored it and
+        # the UI rendered "0%" on a match the media PROVED.
+        text_score = next((r["score"] for r in ranked if r["job_id"] == pick_id), 0.0)
+        _advance_job_to_published(video, job, ev["similarity"] or text_score, db)
     except Exception as exc:
         print(f"[local] auto-match error on hash={video.file_hash[:8]}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 
@@ -306,11 +343,17 @@ def rematch_unmatched(user_id, db: Session) -> dict:
     matched = 0
     checked = 0
     for v in vids:
-        if _time.monotonic() - _t0 > _SWEEP_BUDGET_S:
+        remaining = _SWEEP_BUDGET_S - (_time.monotonic() - _t0)
+        if remaining <= 0:
             print(f"[local] rematch sweep budget hit after {checked}/{len(vids)} videos", flush=True)
             break
         checked += 1
-        _maybe_auto_match(v, db, candidates=candidates, dialogue_map=dialogue_map)
+        # Hand the REMAINING budget down. This check only fires BETWEEN videos,
+        # so without it one video's R2 probes (download + ffmpeg each) could
+        # overrun the whole sweep's guard by minutes — and this sweep runs
+        # unattended on every browser poll cycle.
+        _maybe_auto_match(v, db, candidates=candidates, dialogue_map=dialogue_map,
+                          budget_s=remaining)
         if v.matched_job_id:
             matched += 1
             mjid = v.matched_job_id
@@ -347,6 +390,10 @@ def transcribe_local(video, file_bytes: bytes, db: Session) -> None:
                 video.transcription_error = (err or "ffmpeg failed")[:500]
                 db.commit()
                 return
+            # v855 — the uploaded file IS the export. Take its runtime + loudness
+            # envelope now, while it is on disk: this is the evidence the matcher
+            # decides on, and the bytes are gone when this tempdir closes.
+            _fingerprint_media(video, src, db)
             print(f"[local] hash={video.file_hash[:8]} starting Whisper", flush=True)
             text = _transcribe_wav(wav)
             print(f"[local] hash={video.file_hash[:8]} Whisper done ({len(text)}c)", flush=True)

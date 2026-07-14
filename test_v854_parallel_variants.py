@@ -97,14 +97,24 @@ def test_each_variant_gets_a_DISTINCT_seed():
 
 def test_cooldown_is_paid_once_for_the_whole_batch():
     # Not 4 × 10s. The batch is one submit burst.
+    #
+    # Asserts the cooldown BUDGET (_t["cooldown"], the seconds _cooldown()
+    # decided to wait), not wall-clock. test_ultra_check.py stubs time.sleep on
+    # the shared time module, so a wall-clock assertion here passes alone and
+    # fails in a full-suite run depending on test order.
     page = FakePage([_ok() for _ in range(4)])
     cli = _client(page)
-    cli._last_call = time.monotonic()   # pretend a call just happened
-    iw._FA_API_COOLDOWN = 2             # keep the test fast
-    t0 = time.monotonic()
-    cli.submit_image_batch("p", "NARWHAL", 4, cooldown=True)
-    waited = time.monotonic() - t0
-    assert 1.5 <= waited < 4.0, f"expected ONE ~2s cooldown, waited {waited:.1f}s"
+    _prev = iw._FA_API_COOLDOWN
+    try:
+        iw._FA_API_COOLDOWN = 10
+        cli._last_call = time.monotonic()      # pretend a call just happened
+        cli.submit_image_batch("p", "NARWHAL", 4, cooldown=True)
+    finally:
+        iw._FA_API_COOLDOWN = _prev
+
+    waited = cli._t["cooldown"]
+    assert 8.0 <= waited <= 10.0, f"expected ONE ~10s cooldown, budgeted {waited:.1f}s"
+    assert len(page.fetch_calls) == 1, "the batch must still be a single round-trip"
 
 
 def test_mint_failure_fails_only_its_own_variant():

@@ -762,6 +762,12 @@ class DriveVideo(Base):
     size_bytes           = Column(Integer, nullable=True)
     # Drive's modifiedTime — proxy for "when did operator drop this".
     posted_at            = Column(DateTime, nullable=True, index=True)
+    # v855 — media evidence of the dropped file. The uploaded file IS the export,
+    # so its runtime + loudness envelope identify WHICH job produced it, where
+    # the words (shared script bank) cannot. Measured at transcription time.
+    duration_s           = Column(Float, nullable=True)
+    audio_fp             = Column(Text, nullable=True)
+    audio_fp_at          = Column(DateTime, nullable=True)
     transcription        = Column(Text, nullable=True)
     transcription_status = Column(String(16), default="pending")
     transcription_error  = Column(Text, nullable=True)
@@ -811,6 +817,11 @@ class LocalVideo(Base):
     file_hash            = Column(String(64), nullable=False)
     file_name            = Column(String(500), nullable=False)
     size_bytes           = Column(Integer, nullable=True)
+    # v855 — media evidence of the uploaded file. It IS the export the operator
+    # is about to post, so its runtime + loudness envelope say WHICH job made it.
+    duration_s           = Column(Float, nullable=True)
+    audio_fp             = Column(Text, nullable=True)
+    audio_fp_at          = Column(DateTime, nullable=True)
     transcription        = Column(Text, nullable=True)
     transcription_status = Column(String(16), default="pending")
     transcription_error  = Column(Text, nullable=True)
@@ -1134,6 +1145,21 @@ def _run_migrations_postgresql(engine):
          "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS audio_fp TEXT"),
         ("instagram_videos", "audio_fp_at",
          "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS audio_fp_at TIMESTAMP"),
+        # v855 — the local + drive watchers auto-publish too, and the file they
+        # upload IS the export, so the evidence there is even stronger than on a
+        # re-encoded reel. Same three columns, same meaning.
+        ("local_videos", "duration_s",
+         "ALTER TABLE local_videos ADD COLUMN IF NOT EXISTS duration_s DOUBLE PRECISION"),
+        ("local_videos", "audio_fp",
+         "ALTER TABLE local_videos ADD COLUMN IF NOT EXISTS audio_fp TEXT"),
+        ("local_videos", "audio_fp_at",
+         "ALTER TABLE local_videos ADD COLUMN IF NOT EXISTS audio_fp_at TIMESTAMP"),
+        ("drive_videos", "duration_s",
+         "ALTER TABLE drive_videos ADD COLUMN IF NOT EXISTS duration_s DOUBLE PRECISION"),
+        ("drive_videos", "audio_fp",
+         "ALTER TABLE drive_videos ADD COLUMN IF NOT EXISTS audio_fp TEXT"),
+        ("drive_videos", "audio_fp_at",
+         "ALTER TABLE drive_videos ADD COLUMN IF NOT EXISTS audio_fp_at TIMESTAMP"),
         # v815 — per-account settings JSON blob (auto_image_retry mode, etc.)
         ("users", "settings_json", "ALTER TABLE users ADD COLUMN IF NOT EXISTS settings_json TEXT"),
         # v815 — auto-image-retry audit trail per clip
@@ -1291,6 +1317,13 @@ def _run_migrations_sqlite(engine):
         ("instagram_videos", "audio_fp", "ALTER TABLE instagram_videos ADD COLUMN audio_fp TEXT"),
         ("instagram_videos", "audio_fp_at",
          "ALTER TABLE instagram_videos ADD COLUMN audio_fp_at DATETIME"),
+        # v855 — same media evidence for the local + drive watchers (both auto-publish).
+        ("local_videos", "duration_s", "ALTER TABLE local_videos ADD COLUMN duration_s REAL"),
+        ("local_videos", "audio_fp",   "ALTER TABLE local_videos ADD COLUMN audio_fp TEXT"),
+        ("local_videos", "audio_fp_at", "ALTER TABLE local_videos ADD COLUMN audio_fp_at DATETIME"),
+        ("drive_videos", "duration_s", "ALTER TABLE drive_videos ADD COLUMN duration_s REAL"),
+        ("drive_videos", "audio_fp",   "ALTER TABLE drive_videos ADD COLUMN audio_fp TEXT"),
+        ("drive_videos", "audio_fp_at", "ALTER TABLE drive_videos ADD COLUMN audio_fp_at DATETIME"),
         # v815 — per-account settings JSON blob (auto_image_retry mode, etc.)
         ("users", "settings_json", "ALTER TABLE users ADD COLUMN settings_json TEXT"),
         # v815 — auto-image-retry audit trail per clip

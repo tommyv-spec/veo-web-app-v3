@@ -4143,11 +4143,20 @@ async def retry_failed_for_account(
 
 
 @app.get("/api/instagram/videos/{video_id}/suggestions")
-async def suggest_matches(
+def suggest_matches(   # sync ON PURPOSE — see below
     video_id: int,
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
+    # NOT `async def`: this handler probes exports from R2 (download + ffmpeg,
+    # export_probe.evidence_candidates) and runs blocking sync SQLAlchemy. Inside
+    # an `async def` every one of those blocks the SINGLE event loop of the one
+    # uvicorn worker — every other request in the process stalls behind it, and a
+    # block past gunicorn's --timeout 300 gets the worker SIGABRT'd, killing the
+    # in-flight DB connections (the 2026-07-06 outage). Declared plain `def`,
+    # FastAPI runs it in the anyio threadpool instead, off the loop. There is no
+    # `await` in this body — keep it that way, or move the blocking work into
+    # asyncio.to_thread first.
     from models import InstagramVideo, InstagramAccount, Job
     from sqlalchemy import or_
     v = db.query(InstagramVideo).filter_by(id=video_id).first()
@@ -4202,15 +4211,24 @@ async def suggest_matches(
     # fact, and it separates near-duplicate twins (same shared script, built days
     # apart) that the WORDS alone cannot tell apart. Applied in Python, not SQL,
     # so an absent posted_at can never silently empty the pool.
+    #
+    # ONLY this half of the window applies here. v855's full
+    # within_recency_window ALSO drops jobs built >30d BEFORE the post — right for
+    # the AUTO-PUBLISH matchers (instagram/local/drive_transcribe), wrong here.
+    # This endpoint feeds the MANUAL suggestions popover, and the entire design is
+    # "no evidence -> a human picks". Pruning an old-but-real job means the human
+    # cannot pick it — the tool silently hides the correct answer, and the
+    # "measured max job age: 20.99 days" that set the 30d bound is an observation,
+    # not a law. Being late is not proof; being IMPOSSIBLE (built after the post)
+    # is, so only that filter stays.
     _before = len(candidates)
     candidates = [
         j for j in candidates
         if _ig_match.job_predates_post(j.created_at, v.posted_at)
     ]
     if _before != len(candidates):
-        print(f"[ig-suggest] video={video_id} time-filter dropped "
-              f"{_before - len(candidates)} job(s) created after posted_at={v.posted_at}",
-              flush=True)
+        print(f"[ig-suggest] video={video_id} dropped {_before - len(candidates)} "
+              f"job(s) created AFTER posted_at={v.posted_at}", flush=True)
     # v822.6: the manual suggestions now use the SAME content matcher as the
     # local auto-matcher — rare-term-weighted TF-IDF cosine (idf_power=2),
     # validated on the operator's real data. The old char-level `best_matches`
@@ -4227,8 +4245,42 @@ async def suggest_matches(
     # among the five rows we show.
     verdict = _ig_match.match_verdict(full_ranked, _MATCH_HIGH, _MATCH_MARGIN)
     ranked = full_ranked[:5]
+
+    # v855 — the MEDIA gets the last word. The reel's runtime + loudness envelope
+    # vs each export's: where the words tie (identical scripts scored EXACTLY
+    # equal on the 14 disputed reels), the render does not. Only the text-ranked
+    # shortlist is probed from R2 (see export_probe.LAZY_PROBE_CAP) — probing the
+    # whole pool inside a web request is what times the worker out.
+    evidence = None
+    try:
+        from export_probe import evidence_candidates
+        _cands = evidence_candidates(
+            db, candidates, priority_ids=[r["job_id"] for r in ranked],
+        )
+        ev = _ig_match.evidence_pick(v.duration_s, v.audio_fp, _cands)
+        if ev["job_id"]:
+            evidence = {
+                "source": ev["source"],
+                "similarity": ev["similarity"],
+                "dur_delta": ev["dur_delta"],
+            }
+            # The proven job goes FIRST, even when the text put it nowhere — and
+            # even when it never made the text top-5 at all.
+            proven_id = ev["job_id"]
+            proven_score = next(
+                (r["score"] for r in full_ranked if r["job_id"] == proven_id), 0.0,
+            )
+            ranked = (
+                [{"job_id": proven_id, "score": proven_score}]
+                + [r for r in ranked if r["job_id"] != proven_id]
+            )[:5]
+            verdict = {"verdict": "proven", "top": verdict["top"], "gap": verdict["gap"]}
+    except Exception as _e:   # evidence is a bonus; never break the popover
+        print(f"[ig-suggest] video={video_id} evidence failed: "
+              f"{type(_e).__name__}: {str(_e)[:160]}", flush=True)
+
     print(f"[ig-suggest] video={video_id} pool={len(candidates)} verdict={verdict['verdict']} "
-          f"top={verdict['top']:.3f} gap={verdict['gap']:.3f} "
+          f"top={verdict['top']:.3f} gap={verdict['gap']:.3f} evidence={evidence} "
           f"top5={[(r['job_id'][:8], r['score']) for r in ranked]}", flush=True)
     top = []
     for r in ranked:
@@ -4239,6 +4291,7 @@ async def suggest_matches(
         "verdict": verdict["verdict"],
         "top": verdict["top"],
         "gap": verdict["gap"],
+        "evidence": evidence,
         "suggestions": top,
     }
 
@@ -4515,7 +4568,12 @@ async def upload_local_video(
             existing.transcription_error = None
             existing.transcription = None
             db.commit()
-            transcribe_local(existing, blob, db)
+            # to_thread: transcribe_local is ffmpeg + Whisper + an R2-probing
+            # match — tens of seconds of BLOCKING work. This handler must stay
+            # `async def` (it awaits file.read()), so the blocking call is pushed
+            # off the event loop by hand, or it freezes every other request in
+            # the worker.
+            await asyncio.to_thread(transcribe_local, existing, blob, db)
             db.refresh(existing)
         return existing.to_dict()
 
@@ -4536,9 +4594,11 @@ async def upload_local_video(
     db.commit()
     db.refresh(v)
 
-    # Synchronous transcribe — short enough for the request lifetime (Render
-    # has a 60s+ HTTP timeout; ffmpeg + whisper on a 30s reel is ~10-20s).
-    transcribe_local(v, blob, db)
+    # Transcribe within the request lifetime (Render has a 60s+ HTTP timeout;
+    # ffmpeg + whisper on a 30s reel is ~10-20s) — but on a WORKER THREAD, not
+    # the event loop. Called inline it blocked the loop for those 10-20s and
+    # every other request in the process queued behind it.
+    await asyncio.to_thread(transcribe_local, v, blob, db)
     db.refresh(v)
     return v.to_dict()
 
@@ -4591,12 +4651,19 @@ async def delete_local_video_by_hash(
 
 
 @app.post("/api/local-videos/rematch")
-async def rematch_local_videos(
+def rematch_local_videos(   # sync ON PURPOSE — see suggest_matches
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
     """v822: sweep done-but-unmatched local videos against the current
-    awaiting_finishing pool.  Browser calls this once per poll cycle."""
+    awaiting_finishing pool.  Browser calls this once per poll cycle.
+
+    NOT `async def`. The browser fires this unattended on EVERY poll cycle and
+    the sweep reaches R2 (rematch_unmatched -> _maybe_auto_match ->
+    evidence_candidates: downloads + ffmpeg). That is the worst possible thing
+    to run on the event loop — plain `def` puts it in the anyio threadpool.
+    No `await` in this body; keep it that way.
+    """
     from local_transcribe import rematch_unmatched
     return rematch_unmatched(current_user.id, db)
 
@@ -4926,11 +4993,10 @@ def diag_probe_job_fp(
         raise HTTPException(status_code=404, detail="not found")
 
     from models import Job
-    from export_probe import newest_export_key
-    from audio_fingerprint import fingerprint_media
-    from backends.storage import is_storage_configured, get_storage
-    import tempfile as _tempfile
-    from pathlib import Path as _Path
+    # v855 — the download-fingerprint-cache dance now lives in ONE place, shared
+    # with the live matchers (IG / local / drive watchers + the suggestions
+    # popover). This endpoint is just the bulk driver for it.
+    from export_probe import ensure_export_fingerprint
 
     limit = max(1, min(int(limit or 8), 25))
     q = db.query(Job).filter(
@@ -4945,26 +5011,11 @@ def diag_probe_job_fp(
     todo = q.order_by(Job.created_at.desc()).limit(limit).all()
 
     ok = failed = 0
-    storage = get_storage() if is_storage_configured() else None
     for j in todo:
-        blob = ""
-        try:
-            if storage is not None:
-                key = newest_export_key(storage, j.id)
-                if key:
-                    with _tempfile.TemporaryDirectory() as td:
-                        local = str(_Path(td) / "export.mp4")
-                        storage.download_file(key, local)
-                        blob = fingerprint_media(local)
-        except Exception as e:
-            print(f"[audio-fp] job={j.id[:8]} export fp failed: {e}", flush=True)
-            blob = ""
-        j.export_audio_fp = blob  # "" on failure -> not NULL -> never re-picked
-        if blob:
+        if ensure_export_fingerprint(db, j):
             ok += 1
         else:
             failed += 1
-        db.commit()
     return {
         "probed": len(todo),
         "ok": ok,

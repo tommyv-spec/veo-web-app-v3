@@ -368,3 +368,146 @@ def test_verdict_does_not_round_a_hair_thin_gap_into_confidence():
 def test_verdict_none_on_empty_ranking():
     m = _load()
     assert m.match_verdict([], high=0.5, margin=0.12)["verdict"] == "none"
+
+
+# ============================================================================
+# v855 — evidence_pick: the MEDIA decides, not the words.
+#
+# Every envelope below is a real fingerprint (encode_fingerprint over a
+# synthetic loudness envelope), so these tests exercise the same
+# envelope_similarity path production runs.
+# ============================================================================
+import math as _math
+
+import audio_fingerprint as _afp
+
+
+def _fp(seed, n=120, phase=0.0):
+    """A deterministic, distinctive envelope -> a real base64 fingerprint."""
+    env = [
+        abs(_math.sin((i + phase) * (0.07 + 0.013 * seed)) + 0.35 * _math.cos((i + phase) * 0.31 * (seed + 1)))
+        for i in range(n)
+    ]
+    norm = _math.sqrt(sum(x * x for x in env)) or 1.0
+    return _afp.encode_fingerprint([x / norm for x in env])
+
+
+def _cand(job_id, dur, fp=None):
+    return {"job_id": job_id, "export_duration_s": dur, "export_audio_fp": fp}
+
+
+def test_evidence_duration_decisive():
+    m = _load()
+    r = m.evidence_pick(30.0, None, [_cand("a", 30.1), _cand("b", 34.0)])
+    assert r["job_id"] == "a"
+    assert r["source"] == "duration"
+    assert r["conflict"] is False
+    assert abs(r["dur_delta"] - 0.1) < 1e-6
+
+
+def test_evidence_duration_too_close_to_call():
+    """Two candidates equally close -> the runner-up separation gate fails."""
+    m = _load()
+    r = m.evidence_pick(30.0, None, [_cand("a", 30.1), _cand("b", 29.9)])
+    assert r["job_id"] is None
+    assert r["source"] is None
+    assert r["conflict"] is False
+
+
+def test_evidence_duration_abstains_when_nothing_is_close_enough():
+    m = _load()
+    r = m.evidence_pick(30.0, None, [_cand("a", 45.0), _cand("b", 60.0)])
+    assert r["job_id"] is None
+
+
+def test_evidence_waveform_decisive():
+    m = _load()
+    reel = _fp(1)
+    r = m.evidence_pick(30.0, reel, [_cand("a", 30.05, reel), _cand("b", 30.1, _fp(9))])
+    assert r["job_id"] == "a"
+    assert "waveform" in (r["source"] or "")
+    assert r["similarity"] >= m.WAVE_MIN_SIM
+
+
+def test_evidence_waveform_abstains_on_low_similarity():
+    """A TRUE match can score as low as 0.53 — so a low score means ABSTAIN,
+    never 'the other one'. Abstaining is the correct behavior."""
+    m = _load()
+    r = m.evidence_pick(30.0, _fp(1), [_cand("a", 30.05, _fp(7)), _cand("b", 30.1, _fp(9))])
+    assert r["similarity"] is None or r["similarity"] < m.WAVE_MIN_SIM
+    assert r["job_id"] is None
+    assert r["conflict"] is False
+
+
+def test_evidence_waveform_breaks_an_identical_duration_tie():
+    """THE case that motivated all of this: two builds, same script, exports the
+    SAME length to the last bit. Duration cannot separate them; the take does."""
+    m = _load()
+    reel = _fp(3)
+    cands = [_cand("twin_a", 46.02000045776367, _fp(11)),
+             _cand("twin_b", 46.02000045776367, reel)]
+    dur_only = m.evidence_pick(46.0, None, cands)
+    assert dur_only["job_id"] is None          # duration is helpless here
+    r = m.evidence_pick(46.0, reel, cands)
+    assert r["job_id"] == "twin_b"
+    assert r["source"] == "waveform"
+    assert r["similarity"] >= m.WAVE_MIN_SIM
+
+
+def test_evidence_both_agree_reports_both_sources():
+    m = _load()
+    reel = _fp(2)
+    r = m.evidence_pick(30.0, reel, [_cand("a", 30.05, reel), _cand("b", 31.2, _fp(8))])
+    assert r["job_id"] == "a"
+    assert r["source"] == "waveform+duration"
+
+
+def test_evidence_conflict_yields_no_pick():
+    """Duration says A, the waveform says B. Never seen in validation — but a
+    disagreement means we do not understand the data, and guessing is exactly
+    the failure this exists to fix."""
+    m = _load()
+    reel = _fp(4)
+    # A is nearest by duration (0.0 vs 1.2 -> decisive), but B's audio IS the reel.
+    r = m.evidence_pick(30.0, reel, [_cand("a", 30.0, _fp(12)), _cand("b", 31.2, reel)])
+    assert r["conflict"] is True
+    assert r["job_id"] is None
+    assert r["source"] is None
+
+
+def test_evidence_missing_data_never_raises_and_never_guesses():
+    m = _load()
+    assert m.evidence_pick(None, None, [])["job_id"] is None
+    assert m.evidence_pick(None, None, [_cand("a", 30.0, _fp(1))])["job_id"] is None
+    assert m.evidence_pick(30.0, None, [_cand("a", None, None)])["job_id"] is None
+    assert m.evidence_pick(30.0, _fp(1), [_cand("a", None, _fp(1))])["job_id"] is None
+    assert m.evidence_pick(30.0, "", [_cand("a", 30.0, "")])["job_id"] == "a"  # duration still works
+
+
+def test_evidence_waveform_prefilters_far_durations():
+    """Anything further than 1.5s away cannot be the same render — and the
+    comparison is expensive, so it is never even attempted."""
+    m = _load()
+    reel = _fp(5)
+    r = m.evidence_pick(30.0, reel, [_cand("far", 40.0, reel), _cand("near", 30.2, _fp(13))])
+    assert r["job_id"] != "far"
+
+
+def test_evidence_caps_the_number_of_waveform_comparisons():
+    """envelope_similarity is O(lag x frames) pure Python. The diag endpoint
+    502'd once from doing too many in one request; the cap is the fix."""
+    m = _load()
+    cands = [_cand(f"j{i}", 30.0 + i * 0.01, _fp(i + 20)) for i in range(40)]
+    r = m.evidence_pick(30.0, _fp(5), cands)   # must return, not hang
+    assert r["conflict"] is False
+    assert m.WAVE_MAX_COMPARISONS <= 12
+
+
+def test_recency_window_keeps_recent_jobs_and_drops_old_ones():
+    m = _load()
+    posted = _dt.datetime(2026, 7, 1)
+    assert m.within_recency_window(_dt.datetime(2026, 6, 25), posted) is True
+    assert m.within_recency_window(_dt.datetime(2026, 5, 1), posted) is False   # 61d old
+    assert m.within_recency_window(_dt.datetime(2026, 7, 20), posted) is False  # created after
+    assert m.within_recency_window(None, posted) is True                        # unknown never excludes
+    assert m.within_recency_window(_dt.datetime(2026, 5, 1), None) is True

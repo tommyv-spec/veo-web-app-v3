@@ -284,17 +284,28 @@ def test_no_per_job_n_plus_one_in_sweep_source():
     assert "dialogue_map=dialogue_map" in src     # sweep shares one map
 
 
-def test_local_matcher_uses_tfidf_margin_gate_v822_4():
-    """local_transcribe must use rank_tfidf + auto_pick (not the char-level
-    best_matches) and carry env-tunable HIGH/MARGIN thresholds."""
+def test_local_matcher_decides_on_evidence_v855():
+    """v855 — the local watcher auto-publishes, and the file it was handed IS the
+    export. So the pick comes from the MEDIA (runtime + loudness envelope), not
+    from the text ranking: builds share their script verbatim, and the text gate
+    published the wrong twin. rank_tfidf stays, but only to shortlist candidates
+    worth probing.
+    """
     src = open(_LT, encoding="utf-8").read()
     assert "rank_tfidf(" in src
-    assert "auto_pick(" in src
-    assert "_MATCH_HIGH" in src
-    assert "_MATCH_MARGIN" in src
-    assert "LOCAL_MATCH_HIGH" in src
+    assert "evidence_pick(" in src
+    assert "evidence_candidates(" in src
+    assert "within_recency_window(" in src
+    assert "auto_pick(" not in src, "the local matcher still publishes on the TEXT gate"
     # the old char-level path must be gone from the local matcher
     assert "best_matches(" not in src
+
+
+def test_local_matcher_fingerprints_the_uploaded_file_v855():
+    """The uploaded bytes are the only copy of the export we can measure, and
+    they live in a tempdir that is deleted the moment transcription ends."""
+    src = open(_LT, encoding="utf-8").read()
+    assert "_fingerprint_media(" in src
 
 
 def test_local_matcher_uses_idf_power_v822_6():

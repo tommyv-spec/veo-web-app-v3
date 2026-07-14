@@ -77,6 +77,16 @@ class ObjectStorage:
                 config=Config(
                     signature_version='s3v4',
                     retries={'max_attempts': 3, 'mode': 'adaptive'},
+                    # Botocore's DEFAULT read timeout is 60s and it retries 3×
+                    # adaptively, so a stalled R2 leg can hold a caller for
+                    # MINUTES — long enough for gunicorn's --timeout 300 to
+                    # SIGABRT the worker mid-request. Pin both legs explicitly
+                    # so the worst case is bounded and predictable, and so the
+                    # lazy export probes (export_probe.py) can honour a
+                    # wall-clock budget at all. Retries stay as-is: a transient
+                    # R2 blip should still be ridden out, just not forever.
+                    connect_timeout=10,
+                    read_timeout=60,
                     # v753 — clip serving now streams the R2 body to the
                     # browser, holding one connection open per in-flight
                     # <video> for the duration of playback. The default pool
