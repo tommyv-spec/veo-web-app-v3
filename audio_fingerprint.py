@@ -22,7 +22,8 @@ import subprocess
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 SAMPLE_RATE = 8000        # speech survives 8k and keeps the vector small
 FRAME_SAMPLES = 200       # 25 ms @ 8 kHz
-MAX_LAG_FRAMES = 40       # +/- 1.0s alignment slack (platform head/tail trims)
+MAX_LAG_FRAMES = 40       # legacy fixed window (kept for callers that pass it)
+LAG_SLACK_FRAMES = 240    # 6.0s of slack ON TOP of the length difference
 
 
 def envelope_from_pcm(pcm_bytes, frame_samples=FRAME_SAMPLES):
@@ -45,11 +46,28 @@ def envelope_from_pcm(pcm_bytes, frame_samples=FRAME_SAMPLES):
     return [x / norm for x in env]
 
 
-def envelope_similarity(a, b, max_lag=MAX_LAG_FRAMES):
-    """Best normalized cross-correlation in [0,1] over a small lag window.
+def auto_max_lag(n, m, slack_frames=LAG_SLACK_FRAMES):
+    """How far we must be willing to slide one envelope against the other.
 
-    The lag search absorbs the head/tail trim a re-encode applies; without it a
-    100ms shift would tank an otherwise perfect match.
+    THE bug this exists to prevent: the operator TRIMS the export before posting.
+    A cut of N seconds shifts the audio by N seconds, so the true alignment sits
+    OUTSIDE a narrow window and the correct match scores at the NOISE FLOOR.
+    Measured on a real file: the same video against its own 5s-trimmed copy
+    scored 0.582 at +/-1s (indistinguishable from an unrelated video) and 1.000
+    at +/-5s. A fixed 1s window silently failed on every trimmed video.
+
+    So the window is derived, not guessed: it must at least cover the LENGTH
+    DIFFERENCE (which is exactly how much was cut), plus slack for where the cut
+    was made.
+    """
+    return abs(n - m) + max(0, int(slack_frames))
+
+
+def envelope_similarity(a, b, max_lag=None):
+    """Best coverage-weighted normalized cross-correlation in [0, 1].
+
+    `max_lag=None` derives the window from the length difference (see
+    auto_max_lag) — the right default, because the amount trimmed IS the shift.
 
     Each lag's correlation is WEIGHTED BY COVERAGE (how much of the shorter
     envelope the overlap explains). Without that weight the lag search is a
@@ -57,16 +75,68 @@ def envelope_similarity(a, b, max_lag=MAX_LAG_FRAMES):
     (loud-then-quiet vs quiet-then-loud) slide into a big lag where only their
     two loud halves overlap and score a perfect 1.0 on that half. Coverage kills
     it — a match that explains half the audio is worth half a match — while a
-    real re-encode (trimmed by a few frames) keeps coverage ~1.0 and is untouched.
+    genuinely trimmed copy keeps coverage ~1.0 and is untouched. Coverage is what
+    makes a WIDE window safe.
+
+    Uses numpy (already a dependency) for an O(n log n) FFT correlation, since a
+    wide window makes the naive O(lag x frames) loop far too slow for the request
+    path. Falls back to the exact same maths in pure Python if numpy is absent.
     """
     if not a or not b:
         return 0.0
     n, m = len(a), len(b)
+    if max_lag is None:
+        max_lag = auto_max_lag(n, m)
     shortest = min(n, m)
+
+    try:
+        import numpy as np
+    except ImportError:
+        return _envelope_similarity_py(a, b, max_lag, shortest)
+
+    A = np.asarray(a, dtype=np.float64)
+    B = np.asarray(b, dtype=np.float64)
+    # We want num(lag) = sum_i A[i] * B[i + lag].
+    #   irfft(rfft(B) * conj(rfft(A)))[k] == sum_i B[i + k] * A[i]  == num(k)
+    # The operand order matters: the other way round yields num(-k), which mirrors
+    # every lag and quietly reports the wrong alignment.
+    size = 1 << int(np.ceil(np.log2(n + m)))
+    corr = np.fft.irfft(np.fft.rfft(B, size) * np.conj(np.fft.rfft(A, size)), size)
+    # Overlap energy per lag, from prefix sums (so each lag is normalized over
+    # exactly the frames it actually overlaps — not the whole vector).
+    ca = np.concatenate(([0.0], np.cumsum(A * A)))
+    cb = np.concatenate(([0.0], np.cumsum(B * B)))
+
+    # Lags with a non-empty overlap: lo = max(0, -lag) < hi = min(n, m - lag).
+    #   lag > 0 needs lag < m  -> lag <= m - 1
+    #   lag < 0 needs -lag < n -> lag >= -(n - 1)
+    # so the range is [-(n-1), m-1]. Getting these the wrong way round searches
+    # the wrong side of the alignment and silently misses the true match.
+    best = 0.0
+    lo_lag, hi_lag = -min(max_lag, n - 1), min(max_lag, m - 1)
+    for lag in range(lo_lag, hi_lag + 1):
+        lo = max(0, -lag)
+        hi = min(n, m - lag)
+        if hi <= lo:
+            continue
+        num = corr[lag % size]          # sum_i A[i] * B[i + lag]
+        ea = ca[hi] - ca[lo]
+        eb = cb[hi + lag] - cb[lo + lag]
+        denom = math.sqrt(ea * eb)
+        if denom <= 0:
+            continue
+        coverage = (hi - lo) / float(shortest)
+        best = max(best, (num / denom) * coverage)
+    return max(0.0, min(1.0, float(best)))
+
+
+def _envelope_similarity_py(a, b, max_lag, shortest):
+    """Pure-Python fallback — identical maths, no numpy."""
+    n, m = len(a), len(b)
     best = 0.0
     for lag in range(-max_lag, max_lag + 1):
-        lo = max(0, -lag)            # first i with 0 <= i+lag
-        hi = min(n, m - lag)         # last i (exclusive) with i+lag < m
+        lo = max(0, -lag)
+        hi = min(n, m - lag)
         if hi <= lo:
             continue
         num = ea = eb = 0.0
