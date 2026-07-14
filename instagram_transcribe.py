@@ -182,18 +182,32 @@ def _maybe_auto_match(video, account, db: Session) -> None:
         # module for the cached Whisper model, so a module-scope import here
         # would close the cycle.
         from local_transcribe import _bulk_dialogue_map, _MATCH_IDF_POWER
+        from local_transcribe import enforce_exclusivity
         if not video.transcription:
             return
-        # Candidate pool = any COMPLETED, unlinked, non-archived job. Not
-        # gated on lifecycle_stage — that column is derived live + persisted
-        # lazily, so exported b-roll/twin jobs stuck at awaiting_export get
-        # silently dropped. status=='completed' is the durable signal.
+        # Candidate pool = any COMPLETED, non-archived job. Not gated on
+        # lifecycle_stage — that column is derived live + persisted lazily, so
+        # exported b-roll/twin jobs stuck at awaiting_export get silently
+        # dropped. status=='completed' is the durable signal.
+        #
+        # v857 — ALREADY-LINKED JOBS ARE CANDIDATES NOW. The pool used to require
+        # `instagram_video_id IS NULL`, which looks like an exclusivity rule and
+        # is not one: it just makes the job INVISIBLE to every reel after the
+        # first, so whoever was transcribed first keeps it — right or wrong. That
+        # is how reel B (0.632s from job J's length, waveform inconclusive) kept
+        # the job reel A proves it owns (0.005s AND a 0.947 waveform): A never
+        # even saw J. It also silently broke reposts, where two reels legitimately
+        # share one job.
+        #
+        # So the pool is opened and the decision is made where it belongs — in
+        # enforce_exclusivity below, which ranks the two claims and either links,
+        # takes the job off a weaker holder, or refuses. A job is never taken
+        # silently; the gate logs every branch.
         candidates = (
             db.query(Job)
             .filter(
                 Job.user_id == account.user_id,
                 Job.status == "completed",
-                Job.instagram_video_id.is_(None),
                 Job.archived == False,  # noqa: E712
             )
             .all()
@@ -246,16 +260,31 @@ def _maybe_auto_match(video, account, db: Session) -> None:
             job = db.query(Job).filter_by(id=pick_id).first()
         if not job:
             return
+        # v857 — a job produced ONE video (a repost aside). If another video is
+        # already holding this one, the stronger claim takes it and the weaker one
+        # is REFUSED — never written over the top. On a steal the incumbent is
+        # unlinked (and its publish reverted) inside the gate, in this same
+        # transaction, so the job is never momentarily owned by nobody.
+        claim = enforce_exclusivity(db, job, video, "instagram", ev)
+        if claim == "refuse":
+            return
         video.matched_job_id = job.id
         video.matched_at = datetime.utcnow()
+        # v857.1 — this link was made by the unattended matcher, from media
+        # evidence. That is the ONLY kind of link the gate is allowed to evict
+        # later; an operator's manual pick is not (see enforce_exclusivity).
+        video.match_source = "evidence"
         job.instagram_url = video.url
         job.instagram_video_id = video.id
         job.lifecycle_stage = "published"
+        if job.published_via is None:
+            job.published_via = "ig_match"
         if job.published_at is None:
             job.published_at = datetime.utcnow()
         db.commit()
         print(f"[ig-auto] AUTO-MATCH shortcode={video.shortcode} -> job={str(job.id)[:8]} "
-              f"via={ev['source']} sim={ev['similarity']} dur_delta={ev['dur_delta']}", flush=True)
+              f"via={ev['source']} sim={ev['similarity']} dur_delta={ev['dur_delta']} "
+              f"claim={claim}", flush=True)
     except Exception as exc:
         print(f"[ig-auto] auto-match error on shortcode={video.shortcode}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 

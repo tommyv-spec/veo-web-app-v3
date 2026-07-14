@@ -667,3 +667,182 @@ def job_id_from_filename(file_name):
         return None
     m = _JOB_ID_IN_FILENAME.search(file_name)
     return m.group(1).lower() if m else None
+
+
+# ============================================================================
+# v857 — ONE JOB, ONE VIDEO. Ranking the claims on a job.
+#
+# evidence_pick answers "which job produced THIS video". It is asked once per
+# video and knows nothing about the other videos, so it happily hands the same
+# job to two of them. Production, job c9f0e6c9:
+#
+#   reel A — 0.005s from J's export length AND 0.947 on J's waveform.
+#   reel B — 0.632s from the same length; its waveform was inconclusive.
+#
+# Both cleared the per-reel gate (1.0s tolerance), so B — which happened to be
+# written FIRST — kept a job that A proves it owns, and the operator got a live
+# link to the wrong video.
+#
+# The missing idea is that the two claims are not equal. A duration match within
+# a SECOND is not the same as one within a hundredth, and neither is as strong
+# as a waveform match: one says "the same length", the other says "the same
+# performance". Rank them and the stronger claimant takes the job; the weaker
+# one is refused and left for a human. First-writer-wins is not a rule, it is an
+# accident of transcription order.
+#
+# THE SCORE. One continuous number, in three bands that reflect what the signals
+# actually prove — not arbitrary tiers:
+#
+#   duration only        (0, 0.9]     0.9 * how tight the length match is
+#   waveform only        [1.0, 1.95]  1.0 + 0.95 * how strong the waveform is
+#   waveform + duration  [2.0, 3.0]   2.0 + the mean of the two
+#
+# The bands do not overlap ON PURPOSE: the WEAKEST waveform match (0.90, the
+# gate) must outrank the TIGHTEST length match (0.000s), because two builds with
+# the same clip structure export to the same length to the last bit (measured:
+# two reels both at 46.02000045776367s) while no two performances share a
+# waveform. Inside each band the score moves smoothly with the evidence, so a
+# hair more similarity is worth a hair more claim — never a landslide.
+#
+# THE REPOST. A job produced ONE video, with one operator-confirmed exception:
+# they post the same export twice. Two reels then legitimately claim one job
+# (measured: identical duration to the bit, 0.975 waveform to the same job), and
+# refusing the second would be wrong. So before any contest, ask whether the two
+# POSTED videos are the same file — compare them to EACH OTHER, not to the job.
+# Two different videos never share a waveform.
+# ============================================================================
+
+CLAIM_DUR_SPAN = 0.9      # duration-only claims live in (0, 0.9]
+CLAIM_WAVE_BASE = 1.0     # any waveform claim outranks every duration-only one
+CLAIM_WAVE_SPAN = 0.95    # waveform-only: [1.0, 1.95]
+CLAIM_BOTH_BASE = 2.0     # both signals agreeing outranks either alone
+CLAIM_BOTH_SPAN = 1.0     # waveform+duration: [2.0, 3.0]
+
+# How much stronger a challenger must be to EVICT the video that already holds
+# the job. 15%: far below the 3x gulf between a waveform claim and a duration-
+# only one (a real impostor loses by a mile), and far above the wobble between
+# two waveform scores of the same render (a re-encode moves the similarity by
+# ~0.01 -> the strength by ~1%, so noise can never flip a link).
+CLAIM_MARGIN = 0.15
+
+# A claim must bring WAVEFORM evidence to take a job off another video. Length
+# alone is exactly what produced the bad link: it is enough to claim a FREE job
+# (nobody is harmed if it is wrong — the reel simply links late), never enough
+# to overturn one somebody else is already holding.
+CLAIM_STEAL_MIN_STRENGTH = CLAIM_WAVE_BASE
+
+# A repost is the same file: its waveform is not merely similar, it is the same
+# performance, and its runtime is the same to the frame. Both bars are set well
+# above what a re-encode costs and well below what two different videos ever hit.
+REPOST_MIN_SIM = 0.90
+REPOST_MAX_DUR_DELTA = 0.25
+
+
+def _wave_quality(similarity):
+    """Waveform similarity -> [0, 1] within the band that PASSES the gate."""
+    sim = _as_float(similarity)
+    if sim is None:
+        return None
+    q = (sim - WAVE_MIN_SIM) / (1.0 - WAVE_MIN_SIM)
+    return max(0.0, min(1.0, q))
+
+
+def _dur_quality(dur_delta):
+    """Length delta -> [0, 1]. 0.000s -> 1.0; at the tolerance -> 0.0."""
+    delta = _as_float(dur_delta)
+    if delta is None:
+        return None
+    q = 1.0 - (abs(delta) / DUR_TOLERANCE_S)
+    return max(0.0, min(1.0, q))
+
+
+def claim_strength(evidence):
+    """How strongly a video claims a job. Higher wins.
+
+    evidence: the dict evidence_pick returned (source / similarity / dur_delta).
+    Returns a float; 0.0 when there is no evidence at all. Never raises — a
+    malformed claim is a claim of nothing, not an exception in a watcher.
+
+    `source` is what decides which signals count, NOT the presence of the
+    numbers: when the DURATION decides, evidence_pick still REPORTS the waveform
+    similarity it computed (informational — it did not clear the gate). Scoring
+    that would promote a duration-only claim into the waveform band, which is the
+    inversion this whole function exists to prevent.
+    """
+    if not isinstance(evidence, dict):
+        return 0.0
+    source = evidence.get("source")
+    if not isinstance(source, str) or not source:
+        return 0.0
+    w = _wave_quality(evidence.get("similarity")) if "waveform" in source else None
+    d = _dur_quality(evidence.get("dur_delta")) if "duration" in source else None
+    if w is not None and d is not None:
+        return CLAIM_BOTH_BASE + CLAIM_BOTH_SPAN * ((w + d) / 2.0)
+    if w is not None:
+        return CLAIM_WAVE_BASE + CLAIM_WAVE_SPAN * w
+    if d is not None:
+        return CLAIM_DUR_SPAN * d
+    return 0.0
+
+
+def is_same_video(fp_a, fp_b, duration_a, duration_b,
+                  min_sim=REPOST_MIN_SIM, max_dur_delta=REPOST_MAX_DUR_DELTA):
+    """Are these two POSTED videos the same file (a repost)?
+
+    Reposts are real: the operator posts one export twice. Both reels then
+    legitimately claim one job, and refusing the second would be wrong. Two
+    different videos never share a waveform, so compare the reels to EACH OTHER,
+    not to the job.
+
+    A missing fingerprint (or duration) on either side -> False: we cannot
+    CONFIRM a repost, so they are treated as different videos and the
+    exclusivity rule applies. Absence of evidence is never evidence.
+    """
+    try:
+        if not fp_a or not fp_b:
+            return False
+        da = _as_float(duration_a)
+        db = _as_float(duration_b)
+        if da is None or db is None:
+            return False
+        # The cheap test first — the envelope compare is ~200k float ops.
+        if abs(da - db) > max_dur_delta:
+            return False
+        from audio_fingerprint import decode_fingerprint, envelope_similarity
+        ea = decode_fingerprint(fp_a)
+        eb = decode_fingerprint(fp_b)
+        if not ea or not eb:
+            return False
+        return envelope_similarity(ea, eb) >= min_sim
+    except Exception as e:   # a malformed fp must never break a transcription
+        print(f"[claim] repost check failed: {type(e).__name__}: {str(e)[:120]}", flush=True)
+        return False
+
+
+def resolve_claim(challenger_strength, incumbent_strength, is_repost,
+                  margin=CLAIM_MARGIN):
+    """Who gets the job: "link" | "steal" | "refuse".
+
+    link   — take it, and LEAVE THE INCUMBENT ALONE (a repost: one export, two
+             posts; or no incumbent at all, which the caller passes as 0.0/True).
+    steal  — the challenger proves a clearly stronger claim: unlink the incumbent
+             (reverting the publish it caused) and link the challenger.
+    refuse — do not link. The claims are too close to call, or the challenger is
+             the weaker one. An unlinked reel costs one click; a wrong link costs
+             a day.
+
+    Never silently overwrites: a link only moves on PROOF, and proof means
+    waveform evidence (CLAIM_STEAL_MIN_STRENGTH) that also clears the incumbent
+    by `margin`.
+    """
+    if is_repost:
+        return "link"
+    ch = _as_float(challenger_strength) or 0.0
+    inc = _as_float(incumbent_strength) or 0.0
+    if ch <= 0.0:
+        return "refuse"                       # nothing to claim with
+    if ch < CLAIM_STEAL_MIN_STRENGTH:
+        return "refuse"                       # length alone never evicts
+    if ch > inc and ch >= inc * (1.0 + margin):
+        return "steal"
+    return "refuse"

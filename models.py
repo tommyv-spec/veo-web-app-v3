@@ -681,6 +681,13 @@ class InstagramVideo(Base):
     transcription_error  = Column(Text, nullable=True)
     matched_job_id  = Column(String(36), ForeignKey("jobs.id"), nullable=True, index=True)
     matched_at      = Column(DateTime, nullable=True)
+    # v857.1 — HOW this link was made. 'manual' (an operator picked it),
+    # 'filename' (the platform's own export stamp, v856) or 'evidence' (the
+    # unattended matcher's media evidence). The exclusivity gate will only ever
+    # evict an 'evidence' link: a human's decision and a name we minted ourselves
+    # are not claims to be outranked. NULL on an EXISTING row = a legacy link,
+    # made before this column existed → read as 'manual' (see enforce_exclusivity).
+    match_source    = Column(String(16), nullable=True)
     created_at      = Column(DateTime, default=datetime.utcnow)
 
     account     = relationship("InstagramAccount", back_populates="videos")
@@ -774,6 +781,8 @@ class DriveVideo(Base):
     match_score          = Column(Float, nullable=True)
     matched_job_id       = Column(String(36), ForeignKey("jobs.id"), nullable=True, index=True)
     matched_at           = Column(DateTime, nullable=True)
+    # v857.1 — 'manual' | 'evidence' | 'filename'. See InstagramVideo.match_source.
+    match_source         = Column(String(16), nullable=True)
     created_at           = Column(DateTime, default=datetime.utcnow)
 
     account     = relationship("DriveAccount", back_populates="videos")
@@ -828,6 +837,8 @@ class LocalVideo(Base):
     match_score          = Column(Float, nullable=True)
     matched_job_id       = Column(String(36), ForeignKey("jobs.id"), nullable=True, index=True)
     matched_at           = Column(DateTime, nullable=True)
+    # v857.1 — 'manual' | 'evidence' | 'filename'. See InstagramVideo.match_source.
+    match_source         = Column(String(16), nullable=True)
     created_at           = Column(DateTime, default=datetime.utcnow)
 
     matched_job = relationship("Job", foreign_keys=[matched_job_id])
@@ -1160,6 +1171,15 @@ def _run_migrations_postgresql(engine):
          "ALTER TABLE drive_videos ADD COLUMN IF NOT EXISTS audio_fp TEXT"),
         ("drive_videos", "audio_fp_at",
          "ALTER TABLE drive_videos ADD COLUMN IF NOT EXISTS audio_fp_at TIMESTAMP"),
+        # v857.1 — WHO made this link: 'manual' | 'evidence' | 'filename'. The
+        # exclusivity gate only ever evicts an 'evidence' link; NULL on an
+        # existing row is a legacy link and is read as 'manual' (not stealable).
+        ("instagram_videos", "match_source",
+         "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS match_source VARCHAR(16)"),
+        ("local_videos", "match_source",
+         "ALTER TABLE local_videos ADD COLUMN IF NOT EXISTS match_source VARCHAR(16)"),
+        ("drive_videos", "match_source",
+         "ALTER TABLE drive_videos ADD COLUMN IF NOT EXISTS match_source VARCHAR(16)"),
         # v815 — per-account settings JSON blob (auto_image_retry mode, etc.)
         ("users", "settings_json", "ALTER TABLE users ADD COLUMN IF NOT EXISTS settings_json TEXT"),
         # v815 — auto-image-retry audit trail per clip
@@ -1324,6 +1344,11 @@ def _run_migrations_sqlite(engine):
         ("drive_videos", "duration_s", "ALTER TABLE drive_videos ADD COLUMN duration_s REAL"),
         ("drive_videos", "audio_fp",   "ALTER TABLE drive_videos ADD COLUMN audio_fp TEXT"),
         ("drive_videos", "audio_fp_at", "ALTER TABLE drive_videos ADD COLUMN audio_fp_at DATETIME"),
+        # v857.1 — provenance of a video->job link: 'manual' | 'evidence' | 'filename'
+        ("instagram_videos", "match_source",
+         "ALTER TABLE instagram_videos ADD COLUMN match_source TEXT"),
+        ("local_videos", "match_source", "ALTER TABLE local_videos ADD COLUMN match_source TEXT"),
+        ("drive_videos", "match_source", "ALTER TABLE drive_videos ADD COLUMN match_source TEXT"),
         # v815 — per-account settings JSON blob (auto_image_retry mode, etc.)
         ("users", "settings_json", "ALTER TABLE users ADD COLUMN settings_json TEXT"),
         # v815 — auto-image-retry audit trail per clip
