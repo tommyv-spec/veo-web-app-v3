@@ -107,7 +107,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v579"  # v855 ref media_id cache (content-hash) + upload timing in the [timing] line
+WORKER_VERSION = "img-v579"  # v856 ref media_id cache (content-hash) + upload timing in the [timing] line
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FOLDER = os.environ.get("IMAGE_SESSION_FOLDER",
@@ -3825,7 +3825,7 @@ def _fa_mint_captcha_batch(page, action, n):
     return toks[:n]
 
 
-# ─── v855 — uploaded-reference media_id cache ────────────
+# ─── v856 — uploaded-reference media_id cache ────────────
 # The same refs recur on every node of a batch: the persona ref, the product
 # ref, the chained prior image. The persona PNG is routinely 6-7 MB — base64'd
 # to ~9 MB of JSON and pushed through page.evaluate on EVERY node. Operator log
@@ -3875,7 +3875,7 @@ def _fa_ref_cache_drop_project(page, project_id, pfx=""):
         for k in dead:
             cache.pop(k, None)
         if dead:
-            print(f"{pfx}[flow_api] [v855] dropped {len(dead)} cached ref(s) for this project "
+            print(f"{pfx}[flow_api] [v856] dropped {len(dead)} cached ref(s) for this project "
                   f"— next node re-uploads", flush=True)
     except Exception:
         pass
@@ -3918,7 +3918,7 @@ class _FaClient:
 
     @staticmethod
     def _zero_timings():
-        # v855 — upload/upload_n/upload_cached/upload_mb. The ref uploads were
+        # v856 — upload/upload_n/upload_cached/upload_mb. The ref uploads were
         # invisible: upload_image calls _fa_api_fetch directly and never touched
         # the fetch bucket, so on node 2928 (3 refs) ~52s of a 98.4s submit_wall
         # was unaccounted for. If it isn't in this line, we're guessing.
@@ -3933,7 +3933,7 @@ class _FaClient:
         self._t["outcomes"][key] = self._t["outcomes"].get(key, 0) + 1
 
     def note_cached_upload(self):
-        """v855 — a ref we did NOT have to upload, because the cache had its
+        """v856 — a ref we did NOT have to upload, because the cache had its
         media_id. Counted so the timing line shows the cache working."""
         self._t["upload_cached"] += 1
 
@@ -3962,7 +3962,7 @@ class _FaClient:
     def upload_image(self, image_bytes, file_name="ref.jpg", mime_type="image/jpeg"):
         import base64
         self._cooldown()
-        _u0 = time.monotonic()                                   # v855 timing
+        _u0 = time.monotonic()                                   # v856 timing
         b64 = base64.b64encode(image_bytes).decode("ascii")
         body = _fa_build_upload_image(b64, self.project_id, file_name, mime_type)
         url = _fa_build_url("upload_image")
@@ -5047,7 +5047,7 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
     _t_wall0 = time.monotonic()         # v832 — submit wall-clock start
 
     # Upload references via private API. uploadImage has no captcha.
-    # v855 — skip any ref Flow already holds for this project (cache keyed by
+    # v856 — skip any ref Flow already holds for this project (cache keyed by
     # content hash). The persona ref is the same 6-7 MB file on every node of a
     # batch; re-base64ing and re-POSTing it each time was costing ~17s per ref.
     try:
@@ -5068,7 +5068,7 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
             _uploaded += 1
         if ref_ids:
             print(f"{pfx}[flow_api] refs: {_uploaded} uploaded, {_reused} reused from cache "
-                  f"(v855)", flush=True)
+                  f"(v856)", flush=True)
     except Exception as e:
         reason = f"upload_image raised: {e}"
         _maybe_invalidate_token(reason)
@@ -5237,7 +5237,7 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
                 pass
             print(f"{pfx}[flow_api] content policy reject (UNSAFE_GENERATION) — failing node, no retry/DOM", flush=True)
             return False
-        # v855 — zero variants landed and it wasn't a block or a content reject.
+        # v856 — zero variants landed and it wasn't a block or a content reject.
         # If this node reused cached ref media_ids, one of them could be stale
         # (Flow garbage-collected the media, or it never belonged to this
         # project). Drop the project's cached refs so the next node re-uploads

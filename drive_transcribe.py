@@ -137,10 +137,14 @@ def _maybe_auto_match(video, account, db: Session) -> None:
             job = db.query(Job).filter_by(id=pick_id).first()
         if not job:
             return
+        # `or`, NOT `is None`: when the DURATION decides, evidence_pick can return
+        # a similarity of exactly 0.0 (silent audio / no overlap). 0.0 is not
+        # None, so an `is None` test stored 0.0 and the UI rendered "0%" on a
+        # match the media PROVED. Fall back to the text score of the proven job.
         text_score = next((r["score"] for r in ranked if r["job_id"] == pick_id), 0.0)
         video.matched_job_id = job.id
         video.matched_at = datetime.utcnow()
-        video.match_score = ev["similarity"] if ev["similarity"] is not None else text_score
+        video.match_score = ev["similarity"] or text_score
         job.lifecycle_stage = "published"
         job.published_via = "drive_watch"
         if job.published_at is None:

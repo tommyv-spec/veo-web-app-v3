@@ -1,11 +1,11 @@
-"""v855 — uploaded-reference media_id cache, keyed by (project_id, content hash).
+"""v856 — uploaded-reference media_id cache, keyed by (project_id, content hash).
 
 The persona ref is the same 6-7 MB PNG on every node of a batch. It was being
 base64'd and re-POSTed each time: operator log node 2928 (3 refs) showed a
 98.4s submit_wall with only 46.3s accounted for by cooldown+mint+fetch. The
 missing ~52s was re-uploading bytes Flow already had.
 
-Run: python -m pytest test_v855_ref_cache.py -q
+Run: python -m pytest test_v856_ref_cache.py -q
 """
 import collections
 

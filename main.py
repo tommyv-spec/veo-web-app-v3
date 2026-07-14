@@ -4143,11 +4143,20 @@ async def retry_failed_for_account(
 
 
 @app.get("/api/instagram/videos/{video_id}/suggestions")
-async def suggest_matches(
+def suggest_matches(   # sync ON PURPOSE — see below
     video_id: int,
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
+    # NOT `async def`: this handler probes exports from R2 (download + ffmpeg,
+    # export_probe.evidence_candidates) and runs blocking sync SQLAlchemy. Inside
+    # an `async def` every one of those blocks the SINGLE event loop of the one
+    # uvicorn worker — every other request in the process stalls behind it, and a
+    # block past gunicorn's --timeout 300 gets the worker SIGABRT'd, killing the
+    # in-flight DB connections (the 2026-07-06 outage). Declared plain `def`,
+    # FastAPI runs it in the anyio threadpool instead, off the loop. There is no
+    # `await` in this body — keep it that way, or move the blocking work into
+    # asyncio.to_thread first.
     from models import InstagramVideo, InstagramAccount, Job
     from sqlalchemy import or_
     v = db.query(InstagramVideo).filter_by(id=video_id).first()
@@ -4202,19 +4211,24 @@ async def suggest_matches(
     # fact, and it separates near-duplicate twins (same shared script, built days
     # apart) that the WORDS alone cannot tell apart. Applied in Python, not SQL,
     # so an absent posted_at can never silently empty the pool.
-    # v855 widens this into the full RECENCY WINDOW: also drop jobs built long
-    # before the post (measured max job age at post time: 20.99 days -> 30d with
-    # headroom). Same reason, other end of the timeline.
+    #
+    # ONLY this half of the window applies here. v855's full
+    # within_recency_window ALSO drops jobs built >30d BEFORE the post — right for
+    # the AUTO-PUBLISH matchers (instagram/local/drive_transcribe), wrong here.
+    # This endpoint feeds the MANUAL suggestions popover, and the entire design is
+    # "no evidence -> a human picks". Pruning an old-but-real job means the human
+    # cannot pick it — the tool silently hides the correct answer, and the
+    # "measured max job age: 20.99 days" that set the 30d bound is an observation,
+    # not a law. Being late is not proof; being IMPOSSIBLE (built after the post)
+    # is, so only that filter stays.
     _before = len(candidates)
     candidates = [
         j for j in candidates
-        if _ig_match.within_recency_window(j.created_at, v.posted_at)
+        if _ig_match.job_predates_post(j.created_at, v.posted_at)
     ]
     if _before != len(candidates):
-        print(f"[ig-suggest] video={video_id} recency window dropped "
-              f"{_before - len(candidates)} job(s) outside "
-              f"{_ig_match.RECENCY_WINDOW_DAYS}d of posted_at={v.posted_at}",
-              flush=True)
+        print(f"[ig-suggest] video={video_id} dropped {_before - len(candidates)} "
+              f"job(s) created AFTER posted_at={v.posted_at}", flush=True)
     # v822.6: the manual suggestions now use the SAME content matcher as the
     # local auto-matcher — rare-term-weighted TF-IDF cosine (idf_power=2),
     # validated on the operator's real data. The old char-level `best_matches`
@@ -4554,7 +4568,12 @@ async def upload_local_video(
             existing.transcription_error = None
             existing.transcription = None
             db.commit()
-            transcribe_local(existing, blob, db)
+            # to_thread: transcribe_local is ffmpeg + Whisper + an R2-probing
+            # match — tens of seconds of BLOCKING work. This handler must stay
+            # `async def` (it awaits file.read()), so the blocking call is pushed
+            # off the event loop by hand, or it freezes every other request in
+            # the worker.
+            await asyncio.to_thread(transcribe_local, existing, blob, db)
             db.refresh(existing)
         return existing.to_dict()
 
@@ -4575,9 +4594,11 @@ async def upload_local_video(
     db.commit()
     db.refresh(v)
 
-    # Synchronous transcribe — short enough for the request lifetime (Render
-    # has a 60s+ HTTP timeout; ffmpeg + whisper on a 30s reel is ~10-20s).
-    transcribe_local(v, blob, db)
+    # Transcribe within the request lifetime (Render has a 60s+ HTTP timeout;
+    # ffmpeg + whisper on a 30s reel is ~10-20s) — but on a WORKER THREAD, not
+    # the event loop. Called inline it blocked the loop for those 10-20s and
+    # every other request in the process queued behind it.
+    await asyncio.to_thread(transcribe_local, v, blob, db)
     db.refresh(v)
     return v.to_dict()
 
@@ -4630,12 +4651,19 @@ async def delete_local_video_by_hash(
 
 
 @app.post("/api/local-videos/rematch")
-async def rematch_local_videos(
+def rematch_local_videos(   # sync ON PURPOSE — see suggest_matches
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
     """v822: sweep done-but-unmatched local videos against the current
-    awaiting_finishing pool.  Browser calls this once per poll cycle."""
+    awaiting_finishing pool.  Browser calls this once per poll cycle.
+
+    NOT `async def`. The browser fires this unattended on EVERY poll cycle and
+    the sweep reaches R2 (rematch_unmatched -> _maybe_auto_match ->
+    evidence_candidates: downloads + ffmpeg). That is the worst possible thing
+    to run on the event loop — plain `def` puts it in the anyio threadpool.
+    No `await` in this body; keep it that way.
+    """
     from local_transcribe import rematch_unmatched
     return rematch_unmatched(current_user.id, db)
 

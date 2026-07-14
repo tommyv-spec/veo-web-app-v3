@@ -186,7 +186,8 @@ def _advance_job_to_published(video, job, score, db) -> None:
     print(f"[local] AUTO-MATCH hash={video.file_hash[:8]} -> job={str(job.id)[:8]} score={score:.3f}", flush=True)
 
 
-def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None) -> None:
+def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None,
+                      budget_s=None) -> None:
     """TEXT RANKS, EVIDENCE DECIDES (v855). On proven evidence, advance.
 
     The uploaded file IS the export — not a re-encoded reel — so the media
@@ -200,11 +201,16 @@ def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None) ->
 
     candidates / dialogue_map may be supplied by the sweep so a batch of videos
     shares ONE candidate load + ONE bulk-dialogue query (v822.3).
+
+    budget_s: wall-clock seconds this call may spend probing R2. The sweep passes
+    its REMAINING budget so a single video's probes cannot overrun the sweep's
+    guard (which is only checked BETWEEN videos). None -> the export_probe
+    default.
     """
     try:
         from models import Job
         import instagram_match as _ig_match
-        from export_probe import evidence_candidates
+        from export_probe import evidence_candidates, LAZY_PROBE_BUDGET_S
         if not video.transcription:
             return
         if candidates is None:
@@ -235,7 +241,10 @@ def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None) ->
         # Text only names the shortlist worth probing from R2 (a brand-new job has
         # no cached duration/fingerprint yet). It does not get a vote.
         shortlist = [r["job_id"] for r in ranked[:6]]
-        cands = evidence_candidates(db, candidates, priority_ids=shortlist)
+        cands = evidence_candidates(
+            db, candidates, priority_ids=shortlist,
+            budget_s=LAZY_PROBE_BUDGET_S if budget_s is None else budget_s,
+        )
         ev = _ig_match.evidence_pick(video.duration_s, video.audio_fp, cands)
 
         pick_id = ev["job_id"]
@@ -263,8 +272,12 @@ def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None) ->
         # match_score records the confidence we ACTUALLY decided on: the waveform
         # similarity when the waveform decided, else the text score of the job the
         # duration proved (so the column never reads 0.0 on a proven match).
+        # `not ev["similarity"]`, NOT `is None`: when the DURATION decides,
+        # evidence_pick can hand back a similarity of exactly 0.0 (silent audio,
+        # no overlap) — and 0.0 is not None, so an `is None` test stored it and
+        # the UI rendered "0%" on a match the media PROVED.
         text_score = next((r["score"] for r in ranked if r["job_id"] == pick_id), 0.0)
-        _advance_job_to_published(video, job, ev["similarity"] if ev["similarity"] is not None else text_score, db)
+        _advance_job_to_published(video, job, ev["similarity"] or text_score, db)
     except Exception as exc:
         print(f"[local] auto-match error on hash={video.file_hash[:8]}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 
@@ -330,11 +343,17 @@ def rematch_unmatched(user_id, db: Session) -> dict:
     matched = 0
     checked = 0
     for v in vids:
-        if _time.monotonic() - _t0 > _SWEEP_BUDGET_S:
+        remaining = _SWEEP_BUDGET_S - (_time.monotonic() - _t0)
+        if remaining <= 0:
             print(f"[local] rematch sweep budget hit after {checked}/{len(vids)} videos", flush=True)
             break
         checked += 1
-        _maybe_auto_match(v, db, candidates=candidates, dialogue_map=dialogue_map)
+        # Hand the REMAINING budget down. This check only fires BETWEEN videos,
+        # so without it one video's R2 probes (download + ffmpeg each) could
+        # overrun the whole sweep's guard by minutes — and this sweep runs
+        # unattended on every browser poll cycle.
+        _maybe_auto_match(v, db, candidates=candidates, dialogue_map=dialogue_map,
+                          budget_s=remaining)
         if v.matched_job_id:
             matched += 1
             mjid = v.matched_job_id

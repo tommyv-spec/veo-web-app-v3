@@ -15574,7 +15574,7 @@ The submit is still **blocking** — `_submit_one_job` returns only after the ba
 Expected: ~76-98s per x4 node → **~19-22s**. Tests: `code/test_v854_parallel_variants.py` (8 cases — one round-trip, distinct seeds, one cooldown, per-slot mint failure, partial success, outcome buckets, classifier, bad-shape degradation).
 
 
-## v855 — Reference uploads are cached by content hash (and finally show up in the timing line)
+## v856 — Reference uploads are cached by content hash (and finally show up in the timing line)
 
 **Operator 2026-07-14**, live log after v854 shipped. v854 worked — 4/4 captured, no unusual-activity, `fetch` dropped from ~71s to ~41-51s — but it also exposed a bigger cost that had been invisible the whole time.
 
@@ -15612,4 +15612,4 @@ A 6.8 MB PNG, base64'd to ~9 MB of JSON, pushed through `page.evaluate` — **on
 ### The ceiling v854 actually hit (recorded so nobody re-litigates it)
 Firing the 4 POSTs in parallel bought ~1.5×, not the 4× predicted. Flow **accepts** 4 concurrent `batchGenerateImages` POSTs but does **not render them concurrently** — they queue server-side. So the parallel-submit lever is spent; the remaining wins are in what we send (refs) and how many nodes are in flight, not in how hard we fire variants.
 
-Expected after v855: a 3-ref node ~98s → **~45s**. Tests: `code/test_v855_ref_cache.py` (8 cases — persistence, project scoping, LRU eviction, hot-ref survival, per-project drop, graceful disable, no-op drop, timing line).
+Expected after v856: a 3-ref node ~98s → **~45s**. Tests: `code/test_v856_ref_cache.py` (8 cases — persistence, project scoping, LRU eviction, hot-ref survival, per-project drop, graceful disable, no-op drop, timing line).
