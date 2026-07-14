@@ -823,9 +823,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # design, so exposing it to anon traffic just lets the bootstrap
         # decide whether to call posthog.identify() — no PII leaks.
         "/api/posthog-config", "/api/me",
-        # v822.5 TEMPORARY: token-gated diag endpoint. Reaches its handler,
-        # which enforces DIAG_TOKEN itself (inert unless the env var is set).
+        # v822.5 / v852 TEMPORARY: token-gated diag endpoints. They reach their
+        # handler, which enforces DIAG_TOKEN itself (inert unless the env var is
+        # set). ig-match audits EXISTING Instagram links against the fixed
+        # matcher — the v852 fixes are forward-only, so a link the OLD matcher
+        # made stays wrong until it is found and undone.
         "/api/diag/local-match",
+        "/api/diag/ig-match",
     }
     PUBLIC_PREFIXES = {"/static/", "/auth/", "/api/local-worker/", "/api/user-worker/", "/api/images/worker/"}
     
@@ -4716,6 +4720,126 @@ async def diag_local_match(
         "high": _MATCH_HIGH,
         "margin": _MATCH_MARGIN,
         "note": "v822.5 temporary diag; set DIAG_TOKEN in Render to enable, unset to disable",
+        "videos": out,
+    }
+
+
+@app.get("/api/diag/ig-match")
+async def diag_ig_match(
+    token: str = "",
+    user_id: str = "",
+    limit: int = 50,
+    only_matched: int = 1,
+    db: DBSession = Depends(get_db_session),
+):
+    """v852 TEMPORARY read-only audit of EXISTING Instagram links (NO auth —
+    gated by DIAG_TOKEN, inert unless that env var is set).
+
+    The v852 matching fixes are FORWARD-ONLY: a reel that is already linked is
+    excluded from every candidate pool (`instagram_video_id IS NOT NULL`), so a
+    link made by the OLD matcher stays wrong forever until someone unmatches it.
+    This endpoint finds those. For each linked reel it re-ranks the transcript
+    against the user's WHOLE completed-job library using the current stack, and
+    reports where the STORED job now lands:
+
+      stored_rank = 1  -> the link agrees with the fixed matcher (probably right)
+      stored_rank > 1  -> the fixed matcher would have picked something ELSE
+      stored_rank None -> the stored job is not even in the ranking (very wrong)
+
+    Read-only: changes nothing. REMOVE after the link audit is done.
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+
+    from models import InstagramVideo, InstagramAccount, Job, Clip
+    from local_transcribe import (
+        _bulk_dialogue_map, _MATCH_HIGH, _MATCH_MARGIN, _MATCH_IDF_POWER,
+    )
+    import instagram_match as _ig
+
+    limit = max(1, min(int(limit or 50), 200))
+    q = (
+        db.query(InstagramVideo, InstagramAccount.user_id)
+        .join(InstagramAccount, InstagramVideo.account_id == InstagramAccount.id)
+    )
+    if user_id:
+        q = q.filter(InstagramAccount.user_id == user_id)
+    if int(only_matched):
+        q = q.filter(InstagramVideo.matched_job_id.isnot(None))
+    q = q.filter(InstagramVideo.transcription_status == "done")
+    rows = q.order_by(InstagramVideo.posted_at.desc().nullslast()).limit(limit).all()
+
+    def _first_line(job_id):
+        c = (
+            db.query(Clip.dialogue_text, Clip.voiceover_line)
+            .filter(Clip.job_id == job_id)
+            .order_by(Clip.clip_index.asc())
+            .first()
+        )
+        if not c:
+            return ""
+        return ((c[1] or c[0]) or "")[:70]
+
+    out = []
+    disagree = 0
+    _pool_cache = {}
+    for v, uid in rows:
+        if uid not in _pool_cache:
+            # FULL library — a linked reel's own job has left the live pool, so
+            # re-checking it needs every completed job, linked or not.
+            cand = (
+                db.query(Job)
+                .filter(Job.user_id == uid, Job.status == "completed",
+                        Job.archived == False)  # noqa: E712
+                .all()
+            )
+            _pool_cache[uid] = (cand, _bulk_dialogue_map(db, [j.id for j in cand]))
+        cand, dmap = _pool_cache[uid]
+        # Same hard time filter the live matcher applies.
+        eligible = [j for j in cand if _ig.job_predates_post(j.created_at, v.posted_at)]
+        pairs = [(j.id, dmap.get(j.id, "")) for j in eligible]
+        ranked_full = _ig.rank_tfidf(v.transcription or "", pairs, idf_power=_MATCH_IDF_POWER)
+        verdict = _ig.match_verdict(ranked_full, _MATCH_HIGH, _MATCH_MARGIN)
+
+        stored_rank = stored_score = None
+        for i, r in enumerate(ranked_full):
+            if r["job_id"] == v.matched_job_id:
+                stored_rank, stored_score = i + 1, r["score"]
+                break
+        agrees = (stored_rank == 1)
+        if v.matched_job_id and not agrees:
+            disagree += 1
+
+        out.append({
+            "shortcode": v.shortcode,
+            "url": v.url,
+            "posted_at": v.posted_at.isoformat() if v.posted_at else None,
+            "matched_job_id": v.matched_job_id,
+            "stored_rank": stored_rank,
+            "stored_score": stored_score,
+            "stored_line": _first_line(v.matched_job_id) if v.matched_job_id else None,
+            "link_verdict": "AGREES" if agrees else "DISAGREES",
+            "would_pick": ranked_full[0]["job_id"] if ranked_full else None,
+            "would_pick_line": _first_line(ranked_full[0]["job_id"]) if ranked_full else None,
+            "verdict": verdict["verdict"],
+            "top": verdict["top"],
+            "gap": verdict["gap"],
+            "pool": len(eligible),
+            "pool_before_time_filter": len(cand),
+            "transcript_len": len(v.transcription or ""),
+            "top5": [
+                {"job": r["job_id"][:8], "score": r["score"], "line1": _first_line(r["job_id"])}
+                for r in ranked_full[:5]
+            ],
+        })
+    return {
+        "count": len(out),
+        "disagreeing_links": disagree,
+        "high": _MATCH_HIGH, "margin": _MATCH_MARGIN, "idf_power": _MATCH_IDF_POWER,
+        "note": "v852 temporary link audit; read-only. stored_rank=1 means the link "
+                "agrees with the fixed matcher. Unset DIAG_TOKEN to disable.",
         "videos": out,
     }
 
