@@ -15516,3 +15516,22 @@ Both modes flow through the same v852 protection; the difference is only whether
 When a job has NO speech at all and every clip is protected, the keep-list would cover the whole timeline anyway — so trim+concat would re-encode the entire video for a byte-identical result. v852.1 copies the concat as-is instead (`[VAD/v852.1] all-silent export — copying concat as-is, no re-encode`). Mixed jobs (any spoken clip) still run the normal filter graph.
 
 **Authoring rule:** every `speaker: silent` scene MUST be intentional about which mode it uses. Declare the choice in §0 COUNTS LOCK (e.g. "silent beats = FULL" or "silent beats = timeline @ 5.0s"). Music is added by the operator in post — the platform never scores clips.
+
+
+## v853 — Silent-clip export length is settable in the UI (per-clip override)
+
+**Operator 2026-07-14:** *"and how do i decide which mode will be applied? in the md or in the UI? or both?"* → **Both, with a clear precedence: the MD is the source of truth at import; the UI is the after-the-render override.**
+
+### What shipped
+`static/index.html` — every clip whose `dialogue_text` is empty (and is not a `text_card`) renders a small **🔇 length** control on its card:
+- **`full`** button → PATCHes `clear_fields: ['cut_mode', 'target_duration_s']` → the clip exports at its whole rendered length.
+- **seconds input** → PATCHes `cut_mode: 'timeline'` + `target_duration_s: <n>` → `_trim_one` (v668) ffmpeg-trims the clip to exactly N seconds before concat.
+The active mode is reflected on load (the `full` button highlights when `cut_mode != 'timeline'`; the input pre-fills with the current `target_duration_s`). Handler: `setSilentClipLength(clipId, secs)`. No new endpoint — it reuses the v735 `PATCH /api/clips/{clip_id}` (which already allowed `cut_mode`, `target_duration_s`, and both in `clear_fields`).
+
+### Precedence (the answer to "md or UI?")
+1. **Markdown, at import** — `- **speaker:** silent` + optional `- **cut_mode:** timeline` / `- **target_duration_s:** N`. This is where the build DECLARES intent (§0 COUNTS LOCK: "silent beats = FULL" or "= timeline @ 5.0s"), and it is what a fresh import always applies.
+2. **UI, after the render** — the 🔇 control overrides that clip's stored value in the DB. It does NOT write back to the markdown; a re-import from the same MD resets it.
+
+Use the MD when the beat length is known at authoring time (mirroring a decoded source's beat rhythm). Use the UI to retime a music beat after seeing the actual render, without a re-import.
+
+Either way v852 keep-protects the silent clip from VAD removal; v853 only decides its LENGTH. Music is still added by the operator in post — the platform never scores clips.
