@@ -831,6 +831,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/local-match",
         "/api/diag/ig-match",
         "/api/diag/probe-exports",
+        "/api/diag/apply-relinks",
         # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
         "/api/diag/probe-job-fp",
         "/api/diag/probe-reel-fp",
@@ -4730,6 +4731,106 @@ async def diag_local_match(
         "note": "v822.5 temporary diag; set DIAG_TOKEN in Render to enable, unset to disable",
         "videos": out,
     }
+
+
+class RelinkItem(BaseModel):
+    shortcode: str
+    from_job: Optional[str] = None   # the link we EXPECT to find; refuse if it moved
+    to_job: str
+    proof: Optional[str] = None
+
+
+@app.post("/api/diag/apply-relinks")
+def diag_apply_relinks(
+    items: List[RelinkItem],
+    token: str = "",
+    dry_run: int = 1,
+    db: DBSession = Depends(get_db_session),
+):
+    """v853 TEMPORARY: rewrite proven-wrong Instagram links (DIAG_TOKEN-gated).
+
+    Applies ONLY the explicit list it is handed — it never decides anything
+    itself, so the evidence stays where it was reviewed. `from_job` is an
+    optimistic-concurrency check: if a reel's current link is not what the
+    caller saw when the evidence was gathered, that item is REFUSED rather than
+    silently overwritten.
+
+    Undoing the old link mirrors unmatch_video: a job this system published
+    (published_via='ig_match', or NULL for links made before provenance was
+    recorded) gets its publish REVERTED and its stage re-derived from live
+    state. A job published by drive/local watch keeps its published state —
+    unlinking a reel does not unpublish it.
+
+    Reposts are real (operator-confirmed): two reels CAN legitimately share one
+    job. Job.instagram_video_id holds a single reel, so it points at the most
+    recent one; both InstagramVideo rows carry matched_job_id.
+
+    dry_run=1 (default) reports what WOULD change and writes nothing.
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+
+    from models import InstagramVideo, Job
+    from lifecycle import derive_effective_stage
+
+    results = []
+    for it in items:
+        v = db.query(InstagramVideo).filter_by(shortcode=it.shortcode).first()
+        if not v:
+            results.append({"shortcode": it.shortcode, "status": "REFUSED", "why": "reel not found"})
+            continue
+        if it.from_job and (v.matched_job_id or "") != it.from_job:
+            results.append({
+                "shortcode": it.shortcode, "status": "REFUSED",
+                "why": f"link moved under us: expected {it.from_job}, found {v.matched_job_id}",
+            })
+            continue
+        new_job = db.query(Job).filter_by(id=it.to_job).first()
+        if not new_job:
+            results.append({"shortcode": it.shortcode, "status": "REFUSED", "why": "target job not found"})
+            continue
+
+        old_job = db.query(Job).filter_by(id=v.matched_job_id).first() if v.matched_job_id else None
+        reverted_to = None
+        if not int(dry_run):
+            # 1. Undo the old link, and the publish it caused.
+            if old_job:
+                old_job.instagram_url = None
+                old_job.instagram_video_id = None
+                if (old_job.published_via or "ig_match") == "ig_match":
+                    old_job.lifecycle_stage = None
+                    old_job.lifecycle_stage = derive_effective_stage(
+                        old_job, _count_approved_clips(db, old_job.id)
+                    )
+                    old_job.published_via = None
+                    old_job.published_at = None
+                    reverted_to = old_job.lifecycle_stage
+            # 2. Write the proven link.
+            v.matched_job_id = new_job.id
+            v.matched_at = datetime.utcnow()
+            new_job.instagram_url = v.url
+            new_job.instagram_video_id = v.id
+            if new_job.lifecycle_stage != "published":
+                new_job.lifecycle_stage = "published"
+                new_job.published_via = "ig_match"
+            if new_job.published_at is None:
+                new_job.published_at = datetime.utcnow()
+            print(f"[ig-relink] {it.shortcode}: {(v.matched_job_id or '')[:8]} "
+                  f"old={(old_job.id[:8] if old_job else 'none')} -> new={new_job.id[:8]} "
+                  f"old_reverted_to={reverted_to} proof={it.proof}", flush=True)
+        results.append({
+            "shortcode": it.shortcode,
+            "status": "WOULD APPLY" if int(dry_run) else "APPLIED",
+            "old_job": old_job.id if old_job else None,
+            "old_reverted_to": reverted_to,
+            "new_job": new_job.id,
+            "proof": it.proof,
+        })
+    if not int(dry_run):
+        db.commit()
+    return {"dry_run": bool(int(dry_run)), "count": len(results), "results": results}
 
 
 @app.get("/api/diag/probe-exports")
