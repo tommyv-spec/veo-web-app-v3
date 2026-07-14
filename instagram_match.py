@@ -20,7 +20,7 @@ def _normalize(s: str) -> str:
 
 
 # ============================================================================
-# v823 — SPOKEN-TEXT RECONSTRUCTION.
+# v852 — SPOKEN-TEXT RECONSTRUCTION.
 #
 # The matcher must compare the reel's transcript against the words that were
 # actually SAID in the render we downloaded — not against the script we first
@@ -279,18 +279,20 @@ def auto_pick(ranked, high: float, margin: float):
     Auto-match only when the top candidate is both confident (>= high) AND
     clearly ahead of the runner-up (top - second >= margin).  A near-duplicate
     twin sits right behind the winner -> small margin -> None -> manual pick.
+
+    Delegates to match_verdict so the auto-publish gate and the reported
+    verdict can never drift apart: we auto-match exactly when we would tell a
+    human the match is 'confident'.
     """
     if not ranked:
         return None
-    top = ranked[0]["score"]
-    second = ranked[1]["score"] if len(ranked) > 1 else 0.0
-    if top >= high and (top - second) >= margin:
+    if match_verdict(ranked, high, margin)["verdict"] == "confident":
         return ranked[0]["job_id"]
     return None
 
 
 # ============================================================================
-# v823 — HARD TIME CONSTRAINT.
+# v852 — HARD TIME CONSTRAINT.
 #
 # A reel was rendered and exported BEFORE it was posted, so a job created AFTER
 # the reel went live cannot possibly be its source. This is a hard fact, and it
@@ -327,14 +329,18 @@ def match_verdict(ranked, high, margin):
     weak      — nothing scored well enough to trust.
     """
     if not ranked:
-        return {"verdict": "none", "top": 0.0, "margin": 0.0}
+        return {"verdict": "none", "top": 0.0, "gap": 0.0}
     top = ranked[0]["score"]
     second = ranked[1]["score"] if len(ranked) > 1 else 0.0
-    gap = round(top - second, 4)
+    # Compare the UNROUNDED gap: rounding first turns a hair-thin 0.11996 into
+    # 0.12, which clears a 0.12 margin and reports a coin-flip between twins as
+    # a certainty — exactly what this gate exists to prevent. Round only for
+    # what we hand back to be displayed.
+    gap = top - second
     if top < high:
         verdict = "weak"
     elif gap < margin:
         verdict = "ambiguous"
     else:
         verdict = "confident"
-    return {"verdict": verdict, "top": top, "margin": gap}
+    return {"verdict": verdict, "top": top, "gap": round(gap, 4)}

@@ -167,7 +167,7 @@ def test_bm25_empty():
     assert m.rank_bm25("x", []) == []
 
 
-# ---- v823: spoken-text reconstruction (Prompt B + final cut) --------------
+# ---- v852: spoken-text reconstruction (Prompt B + final cut) --------------
 
 def _clip(**kw):
     """A Clip row as the bulk builder hands it to the pure rules."""
@@ -254,7 +254,7 @@ def test_reconstruct_orders_by_clip_index():
     assert m.reconstruct_dialogue(clips) == "first second"
 
 
-# ---- v823: time constraint + confidence verdict ---------------------------
+# ---- v852: time constraint + confidence verdict ---------------------------
 import datetime as _dt
 
 
@@ -304,6 +304,15 @@ def test_verdict_weak_when_nothing_scores_well():
     ranked = [{"job_id": "a", "score": 0.20}, {"job_id": "b", "score": 0.05}]
     v = m.match_verdict(ranked, high=0.50, margin=0.12)
     assert v["verdict"] == "weak"
+
+
+def test_verdict_does_not_round_a_hair_thin_gap_into_confidence():
+    """A gap of 0.11996 must stay AMBIGUOUS under a 0.12 margin — rounding it
+    to 0.12 first would report a coin-flip between twins as a certainty."""
+    m = _load()
+    ranked = [{"job_id": "a", "score": 0.81996}, {"job_id": "b", "score": 0.70000}]
+    v = m.match_verdict(ranked, high=0.50, margin=0.12)
+    assert v["verdict"] == "ambiguous"
 
 
 def test_verdict_none_on_empty_ranking():
