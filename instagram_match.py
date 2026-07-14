@@ -358,6 +358,214 @@ def job_predates_post(job_created_at, posted_at, slack_days=JOB_CREATED_SLACK_DA
     return job_created_at <= posted_at + timedelta(days=slack_days)
 
 
+# ============================================================================
+# v855 — EVIDENCE PICK. The media decides; the words only rank.
+#
+# Text is powerless here. ~787 jobs, many sharing a script VERBATIM: on the 14
+# disputed reels the top-1 and top-2 TF-IDF scores came out EXACTLY equal. A
+# ranking that cannot separate two candidates cannot be allowed to publish one.
+#
+# Two MEDIA signals can, and both were measured on production data:
+#
+#   DURATION — Job.export_duration_s (ffprobe of the shipped mp4) vs
+#   InstagramVideo.duration_s (HikerAPI video_duration). The TRUE match lands
+#   within 0.02-0.36s; wrong candidates are SECONDS away.
+#
+#   WAVEFORM — the loudness envelope of the export vs the posted reel. Duration
+#   cannot separate two builds that share a clip structure (their exports come
+#   out the same length to the last bit — measured: two reels BOTH at
+#   46.02000045776367s). Only the waveform separates the same words at the same
+#   length, because it is a different PERFORMANCE.
+#
+# Thresholds below are MEASURED, not invented. On 23 ground-truth reels the
+# waveform claimed decisive 13 times and agreed with duration 13/13 — zero
+# contradictions. The separations are bimodal (0.004-0.03 for genuine twins,
+# 0.29-0.48 for obvious non-matches), so a 0.05 gate sits in an empty gap.
+#
+# ABSTAINING IS CORRECT. A true match's similarity can be as low as 0.53 (a
+# heavily re-encoded reel), so a LOW score means "I cannot tell", never "it is
+# the other one". No evidence -> no automatic decision -> a human picks.
+# ============================================================================
+
+DUR_TOLERANCE_S = 1.0      # |reel - export| for the winner
+DUR_SEPARATION_S = 0.5     # runner-up must be at least this much further
+WAVE_MIN_SIM = 0.90
+WAVE_SEPARATION = 0.05
+
+# COST GATE. envelope_similarity is O(lags x frames) in pure Python: a 60s clip
+# is ~2400 frames x 81 lags ~= 200k float ops PER PAIR. One reel against 200
+# windowed candidates is ~40M ops on the web worker -> gunicorn worker timeout
+# -> 502 -> SIGABRT -> killed in-flight DB connections (the 2026-07-06 outage
+# shape, which the diag endpoint already produced once). So we compare only
+# candidates whose export length is within 1.5s of the reel — anything further
+# away is a different render BY DEFINITION and cannot be the source — and hard-
+# cap the count, nearest-duration first.
+WAVE_DUR_PREFILTER_S = 1.5
+WAVE_MAX_COMPARISONS = 12
+
+# A job can only be the source of a reel posted AFTER it was built, and the
+# operator posts what they just made: the measured maximum job age at post time
+# is 20.99 days. 30 days is that with headroom.
+RECENCY_WINDOW_DAYS = 30
+
+
+def within_recency_window(job_created_at, posted_at, days=RECENCY_WINDOW_DAYS):
+    """True when the job was built inside the window that could have produced
+    this post: not AFTER the post (job_predates_post) and not absurdly before it.
+
+    Unknown timestamps never exclude — an absent posted_at must not silently
+    empty the candidate pool.
+    """
+    if not job_predates_post(job_created_at, posted_at):
+        return False
+    if job_created_at is None or posted_at is None:
+        return True
+    return job_created_at >= posted_at - timedelta(days=days)
+
+
+def _as_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _duration_pick(reel_duration_s, candidates):
+    """(job_id, delta) of the export closest in LENGTH to the reel, or (None, ...).
+
+    Decisive only when the winner is within DUR_TOLERANCE_S *and* the runner-up
+    is at least DUR_SEPARATION_S further away. Two candidates equally close =
+    too close to call = no pick.
+    """
+    reel = _as_float(reel_duration_s)
+    if reel is None:
+        return (None, None)
+    scored = []
+    for c in candidates:
+        d = _as_float(c.get("export_duration_s"))
+        if d is None:
+            continue
+        scored.append((abs(reel - d), c.get("job_id")))
+    if not scored:
+        return (None, None)
+    scored.sort(key=lambda t: t[0])
+    best_delta, best_id = scored[0]
+    if best_delta > DUR_TOLERANCE_S:
+        return (None, None)
+    if len(scored) > 1 and (scored[1][0] - best_delta) < DUR_SEPARATION_S:
+        return (None, None)   # a twin sits just as close — the length cannot tell them apart
+    return (best_id, best_delta)
+
+
+def _waveform_pick(reel_duration_s, reel_fp, candidates):
+    """(job_id, similarity) of the export whose PERFORMANCE matches the reel.
+
+    Returns (None, best_sim_or_None) when nothing is decisive — the caller must
+    treat that as ABSTAIN, never as evidence against the top candidate.
+    """
+    if not reel_fp:
+        return (None, None, {})
+    from audio_fingerprint import decode_fingerprint, envelope_similarity
+    reel_env = decode_fingerprint(reel_fp)
+    if not reel_env:
+        return (None, None, {})
+
+    reel = _as_float(reel_duration_s)
+    if reel is None:
+        return (None, None, {})   # without a reel length the cost gate cannot be applied
+    pool = []
+    for c in candidates:
+        if not c.get("export_audio_fp"):
+            continue
+        d = _as_float(c.get("export_duration_s"))
+        if d is None:
+            # An unverifiable length cannot pass the cost gate, and in practice a
+            # job with a fingerprint always has one (the fp backfill only ran on
+            # jobs whose duration was already probed).
+            continue
+        delta = abs(reel - d)
+        if delta > WAVE_DUR_PREFILTER_S:
+            continue   # cannot be the same render; skip the expensive compare
+        pool.append((delta, c))
+    pool.sort(key=lambda t: t[0])
+
+    sims = {}
+    ranked = []
+    for _delta, c in pool[:WAVE_MAX_COMPARISONS]:
+        env = decode_fingerprint(c.get("export_audio_fp"))
+        if not env:
+            continue
+        s = envelope_similarity(reel_env, env)
+        sims[c.get("job_id")] = round(s, 4)
+        ranked.append((s, c.get("job_id")))
+    if not ranked:
+        return (None, None, sims)
+    ranked.sort(key=lambda t: -t[0])
+    best_sim, best_id = ranked[0]
+    if best_sim < WAVE_MIN_SIM:
+        return (None, round(best_sim, 4), sims)   # ABSTAIN, not "the other one"
+    if len(ranked) > 1 and (best_sim - ranked[1][0]) < WAVE_SEPARATION:
+        return (None, round(best_sim, 4), sims)
+    return (best_id, round(best_sim, 4), sims)
+
+
+def evidence_pick(reel_duration_s, reel_fp, candidates):
+    """Decide WHICH job produced this video, from media evidence alone.
+
+    candidates: list of dicts {job_id, export_duration_s, export_audio_fp}.
+
+    Returns {"job_id": <id|None>, "source": "waveform"|"duration"|"waveform+duration"|None,
+             "similarity": float|None, "dur_delta": float|None, "conflict": bool}
+
+    Missing data (no reel duration, no fp, no candidates) -> job_id None. NEVER
+    raises, NEVER guesses.
+    """
+    out = {"job_id": None, "source": None, "similarity": None,
+           "dur_delta": None, "conflict": False}
+    if not candidates:
+        return out
+    try:
+        dur_id, dur_delta = _duration_pick(reel_duration_s, candidates)
+        wave_id, wave_sim, sims = _waveform_pick(reel_duration_s, reel_fp, candidates)
+    except Exception as e:   # a malformed fp must never break a transcription
+        print(f"[evidence] pick failed: {type(e).__name__}: {str(e)[:120]}", flush=True)
+        return out
+
+    if dur_id and wave_id and dur_id != wave_id:
+        # The two signals contradict each other. Never seen in validation — and a
+        # disagreement means we do not understand the data, so guessing here is
+        # exactly the failure this function exists to fix. Hand it to a human.
+        out["conflict"] = True
+        out["similarity"] = wave_sim
+        out["dur_delta"] = dur_delta
+        return out
+
+    def _delta_of(jid):
+        reel = _as_float(reel_duration_s)
+        for c in candidates:
+            if c.get("job_id") == jid:
+                d = _as_float(c.get("export_duration_s"))
+                if reel is None or d is None:
+                    return None
+                return round(abs(reel - d), 4)
+        return None
+
+    if wave_id:
+        out["job_id"] = wave_id
+        out["source"] = "waveform+duration" if dur_id == wave_id else "waveform"
+        out["similarity"] = wave_sim
+        out["dur_delta"] = _delta_of(wave_id)
+    elif dur_id:
+        out["job_id"] = dur_id
+        out["source"] = "duration"
+        out["dur_delta"] = round(dur_delta, 4) if dur_delta is not None else None
+        out["similarity"] = sims.get(dur_id)   # reported when computed; never gating
+    else:
+        out["similarity"] = wave_sim           # for the log line: "how close did we get"
+        out["dur_delta"] = None
+    return out
+
+
 def match_verdict(ranked, high, margin):
     """Classify a ranking so the UI can refuse to present a guess as a fact.
 
