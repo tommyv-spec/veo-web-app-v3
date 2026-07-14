@@ -3914,6 +3914,9 @@ def sync_instagram_account(
             # handled string taken_at — NULL posted_at sinks the reel in the grid.
             if not existing.posted_at and c.get("posted_at"):
                 existing.posted_at = c["posted_at"]
+            # v853 — backfill the reel runtime on rows synced before we read it.
+            if existing.duration_s is None and c.get("duration_s"):
+                existing.duration_s = c["duration_s"]
             # Refresh signed URLs (they expire) so retries can re-download.
             if c.get("video_url"):
                 existing.video_url = c.get("video_url")
@@ -3948,6 +3951,7 @@ def sync_instagram_account(
             likes=c.get("likes") or 0,
             comments=c.get("comments") or 0,
             posted_at=c.get("posted_at"),
+            duration_s=c.get("duration_s"),
         )
         db.add(v)
         added += 1
@@ -4730,10 +4734,17 @@ async def diag_ig_match(
     user_id: str = "",
     limit: int = 50,
     only_matched: int = 1,
+    probe: int = 0,
     db: DBSession = Depends(get_db_session),
 ):
     """v852 TEMPORARY read-only audit of EXISTING Instagram links (NO auth —
     gated by DIAG_TOKEN, inert unless that env var is set).
+
+    v853: pass probe=1 to add DURATION to the report. Many disputed reels tie on
+    text (identical scripts, gap=0.0000), so words cannot separate them — but the
+    reel's runtime and the job's exported mp4 runtime can. Probing is capped at
+    the top-3 ranked candidates + the stored job per reel (NOT the 787-job pool)
+    and the result caches on the Job row, so a second run is free.
 
     The v852 matching fixes are FORWARD-ONLY: a reel that is already linked is
     excluded from every candidate pool (`instagram_video_id IS NOT NULL`), so a
@@ -4758,6 +4769,7 @@ async def diag_ig_match(
         _bulk_dialogue_map, _MATCH_HIGH, _MATCH_MARGIN, _MATCH_IDF_POWER,
     )
     import instagram_match as _ig
+    from export_probe import ensure_export_duration
 
     limit = max(1, min(int(limit or 50), 200))
     q = (
@@ -4795,8 +4807,12 @@ async def diag_ig_match(
                         Job.archived == False)  # noqa: E712
                 .all()
             )
-            _pool_cache[uid] = (cand, _bulk_dialogue_map(db, [j.id for j in cand]))
-        cand, dmap = _pool_cache[uid]
+            _pool_cache[uid] = (
+                cand,
+                _bulk_dialogue_map(db, [j.id for j in cand]),
+                {j.id: j for j in cand},
+            )
+        cand, dmap, jobs_by_id = _pool_cache[uid]
         # Same hard time filter the live matcher applies.
         eligible = [j for j in cand if _ig.job_predates_post(j.created_at, v.posted_at)]
         pairs = [(j.id, dmap.get(j.id, "")) for j in eligible]
@@ -4812,14 +4828,43 @@ async def diag_ig_match(
         if v.matched_job_id and not agrees:
             disagree += 1
 
+        # v853 — duration probe, capped at the top-3 ranked candidates + the
+        # stored job. Probing the whole pool would download 787 exports.
+        _probe_ids = set()
+        if int(probe or 0):
+            _probe_ids = {r["job_id"] for r in ranked_full[:3]}
+            if v.matched_job_id:
+                _probe_ids.add(v.matched_job_id)
+        _dur_cache = {}
+
+        def _export_dur(job_id, _ids=_probe_ids, _cache=_dur_cache):
+            """Export duration of job_id. None unless probe=1 AND job is in the cap."""
+            if not job_id or job_id not in _ids:
+                return None
+            if job_id not in _cache:
+                j = jobs_by_id.get(job_id) or db.query(Job).filter(Job.id == job_id).first()
+                _cache[job_id] = ensure_export_duration(db, j) if j else None
+            return _cache[job_id]
+
+        def _dur_delta(export_dur, _reel=v.duration_s):
+            """|reel - export| in seconds; None if either side is missing."""
+            if export_dur is None or _reel is None:
+                return None
+            return abs(float(_reel) - float(export_dur))
+
+        _stored_dur = _export_dur(v.matched_job_id)
+
         out.append({
             "shortcode": v.shortcode,
             "url": v.url,
             "posted_at": v.posted_at.isoformat() if v.posted_at else None,
+            "reel_duration_s": v.duration_s,
             "matched_job_id": v.matched_job_id,
             "stored_rank": stored_rank,
             "stored_score": stored_score,
             "stored_line": _first_line(v.matched_job_id) if v.matched_job_id else None,
+            "stored_export_dur": _stored_dur,
+            "stored_dur_delta": _dur_delta(_stored_dur),
             "link_verdict": "AGREES" if agrees else "DISAGREES",
             "would_pick": ranked_full[0]["job_id"] if ranked_full else None,
             "would_pick_line": _first_line(ranked_full[0]["job_id"]) if ranked_full else None,
@@ -4830,7 +4875,13 @@ async def diag_ig_match(
             "pool_before_time_filter": len(cand),
             "transcript_len": len(v.transcription or ""),
             "top5": [
-                {"job": r["job_id"][:8], "score": r["score"], "line1": _first_line(r["job_id"])}
+                {
+                    "job": r["job_id"][:8],
+                    "score": r["score"],
+                    "line1": _first_line(r["job_id"]),
+                    "export_dur": _export_dur(r["job_id"]),
+                    "dur_delta": _dur_delta(_export_dur(r["job_id"])),
+                }
                 for r in ranked_full[:5]
             ],
         })

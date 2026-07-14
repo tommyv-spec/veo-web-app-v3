@@ -230,6 +230,11 @@ class Job(Base):
     lifecycle_stage = Column(String(32), nullable=True, default=None)
     approval_at = Column(DateTime, nullable=True)
     export_at = Column(DateTime, nullable=True)
+    # v853 — duration of the FINAL EXPORT mp4. Computed lazily on first use and
+    # cached: hooking the export path would need a backfill for every historical
+    # job, while computing on demand self-heals every job that already exists.
+    export_duration_s = Column(Float, nullable=True)
+    export_probed_at  = Column(DateTime, nullable=True)   # NULL = never attempted
     finishing_at = Column(DateTime, nullable=True)
     published_at = Column(DateTime, nullable=True)
     notes = Column(Text, nullable=True)
@@ -656,6 +661,9 @@ class InstagramVideo(Base):
     likes           = Column(Integer, default=0)
     comments        = Column(Integer, default=0)
     posted_at       = Column(DateTime, nullable=True, index=True)
+    # v853 — reel runtime from HikerAPI (video_duration). Free discriminator for
+    # near-duplicate scripts: same words, different render, different length.
+    duration_s      = Column(Float, nullable=True)
     transcription   = Column(Text, nullable=True)
     transcription_status = Column(String(16), default="pending")
     transcription_error  = Column(Text, nullable=True)
@@ -682,6 +690,7 @@ class InstagramVideo(Base):
             "likes": self.likes,
             "comments": self.comments,
             "posted_at": self.posted_at.isoformat() if self.posted_at else None,
+            "duration_s": self.duration_s,
             "transcription_status": self.transcription_status,
             "transcription_error": self.transcription_error,
             "matched_job_id": self.matched_job_id,
@@ -1099,6 +1108,13 @@ def _run_migrations_postgresql(engine):
         ("jobs", "instagram_video_id", "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS instagram_video_id INTEGER"),
         # 2026-06-01: drive-watch lifecycle path
         ("jobs", "published_via",      "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS published_via VARCHAR(20)"),
+        # v853 — duration discriminator for the IG->job matcher
+        ("jobs", "export_duration_s",
+         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS export_duration_s DOUBLE PRECISION"),
+        ("jobs", "export_probed_at",
+         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS export_probed_at TIMESTAMP"),
+        ("instagram_videos", "duration_s",
+         "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS duration_s DOUBLE PRECISION"),
         # v815 — per-account settings JSON blob (auto_image_retry mode, etc.)
         ("users", "settings_json", "ALTER TABLE users ADD COLUMN IF NOT EXISTS settings_json TEXT"),
         # v815 — auto-image-retry audit trail per clip
@@ -1246,6 +1262,11 @@ def _run_migrations_sqlite(engine):
         ("instagram_videos", "video_url", "ALTER TABLE instagram_videos ADD COLUMN video_url TEXT"),
         # 2026-06-01: drive-watch lifecycle path
         ("jobs", "published_via",      "ALTER TABLE jobs ADD COLUMN published_via TEXT"),
+        # v853 — duration discriminator for the IG->job matcher
+        ("jobs", "export_duration_s", "ALTER TABLE jobs ADD COLUMN export_duration_s REAL"),
+        ("jobs", "export_probed_at",  "ALTER TABLE jobs ADD COLUMN export_probed_at DATETIME"),
+        ("instagram_videos", "duration_s",
+         "ALTER TABLE instagram_videos ADD COLUMN duration_s REAL"),
         # v815 — per-account settings JSON blob (auto_image_retry mode, etc.)
         ("users", "settings_json", "ALTER TABLE users ADD COLUMN settings_json TEXT"),
         # v815 — auto-image-retry audit trail per clip
