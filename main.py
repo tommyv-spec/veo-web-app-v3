@@ -4733,8 +4733,10 @@ async def diag_ig_match(
     token: str = "",
     user_id: str = "",
     limit: int = 50,
+    offset: int = 0,
     only_matched: int = 1,
     probe: int = 0,
+    max_probe: int = 6,
     db: DBSession = Depends(get_db_session),
 ):
     """v852 TEMPORARY read-only audit of EXISTING Instagram links (NO auth —
@@ -4772,6 +4774,15 @@ async def diag_ig_match(
     from export_probe import ensure_export_duration
 
     limit = max(1, min(int(limit or 50), 200))
+    offset = max(0, int(offset or 0))
+    # Each probe DOWNLOADS an export from R2 and ffprobes it. Doing that for the
+    # whole set in one request blew the gunicorn worker timeout (HTTP 502) — the
+    # same shape as the 2026-07-06 outage (worker timeout -> SIGABRT -> killed DB
+    # connections). So probing is BUDGETED per request: walk the set in pages and
+    # stop probing once the budget is spent. Results cache on the Job row, so
+    # paging through the set accumulates the answers without ever running a long
+    # request.
+    probe_budget = [max(0, int(max_probe or 0))] if int(probe) else [0]
     q = (
         db.query(InstagramVideo, InstagramAccount.user_id)
         .join(InstagramAccount, InstagramVideo.account_id == InstagramAccount.id)
@@ -4781,7 +4792,21 @@ async def diag_ig_match(
     if int(only_matched):
         q = q.filter(InstagramVideo.matched_job_id.isnot(None))
     q = q.filter(InstagramVideo.transcription_status == "done")
-    rows = q.order_by(InstagramVideo.posted_at.desc().nullslast()).limit(limit).all()
+    rows = (
+        q.order_by(InstagramVideo.posted_at.desc().nullslast())
+        .offset(offset).limit(limit).all()
+    )
+
+    def _probe(job):
+        """Cached duration; spends budget only when a real download is needed."""
+        if job is None:
+            return None
+        if job.export_duration_s is not None or job.export_probed_at is not None:
+            return ensure_export_duration(db, job)  # cached -> free
+        if probe_budget[0] <= 0:
+            return None
+        probe_budget[0] -= 1
+        return ensure_export_duration(db, job)
 
     def _first_line(job_id):
         c = (
@@ -4843,7 +4868,7 @@ async def diag_ig_match(
                 return None
             if job_id not in _cache:
                 j = jobs_by_id.get(job_id) or db.query(Job).filter(Job.id == job_id).first()
-                _cache[job_id] = ensure_export_duration(db, j) if j else None
+                _cache[job_id] = _probe(j)
             return _cache[job_id]
 
         def _dur_delta(export_dur, _reel=v.duration_s):
@@ -4887,10 +4912,15 @@ async def diag_ig_match(
         })
     return {
         "count": len(out),
+        "offset": offset,
         "disagreeing_links": disagree,
+        "probe_budget_left": probe_budget[0],
         "high": _MATCH_HIGH, "margin": _MATCH_MARGIN, "idf_power": _MATCH_IDF_POWER,
         "note": "v852 temporary link audit; read-only. stored_rank=1 means the link "
-                "agrees with the fixed matcher. Unset DIAG_TOKEN to disable.",
+                "agrees with the fixed matcher. Page with offset= and probe in small "
+                "batches (max_probe) — each probe downloads an export from R2, and "
+                "doing the whole set in one request times out the worker. Results "
+                "cache on the Job row. Unset DIAG_TOKEN to disable.",
         "videos": out,
     }
 
