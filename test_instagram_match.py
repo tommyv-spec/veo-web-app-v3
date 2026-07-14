@@ -396,6 +396,21 @@ def _cand(job_id, dur, fp=None):
     return {"job_id": job_id, "export_duration_s": dur, "export_audio_fp": fp}
 
 
+def _distinct_fp(offset, n=120, k=8):
+    """A sparse-spike loudness envelope: mostly quiet with a few loud frames at
+    unique positions. Genuinely DECORRELATED from the smooth _fp envelopes — it
+    scores well below WAVE_MIN_SIM at any lag — so it stands in for a DIFFERENT
+    performance whose waveform is INCONCLUSIVE (the real ~0.58 noise floor). The
+    smooth _fp helper cannot do this: two smooth positive envelopes always find a
+    decent-correlation lag and floor out around 0.76, which is above the retuned
+    0.75 gate."""
+    env = [0.02] * n
+    for j in range(k):
+        env[(offset + j * 17 + j * j) % n] = 1.0
+    nr = _math.sqrt(sum(x * x for x in env)) or 1.0
+    return _afp.encode_fingerprint([x / nr for x in env])
+
+
 def test_evidence_duration_decisive():
     m = _load()
     r = m.evidence_pick(30.0, None, [_cand("a", 30.1), _cand("b", 34.0)])
@@ -430,11 +445,14 @@ def test_evidence_waveform_decisive():
 
 
 def test_evidence_waveform_abstains_on_low_similarity():
-    """A TRUE match can score as low as 0.53 — so a low score means ABSTAIN,
-    never 'the other one'. Abstaining is the correct behavior."""
+    """No candidate is a real match, so the pick must ABSTAIN — never hand back
+    'the other one'. These two unrelated candidates score a near-tie, so the GAP
+    rule (WAVE_SEPARATION) forces the abstention. A low absolute score is no
+    longer the only guard: the floor dropped to WAVE_MIN_SIM because the coverage
+    cap makes a trimmed-but-true match land ~0.88, and the trustworthy signal is
+    the gap to the runner-up, not the raw number."""
     m = _load()
     r = m.evidence_pick(30.0, _fp(1), [_cand("a", 30.05, _fp(7)), _cand("b", 30.1, _fp(9))])
-    assert r["similarity"] is None or r["similarity"] < m.WAVE_MIN_SIM
     assert r["job_id"] is None
     assert r["conflict"] is False
 
@@ -494,13 +512,15 @@ def test_evidence_waveform_prefilters_far_durations():
 
 
 def test_evidence_caps_the_number_of_waveform_comparisons():
-    """envelope_similarity is O(lag x frames) pure Python. The diag endpoint
-    502'd once from doing too many in one request; the cap is the fix."""
+    """The compare is bounded on purpose: the diag endpoint 502'd once from
+    unbounded work (worker timeout -> SIGABRT -> killed DB connections). The FFT
+    correlation made each compare ~1-2ms, so the cap rose 12 -> 30 (a wider net,
+    still bounded — a request must never do unbounded work)."""
     m = _load()
     cands = [_cand(f"j{i}", 30.0 + i * 0.01, _fp(i + 20)) for i in range(40)]
     r = m.evidence_pick(30.0, _fp(5), cands)   # must return, not hang
     assert r["conflict"] is False
-    assert m.WAVE_MAX_COMPARISONS <= 12
+    assert m.WAVE_MAX_COMPARISONS <= 30
 
 
 def test_recency_window_keeps_recent_jobs_and_drops_old_ones():
@@ -839,7 +859,9 @@ def test_regression_the_weak_claimant_does_not_steal_the_proven_job():
     export_dur = 17.269
     j_fp = _fp(4)                     # J's exported mp4
     a_fp = _fp(4, phase=0.4)          # reel A: a re-encode of that same render
-    b_fp = _fp(11)                    # reel B: a different performance entirely
+    b_fp = _distinct_fp(7)            # reel B: a different performance — its
+                                      # waveform is INCONCLUSIVE (scores below the
+                                      # gate), exactly as in the c9f0e6c9 data
     pool = [_cand("J", export_dur, j_fp)]
 
     ev_a = m.evidence_pick(17.274, a_fp, pool)          # delta 0.005
@@ -887,3 +909,139 @@ def test_regression_a_repost_still_links_both_reels():
     repost = m.is_same_video(a_fp, b_fp, export_dur, export_dur)
     assert repost is True
     assert m.resolve_claim(m.claim_strength(ev_b), m.claim_strength(ev_a), repost) == "link"
+
+
+# ============================================================================
+# v858 — RETUNE FOR TRIMMED EXPORTS.
+#
+# The operator TRIMS the export before posting (measured: 5s off a 97s video).
+# A cut of N seconds shifts the audio by N seconds; envelope_similarity now
+# DERIVES the align window from the length difference, so the same take vs its
+# own 5s-trimmed copy scores 1.000. But the similarity is COVERAGE-WEIGHTED:
+# trimming 5s off 97s caps the overlap at ~95%, so even a PERFECT match cannot
+# exceed ~0.95 and real ones land ~0.88. So the live constants were retuned:
+#   - WAVE_MIN_SIM   0.90 -> 0.75  (the 0.90 bar abstained on exactly the
+#                                   trimmed videos it should catch),
+#   - WAVE_SEPARATION 0.05 -> 0.15 (the GAP to the runner-up is the trustworthy
+#                                   signal — a real match beats the field by
+#                                   ~0.28; the gap requirement got 3x STRICTER),
+#   - WAVE_DUR_PREFILTER_S 1.5 -> 12.0 (a 5s trim put the correct job outside the
+#                                   1.5s window, so it was never even compared —
+#                                   this made job 41413fbd invisible to its own
+#                                   file).
+#
+# The gate/gap band tests SCRIPT the similarity by encoding the target value into
+# the candidate fingerprint and patching envelope_similarity: a synthetic
+# envelope's acoustic similarity cannot be dialled to an exact 0.88/0.60, but the
+# DECISION logic under test is a function of those numbers, not of how they were
+# produced. The prefilter test uses REAL fingerprints — there the point is the
+# duration window, not the score.
+# ============================================================================
+
+def _sim_tag_fp(sim):
+    """A real fingerprint that CARRIES its own scripted similarity in frame 0."""
+    return _afp.encode_fingerprint([float(sim)])
+
+
+def _patch_scripted_sim(monkeypatch):
+    """Make envelope_similarity return the candidate env's frame-0 tag.
+    _waveform_pick calls envelope_similarity(reel_env, cand_env), so the
+    candidate is the SECOND argument. _waveform_pick re-imports the name from the
+    audio_fingerprint module on each call, so patching the module attr takes."""
+    def fake(a, b, max_lag=None):
+        return float(b[0])
+    monkeypatch.setattr(_afp, "envelope_similarity", fake)
+
+
+def _trim_env(seed, n, drop, phase=0.0):
+    """A smooth loudness envelope, optionally trimmed `drop` frames off the front
+    and renormalized — a real trimmed take to feed encode_fingerprint."""
+    env = [abs(_math.sin((i + phase) * (0.07 + 0.013 * seed))
+               + 0.35 * _math.cos((i + phase) * 0.31 * (seed + 1))) for i in range(n)]
+    env = env[drop:]
+    nr = _math.sqrt(sum(x * x for x in env)) or 1.0
+    return [x / nr for x in env]
+
+
+def test_evidence_trimmed_true_match_is_decisive_below_the_old_floor(monkeypatch):
+    """A trimmed-but-true match at 0.88 with a clear runner-up at 0.60 must now be
+    DECISIVE. Under the old 0.90 floor it ABSTAINED — penalising the operator for
+    trimming. The 0.28 gap is what proves it."""
+    _patch_scripted_sim(monkeypatch)
+    m = _load()
+    reel = _sim_tag_fp(1.0)
+    r = m.evidence_pick(30.0, reel,
+                        [_cand("true", 30.05, _sim_tag_fp(0.88)),
+                         _cand("other", 30.1, _sim_tag_fp(0.60))])
+    assert r["job_id"] == "true"
+    assert "waveform" in (r["source"] or "")
+    assert abs(r["similarity"] - 0.88) < 1e-6
+    assert m.WAVE_MIN_SIM <= 0.88 < 0.90   # sits below the OLD bar on purpose
+
+
+def test_evidence_abstains_on_a_murky_pair_within_the_gap(monkeypatch):
+    """0.88 vs 0.80 is a gap of 0.08 — inside WAVE_SEPARATION. Both clear the
+    floor, but the field is too close to call, so the pick ABSTAINS. The gap rule
+    is the guard against a confident wrong pick."""
+    _patch_scripted_sim(monkeypatch)
+    m = _load()
+    reel = _sim_tag_fp(1.0)
+    r = m.evidence_pick(30.0, reel,
+                        [_cand("a", 30.05, _sim_tag_fp(0.88)),
+                         _cand("b", 30.1, _sim_tag_fp(0.80))])
+    assert r["job_id"] is None
+    assert r["conflict"] is False
+
+
+def test_evidence_separation_is_measured_among_compared_candidates(monkeypatch):
+    """The gap's runner-up must be the strongest OTHER candidate actually
+    compared — not a truncated view. A decisive top (0.95) with the next-best
+    compared candidate at 0.60 stays decisive even amid a crowd of near-floor
+    also-rans."""
+    _patch_scripted_sim(monkeypatch)
+    m = _load()
+    reel = _sim_tag_fp(1.0)
+    cands = [_cand("win", 30.01, _sim_tag_fp(0.95)),
+             _cand("run", 30.02, _sim_tag_fp(0.60))]
+    cands += [_cand(f"floor{i}", 30.03 + i * 0.001, _sim_tag_fp(0.58)) for i in range(10)]
+    r = m.evidence_pick(30.0, reel, cands)
+    assert r["job_id"] == "win"
+
+
+def test_waveform_prefilter_now_compares_a_5s_trimmed_export():
+    """The bug that made job 41413fbd invisible to its own file: a 5s trim put
+    the correct job 5s from the reel, OUTSIDE the old 1.5s prefilter, so it was
+    never compared. With the 12s window it is compared — and it matches. REAL
+    fingerprints (encode_fingerprint), because the point here is the duration
+    window, not the score."""
+    m = _load()
+    # export: 20s of loudness (800 frames @ 25ms). reel: the same take, trimmed
+    # 5s off the front (600 frames) -> a genuine ~1.0 match that is 5s shorter.
+    full_fp = _afp.encode_fingerprint(_trim_env(seed=4, n=800, drop=0))
+    reel_fp = _afp.encode_fingerprint(_trim_env(seed=4, n=800, drop=200))
+    cand = _cand("export", 20.0, full_fp)
+    reel_dur = 15.0                              # 5s shorter than the export
+
+    delta = abs(reel_dur - 20.0)
+    assert 1.5 < delta < m.WAVE_DUR_PREFILTER_S  # excluded at 1.5, included at 12
+
+    _id, _sim, sims = m._waveform_pick(reel_dur, reel_fp, [cand])
+    assert "export" in sims                      # it WAS compared (skipped at 1.5s)
+    r = m.evidence_pick(reel_dur, reel_fp, [cand])
+    assert r["job_id"] == "export"
+    assert "waveform" in (r["source"] or "")
+
+
+def test_claim_strength_waveform_floor_still_outranks_tightest_duration():
+    """The load-bearing ordering, re-checked at the NEW floor: ANY waveform claim
+    beats ANY duration-only one. A waveform claim at exactly WAVE_MIN_SIM must
+    still outrank a perfect (0.000s) duration-only claim — otherwise a length
+    twin could evict a performance-proven link. And length alone can never even
+    reach the steal floor."""
+    m = _load()
+    wave_floor = m.claim_strength(_ev("waveform", similarity=m.WAVE_MIN_SIM))
+    tightest_dur = m.claim_strength(_ev("duration", dur_delta=0.0))
+    assert tightest_dur > 0.0
+    assert wave_floor > tightest_dur
+    assert m.CLAIM_STEAL_MIN_STRENGTH >= m.CLAIM_WAVE_BASE
+    assert m.CLAIM_STEAL_MIN_STRENGTH > tightest_dur   # a duration-only claim cannot steal
