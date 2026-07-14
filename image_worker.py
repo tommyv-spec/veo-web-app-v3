@@ -106,7 +106,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v577"  # v791b interleaved download scan + v791c 403/stale-URL re-resolve retry
+WORKER_VERSION = "img-v578"  # v854 parallel variant submit (N batchGenerateImages POSTs fired concurrently)
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FOLDER = os.environ.get("IMAGE_SESSION_FOLDER",
@@ -3756,6 +3756,93 @@ def _fa_mint_or_empty(page, action):
         return ""
 
 
+# ─── v854 — parallel variant submit ──────────────────────
+# batchGenerateImages is SYNCHRONOUS: the POST doesn't return until Flow has
+# rendered the image (~18s), and the finished fifeUrl comes back in the response
+# body. Firing the N variants one at a time therefore cost N × 18s of blocked
+# main thread (operator log 2026-07-14, node 2916: fetch=71.0s(4x), submit_wall=76.2s).
+# Flow's own UI fires them in PARALLEL — the HAR ceiling noted at the --parallel
+# flag is ~5 simultaneous POSTs. These two JS snippets mint N reCAPTCHA tokens
+# and fire N POSTs concurrently inside ONE page.evaluate, so a x4 node costs one
+# render's wall time instead of four.
+
+_FA_CAPTCHA_BATCH_JS = """
+async ([siteKey, action, n]) => {
+  function waitG(t) {
+    return new Promise((res, rej) => {
+      const s = Date.now();
+      const c = () => {
+        if (window.grecaptcha && window.grecaptcha.enterprise && window.grecaptcha.enterprise.execute) return res();
+        if (Date.now() - s > t) return rej(new Error('grecaptcha not available'));
+        setTimeout(c, 200);
+      };
+      c();
+    });
+  }
+  await waitG(10000);
+  const jobs = [];
+  for (let i = 0; i < n; i++) jobs.push(window.grecaptcha.enterprise.execute(siteKey, { action }));
+  const out = await Promise.allSettled(jobs);
+  return out.map(r => (r.status === 'fulfilled' && r.value) ? r.value : '');
+}
+"""
+
+_FA_BATCH_FETCH_JS = """
+async ([url, method, headers, bodyStrs]) => {
+  const one = async (bodyStr) => {
+    const opts = { method, headers, credentials: 'include' };
+    if (bodyStr !== null) opts.body = bodyStr;
+    let status = 0, ok = false, text = '';
+    try {
+      const r = await fetch(url, opts);
+      status = r.status; ok = r.ok;
+      text = await r.text();
+    } catch (e) {
+      return { status: 0, ok: false, data: null, text: 'fetch failed: ' + (e && e.message) };
+    }
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    return { status, ok, data, text: data ? '' : (text || '').slice(0, 2000) };
+  };
+  return await Promise.all(bodyStrs.map(one));
+}
+"""
+
+
+def _fa_mint_captcha_batch(page, action, n):
+    """Mint n reCAPTCHA tokens concurrently. Always returns a list of length n;
+    a slot that failed to mint is an empty string (caller fails that variant)."""
+    n = int(n or 1)
+    try:
+        toks = page.evaluate(_FA_CAPTCHA_BATCH_JS, [_FA_RECAPTCHA_SITE_KEY, action, n])
+    except Exception:
+        return [""] * n
+    if not isinstance(toks, list):
+        return [""] * n
+    toks = [t if isinstance(t, str) else "" for t in toks]
+    toks += [""] * (n - len(toks))
+    return toks[:n]
+
+
+def _fa_api_fetch_many(page, url, method, token, body_objs, extra_headers=None):
+    """Fire len(body_objs) POSTs concurrently in one page.evaluate. Returns one
+    result dict per body, same shape as _fa_api_fetch, in the same order."""
+    headers = {"authorization": f"Bearer {token}", "content-type": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
+    body_strs = [json.dumps(b) for b in body_objs]
+    try:
+        res = page.evaluate(_FA_BATCH_FETCH_JS, [url, method, headers, body_strs])
+    except Exception as e:
+        return [{"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
+                for _ in body_objs]
+    if not isinstance(res, list) or len(res) != len(body_objs):
+        return [{"status": 0, "ok": False, "data": None,
+                 "text": f"batch fetch returned bad shape: {type(res).__name__}"}
+                for _ in body_objs]
+    return res
+
+
 # ─── Sync client (minimal: upload + image submit) ────────
 class _FaClient:
     def __init__(self, page, project_id="", tier=None):
@@ -3875,6 +3962,107 @@ class _FaClient:
                 self._bump_outcome("other")
             break
         raise _FaError(f"submit_image failed: {_fa_error_reason(last) or 'unknown'}")
+
+    @staticmethod
+    def _classify(reason):
+        """v854 — bucket a submit failure for the [timing] outcome line. Same
+        buckets the sequential path used, hoisted so the batch path shares them."""
+        r = (reason or "").lower()
+        if ("unusual_activity" in r or "permission_denied" in r
+                or " 403" in r or "code=403" in r):
+            return "unusual"
+        if "captcha" in r or "recaptcha" in r:
+            return "recaptcha"
+        if any(s in r for s in ("500", "502", "503", "504",
+                                "internal", "unavailable", "deadline")):
+            return "5xx"
+        return "other"
+
+    def submit_image_batch(self, prompt, image_model_name, count,
+                           reference_media_ids=None, base_image_media_id="",
+                           aspect=None, seeds=None, cooldown=True):
+        """v854 — fire `count` batchGenerateImages POSTs CONCURRENTLY.
+
+        The sequential submit_image above blocks for a full render per call
+        (batchGenerateImages returns the finished image, not a job handle), so a
+        x4 node paid 4 × ~18s serially. This fires all N in one page.evaluate
+        under Promise.all — wall time is one render, which is what Flow's own UI
+        does.
+
+        Returns a list of `count` dicts, in variant order, each either
+            {"ok": True,  "media_id": str, "fife_url": str}
+        or  {"ok": False, "reason": str}
+        A per-variant failure never raises — the caller decides what to do with
+        the mix (v818.4 partial-ok, v843 unusual, v844 content reject).
+        """
+        if not image_model_name:
+            raise _FaError("no imageModelName")
+        n = max(1, int(count or 1))
+        if cooldown:
+            self._cooldown()
+
+        # Distinct seeds. The sequential path got these for free — each call
+        # re-read time.time() ms. Fired in one batch, every body would carry the
+        # SAME seed and Flow would return N identical images.
+        if not seeds:
+            base = int(time.time() * 1000) % 1000000
+            seeds = [(base + i * 7919) % 1000000 for i in range(n)]
+
+        url = _fa_build_url("generate_images", project_id=self.project_id)
+        token = self._token()
+
+        _m0 = time.monotonic()
+        captchas = _fa_mint_captcha_batch(self.page, _FA_CAPTCHA_IMAGE, n)
+        self._t["mint"] += time.monotonic() - _m0
+        self._t["mint_n"] += n
+
+        out = [None] * n
+        bodies, slots = [], []
+        for i in range(n):
+            if not captchas[i]:
+                self._bump_outcome("mint_fail")
+                out[i] = {"ok": False, "reason": "captcha mint failed"}
+                continue
+            body = _fa_build_generate_image(
+                prompt=prompt, project_id=self.project_id,
+                image_model_name=image_model_name, aspect=aspect, seed=seeds[i],
+                reference_media_ids=reference_media_ids,
+                base_image_media_id=base_image_media_id, tier=self.tier,
+            )
+            _fa_inject_captcha_token(body, captchas[i])
+            bodies.append(body)
+            slots.append(i)
+
+        if bodies:
+            _f0 = time.monotonic()
+            results = _fa_api_fetch_many(self.page, url, "POST", token, bodies)
+            self._t["fetch"] += time.monotonic() - _f0
+            self._t["fetch_n"] += len(bodies)
+            for slot, res in zip(slots, results):
+                # A transport failure (fetch threw / evaluate threw / bad shape)
+                # reports status=0, which _fa_is_error does NOT flag — it only
+                # looks for an error body or a >=400 status. Catch it via the
+                # `ok` flag too, else the slot falls through to the no-media_id
+                # branch below and reports a misleading reason.
+                _transport_dead = not (isinstance(res, dict) and res.get("ok"))
+                if _fa_is_error(res) or _transport_dead:
+                    reason = (_fa_error_reason(res)
+                              or (res.get("text") if isinstance(res, dict) else "")
+                              or "unknown")
+                    self._bump_outcome(self._classify(reason))
+                    out[slot] = {"ok": False, "reason": f"submit_image failed: {reason}"}
+                    continue
+                media_id = _fa_extract_image_media_id(res)
+                if not media_id:
+                    self._bump_outcome("other")
+                    out[slot] = {"ok": False, "reason": "submit_image failed: no media_id in response"}
+                    continue
+                self._bump_outcome("ok")
+                gen = ((res.get("data") or {}).get("media", [{}])[0].get("image") or {}).get("generatedImage") or {}
+                out[slot] = {"ok": True, "media_id": media_id,
+                             "fife_url": gen.get("fifeUrl", gen.get("imageUri", ""))}
+
+        return out
 
 
 def _fa_resolve_image_model_name(label):
@@ -4820,59 +5008,83 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
     except Exception as e:
         return _latch_off(f"pending registration failed: {e}")
 
-    # Fire N submits in-page. Sleep ~1.5s between each to (a) avoid the
-    # rapid-fire pattern that tripped PUBLIC_ERROR_UNUSUAL_ACTIVITY in the
-    # previous iteration and (b) let captcha tokens be minted cleanly. Total
-    # ~6s for x4 — still well faster than the DOM path's ~25s.
-    # v818.4 — PER-VARIANT retry. Each of the N variant submits is retried on
-    # BOTH a transient server 5xx AND an 'unusual activity' 403 (operator saw a
-    # x4 batch where only ONE variant's submit 403'd yet 3 rendered fine — a
-    # single variant's block must NOT nuke the whole node). Decision AFTER the
-    # loop, based on what actually landed:
+    # v854 — fire the N submits CONCURRENTLY (was: one at a time, 1.5s apart).
+    # batchGenerateImages does not return until Flow has rendered the image, so
+    # the old serial loop paid N × ~18s of blocked main thread (operator log
+    # 2026-07-14, node 2916: fetch=71.0s(4x) submit_wall=76.2s for a x4). Flow's
+    # own UI fires them in parallel — HAR ceiling ~5 simultaneous POSTs, and x4
+    # sits under it. Wall time is now ONE render.
+    #
+    # v818.4 PER-VARIANT retry is preserved, now as retry ROUNDS: after each
+    # round, only the variants that failed transiently are re-fired (again in
+    # parallel). A single variant's failure must never nuke the whole node.
+    # v843 — retry a transient 5xx (and a captcha mint hiccup, which the old
+    # inner loop covered via _FA_CAPTCHA_MAX_RETRIES). NEVER retry an 'unusual
+    # activity' block: the account is flagged, re-minting is futile (was grinding
+    # 144 fetches / 77 min). Bail fast + let the caller ship-and-restore.
+    #
+    # Decision AFTER the rounds, based on what actually landed (unchanged):
     #   - any variant captured  → ship what we got (partial-ok), no restore
     #   - zero captured, all blocked with unusual-activity → real account block
     #     → golden restore (_signal_unusual)
     #   - zero captured, other transient → DOM fall-back; else latch.
     _SUBMIT_API_RETRIES = 3
+    _n_variants = max(1, int(variants or 1))
     captured_fife_urls = []
     _last_fail_reason = None
     _saw_unusual = False
+
+    def _is_captcha_hiccup(reason: str) -> bool:
+        """A genuine transient mint/captcha failure — worth one more parallel
+        round. An 'unusual activity' 403 also mentions captcha internals, so it
+        is excluded explicitly (that one must NOT be retried)."""
+        if _is_unusual(reason):
+            return False
+        r = (reason or "").lower()
+        return "captcha" in r or "recaptcha" in r
+
     try:
-        for v in range(int(variants or 1)):
-            if v > 0:
-                time.sleep(1.5)
-            for _att in range(_SUBMIT_API_RETRIES + 1):
-                try:
-                    media_id, fife_url = cli.submit_image(
-                        prompt=api_prompt,
-                        image_model_name=image_model,
-                        reference_media_ids=ref_ids or None,
-                        aspect=api_aspect,
-                        cooldown=(v == 0 and _att == 0),  # only first call pays the 10s cooldown
-                    )
-                    if fife_url:
-                        captured_fife_urls.append(fife_url)
-                    _last_fail_reason = None
-                    break  # this variant is done
-                except Exception as e:
-                    reason = f"submit_image raised: {e}"
-                    _maybe_invalidate_token(reason)
-                    _unusual = _is_unusual(reason)
-                    if _unusual:
-                        _saw_unusual = True
-                    # v843 — retry only a transient 5xx. Do NOT retry on 'unusual
-                    # activity': the account is blocked, re-minting reCAPTCHA is
-                    # futile (was grinding 144 fetches / 77 min). On unusual we
-                    # bail fast + let the caller ship-and-restore.
-                    if _is_server_5xx(reason) and _att < _SUBMIT_API_RETRIES:
-                        _w = 2 * (_att + 1)
-                        _kind = "server error"
-                        print(f"{pfx}[flow_api] {_kind} on variant {v + 1}/{variants} "
-                              f"({reason[-44:]}) — API retry {_att + 1}/{_SUBMIT_API_RETRIES} in {_w}s", flush=True)
-                        time.sleep(_w)
-                        continue
-                    _last_fail_reason = reason
-                    break  # non-retryable, or API retries exhausted for this variant
+        _pending = list(range(_n_variants))   # variant slots still owed an image
+        _fail_reason_by_slot = {}
+        for _att in range(_SUBMIT_API_RETRIES + 1):
+            if not _pending:
+                break
+            _round = cli.submit_image_batch(
+                prompt=api_prompt,
+                image_model_name=image_model,
+                count=len(_pending),
+                reference_media_ids=ref_ids or None,
+                aspect=api_aspect,
+                cooldown=(_att == 0),   # only the first round pays the cross-node cooldown
+            )
+            _retry_next = []
+            for _slot, _r in zip(_pending, _round):
+                if _r and _r.get("ok"):
+                    if _r.get("fife_url"):
+                        captured_fife_urls.append(_r["fife_url"])
+                    _fail_reason_by_slot.pop(_slot, None)
+                    continue
+                reason = (_r or {}).get("reason") or "submit_image failed: unknown"
+                _maybe_invalidate_token(reason)
+                if _is_unusual(reason):
+                    _saw_unusual = True
+                _fail_reason_by_slot[_slot] = reason
+                if (_is_server_5xx(reason) or _is_captcha_hiccup(reason)) and _att < _SUBMIT_API_RETRIES:
+                    _retry_next.append(_slot)
+            if _retry_next and _att < _SUBMIT_API_RETRIES:
+                _w = 2 * (_att + 1)
+                print(f"{pfx}[flow_api] transient failure on {len(_retry_next)}/{_n_variants} variant(s) "
+                      f"— parallel API retry {_att + 1}/{_SUBMIT_API_RETRIES} in {_w}s", flush=True)
+                time.sleep(_w)
+            _pending = _retry_next
+
+        if _fail_reason_by_slot:
+            # v844 — a content reject must win the summary reason even when other
+            # variants failed for other causes, so the caller's UNSAFE_GENERATION
+            # fast-fail still fires. Otherwise report the last failure seen.
+            _reasons = list(_fail_reason_by_slot.values())
+            _unsafe = [r for r in _reasons if "UNSAFE_GENERATION" in r.upper()]
+            _last_fail_reason = _unsafe[0] if _unsafe else _reasons[-1]
     except Exception as e:
         _last_fail_reason = f"submit loop raised: {e}"
 
@@ -4979,8 +5191,8 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
         return _latch_off(f"InFlightJob registration failed: {e}")
 
     print(
-        f"{pfx}[flow_api] fired {len(captured_fife_urls)}x batchGenerateImages POSTs "
-        f"via in-page API; URLs written to scanner pool + InFlightJob registered",
+        f"{pfx}[flow_api] [v854] fired {len(captured_fife_urls)}x batchGenerateImages POSTs "
+        f"IN PARALLEL via in-page API; URLs written to scanner pool + InFlightJob registered",
         flush=True,
     )
     return True

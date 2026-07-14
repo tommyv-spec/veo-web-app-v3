@@ -15535,3 +15535,40 @@ The active mode is reflected on load (the `full` button highlights when `cut_mod
 Use the MD when the beat length is known at authoring time (mirroring a decoded source's beat rhythm). Use the UI to retime a music beat after seeing the actual render, without a re-import.
 
 Either way v852 keep-protects the silent clip from VAD removal; v853 only decides its LENGTH. Music is still added by the operator in post — the platform never scores clips.
+
+
+## v854 — Image worker fires the N variants IN PARALLEL (was: one at a time)
+
+**Operator 2026-07-14:** *"let's find some solutions to make the generations faster"* → the image worker was spending its whole life blocked on one render at a time.
+
+### The bug (measured, not guessed)
+`flowMedia:batchGenerateImages` is **synchronous**: the POST does not return until Flow has rendered the image, and the finished `fifeUrl` comes back in the response body (`_FaClient.submit_image` reads it straight out). There is no image status-poll endpoint in `_FA_ENDPOINTS` — the video side has `batchCheckAsyncVideoGenerationStatus`, the image side has nothing, because it doesn't need one.
+
+`_fa_api_fetch` is `page.evaluate(async fn)`, and Playwright **awaits the promise** — so every POST parks the worker's single main thread for a full render. The old variant loop fired them one at a time, 1.5s apart. A x4 node therefore paid 4 × ~18s of serial, blocked wall time.
+
+Operator log, node 2916 (img-v577):
+```
+[timing] node 2916: cooldown=0.0s mint=0.8s(4x) fetch=71.0s(4x: ok=3 other=1) submit_wall=76.2s
+```
+`fetch=71.0s across 4x` — the cooldown and the reCAPTCHA mint are noise. **The fetch is the entire cost, and it was serial.**
+
+Corollary: **`--parallel N` was dead on the flow_api path.** `_submit_one_job` runs on the main loop thread, so while it blocked, the loop could not scan, could not download, and could not submit the next node. The slot counter never got a chance to exceed 1. The docstring's promise ("overlap job N's render with job N+1's setup") only ever held for the DOM path.
+
+### What shipped
+`_FA_CAPTCHA_BATCH_JS` + `_FA_BATCH_FETCH_JS` + `_FaClient.submit_image_batch(prompt, model, count, ...)` — mint N reCAPTCHA tokens under `Promise.allSettled`, then fire N `batchGenerateImages` POSTs under `Promise.all`, all inside **one** `page.evaluate`. Wall time is now ONE render instead of N.
+
+This is what Flow's own UI does — the HAR ceiling noted at the `--parallel` flag is ~5 simultaneous POSTs, and a x4 node sits under it. The traffic pattern gets *more* human, not less; the old serial 1.5s drip was the unnatural one.
+
+**Distinct seeds are mandatory.** The serial path got them for free (each call re-read `time.time()` ms). A parallel batch builds all N bodies in the same millisecond, so without an explicit per-slot seed Flow returns **N identical images**. `submit_image_batch` derives `seeds[i] = (base + i * 7919) % 1000000`.
+
+### Failure semantics — preserved, now as retry ROUNDS
+`submit_image_batch` never raises for a per-variant failure; it returns one `{"ok": ...}` dict per slot and the caller decides. `_flow_api_pull_submit_try` re-fires only the slots that failed transiently, again in parallel:
+- **v818.4 partial-ok** — any variant captured → ship what landed. One variant's 403 must never nuke the node.
+- **v843 unusual-activity** — never retried (re-minting into a flagged account was grinding 144 fetches / 77 min). Bail → ship-and-restore.
+- **v844 content reject** — `UNSAFE_GENERATION` wins the summary reason even when other slots failed for other causes, so the caller's fast-fail still fires. NOTE: an unsafe prompt still *renders* all 4 before rejecting them (node 2907: `fetch=76.1s(4x: other=4)`), so parallel firing cuts an unsafe node from ~76s to ~19s too.
+- **Transport failure** (`fetch failed` / `evaluate failed` / bad shape) reports `status=0`, which `_fa_is_error` does NOT flag (it only looks for an error body or >=400). `submit_image_batch` catches it via the `ok` flag, else the slot falls through to the no-media_id branch and reports a misleading reason.
+
+### What this does NOT fix
+The submit is still **blocking** — `_submit_one_job` returns only after the batch renders. Nodes remain serial with respect to each other; `--parallel` is still inert on this path. Making the submit non-blocking (fetches into a `window.__kvImg` registry, main loop harvests) is the follow-up, and it needs a **global cap on in-flight POSTs (~5-6)**, not a per-node slot count — 3 slots × 4 variants = 12 simultaneous POSTs would blow past the HAR ceiling and buy `PUBLIC_ERROR_UNUSUAL_ACTIVITY`.
+
+Expected: ~76-98s per x4 node → **~19-22s**. Tests: `code/test_v854_parallel_variants.py` (8 cases — one round-trip, distinct seeds, one cooldown, per-slot mint failure, partial success, outcome buckets, classifier, bad-shape degradation).
