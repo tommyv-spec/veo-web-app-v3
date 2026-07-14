@@ -8,8 +8,8 @@ This module handles the server-side pipeline:
   2. ffmpeg → mono 16k WAV.
   3. faster-whisper → transcript.
   4. Score against the user's awaiting_finishing jobs.
-  5. On match >= IG_AUTO_MATCH_THRESHOLD, advance the job to published with
-     published_via='local_watch'.
+  5. On a CONFIDENT match (TF-IDF + the _MATCH_HIGH/_MATCH_MARGIN gate),
+     advance the job to published with published_via='local_watch'.
 
 Mirrors drive_transcribe.py shape so the matching logic stays consistent.
 """
@@ -24,13 +24,13 @@ from sqlalchemy.orm import Session
 # load. faster-whisper is heavyweight so this matters for cold-start cost.
 from instagram_transcribe import _model as _whisper_model
 
-_AUTO_MATCH_THRESHOLD = float(os.environ.get("IG_AUTO_MATCH_THRESHOLD", "0.70"))
-
-# v822.4 LOCAL matcher (TF-IDF cosine + margin gate). Env-tunable WITHOUT a
-# deploy so the operator can calibrate from the `[local] ... s1=/s2=/margin=`
-# log lines. HIGH = min cosine for the top candidate; MARGIN = how far the top
-# must beat the runner-up to auto-publish (near-duplicate twins sit within
-# MARGIN -> deferred to manual pick, never auto-matched to the wrong one).
+# v822.4 matcher gate (TF-IDF cosine + margin). Env-tunable WITHOUT a deploy so
+# the operator can calibrate from the `... s1=/s2=/margin=/decision=` log lines.
+# HIGH = min cosine for the top candidate; MARGIN = how far the top must beat
+# the runner-up to auto-publish (near-duplicate twins sit within MARGIN ->
+# deferred to manual pick, never auto-matched to the wrong one).
+# v853: these are now THE thresholds for every auto-publishing matcher — the
+# local watcher, the drive watcher and the IG watcher all import them.
 _MATCH_HIGH = float(os.environ.get("LOCAL_MATCH_HIGH", "0.50"))
 _MATCH_MARGIN = float(os.environ.get("LOCAL_MATCH_MARGIN", "0.12"))
 # v822.6: exponent on IDF. 2.0 (rare-term-weighted cosine) beat plain TF-IDF
@@ -87,10 +87,14 @@ def _transcribe_wav(wav_path: str) -> str:
 def _bulk_dialogue_map(db, job_ids) -> dict:
     """{job_id: the words actually SPOKEN in the render} for MANY jobs, ONE query.
 
-    THE canonical dialogue builder — feeds the IG suggestions endpoint, the
-    drive watcher, and the local-folder watcher. The reconstruction rules live
-    in instagram_match.reconstruct_dialogue (pure + unit-tested); this function
-    is only the DB glue.
+    THE canonical dialogue builder. Its four consumers (v853 — all of them, at
+    last): the IG suggestions endpoint (main.py), the local-folder watcher
+    (below), the drive watcher (drive_transcribe) and the IG watcher
+    (instagram_transcribe). The last two used to carry a private `_full_dialogue`
+    with the OLD text rule and got neither the Prompt-B reworded line nor the
+    final cut. The reconstruction rules live in
+    instagram_match.reconstruct_dialogue (pure + unit-tested); this function is
+    only the DB glue.
 
     v852: audio_pair rows are now FETCHED (they are the lookup source for their
     visual twin's spoken words — a Prompt-B fallback on the audio twin makes the
