@@ -15512,4 +15512,7 @@ Diagnostic: `[VAD/v852] protecting N silent clip(s) from VAD removal: [(start, e
 
 Both modes flow through the same v852 protection; the difference is only whether the clip file was trimmed to the decoded beat length before it reached the concat. Use DECODED LENGTH when mirroring a source video's beat rhythm (meme ladders cut to music); use FULL when the beat length is free.
 
+### v852.1 — all-silent fast path (reviewer note on v852)
+When a job has NO speech at all and every clip is protected, the keep-list would cover the whole timeline anyway — so trim+concat would re-encode the entire video for a byte-identical result. v852.1 copies the concat as-is instead (`[VAD/v852.1] all-silent export — copying concat as-is, no re-encode`). Mixed jobs (any spoken clip) still run the normal filter graph.
+
 **Authoring rule:** every `speaker: silent` scene MUST be intentional about which mode it uses. Declare the choice in §0 COUNTS LOCK (e.g. "silent beats = FULL" or "silent beats = timeline @ 5.0s"). Music is added by the operator in post — the platform never scores clips.

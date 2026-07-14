@@ -3053,6 +3053,25 @@ def apply_vad(
             "silence_removed": 0
         }
 
+    # v852.1 — ALL-SILENT job fast path (review note on v852): when there is no
+    # speech at all and every clip is protected, the keep-list would cover the
+    # whole timeline anyway. Copy instead of running trim+concat, which would
+    # re-encode the entire video for a byte-identical result.
+    if not speech_segments and _protected_spans:
+        print(
+            f"[VAD/v852.1] all-silent export ({len(_protected_spans)} clip(s)) "
+            f"— copying concat as-is, no re-encode",
+            flush=True,
+        )
+        import shutil
+        shutil.copy(src, out)
+        return {
+            "original_duration": original_duration,
+            "final_duration": original_duration,
+            "segments_found": len(_protected_spans),
+            "silence_removed": 0,
+        }
+
     # v852 — merge the protected silent spans in with the speech spans so the
     # keep-list covers them; overlapping/adjacent spans coalesce below.
     speech_segments = list(speech_segments) + _protected_spans
