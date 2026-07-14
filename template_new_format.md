@@ -858,7 +858,7 @@ The main character, same [setting anchor] as image 2, same framing — shot on i
 - **visual register:** HOOK
 - **rhythm tier:** 
 - **speaker:** the main character on-camera      # v681 — <character_name from Ingredients> <on-camera|silent>. (omitted) defaults to <persona> on-camera. NO `voiceover` in v681 (deferred to v682).
-- **cut_mode:** auto      # v668 — whisper | timeline | auto. Default `auto` picks `timeline` for bracket-annotation lines (`[music plays]`, `[SFX:...]`) and `whisper` otherwise. Set explicitly when overriding.
+- **cut_mode:** auto      # v668 — whisper | timeline | auto. v852: on a `speaker: silent` scene, OMIT for FULL-length export, or set `timeline` + `target_duration_s` to export the clip at the decoded beat duration. Silent clips are keep-protected from VAD either way (v852). Default `auto` picks `timeline` for bracket-annotation lines (`[music plays]`, `[SFX:...]`) and `whisper` otherwise. Set explicitly when overriding.
 - **line:** 
 - **pad:**           # v644 — optional suffix added AFTER line in Veo prompt only (target line+pad ≈ 20 words; pad is cut from final video by whisper-VAD)
 - **action_note:** 

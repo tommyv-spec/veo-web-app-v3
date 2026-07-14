@@ -3003,7 +3003,45 @@ def apply_vad(
             padding_after=padding_after
         )
     
-    if not speech_segments:
+    # === v852 — SILENT CLIPS ARE KEEP-PROTECTED ===
+    # Operator 2026-07-14: "the silent clips where i will edit the music are
+    # excluded because silent... the clips can either be exported full or
+    # according to the original video decoded where they had already a
+    # precise duration."
+    #
+    # Root cause: VAD keeps only DETECTED-SPEECH spans. A `speaker: silent`
+    # scene (meme beat / caught-cam footage / b-roll the operator scores in
+    # post) carries dialogue_text='' → contributes ZERO speech words (whisper
+    # mode) and ZERO audio energy (energy mode) → its span never enters the
+    # keep-segment list → the trim+concat filter graph DELETES the whole clip
+    # from the final export. Silent beats vanished from the stitched video.
+    #
+    # Fix: any clip whose dialogue_text is empty gets its FULL boundary span
+    # injected as a protected keep-segment before the merge. Both operator
+    # options fall out of this one change:
+    #   (a) FULL           — no cut_mode; the whole rendered clip survives.
+    #   (b) DECODED length — `cut_mode: timeline` + `target_duration_s` already
+    #       ffmpeg-trimmed the file to the decoded beat duration in _trim_one
+    #       (v668) BEFORE concat, so the protected span IS that duration.
+    # Silence-removal still runs normally inside SPOKEN clips.
+    _protected_spans = []
+    if clip_boundaries and dialogue_texts:
+        for _ci, (_cs, _ce) in enumerate(clip_boundaries):
+            _txt = (dialogue_texts[_ci] or "").strip() if _ci < len(dialogue_texts) else ""
+            if not _txt and _ce > _cs:
+                _protected_spans.append((_cs, _ce))
+        if _protected_spans:
+            print(
+                f"[VAD/v852] protecting {len(_protected_spans)} silent clip(s) "
+                f"from VAD removal: "
+                f"{[(f'{s:.2f}', f'{e:.2f}') for s, e in _protected_spans]}",
+                flush=True,
+            )
+            logger.info(
+                f"v852: {len(_protected_spans)} silent clip span(s) keep-protected"
+            )
+
+    if not speech_segments and not _protected_spans:
         # No speech detected - just copy the file
         logger.warning("No speech detected in video")
         import shutil
@@ -3014,7 +3052,11 @@ def apply_vad(
             "segments_found": 0,
             "silence_removed": 0
         }
-    
+
+    # v852 — merge the protected silent spans in with the speech spans so the
+    # keep-list covers them; overlapping/adjacent spans coalesce below.
+    speech_segments = list(speech_segments) + _protected_spans
+
     # Merge overlapping segments
     merged = []
     for start, end in sorted(speech_segments):

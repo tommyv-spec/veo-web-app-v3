@@ -15485,3 +15485,31 @@ Second half of the bug: even if the retry HAD fired, the old backoff was `[2, 5,
 **Scope / gates**: GENERATE-side authoring, every frame with US icons, forward-only (shipped builds keep their staging; new builds + new frames comply). Prompt-writing test: for each icon in the prompt, ask "does THIS beat use it?" — no → place it explicitly in the background sentence ("In the background, sharp and fully visible, ..."), never in the subject sentence.
 
 **Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (§B note), `wiki/concepts/script-adaptation/us-iconic-blend-catalog.md` (placement note), memory `feedback_us-elements-background-unless-used`, `wiki/log.md`.
+
+
+## v852 — Silent clips survive the export (VAD keep-protection) + the two silent-clip duration modes
+
+**Operator 2026-07-14:** *"when we extract the job like these, the silent clips where i will edit the music are excluded because silent... so we need to adjust the markdown and platform behaviour for those clips. The clips can either be exported full or according to the original video decoded where they had already a precise duration."*
+
+### The bug (pre-v852)
+Export runs VAD over the CONCATENATED video and keeps only detected-speech spans. A `speaker: silent` scene (meme beat, caught-cam footage, b-roll the operator scores with music in post) is written to the export payload with `dialogue_text = ''` → it produces ZERO speech words (whisper mode) and ZERO audio energy (energy mode) → its time span never enters the keep-segment list → the trim+concat filter graph **deletes the entire clip** from the stitched output. Builds whose whole hook is silent (day1dayx meme ladders, security-cam beats) exported with the hook missing.
+
+Per-clip VAD (v691d) already skipped no-dialogue clips; the deletion happened in the FINAL-PASS `apply_vad` over the concat.
+
+### The fix
+`video_processor.py::apply_vad` — before the keep-segments merge, any clip whose `dialogue_texts[i]` is empty gets its **full `clip_boundaries[i]` span injected as a protected keep-segment**. Protected spans coalesce with speech spans in the existing merge, so:
+- silent clips survive **in full**, in their storyboard position, with their video + silent/ambient audio bed;
+- silence-removal still runs normally **inside spoken clips** (no behavior change there);
+- the no-speech early-return (copy whole file) now also triggers on `not speech_segments and not _protected_spans`, so an ALL-silent job keeps its whole timeline instead of being copied unpredictably;
+- the per-clip VAD path (`clip_boundaries=None`) is untouched.
+Diagnostic: `[VAD/v852] protecting N silent clip(s) from VAD removal: [(start, end), ...]`.
+
+### The two silent-clip duration modes (author picks one per silent scene)
+| Mode | Markdown | Exported length |
+|---|---|---|
+| **FULL** (default) | `- **speaker:** silent` and NO `cut_mode` | the whole rendered clip (Veo's 6/8s bucket) |
+| **DECODED LENGTH** | `- **speaker:** silent` + `- **cut_mode:** timeline` + `- **target_duration_s:** <seconds>` | ffmpeg-trimmed to exactly `target_duration_s` in `_trim_one` (v668) BEFORE concat — use the beat duration captured at decode time |
+
+Both modes flow through the same v852 protection; the difference is only whether the clip file was trimmed to the decoded beat length before it reached the concat. Use DECODED LENGTH when mirroring a source video's beat rhythm (meme ladders cut to music); use FULL when the beat length is free.
+
+**Authoring rule:** every `speaker: silent` scene MUST be intentional about which mode it uses. Declare the choice in §0 COUNTS LOCK (e.g. "silent beats = FULL" or "silent beats = timeline @ 5.0s"). Music is added by the operator in post — the platform never scores clips.
