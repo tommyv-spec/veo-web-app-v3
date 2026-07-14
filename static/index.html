@@ -5595,6 +5595,13 @@ Ambient: same kitchen room tone, soft pour sound.
             const r = await fetch(`/api/instagram/videos/${videoId}/suggestions`, { credentials: "include" });
             const data = r.ok ? await r.json() : {};
             const suggestions = data.suggestions || [];
+            // v852 — "still transcribing" is NOT "no candidates". Blaming the pool
+            // for a reel that has not been transcribed yet sends the operator
+            // hunting for a pool problem that does not exist.
+            if (data.verdict === "not_transcribed") {
+              alert(`This reel hasn't been transcribed yet (status: ${data.transcription_status || "pending"}). Wait for the transcription to finish, then try again.`);
+              return;
+            }
             if (!suggestions.length) {
               alert("No finishing-lane jobs left to match against. Either every candidate is already linked to another IG video, or none has reached that stage yet.");
               return;

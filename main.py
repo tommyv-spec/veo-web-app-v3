@@ -4144,7 +4144,18 @@ async def suggest_matches(
     if not acc or acc.user_id != current_user.id:
         raise HTTPException(403, detail="access denied")
     if not v.transcription or v.transcription_status != "done":
-        return []
+        # v852 — same object shape as the happy path, with a verdict the UI can
+        # tell apart. The old bare `[]` was indistinguishable from an empty pool,
+        # so the popover blamed the candidate pool ("no jobs to match against")
+        # for what is really a reel that has not finished transcribing — sending
+        # the operator hunting for a problem that does not exist.
+        return {
+            "verdict": "not_transcribed",
+            "top": 0.0,
+            "gap": 0.0,
+            "suggestions": [],
+            "transcription_status": v.transcription_status,
+        }
     # Candidate pool = jobs that actually REACHED the finishing lane. A reel on
     # IG was necessarily exported first, so a job that never exported cannot be
     # its source — matching one wrongly stamps `published` onto a job still
