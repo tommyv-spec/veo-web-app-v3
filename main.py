@@ -4360,8 +4360,24 @@ async def match_video(
         print(f"[ig-match] WARNING video={video_id} matched job={job.id[:8]} that never "
               f"reached finishing (has_export={job.has_export} stage={job.lifecycle_stage})",
               flush=True)
+    # v857.1 — RELEASE THE PREVIOUS HOLDER. A job produced ONE video and nothing in
+    # the schema enforces it, so writing this link without clearing the last one
+    # leaves TWO reels pointing at one job — and the phantom holder then poisons
+    # find_job_incumbent. The popover says "already linked to X — picking this
+    # moves the link"; this is what makes that true. A repost (the same export
+    # posted twice) is the one legitimate double claim and is left alone.
+    from local_transcribe import release_other_holders
+    released = release_other_holders(db, job, v, "instagram")
+    if released:
+        print(f"[ig-match] video={video_id} job={job.id[:8]} moved the link off "
+              f"{', '.join(released)}", flush=True)
     v.matched_job_id = job.id
     v.matched_at = datetime.utcnow()
+    # A HUMAN MADE THIS LINK. The unattended matcher must never evict it: a manual
+    # pick carries no media evidence, so it would score ~0 against any waveform
+    # challenger, and the displaced reel is never re-matched (transcribe_one is
+    # idempotent on 'done') — the operator's repair would be destroyed, not moved.
+    v.match_source = "manual"
     job.instagram_url = v.url
     job.instagram_video_id = v.id
     # Record WHO published the job, mirroring drive_watch / local_watch. Without
@@ -4395,6 +4411,7 @@ async def unmatch_video(
     matched_job_id = v.matched_job_id
     v.matched_job_id = None
     v.matched_at = None
+    v.match_source = None   # the link is gone; its provenance goes with it
     reverted_to = None
     if matched_job_id:
         job = db.query(Job).filter_by(id=matched_job_id).first()
@@ -4916,6 +4933,7 @@ def diag_apply_relinks(
                         reverted_to = old_job.lifecycle_stage
                 v.matched_job_id = None
                 v.matched_at = None
+                v.match_source = None   # the link is gone; its provenance goes with it
                 print(f"[ig-relink] UNLINK {it.shortcode} from "
                       f"{(old_job.id[:8] if old_job else 'none')} ({it.proof})", flush=True)
             results.append({
@@ -4959,6 +4977,9 @@ def diag_apply_relinks(
             # 2. Write the proven link.
             v.matched_job_id = new_job.id
             v.matched_at = datetime.utcnow()
+            # 'manual': an operator reviewed the evidence and handed this exact
+            # list in. The unattended matcher does not get to overrule it later.
+            v.match_source = "manual"
             new_job.instagram_url = v.url
             new_job.instagram_video_id = v.id
             if new_job.lifecycle_stage != "published":

@@ -105,8 +105,13 @@ def _maybe_auto_match(video, account, db: Session) -> None:
             video.matched_job_id = stamped.id
             video.matched_at = datetime.utcnow()
             video.match_score = 1.0   # not a similarity — a certainty
+            video.match_source = "filename"   # a lookup, not a claim — never evicted
+            # Only claim the publish when nobody else already did it: a job the IG
+            # matcher published keeps published_via='ig_match', or unmatch_video
+            # can no longer revert its own publish.
+            if stamped.lifecycle_stage != "published" and not stamped.published_via:
+                stamped.published_via = "drive_watch"
             stamped.lifecycle_stage = "published"
-            stamped.published_via = "drive_watch"
             if stamped.published_at is None:
                 stamped.published_at = datetime.utcnow()
             db.commit()
@@ -182,8 +187,13 @@ def _maybe_auto_match(video, account, db: Session) -> None:
         video.matched_job_id = job.id
         video.matched_at = datetime.utcnow()
         video.match_score = ev["similarity"] or text_score
+        video.match_source = "evidence"   # the matcher made this one; it can be evicted
+        # Do not clobber somebody else's publish token — a drive file can link
+        # ALONGSIDE the reel posted from it, onto a job already published by the IG
+        # matcher, and unmatch_video only reverts a publish it owns ('ig_match'/NULL).
+        if job.lifecycle_stage != "published" and not job.published_via:
+            job.published_via = "drive_watch"
         job.lifecycle_stage = "published"
-        job.published_via = "drive_watch"
         if job.published_at is None:
             job.published_at = datetime.utcnow()
         db.commit()

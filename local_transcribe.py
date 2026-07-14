@@ -359,6 +359,10 @@ def release_incumbent(db, job, inc_kind, incumbent):
     incumbent.matched_at = None
     if hasattr(incumbent, "match_score"):
         incumbent.match_score = None
+    # The link is gone, so its provenance goes with it — a stale 'manual' left on
+    # an unlinked row would make the NEXT link look hand-made and unstealable.
+    if hasattr(incumbent, "match_source"):
+        incumbent.match_source = None
     if inc_kind == "instagram" and job.instagram_video_id == incumbent.id:
         job.instagram_url = None
         job.instagram_video_id = None
@@ -375,6 +379,52 @@ def release_incumbent(db, job, inc_kind, incumbent):
         job.published_at = None
         reverted_to = job.lifecycle_stage
     return reverted_to
+
+
+def release_other_holders(db, job, video, kind="instagram"):
+    """Unlink every OTHER video of this kind that is already holding `job`.
+
+    A job produced ONE video, and there is no unique constraint saying so — the
+    only thing stopping two rows from pointing at one job is the code that writes
+    them. An OPERATOR pick (main.py match_video) is the one link that skips the
+    evidence gate, so it needs its own release: without it the popover's promise
+    ("already linked to X — picking this moves the link") is a lie, both rows keep
+    matched_job_id, and the phantom holder poisons find_job_incumbent (a .first()
+    with no order_by picks whichever row the DB hands back).
+
+    The repost is left alone — one export posted twice, both reels legitimately
+    hold the job (is_same_video compares the two POSTED files to each other).
+    Cross-surface holders are left alone too: the export FILE and the reel posted
+    from it are the same render on two surfaces, not rivals (see the header).
+
+    Does not commit — the caller writes the new link in the same transaction.
+    Returns the labels of the videos it released.
+    """
+    from models import InstagramVideo, LocalVideo, DriveVideo
+    import instagram_match as _ig_match
+    model = {"instagram": InstagramVideo, "local": LocalVideo, "drive": DriveVideo}[kind]
+
+    released = []
+    holders = (
+        db.query(model)
+        .filter(model.matched_job_id == job.id, model.id != video.id)
+        .all()
+    )
+    for other in holders:
+        them = _video_label(kind, other)
+        if _ig_match.is_same_video(
+            getattr(video, "audio_fp", None), getattr(other, "audio_fp", None),
+            getattr(video, "duration_s", None), getattr(other, "duration_s", None),
+        ):
+            print(f"[claim] job={str(job.id)[:8]} {kind}={_video_label(kind, video)} "
+                  f"LINK alongside {kind}={them} repost=true", flush=True)
+            continue
+        reverted_to = release_incumbent(db, job, kind, other)
+        released.append(them)
+        print(f"[claim] job={str(job.id)[:8]} {kind}={_video_label(kind, video)} "
+              f"RELEASED {kind}={them} reason=manual-pick "
+              f"incumbent_reverted_to={reverted_to}", flush=True)
+    return released
 
 
 def enforce_exclusivity(db, job, video, kind, evidence):
@@ -413,6 +463,23 @@ def enforce_exclusivity(db, job, video, kind, evidence):
                   f"cross_surface={str(bool(cross_surface)).lower()}", flush=True)
             return "link"
 
+        # A HUMAN'S LINK IS NOT A CLAIM. The strength below is computed from MEDIA
+        # EVIDENCE, and an operator's manual pick carries none — it scores ~0, so
+        # any waveform-clearing challenger could evict it. The displaced reel is
+        # then never re-matched (transcribe_one is idempotent on 'done'), so the
+        # operator's repair would be DESTROYED, not moved. Same for a filename
+        # stamp (v856): the platform minted that name, it is a lookup, not a claim.
+        #
+        # A NULL match_source on an EXISTING row is a LEGACY link, made before this
+        # column existed. We cannot prove it was machine-made, and destroying a
+        # possibly hand-made link is far worse than declining a steal — so NULL is
+        # read as 'manual'. Only a link this code stamped 'evidence' can be taken.
+        inc_source = getattr(inc, "match_source", None) or "manual"
+        if inc_source in ("manual", "filename"):
+            print(f"[claim] job={str(job.id)[:8]} {kind}={me} REFUSE "
+                  f"reason=incumbent-is-{inc_source} incumbent={them}", flush=True)
+            return "refuse"
+
         challenger = _ig_match.claim_strength(evidence)
         holder = incumbent_claim_strength(db, job, inc)
         verdict = _ig_match.resolve_claim(challenger, holder, False)
@@ -430,22 +497,46 @@ def enforce_exclusivity(db, job, video, kind, evidence):
     except Exception as e:
         # Refusing is the safe failure: the video waits for a manual pick. Linking
         # through a broken gate is how a wrong link gets written.
+        #
+        # ROLL BACK FIRST. release_incumbent clears the incumbent's link BEFORE it
+        # re-derives the stage, so a failure in derive_effective_stage (or the Clip
+        # count) leaves the link DESTROYED and never replaced. The local sweep runs
+        # many videos on the REQUEST session, so the next video's db.commit() would
+        # flush that hole to disk. Returning "refuse" on a half-applied release is
+        # not a refusal, it is data loss.
+        try:
+            db.rollback()
+        except Exception as re:   # a fake/closed session must not mask the refusal
+            print(f"[claim] rollback after gate-error failed: "
+                  f"{type(re).__name__}: {str(re)[:100]}", flush=True)
         print(f"[claim] job={str(getattr(job, 'id', '?'))[:8]} REFUSE reason=gate-error "
               f"{type(e).__name__}: {str(e)[:160]}", flush=True)
         return "refuse"
 
 
-def _advance_job_to_published(video, job, score, db) -> None:
-    """Mark a LocalVideo matched + advance its Job to published/local_watch."""
+def _advance_job_to_published(video, job, score, db, match_source="evidence") -> None:
+    """Mark a LocalVideo matched + advance its Job to published/local_watch.
+
+    published_via is only claimed when NOBODY ELSE published this job. A local
+    file can legitimately link ALONGSIDE a reel (the export and the reel posted
+    from it are the same render), and that job is already `published` via
+    'ig_match' — overwriting the token with 'local_watch' then makes
+    main.py unmatch_video refuse to revert its own publish (it only reverts
+    'ig_match', or NULL, which reads as ig_match). Provenance belongs to whoever
+    did the publishing; we only take it when we ARE that one.
+    """
     video.matched_job_id = job.id
     video.matched_at = datetime.utcnow()
     video.match_score = score
+    video.match_source = match_source
+    if job.lifecycle_stage != "published" and not job.published_via:
+        job.published_via = "local_watch"
     job.lifecycle_stage = "published"
-    job.published_via = "local_watch"
     if job.published_at is None:
         job.published_at = datetime.utcnow()
     db.commit()
-    print(f"[local] AUTO-MATCH hash={video.file_hash[:8]} -> job={str(job.id)[:8]} score={score:.3f}", flush=True)
+    print(f"[local] AUTO-MATCH hash={video.file_hash[:8]} -> job={str(job.id)[:8]} "
+          f"score={score:.3f} match_source={match_source}", flush=True)
 
 
 def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None,
@@ -486,7 +577,7 @@ def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None,
                 flush=True,
             )
             # score=1.0: this is not a similarity, it is a certainty.
-            _advance_job_to_published(video, stamped, 1.0, db)
+            _advance_job_to_published(video, stamped, 1.0, db, match_source="filename")
             return
 
         if not video.transcription:
@@ -560,7 +651,8 @@ def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None,
         # written over the top.
         if enforce_exclusivity(db, job, video, "local", ev) == "refuse":
             return
-        _advance_job_to_published(video, job, ev["similarity"] or text_score, db)
+        _advance_job_to_published(video, job, ev["similarity"] or text_score, db,
+                                  match_source="evidence")
     except Exception as exc:
         print(f"[local] auto-match error on hash={video.file_hash[:8]}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 

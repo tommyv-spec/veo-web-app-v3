@@ -270,6 +270,10 @@ def _maybe_auto_match(video, account, db: Session) -> None:
             return
         video.matched_job_id = job.id
         video.matched_at = datetime.utcnow()
+        # v857.1 — this link was made by the unattended matcher, from media
+        # evidence. That is the ONLY kind of link the gate is allowed to evict
+        # later; an operator's manual pick is not (see enforce_exclusivity).
+        video.match_source = "evidence"
         job.instagram_url = video.url
         job.instagram_video_id = video.id
         job.lifecycle_stage = "published"
