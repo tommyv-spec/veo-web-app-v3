@@ -126,17 +126,30 @@ class _FakeQuery:
 
 class _FakeDB:
     """Returns the SAME canned rows for every query() — enough for the
-    grouping + cooldown/empty-pool guards, which never depend on WHICH cols."""
-    def __init__(self, rows):
+    grouping + cooldown/empty-pool guards, which never depend on WHICH cols.
+
+    Exception: the v852 lineup query selects Job columns, so it gets its own
+    canned rows (a clip tuple unpacked as (job_id, clip_order_json) would be
+    nonsense)."""
+    def __init__(self, rows, job_rows=None):
         self._rows = rows
+        self._job_rows = list(job_rows or [])
     def query(self, *cols):
+        owners = {
+            getattr(c, "class_", None).__name__
+            for c in cols if getattr(c, "class_", None) is not None
+        }
+        if owners == {"Job"}:
+            return _FakeQuery(self._job_rows)
         return _FakeQuery(self._rows)
 
 
 def _row(job_id, clip_id=1, clip_index=0, role=None, paired=None,
-         dt="", dtb=None, variant="A", vo=None, approval="approved"):
+         dt="", dtb=None, variant="A", vo=None, approval="approved",
+         status="completed"):
     """Positional row tuple matching the _bulk_dialogue_map query column order."""
-    return (clip_id, job_id, clip_index, role, paired, dt, dtb, variant, vo, approval)
+    return (clip_id, job_id, clip_index, role, paired, dt, dtb, variant, vo,
+            approval, status)
 
 
 def test_bulk_dialogue_map_groups_and_coalesces():
@@ -171,6 +184,50 @@ def test_bulk_dialogue_map_excludes_rejected_clips():
     ]
     m = lt._bulk_dialogue_map(_FakeDB(rows), ["j1"])
     assert m["j1"] == "kept"
+
+
+def test_bulk_dialogue_map_keeps_a_pending_clip_the_export_still_contains():
+    """v852 fix: a post-export redo flips an approved clip back to
+    pending_review (main.py:12963) but the posted mp4 still speaks that line.
+    The builder must keep it — losing a whole line hurts the cosine more than
+    a slightly stale one."""
+    lt = _load_lt()
+    rows = [
+        _row("j1", clip_id=1, clip_index=0, dt="first line", approval="approved"),
+        _row("j1", clip_id=2, clip_index=1, dt="redone line", approval="pending_review"),
+    ]
+    m = lt._bulk_dialogue_map(_FakeDB(rows), ["j1"])
+    assert m["j1"] == "first line redone line"
+
+
+def test_bulk_dialogue_map_drops_clips_that_never_rendered():
+    """v852 fix: failed / skipped clips are not in the export."""
+    lt = _load_lt()
+    rows = [
+        _row("j1", clip_id=1, clip_index=0, dt="rendered", status="completed"),
+        _row("j1", clip_id=2, clip_index=1, dt="never rendered", status="failed"),
+    ]
+    m = lt._bulk_dialogue_map(_FakeDB(rows), ["j1"])
+    assert m["j1"] == "rendered"
+
+
+def test_bulk_dialogue_map_honours_a_custom_lineup():
+    """v852 fix: a lineup export selects clips by id with NO approval filter
+    (main.py:9232-9241), so the lineup IS the final cut."""
+    lt = _load_lt()
+    rows = [
+        _row("j1", clip_id=1, clip_index=0, dt="in the lineup", approval="pending_review"),
+        _row("j1", clip_id=2, clip_index=1, dt="approved but cut", approval="approved"),
+    ]
+    m = lt._bulk_dialogue_map(_FakeDB(rows, job_rows=[("j1", "[1]")]), ["j1"])
+    assert m["j1"] == "in the lineup"
+
+
+def test_bulk_dialogue_map_malformed_lineup_does_not_raise():
+    lt = _load_lt()
+    rows = [_row("j1", clip_id=1, clip_index=0, dt="only line")]
+    m = lt._bulk_dialogue_map(_FakeDB(rows, job_rows=[("j1", "not json{")]), ["j1"])
+    assert m["j1"] == "only line"
 
 
 def test_bulk_dialogue_map_broll_pair_uses_the_audio_twin():

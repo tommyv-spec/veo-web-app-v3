@@ -97,6 +97,13 @@ def _bulk_dialogue_map(db, job_ids) -> dict:
     visual's voiceover_line stale). reconstruct_dialogue drops them from the
     OUTPUT, so nothing is double-counted.
 
+    v852 (fix): the final cut is what the EXPORT actually writes, so we also
+    fetch Clip.status and the job's clip_order_json lineup. A lineup export
+    selects clips by id with NO approval filter (main.py:9232-9241), so the
+    lineup IS the cut; without one the cut is completed-and-not-rejected. The
+    lineup fetch is ONE bulk query for the whole job pool — never per job (the
+    v822.3 N+1 must not come back).
+
     v822.3: replaces the old per-job `_full_dialogue` N+1. At pool=226 the
     N+1 fired 226 Clip queries PER video, and the v822 rematch sweep ran that
     for ~33 unmatched videos every 30s (~7,500 queries + 7,500 char-level
@@ -104,8 +111,9 @@ def _bulk_dialogue_map(db, job_ids) -> dict:
     TIMEOUT → SIGABRT → killed in-flight DB connections → SSL SYSCALL EOF
     across the whole platform (prod incident 2026-07-06).
     """
+    import json
     from collections import defaultdict
-    from models import Clip
+    from models import Clip, Job
     import instagram_match as _ig_match
     job_ids = list(job_ids)
     if not job_ids:
@@ -114,14 +122,14 @@ def _bulk_dialogue_map(db, job_ids) -> dict:
         db.query(
             Clip.id, Clip.job_id, Clip.clip_index, Clip.clip_role, Clip.paired_clip_id,
             Clip.dialogue_text, Clip.dialogue_text_b, Clip.rendered_prompt_variant,
-            Clip.voiceover_line, Clip.approval_status,
+            Clip.voiceover_line, Clip.approval_status, Clip.status,
         )
         .filter(Clip.job_id.in_(job_ids))
         .order_by(Clip.job_id, Clip.clip_index.asc())
         .all()
     )
     by_job = defaultdict(list)
-    for (cid, jid, cidx, role, paired, dt, dtb, variant, vo, approval) in rows:
+    for (cid, jid, cidx, role, paired, dt, dtb, variant, vo, approval, status) in rows:
         by_job[jid].append({
             "id": cid,
             "clip_index": cidx,
@@ -132,8 +140,30 @@ def _bulk_dialogue_map(db, job_ids) -> dict:
             "rendered_prompt_variant": variant,
             "voiceover_line": vo,
             "approval_status": approval,
+            "status": status,
         })
-    return {jid: _ig_match.reconstruct_dialogue(clips) for jid, clips in by_job.items()}
+
+    # ONE bulk query for the lineups of the whole pool (not one per job).
+    lineups = {}
+    job_rows = (
+        db.query(Job.id, Job.clip_order_json)
+        .filter(Job.id.in_(job_ids))
+        .all()
+    )
+    for (jid, order_json) in job_rows:
+        if not order_json:
+            continue
+        try:
+            ids = json.loads(order_json)
+        except (ValueError, TypeError):
+            continue  # malformed lineup -> behave as if there were none
+        if isinstance(ids, list) and ids:
+            lineups[jid] = ids
+
+    return {
+        jid: _ig_match.reconstruct_dialogue(clips, lineup_ids=lineups.get(jid))
+        for jid, clips in by_job.items()
+    }
 
 
 def _advance_job_to_published(video, job, score, db) -> None:

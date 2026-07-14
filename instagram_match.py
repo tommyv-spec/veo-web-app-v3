@@ -39,10 +39,35 @@ def _normalize(s: str) -> str:
 #      reach through the pair. (A Prompt-B fallback on the visual twin is
 #      irrelevant: that render is silent.)
 #
-# Only clips that made the FINAL CUT count — the export is "all approved clips".
+# WHICH CLIPS COUNT — mirror what the export ACTUALLY contains, not what we
+# wish it contained. "The exported mp4 = the approved clips" is FALSE:
+#
+#   * A custom LINEUP export (main.py:9232-9241) selects clips by id where
+#     `status == completed` and applies NO approval filter at all — only the
+#     `else` branch (main.py:9250-9253) filters on approved. So a lineup job's
+#     mp4 legitimately contains pending_review clips.
+#   * A post-export REDO flips an approved clip back to pending_review
+#     (main.py:12963) while the already-posted mp4 still speaks that line, and
+#     terminal redo states (REDO_STUCK / REDO_ZOMBIE / max_attempts) leave it
+#     non-approved forever.
+#
+# Dropping such a clip DELETES a whole line's rare terms from the job's text
+# while the reel's transcript still contains them — that costs the TF-IDF
+# cosine far more than keeping one slightly stale line. A false EXCLUSION is
+# much worse than a false INCLUSION. So the rule is:
+#
+#   1. lineup present -> the final cut is exactly those clip ids.
+#   2. else           -> status == completed AND approval != rejected.
+#      (failed / skipped / not-yet-generated clips are not `completed`, so the
+#      original pollution targets still go; a pending_review clip is KEPT.)
+#   3. audio_pair rows are never filtered — they are the lookup source for
+#      their visual twin's spoken words.
+#   4. empty selection -> fall back to ALL clips. Never blank a job.
 # ============================================================================
 
 FINAL_CUT_APPROVAL = "approved"
+EXCLUDED_APPROVAL = "rejected"
+RENDERED_STATUS = "completed"
 
 
 def spoken_line(clip):
@@ -57,12 +82,14 @@ def spoken_line(clip):
     return ((clip.get("voiceover_line") or clip.get("dialogue_text")) or "").strip()
 
 
-def reconstruct_dialogue(clips, final_cut_only=True):
+def reconstruct_dialogue(clips, final_cut_only=True, lineup_ids=None):
     """Concatenate a job's SPOKEN words, in clip_index order.
 
     clips: list of dicts with keys id, clip_index, clip_role, paired_clip_id,
            dialogue_text, dialogue_text_b, rendered_prompt_variant,
-           voiceover_line, approval_status.
+           voiceover_line, approval_status, status.
+    lineup_ids: the job's clip_order_json (list/set of clip ids) or None. When
+           present it IS the final cut — the lineup export ignores approval.
     """
     # The audio twin owns the speech for its visual partner.
     audio_by_visual = {}
@@ -89,16 +116,27 @@ def reconstruct_dialogue(clips, final_cut_only=True):
         return " ".join(parts).strip()
 
     if final_cut_only:
+        if lineup_ids:
+            wanted = set(lineup_ids)
+            def _in_cut(c):
+                return c.get("id") in wanted
+        else:
+            def _in_cut(c):
+                return (
+                    (c.get("status") or "") == RENDERED_STATUS
+                    and (c.get("approval_status") or "") != EXCLUDED_APPROVAL
+                )
         kept = [
             c for c in clips
             if (c.get("clip_role") or "") == "audio_pair"  # lookup source, never filtered
-            or (c.get("approval_status") or "") == FINAL_CUT_APPROVAL
+            or _in_cut(c)
         ]
         text = _emit(kept)
         if text:
             return text
-        # Fall through: a job with nothing marked approved (legacy rows) must
-        # not reconstruct to BLANK — that would drop it from the candidate pool
+        # Fall through: a job whose selection came out EMPTY (legacy rows with
+        # no status, a stale lineup naming ids that no longer exist) must not
+        # reconstruct to BLANK — that would drop it from the candidate pool
         # entirely, which is strictly worse than matching on slightly noisy text.
     return _emit(clips)
 

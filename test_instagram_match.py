@@ -175,7 +175,7 @@ def _clip(**kw):
         "id": 1, "clip_index": 0, "clip_role": None, "paired_clip_id": None,
         "dialogue_text": "", "dialogue_text_b": None,
         "rendered_prompt_variant": "A", "voiceover_line": None,
-        "approval_status": "approved",
+        "approval_status": "approved", "status": "completed",
     }
     base.update(kw)
     return base
@@ -224,14 +224,64 @@ def test_reconstruct_visual_pair_without_twin_falls_back_to_voiceover_line():
     assert m.reconstruct_dialogue(clips) == "spoken over the b-roll"
 
 
-def test_reconstruct_drops_clips_not_in_the_final_cut():
+def test_reconstruct_drops_rejected_clips_not_in_the_final_cut():
     m = _load()
     clips = [
         _clip(id=1, clip_index=0, dialogue_text="kept line", approval_status="approved"),
         _clip(id=2, clip_index=1, dialogue_text="rejected line", approval_status="rejected"),
-        _clip(id=3, clip_index=2, dialogue_text="pending line", approval_status="pending_review"),
     ]
     assert m.reconstruct_dialogue(clips) == "kept line"
+
+
+def test_reconstruct_keeps_a_pending_clip_that_is_in_the_exported_cut():
+    """A post-export redo flips an approved clip back to pending_review, but the
+    mp4 already posted still SPEAKS that line. Dropping it would delete a whole
+    line's rare terms from the job's text while the reel's transcript still has
+    them — worse than keeping a slightly stale line."""
+    m = _load()
+    clips = [
+        _clip(id=1, clip_index=0, dialogue_text="first line", approval_status="approved"),
+        _clip(id=2, clip_index=1, dialogue_text="redone line", approval_status="pending_review"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "first line redone line"
+
+
+def test_reconstruct_still_drops_an_explicitly_rejected_clip():
+    m = _load()
+    clips = [
+        _clip(id=1, clip_index=0, dialogue_text="kept", approval_status="approved"),
+        _clip(id=2, clip_index=1, dialogue_text="rejected", approval_status="rejected"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "kept"
+
+
+def test_reconstruct_drops_clips_that_never_rendered():
+    """failed / skipped / still-generating clips are not in the export."""
+    m = _load()
+    clips = [
+        _clip(id=1, clip_index=0, dialogue_text="rendered", status="completed"),
+        _clip(id=2, clip_index=1, dialogue_text="failed one", status="failed"),
+        _clip(id=3, clip_index=2, dialogue_text="skipped one", status="skipped"),
+    ]
+    assert m.reconstruct_dialogue(clips) == "rendered"
+
+
+def test_reconstruct_honours_a_custom_lineup_over_approval():
+    """A lineup export selects by clip id and ignores approval entirely
+    (main.py:9232-9241), so the lineup IS the final cut."""
+    m = _load()
+    clips = [
+        _clip(id=1, clip_index=0, dialogue_text="in the lineup", approval_status="pending_review"),
+        _clip(id=2, clip_index=1, dialogue_text="approved but cut", approval_status="approved"),
+    ]
+    assert m.reconstruct_dialogue(clips, lineup_ids=[1]) == "in the lineup"
+
+
+def test_reconstruct_lineup_still_never_blanks():
+    m = _load()
+    clips = [_clip(id=1, clip_index=0, dialogue_text="only line")]
+    # lineup names a clip id that does not exist -> selection empty -> fall back
+    assert m.reconstruct_dialogue(clips, lineup_ids=[999]) == "only line"
 
 
 def test_reconstruct_never_blanks_a_job_with_no_approved_clips():
