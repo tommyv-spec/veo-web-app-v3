@@ -4251,7 +4251,14 @@ async def match_video(
     v.matched_at = datetime.utcnow()
     job.instagram_url = v.url
     job.instagram_video_id = v.id
-    job.lifecycle_stage = "published"
+    # Record WHO published the job, mirroring drive_watch / local_watch. Without
+    # this, unmatch cannot tell a job THIS match dragged into `published` from
+    # one that drive/local legitimately published and we merely back-filled a
+    # url onto — so it left every wrongly-matched job stuck in the published
+    # lane forever. Only claim provenance when we are the one publishing it.
+    if job.lifecycle_stage != "published":
+        job.lifecycle_stage = "published"
+        job.published_via = "ig_match"
     if job.published_at is None:
         job.published_at = datetime.utcnow()
     db.commit()
@@ -4271,16 +4278,37 @@ async def unmatch_video(
     acc = db.query(InstagramAccount).filter_by(id=v.account_id).first()
     if not acc or acc.user_id != current_user.id:
         raise HTTPException(403, detail="access denied")
+    from lifecycle import derive_effective_stage
     matched_job_id = v.matched_job_id
     v.matched_job_id = None
     v.matched_at = None
+    reverted_to = None
     if matched_job_id:
         job = db.query(Job).filter_by(id=matched_job_id).first()
         if job:
             job.instagram_url = None
             job.instagram_video_id = None
+            # Undo the publish this match caused. Clearing the url alone left the
+            # job parked in `published` — so a wrong match was unrecoverable and
+            # an unfinished job sat at the end of the board.
+            #
+            # Only revert when THIS match did the publishing: published_via is
+            # 'ig_match', or NULL for rows matched before provenance was
+            # recorded (drive/local always stamp their own token, so NULL here
+            # means the IG match published it). A drive/local-published job keeps
+            # its published state — unlinking the reel doesn't unpublish it.
+            if (job.published_via or "ig_match") == "ig_match":
+                job.lifecycle_stage = None  # re-derive from live state, not the stale column
+                job.lifecycle_stage = derive_effective_stage(
+                    job, _count_approved_clips(db, job.id)
+                )
+                job.published_via = None
+                job.published_at = None
+                reverted_to = job.lifecycle_stage
+                print(f"[ig-unmatch] video={video_id} job={job.id[:8]} "
+                      f"reverted published -> {reverted_to}", flush=True)
     db.commit()
-    return {"unmatched": video_id}
+    return {"unmatched": video_id, "reverted_job_stage": reverted_to}
 
 
 # ============================================================================
