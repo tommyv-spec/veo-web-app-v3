@@ -312,7 +312,7 @@ git commit -m "feat(match): audio fingerprint - loudness envelope, ffmpeg + stdl
 Append to `test_instagram_match.py`:
 
 ```python
-# ---- v824: duration gate + media-identity decision ------------------------
+# ---- v853: duration gate + media-identity decision ------------------------
 
 def test_duration_gate_accepts_a_near_exact_match():
     m = _load()
@@ -369,7 +369,7 @@ Append to `instagram_match.py`:
 
 ```python
 # ============================================================================
-# v824 — MEDIA IDENTITY.
+# v853 — MEDIA IDENTITY.
 #
 # The posted reel IS the exported mp4, re-encoded. Text can only ever say
 # "these say similar things"; the waveform says "this is the same take".
@@ -439,7 +439,7 @@ git commit -m "feat(match): duration gate + media-identity decision"
 In `class Job`, after `export_at`:
 
 ```python
-    # v824 — media identity. Cached lazily on first match attempt (NOT at export
+    # v853 — media identity. Cached lazily on first match attempt (NOT at export
     # time): that needs no backfill migration and no change to the 600-line
     # export path, and every historical job self-heals the first time it is
     # considered as a candidate.
@@ -451,7 +451,7 @@ In `class Job`, after `export_at`:
 In `class InstagramVideo`, after `posted_at`:
 
 ```python
-    # v824 — from the HikerAPI clip payload (`video_duration`) + computed at
+    # v853 — from the HikerAPI clip payload (`video_duration`) + computed at
     # transcription time, when the mp4 is already downloaded.
     duration_s      = Column(Float, nullable=True)
     audio_fp        = Column(Text, nullable=True)
@@ -460,7 +460,7 @@ In `class InstagramVideo`, after `posted_at`:
 In `class LocalVideo`, after `size_bytes`:
 
 ```python
-    # v824 — computed at upload, when the file is already on disk.
+    # v853 — computed at upload, when the file is already on disk.
     duration_s           = Column(Float, nullable=True)
     audio_fp             = Column(Text, nullable=True)
 ```
@@ -528,7 +528,7 @@ git commit -m "feat(match): cache duration + audio fingerprint on job/ig/local r
 In `instagram_client.py`, inside `_clip_to_dict`, add before the `return`:
 
 ```python
-    # v824 — the reel's length. Verified live on the HikerAPI clip payload:
+    # v853 — the reel's length. Verified live on the HikerAPI clip payload:
     # video_duration: 13.303999900817871
     try:
         duration_s = float(m.get("video_duration")) if m.get("video_duration") else None
@@ -598,7 +598,7 @@ The reel mp4 is already fetched to a local path there for whisper. Identify that
 Immediately after transcription succeeds and while `media_path` still exists, add:
 
 ```python
-        # v824 — fingerprint the SAME download whisper just used. Free: the
+        # v853 — fingerprint the SAME download whisper just used. Free: the
         # bytes are already on disk. This is what later proves the reel is our
         # export rather than a build that merely says similar words.
         try:
@@ -647,7 +647,7 @@ Find the function that has the uploaded file on disk before transcription.
 After the transcription of the local file succeeds, while the path still exists:
 
 ```python
-        # v824 — the local final-cut IS the export. Fingerprint it so the
+        # v853 — the local final-cut IS the export. Fingerprint it so the
         # auto-matcher can CONFIRM its pick instead of trusting the words alone.
         try:
             from audio_fingerprint import fingerprint_file
@@ -759,7 +759,7 @@ git commit -m "feat(match): lazily cache a job's export fingerprint"
 After `ranked = ranked_all[:5]` and before building `top`:
 
 ```python
-    # v824 — the words RANK; the waveform DECIDES. Confirm only the top 2: the
+    # v853 — the words RANK; the waveform DECIDES. Confirm only the top 2: the
     # fingerprint costs an R2 download the first time a job is weighed, so we
     # spend it on the candidates that could actually win, not the whole pool.
     identity = None
@@ -786,14 +786,14 @@ After `ranked = ranked_all[:5]` and before building `top`:
     if identity:
         # Proven. Float it to the top and say so — this is no longer a guess.
         ranked.sort(key=lambda r: r["job_id"] != identity["job_id"])
-        verdict = {"verdict": "identical", "top": 1.0, "margin": 1.0}
+        verdict = {"verdict": "identical", "top": 1.0, "gap": 1.0}
 ```
 
 and extend the response dict:
 
 ```python
     return {"verdict": verdict["verdict"], "top": verdict["top"],
-            "margin": verdict["margin"], "identity": identity, "suggestions": top}
+            "gap": verdict["gap"], "identity": identity, "suggestions": top}
 ```
 
 - [ ] **Step 2: Show it in the popover**
@@ -833,7 +833,7 @@ Replace the `pick_id = _ig_match.auto_pick(ranked, _MATCH_HIGH, _MATCH_MARGIN)` 
 ```python
         pick_id = _ig_match.auto_pick(ranked, _MATCH_HIGH, _MATCH_MARGIN)
 
-        # v824 — the fingerprint can PROMOTE an otherwise-ambiguous pick (the
+        # v853 — the fingerprint can PROMOTE an otherwise-ambiguous pick (the
         # words could not separate two twins, but the waveform can) and can VETO
         # a confident one (right words, wrong render). This path auto-publishes
         # with no human in the loop, so proof beats confidence.
