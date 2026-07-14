@@ -832,6 +832,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/ig-match",
         "/api/diag/probe-exports",
         "/api/diag/apply-relinks",
+        "/api/diag/refresh-reel-urls",
         # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
         "/api/diag/probe-job-fp",
         "/api/diag/probe-reel-fp",
@@ -4906,6 +4907,61 @@ def diag_apply_relinks(
     if not int(dry_run):
         db.commit()
     return {"dry_run": bool(int(dry_run)), "count": len(results), "results": results}
+
+
+@app.get("/api/diag/refresh-reel-urls")
+def diag_refresh_reel_urls(
+    token: str = "",
+    db: DBSession = Depends(get_db_session),
+):
+    """v853 TEMPORARY: re-pull Instagram video_urls, then re-arm the failed fps.
+
+    Instagram CDN urls EXPIRE. 24 of the 67 reels could not be fingerprinted
+    because their stored video_url was already dead — and a reel with no
+    fingerprint can never be proven against a job's export, so it sits forever
+    in the undecided pile.
+
+    This refreshes the urls straight from HikerAPI (no login needed — the
+    account's key is in the DB) and clears audio_fp_at on every reel whose
+    fingerprint is still missing, so the probe worklist picks them up again.
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+
+    from models import InstagramAccount, InstagramVideo
+
+    refreshed = rearmed = 0
+    accounts = db.query(InstagramAccount).all()
+    for acc in accounts:
+        try:
+            api_key = _enc_decrypt(acc.api_key_encrypted)
+            if not acc.ig_user_id:
+                acc.ig_user_id = _ig_resolve_user_id(acc.handle, api_key)
+            clips = _ig_fetch_recent_clips(acc.ig_user_id, api_key, limit=0)
+        except HikerAPIError as he:
+            print(f"[reel-urls] account={acc.id} HikerAPI failed: {he}", flush=True)
+            continue
+        by_code = {c["shortcode"]: c for c in clips if c.get("shortcode")}
+        rows = db.query(InstagramVideo).filter_by(account_id=acc.id).all()
+        for v in rows:
+            c = by_code.get(v.shortcode)
+            if not c:
+                continue
+            if c.get("video_url"):
+                v.video_url = c["video_url"]
+                refreshed += 1
+            if v.duration_s is None and c.get("duration_s"):
+                v.duration_s = c["duration_s"]
+            # Re-arm: a reel with no fingerprint gets another attempt now that
+            # its url is alive again.
+            if not v.audio_fp:
+                v.audio_fp_at = None
+                rearmed += 1
+    db.commit()
+    print(f"[reel-urls] refreshed={refreshed} rearmed_for_fp={rearmed}", flush=True)
+    return {"accounts": len(accounts), "urls_refreshed": refreshed, "rearmed_for_fingerprint": rearmed}
 
 
 @app.get("/api/diag/probe-exports")
