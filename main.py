@@ -10244,8 +10244,30 @@ async def _do_export_final(
     # Create output filename with unique suffix to prevent collisions
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     unique_suffix = uuid.uuid4().hex[:6]  # 6 char random suffix
-    output_filename = f"final_export_{timestamp}_{unique_suffix}.mp4"
+    # v856 — STAMP THE JOB ID INTO THE NAME WE MINT.
+    #
+    # The operator downloads this mp4 and drops it in a watched folder, and the
+    # watcher then has to work out which job it came from — by transcribing it
+    # and comparing words. Builds share their script bank VERBATIM, so that
+    # comparison regularly cannot separate two jobs, and a day of wrong links
+    # is what a coin-flip between twins buys you.
+    #
+    # We named this file. So we write the answer on it: the watcher reads the
+    # id straight back out (instagram_match.job_id_from_filename) and the match
+    # becomes a lookup that cannot be wrong.
+    #
+    # The id goes AFTER the prefix, never before it: `final_export_` /
+    # `final_broll_` / `export_` is how ~6 other places detect "this is a final
+    # export" (main.py has_export self-heal, export_probe._FINAL_PREFIXES, the
+    # UI's export list). Inserting inside the name leaves every one of them
+    # working. A non-uuid job id yields no segment and we mint the legacy shape
+    # — the watcher just falls back to evidence, as it does for any older file.
+    _job_seg = _ig_match.export_job_segment(str(job_id))
+    _job_part = f"{_job_seg}_" if _job_seg else ""
+    output_filename = f"final_export_{_job_part}{timestamp}_{unique_suffix}.mp4"
     output_path = output_dir / output_filename
+    print(f"[Export][v856] minted {output_filename} (job={str(job_id)[:8]} "
+          f"stamped={'yes' if _job_seg else 'no'})", flush=True)  # TEMP DIAG
     
     try:
         print(f"[Export] Starting export for job {job_id}")

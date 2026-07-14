@@ -9,6 +9,7 @@ for every historical job. Computing on demand caches the answer on first use and
 self-heals every job that already exists.
 """
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -20,6 +21,22 @@ FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
 # Same tuple main.py uses to decide "this job WAS exported" (see the has_export
 # check around main.py:7734). Keep the two in step.
 _FINAL_PREFIXES = ("final_export_", "final_broll_", "export_")
+
+# The YYYYMMDD_HHMMSS an export is minted with. The `(?!\d)` matters: a v856
+# name is final_export_<job8>_<ts>_<hash>, and an all-decimal job id (e.g.
+# 12345678) would otherwise let "12345678_202607" match as the timestamp. A real
+# timestamp is followed by "_", never by another digit.
+_TS_RE = re.compile(r"(\d{8}_\d{6})(?!\d)")
+
+
+def _export_timestamp(name):
+    """The export's YYYYMMDD_HHMMSS, or "" when the name carries none.
+
+    "" sorts first, i.e. an unparseable name is treated as the OLDEST — it can
+    never displace a name we can actually date.
+    """
+    m = _TS_RE.search(name or "")
+    return m.group(1) if m else ""
 
 
 def probe_duration(path):
@@ -48,9 +65,22 @@ def newest_export_key(storage, job_id):
     finals = [k for k in keys if Path(k).name.startswith(_FINAL_PREFIXES)]
     if not finals:
         return None
-    # final_export_<timestamp>_<hash>.mp4 — timestamp-prefixed, so a lexical sort
-    # puts the newest export last.
-    return sorted(finals)[-1]
+    # Sort on the TIMESTAMP, not on the whole name.
+    #
+    # It used to be `sorted(finals)[-1]`, which worked only because the name
+    # began `final_export_<timestamp>_...` — the timestamp was the first thing
+    # that varied, so lexical order WAS chronological order. v856 stamps the
+    # job id in ahead of the timestamp and quietly breaks that assumption: for a
+    # job with both a legacy export and a re-export, the legacy name starts
+    # "2026..." while the new one starts with the job id, and any job id below
+    # "2026..." (hex, so most of them) sorts the NEWER file FIRST — handing the
+    # OLD mp4 back as "newest". The probe would then fingerprint the wrong
+    # render and every downstream evidence match would be measured against it.
+    #
+    # Read the timestamp out explicitly instead. Name stays the tie-break, which
+    # preserves the old within-timestamp order (final_broll_ < final_export_, so
+    # the speaker export still wins over its b-roll twin).
+    return sorted(finals, key=lambda k: (_export_timestamp(Path(k).name), k))[-1]
 
 
 # How many jobs a single match is allowed to probe from R2. Each probe is a

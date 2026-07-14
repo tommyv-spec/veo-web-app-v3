@@ -511,3 +511,133 @@ def test_recency_window_keeps_recent_jobs_and_drops_old_ones():
     assert m.within_recency_window(_dt.datetime(2026, 7, 20), posted) is False  # created after
     assert m.within_recency_window(None, posted) is True                        # unknown never excludes
     assert m.within_recency_window(_dt.datetime(2026, 5, 1), None) is True
+
+
+# ============================================================================
+# v856 — THE FILENAME IS THE ANSWER.
+#
+# The platform mints the export filename itself, so it can stamp the job id
+# into it. When that stamp is present the match is a LOOKUP, not a guess — it
+# beats text, duration and waveform, none of which can separate two renders of
+# the same script.
+# ============================================================================
+
+def test_job_id_from_filename_reads_the_stamp():
+    m = _load()
+    assert m.job_id_from_filename(
+        "final_export_6e52de72_20260714_120000_a1b2c3.mp4") == "6e52de72"
+
+
+def test_job_id_from_filename_handles_the_broll_variant():
+    m = _load()
+    assert m.job_id_from_filename(
+        "final_broll_6e52de72_20260714_120000_a1b2c3.mp4") == "6e52de72"
+
+
+def test_job_id_from_filename_is_case_insensitive_and_normalizes_down():
+    """A filesystem (or the operator) may hand the name back upper-cased. The
+    job ids are lowercase hex, and the caller feeds this straight into a
+    case-sensitive SQL LIKE — so normalize here, at the source."""
+    m = _load()
+    assert m.job_id_from_filename(
+        "FINAL_EXPORT_6E52DE72_20260714_120000_A1B2C3.MP4") == "6e52de72"
+
+
+def test_job_id_from_filename_ignores_a_renamed_file():
+    m = _load()
+    assert m.job_id_from_filename("my saffron reel FINAL v3.mp4") is None
+    assert m.job_id_from_filename("6e52de72.mp4") is None
+
+
+def test_job_id_from_filename_ignores_the_id_in_the_wrong_place():
+    """The stamp only counts where the platform puts it: right after the
+    prefix. An id anywhere else is a coincidence, not a claim."""
+    m = _load()
+    assert m.job_id_from_filename(
+        "6e52de72_final_export_20260714_120000_a1b2c3.mp4") is None
+    assert m.job_id_from_filename(
+        "final_export_20260714_120000_6e52de72.mp4") is None
+
+
+def test_job_id_from_filename_does_not_mistake_a_LEGACY_name_for_a_stamp():
+    """THE regression this whole feature can die on.
+
+    Legacy shape:  final_export_<YYYYMMDD>_<HHMMSS>_<hash>.mp4
+    Stamped shape: final_export_<job8>_<YYYYMMDD>_<HHMMSS>_<hash>.mp4
+
+    A date like `20260714` is EIGHT VALID HEX CHARS sitting in exactly the slot
+    the job id now occupies. A regex that only asks for [0-9a-f]{8} after the
+    prefix therefore reads every legacy export as job id "20260714" — which
+    resolves to zero jobs at best, and to a WRONG job the day a real job id
+    starts with those digits. Legacy names must return None and fall through to
+    the evidence path, so the trailing timestamp is part of the pattern.
+    """
+    m = _load()
+    assert m.job_id_from_filename("final_export_20260714_120000_a1b2c3.mp4") is None
+    assert m.job_id_from_filename("final_broll_20260714_120000_a1b2c3.mp4") is None
+    # ...and the all-decimal job id (a real possibility: 10^8/16^8 of uuids)
+    # still reads, because the timestamp that follows it is what proves the slot.
+    assert m.job_id_from_filename(
+        "final_export_12345678_20260714_120000_a1b2c3.mp4") == "12345678"
+
+
+def test_job_id_from_filename_needs_only_the_date_not_the_whole_timestamp():
+    """The stamp is proven by the DATE that follows it, not the full timestamp.
+
+    Legacy is <8>_<6>_<6> and stamped is <8>_<8>_<6>_<6>, so 8 digits in the
+    second slot is already enough to tell them apart — and only requiring the
+    date keeps the reader working on any shortened variant of the name.
+    """
+    m = _load()
+    assert m.job_id_from_filename(
+        "final_export_6e52de72_20260714_a1b2c3.mp4") == "6e52de72"
+
+
+def test_job_id_from_filename_survives_junk_input():
+    m = _load()
+    assert m.job_id_from_filename(None) is None
+    assert m.job_id_from_filename("") is None
+    assert m.job_id_from_filename(123) is None
+
+
+def test_job_id_from_filename_reads_through_a_voice_cloned_wrapper():
+    """voice_cloned_<voice>_<orig>.mp4 wraps the export name — and it IS that
+    job's audio, so the stamp inside it still identifies the job correctly."""
+    m = _load()
+    assert m.job_id_from_filename(
+        "voice_cloned_nuri_final_export_6e52de72_20260714_120000_a1b2c3.mp4"
+    ) == "6e52de72"
+
+
+def test_job_id_from_filename_ignores_a_non_hex_segment():
+    m = _load()
+    assert m.job_id_from_filename(
+        "final_export_zzzzzzzz_20260714_120000_a1b2c3.mp4") is None
+
+
+# --- the minting side: one definition, so writer and reader cannot drift -----
+
+def test_export_job_segment_is_the_first_8_hex_chars():
+    m = _load()
+    assert m.export_job_segment("6e52de72-9c1f-4b0a-8f3e-1d2c3b4a5f60") == "6e52de72"
+
+
+def test_export_job_segment_refuses_a_non_uuid_job_id():
+    """A non-hex id cannot be stamped without breaking the reader, so it is not
+    stamped at all — the name falls back to the legacy shape and the watcher
+    falls back to evidence. Degrade, never corrupt."""
+    m = _load()
+    assert m.export_job_segment("not-a-uuid-at-all") is None
+    assert m.export_job_segment("") is None
+    assert m.export_job_segment(None) is None
+
+
+def test_minted_name_round_trips_through_the_reader():
+    """The contract, end to end: what main.py writes is what the watcher reads."""
+    m = _load()
+    job_id = "6e52de72-9c1f-4b0a-8f3e-1d2c3b4a5f60"
+    seg = m.export_job_segment(job_id)
+    name = f"final_export_{seg}_20260714_120000_a1b2c3.mp4"
+    assert name.startswith(("final_export_", "final_broll_", "export_"))  # prefix detectors
+    assert m.job_id_from_filename(name) == seg
+    assert job_id.startswith(m.job_id_from_filename(name))

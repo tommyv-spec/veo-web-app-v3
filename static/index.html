@@ -3588,6 +3588,9 @@ Example: A realistic vertical video of a professional presenter speaking directl
                             <strong>Finishing</strong>. Matched jobs move to <strong>Published</strong> before the Instagram
                             sync runs — when the reel posts the IG URL fills in automatically.
                             <br><br>
+                            <strong style="color:#8c8;">Don't rename the file.</strong> The exported filename already carries its job id,
+                            so dropping it in as-is makes the match exact — rename it and we have to guess from the audio.
+                            <br><br>
                             <span style="color:#999;">Browser support: Chrome / Edge / Opera. Firefox / Safari can't watch folders.</span>
                         </p>
                         <div id="localVideosList"></div>
@@ -14528,8 +14531,9 @@ Ambient: same kitchen room tone, soft pour sound.
 
                 // v701m — order exports newest-first, with speaker + broll
                 // pair grouped together. Filename schema:
-                //   final_export_YYYYMMDD_HHMMSS_<hash>.mp4
-                //   final_broll_YYYYMMDD_HHMMSS_<hash>.mp4
+                //   final_export_<job8>_YYYYMMDD_HHMMSS_<hash>.mp4   (v856)
+                //   final_broll_<job8>_YYYYMMDD_HHMMSS_<hash>.mp4    (v856)
+                //   final_export_YYYYMMDD_HHMMSS_<hash>.mp4          (legacy, still in R2)
                 //   voice_cloned_<voice>_<orig_filename>.mp4
                 // Pre-v701m the iteration order was whatever the
                 // /list-outputs endpoint returned (R2 list order =
@@ -14537,8 +14541,14 @@ Ambient: same kitchen room tone, soft pour sound.
                 // timestamp because "broll" < "export"). User sees the
                 // OLDER speaker export above the newer one. Sort key:
                 // extract the timestamp segment and sort DESC.
+                //
+                // The (?!\d) is load-bearing since v856 put the job id ahead of
+                // the timestamp: an all-decimal job id (12345678) lets the bare
+                // /(\d{8}_\d{6})/ match "12345678_202607" and sort the export by
+                // its ID instead of its DATE. A real timestamp is always
+                // followed by "_", never by another digit.
                 const _exportTimestamp = (fn) => {
-                    const m = fn.match(/(\d{8}_\d{6})/);
+                    const m = fn.match(/(\d{8}_\d{6})(?!\d)/);
                     return m ? m[1] : '';
                 };
                 const _exportKindRank = (fn) => {

@@ -27,6 +27,9 @@ from instagram_transcribe import fingerprint_downloaded_media as _fingerprint_me
 # endpoint use). local_transcribe imports instagram_transcribe, not this
 # module, so this module-scope import closes no cycle.
 from local_transcribe import _bulk_dialogue_map, _MATCH_IDF_POWER
+# v856 — the filename lookup that runs before any inference. Shared with the
+# local watcher so the two cannot disagree about how to read our own name.
+from local_transcribe import resolve_job_by_filename
 
 
 def _earliest_awaiting_finishing_approval(db: Session, user_id: str) -> Optional[datetime]:
@@ -82,6 +85,31 @@ def _maybe_auto_match(video, account, db: Session) -> None:
         from models import Job
         import instagram_match as _ig_match
         from export_probe import evidence_candidates
+
+        # v856 — the filename first. The platform minted this export and stamped
+        # its job id into the name; reading it back is a LOOKUP, and a lookup
+        # beats every heuristic below. Before the transcription gate on purpose:
+        # the name identifies the job even when there are no words to score.
+        # DriveVideo calls the field `name` (LocalVideo calls it `file_name`).
+        stamped = resolve_job_by_filename(db, video.name, account.user_id)
+        if stamped is not None:
+            print(
+                f"[drive-auto] file={video.drive_file_id} decision=AUTO "
+                f"source=filename job={str(stamped.id)[:8]} name={video.name}",
+                flush=True,
+            )
+            video.matched_job_id = stamped.id
+            video.matched_at = datetime.utcnow()
+            video.match_score = 1.0   # not a similarity — a certainty
+            stamped.lifecycle_stage = "published"
+            stamped.published_via = "drive_watch"
+            if stamped.published_at is None:
+                stamped.published_at = datetime.utcnow()
+            db.commit()
+            print(f"[drive-auto] AUTO-MATCH file={video.drive_file_id} -> "
+                  f"job={str(stamped.id)[:8]} via=filename", flush=True)
+            return
+
         if not video.transcription:
             return
         candidates = (
