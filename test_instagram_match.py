@@ -641,3 +641,249 @@ def test_minted_name_round_trips_through_the_reader():
     assert name.startswith(("final_export_", "final_broll_", "export_"))  # prefix detectors
     assert m.job_id_from_filename(name) == seg
     assert job_id.startswith(m.job_id_from_filename(name))
+
+
+# ============================================================================
+# v857 — ONE JOB, ONE VIDEO (except a repost).
+#
+# claim_strength ranks two videos claiming the SAME job, so the stronger one
+# takes it instead of the first writer keeping it. is_same_video is the one
+# legitimate exception: the operator posting a single export twice.
+# ============================================================================
+
+def _ev(source=None, similarity=None, dur_delta=None, conflict=False, job_id="j"):
+    """An evidence_pick-shaped dict."""
+    return {"job_id": job_id if source else None, "source": source,
+            "similarity": similarity, "dur_delta": dur_delta, "conflict": conflict}
+
+
+def test_claim_strength_no_evidence_is_zero():
+    m = _load()
+    assert m.claim_strength(_ev()) == 0.0
+    assert m.claim_strength({}) == 0.0
+    assert m.claim_strength(None) == 0.0
+
+
+def test_claim_strength_orders_the_three_kinds_of_evidence():
+    """waveform+duration > waveform alone > duration alone — ALWAYS, including
+    the worst waveform against the best duration. A length match is 'the same
+    length'; a waveform match is 'the same performance'."""
+    m = _load()
+    best_dur = m.claim_strength(_ev("duration", dur_delta=0.0))
+    worst_wave = m.claim_strength(_ev("waveform", similarity=m.WAVE_MIN_SIM))
+    best_wave = m.claim_strength(_ev("waveform", similarity=1.0))
+    worst_both = m.claim_strength(
+        _ev("waveform+duration", similarity=m.WAVE_MIN_SIM, dur_delta=m.DUR_TOLERANCE_S))
+    assert 0.0 < best_dur < worst_wave <= best_wave < worst_both
+
+
+def test_claim_strength_a_weak_waveform_still_beats_a_strong_duration():
+    """The exact inversion the gap-free score exists to prevent: a 0.90 waveform
+    must NOT lose to a 0.9s duration (nor to a 0.0s one)."""
+    m = _load()
+    wave_090 = m.claim_strength(_ev("waveform", similarity=0.90))
+    dur_09s = m.claim_strength(_ev("duration", dur_delta=0.9))
+    dur_0s = m.claim_strength(_ev("duration", dur_delta=0.0))
+    assert wave_090 > dur_09s
+    assert wave_090 > dur_0s
+
+
+def test_claim_strength_within_duration_a_tighter_delta_is_stronger():
+    """0.005s beats 0.632s — the production numbers."""
+    m = _load()
+    tight = m.claim_strength(_ev("duration", dur_delta=0.005))
+    loose = m.claim_strength(_ev("duration", dur_delta=0.632))
+    assert tight > loose > 0.0
+
+
+def test_claim_strength_within_waveform_a_higher_similarity_is_stronger():
+    m = _load()
+    assert m.claim_strength(_ev("waveform", similarity=0.98)) > \
+           m.claim_strength(_ev("waveform", similarity=0.91))
+
+
+def test_claim_strength_is_continuous_in_each_signal():
+    """No cliffs INSIDE a kind of evidence: nudging the similarity or the delta
+    a hair may not move the score by a landslide."""
+    m = _load()
+    a = m.claim_strength(_ev("waveform", similarity=0.940))
+    b = m.claim_strength(_ev("waveform", similarity=0.941))
+    assert 0 < (b - a) < 0.05
+    c = m.claim_strength(_ev("duration", dur_delta=0.500))
+    d = m.claim_strength(_ev("duration", dur_delta=0.501))
+    assert 0 < (c - d) < 0.05
+
+
+def test_claim_strength_ignores_a_similarity_the_waveform_did_not_decide_on():
+    """evidence_pick REPORTS a similarity when the DURATION decided (source
+    'duration') — it is informational, it did not pass the gate. Scoring it
+    would promote a duration-only claim into the waveform band."""
+    m = _load()
+    reported = m.claim_strength(_ev("duration", similarity=0.99, dur_delta=0.4))
+    assert reported < m.claim_strength(_ev("waveform", similarity=m.WAVE_MIN_SIM))
+
+
+def test_claim_strength_never_raises_on_junk():
+    m = _load()
+    assert m.claim_strength({"source": "waveform", "similarity": None}) >= 0.0
+    assert m.claim_strength({"source": "duration", "dur_delta": "abc"}) == 0.0
+    assert m.claim_strength({"source": 123}) == 0.0
+
+
+# ---- is_same_video: the repost, the one legitimate double claim -------------
+
+def test_is_same_video_true_for_a_repost():
+    """Operator-confirmed: the same export posted twice — identical duration to
+    the bit, near-identical waveform."""
+    m = _load()
+    fp = _fp(3)
+    assert m.is_same_video(fp, fp, 46.02, 46.02) is True
+
+
+def test_is_same_video_false_for_two_different_performances():
+    m = _load()
+    assert m.is_same_video(_fp(3), _fp(9), 46.02, 46.02) is False
+
+
+def test_is_same_video_false_when_the_durations_disagree():
+    """Same-ish audio but a different runtime is a different cut, not a repost."""
+    m = _load()
+    fp = _fp(3)
+    assert m.is_same_video(fp, fp, 46.02, 47.50) is False
+
+
+def test_is_same_video_false_when_a_fingerprint_is_missing():
+    """Cannot CONFIRM a repost -> treat as two different videos -> exclusivity
+    applies. Absence of evidence is never evidence."""
+    m = _load()
+    assert m.is_same_video(None, _fp(3), 46.02, 46.02) is False
+    assert m.is_same_video(_fp(3), "", 46.02, 46.02) is False
+    assert m.is_same_video("", "", 46.02, 46.02) is False
+
+
+def test_is_same_video_false_when_a_duration_is_missing():
+    m = _load()
+    fp = _fp(3)
+    assert m.is_same_video(fp, fp, None, 46.02) is False
+    assert m.is_same_video(fp, fp, 46.02, None) is False
+
+
+def test_is_same_video_never_raises_on_a_malformed_fingerprint():
+    m = _load()
+    assert m.is_same_video("!!not base64!!", _fp(3), 46.0, 46.0) is False
+
+
+# ---- resolve_claim: link | steal | refuse -----------------------------------
+
+def test_resolve_claim_links_when_there_is_no_incumbent_strength_but_a_repost():
+    m = _load()
+    assert m.resolve_claim(0.0, 9.9, True) == "link"
+
+
+def test_resolve_claim_steals_when_the_challenger_is_clearly_stronger():
+    m = _load()
+    strong = m.claim_strength(_ev("waveform+duration", similarity=0.947, dur_delta=0.005))
+    weak = m.claim_strength(_ev("duration", dur_delta=0.632))
+    assert m.resolve_claim(strong, weak, False) == "steal"
+
+
+def test_resolve_claim_refuses_when_the_challenger_is_weaker():
+    m = _load()
+    strong = m.claim_strength(_ev("waveform+duration", similarity=0.947, dur_delta=0.005))
+    weak = m.claim_strength(_ev("duration", dur_delta=0.632))
+    assert m.resolve_claim(weak, strong, False) == "refuse"
+
+
+def test_resolve_claim_refuses_a_near_tie():
+    """Within the margin the two claims are indistinguishable — a human picks.
+    Never silently overwrite."""
+    m = _load()
+    a = m.claim_strength(_ev("waveform", similarity=0.950))
+    b = m.claim_strength(_ev("waveform", similarity=0.955))
+    assert m.resolve_claim(b, a, False) == "refuse"
+    assert m.resolve_claim(a, b, False) == "refuse"
+
+
+def test_resolve_claim_a_duration_only_claim_never_evicts_an_incumbent():
+    """A mere length match is what caused the bad link. It may take a FREE job;
+    it may never take one another video already holds."""
+    m = _load()
+    dur_only = m.claim_strength(_ev("duration", dur_delta=0.001))
+    assert m.resolve_claim(dur_only, 0.0, False) == "refuse"
+    assert m.resolve_claim(dur_only, dur_only / 2.0, False) == "refuse"
+
+
+def test_resolve_claim_refuses_when_the_challenger_has_no_evidence():
+    m = _load()
+    assert m.resolve_claim(0.0, 0.0, False) == "refuse"
+
+
+def test_resolve_claim_margin_is_a_real_gap_not_noise():
+    m = _load()
+    assert 0.0 < m.CLAIM_MARGIN < 1.0
+
+
+# ---- THE PRODUCTION FAILURE, reproduced -------------------------------------
+
+def test_regression_the_weak_claimant_does_not_steal_the_proven_job():
+    """2026-07 production, job c9f0e6c9:
+
+      reel A — 0.005s from J's export length AND 0.947 on the waveform.
+      reel B — 0.632s away, waveform inconclusive.
+
+    Both passed the per-reel gate, so B (transcribed first) took the job A
+    proves it owns. A gets J; B must be REFUSED — even though B's duration alone
+    still passes the old gate.
+    """
+    m = _load()
+    export_dur = 17.269
+    j_fp = _fp(4)                     # J's exported mp4
+    a_fp = _fp(4, phase=0.4)          # reel A: a re-encode of that same render
+    b_fp = _fp(11)                    # reel B: a different performance entirely
+    pool = [_cand("J", export_dur, j_fp)]
+
+    ev_a = m.evidence_pick(17.274, a_fp, pool)          # delta 0.005
+    ev_b = m.evidence_pick(16.637, b_fp, pool)          # delta 0.632
+
+    assert ev_a["job_id"] == "J"
+    assert "waveform" in (ev_a["source"] or "")          # the performance matched
+    assert ev_a["similarity"] >= m.WAVE_MIN_SIM
+    assert round(ev_a["dur_delta"], 3) == 0.005
+
+    # B still passes the OLD per-reel gate on length alone — that is the defect.
+    assert ev_b["job_id"] == "J"
+    assert ev_b["source"] == "duration"
+    assert round(ev_b["dur_delta"], 3) == 0.632
+
+    sa = m.claim_strength(ev_a)
+    sb = m.claim_strength(ev_b)
+    assert sa > sb
+
+    # Not a repost: two different reels, and their durations are 0.6s apart.
+    repost = m.is_same_video(a_fp, b_fp, 17.274, 16.637)
+    assert repost is False
+
+    # B arrives while A holds J -> REFUSED, left for a manual pick.
+    assert m.resolve_claim(sb, sa, repost) == "refuse"
+    # A arrives while B holds J -> A takes it back.
+    assert m.resolve_claim(sa, sb, repost) == "steal"
+
+
+def test_regression_a_repost_still_links_both_reels():
+    """Operator-confirmed: one export, posted twice. Two reels, identical
+    duration to the bit, 0.975 waveform to the same job. Refusing the second
+    would be wrong — both link, and the incumbent is left alone."""
+    m = _load()
+    export_dur = 46.02000045776367
+    j_fp = _fp(6)
+    a_fp = _fp(6, phase=0.2)          # reel 1: a re-encode of the export
+    b_fp = _fp(6, phase=0.25)         # reel 2: the SAME file, posted again
+    pool = [_cand("J", export_dur, j_fp)]
+
+    ev_a = m.evidence_pick(export_dur, a_fp, pool)
+    ev_b = m.evidence_pick(export_dur, b_fp, pool)
+    assert ev_a["job_id"] == "J" and ev_b["job_id"] == "J"
+
+    repost = m.is_same_video(a_fp, b_fp, export_dur, export_dur)
+    assert repost is True
+    assert m.resolve_claim(m.claim_strength(ev_b), m.claim_strength(ev_a), repost) == "link"

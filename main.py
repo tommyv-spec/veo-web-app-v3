@@ -4194,12 +4194,18 @@ def suggest_matches(   # sync ON PURPOSE — see below
     # who manually parked a job in the lane, and to keep already-published jobs
     # eligible for instagram_url back-fill (drive/local watch publish with
     # instagram_video_id still NULL).
+    #
+    # v857 — a job already linked to ANOTHER reel stays in the pool (the
+    # `instagram_video_id IS NULL` filter is gone). Hiding it did not protect
+    # anything: it only meant that once a reel took a job — rightly or wrongly —
+    # the popover could never offer that job to the reel that actually owns it,
+    # so a wrong link was unfixable from the UI. It is shown, flagged
+    # `already_linked_to`, and the operator decides. A warning, not a block.
     candidates = (
         db.query(Job)
         .filter(
             Job.user_id == current_user.id,
             Job.status == "completed",
-            Job.instagram_video_id.is_(None),
             Job.archived == False,  # noqa: E712
             or_(
                 Job.has_export == True,  # noqa: E712
@@ -4283,11 +4289,43 @@ def suggest_matches(   # sync ON PURPOSE — see below
     print(f"[ig-suggest] video={video_id} pool={len(candidates)} verdict={verdict['verdict']} "
           f"top={verdict['top']:.3f} gap={verdict['gap']:.3f} evidence={evidence} "
           f"top5={[(r['job_id'][:8], r['score']) for r in ranked]}", flush=True)
+
+    # v857 — WARN when a suggested job is already another reel's. A job produced
+    # ONE video, so linking it twice means one of the two links is false; the
+    # popover has to say so instead of letting the operator make the same wrong
+    # link by hand that the auto-matcher now refuses. A REPOST is the exception —
+    # one export posted twice legitimately claims one job — so a reel that is the
+    # SAME FILE as the holder is not flagged. Warning, never a block: the operator
+    # can still pick the row, which is how a wrong link gets repaired.
+    holders = {}
+    _linked = (
+        db.query(InstagramVideo)
+        .filter(
+            InstagramVideo.matched_job_id.in_([r["job_id"] for r in ranked]),
+            InstagramVideo.id != v.id,
+        )
+        .all()
+    ) if ranked else []
+    for other in _linked:
+        if other.matched_job_id in holders:
+            continue
+        if _ig_match.is_same_video(v.audio_fp, other.audio_fp, v.duration_s, other.duration_s):
+            print(f"[ig-suggest] video={video_id} job={str(other.matched_job_id)[:8]} is held by "
+                  f"{other.shortcode} but they are the SAME FILE (repost) — not flagged", flush=True)
+            continue
+        holders[other.matched_job_id] = other.shortcode
+
     top = []
     for r in ranked:
         clip = db.query(Clip).filter(Clip.job_id == r["job_id"], Clip.clip_index == 0).first()
         slug = (clip.dialogue_text or "")[:80] if clip and clip.dialogue_text else r["job_id"][:8]
-        top.append({"job_id": r["job_id"], "score": r["score"], "slug": slug})
+        row = {"job_id": r["job_id"], "score": r["score"], "slug": slug}
+        if r["job_id"] in holders:
+            row["already_linked_to"] = holders[r["job_id"]]
+        top.append(row)
+    if holders:
+        print(f"[ig-suggest] video={video_id} already-linked jobs in the list: "
+              f"{[(k[:8], s) for k, s in holders.items()]}", flush=True)
     return {
         "verdict": verdict["verdict"],
         "top": verdict["top"],

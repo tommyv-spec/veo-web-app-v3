@@ -30,6 +30,10 @@ from local_transcribe import _bulk_dialogue_map, _MATCH_IDF_POWER
 # v856 — the filename lookup that runs before any inference. Shared with the
 # local watcher so the two cannot disagree about how to read our own name.
 from local_transcribe import resolve_job_by_filename
+# v857 — the one-job-one-video gate. Shared for the same reason: three copies of
+# "is somebody already holding this job" drift, and then a watcher overwrites a
+# link.
+from local_transcribe import enforce_exclusivity
 
 
 def _earliest_awaiting_finishing_approval(db: Session, user_id: str) -> Optional[datetime]:
@@ -170,6 +174,11 @@ def _maybe_auto_match(video, account, db: Session) -> None:
         # None, so an `is None` test stored 0.0 and the UI rendered "0%" on a
         # match the media PROVED. Fall back to the text score of the proven job.
         text_score = next((r["score"] for r in ranked if r["job_id"] == pick_id), 0.0)
+        # v857 — a job produced ONE video. Another video already holding this one
+        # only yields to a clearly stronger claim; a weaker one is refused and
+        # left for a manual pick.
+        if enforce_exclusivity(db, job, video, "drive", ev) == "refuse":
+            return
         video.matched_job_id = job.id
         video.matched_at = datetime.utcnow()
         video.match_score = ev["similarity"] or text_score

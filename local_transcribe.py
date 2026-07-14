@@ -228,6 +228,213 @@ def resolve_job_by_filename(db, file_name, user_id):
     return hits[0]
 
 
+# ============================================================================
+# v857 — ONE JOB, ONE VIDEO. The exclusivity gate, shared by all three watchers.
+#
+# evidence_pick is asked "which job produced THIS video" and knows nothing about
+# the other videos, so two of them can be handed the SAME job. It happened: reel
+# B (0.632s from job J's export length, waveform inconclusive) kept a job that
+# reel A proves it owns (0.005s AND a 0.947 waveform), purely because B was
+# transcribed first. Nothing in the code even LOOKED.
+#
+# The DB glue lives here — next to the other cross-watcher glue (_bulk_dialogue_map,
+# resolve_job_by_filename) — because three copies of "is somebody already holding
+# this job" drift, and the day they drift one watcher starts overwriting links.
+# The DECISION itself is pure and unit-tested in instagram_match (claim_strength /
+# is_same_video / resolve_claim); this file only reads and writes rows.
+#
+# THREE WAYS TWO VIDEOS LEGITIMATELY SHARE ONE JOB — none of them a conflict:
+#
+#   1. A REPOST. The operator posts one export twice (operator-confirmed: two
+#      reels, identical duration to the bit, 0.975 waveform to the same job).
+#      is_same_video compares the two POSTED files to each other and says so.
+#
+#   2. THE SAME RENDER ON ANOTHER SURFACE. One job's export is a LocalVideo (the
+#      file the operator dropped in the watched folder), a DriveVideo (that same
+#      file in Drive) AND an InstagramVideo (the reel posted from it). The IG
+#      matcher is DESIGNED to back-fill instagram_url onto a job drive/local
+#      watch already published (drive_transcribe: "does NOT touch instagram_url —
+#      that's the IG matcher's job"). A cross-surface claim that is WAVEFORM-
+#      proven is that same render, not a rival — link it and leave the incumbent
+#      alone. (Cross-surface is NOT waved through on a duration-only claim: that
+#      is precisely the weak evidence that produced the bad link.)
+#
+#   3. A stamped filename (v856) — a lookup, not a claim. It does not come
+#      through this gate at all.
+#
+# Everything else is a contest, and the stronger claim wins it.
+# ============================================================================
+
+# Which token each watcher stamps on a job it publishes. Reverting a publish is
+# only ever OUR business: a job published by drive watch keeps its published
+# state when an IG link is removed (mirrors main.py unmatch_video).
+_PUBLISHED_VIA = {"instagram": "ig_match", "local": "local_watch", "drive": "drive_watch"}
+
+
+def _video_label(kind, video):
+    """What to call this video in a log line: the handle the operator knows."""
+    if kind == "instagram":
+        return getattr(video, "shortcode", None) or f"id={getattr(video, 'id', '?')}"
+    if kind == "local":
+        return getattr(video, "file_name", None) or f"id={getattr(video, 'id', '?')}"
+    return getattr(video, "name", None) or f"id={getattr(video, 'id', '?')}"
+
+
+def find_job_incumbent(db, job_id, kind, video_id):
+    """(incumbent_kind, video) — the OTHER video already linked to this job.
+
+    (None, None) when the job is free. Checks all three watcher tables: a job is
+    ONE render, and the local watcher holding it does not make it free for a reel
+    to claim a second time. SAME-KIND FIRST — a rival reel is the conflict this
+    gate exists for; a cross-surface holder is usually the same render (see the
+    header), and only matters when there is no rival.
+
+    Job.instagram_video_id is the job's own back-reference and SHOULD agree with
+    InstagramVideo.matched_job_id. Both are checked: a disagreement means one
+    write half-landed, and a half-linked job must not read as a free one.
+    """
+    from models import InstagramVideo, LocalVideo, DriveVideo
+    tables = [("instagram", InstagramVideo), ("local", LocalVideo), ("drive", DriveVideo)]
+    # Look at our own table first, then the others.
+    tables.sort(key=lambda t: 0 if t[0] == kind else 1)
+    for k, model in tables:
+        q = db.query(model).filter(model.matched_job_id == job_id)
+        if k == kind:
+            q = q.filter(model.id != video_id)
+        row = q.first()
+        if row is not None:
+            return (k, row)
+
+    # The job's own back-reference, in case the reel row lost its half of the link.
+    from models import Job
+    job = db.query(Job).filter(Job.id == job_id).first()
+    back_ref = getattr(job, "instagram_video_id", None) if job is not None else None
+    if back_ref and not (kind == "instagram" and back_ref == video_id):
+        row = db.query(InstagramVideo).filter(InstagramVideo.id == back_ref).first()
+        if row is not None:
+            print(f"[claim] job={str(job_id)[:8]} back-reference points at reel "
+                  f"{_video_label('instagram', row)} but that reel's matched_job_id "
+                  f"does not point back — treating it as the incumbent", flush=True)
+            return ("instagram", row)
+    return (None, None)
+
+
+def incumbent_claim_strength(db, job, incumbent):
+    """How strongly the video that ALREADY holds this job claims it.
+
+    Recomputed from scratch against this ONE job (a one-candidate pool: we are
+    not asking "which job is the incumbent's", we are asking "how well does the
+    incumbent explain THIS job"), so the two claims are scored by the same ruler.
+    """
+    import instagram_match as _ig_match
+    cand = [{
+        "job_id": job.id,
+        "export_duration_s": job.export_duration_s,
+        "export_audio_fp": job.export_audio_fp,
+    }]
+    ev = _ig_match.evidence_pick(
+        getattr(incumbent, "duration_s", None),
+        getattr(incumbent, "audio_fp", None),
+        cand,
+    )
+    return _ig_match.claim_strength(ev)
+
+
+def release_incumbent(db, job, inc_kind, incumbent):
+    """Unlink the incumbent from this job and undo the publish IT caused.
+
+    Mirrors main.py unmatch_video / diag_apply_relinks: clearing the link alone
+    leaves the job parked in `published`, so a wrong match was unrecoverable and
+    an unfinished job sat at the end of the board. Only revert when the publish
+    was OURS to revert — published_via names the watcher that did it, and NULL
+    means the IG match did (drive/local always stamp their own token).
+
+    Does not commit: the caller writes the new link in the same transaction, so
+    the job is never momentarily owned by nobody.
+    """
+    from models import Clip
+    from lifecycle import derive_effective_stage
+
+    incumbent.matched_job_id = None
+    incumbent.matched_at = None
+    if hasattr(incumbent, "match_score"):
+        incumbent.match_score = None
+    if inc_kind == "instagram" and job.instagram_video_id == incumbent.id:
+        job.instagram_url = None
+        job.instagram_video_id = None
+
+    reverted_to = None
+    via = job.published_via or ("ig_match" if inc_kind == "instagram" else "")
+    if via == _PUBLISHED_VIA[inc_kind]:
+        approved = db.query(Clip).filter(
+            Clip.job_id == job.id, Clip.approval_status == "approved",
+        ).count()
+        job.lifecycle_stage = None   # re-derive from live state, not the stale column
+        job.lifecycle_stage = derive_effective_stage(job, approved)
+        job.published_via = None
+        job.published_at = None
+        reverted_to = job.lifecycle_stage
+    return reverted_to
+
+
+def enforce_exclusivity(db, job, video, kind, evidence):
+    """The gate every auto-link passes through: "link" | "steal" | "refuse".
+
+    link   — the job is free, or the two videos are the same render (a repost, or
+             the export and the reel made from it). The incumbent is left alone.
+    steal   — the challenger's claim is clearly stronger: the incumbent is
+             UNLINKED here (and its publish reverted) so the caller can link.
+    refuse — do not link. Left for a manual pick.
+
+    Never raises and never silently overwrites: on any internal error it refuses,
+    because not linking is the recoverable outcome. Every branch logs one line.
+    """
+    import instagram_match as _ig_match
+    try:
+        inc_kind, inc = find_job_incumbent(db, job.id, kind, video.id)
+        if inc is None:
+            return "link"
+
+        me = _video_label(kind, video)
+        them = _video_label(inc_kind, inc)
+        repost = _ig_match.is_same_video(
+            getattr(video, "audio_fp", None), getattr(inc, "audio_fp", None),
+            getattr(video, "duration_s", None), getattr(inc, "duration_s", None),
+        )
+        # A waveform-proven claim from ANOTHER surface is the same render seen
+        # somewhere else (the export file vs the reel posted from it), not a rival.
+        cross_surface = (
+            inc_kind != kind
+            and "waveform" in str((evidence or {}).get("source") or "")
+        )
+        if repost or cross_surface:
+            print(f"[claim] job={str(job.id)[:8]} {kind}={me} LINK alongside "
+                  f"{inc_kind}={them} repost={str(bool(repost)).lower()} "
+                  f"cross_surface={str(bool(cross_surface)).lower()}", flush=True)
+            return "link"
+
+        challenger = _ig_match.claim_strength(evidence)
+        holder = incumbent_claim_strength(db, job, inc)
+        verdict = _ig_match.resolve_claim(challenger, holder, False)
+        if verdict == "steal":
+            reverted_to = release_incumbent(db, job, inc_kind, inc)
+            print(f"[claim] job={str(job.id)[:8]} {kind}={me} STEAL from "
+                  f"{inc_kind}={them} challenger={challenger:.3f} incumbent={holder:.3f} "
+                  f"margin={_ig_match.CLAIM_MARGIN} incumbent_reverted_to={reverted_to}",
+                  flush=True)
+            return "steal"
+        print(f"[claim] job={str(job.id)[:8]} {kind}={me} REFUSE "
+              f"reason=weaker-claim incumbent={them} challenger={challenger:.3f} "
+              f"incumbent_strength={holder:.3f}", flush=True)
+        return "refuse"
+    except Exception as e:
+        # Refusing is the safe failure: the video waits for a manual pick. Linking
+        # through a broken gate is how a wrong link gets written.
+        print(f"[claim] job={str(getattr(job, 'id', '?'))[:8]} REFUSE reason=gate-error "
+              f"{type(e).__name__}: {str(e)[:160]}", flush=True)
+        return "refuse"
+
+
 def _advance_job_to_published(video, job, score, db) -> None:
     """Mark a LocalVideo matched + advance its Job to published/local_watch."""
     video.matched_job_id = job.id
@@ -348,6 +555,11 @@ def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None,
         # no overlap) — and 0.0 is not None, so an `is None` test stored it and
         # the UI rendered "0%" on a match the media PROVED.
         text_score = next((r["score"] for r in ranked if r["job_id"] == pick_id), 0.0)
+        # v857 — a job produced ONE video. If another video already holds this
+        # one, the stronger claim takes it; a weaker claim is refused, never
+        # written over the top.
+        if enforce_exclusivity(db, job, video, "local", ev) == "refuse":
+            return
         _advance_job_to_published(video, job, ev["similarity"] or text_score, db)
     except Exception as exc:
         print(f"[local] auto-match error on hash={video.file_hash[:8]}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)

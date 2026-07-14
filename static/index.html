@@ -1664,6 +1664,10 @@
         .ig-video-status.failed { background: rgba(239,68,68,0.2); color: #ef4444; }
         .ig-suggestion-row { padding: 4px 8px; cursor: pointer; border-bottom: 1px solid var(--border-subtle); font-size: 11px; }
         .ig-suggestion-row:hover { background: rgba(99,102,241,0.1); }
+        /* v857 — this job is already another reel's. Pickable (that is how a wrong
+           link gets repaired), but it may never look like a clean choice. */
+        .ig-suggestion-row.taken { background: rgba(245,158,11,0.08); border-left: 2px solid #f59e0b; }
+        .ig-suggestion-row.taken:hover { background: rgba(245,158,11,0.16); }
         .lc-card {
             background: var(--bg); border: 1px solid var(--border-subtle);
             border-radius: 6px; padding: 8px; cursor: pointer;
@@ -5647,13 +5651,20 @@ Ambient: same kitchen room tone, soft pour sound.
               ? `<div style="font-size:10px;color:${BANNER[0]};padding:3px 4px 5px;line-height:1.3;">${BANNER[1]}</div>`
               : "";
             const strongTop = data.verdict === "confident" || data.verdict === "proven";
-            pop.innerHTML = banner + suggestions.map((s, i) =>
-              `<div class="ig-suggestion-row" data-job-id="${escapeHtml(s.job_id)}" data-video-id="${videoId}"
-                    style="padding:3px 4px;cursor:pointer;${i === 0 && strongTop ? "font-weight:600;" : ""}">
-                <span>${escapeHtml((s.slug || s.job_id).slice(0, 50))}</span>
+            // v857 — a job produced ONE video. `already_linked_to` says this job is
+            // already another reel's, and the two reels are NOT the same file (a
+            // repost is not flagged). One of the two links would be false. Shown
+            // and pickable on purpose — this row is how a wrong link gets repaired
+            // — but it is never presented as a clean choice.
+            pop.innerHTML = banner + suggestions.map((s, i) => {
+              const taken = s.already_linked_to;
+              return `<div class="ig-suggestion-row${taken ? " taken" : ""}" data-job-id="${escapeHtml(s.job_id)}" data-video-id="${videoId}"
+                    style="padding:3px 4px;cursor:pointer;${i === 0 && strongTop && !taken ? "font-weight:600;" : ""}${taken ? "color:#f59e0b;" : ""}">
+                <span>${taken ? "⚠ " : ""}${escapeHtml((s.slug || s.job_id).slice(0, 50))}</span>
                 <span style="float:right;color:#888;">${i === 0 && data.verdict === "proven" ? "✓✓ " : ""}${Math.round(s.score * 100)}%</span>
-              </div>`
-            ).join("");
+                ${taken ? `<div style="clear:both;font-size:9px;color:#f59e0b;line-height:1.3;">already linked to ${escapeHtml(taken)} — picking this moves the link</div>` : ""}
+              </div>`;
+            }).join("");
             const rect = matchBtn.getBoundingClientRect();
             pop.style.left = (rect.left + window.scrollX) + "px";
             pop.style.top = (rect.bottom + window.scrollY + 4) + "px";
