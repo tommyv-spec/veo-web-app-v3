@@ -173,6 +173,61 @@ def _bulk_dialogue_map(db, job_ids) -> dict:
     }
 
 
+# ============================================================================
+# v856 — MATCH BY FILENAME FIRST. The lookup that cannot be wrong.
+#
+# The matcher below this comment is an inference engine: it transcribes the
+# file, ranks jobs by their words, then probes R2 for a duration and a loudness
+# envelope to break the tie. Every step is a comparison with a threshold in it,
+# and comparisons can come out wrong — that is what a day of wrong links cost.
+#
+# But the platform MINTED the file the operator just dropped in, and it named
+# it (main.py, v856). The name carries the job id. So before we infer anything,
+# we READ it. A stamped name is not evidence to be weighed against other
+# evidence; it is the answer, and nothing the transcription finds could improve
+# on it.
+#
+# The inference path stays exactly as it was, for the two cases where the stamp
+# is not there: an export minted BEFORE v856 (legacy files still sitting in the
+# folder and in R2), and a file the operator RENAMED. Neither is weakened.
+# ============================================================================
+
+def resolve_job_by_filename(db, file_name, user_id):
+    """The Job whose id the platform stamped into `file_name`, or None.
+
+    Shared by the local watcher and the drive watcher — one definition, because
+    two copies of "how do we read our own filename" drift the day the export
+    naming changes.
+
+    None means "no answer", NEVER "best answer". Specifically:
+      * no stamp in the name (renamed / pre-v856 file) -> None
+      * the 8-char prefix resolves to ZERO jobs for this user -> None
+      * it resolves to MORE THAN ONE job (an 8-hex-char collision, or another
+        user's id colliding inside this user's pool) -> None
+    In every one of those cases the caller falls back to the evidence path.
+    An ambiguous lookup is not a lookup; we do not break the tie by guessing.
+    """
+    from models import Job
+    import instagram_match as _ig_match
+
+    prefix = _ig_match.job_id_from_filename(file_name)
+    if not prefix:
+        return None
+    # `prefix` is [0-9a-f]{8} by construction, so it carries no LIKE wildcard
+    # (% or _) and needs no escaping. Scoped to the owner: a job id belonging to
+    # somebody else must never be reachable through a filename.
+    hits = (
+        db.query(Job)
+        .filter(Job.id.like(prefix + "%"), Job.user_id == user_id)
+        .all()
+    )
+    if len(hits) != 1:
+        print(f"[filename-match] prefix={prefix} resolved to {len(hits)} jobs "
+              f"-> falling back to evidence", flush=True)
+        return None
+    return hits[0]
+
+
 def _advance_job_to_published(video, job, score, db) -> None:
     """Mark a LocalVideo matched + advance its Job to published/local_watch."""
     video.matched_job_id = job.id
@@ -211,6 +266,22 @@ def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None,
         from models import Job
         import instagram_match as _ig_match
         from export_probe import evidence_candidates, LAZY_PROBE_BUDGET_S
+
+        # v856 — the filename first. This runs BEFORE the transcription gate on
+        # purpose: a stamped name identifies the job even when Whisper produced
+        # nothing (a silent export still has a name), and no amount of text or
+        # waveform evidence can beat an id we wrote ourselves.
+        stamped = resolve_job_by_filename(db, video.file_name, video.user_id)
+        if stamped is not None:
+            print(
+                f"[local] hash={video.file_hash[:8]} decision=AUTO source=filename "
+                f"job={str(stamped.id)[:8]} file={video.file_name}",
+                flush=True,
+            )
+            # score=1.0: this is not a similarity, it is a certainty.
+            _advance_job_to_published(video, stamped, 1.0, db)
+            return
+
         if not video.transcription:
             return
         if candidates is None:

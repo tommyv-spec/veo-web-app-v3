@@ -590,3 +590,80 @@ def match_verdict(ranked, high, margin):
     else:
         verdict = "confident"
     return {"verdict": verdict, "top": top, "gap": round(gap, 4)}
+
+
+# ============================================================================
+# v856 — THE FILENAME IS THE ANSWER.
+#
+# Everything above this line is a GUESS. Text, duration, waveform: all of them
+# are measurements of the file, compared against measurements of a job, with a
+# threshold in between. They exist because the watcher was handed an mp4 and
+# asked "which job made this?" with nothing but the bytes to go on.
+#
+# But the platform MINTED that mp4, and it named it. So it can simply write the
+# answer down. `final_export_<job8>_<timestamp>_<hash>.mp4` carries the job id
+# in the name; reading it back is a LOOKUP, and a lookup cannot be wrong.
+#
+# Two rules keep it that way:
+#
+#   1. The stamp counts ONLY in the slot the minter puts it in — right after
+#      the prefix, and followed by the export DATE. This is not pedantry:
+#
+#         legacy   final_export_<YYYYMMDD>_<HHMMSS>_<hash6>.mp4
+#         stamped  final_export_<job8>_<YYYYMMDD>_<HHMMSS>_<hash6>.mp4
+#
+#      A date like `20260714` is EIGHT VALID HEX CHARACTERS sitting in exactly
+#      the slot the job id now occupies. A pattern that asks only for
+#      `[0-9a-f]{8}` after the prefix therefore reads EVERY legacy export ever
+#      shipped as job id "20260714" — which finds no job at best, and the wrong
+#      job the day a real id starts with those digits. What actually separates
+#      the two shapes is what comes NEXT: 8 digits (a date) in the stamped name,
+#      only 6 (a time) in the legacy one. So the date is part of the pattern.
+#
+#   2. A name with no stamp (renamed by the operator, or minted before this
+#      rule existed) returns None and the caller falls back to the evidence
+#      path. We never DOWNGRADE a guess into a certainty.
+# ============================================================================
+
+# final_export_<job8>_<YYYYMMDD>...  — the trailing date is load-bearing, see rule 1.
+# It is matched but not captured; only the id is handed back.
+_JOB_ID_IN_FILENAME = re.compile(
+    r"final_(?:export|broll)_([0-9a-f]{8})_\d{8}", re.IGNORECASE
+)
+
+
+def export_job_segment(job_id):
+    """The 8 chars of `job_id` that go INTO an export filename, or None.
+
+    The minting half of the contract (main.py calls this; job_id_from_filename
+    reads it back). Both halves live here so they cannot drift apart — the day
+    they disagree, every watcher silently stops matching.
+
+    Job ids are uuid4 hex. 8 hex chars = 4.3 billion values, plenty to pin a
+    single operator's jobs, and short enough to keep the name readable. An id
+    that is NOT hex cannot be stamped without breaking the reader, so it is not
+    stamped at all: the caller keeps the legacy name shape and the watcher
+    keeps using evidence. Degrade, never corrupt.
+    """
+    if not isinstance(job_id, str):
+        return None
+    seg = job_id[:8].lower()
+    if len(seg) != 8 or not all(c in "0123456789abcdef" for c in seg):
+        return None
+    return seg
+
+
+def job_id_from_filename(file_name):
+    """The job id the platform stamped into its own export filename, or None.
+
+    This is a LOOKUP, not a guess: the platform minted this name, so when it is
+    present it beats every heuristic — text, duration, waveform. Returns the
+    8-char prefix; the caller resolves it to a full job id.
+
+    Lowercased on the way out: job ids are lowercase hex and callers feed this
+    into a case-sensitive SQL LIKE.
+    """
+    if not isinstance(file_name, str) or not file_name:
+        return None
+    m = _JOB_ID_IN_FILENAME.search(file_name)
+    return m.group(1).lower() if m else None
