@@ -834,6 +834,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/apply-relinks",
         "/api/diag/refresh-reel-urls",
         "/api/diag/identify",
+        "/api/diag/jobs-export-index",
         # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
         "/api/diag/probe-job-fp",
         "/api/diag/probe-reel-fp",
@@ -5002,6 +5003,67 @@ def diag_apply_relinks(
     if not int(dry_run):
         db.commit()
     return {"dry_run": bool(int(dry_run)), "count": len(results), "results": results}
+
+
+@app.get("/api/diag/jobs-export-index")
+def diag_jobs_export_index(
+    token: str = "",
+    user_id: str = "",
+    db: DBSession = Depends(get_db_session),
+):
+    """v853 TEMPORARY: every exported job + its export length + where it stands.
+
+    The operator's rule: the folder may hold MORE files than there are jobs, but
+    every job that reached the finishing lane MUST correspond to exactly one file.
+    So the reconciliation is JOB-CENTRIC — this is the left-hand side of it.
+
+    A local file IS the export (no platform re-encode), so its duration should
+    match a job's export to within milliseconds. That makes duration almost a
+    hash here, unlike the Instagram side where a re-encode blurs it.
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+
+    from models import Job, Clip, InstagramVideo
+
+    q = db.query(Job).filter(Job.status == "completed", Job.archived == False)  # noqa: E712
+    if user_id:
+        q = q.filter(Job.user_id == user_id)
+    jobs = q.all()
+
+    out = []
+    for j in jobs:
+        stage = j.lifecycle_stage
+        # Only jobs that actually reached the finishing lane are REQUIRED to have
+        # a file: an unexported job has nothing to have been posted.
+        expected_in_folder = bool(j.has_export) or stage in ("awaiting_finishing", "published")
+        if not expected_in_folder:
+            continue
+        c = (
+            db.query(Clip.dialogue_text, Clip.voiceover_line)
+            .filter(Clip.job_id == j.id)
+            .order_by(Clip.clip_index.asc())
+            .first()
+        )
+        reel = (
+            db.query(InstagramVideo)
+            .filter(InstagramVideo.matched_job_id == j.id)
+            .first()
+        )
+        out.append({
+            "job_id": j.id,
+            "stage": stage,
+            "created_at": j.created_at.isoformat() if j.created_at else None,
+            "export_duration_s": j.export_duration_s,
+            "has_export_fp": bool(j.export_audio_fp),
+            "instagram_url": j.instagram_url,
+            "reel_shortcode": reel.shortcode if reel else None,
+            "first_line": (((c[1] or c[0]) or "")[:70] if c else ""),
+        })
+    out.sort(key=lambda x: (x["created_at"] or ""), reverse=True)
+    return {"count": len(out), "jobs": out}
 
 
 class IdentifyRequest(BaseModel):
