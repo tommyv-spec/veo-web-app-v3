@@ -5071,6 +5071,9 @@ class IdentifyRequest(BaseModel):
     duration_s: Optional[float] = None
     user_id: Optional[str] = None
     limit: int = 8
+    only_job: Optional[str] = None    # compare against ONE job (prefix ok) — diagnosis
+    lag_s: Optional[float] = None     # alignment search window; default 1.0s
+    prefilter_s: Optional[float] = None  # duration prefilter; None => 2.0s
 
 
 @app.post("/api/diag/identify")
@@ -5106,20 +5109,28 @@ def diag_identify(
     )
     if req.user_id:
         q = q.filter(Job.user_id == req.user_id)
+    if req.only_job:
+        q = q.filter(Job.id.like(req.only_job + "%"))
     jobs = q.all()
 
-    # Duration pre-filter: anything more than 2s from the file cannot be the same
-    # render, and the envelope compare is O(lag x frames) — comparing the whole
-    # library in one request is what times out the worker.
-    if req.duration_s is not None:
+    # Duration pre-filter. The operator TRIMS the export before posting — measured
+    # up to ~5s — so a tight window silently hides the correct job. Widened, and
+    # overridable for diagnosis.
+    prefilter = req.prefilter_s if req.prefilter_s is not None else 2.0
+    if req.duration_s is not None and not req.only_job and prefilter > 0:
         near = [j for j in jobs if j.export_duration_s is not None
-                and abs(j.export_duration_s - req.duration_s) <= 2.0]
+                and abs(j.export_duration_s - req.duration_s) <= prefilter]
         if near:
             jobs = near
 
+    # Alignment window. A cut of N seconds shifts the audio by N seconds, so the
+    # correct alignment sits OUTSIDE a narrow window and the true match scores as
+    # noise. Frames are 25ms.
+    max_lag = int(round((req.lag_s if req.lag_s is not None else 1.0) / 0.025))
+
     scored = []
     for j in jobs:
-        sim = envelope_similarity(query_fp, decode_fingerprint(j.export_audio_fp))
+        sim = envelope_similarity(query_fp, decode_fingerprint(j.export_audio_fp), max_lag=max_lag)
         scored.append({
             "job_id": j.id,
             "similarity": round(sim, 4),
