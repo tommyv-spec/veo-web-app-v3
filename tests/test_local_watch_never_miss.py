@@ -133,16 +133,60 @@ class _FakeDB:
         return _FakeQuery(self._rows)
 
 
+def _row(job_id, clip_id=1, clip_index=0, role=None, paired=None,
+         dt="", dtb=None, variant="A", vo=None, approval="approved"):
+    """Positional row tuple matching the _bulk_dialogue_map query column order."""
+    return (clip_id, job_id, clip_index, role, paired, dt, dtb, variant, vo, approval)
+
+
 def test_bulk_dialogue_map_groups_and_coalesces():
     lt = _load_lt()
     rows = [
-        ("j1", "hello", None),   # dialogue_text
-        ("j1", "", "world"),     # voiceover_line preferred
-        ("j2", "solo", None),
+        _row("j1", clip_id=1, clip_index=0, dt="hello"),
+        _row("j1", clip_id=2, clip_index=1, dt="", vo="world"),   # voiceover_line preferred
+        _row("j2", clip_id=3, clip_index=0, dt="solo"),
     ]
     m = lt._bulk_dialogue_map(_FakeDB(rows), ["j1", "j2"])
     assert m["j1"] == "hello world"
     assert m["j2"] == "solo"
+
+
+def test_bulk_dialogue_map_uses_prompt_b_reworded_line():
+    """v852: a clip that rendered via Prompt B speaks dialogue_text_b."""
+    lt = _load_lt()
+    rows = [
+        _row("j1", clip_id=1, clip_index=0, dt="the banned wording",
+             dtb="the reworded line actually spoken", variant="B"),
+    ]
+    m = lt._bulk_dialogue_map(_FakeDB(rows), ["j1"])
+    assert m["j1"] == "the reworded line actually spoken"
+
+
+def test_bulk_dialogue_map_excludes_rejected_clips():
+    """v852: only clips that made the final cut are in the exported video."""
+    lt = _load_lt()
+    rows = [
+        _row("j1", clip_id=1, clip_index=0, dt="kept", approval="approved"),
+        _row("j1", clip_id=2, clip_index=1, dt="rejected", approval="rejected"),
+    ]
+    m = lt._bulk_dialogue_map(_FakeDB(rows), ["j1"])
+    assert m["j1"] == "kept"
+
+
+def test_bulk_dialogue_map_broll_pair_uses_the_audio_twin():
+    """v852: the audio_pair twin RENDERS the speech. When it fell back to
+    Prompt B, the visual twin's voiceover_line is stale. The builder must fetch
+    audio_pair rows (no SQL exclusion) so the pair can be resolved."""
+    lt = _load_lt()
+    rows = [
+        _row("j1", clip_id=10, clip_index=0, role="visual_pair",
+             dt="", vo="the stale original line"),
+        _row("j1", clip_id=11, clip_index=100000, role="audio_pair", paired=10,
+             dt="the stale original line",
+             dtb="the reworded line actually spoken", variant="B"),
+    ]
+    m = lt._bulk_dialogue_map(_FakeDB(rows), ["j1"])
+    assert m["j1"] == "the reworded line actually spoken"
 
 
 def test_bulk_dialogue_map_empty_ids_no_query():

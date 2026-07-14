@@ -85,10 +85,17 @@ def _transcribe_wav(wav_path: str) -> str:
 
 
 def _bulk_dialogue_map(db, job_ids) -> dict:
-    """{job_id: concatenated spoken dialogue} for MANY jobs in ONE query.
+    """{job_id: the words actually SPOKEN in the render} for MANY jobs, ONE query.
 
-    COALESCE(voiceover_line, dialogue_text) per the v698A b-roll fix; the
-    audio_pair silent twins are excluded so lines are not double-counted.
+    THE canonical dialogue builder — feeds the IG suggestions endpoint, the
+    drive watcher, and the local-folder watcher. The reconstruction rules live
+    in instagram_match.reconstruct_dialogue (pure + unit-tested); this function
+    is only the DB glue.
+
+    v852: audio_pair rows are now FETCHED (they are the lookup source for their
+    visual twin's spoken words — a Prompt-B fallback on the audio twin makes the
+    visual's voiceover_line stale). reconstruct_dialogue drops them from the
+    OUTPUT, so nothing is double-counted.
 
     v822.3: replaces the old per-job `_full_dialogue` N+1. At pool=226 the
     N+1 fired 226 Clip queries PER video, and the v822 rematch sweep ran that
@@ -99,20 +106,34 @@ def _bulk_dialogue_map(db, job_ids) -> dict:
     """
     from collections import defaultdict
     from models import Clip
+    import instagram_match as _ig_match
     job_ids = list(job_ids)
     if not job_ids:
         return {}
     rows = (
-        db.query(Clip.job_id, Clip.dialogue_text, Clip.voiceover_line)
+        db.query(
+            Clip.id, Clip.job_id, Clip.clip_index, Clip.clip_role, Clip.paired_clip_id,
+            Clip.dialogue_text, Clip.dialogue_text_b, Clip.rendered_prompt_variant,
+            Clip.voiceover_line, Clip.approval_status,
+        )
         .filter(Clip.job_id.in_(job_ids))
-        .filter((Clip.clip_role == None) | (Clip.clip_role != 'audio_pair'))  # noqa: E711
         .order_by(Clip.job_id, Clip.clip_index.asc())
         .all()
     )
-    acc = defaultdict(list)
-    for jid, dt, vo in rows:
-        acc[jid].append(((vo or dt) or "").strip())
-    return {jid: " ".join(parts).strip() for jid, parts in acc.items()}
+    by_job = defaultdict(list)
+    for (cid, jid, cidx, role, paired, dt, dtb, variant, vo, approval) in rows:
+        by_job[jid].append({
+            "id": cid,
+            "clip_index": cidx,
+            "clip_role": role,
+            "paired_clip_id": paired,
+            "dialogue_text": dt,
+            "dialogue_text_b": dtb,
+            "rendered_prompt_variant": variant,
+            "voiceover_line": vo,
+            "approval_status": approval,
+        })
+    return {jid: _ig_match.reconstruct_dialogue(clips) for jid, clips in by_job.items()}
 
 
 def _advance_job_to_published(video, job, score, db) -> None:
