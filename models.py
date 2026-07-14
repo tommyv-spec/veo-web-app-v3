@@ -235,6 +235,13 @@ class Job(Base):
     # job, while computing on demand self-heals every job that already exists.
     export_duration_s = Column(Float, nullable=True)
     export_probed_at  = Column(DateTime, nullable=True)   # NULL = never attempted
+    # v854 — loudness-envelope fingerprint of the FINAL EXPORT mp4 (base64
+    # float32, see audio_fingerprint.py). Duration alone cannot split "twins":
+    # two builds with the same clip structure export to the SAME length. They are
+    # different renders though, so their waveforms differ.
+    # NULL = never fingerprinted. "" = tried and failed (no export / bad mp4) —
+    # NOT NULL, so the backfill worklist does not pick it up forever.
+    export_audio_fp = Column(Text, nullable=True)
     finishing_at = Column(DateTime, nullable=True)
     published_at = Column(DateTime, nullable=True)
     notes = Column(Text, nullable=True)
@@ -664,6 +671,11 @@ class InstagramVideo(Base):
     # v853 — reel runtime from HikerAPI (video_duration). Free discriminator for
     # near-duplicate scripts: same words, different render, different length.
     duration_s      = Column(Float, nullable=True)
+    # v854 — loudness-envelope fingerprint of the POSTED reel (base64 float32).
+    # audio_fp_at is stamped on EVERY attempt, success or not: IG video_urls
+    # expire, and a dead url must not be retried forever. NULL = never attempted.
+    audio_fp        = Column(Text, nullable=True)
+    audio_fp_at     = Column(DateTime, nullable=True)
     transcription   = Column(Text, nullable=True)
     transcription_status = Column(String(16), default="pending")
     transcription_error  = Column(Text, nullable=True)
@@ -1115,6 +1127,13 @@ def _run_migrations_postgresql(engine):
          "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS export_probed_at TIMESTAMP"),
         ("instagram_videos", "duration_s",
          "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS duration_s DOUBLE PRECISION"),
+        # v854 — waveform discriminator: duration ties on twins, the take does not
+        ("jobs", "export_audio_fp",
+         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS export_audio_fp TEXT"),
+        ("instagram_videos", "audio_fp",
+         "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS audio_fp TEXT"),
+        ("instagram_videos", "audio_fp_at",
+         "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS audio_fp_at TIMESTAMP"),
         # v815 — per-account settings JSON blob (auto_image_retry mode, etc.)
         ("users", "settings_json", "ALTER TABLE users ADD COLUMN IF NOT EXISTS settings_json TEXT"),
         # v815 — auto-image-retry audit trail per clip
@@ -1267,6 +1286,11 @@ def _run_migrations_sqlite(engine):
         ("jobs", "export_probed_at",  "ALTER TABLE jobs ADD COLUMN export_probed_at DATETIME"),
         ("instagram_videos", "duration_s",
          "ALTER TABLE instagram_videos ADD COLUMN duration_s REAL"),
+        # v854 — waveform discriminator: duration ties on twins, the take does not
+        ("jobs", "export_audio_fp", "ALTER TABLE jobs ADD COLUMN export_audio_fp TEXT"),
+        ("instagram_videos", "audio_fp", "ALTER TABLE instagram_videos ADD COLUMN audio_fp TEXT"),
+        ("instagram_videos", "audio_fp_at",
+         "ALTER TABLE instagram_videos ADD COLUMN audio_fp_at DATETIME"),
         # v815 — per-account settings JSON blob (auto_image_retry mode, etc.)
         ("users", "settings_json", "ALTER TABLE users ADD COLUMN settings_json TEXT"),
         # v815 — auto-image-retry audit trail per clip
