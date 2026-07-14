@@ -4669,7 +4669,7 @@ def rematch_local_videos(   # sync ON PURPOSE — see suggest_matches
 
 
 @app.get("/api/diag/local-match")
-async def diag_local_match(
+def diag_local_match(
     token: str = "",
     user_id: str = "",
     limit: int = 20,
@@ -5087,7 +5087,7 @@ def diag_probe_reel_fp(
 
 
 @app.get("/api/diag/ig-match")
-async def diag_ig_match(
+def diag_ig_match(
     token: str = "",
     user_id: str = "",
     limit: int = 50,
