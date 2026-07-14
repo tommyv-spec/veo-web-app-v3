@@ -4796,9 +4796,17 @@ def diag_apply_relinks(
         reverted_to = None
         if not int(dry_run):
             # 1. Undo the old link, and the publish it caused.
-            if old_job:
-                old_job.instagram_url = None
-                old_job.instagram_video_id = None
+            #
+            # Only clear the job's back-reference if it still points at THIS reel.
+            # Reel A can release job J in the same batch that reel B claims it —
+            # and if A's cleanup runs after B's claim, an unguarded clear wipes
+            # the link B just wrote, leaving the reel pointing at the job while
+            # the job points at nothing. (This happened on the first run; the
+            # link was repaired, and this guard is why it cannot recur.)
+            if old_job and old_job.id != new_job.id:
+                if old_job.instagram_video_id == v.id:
+                    old_job.instagram_url = None
+                    old_job.instagram_video_id = None
                 if (old_job.published_via or "ig_match") == "ig_match":
                     old_job.lifecycle_stage = None
                     old_job.lifecycle_stage = derive_effective_stage(
