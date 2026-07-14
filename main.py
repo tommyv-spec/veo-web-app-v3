@@ -831,6 +831,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/local-match",
         "/api/diag/ig-match",
         "/api/diag/probe-exports",
+        # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
+        "/api/diag/probe-job-fp",
+        "/api/diag/probe-reel-fp",
     }
     PUBLIC_PREFIXES = {"/static/", "/auth/", "/api/local-worker/", "/api/user-worker/", "/api/images/worker/"}
     
@@ -4781,6 +4784,148 @@ def diag_probe_exports(
     }
 
 
+@app.get("/api/diag/probe-job-fp")
+def diag_probe_job_fp(
+    token: str = "",
+    user_id: str = "",
+    limit: int = 8,
+    db: DBSession = Depends(get_db_session),
+):
+    """v854 TEMPORARY: backfill the WAVEFORM fingerprint of each job's export.
+
+    Duration already decided the easy reels, but 33 of 65 sit on "twins" — two
+    builds with the same clip structure whose exports come out to the SAME length
+    to the last bit (measured: two reels both 46.02000045776367s). Same words,
+    same length, different RENDER. The loudness envelope is the only thing left
+    that differs.
+
+    Worklist is only jobs that already have a duration (export_duration_s NOT
+    NULL) — a job with no export can never be a posted reel's source, so there is
+    nothing to fingerprint.
+
+    Each job DOWNLOADS its export from R2, so call repeatedly with a small `limit`
+    until `remaining` hits 0. Doing too many in one request times out the worker
+    (the 2026-07-06 outage shape).
+
+    Failure is recorded as export_audio_fp = "" (empty string, NOT NULL) so the
+    job drops out of the worklist and is never re-downloaded. NULL means "never
+    looked"; "" means "looked, nothing usable".
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+
+    from models import Job
+    from export_probe import newest_export_key
+    from audio_fingerprint import fingerprint_media
+    from backends.storage import is_storage_configured, get_storage
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+
+    limit = max(1, min(int(limit or 8), 25))
+    q = db.query(Job).filter(
+        Job.status == "completed",
+        Job.archived == False,  # noqa: E712
+        Job.export_duration_s.isnot(None),
+        Job.export_audio_fp.is_(None),
+    )
+    if user_id:
+        q = q.filter(Job.user_id == user_id)
+    remaining_before = q.count()
+    todo = q.order_by(Job.created_at.desc()).limit(limit).all()
+
+    ok = failed = 0
+    storage = get_storage() if is_storage_configured() else None
+    for j in todo:
+        blob = ""
+        try:
+            if storage is not None:
+                key = newest_export_key(storage, j.id)
+                if key:
+                    with _tempfile.TemporaryDirectory() as td:
+                        local = str(_Path(td) / "export.mp4")
+                        storage.download_file(key, local)
+                        blob = fingerprint_media(local)
+        except Exception as e:
+            print(f"[audio-fp] job={j.id[:8]} export fp failed: {e}", flush=True)
+            blob = ""
+        j.export_audio_fp = blob  # "" on failure -> not NULL -> never re-picked
+        if blob:
+            ok += 1
+        else:
+            failed += 1
+        db.commit()
+    return {
+        "probed": len(todo),
+        "ok": ok,
+        "failed": failed,
+        "remaining": max(0, remaining_before - len(todo)),
+    }
+
+
+@app.get("/api/diag/probe-reel-fp")
+def diag_probe_reel_fp(
+    token: str = "",
+    user_id: str = "",
+    limit: int = 8,
+    db: DBSession = Depends(get_db_session),
+):
+    """v854 TEMPORARY: backfill the WAVEFORM fingerprint of each POSTED reel.
+
+    No download step — ffmpeg reads the CDN url directly and we only keep the
+    8kHz loudness envelope.
+
+    IG video_urls EXPIRE. ffmpeg failing on an old reel is EXPECTED, not a bug:
+    re-sync the account to refresh the urls, then re-run this. audio_fp_at is
+    stamped on EVERY attempt (success or not) so a dead url is not retried on
+    every future call; a re-sync + a manual NULL-ing of audio_fp_at is what
+    re-opens a reel for another try.
+
+    Call repeatedly with a small `limit` until `remaining` hits 0 — each reel is a
+    network fetch, and doing the whole set in one request times out the worker.
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+
+    from models import InstagramVideo, InstagramAccount
+    from audio_fingerprint import fingerprint_media
+
+    limit = max(1, min(int(limit or 8), 25))
+    q = db.query(InstagramVideo).filter(
+        InstagramVideo.transcription_status == "done",
+        InstagramVideo.audio_fp_at.is_(None),
+        InstagramVideo.video_url.isnot(None),
+    )
+    if user_id:
+        q = (
+            q.join(InstagramAccount, InstagramVideo.account_id == InstagramAccount.id)
+             .filter(InstagramAccount.user_id == user_id)
+        )
+    remaining_before = q.count()
+    todo = q.order_by(InstagramVideo.posted_at.desc().nullslast()).limit(limit).all()
+
+    ok = failed = 0
+    for v in todo:
+        blob = fingerprint_media(v.video_url)   # never raises; "" on failure
+        v.audio_fp_at = datetime.utcnow()       # stamped even on failure
+        if blob:
+            v.audio_fp = blob
+            ok += 1
+        else:
+            failed += 1
+            print(f"[audio-fp] reel={v.shortcode} fp failed (expired video_url?)", flush=True)
+        db.commit()
+    return {
+        "probed": len(todo),
+        "ok": ok,
+        "failed": failed,
+        "remaining": max(0, remaining_before - len(todo)),
+    }
+
+
 @app.get("/api/diag/ig-match")
 async def diag_ig_match(
     token: str = "",
@@ -4826,6 +4971,7 @@ async def diag_ig_match(
     )
     import instagram_match as _ig
     from export_probe import ensure_export_duration
+    from audio_fingerprint import decode_fingerprint, envelope_similarity
 
     limit = max(1, min(int(limit or 50), 200))
     offset = max(0, int(offset or 0))
@@ -5001,7 +5147,76 @@ async def diag_ig_match(
                 "probed": len(_dur_ranked),
             }
 
+        # v854 — WAVEFORM. Duration decides the loners; it CANNOT decide the
+        # "twins" (two builds with the same clip structure export to the same
+        # length to the last bit). The reel is a re-encode of one specific export:
+        # same take, same timing. Only its loudness envelope says WHICH one.
+        #
+        # BUDGET, and it matters: envelope_similarity is O(lags x frames) pure
+        # Python — a 60s clip is ~2400 frames x 81 lags ~= 200k ops PER pair. One
+        # reel against 200 windowed candidates would be ~40M ops and would blow
+        # the gunicorn worker timeout (HTTP 502 -> SIGABRT -> killed DB
+        # connections: the 2026-07-06 outage shape, which this endpoint has
+        # already produced once). So:
+        #   1. only compare against candidates whose EXPORT DURATION is within
+        #      1.5s of the reel — anything further away is a different render by
+        #      definition and cannot be the source anyway. Free filter, and it is
+        #      exactly the twins that survive it.
+        #   2. hard-cap at 12 comparisons per reel, nearest-duration first.
+        # `compared` reports how many actually ran, so a truncated search is
+        # visible instead of silently looking decisive.
+        _WF_DUR_TOL_S = 1.5
+        _WF_MAX_CMP = 12
+        _reel_env = decode_fingerprint(v.audio_fp) if v.audio_fp else []
+        _wf_sims = {}
+        waveform_best = None
+        if _reel_env:
+            _wf_cands = []
+            for _j in eligible:
+                if not _j.export_audio_fp or _j.export_duration_s is None:
+                    continue
+                _d = _dur_delta(_j.export_duration_s)
+                if _d is None or _d > _WF_DUR_TOL_S:
+                    continue
+                _wf_cands.append((_d, _j))
+            _wf_cands.sort(key=lambda t: t[0])
+            _wf_pick = _wf_cands[:_WF_MAX_CMP]
+            # The STORED job is the thing under audit — always score it, even when
+            # its duration puts it outside the tolerance, so `stored_waveform_sim`
+            # is never a silent None on a link we are supposed to be judging.
+            if v.matched_job_id and not any(j.id == v.matched_job_id for _, j in _wf_pick):
+                _sj = jobs_by_id.get(v.matched_job_id)
+                if _sj is not None and _sj.export_audio_fp:
+                    _wf_pick.append((_dur_delta(_sj.export_duration_s) or 999.0, _sj))
+            _wf_ranked = []
+            for _d, _j in _wf_pick:
+                _sim = envelope_similarity(_reel_env, decode_fingerprint(_j.export_audio_fp))
+                _wf_sims[_j.id] = round(_sim, 4)
+                _wf_ranked.append({"job": _j.id, "similarity": round(_sim, 4)})
+            _wf_ranked.sort(key=lambda x: -x["similarity"])
+            if _wf_ranked:
+                _wb = _wf_ranked[0]
+                _wsep = (
+                    round(_wb["similarity"] - _wf_ranked[1]["similarity"], 4)
+                    if len(_wf_ranked) > 1 else None
+                )
+                waveform_best = {
+                    "job": _wb["job"],
+                    "similarity": _wb["similarity"],
+                    "separation": _wsep,
+                    # High AND clearly ahead of the runner-up. A re-encode of OUR
+                    # mp4 scores ~0.98+; a different take of the same script does
+                    # not get close.
+                    "decisive": bool(
+                        _wb["similarity"] >= 0.90
+                        and (_wsep is None or _wsep >= 0.05)
+                    ),
+                    "compared": len(_wf_ranked),
+                }
+
         out.append({
+            "waveform_best": waveform_best,
+            "stored_waveform_sim": _wf_sims.get(v.matched_job_id) if v.matched_job_id else None,
             "duration_best": duration_best,
             "probe_stats": _probe_stats,
             "stored_age_days": _age_days(v.matched_job_id) if v.matched_job_id else None,
@@ -5031,6 +5246,10 @@ async def diag_ig_match(
                     "line1": _first_line(r["job_id"]),
                     "export_dur": _export_dur(r["job_id"]),
                     "dur_delta": _dur_delta(_export_dur(r["job_id"])),
+                    # v854 — only present when this candidate was inside the
+                    # waveform budget (duration within 1.5s, top 12). No extra
+                    # comparisons are run for the report.
+                    "sim": _wf_sims.get(r["job_id"]),
                 }
                 for r in ranked_full[:5]
             ],

@@ -36,6 +36,22 @@ def probe_duration(path):
         return None
 
 
+def newest_export_key(storage, job_id):
+    """R2 key of the job's NEWEST final export, or None.
+
+    Shared by the duration probe and the v854 waveform probe — both need the same
+    "which mp4 did we actually ship" answer, and two copies of this lookup would
+    drift the day the export naming changes.
+    """
+    keys = storage.list_objects(prefix=f"jobs/{job_id}/outputs/")
+    finals = [k for k in keys if Path(k).name.startswith(_FINAL_PREFIXES)]
+    if not finals:
+        return None
+    # final_export_<timestamp>_<hash>.mp4 — timestamp-prefixed, so a lexical sort
+    # puts the newest export last.
+    return sorted(finals)[-1]
+
+
 def ensure_export_duration(db, job):
     """Duration of the job's final export, computed at most once per job.
 
@@ -54,15 +70,11 @@ def ensure_export_duration(db, job):
         return None
     try:
         storage = get_storage()
-        keys = storage.list_objects(prefix=f"jobs/{job.id}/outputs/")
-        finals = [k for k in keys if Path(k).name.startswith(_FINAL_PREFIXES)]
-        if not finals:
+        key = newest_export_key(storage, job.id)
+        if not key:
             print(f"[export-probe] job={job.id[:8]} no final export in R2", flush=True)
             db.commit()
             return None
-        # final_export_<timestamp>_<hash>.mp4 — timestamp-prefixed, so a lexical
-        # sort puts the newest export last.
-        key = sorted(finals)[-1]
         with tempfile.TemporaryDirectory() as td:
             local = str(Path(td) / "export.mp4")
             storage.download_file(key, local)
