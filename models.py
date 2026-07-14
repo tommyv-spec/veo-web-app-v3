@@ -242,6 +242,11 @@ class Job(Base):
     # NULL = never fingerprinted. "" = tried and failed (no export / bad mp4) —
     # NOT NULL, so the backfill worklist does not pick it up forever.
     export_audio_fp = Column(Text, nullable=True)
+    # v858 — basename (no ext) of the final export mp4, for filename<->job lookup.
+    # Stamped at mint time (main.py export) and backfilled lazily on the next
+    # export probe, so a folder file whose name embeds the basename resolves to
+    # its job by a plain equality lookup — no waveform, no transcription.
+    export_basename = Column(String(120), nullable=True)  # basename (no ext) of the final export mp4, for filename<->job lookup
     finishing_at = Column(DateTime, nullable=True)
     published_at = Column(DateTime, nullable=True)
     notes = Column(Text, nullable=True)
@@ -1152,6 +1157,9 @@ def _run_migrations_postgresql(engine):
         # v854 — waveform discriminator: duration ties on twins, the take does not
         ("jobs", "export_audio_fp",
          "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS export_audio_fp TEXT"),
+        # v858 — export basename for filename<->job lookup (stamped at mint, backfilled on probe)
+        ("jobs", "export_basename",
+         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS export_basename VARCHAR(120)"),
         ("instagram_videos", "audio_fp",
          "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS audio_fp TEXT"),
         ("instagram_videos", "audio_fp_at",
@@ -1334,6 +1342,8 @@ def _run_migrations_sqlite(engine):
          "ALTER TABLE instagram_videos ADD COLUMN duration_s REAL"),
         # v854 — waveform discriminator: duration ties on twins, the take does not
         ("jobs", "export_audio_fp", "ALTER TABLE jobs ADD COLUMN export_audio_fp TEXT"),
+        # v858 — export basename for filename<->job lookup
+        ("jobs", "export_basename", "ALTER TABLE jobs ADD COLUMN export_basename TEXT"),
         ("instagram_videos", "audio_fp", "ALTER TABLE instagram_videos ADD COLUMN audio_fp TEXT"),
         ("instagram_videos", "audio_fp_at",
          "ALTER TABLE instagram_videos ADD COLUMN audio_fp_at DATETIME"),

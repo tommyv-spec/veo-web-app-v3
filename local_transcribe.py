@@ -193,39 +193,61 @@ def _bulk_dialogue_map(db, job_ids) -> dict:
 # ============================================================================
 
 def resolve_job_by_filename(db, file_name, user_id):
-    """The Job whose id the platform stamped into `file_name`, or None.
+    """The Job the platform's own export name in `file_name` points at, or None.
 
     Shared by the local watcher and the drive watcher — one definition, because
     two copies of "how do we read our own filename" drift the day the export
     naming changes.
 
-    None means "no answer", NEVER "best answer". Specifically:
-      * no stamp in the name (renamed / pre-v856 file) -> None
-      * the 8-char prefix resolves to ZERO jobs for this user -> None
-      * it resolves to MORE THAN ONE job (an 8-hex-char collision, or another
-        user's id colliding inside this user's pool) -> None
+    Two lookup keys are tried, in this order (both are the platform's own words
+    written into the name — a LOOKUP, never a guess):
+
+      1. v856 job-id stamp — `final_export_<job8>_...`. The 8-char id resolves
+         to the job by prefix.
+      2. v858 export basename — `final_export_<ts>_<hash>` (the legacy shape that
+         fills the operator's real folder, no job id in it). We STORE that
+         basename on Job.export_basename at mint + backfill, so it resolves by a
+         plain equality lookup.
+
+    None means "no answer", NEVER "best answer". Specifically, for EITHER key:
+      * no stamp / basename in the name (renamed file) -> None
+      * it resolves to ZERO jobs for this user -> None
+      * it resolves to MORE THAN ONE job -> None
     In every one of those cases the caller falls back to the evidence path.
     An ambiguous lookup is not a lookup; we do not break the tie by guessing.
     """
     from models import Job
     import instagram_match as _ig_match
 
+    # 1. The v856 job-id stamp.
     prefix = _ig_match.job_id_from_filename(file_name)
-    if not prefix:
-        return None
-    # `prefix` is [0-9a-f]{8} by construction, so it carries no LIKE wildcard
-    # (% or _) and needs no escaping. Scoped to the owner: a job id belonging to
-    # somebody else must never be reachable through a filename.
-    hits = (
-        db.query(Job)
-        .filter(Job.id.like(prefix + "%"), Job.user_id == user_id)
-        .all()
-    )
-    if len(hits) != 1:
+    if prefix:
+        # `prefix` is [0-9a-f]{8} by construction, so it carries no LIKE wildcard
+        # (% or _) and needs no escaping. Scoped to the owner: a job id belonging
+        # to somebody else must never be reachable through a filename.
+        hits = (
+            db.query(Job)
+            .filter(Job.id.like(prefix + "%"), Job.user_id == user_id)
+            .all()
+        )
+        if len(hits) == 1:
+            return hits[0]
         print(f"[filename-match] prefix={prefix} resolved to {len(hits)} jobs "
+              f"-> trying basename / evidence", flush=True)
+
+    # 2. The v858 export basename (legacy files, and also present in v856 names).
+    base = _ig_match.export_basename_from_filename(file_name)
+    if base:
+        hits = (
+            db.query(Job)
+            .filter(Job.export_basename == base, Job.user_id == user_id)
+            .all()
+        )
+        if len(hits) == 1:
+            return hits[0]
+        print(f"[filename-match] basename={base} resolved to {len(hits)} jobs "
               f"-> falling back to evidence", flush=True)
-        return None
-    return hits[0]
+    return None
 
 
 # ============================================================================

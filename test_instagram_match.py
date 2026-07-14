@@ -664,6 +664,83 @@ def test_minted_name_round_trips_through_the_reader():
 
 
 # ============================================================================
+# v858 — export_basename_from_filename. The WHOLE basename read back out of a
+# folder file's name, for the legacy files (no job id) that fill the operator's
+# real folder. It is a lookup key against Job.export_basename, not a guess.
+# ============================================================================
+
+def test_export_basename_reads_the_real_operator_file_with_odd_spacing():
+    """The exact string from the operator's folder: leading label, spaces,
+    parenthetical, AND a doubled extension (.mp.mp4). The basename must still
+    come out clean."""
+    m = _load()
+    assert m.export_basename_from_filename(
+        "Posted- 0714 (6) -  final_export_20260713_002341_026904.mp.mp4"
+    ) == "final_export_20260713_002341_026904"
+
+
+def test_export_basename_reads_the_second_real_operator_file():
+    m = _load()
+    assert m.export_basename_from_filename(
+        "Posted-0714 (8)final_export_20260713_003433_a9e0a1.mp4"
+    ) == "final_export_20260713_003433_a9e0a1"
+
+
+def test_export_basename_reads_the_v856_job_stamped_shape():
+    """A v856 name carries the job id AND the basename; the basename lookup must
+    return the whole thing (so the name resolves either way)."""
+    m = _load()
+    assert m.export_basename_from_filename(
+        "final_export_6e52de72_20260714_120000_a1b2c3.mp4"
+    ) == "final_export_6e52de72_20260714_120000_a1b2c3"
+
+
+def test_export_basename_reads_the_broll_variant():
+    m = _load()
+    assert m.export_basename_from_filename(
+        "final_broll_20260713_002341_026904.mp4"
+    ) == "final_broll_20260713_002341_026904"
+
+
+def test_export_basename_is_case_insensitive_and_normalizes_down():
+    """The minter writes the basename lowercase; the caller does a case-sensitive
+    equality lookup — so an upper-cased rename still resolves."""
+    m = _load()
+    assert m.export_basename_from_filename(
+        "POSTED FINAL_EXPORT_20260713_002341_026904.MP4"
+    ) == "final_export_20260713_002341_026904"
+
+
+def test_export_basename_renamed_file_with_no_token_is_none():
+    m = _load()
+    assert m.export_basename_from_filename("my saffron reel FINAL v3.mp4") is None
+    assert m.export_basename_from_filename("Posted 0714 (6).mp4") is None
+
+
+def test_export_basename_survives_junk_input():
+    m = _load()
+    assert m.export_basename_from_filename(None) is None
+    assert m.export_basename_from_filename("") is None
+    assert m.export_basename_from_filename(123) is None
+
+
+def test_export_basename_rejects_junk_between_prefix_and_timestamp():
+    """Only the REAL minted shape counts. `final_export_` followed by anything
+    that is not the (optional job8) + timestamp + hash tail is not a basename —
+    it must not become a false positive."""
+    m = _load()
+    assert m.export_basename_from_filename(
+        "final_export_whatever_stuff.mp4") is None
+    # a 7-char (not 8) hex chunk in the job slot is not the v856 shape, and
+    # `whatever` is not a timestamp, so no basename.
+    assert m.export_basename_from_filename(
+        "final_export_deadbee_20260714.mp4") is None
+    # timestamp present but no 6-hex hash tail -> not the minted shape.
+    assert m.export_basename_from_filename(
+        "final_export_20260714_120000.mp4") is None
+
+
+# ============================================================================
 # v857 — ONE JOB, ONE VIDEO (except a repost).
 #
 # claim_strength ranks two videos claiming the SAME job, so the stronger one

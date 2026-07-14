@@ -683,6 +683,58 @@ def job_id_from_filename(file_name):
 
 
 # ============================================================================
+# v858 — THE WHOLE BASENAME IS THE ANSWER (legacy files too).
+#
+# job_id_from_filename above only fires on the v856 shape, where the job id is
+# stamped into the name. But the operator's REAL folder is full of files minted
+# BEFORE v856, whose names still embed the export basename verbatim, just with
+# no job id in it:
+#
+#     Posted- 0714 (6) -  final_export_20260713_002341_026904.mp.mp4
+#     Posted-0714 (8)final_export_20260713_003433_a9e0a1.mp4
+#
+# The basename `final_export_<ts>_<hash6>` is the R2 object name the platform
+# minted; nothing about it is a guess. We now STORE that basename on the Job
+# row (Job.export_basename) at mint time, and backfill it lazily on the next
+# export probe — so a filename that embeds it resolves to its job by a plain
+# equality lookup, no waveform, no transcription.
+#
+# This pulls the basename out of the (often mangled) folder name; the caller
+# does the DB lookup. It matches BOTH shapes:
+#     legacy   final_export_<YYYYMMDD>_<HHMMSS>_<hash6>
+#     v856     final_export_<job8>_<YYYYMMDD>_<HHMMSS>_<hash6>
+# so a v856 name resolves either way (by job id OR by stored basename).
+# ============================================================================
+
+# The optional (?:[0-9a-f]{8}_)? is the v856 job-id slot; the mandatory
+# \d{8}_\d{6}_[0-9a-f]{6} is the export timestamp+hash the minter always writes.
+# Requiring that exact tail is what stops junk (final_export_whatever_...) from
+# reading as a basename: only the real minted shape matches.
+_EXPORT_BASENAME = re.compile(
+    r'(final_(?:export|broll)_(?:[0-9a-f]{8}_)?\d{8}_\d{6}_[0-9a-f]{6})',
+    re.IGNORECASE,
+)
+
+
+def export_basename_from_filename(file_name):
+    """The platform export basename embedded in a folder filename, or None.
+
+    Matches both `final_export_<ts>_<hash>` (legacy) and the v856
+    `final_export_<job8>_<ts>_<hash>` shape. This is a LOOKUP key, not a guess:
+    the platform minted this basename, so a hit is certain. Returns the basename
+    string; the caller resolves it to a job via Job.export_basename.
+
+    Lowercased on the way out: the minter writes the basename lowercase (hex
+    hash + digits), and the caller feeds this into a case-sensitive equality
+    lookup — so a filename the operator upper-cased still resolves.
+    """
+    if not isinstance(file_name, str) or not file_name:
+        return None
+    m = _EXPORT_BASENAME.search(file_name)
+    return m.group(1).lower() if m else None
+
+
+# ============================================================================
 # v857 — ONE JOB, ONE VIDEO. Ranking the claims on a job.
 #
 # evidence_pick answers "which job produced THIS video". It is asked once per

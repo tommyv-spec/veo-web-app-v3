@@ -834,6 +834,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/apply-relinks",
         "/api/diag/refresh-reel-urls",
         "/api/diag/identify",
+        "/api/diag/resolve-basename",
         "/api/diag/jobs-export-index",
         # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
         "/api/diag/probe-job-fp",
@@ -5142,6 +5143,42 @@ def diag_identify(
         })
     scored.sort(key=lambda x: -x["similarity"])
     return {"compared": len(scored), "top": scored[: max(1, min(req.limit, 20))]}
+
+
+@app.get("/api/diag/resolve-basename")
+def diag_resolve_basename(
+    token: str = "",
+    name: str = "",
+    db: DBSession = Depends(get_db_session),
+):
+    """v858 TEMPORARY: resolve a folder filename to its job via the export
+    basename it embeds (DIAG_TOKEN-gated). Read-only.
+
+    The platform minted the export and named it; a folder file whose NAME still
+    embeds that basename identifies its job by a plain equality lookup — no
+    waveform, no transcription. This lets the operator's already-downloaded files
+    resolve NOW, without waiting for a re-sync to re-run the watcher.
+
+    Returns {basename, job_id|null, ambiguous}. basename is null when the name
+    carries no minted export token; job_id is null when the basename resolves to
+    zero jobs; ambiguous is true when it resolves to 2+ (never happens in
+    practice — every mint writes a unique timestamp+hash).
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+
+    from models import Job
+    base = _ig_match.export_basename_from_filename(name)
+    if not base:
+        return {"basename": None, "job_id": None, "ambiguous": False}
+    hits = db.query(Job).filter(Job.export_basename == base).all()
+    return {
+        "basename": base,
+        "job_id": hits[0].id if len(hits) == 1 else None,
+        "ambiguous": len(hits) > 1,
+    }
 
 
 @app.get("/api/diag/refresh-reel-urls")
@@ -10501,8 +10538,17 @@ async def _do_export_final(
     _job_part = f"{_job_seg}_" if _job_seg else ""
     output_filename = f"final_export_{_job_part}{timestamp}_{unique_suffix}.mp4"
     output_path = output_dir / output_filename
+    # v858 — write the export basename onto the Job row so a folder file whose
+    # NAME embeds this basename resolves to its job by a plain equality lookup
+    # (instagram_match.export_basename_from_filename -> Job.export_basename),
+    # with no waveform and no transcription. Persisted with the job's own commit
+    # further down (job.has_export = True; db.commit()). The R2 object is stored
+    # under this same name (jobs/<id>/outputs/<output_filename>), so basename ==
+    # Path(key).stem, which is exactly what the lazy backfill in export_probe
+    # stamps on historical jobs.
+    job.export_basename = output_filename[:-4]  # strip ".mp4"
     print(f"[Export][v856] minted {output_filename} (job={str(job_id)[:8]} "
-          f"stamped={'yes' if _job_seg else 'no'})", flush=True)  # TEMP DIAG
+          f"stamped={'yes' if _job_seg else 'no'} basename={job.export_basename})", flush=True)  # TEMP DIAG
     
     try:
         print(f"[Export] Starting export for job {job_id}")
