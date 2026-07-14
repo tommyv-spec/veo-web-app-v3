@@ -6,6 +6,7 @@ import difflib
 import math
 import re
 from collections import Counter
+from datetime import timedelta
 
 _PUNCT_RE = re.compile(r"[^\w\s]")
 _WS_RE = re.compile(r"\s+")
@@ -286,3 +287,54 @@ def auto_pick(ranked, high: float, margin: float):
     if top >= high and (top - second) >= margin:
         return ranked[0]["job_id"]
     return None
+
+
+# ============================================================================
+# v823 — HARD TIME CONSTRAINT.
+#
+# A reel was rendered and exported BEFORE it was posted, so a job created AFTER
+# the reel went live cannot possibly be its source. This is a hard fact, and it
+# separates near-duplicate twins (same script, built days apart) that the WORDS
+# alone cannot tell apart.
+#
+# We gate on Job.created_at, NOT Job.export_at: export_at was backfilled as
+# COALESCE(completed_at, NOW()) (models.py:1168), so on legacy rows it can be a
+# MIGRATION timestamp — later than reels posted long before — and filtering on
+# it would drop the correct old job. created_at is written at row insert and
+# never backfilled.
+# ============================================================================
+
+JOB_CREATED_SLACK_DAYS = 1.0
+
+
+def job_predates_post(job_created_at, posted_at, slack_days=JOB_CREATED_SLACK_DAYS):
+    """False only when the job was created AFTER the reel was posted (+slack).
+
+    Unknown timestamps never exclude — an absent posted_at must not silently
+    empty the candidate pool.
+    """
+    if job_created_at is None or posted_at is None:
+        return True
+    return job_created_at <= posted_at + timedelta(days=slack_days)
+
+
+def match_verdict(ranked, high, margin):
+    """Classify a ranking so the UI can refuse to present a guess as a fact.
+
+    confident — top clears `high` AND clearly beats the runner-up.
+    ambiguous — top is strong but a twin sits within `margin`: the words cannot
+                tell them apart, so a human must.
+    weak      — nothing scored well enough to trust.
+    """
+    if not ranked:
+        return {"verdict": "none", "top": 0.0, "margin": 0.0}
+    top = ranked[0]["score"]
+    second = ranked[1]["score"] if len(ranked) > 1 else 0.0
+    gap = round(top - second, 4)
+    if top < high:
+        verdict = "weak"
+    elif gap < margin:
+        verdict = "ambiguous"
+    else:
+        verdict = "confident"
+    return {"verdict": verdict, "top": top, "margin": gap}

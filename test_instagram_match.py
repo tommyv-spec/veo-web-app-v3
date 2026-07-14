@@ -252,3 +252,60 @@ def test_reconstruct_orders_by_clip_index():
         _clip(id=1, clip_index=0, dialogue_text="first"),
     ]
     assert m.reconstruct_dialogue(clips) == "first second"
+
+
+# ---- v823: time constraint + confidence verdict ---------------------------
+import datetime as _dt
+
+
+def test_job_created_after_the_reel_was_posted_is_impossible():
+    m = _load()
+    posted = _dt.datetime(2026, 6, 1, 12, 0, 0)
+    created_after = _dt.datetime(2026, 6, 10, 12, 0, 0)   # 9 days AFTER the post
+    assert m.job_predates_post(created_after, posted) is False
+
+
+def test_job_created_before_the_reel_is_eligible():
+    m = _load()
+    posted = _dt.datetime(2026, 6, 10, 12, 0, 0)
+    created_before = _dt.datetime(2026, 6, 1, 12, 0, 0)
+    assert m.job_predates_post(created_before, posted) is True
+
+
+def test_job_created_just_after_post_survives_on_clock_skew_slack():
+    m = _load()
+    posted = _dt.datetime(2026, 6, 10, 12, 0, 0)
+    created = _dt.datetime(2026, 6, 10, 20, 0, 0)  # 8h later — within 1-day slack
+    assert m.job_predates_post(created, posted) is True
+
+
+def test_unknown_timestamps_never_exclude():
+    m = _load()
+    assert m.job_predates_post(None, _dt.datetime(2026, 6, 1)) is True
+    assert m.job_predates_post(_dt.datetime(2026, 6, 1), None) is True
+
+
+def test_verdict_confident_when_top_is_high_and_clear():
+    m = _load()
+    ranked = [{"job_id": "a", "score": 0.80}, {"job_id": "b", "score": 0.40}]
+    v = m.match_verdict(ranked, high=0.50, margin=0.12)
+    assert v["verdict"] == "confident"
+
+
+def test_verdict_ambiguous_when_twins_are_neck_and_neck():
+    m = _load()
+    ranked = [{"job_id": "a", "score": 0.80}, {"job_id": "b", "score": 0.78}]
+    v = m.match_verdict(ranked, high=0.50, margin=0.12)
+    assert v["verdict"] == "ambiguous"
+
+
+def test_verdict_weak_when_nothing_scores_well():
+    m = _load()
+    ranked = [{"job_id": "a", "score": 0.20}, {"job_id": "b", "score": 0.05}]
+    v = m.match_verdict(ranked, high=0.50, margin=0.12)
+    assert v["verdict"] == "weak"
+
+
+def test_verdict_none_on_empty_ranking():
+    m = _load()
+    assert m.match_verdict([], high=0.5, margin=0.12)["verdict"] == "none"
