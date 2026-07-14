@@ -180,6 +180,10 @@ def ensure_export_fingerprint(db, job):
         storage = get_storage()
         key = newest_export_key(storage, job.id)
         if key:
+            # v858 — self-heal the basename<->job lookup key on any historical
+            # job, reusing the key we already resolved (no extra R2 call).
+            if job.export_basename is None:
+                job.export_basename = Path(key).stem
             with tempfile.TemporaryDirectory() as td:
                 local = str(Path(td) / "export.mp4")
                 storage.download_file(key, local)
@@ -224,6 +228,9 @@ def ensure_export_duration(db, job):
             print(f"[export-probe] job={job.id[:8]} no final export in R2", flush=True)
             db.commit()
             return None
+        # v858 — self-heal the basename<->job lookup key, reusing the resolved key.
+        if job.export_basename is None:
+            job.export_basename = Path(key).stem
         with tempfile.TemporaryDirectory() as td:
             local = str(Path(td) / "export.mp4")
             storage.download_file(key, local)
