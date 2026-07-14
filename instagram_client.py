@@ -376,6 +376,14 @@ def _clip_to_dict(m: dict) -> dict:
             video_url = vv[0].get("url") if isinstance(vv[0], dict) else None
     ts = m.get("taken_at") or m.get("taken_at_ts") or m.get("posted_at") or m.get("device_timestamp")
     posted_at = _parse_ts(ts)
+    # v853 — reel runtime. Two jobs can share every WORD (the script bank is
+    # reused verbatim across builds) but they are different RENDERS, so their
+    # lengths differ. Duration is a free, hard discriminator the text matcher
+    # cannot supply. HikerAPI returns it on the clip payload as video_duration.
+    try:
+        duration_s = float(m.get("video_duration")) if m.get("video_duration") else None
+    except (TypeError, ValueError):
+        duration_s = None
     views = _first_count(m, _VIEW_KEYS)
     # Diagnostic: a zero-view reel whose payload DOES carry a play/view key we
     # failed to read means a key name we don't know yet. Dump those keys.
@@ -401,4 +409,5 @@ def _clip_to_dict(m: dict) -> dict:
         "likes": _first_count(m, _LIKE_KEYS),
         "comments": _first_count(m, _COMMENT_KEYS),
         "posted_at": posted_at,
+        "duration_s": duration_s,
     }
