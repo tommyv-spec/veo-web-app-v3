@@ -36,6 +36,7 @@ import threading
 import random
 import json
 import argparse
+import collections
 import tempfile
 import hashlib
 from pathlib import Path
@@ -106,7 +107,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v578"  # v854 parallel variant submit (N batchGenerateImages POSTs fired concurrently)
+WORKER_VERSION = "img-v579"  # v855 ref media_id cache (content-hash) + upload timing in the [timing] line
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FOLDER = os.environ.get("IMAGE_SESSION_FOLDER",
@@ -3824,6 +3825,62 @@ def _fa_mint_captcha_batch(page, action, n):
     return toks[:n]
 
 
+# ─── v855 — uploaded-reference media_id cache ────────────
+# The same refs recur on every node of a batch: the persona ref, the product
+# ref, the chained prior image. The persona PNG is routinely 6-7 MB — base64'd
+# to ~9 MB of JSON and pushed through page.evaluate on EVERY node. Operator log
+# 2026-07-14 node 2928: 3 refs, submit_wall=98.4s while cooldown+mint+fetch only
+# accounted for 46.3s. The missing ~52s was re-uploading bytes Flow already had.
+#
+# Keyed by (project_id, sha256(bytes)) — Flow scopes uploaded media to a project
+# (uploadImage carries projectId in clientContext), so a project switch must
+# legitimately re-upload. Within a batch the persona now uploads ONCE.
+#
+# Lives on the page object, so it dies with a golden relaunch: a fresh session
+# must never reuse media_ids minted by a blocked one.
+_FA_REF_CACHE_CAP = 64
+
+
+def _fa_ref_cache(page):
+    cache = getattr(page, "_fa_ref_media_cache", None)
+    if cache is None:
+        cache = collections.OrderedDict()
+        try:
+            page._fa_ref_media_cache = cache
+        except Exception:
+            # Page won't take attributes — run without the cache. Slower, still correct.
+            return collections.OrderedDict()
+    return cache
+
+
+def _fa_ref_cache_put(cache, key, media_id):
+    cache[key] = media_id
+    try:
+        cache.move_to_end(key)
+        while len(cache) > _FA_REF_CACHE_CAP:
+            cache.popitem(last=False)
+    except Exception:
+        pass
+
+
+def _fa_ref_cache_drop_project(page, project_id, pfx=""):
+    """Forget every ref this project cached. Called when a submit fails for a
+    reason that could be a stale/garbage-collected media_id, so the next node
+    re-uploads instead of re-sending a dead id forever."""
+    try:
+        cache = getattr(page, "_fa_ref_media_cache", None)
+        if not cache:
+            return
+        dead = [k for k in cache if k[0] == project_id]
+        for k in dead:
+            cache.pop(k, None)
+        if dead:
+            print(f"{pfx}[flow_api] [v855] dropped {len(dead)} cached ref(s) for this project "
+                  f"— next node re-uploads", flush=True)
+    except Exception:
+        pass
+
+
 def _fa_api_fetch_many(page, url, method, token, body_objs, extra_headers=None):
     """Fire len(body_objs) POSTs concurrently in one page.evaluate. Returns one
     result dict per body, same shape as _fa_api_fetch, in the same order."""
@@ -3861,7 +3918,12 @@ class _FaClient:
 
     @staticmethod
     def _zero_timings():
+        # v855 — upload/upload_n/upload_cached/upload_mb. The ref uploads were
+        # invisible: upload_image calls _fa_api_fetch directly and never touched
+        # the fetch bucket, so on node 2928 (3 refs) ~52s of a 98.4s submit_wall
+        # was unaccounted for. If it isn't in this line, we're guessing.
         return {"cooldown": 0.0, "mint": 0.0, "mint_n": 0, "fetch": 0.0, "fetch_n": 0,
+                "upload": 0.0, "upload_n": 0, "upload_cached": 0, "upload_mb": 0.0,
                 "outcomes": {}}
 
     def reset_timings(self):
@@ -3870,10 +3932,17 @@ class _FaClient:
     def _bump_outcome(self, key):
         self._t["outcomes"][key] = self._t["outcomes"].get(key, 0) + 1
 
+    def note_cached_upload(self):
+        """v855 — a ref we did NOT have to upload, because the cache had its
+        media_id. Counted so the timing line shows the cache working."""
+        self._t["upload_cached"] += 1
+
     def timings_summary(self):
         t = self._t
         _oc = " ".join(f"{k}={v}" for k, v in sorted(t["outcomes"].items())) or "none"
         return (f"cooldown={t['cooldown']:.1f}s mint={t['mint']:.1f}s({t['mint_n']}x) "
+                f"upload={t['upload']:.1f}s({t['upload_n']}x, {t['upload_mb']:.1f}MB, "
+                f"cached={t['upload_cached']}) "
                 f"fetch={t['fetch']:.1f}s({t['fetch_n']}x: {_oc})")
 
     def _cooldown(self):
@@ -3893,10 +3962,14 @@ class _FaClient:
     def upload_image(self, image_bytes, file_name="ref.jpg", mime_type="image/jpeg"):
         import base64
         self._cooldown()
+        _u0 = time.monotonic()                                   # v855 timing
         b64 = base64.b64encode(image_bytes).decode("ascii")
         body = _fa_build_upload_image(b64, self.project_id, file_name, mime_type)
         url = _fa_build_url("upload_image")
         res = _fa_api_fetch(self.page, url, "POST", self._token(), body)
+        self._t["upload"] += time.monotonic() - _u0
+        self._t["upload_n"] += 1
+        self._t["upload_mb"] += len(image_bytes) / 1048576.0
         if _fa_is_error(res):
             raise _FaError(f"uploadImage failed: {_fa_error_reason(res)}")
         data = res.get("data") or {}
@@ -4974,12 +5047,28 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
     _t_wall0 = time.monotonic()         # v832 — submit wall-clock start
 
     # Upload references via private API. uploadImage has no captcha.
+    # v855 — skip any ref Flow already holds for this project (cache keyed by
+    # content hash). The persona ref is the same 6-7 MB file on every node of a
+    # batch; re-base64ing and re-POSTing it each time was costing ~17s per ref.
     try:
         ref_ids = []
+        _ref_cache = _fa_ref_cache(page)
+        _uploaded, _reused = 0, 0
         for i, b in enumerate(ref_bytes_list):
-            ref_ids.append(cli.upload_image(b, file_name=f"ref_{i}.jpg"))
+            _key = (project_id, hashlib.sha256(b).hexdigest())
+            _hit = _ref_cache.get(_key)
+            if _hit:
+                ref_ids.append(_hit)
+                cli.note_cached_upload()
+                _reused += 1
+                continue
+            _mid = cli.upload_image(b, file_name=f"ref_{i}.jpg")
+            _fa_ref_cache_put(_ref_cache, _key, _mid)
+            ref_ids.append(_mid)
+            _uploaded += 1
         if ref_ids:
-            print(f"{pfx}[flow_api] uploaded {len(ref_ids)} ref(s) via API", flush=True)
+            print(f"{pfx}[flow_api] refs: {_uploaded} uploaded, {_reused} reused from cache "
+                  f"(v855)", flush=True)
     except Exception as e:
         reason = f"upload_image raised: {e}"
         _maybe_invalidate_token(reason)
@@ -5148,6 +5237,14 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
                 pass
             print(f"{pfx}[flow_api] content policy reject (UNSAFE_GENERATION) — failing node, no retry/DOM", flush=True)
             return False
+        # v855 — zero variants landed and it wasn't a block or a content reject.
+        # If this node reused cached ref media_ids, one of them could be stale
+        # (Flow garbage-collected the media, or it never belonged to this
+        # project). Drop the project's cached refs so the next node re-uploads
+        # rather than re-sending a dead id forever. Cheap; only fires on a node
+        # that already failed.
+        if _reused:
+            _fa_ref_cache_drop_project(page, project_id, pfx)
         if _is_transient(_last_fail_reason):
             return _fall_back_one(_last_fail_reason)
         return _latch_off(_last_fail_reason)
