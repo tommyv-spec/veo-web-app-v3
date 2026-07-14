@@ -4918,6 +4918,22 @@ async def diag_ig_match(
                 _dur_ranked.append({"job": _jid, "export_dur": _d, "delta": _delta,
                                     "age_days": _age_days(_jid)})
         _dur_ranked.sort(key=lambda x: x["delta"])
+        # Why is coverage short of 100%? Two very different reasons, and guessing
+        # between them is how you ship a wrong conclusion:
+        #   no_export -> the job HAS no final export in R2 (probe ran, found
+        #                nothing). It can never have a duration, and a job that
+        #                was never exported cannot be a posted reel's source.
+        #   unprobed  -> we simply have not looked yet (budget).
+        _with_dur = _no_export = _unprobed = 0
+        for _j in eligible:
+            if _j.export_duration_s is not None:
+                _with_dur += 1
+            elif _j.export_probed_at is not None:
+                _no_export += 1
+            else:
+                _unprobed += 1
+        _probe_stats = {"with_duration": _with_dur, "no_export": _no_export,
+                        "unprobed": _unprobed, "pool": len(eligible)}
         duration_best = None
         if _dur_ranked:
             _b = _dur_ranked[0]
@@ -4934,6 +4950,7 @@ async def diag_ig_match(
 
         out.append({
             "duration_best": duration_best,
+            "probe_stats": _probe_stats,
             "stored_age_days": _age_days(v.matched_job_id) if v.matched_job_id else None,
             "shortcode": v.shortcode,
             "url": v.url,
