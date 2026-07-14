@@ -833,6 +833,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/probe-exports",
         "/api/diag/apply-relinks",
         "/api/diag/refresh-reel-urls",
+        "/api/diag/identify",
         # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
         "/api/diag/probe-job-fp",
         "/api/diag/probe-reel-fp",
@@ -5001,6 +5002,72 @@ def diag_apply_relinks(
     if not int(dry_run):
         db.commit()
     return {"dry_run": bool(int(dry_run)), "count": len(results), "results": results}
+
+
+class IdentifyRequest(BaseModel):
+    fingerprint: str
+    duration_s: Optional[float] = None
+    user_id: Optional[str] = None
+    limit: int = 8
+
+
+@app.post("/api/diag/identify")
+def diag_identify(
+    req: IdentifyRequest,
+    token: str = "",
+    db: DBSession = Depends(get_db_session),
+):
+    """v853 TEMPORARY: which JOB produced this media? (DIAG_TOKEN-gated.)
+
+    The operator hands us the actual exported file they posted. That file IS the
+    export — no platform re-encode in between — so its waveform should match the
+    job's export almost exactly, which is far stronger evidence than comparing a
+    re-encoded reel. Ranks every completed job that has a cached export
+    fingerprint. Read-only.
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+
+    from models import Job
+    from audio_fingerprint import decode_fingerprint, envelope_similarity
+
+    query_fp = decode_fingerprint(req.fingerprint or "")
+    if not query_fp:
+        raise HTTPException(status_code=400, detail="unreadable fingerprint")
+
+    q = db.query(Job).filter(
+        Job.status == "completed",
+        Job.export_audio_fp.isnot(None),
+        Job.export_audio_fp != "",
+    )
+    if req.user_id:
+        q = q.filter(Job.user_id == req.user_id)
+    jobs = q.all()
+
+    # Duration pre-filter: anything more than 2s from the file cannot be the same
+    # render, and the envelope compare is O(lag x frames) — comparing the whole
+    # library in one request is what times out the worker.
+    if req.duration_s is not None:
+        near = [j for j in jobs if j.export_duration_s is not None
+                and abs(j.export_duration_s - req.duration_s) <= 2.0]
+        if near:
+            jobs = near
+
+    scored = []
+    for j in jobs:
+        sim = envelope_similarity(query_fp, decode_fingerprint(j.export_audio_fp))
+        scored.append({
+            "job_id": j.id,
+            "similarity": round(sim, 4),
+            "export_duration_s": j.export_duration_s,
+            "dur_delta": (round(abs(j.export_duration_s - req.duration_s), 3)
+                          if (j.export_duration_s is not None and req.duration_s is not None) else None),
+            "linked_reel": j.instagram_url,
+        })
+    scored.sort(key=lambda x: -x["similarity"])
+    return {"compared": len(scored), "top": scored[: max(1, min(req.limit, 20))]}
 
 
 @app.get("/api/diag/refresh-reel-urls")
