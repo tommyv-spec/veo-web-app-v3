@@ -4202,14 +4202,18 @@ async def suggest_matches(
     # fact, and it separates near-duplicate twins (same shared script, built days
     # apart) that the WORDS alone cannot tell apart. Applied in Python, not SQL,
     # so an absent posted_at can never silently empty the pool.
+    # v855 widens this into the full RECENCY WINDOW: also drop jobs built long
+    # before the post (measured max job age at post time: 20.99 days -> 30d with
+    # headroom). Same reason, other end of the timeline.
     _before = len(candidates)
     candidates = [
         j for j in candidates
-        if _ig_match.job_predates_post(j.created_at, v.posted_at)
+        if _ig_match.within_recency_window(j.created_at, v.posted_at)
     ]
     if _before != len(candidates):
-        print(f"[ig-suggest] video={video_id} time-filter dropped "
-              f"{_before - len(candidates)} job(s) created after posted_at={v.posted_at}",
+        print(f"[ig-suggest] video={video_id} recency window dropped "
+              f"{_before - len(candidates)} job(s) outside "
+              f"{_ig_match.RECENCY_WINDOW_DAYS}d of posted_at={v.posted_at}",
               flush=True)
     # v822.6: the manual suggestions now use the SAME content matcher as the
     # local auto-matcher — rare-term-weighted TF-IDF cosine (idf_power=2),
@@ -4227,8 +4231,42 @@ async def suggest_matches(
     # among the five rows we show.
     verdict = _ig_match.match_verdict(full_ranked, _MATCH_HIGH, _MATCH_MARGIN)
     ranked = full_ranked[:5]
+
+    # v855 — the MEDIA gets the last word. The reel's runtime + loudness envelope
+    # vs each export's: where the words tie (identical scripts scored EXACTLY
+    # equal on the 14 disputed reels), the render does not. Only the text-ranked
+    # shortlist is probed from R2 (see export_probe.LAZY_PROBE_CAP) — probing the
+    # whole pool inside a web request is what times the worker out.
+    evidence = None
+    try:
+        from export_probe import evidence_candidates
+        _cands = evidence_candidates(
+            db, candidates, priority_ids=[r["job_id"] for r in ranked],
+        )
+        ev = _ig_match.evidence_pick(v.duration_s, v.audio_fp, _cands)
+        if ev["job_id"]:
+            evidence = {
+                "source": ev["source"],
+                "similarity": ev["similarity"],
+                "dur_delta": ev["dur_delta"],
+            }
+            # The proven job goes FIRST, even when the text put it nowhere — and
+            # even when it never made the text top-5 at all.
+            proven_id = ev["job_id"]
+            proven_score = next(
+                (r["score"] for r in full_ranked if r["job_id"] == proven_id), 0.0,
+            )
+            ranked = (
+                [{"job_id": proven_id, "score": proven_score}]
+                + [r for r in ranked if r["job_id"] != proven_id]
+            )[:5]
+            verdict = {"verdict": "proven", "top": verdict["top"], "gap": verdict["gap"]}
+    except Exception as _e:   # evidence is a bonus; never break the popover
+        print(f"[ig-suggest] video={video_id} evidence failed: "
+              f"{type(_e).__name__}: {str(_e)[:160]}", flush=True)
+
     print(f"[ig-suggest] video={video_id} pool={len(candidates)} verdict={verdict['verdict']} "
-          f"top={verdict['top']:.3f} gap={verdict['gap']:.3f} "
+          f"top={verdict['top']:.3f} gap={verdict['gap']:.3f} evidence={evidence} "
           f"top5={[(r['job_id'][:8], r['score']) for r in ranked]}", flush=True)
     top = []
     for r in ranked:
@@ -4239,6 +4277,7 @@ async def suggest_matches(
         "verdict": verdict["verdict"],
         "top": verdict["top"],
         "gap": verdict["gap"],
+        "evidence": evidence,
         "suggestions": top,
     }
 
@@ -4926,11 +4965,10 @@ def diag_probe_job_fp(
         raise HTTPException(status_code=404, detail="not found")
 
     from models import Job
-    from export_probe import newest_export_key
-    from audio_fingerprint import fingerprint_media
-    from backends.storage import is_storage_configured, get_storage
-    import tempfile as _tempfile
-    from pathlib import Path as _Path
+    # v855 — the download-fingerprint-cache dance now lives in ONE place, shared
+    # with the live matchers (IG / local / drive watchers + the suggestions
+    # popover). This endpoint is just the bulk driver for it.
+    from export_probe import ensure_export_fingerprint
 
     limit = max(1, min(int(limit or 8), 25))
     q = db.query(Job).filter(
@@ -4945,26 +4983,11 @@ def diag_probe_job_fp(
     todo = q.order_by(Job.created_at.desc()).limit(limit).all()
 
     ok = failed = 0
-    storage = get_storage() if is_storage_configured() else None
     for j in todo:
-        blob = ""
-        try:
-            if storage is not None:
-                key = newest_export_key(storage, j.id)
-                if key:
-                    with _tempfile.TemporaryDirectory() as td:
-                        local = str(_Path(td) / "export.mp4")
-                        storage.download_file(key, local)
-                        blob = fingerprint_media(local)
-        except Exception as e:
-            print(f"[audio-fp] job={j.id[:8]} export fp failed: {e}", flush=True)
-            blob = ""
-        j.export_audio_fp = blob  # "" on failure -> not NULL -> never re-picked
-        if blob:
+        if ensure_export_fingerprint(db, j):
             ok += 1
         else:
             failed += 1
-        db.commit()
     return {
         "probed": len(todo),
         "ok": ok,

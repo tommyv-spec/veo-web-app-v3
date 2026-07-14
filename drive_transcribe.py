@@ -22,12 +22,11 @@ from drive_client import list_folder_videos, download_file, DriveError
 # Reuse instagram_transcribe's Whisper model + matcher path so we don't
 # load Whisper twice in the same worker process.
 from instagram_transcribe import _model as _whisper_model
+from instagram_transcribe import fingerprint_downloaded_media as _fingerprint_media
 # The CANONICAL matching stack (same one the local watcher + the suggestions
 # endpoint use). local_transcribe imports instagram_transcribe, not this
 # module, so this module-scope import closes no cycle.
-from local_transcribe import (
-    _bulk_dialogue_map, _MATCH_HIGH, _MATCH_MARGIN, _MATCH_IDF_POWER,
-)
+from local_transcribe import _bulk_dialogue_map, _MATCH_IDF_POWER
 
 
 def _earliest_awaiting_finishing_approval(db: Session, user_id: str) -> Optional[datetime]:
@@ -66,21 +65,23 @@ def _transcribe_wav(wav_path: str) -> str:
 
 
 def _maybe_auto_match(video, account, db: Session) -> None:
-    """Score against awaiting_finishing jobs. On hit, set published_via='drive_watch'.
+    """TEXT RANKS, EVIDENCE DECIDES (v855). On a hit, set published_via='drive_watch'.
+
+    The file in the watched folder IS the export the operator is about to post,
+    so its runtime + loudness envelope identify the source job outright. The
+    words cannot: builds share their script bank verbatim, and this matcher used
+    to auto-publish on the text ranking alone — which is how the wrong job got
+    stamped `published` while the right one sat in the finishing lane.
+
+    No evidence -> NO auto-publish; the video waits for a manual pick.
 
     Does NOT touch instagram_url / instagram_video_id — that's the IG matcher's
     job (with widened candidate filter to include drive-watch-published jobs).
-
-    v853: uses the CANONICAL matching stack, same as the local watcher — the
-    Prompt-B-aware, final-cut-aware `_bulk_dialogue_map` (ONE query for the
-    whole pool) + `rank_tfidf` + the `auto_pick` HIGH/MARGIN gate. It used to
-    run the char-level `best_matches` over a private `_full_dialogue` N+1,
-    which scored near-duplicate scripts at ~1.000 against the WRONG twin and
-    confidently published it.
     """
     try:
         from models import Job
         import instagram_match as _ig_match
+        from export_probe import evidence_candidates
         if not video.transcription:
             return
         candidates = (
@@ -91,8 +92,17 @@ def _maybe_auto_match(video, account, db: Session) -> None:
             )
             .all()
         )
+        # v855 recency window — posted_at here is Drive's modifiedTime ("when the
+        # operator dropped this"), so it is the right reference for "which jobs
+        # could possibly have produced it".
+        ref_at = video.posted_at or video.created_at
+        candidates = [
+            j for j in candidates
+            if _ig_match.within_recency_window(j.created_at, ref_at)
+        ]
         if not candidates:
-            print(f"[drive-auto] file={video.drive_file_id} no awaiting_finishing candidates", flush=True)
+            print(f"[drive-auto] file={video.drive_file_id} decision=MANUAL source=none "
+                  f"reason=empty-pool pool=0", flush=True)
             return
 
         dialogue_map = _bulk_dialogue_map(db, [j.id for j in candidates])
@@ -100,41 +110,44 @@ def _maybe_auto_match(video, account, db: Session) -> None:
         ranked = _ig_match.rank_tfidf(
             video.transcription, cand_pairs, idf_power=_MATCH_IDF_POWER,
         )
-        if not ranked:
-            print(
-                f"[drive-auto] file={video.drive_file_id} no ranking | "
-                f"pool={len(candidates)} tlen={len(video.transcription or '')}",
-                flush=True,
-            )
-            return
-        s1 = ranked[0]["score"]
-        s2 = ranked[1]["score"] if len(ranked) > 1 else 0.0
-        pick_id = _ig_match.auto_pick(ranked, _MATCH_HIGH, _MATCH_MARGIN)
+        # Text only names the shortlist worth probing from R2. It does not vote.
+        shortlist = [r["job_id"] for r in ranked[:6]]
+        cands = evidence_candidates(db, candidates, priority_ids=shortlist)
+        ev = _ig_match.evidence_pick(video.duration_s, video.audio_fp, cands)
+
+        pick_id = ev["job_id"]
+        text_top = ranked[0]["job_id"] if ranked else None
+        reason = (
+            "conflict" if ev["conflict"]
+            else ("" if pick_id else ("no-file-fp" if not video.audio_fp else "no-evidence"))
+        )
         print(
-            f"[drive-auto] file={video.drive_file_id} top_job={str(ranked[0]['job_id'])[:8]} "
-            f"s1={s1:.3f} s2={s2:.3f} margin={s1 - s2:.3f} "
-            f"decision={'AUTO' if pick_id else 'MANUAL'} pool={len(candidates)} "
-            f"tlen={len(video.transcription or '')}",
+            f"[drive-auto] file={video.drive_file_id} "
+            f"decision={'AUTO' if pick_id else 'MANUAL'} "
+            f"source={ev['source'] or 'none'} job={str(pick_id or '-')[:8]} "
+            f"sim={ev['similarity']} dur_delta={ev['dur_delta']} pool={len(candidates)} "
+            f"file_dur={video.duration_s} text_top={str(text_top or '-')[:8]}"
+            + (f" reason={reason}" if reason else ""),
             flush=True,
         )
         if not pick_id:
-            # Ambiguous (near-duplicate twins) or low-confidence -> leave the
-            # video unmatched for a manual pick instead of a wrong auto-publish.
             return
         job = next((j for j in candidates if j.id == pick_id), None)
         if job is None:
             job = db.query(Job).filter_by(id=pick_id).first()
         if not job:
             return
+        text_score = next((r["score"] for r in ranked if r["job_id"] == pick_id), 0.0)
         video.matched_job_id = job.id
         video.matched_at = datetime.utcnow()
-        video.match_score = s1
+        video.match_score = ev["similarity"] if ev["similarity"] is not None else text_score
         job.lifecycle_stage = "published"
         job.published_via = "drive_watch"
         if job.published_at is None:
             job.published_at = datetime.utcnow()
         db.commit()
-        print(f"[drive-auto] AUTO-MATCH file={video.drive_file_id} -> job={str(job.id)[:8]} score={s1:.3f}", flush=True)
+        print(f"[drive-auto] AUTO-MATCH file={video.drive_file_id} -> job={str(job.id)[:8]} "
+              f"via={ev['source']} sim={ev['similarity']} dur_delta={ev['dur_delta']}", flush=True)
     except Exception as exc:
         print(f"[drive-auto] auto-match error on file={video.drive_file_id}: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 
@@ -178,6 +191,9 @@ def transcribe_one(video, db: Session) -> None:
                 video.transcription_error = err[:500]
                 db.commit()
                 return
+            # v855 — the downloaded file IS the export. Take its media evidence
+            # now; the tempdir is the only place it ever exists locally.
+            _fingerprint_media(video, mp4, db)
             print(f"[drive] file={video.drive_file_id} starting Whisper", flush=True)
             text = _transcribe_wav(wav)
             print(f"[drive] file={video.drive_file_id} Whisper done ({len(text)}c)", flush=True)
