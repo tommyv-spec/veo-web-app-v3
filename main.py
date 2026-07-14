@@ -4737,6 +4737,7 @@ async def diag_ig_match(
     only_matched: int = 1,
     probe: int = 0,
     max_probe: int = 6,
+    window_days: int = 0,
     db: DBSession = Depends(get_db_session),
 ):
     """v852 TEMPORARY read-only audit of EXISTING Instagram links (NO auth —
@@ -4840,6 +4841,18 @@ async def diag_ig_match(
         cand, dmap, jobs_by_id = _pool_cache[uid]
         # Same hard time filter the live matcher applies.
         eligible = [j for j in cand if _ig.job_predates_post(j.created_at, v.posted_at)]
+        # v853 — recency window, RELATIVE TO THIS REEL'S POST DATE (never to
+        # "today": a reel posted 5 weeks ago was made by a job older than that,
+        # and a today-anchored window would exclude the very job that made it).
+        # A job built long before the post is unlikely to be its source, and
+        # cutting the pool is what makes it affordable to duration-probe EVERY
+        # remaining candidate instead of only the ones text happened to nominate.
+        if int(window_days or 0) > 0 and v.posted_at is not None:
+            _floor = v.posted_at - timedelta(days=int(window_days))
+            eligible = [
+                j for j in eligible
+                if j.created_at is not None and j.created_at >= _floor
+            ]
         pairs = [(j.id, dmap.get(j.id, "")) for j in eligible]
         ranked_full = _ig.rank_tfidf(v.transcription or "", pairs, idf_power=_MATCH_IDF_POWER)
         verdict = _ig.match_verdict(ranked_full, _MATCH_HIGH, _MATCH_MARGIN)
@@ -4853,11 +4866,18 @@ async def diag_ig_match(
         if v.matched_job_id and not agrees:
             disagree += 1
 
-        # v853 — duration probe, capped at the top-3 ranked candidates + the
-        # stored job. Probing the whole pool would download 787 exports.
+        # v853 — duration probe. Without a window we can only afford the top-3
+        # TEXT candidates + the stored job — but that is exactly the weakness:
+        # if the true job never made the text top-3, duration never gets to see
+        # it. With a recency window the pool is small enough to probe EVERY
+        # candidate, so duration searches the whole (windowed) library rather
+        # than re-ranking text's nominees.
         _probe_ids = set()
         if int(probe or 0):
-            _probe_ids = {r["job_id"] for r in ranked_full[:3]}
+            if int(window_days or 0) > 0:
+                _probe_ids = {j.id for j in eligible}
+            else:
+                _probe_ids = {r["job_id"] for r in ranked_full[:3]}
             if v.matched_job_id:
                 _probe_ids.add(v.matched_job_id)
         _dur_cache = {}
@@ -4879,7 +4899,42 @@ async def diag_ig_match(
 
         _stored_dur = _export_dur(v.matched_job_id)
 
+        def _age_days(job_id):
+            """How old the job was when the reel was posted — this is what tells
+            us whether a recency window is safe, instead of guessing at one."""
+            j = jobs_by_id.get(job_id)
+            if not j or not j.created_at or not v.posted_at:
+                return None
+            return round((v.posted_at - j.created_at).total_seconds() / 86400.0, 2)
+
+        # DURATION-FIRST pick over everything actually probed — independent of
+        # the text ranking. This is the whole point: two jobs can share every
+        # word, but they are different renders, so their exports differ in length.
+        _dur_ranked = []
+        for _jid in _probe_ids:
+            _d = _export_dur(_jid)
+            _delta = _dur_delta(_d)
+            if _delta is not None:
+                _dur_ranked.append({"job": _jid, "export_dur": _d, "delta": _delta,
+                                    "age_days": _age_days(_jid)})
+        _dur_ranked.sort(key=lambda x: x["delta"])
+        duration_best = None
+        if _dur_ranked:
+            _b = _dur_ranked[0]
+            _sep = (_dur_ranked[1]["delta"] - _b["delta"]) if len(_dur_ranked) > 1 else None
+            duration_best = {
+                **_b,
+                "separation": round(_sep, 3) if _sep is not None else None,
+                # Decisive = close to the reel AND clearly clearer than the next
+                # best. Both halves matter: "close" alone is meaningless if three
+                # candidates are equally close.
+                "decisive": bool(_b["delta"] <= 1.0 and (_sep is None or _sep >= 0.5)),
+                "probed": len(_dur_ranked),
+            }
+
         out.append({
+            "duration_best": duration_best,
+            "stored_age_days": _age_days(v.matched_job_id) if v.matched_job_id else None,
             "shortcode": v.shortcode,
             "url": v.url,
             "posted_at": v.posted_at.isoformat() if v.posted_at else None,
