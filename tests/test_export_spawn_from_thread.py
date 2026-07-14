@@ -52,15 +52,26 @@ def test_sweep_does_not_spawn_it_returns_ids():
     assert "return to_fire" in sweep
 
 
-def test_both_sweep_callers_spawn_on_the_loop():
+def test_no_sweep_caller_spawns_at_all_any_more():
+    """v855 superseded the v854 fix: the sweep callers no longer spawn EITHER.
+
+    v854 moved the spawn from the thread onto the loop, which fixed the crash.
+    v855 removed it entirely — the sweep only re-queues, and the dispatcher
+    starts runs one at a time under the concurrency cap. That kills the same bug
+    class permanently (nothing on a thread can spawn) AND stops N orphans
+    becoming N simultaneous ffmpeg runs after a deploy.
+
+    The load-bearing invariant is unchanged and still tested below:
+    _spawn_export_runner must never be reachable from a worker thread.
+    """
     src = _main_src()
-    # the 60s sweeper
     sweeper = src.split("async def _export_sweeper(")[1].split("\ndef ")[0]
     assert "await asyncio.to_thread(_sweep_stale_exports)" in sweeper
-    assert "_spawn_export_runner(_rid)" in sweeper
-    # the boot sweep, inside lifespan
-    assert "for _oid in _orphan_ids:" in src
-    assert "_spawn_export_runner(_oid)" in src
+    assert "_spawn_export_runner(" not in sweeper
+
+    # the boot sweep, inside lifespan, likewise only re-queues
+    boot = src.split("_orphan_ids = await _asyncio.to_thread(_sweep_stale_exports)")[1][:400]
+    assert "_spawn_export_runner(" not in boot
 
 
 def test_spawn_unregisters_the_id_when_the_task_cannot_be_created():
@@ -79,10 +90,19 @@ def test_a_dead_runner_task_cannot_leak_its_id():
     assert "_t.exception()" in spawn      # a swallowed task exception is how this hid
 
 
-def test_post_rescues_a_stuck_queued_run():
-    """Re-clicking Export used to re-attach to the dead row and do nothing."""
+def test_a_stuck_queued_run_gets_picked_up_without_a_re_click():
+    """v854 added a rescue-spawn on the POST, because a queued run with no live
+    runner was otherwise stranded and re-clicking Export just re-attached to the
+    dead row.
+
+    v855 makes that unnecessary: the dispatcher polls for queued work every
+    DISPATCH_INTERVAL_S and starts ANY queued run, including one a dead
+    container left behind. No click required.
+    """
     src = _main_src()
-    assert "RESCUE run=" in src
+    disp = src.split("async def _export_dispatcher(")[1].split("\ndef _claim_export_run(")[0]
+    assert "_next_queued_export_ids" in disp
+    assert "_spawn_export_runner(_rid)" in disp
 
 
 # ---- Layer 2: the actual failure, reproduced ------------------------------

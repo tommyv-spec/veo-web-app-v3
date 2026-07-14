@@ -11,6 +11,7 @@ it died (Render deploy / OOM / crash) without finishing. The runner
 heartbeats every HEARTBEAT_INTERVAL_S; anything older than STALE_AFTER_S is
 considered orphaned.
 """
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -32,6 +33,28 @@ HEARTBEAT_INTERVAL_S = 30
 # waiting this out. Only a hard kill (OOM/SIGKILL) pays the delay.
 STALE_AFTER_S = 180
 MAX_ATTEMPTS = 3
+
+# v855 — how many exports may RUN AT ONCE on this container.
+#
+# DEFAULT 1. Do not raise it without measuring peak RSS on the real box.
+# Render standard = 2 GB RAM / 1 CPU (render.yaml:11-12), and a SINGLE export
+# already lives at that ceiling: v691d, v701w, v701x, v701y, v701z and v692b are
+# every one of them a fix for ONE export OOMing. Two exports at once means two
+# ffmpeg chains and two Whisper models on one CPU — and on one CPU that is not
+# even FASTER than running them back to back, just riskier. The box also runs 5
+# video-gen workers (MAX_JOB_WORKERS=5).
+#
+# Queueing is the feature; parallelism is not.
+MAX_CONCURRENT = int(os.environ.get("EXPORT_MAX_CONCURRENT", "1"))
+
+# How often the dispatcher looks for queued work. A 2s pickup delay is invisible
+# next to a 10-minute export.
+DISPATCH_INTERVAL_S = 2
+
+
+def slots_free(running_now: int, max_concurrent: int = MAX_CONCURRENT) -> int:
+    """How many more exports this container may start right now."""
+    return max(0, max_concurrent - running_now)
 
 
 def is_stale(state: str, heartbeat_at: Optional[datetime], now: datetime,

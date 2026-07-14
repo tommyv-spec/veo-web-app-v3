@@ -589,14 +589,12 @@ async def lifespan(app: FastAPI):
         # graceful shutdown hook), so the sweep reclaims them right now instead
         # of the operator staring at a poll that will never resolve.
         try:
-            # v854 — the sweep is DB-only and runs on a thread; spawning must
-            # happen HERE, on the event loop. Doing it inside the sweep raised
-            # "no running event loop" and silently poisoned _LOCAL_EXPORT_IDS.
+            # v855 — the sweep only RE-QUEUES; the dispatcher starts them, one at
+            # a time. Spawning them all here (as v850 did) fired every orphan at
+            # once on a 2 GB box — OOM, restart, repeat.
             _orphan_ids = await _asyncio.to_thread(_sweep_stale_exports)
-            for _oid in _orphan_ids:
-                _spawn_export_runner(_oid)
             if _orphan_ids:
-                print(f"[Deferred][Export/v850] re-fired {len(_orphan_ids)} export(s) orphaned by the last restart", flush=True)
+                print(f"[Deferred][Export/v850] re-queued {len(_orphan_ids)} export(s) orphaned by the last restart", flush=True)
             else:
                 print("[Deferred][Export/v850] no orphaned exports to re-run", flush=True)
         except Exception as _xe:
@@ -655,6 +653,9 @@ async def lifespan(app: FastAPI):
     # v850 — durable export queue: re-fire anything a dead container orphaned.
     # Covers the hard-kill path (OOM/SIGKILL) where the shutdown hook below
     # never ran.
+    _export_dispatcher_task = _asyncio.create_task(_export_dispatcher())
+    print(f"[App][Export/v855] export dispatcher started "
+          f"(max {_eq.MAX_CONCURRENT} concurrent, {_eq.DISPATCH_INTERVAL_S}s tick)", flush=True)
     _export_sweeper_task = _asyncio.create_task(_export_sweeper())
     print("[App][Export/v850] stale-export sweeper started (every 60s)", flush=True)
 
@@ -668,6 +669,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     _purge_task.cancel()
     _export_sweeper_task.cancel()
+    _export_dispatcher_task.cancel()
     _image_stop_event.set()
     try:
         await _asyncio.wait_for(_image_watch_task, timeout=3.0)
@@ -8624,6 +8626,70 @@ def _spawn_export_runner(export_id: str) -> None:
     task.add_done_callback(_on_done)
 
 
+def _next_queued_export_ids(limit: int) -> list:
+    """Oldest queued runs first, skipping any this container already runs.
+
+    Sync — call via to_thread. READ-ONLY: the CAS in _claim_export_run is what
+    actually takes a row, so a dispatcher tick that races the sweeper is
+    harmless (the loser gets rowcount=0 and returns).
+    """
+    from models import get_db, ExportRun
+
+    if limit <= 0:
+        return []
+    with get_db() as _db:
+        try:
+            rows = (
+                _db.query(ExportRun.id)
+                .filter(ExportRun.state == _eq.STATE_QUEUED)
+                .order_by(ExportRun.created_at.asc())
+                .limit(limit + len(_LOCAL_EXPORT_IDS))
+                .all()
+            )
+            out = [r[0] for r in rows if r[0] not in _LOCAL_EXPORT_IDS]
+            return out[:limit]
+        except Exception as _qe:
+            print(f"[Export/v855] queue read failed: {_qe}", flush=True)
+            return []
+
+
+async def _export_dispatcher():
+    """v855 — THE ONLY PLACE A RUNNER IS EVER SPAWNED.
+
+    Before v855 two places fired runners: the POST (on the request) and the
+    sweeper. Neither had a cap. So N queued exports for N different jobs became
+    N simultaneous ffmpeg+Whisper runs on a 2 GB / 1 CPU box, and a deploy that
+    orphaned N runs made the next container fire all N at boot — OOM, restart,
+    fire them again. The frontend's global "Export already in progress" alert
+    was the only thing holding that back, which is why the operator could not
+    queue a second export at all.
+
+    Now the POST just inserts a queued row and the sweeper just re-queues. This
+    loop starts them, oldest first, and never exceeds MAX_CONCURRENT.
+
+    Slots are counted from _LOCAL_EXPORT_IDS — this container's LIVE tasks —
+    never from a DB count of state='running'. A row stranded in 'running' by a
+    dead container would otherwise hold a slot forever and stall the queue for
+    good; rescuing those rows is the sweeper's job, not the counter's.
+    """
+    while True:
+        try:
+            free = _eq.slots_free(len(_LOCAL_EXPORT_IDS))
+            if free > 0:
+                for _rid in await asyncio.to_thread(_next_queued_export_ids, free):
+                    print(f"[Export/v855] DISPATCH run={_rid[:8]} "
+                          f"({len(_LOCAL_EXPORT_IDS)}/{_eq.MAX_CONCURRENT} slots in use)",
+                          flush=True)
+                    _spawn_export_runner(_rid)
+        except asyncio.CancelledError:
+            raise
+        except Exception as _de:
+            # Never die: if this loop stops, every export sits queued forever
+            # and nothing tells anyone.
+            print(f"[Export/v855] dispatcher tick failed (non-fatal): {_de}", flush=True)
+        await asyncio.sleep(_eq.DISPATCH_INTERVAL_S)
+
+
 def _claim_export_run(export_id: str):
     """Compare-and-swap claim on an ExportRun. Sync — call via to_thread.
 
@@ -8886,12 +8952,12 @@ async def _export_sweeper():
     while True:
         try:
             await asyncio.sleep(60)
-            # v854 — sweep on a thread (DB work), spawn on the loop.
+            # v855 — the sweep only RE-QUEUES. The dispatcher starts them, so
+            # N orphans can never become N simultaneous ffmpeg runs.
             ids = await asyncio.to_thread(_sweep_stale_exports)
-            for _rid in ids:
-                _spawn_export_runner(_rid)
             if ids:
-                print(f"[Export/v850] sweeper re-fired {len(ids)} orphaned export(s)", flush=True)
+                print(f"[Export/v850] sweeper re-queued {len(ids)} orphaned export(s) "
+                      f"— the dispatcher will start them one at a time", flush=True)
         except asyncio.CancelledError:
             raise
         except Exception as _e:
@@ -10235,15 +10301,9 @@ async def export_final_video(
     if existing:
         print(f"[Export/v850] job={job_id[:8]} already has run={existing.id[:8]} "
               f"({existing.state}); joining it", flush=True)
-        # v854 — RESCUE. A queued run that nothing is running is a stuck run:
-        # the sweeper's spawn was broken (see _sweep_stale_exports), so a run
-        # could sit queued forever while every re-click just re-attached to it.
-        # If we are joining a queued run that this container is NOT running,
-        # spawn it. The CAS claim makes a redundant spawn harmless.
-        if existing.state == _eq.STATE_QUEUED and existing.id not in _LOCAL_EXPORT_IDS:
-            print(f"[Export/v854] RESCUE run={existing.id[:8]} — queued with no live "
-                  f"runner; spawning it now", flush=True)
-            _spawn_export_runner(existing.id)
+        # v855: no rescue-spawn needed here any more — the dispatcher picks up
+        # ANY queued run within DISPATCH_INTERVAL_S, including one a dead
+        # container left behind.
         return JSONResponse(status_code=202, content=existing.to_dict())
 
     run = ExportRun(
@@ -10259,8 +10319,10 @@ async def export_final_video(
     db.commit()
     db.refresh(run)
 
+    # v855 — do NOT spawn here. The dispatcher is the only spawn path, and it is
+    # what enforces the concurrency cap. It picks this up within
+    # DISPATCH_INTERVAL_S (2s), which is nothing next to a 10-minute export.
     print(f"[Export/v850] QUEUED run={run.id[:8]} job={job_id[:8]}", flush=True)
-    _spawn_export_runner(run.id)
     return JSONResponse(status_code=202, content=run.to_dict())
 
 
