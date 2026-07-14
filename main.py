@@ -830,6 +830,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # made stays wrong until it is found and undone.
         "/api/diag/local-match",
         "/api/diag/ig-match",
+        "/api/diag/probe-exports",
     }
     PUBLIC_PREFIXES = {"/static/", "/auth/", "/api/local-worker/", "/api/user-worker/", "/api/images/worker/"}
     
@@ -4725,6 +4726,58 @@ async def diag_local_match(
         "margin": _MATCH_MARGIN,
         "note": "v822.5 temporary diag; set DIAG_TOKEN in Render to enable, unset to disable",
         "videos": out,
+    }
+
+
+@app.get("/api/diag/probe-exports")
+def diag_probe_exports(
+    token: str = "",
+    user_id: str = "",
+    limit: int = 20,
+    db: DBSession = Depends(get_db_session),
+):
+    """v853 TEMPORARY: backfill export durations, ONE JOB AT A TIME, globally.
+
+    The per-reel probe in /api/diag/ig-match re-walked the same jobs across
+    overlapping 30-day windows, so it burned its budget on repeats and coverage
+    stalled. Each job only needs probing ONCE — so probe them off a global
+    worklist (export_probed_at IS NULL) instead of per reel.
+
+    Call repeatedly with a small `limit` until `remaining` hits 0. Each call is
+    short by construction: probing downloads an export from R2, and doing too
+    many in one request times out the worker (the 2026-07-06 outage shape).
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+
+    from models import Job
+    from export_probe import ensure_export_duration
+
+    limit = max(1, min(int(limit or 20), 25))
+    q = db.query(Job).filter(
+        Job.status == "completed",
+        Job.archived == False,  # noqa: E712
+        Job.export_probed_at.is_(None),
+    )
+    if user_id:
+        q = q.filter(Job.user_id == user_id)
+    remaining_before = q.count()
+    todo = q.order_by(Job.created_at.desc()).limit(limit).all()
+
+    got = missing = 0
+    for j in todo:
+        d = ensure_export_duration(db, j)
+        if d is None:
+            missing += 1
+        else:
+            got += 1
+    return {
+        "probed": len(todo),
+        "with_duration": got,
+        "no_export": missing,
+        "remaining": max(0, remaining_before - len(todo)),
     }
 
 
