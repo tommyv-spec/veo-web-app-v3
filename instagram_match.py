@@ -389,19 +389,32 @@ def job_predates_post(job_created_at, posted_at, slack_days=JOB_CREATED_SLACK_DA
 
 DUR_TOLERANCE_S = 1.0      # |reel - export| for the winner
 DUR_SEPARATION_S = 0.5     # runner-up must be at least this much further
-WAVE_MIN_SIM = 0.90
-WAVE_SEPARATION = 0.05
 
-# COST GATE. envelope_similarity is O(lags x frames) in pure Python: a 60s clip
-# is ~2400 frames x 81 lags ~= 200k float ops PER PAIR. One reel against 200
-# windowed candidates is ~40M ops on the web worker -> gunicorn worker timeout
-# -> 502 -> SIGABRT -> killed in-flight DB connections (the 2026-07-06 outage
-# shape, which the diag endpoint already produced once). So we compare only
-# candidates whose export length is within 1.5s of the reel — anything further
-# away is a different render BY DEFINITION and cannot be the source — and hard-
-# cap the count, nearest-duration first.
-WAVE_DUR_PREFILTER_S = 1.5
-WAVE_MAX_COMPARISONS = 12
+# WAVEFORM GATE — retuned for TRIMMED exports (see auto_max_lag in
+# audio_fingerprint). The operator trims the export before posting (measured: 5s
+# off a 97s video). envelope_similarity is COVERAGE-WEIGHTED: a 5s cut off 97s
+# caps the overlap at ~95%, so even a PERFECT match cannot exceed ~0.95, and real
+# trimmed matches land ~0.88. The old 0.90 bar therefore PENALISED the operator
+# for trimming — it abstained on exactly the videos it should catch. So the
+# absolute floor drops (it was measuring the wrong thing) while the GAP to the
+# runner-up gets 3x STRICTER: a genuine match beats the field by ~0.28, so the
+# separation is the trustworthy signal, not the raw score. Measured on the real
+# folder (127 files, 363 jobs): minSim 0.75 / gap 0.15 matched 92 files with
+# ZERO real conflicts (the only two apparent conflicts were duplicate copies of
+# the same video, scoring 0.991/1.000 against EACH OTHER).
+WAVE_MIN_SIM = 0.75
+WAVE_SEPARATION = 0.15
+
+# COST GATE. envelope_similarity now uses an O(n log n) FFT correlation, so one
+# compare is ~1-2ms — a wider net is affordable, and the OLD 1.5s window was the
+# bug: a 5s trim put the correct job 5s from the reel, OUTSIDE the window, so it
+# was never compared at all (this made job 41413fbd invisible to its own file).
+# 12s covers any realistic trim. The count stays HARD-capped, nearest-duration
+# first: a request must never do unbounded work — this codebase 502'd once from
+# exactly that (worker timeout -> SIGABRT -> killed in-flight DB connections, the
+# 2026-07-06 outage shape).
+WAVE_DUR_PREFILTER_S = 12.0
+WAVE_MAX_COMPARISONS = 30
 
 # A job can only be the source of a reel posted AFTER it was built, and the
 # operator posts what they just made: the measured maximum job age at post time
@@ -697,12 +710,13 @@ def job_id_from_filename(file_name):
 #   waveform only        [1.0, 1.95]  1.0 + 0.95 * how strong the waveform is
 #   waveform + duration  [2.0, 3.0]   2.0 + the mean of the two
 #
-# The bands do not overlap ON PURPOSE: the WEAKEST waveform match (0.90, the
-# gate) must outrank the TIGHTEST length match (0.000s), because two builds with
-# the same clip structure export to the same length to the last bit (measured:
-# two reels both at 46.02000045776367s) while no two performances share a
-# waveform. Inside each band the score moves smoothly with the evidence, so a
-# hair more similarity is worth a hair more claim — never a landslide.
+# The bands do not overlap ON PURPOSE: the WEAKEST waveform match (WAVE_MIN_SIM,
+# the gate — the band's lower anchor tracks the constant, not a hardcoded 0.90)
+# must outrank the TIGHTEST length match (0.000s), because two builds with the
+# same clip structure export to the same length to the last bit (measured: two
+# reels both at 46.02000045776367s) while no two performances share a waveform.
+# Inside each band the score moves smoothly with the evidence, so a hair more
+# similarity is worth a hair more claim — never a landslide.
 #
 # THE REPOST. A job produced ONE video, with one operator-confirmed exception:
 # they post the same export twice. Two reels then legitimately claim one job
