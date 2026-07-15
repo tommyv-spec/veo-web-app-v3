@@ -20673,15 +20673,20 @@ Ambient: same kitchen room tone, soft pour sound.
             nodes.forEach(n => imgState.regeneratingIds.add(n.id));
             imgReflectRegenerating();
             let ok = 0, fail = 0;
-            for (const n of nodes) {
-                try {
-                    const res = await fetch(`/api/images/nodes/${n.id}/regenerate`, { method: 'POST' });
-                    if (res.ok) ok++; else fail++;
-                } catch { fail++; }
+            try {
+                for (const n of nodes) {
+                    try {
+                        const res = await fetch(`/api/images/nodes/${n.id}/regenerate`, { method: 'POST' });
+                        if (res.ok) ok++; else fail++;
+                    } catch { fail++; }
+                }
+                await imgRefreshNodes();
+                imgRenderJobOverview(groupKey);
+            } finally {
+                // v858.1 — always clear the optimistic flags, even if a render
+                // or refresh above throws, so the spinner never sticks forever.
+                nodes.forEach(n => imgState.regeneratingIds.delete(n.id));
             }
-            nodes.forEach(n => imgState.regeneratingIds.delete(n.id));
-            await imgRefreshNodes();
-            imgRenderJobOverview(groupKey);
             if (fail > 0) alert(`Regenerated ${ok} · failed ${fail}`);
         }
 
@@ -22034,7 +22039,11 @@ Ambient: same kitchen room tone, soft pour sound.
         // v858 — repaint the sidebar + current main view WITHOUT a network call,
         // so the optimistic regenerate spinner shows the instant regen is clicked.
         function imgReflectRegenerating() {
-            try { imgRenderNodeList(); } catch (e) {}
+            // v858.1 — imgRenderNodeList rebuilds imgState.groupsByKey, which
+            // imgRenderJobOverview reads below; log (don't swallow) so a stale
+            // groups render is visible instead of silent.
+            try { imgRenderNodeList(); }
+            catch (e) { console.warn('[v858] imgRenderNodeList failed during optimistic regen repaint:', e); }
             if (imgState.detailNodeId && imgState.nodesById[imgState.detailNodeId]) {
                 try { imgRenderNodeDetail(imgState.nodesById[imgState.detailNodeId]); } catch (e) {}
             } else if (imgState.selectedJobKey) {
