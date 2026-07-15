@@ -6314,8 +6314,12 @@ Ambient: same kitchen room tone, soft pour sound.
         }
         
         function newJob(){
-            if (typeof setAppMode === "function") setAppMode({ mode: "create" });
+            // collapseResults() FIRST: it clears the stale job selection and, if a
+            // mode class is active, routes to Browse. Running it AFTER setAppMode
+            // ('create') would bounce the just-set create state straight back to
+            // browse (that's the bug that left Clone stranded on the job list).
             collapseResults();
+            if (typeof setAppMode === "function") setAppMode({ mode: "create" });
             // Clear form for new job
             uploadJobId=null;uploadedImages=[];uploadedFilesData=[];
             document.getElementById('uploadedCount').textContent='';

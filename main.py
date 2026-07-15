@@ -746,8 +746,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         r"|/api/user-worker/jobs/pending"       # Worker job poll
         r"|/api/user-worker/jobs/[^/]+$"        # Worker job-detail poll (GET)
         r"|/api/user-worker/clips/redo-pending" # Worker redo poll
-        r"|/api/user-worker/clips/kling-pending"# Kling drain poll (heavy)
-        r"|/api/user-worker/clips/[0-9]+/approval-status"  # Approval poll
+        r"|/api/user-worker/clips/kling-pending$"# Kling drain poll (heavy)
+        r"|/api/user-worker/clips/[0-9]+/approval-status$"  # Approval poll
         r"|/api/user-worker/frames/"            # Frame serving to worker
         r"|/api/user-worker/tokens$"            # Token list poll
         r"|/api/user-worker/status$"            # Worker status poll
