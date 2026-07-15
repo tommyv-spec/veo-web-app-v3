@@ -836,6 +836,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/identify",
         "/api/diag/resolve-basename",
         "/api/diag/backfill-basenames",
+        "/api/diag/revert-published",
         "/api/diag/jobs-export-index",
         # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
         "/api/diag/probe-job-fp",
@@ -5235,6 +5236,64 @@ def diag_refresh_reel_urls(
     db.commit()
     print(f"[reel-urls] refreshed={refreshed} rearmed_for_fp={rearmed}", flush=True)
     return {"accounts": len(accounts), "urls_refreshed": refreshed, "rearmed_for_fingerprint": rearmed}
+
+
+class RevertJobsRequest(BaseModel):
+    job_ids: List[str]
+
+
+@app.post("/api/diag/revert-published")
+def diag_revert_published(
+    req: RevertJobsRequest,
+    token: str = "",
+    dry_run: int = 1,
+    db: DBSession = Depends(get_db_session),
+):
+    """v853 TEMPORARY: send a wrongly-'published' job back to awaiting_finishing.
+
+    Only for jobs marked published that have NO Instagram reel pointing at them —
+    a today's-cleanup casualty (its reel was moved to another job, and because it
+    was folder-published the reel-unlink didn't revert it). REFUSES any job that
+    still has a linked reel, so a genuinely-posted job can't be un-published by a
+    bad id in the list. Stage is re-derived from live state, not forced.
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+    from models import Job, InstagramVideo
+    from lifecycle import derive_effective_stage
+
+    results = []
+    for jid in req.job_ids:
+        j = db.query(Job).filter_by(id=jid).first()
+        if not j:
+            results.append({"job": jid[:8], "status": "REFUSED", "why": "not found"})
+            continue
+        reel = db.query(InstagramVideo).filter_by(matched_job_id=j.id).first()
+        if reel is not None:
+            results.append({"job": jid[:8], "status": "REFUSED",
+                            "why": f"still linked to reel {reel.shortcode}"})
+            continue
+        if j.lifecycle_stage != "published":
+            results.append({"job": jid[:8], "status": "SKIP", "why": f"stage is {j.lifecycle_stage}"})
+            continue
+        new_stage = None
+        if not int(dry_run):
+            j.instagram_url = None
+            j.instagram_video_id = None
+            j.published_via = None
+            j.published_at = None
+            j.lifecycle_stage = None
+            j.lifecycle_stage = derive_effective_stage(j, _count_approved_clips(db, j.id))
+            new_stage = j.lifecycle_stage
+            print(f"[revert] job={j.id[:8]} published -> {new_stage}", flush=True)
+        results.append({"job": jid[:8],
+                        "status": "WOULD REVERT" if int(dry_run) else "REVERTED",
+                        "to": new_stage})
+    if not int(dry_run):
+        db.commit()
+    return {"dry_run": bool(int(dry_run)), "results": results}
 
 
 @app.get("/api/diag/backfill-basenames")
