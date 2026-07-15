@@ -547,7 +547,7 @@ def test_every_link_site_records_how_the_link_was_made():
     assert 'match_source = "filename"' in dt_src              # drive v856 stamp
     assert 'match_source="evidence"' in lt_src                # local auto-match
     assert 'match_source="filename"' in lt_src                # local v856 stamp
-    assert main_src.count('v.match_source = "manual"') == 2   # match_video + relink
+    assert main_src.count('v.match_source = "manual"') == 1   # match_video
 
 
 def test_the_manual_pick_releases_the_old_holder_before_it_writes():
