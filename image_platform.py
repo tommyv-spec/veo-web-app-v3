@@ -1982,8 +1982,25 @@ def _replace_parents(db: Session, child: ImageNode, parents: List[ParentRef]):
         ))
 
 
+def _thumb_rels_for(rel_path: str):
+    """All thumbnail rel-paths derived from a full-res variant rel-path.
+
+    A full-res `nodes/5/variant_1.png` gets served at ?w= as
+    `nodes/5/variant_1.w{128,256,512}.webp` (see serve_image_file). The
+    thumb name is keyed by the STEM only, so it's stable across regens —
+    which is exactly why stale thumbs must be deleted alongside the
+    full-res file, or every tile keeps serving the pre-regen image."""
+    p = Path(rel_path)
+    parent = p.parent.as_posix()
+    stem = p.stem
+    for tw in _THUMB_WIDTHS:
+        name = f"{stem}.w{tw}.webp"
+        yield f"{parent}/{name}" if parent not in ("", ".") else name
+
+
 def _delete_variant_files(node: ImageNode):
     d = node_dir(node.id)
+    thumbs_deleted = 0
     for v in node.variants:
         try:
             # Delete R2 backup too (ignores errors)
@@ -1993,12 +2010,36 @@ def _delete_variant_files(node: ImageNode):
                 p.unlink()
         except Exception as e:
             log.warning(f"Couldn't delete variant file {v.image_path}: {e}")
-    # Clean any stragglers
+        # v856: purge the derived thumbnails (local + R2) too. Thumbs are
+        # keyed by the stable stem (variant_N.w256.webp), so the ?v={id}
+        # cache-bust does NOT reach them — a surviving thumb makes every
+        # gallery tile show the pre-regen image even after generation
+        # completes. Delete them so the next ?w= request regenerates a
+        # fresh thumb from the new full-res bytes.
+        for thumb_rel in _thumb_rels_for(v.image_path):
+            try:
+                _storage_delete(thumb_rel)
+                tp = images_root() / thumb_rel
+                if tp.exists():
+                    tp.unlink()
+                    thumbs_deleted += 1
+            except Exception as e:
+                log.warning(f"Couldn't delete thumb {thumb_rel}: {e}")
+    # Clean any stragglers — both full-res AND thumbnail webp files whose
+    # variant rows may already be gone (partial/aborted states).
     for f in d.glob("variant_*.png"):
         try:
             f.unlink()
         except Exception:
             pass
+    for f in d.glob("variant_*.w*.webp"):
+        try:
+            f.unlink()
+            thumbs_deleted += 1
+        except Exception:
+            pass
+    # v856 diagnostic — remove once operator confirms tiles refresh on regen.
+    log.info(f"[image_platform/v856] _delete_variant_files node={node.id}: purged thumbs (disk hits={thumbs_deleted})")
 
 
 # ---- list / detail --------------------------------------------------------
