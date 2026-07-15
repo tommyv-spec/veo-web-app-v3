@@ -11757,6 +11757,7 @@ Ambient: same kitchen room tone, soft pour sound.
                        <input class="v853-sec" type="number" min="0.1" step="0.1" placeholder="sec"
                               value="${_v853Timeline?_v853Dur:''}"
                               onclick="event.stopPropagation()"
+                              oninput="event.stopPropagation();this.parentElement.querySelector('.v853-btn').classList.toggle('active', !this.value.trim())"
                               onchange="event.stopPropagation();setSilentClipLength(${clipId}, this.value)">
                    </div>`
                 : '';
