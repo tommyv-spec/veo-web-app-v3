@@ -5324,7 +5324,7 @@ def diag_run_rematch(
     if not user_id:
         return {"detail": "no local videos"}
     _last_sweep_at.pop(user_id, None)  # clear cooldown for a deliberate run
-    return rematch_unmatched(user_id, db)
+    return rematch_unmatched(user_id, db, max_age_h=100000)  # reach historical rows
 
 
 class SetLocalFpRequest(BaseModel):

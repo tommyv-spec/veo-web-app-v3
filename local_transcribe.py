@@ -702,13 +702,17 @@ _SWEEP_MAX_AGE_H = 48
 _last_sweep_at = {}  # user_id -> monotonic timestamp (per web-worker process)
 
 
-def rematch_unmatched(user_id, db: Session) -> dict:
-    """Re-score RECENT done-but-unmatched LocalVideos against the CURRENT
-    awaiting_finishing pool.  Called by the browser after each scan.
+def rematch_unmatched(user_id, db: Session, max_age_h=None) -> dict:
+    """Re-score done-but-unmatched LocalVideos against the CURRENT candidate pool.
+    Called by the browser after each scan.
 
     Closes the race where a video was uploaded before its job reached
     Finishing (match ran once, at upload time).  Bounded per v822.3 so it can
     never again saturate the web worker.
+
+    max_age_h caps how old a video may be to be re-checked (default 48h for the
+    live sweep — no point re-scanning ancient rows every poll). A one-off audit
+    passes a large value to reach historical rows after a fingerprint backfill.
     """
     import time as _time
     from datetime import timedelta
@@ -736,7 +740,7 @@ def rematch_unmatched(user_id, db: Session) -> dict:
     if not candidates:
         return {"checked": 0, "matched": 0}
 
-    cutoff = datetime.utcnow() - timedelta(hours=_SWEEP_MAX_AGE_H)
+    cutoff = datetime.utcnow() - timedelta(hours=(max_age_h or _SWEEP_MAX_AGE_H))
     vids = (
         db.query(LocalVideo)
         .filter(
