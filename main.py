@@ -14406,19 +14406,25 @@ async def user_worker_get_kling_clips(
         if not start_filename:
             continue  # frames not ready yet — leave queued
 
-        # Motion prompt: the clip's verbatim Veo prompt override, else the spoken line.
-        prompt = clip.dialogue_text or ""
-        try:
-            data = _json.loads(job.dialogue_json or "{}")
-            for line in (data.get("lines") or []):
-                if isinstance(line, dict) and line.get("id") == clip.dialogue_id:
-                    ov = line.get("veo_prompt_override")
-                    if ov and ov.strip():
-                        prompt = ov.strip()
-                    break
-        except Exception:
-            pass
-        if not (prompt or "").strip():
+        # Prompt for Kling i2v: use the clip's BUILT Veo prompt (clip.prompt_text —
+        # action/camera + any veo_prompt_override folded in by build_prompt), NOT the
+        # bare spoken line. Fall back to the override from dialogue_json, then the
+        # dialogue line, then a generic motion prompt.
+        prompt = (clip.prompt_text or "").strip()
+        if not prompt:
+            try:
+                data = _json.loads(job.dialogue_json or "{}")
+                for line in (data.get("lines") or []):
+                    if isinstance(line, dict) and line.get("id") == clip.dialogue_id:
+                        ov = line.get("veo_prompt_override")
+                        if ov and ov.strip():
+                            prompt = ov.strip()
+                        break
+            except Exception:
+                pass
+        if not prompt:
+            prompt = (clip.dialogue_text or "").strip()
+        if not prompt:
             prompt = "Subtle natural motion, static locked-off camera."
 
         duration = 5
