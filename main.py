@@ -731,6 +731,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         # Routine assets / config pings — zero debug value.
         "/sw.js",
         "/api/me",
+        "/auth/me",
         "/api/posthog-config",
     }
 
@@ -756,7 +757,10 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         r"|/api/voice-clone-warmup"             # Warmup ping
         # Image platform polling — frontend + worker
         r"|/api/images/nodes$"                  # Sidebar node list poll
+        r"|/api/images/nodes/active$"           # Active-nodes poll (heavy 304 flood)
         r"|/api/images/nodes/[0-9]+$"           # Single node detail poll
+        r"|/api/user/settings$"                 # User settings poll
+        r"|/api/user/keys$"                     # User keys poll
         r"|/api/images/graph$"                  # Graph view poll
         r"|/api/images/batches$"                # Batch list poll
         r"|/api/images/batches/[^/]+$"          # Single batch detail
