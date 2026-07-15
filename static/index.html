@@ -383,6 +383,24 @@
             font-size: 18px; color: var(--text-muted);
         }
         .img-sidebar-row .row-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        /* v858 — regenerate feedback overlay: dim any leftover image + spinner the
+           instant regen is clicked (optimistic, before the network round-trip).
+           Shared by the sidebar row (40px) and the storyboard tile. */
+        .row-thumb.is-regenerating, .tile-thumb.is-regenerating { position: relative; }
+        .row-thumb.is-regenerating img, .tile-thumb.is-regenerating img { filter: brightness(0.3) blur(1px); }
+        .regen-overlay {
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 6px;
+            background: rgba(0,0,0,0.44); color: #fff; font-size: 11px; font-weight: 600;
+            letter-spacing: 0.02em; text-align: center;
+        }
+        .regen-ring {
+            width: 26px; height: 26px; border: 3px solid rgba(255,255,255,0.25);
+            border-top-color: var(--accent); border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        .row-thumb .regen-ring { width: 16px; height: 16px; border-width: 2px; }
+        .row-thumb .regen-label { display: none; }
         .img-sidebar-row .row-body { flex: 1; min-width: 0; }
         .img-sidebar-row .row-name {
             font-size: 13px; color: var(--text-primary); font-weight: 500;
@@ -507,22 +525,6 @@
         }
         .img-storyboard-tile .tile-thumb img {
             width: 100%; height: 100%; object-fit: cover; display: block;
-        }
-        /* v857 — regenerating feedback: dim any leftover image + spinner overlay
-           so a regen is unmistakable the instant it's clicked (was: only a tiny
-           status word changed). */
-        .img-storyboard-tile .tile-thumb.is-regenerating { position: relative; }
-        .img-storyboard-tile .tile-thumb.is-regenerating img { filter: brightness(0.32) blur(1px); }
-        .img-storyboard-tile .tile-thumb .regen-overlay {
-            position: absolute; inset: 0; display: flex; flex-direction: column;
-            align-items: center; justify-content: center; gap: 8px;
-            background: rgba(0,0,0,0.42); color: #fff;
-            font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
-        }
-        .img-storyboard-tile .tile-thumb .regen-ring {
-            width: 30px; height: 30px;
-            border: 3px solid rgba(255,255,255,0.25); border-top-color: var(--accent);
-            border-radius: 50%; animation: spin 0.8s linear infinite;
         }
         .img-storyboard-tile .tile-body {
             padding: 8px 10px;
@@ -19705,13 +19707,20 @@ Ambient: same kitchen room tone, soft pour sound.
             const statusLabel = n.kind === 'upload' ? 'upload' : n.status;
             const isGenerating = n.status === 'generating' || n.status === 'queued';
             const isSelected = n.id === selectedId;
-            const thumbContent = thumbUrl
+            // v858 — optimistic regenerate feedback (see imgRegenerate).
+            const isRegen = isGenerating || (imgState.regeneratingIds && imgState.regeneratingIds.has(n.id));
+            const _rowImg = thumbUrl
                 ? `<img src="${thumbUrl}" alt="" onerror="this.outerHTML='<div style=\\'display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:var(--error);\\'>⚠</div>'">`
-                : (isGenerating ? '⏳' : (n.status === 'failed' ? '❌' : '🖼'));
+                : (isRegen ? '' : (n.status === 'failed' ? '❌' : '🖼'));
+            const _rowRegen = isRegen
+                ? `<div class="regen-overlay"><div class="regen-ring"></div><div class="regen-label">${n.status === 'generating' ? 'Generating…' : 'Regenerating…'}</div></div>`
+                : '';
+            const thumbContent = _rowImg + _rowRegen;
+            const thumbClass = isRegen ? 'row-thumb is-regenerating' : 'row-thumb';
             const nameSafe = imgEscape(n.name || ('Node ' + n.id));
             return `
                 <div class="img-sidebar-row ${isSelected ? 'selected' : ''} ${isGenerating ? 'is-generating' : ''}" data-node-id="${n.id}" onclick="imgSelectNode(${n.id})">
-                    <div class="row-thumb">${thumbContent}</div>
+                    <div class="${thumbClass}">${thumbContent}</div>
                     <div class="row-body">
                         <div class="row-name" title="${nameSafe}">${nameSafe}</div>
                         <div class="row-meta">
@@ -20531,9 +20540,16 @@ Ambient: same kitchen room tone, soft pour sound.
                 const thumbUrl = imgThumbUrl(fullUrl, 256);
                 const statusLabel = n.kind === 'upload' ? 'upload' : n.status;
                 const isGenerating = n.status === 'generating' || n.status === 'queued';
-                const thumbContent = thumbUrl
+                // v858 — optimistic regenerate feedback (see imgRegenerate).
+                const isRegen = isGenerating || (imgState.regeneratingIds && imgState.regeneratingIds.has(n.id));
+                const _tileImg = thumbUrl
                     ? `<img src="${thumbUrl}" loading="lazy" decoding="async" alt="" onerror="this.outerHTML='<div>⚠</div>'">`
-                    : (isGenerating ? '⏳' : (n.status === 'failed' ? '❌' : '🖼'));
+                    : (isRegen ? '' : (n.status === 'failed' ? '❌' : '🖼'));
+                const _tileRegen = isRegen
+                    ? `<div class="regen-overlay"><div class="regen-ring"></div><div class="regen-label">${n.status === 'generating' ? 'Generating…' : 'Regenerating…'}</div></div>`
+                    : '';
+                const thumbContent = _tileImg + _tileRegen;
+                const thumbClass = isRegen ? 'tile-thumb is-regenerating' : 'tile-thumb';
                 const nameSafe = imgEscape(n.name || ('Node ' + n.id));
                 // Chronological index label: "Scene N" if extractable, else sequential
                 const mm = (n.name || '').match(/Scene\s+(\d+)/i);
@@ -20549,7 +20565,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     <div class="img-storyboard-tile" onclick="imgSelectNode(${n.id})">
                         <div class="tile-index">${indexLabel}</div>
                         ${dlBtn}
-                        <div class="tile-thumb">${thumbContent}</div>
+                        <div class="${thumbClass}">${thumbContent}</div>
                         <div class="tile-body">
                             <div class="tile-name" title="${nameSafe}">${nameSafe}</div>
                             <div class="tile-meta">
@@ -20652,6 +20668,10 @@ Ambient: same kitchen room tone, soft pour sound.
             const nodes = (imgState.groupsByKey[groupKey] || []).filter(n => n.status === 'failed');
             if (!nodes.length) { alert('No failed scenes in this job'); return; }
             if (!confirm(`Regenerate ${nodes.length} failed scene${nodes.length === 1 ? '' : 's'}?`)) return;
+            // v858 — optimistic feedback for the whole batch (see imgRegenerate).
+            if (!imgState.regeneratingIds) imgState.regeneratingIds = new Set();
+            nodes.forEach(n => imgState.regeneratingIds.add(n.id));
+            imgReflectRegenerating();
             let ok = 0, fail = 0;
             for (const n of nodes) {
                 try {
@@ -20659,6 +20679,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     if (res.ok) ok++; else fail++;
                 } catch { fail++; }
             }
+            nodes.forEach(n => imgState.regeneratingIds.delete(n.id));
             await imgRefreshNodes();
             imgRenderJobOverview(groupKey);
             if (fail > 0) alert(`Regenerated ${ok} · failed ${fail}`);
@@ -21375,7 +21396,8 @@ Ambient: same kitchen room tone, soft pour sound.
             }
 
             let variantsHtml = '';
-            const isGenerating = node.status === 'generating' || node.status === 'queued';
+            const isGenerating = node.status === 'generating' || node.status === 'queued'
+                || (imgState.regeneratingIds && imgState.regeneratingIds.has(node.id)); // v858 optimistic
             if (isGenerating) {
                 // Stuck-claim escape hatch: if the worker crashed mid-job, the node
                 // sits in 'generating' forever until the 10-min server TTL sweep
@@ -21986,6 +22008,13 @@ Ambient: same kitchen room tone, soft pour sound.
             if (!confirm('Regenerate this node? The current variants will be deleted.')) return;
             // v773.11.2: PostHog event — node regenerate (destructive — current variants deleted).
             window.track && window.track('image_node_regenerated', { node_id: nodeId });
+            // v858 — instant optimistic feedback: flag regenerating + repaint BEFORE
+            // the network round-trip so the row/tile shows a spinner immediately
+            // (was: nothing visible until POST + refresh returned — the operator
+            // only saw the status word flip to "queued").
+            if (!imgState.regeneratingIds) imgState.regeneratingIds = new Set();
+            imgState.regeneratingIds.add(nodeId);
+            imgReflectRegenerating();
             try {
                 const res = await fetch(`/api/images/nodes/${nodeId}/regenerate`, { method: 'POST' });
                 if (!res.ok) {
@@ -21995,6 +22024,21 @@ Ambient: same kitchen room tone, soft pour sound.
                 await imgRefreshNodes();
             } catch (e) {
                 alert('Error: ' + e.message);
+            } finally {
+                // Server now reflects queued/generating → the status-driven render
+                // owns the spinner from here; drop the optimistic flag.
+                imgState.regeneratingIds.delete(nodeId);
+            }
+        }
+
+        // v858 — repaint the sidebar + current main view WITHOUT a network call,
+        // so the optimistic regenerate spinner shows the instant regen is clicked.
+        function imgReflectRegenerating() {
+            try { imgRenderNodeList(); } catch (e) {}
+            if (imgState.detailNodeId && imgState.nodesById[imgState.detailNodeId]) {
+                try { imgRenderNodeDetail(imgState.nodesById[imgState.detailNodeId]); } catch (e) {}
+            } else if (imgState.selectedJobKey) {
+                try { imgRenderJobOverview(imgState.selectedJobKey); } catch (e) {}
             }
         }
 
