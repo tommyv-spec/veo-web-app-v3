@@ -112,29 +112,62 @@ def load_laptop_email(settings_path, env=None):
         return ""
 
 
+def _chrome_user_data_dirs_for_platform(env):
+    r"""Ordered Chrome-family profile roots for THIS OS (stable, Beta, Dev,
+    Canary, Chromium). The "user data dir" = the folder that DIRECTLY holds
+    `Local State` + the profile subfolders (Default, Profile 1, ...):
+      Windows  %LOCALAPPDATA%\Google\Chrome\User Data
+      macOS    ~/Library/Application Support/Google/Chrome   (NO "User Data")
+      Linux    ~/.config/google-chrome                       (NO "User Data")
+    """
+    dirs = []
+    if sys.platform == "win32":
+        local_appdata = env.get("LOCALAPPDATA")
+        if local_appdata:
+            for parts in (("Google", "Chrome"), ("Google", "Chrome Beta"),
+                          ("Google", "Chrome Dev"), ("Google", "Chrome SxS"),
+                          ("Chromium",)):
+                dirs.append(os.path.join(local_appdata, *parts, "User Data"))
+    elif sys.platform == "darwin":
+        home = env.get("HOME") or os.path.expanduser("~")
+        base = os.path.join(home, "Library", "Application Support")
+        for parts in (("Google", "Chrome"), ("Google", "Chrome Beta"),
+                      ("Google", "Chrome Dev"), ("Google", "Chrome Canary"),
+                      ("Chromium",)):
+            dirs.append(os.path.join(base, *parts))
+    else:  # linux / other posix
+        home = env.get("HOME") or os.path.expanduser("~")
+        base = os.path.join(home, ".config")
+        for name in ("google-chrome", "google-chrome-beta",
+                     "google-chrome-unstable", "chromium"):
+            dirs.append(os.path.join(base, name))
+    return dirs
+
+
 def resolve_laptop_user_data_dir(env=None):
-    r"""LAPTOP_CHROME_USER_DATA override, else
-    %LOCALAPPDATA%\Google\Chrome\User Data, else None."""
+    r"""LAPTOP_CHROME_USER_DATA override, else the OS-default STABLE Chrome
+    user-data dir (Win %LOCALAPPDATA%\Google\Chrome\User Data / macOS
+    ~/Library/Application Support/Google/Chrome / Linux ~/.config/google-chrome),
+    else None."""
     env = os.environ if env is None else env
     override = env.get("LAPTOP_CHROME_USER_DATA")
     if override:
         return override
-    local_appdata = env.get("LOCALAPPDATA")
-    if not local_appdata:
-        return None
-    return os.path.join(local_appdata, "Google", "Chrome", "User Data")
+    dirs = _chrome_user_data_dirs_for_platform(env)
+    return dirs[0] if dirs else None
 
 
 def _channel_for_user_data_dir(user_data_dir):
     """Map a Chrome User Data path to its Playwright launch channel so the
     worker can open the pulled profile with the SAME Chrome channel it came
-    from (a Beta profile should be opened by Chrome Beta)."""
+    from (a Beta profile should be opened by Chrome Beta). Handles Win
+    'Chrome SxS', macOS 'Chrome Canary', and Linux hyphen names."""
     u = (user_data_dir or "").lower()
-    if "chrome beta" in u:
+    if "chrome beta" in u or "google-chrome-beta" in u:
         return "chrome-beta"
-    if "chrome dev" in u:
+    if "chrome dev" in u or "google-chrome-unstable" in u:
         return "chrome-dev"
-    if "chrome sxs" in u:
+    if "chrome sxs" in u or "chrome canary" in u:
         return "chrome-canary"
     if "chromium" in u:
         return "chromium"
@@ -142,22 +175,15 @@ def _channel_for_user_data_dir(user_data_dir):
 
 
 def resolve_laptop_user_data_dirs(env=None):
-    r"""All Chrome-family User Data dirs to search for the account, in order:
-    stable, Beta, Dev, Canary (SxS), Chromium. The Google account may live in
-    any channel — Beta has its own %LOCALAPPDATA%\Google\Chrome Beta\User Data.
-    LAPTOP_CHROME_USER_DATA override returns just that one."""
+    r"""All Chrome-family user-data dirs to search for the account, in order:
+    stable, Beta, Dev, Canary, Chromium — OS-aware (see
+    _chrome_user_data_dirs_for_platform). The Google account may live in any
+    channel. LAPTOP_CHROME_USER_DATA override returns just that one."""
     env = os.environ if env is None else env
     override = env.get("LAPTOP_CHROME_USER_DATA")
     if override:
         return [override]
-    dirs = []
-    local_appdata = env.get("LOCALAPPDATA")
-    if local_appdata:
-        for parts in (("Google", "Chrome"), ("Google", "Chrome Beta"),
-                      ("Google", "Chrome Dev"), ("Google", "Chrome SxS"),
-                      ("Chromium",)):
-            dirs.append(os.path.join(local_appdata, *parts, "User Data"))
-    return dirs
+    return _chrome_user_data_dirs_for_platform(env)
 
 
 def locate_profile(email):
@@ -668,7 +694,14 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
             user_data_dir, profile_folder = ud, pf
             break
     if not profile_folder:
-        log(f"{tag}lean golden: {email!r} not logged into any Chrome channel")
+        # DIAG (cross-platform profile-pull): list what we searched so a Mac/Linux
+        # miss is debuggable (empty list => platform paths unresolved).
+        _searched = [
+            f"{d} [{'ok' if (d and os.path.isdir(d) and os.path.isfile(os.path.join(d, 'Local State'))) else 'missing'}]"
+            for d in candidates
+        ]
+        log(f"{tag}lean golden: {email!r} not logged into any Chrome channel "
+            f"(platform={sys.platform}, searched={_searched or '[]'})")
         return False
     src_profile = os.path.join(user_data_dir, profile_folder)
     if not os.path.isdir(src_profile):
