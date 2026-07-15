@@ -2897,14 +2897,17 @@
                             <div class="user-name" id="userNameFull" style="max-width: none; font-weight: 500;"></div>
                             <div class="user-dropdown-email" id="userEmail"></div>
                         </div>
-                        <div class="user-dropdown-item" onclick="openApiKeysModal()">
+                        <!-- Hidden for now (kept in DOM so openApiKeysModal + backend still work) -->
+                        <div class="user-dropdown-item" onclick="openApiKeysModal()" style="display:none;">
                             <span>🔑</span> API Keys
                         </div>
                         <div class="user-dropdown-item" onclick="document.getElementById('userDropdown').classList.remove('show');openTutorial();">
                             <span>📖</span> Tutorial
                         </div>
-                        <!-- v815 — account setting: auto-retry mode for images rejected for prominent people -->
-                        <div class="setting-row" style="display:flex;flex-direction:column;gap:4px;padding:8px 12px;">
+                        <!-- v815 — account setting: auto-retry mode for images rejected for prominent people.
+                             Hidden for now (belongs in the settings section, not the user-info menu).
+                             Kept in DOM (was display:flex) so the load/save JS for #autoImageRetryMode still works. -->
+                        <div class="setting-row" style="display:none;flex-direction:column;gap:4px;padding:8px 12px;">
                             <label for="autoImageRetryMode" style="font-size:12px;">Auto-retry when an image is rejected for prominent people</label>
                             <select id="autoImageRetryMode" onchange="saveAutoImageRetryMode(this.value)">
                                 <option value="batch">All other images in the batch (default)</option>
