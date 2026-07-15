@@ -3180,11 +3180,15 @@ def serve_image_file(
         # ONLY behavior now: download from R2 → cache locally → FileResponse.
         # Browser never sees an R2 host. The diagnostic log below confirms
         # which path the request takes.
-        print(
-            f"[image_platform/v695] /files cold-cache miss: path={safe!r} — "
-            f"downloading from R2 to local then FileResponse (no redirect)",
-            flush=True,
-        )
+        # Pairs 1:1 with the [Storage] Downloaded line — two log lines per
+        # file, hundreds on a cache warm. Off by default; LOG_STORAGE_DOWNLOADS=1
+        # re-enables both when debugging the cold-cache path.
+        if os.environ.get("LOG_STORAGE_DOWNLOADS"):
+            print(
+                f"[image_platform/v695] /files cold-cache miss: path={safe!r} — "
+                f"downloading from R2 to local then FileResponse (no redirect)",
+                flush=True,
+            )
 
         # v561: fall-through legacy path — used when storage isn't
         # configured, when HEAD failed for non-404 reasons (the next

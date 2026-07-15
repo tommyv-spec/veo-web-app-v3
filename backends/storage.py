@@ -237,7 +237,11 @@ class ObjectStorage:
             str(local_path)
         )
         
-        print(f"[Storage] Downloaded: {remote_key} → {local_path}", flush=True)
+        # Per-file download log is high-volume noise (hundreds of lines on a
+        # single page/cache warm). Off by default; set LOG_STORAGE_DOWNLOADS=1
+        # to re-enable when debugging storage/cache.
+        if os.environ.get("LOG_STORAGE_DOWNLOADS"):
+            print(f"[Storage] Downloaded: {remote_key} → {local_path}", flush=True)
         return local_path
     
     def download_bytes(self, remote_key: str) -> bytes:

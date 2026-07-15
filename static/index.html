@@ -3199,21 +3199,12 @@
                             </div>
                         </div>
                         
-                        <!-- Aspect Ratio + Resolution -->
-                        <div class="cols-2">
-                            <div class="group">
-                                <div class="lbl">Aspect Ratio</div>
-                                <div class="seg" id="aspectSeg">
-                                    <button data-value="16:9" onclick="selectAspectSeg(this)">16:9</button>
-                                    <button class="active" data-value="9:16" onclick="selectAspectSeg(this)">9:16</button>
-                                </div>
-                            </div>
-                            <div class="group">
-                                <div class="lbl">Resolution</div>
-                                <div class="seg" id="resSeg">
-                                    <button class="active" data-value="720p" onclick="selectResSeg(this)">720p HD</button>
-                                    <button data-value="1080p" onclick="selectResSeg(this)">1080p Full HD</button>
-                                </div>
+                        <!-- Aspect Ratio (Resolution removed: Flow always exports 720p) -->
+                        <div class="group">
+                            <div class="lbl">Aspect Ratio</div>
+                            <div class="seg" id="aspectSeg">
+                                <button data-value="16:9" onclick="selectAspectSeg(this)">16:9</button>
+                                <button class="active" data-value="9:16" onclick="selectAspectSeg(this)">9:16</button>
                             </div>
                         </div>
                         

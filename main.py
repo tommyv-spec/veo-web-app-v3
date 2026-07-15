@@ -728,6 +728,10 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         # v780 — video (Flow) worker heartbeat. POST every 5s per worker;
         # silence the request-log noise.
         "/api/user-worker/heartbeat",
+        # Routine assets / config pings — zero debug value.
+        "/sw.js",
+        "/api/me",
+        "/api/posthog-config",
     }
 
     # Patterns for routine polling (suppress unless error)
@@ -740,7 +744,13 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         r"|/api/jobs/[^/]+/images/"             # Image serving
         r"|/api/jobs/[^/]+/outputs/"            # Video serving (206)
         r"|/api/user-worker/jobs/pending"       # Worker job poll
+        r"|/api/user-worker/jobs/[^/]+$"        # Worker job-detail poll (GET)
         r"|/api/user-worker/clips/redo-pending" # Worker redo poll
+        r"|/api/user-worker/clips/kling-pending"# Kling drain poll (heavy)
+        r"|/api/user-worker/clips/[0-9]+/approval-status"  # Approval poll
+        r"|/api/user-worker/frames/"            # Frame serving to worker
+        r"|/api/user-worker/tokens$"            # Token list poll
+        r"|/api/user-worker/status$"            # Worker status poll
         r"|/api/local-worker/jobs/pending"      # Local worker job poll
         r"|/api/local-worker/clips/redo-pending"# Local worker redo poll
         r"|/api/voice-clone-warmup"             # Warmup ping
@@ -2280,13 +2290,16 @@ async def _create_job_impl(
     if config_dict.get('kling_variant'):
         try:
             from sqlalchemy import update as _sa_update
+            # Kling variant is FIRST CLIP ONLY (clip_index == 0). Audio-twin
+            # pairs carry clip_index offset +100000, so this cleanly targets
+            # only the first visual clip.
             db.execute(
                 _sa_update(Clip)
-                .where(Clip.job_id == job_id)
+                .where(Clip.job_id == job_id, Clip.clip_index == 0)
                 .values(kling_variant_status='queued')
             )
             db.commit()
-            add_job_log(db, job_id, "🎬 Kling variant queued for each clip — local worker will generate (Kling 3.0 + audio)", "INFO", "kling")
+            add_job_log(db, job_id, "🎬 Kling variant queued for the first clip only — local worker will generate (Kling 3.0 + audio)", "INFO", "kling")
         except Exception as _e:
             try:
                 db.rollback()
