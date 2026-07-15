@@ -839,6 +839,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/revert-published",
         "/api/diag/local-video-state",
         "/api/diag/set-local-fp",
+        "/api/diag/run-rematch",
         "/api/diag/jobs-export-index",
         # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
         "/api/diag/probe-job-fp",
@@ -5296,6 +5297,34 @@ def diag_revert_published(
     if not int(dry_run):
         db.commit()
     return {"dry_run": bool(int(dry_run)), "results": results}
+
+
+@app.post("/api/diag/run-rematch")
+def diag_run_rematch(
+    token: str = "",
+    user_id: str = "",
+    db: DBSession = Depends(get_db_session),
+):
+    """v853 TEMPORARY: run the local rematch sweep for a user (DIAG_TOKEN-gated).
+
+    The real endpoint needs a login; this lets the sweep run over the now-widened
+    pool + freshly-backfilled fingerprints without the operator re-scanning. Sync
+    def (it reaches R2). It bypasses the per-user cooldown so a manual audit run
+    is never a no-op.
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+    from models import LocalVideo
+    from local_transcribe import rematch_unmatched, _last_sweep_at
+    if not user_id:
+        row = db.query(LocalVideo.user_id).first()
+        user_id = row[0] if row else ""
+    if not user_id:
+        return {"detail": "no local videos"}
+    _last_sweep_at.pop(user_id, None)  # clear cooldown for a deliberate run
+    return rematch_unmatched(user_id, db)
 
 
 class SetLocalFpRequest(BaseModel):
