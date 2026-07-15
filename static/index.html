@@ -508,6 +508,22 @@
         .img-storyboard-tile .tile-thumb img {
             width: 100%; height: 100%; object-fit: cover; display: block;
         }
+        /* v857 — regenerating feedback: dim any leftover image + spinner overlay
+           so a regen is unmistakable the instant it's clicked (was: only a tiny
+           status word changed). */
+        .img-storyboard-tile .tile-thumb.is-regenerating { position: relative; }
+        .img-storyboard-tile .tile-thumb.is-regenerating img { filter: brightness(0.32) blur(1px); }
+        .img-storyboard-tile .tile-thumb .regen-overlay {
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 8px;
+            background: rgba(0,0,0,0.42); color: #fff;
+            font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+        }
+        .img-storyboard-tile .tile-thumb .regen-ring {
+            width: 30px; height: 30px;
+            border: 3px solid rgba(255,255,255,0.25); border-top-color: var(--accent);
+            border-radius: 50%; animation: spin 0.8s linear infinite;
+        }
         .img-storyboard-tile .tile-body {
             padding: 8px 10px;
             background: var(--bg-surface);
@@ -19767,47 +19783,91 @@ Ambient: same kitchen room tone, soft pour sound.
         // Content-Disposition: inline, so a plain link opens the PNG in a tab on
         // some browsers. The blob path also lets the real extension come from the
         // response content-type.
+        // v854.1 — the fetch-to-blob save, shared by imgDownloadOne and
+        // imgDownloadParents. Fetches the full-res URL, picks the real
+        // extension from the content-type, and triggers a browser save.
+        async function imgSaveUrlAsFile(url, label) {
+            const res = await fetch(imgFullResUrl(url));
+            if (!res.ok) throw new Error('fetch failed (' + res.status + ')');
+            const blob = await res.blob();
+            let ext = 'png';
+            const ct = res.headers.get('content-type') || '';
+            if (ct.includes('webp')) ext = 'webp';
+            else if (ct.includes('jpeg') || ct.includes('jpg')) ext = 'jpg';
+            else {
+                const m = imgFullResUrl(url).split('?')[0].match(/\.(png|jpe?g|webp)$/i);
+                if (m) ext = m[1].toLowerCase().replace('jpeg', 'jpg');
+            }
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = imgSlug(label) + '.' + ext;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+        }
+
+        // v852 — resolve a node's chosen (or given) variant image_url from
+        // imgState. IDs only — the caller inlines this into an onclick="" attr,
+        // and an image_path can carry a single quote (manual uploads named from
+        // the user's filename) that would break out of the JS string literal.
+        function imgResolveVariantUrl(nodeId, variantId) {
+            const node = (imgState.nodesById || {})[nodeId];
+            if (!node) return null;
+            const vs = node.variants || [];
+            const variant = variantId
+                ? vs.find(v => v.id === variantId)
+                : (node.chosen_variant || vs[0]);
+            return variant ? variant.image_url : null;
+        }
+
+        // v852 — download ONE image at original resolution. variantId null → the
+        // node's chosen variant.
         async function imgDownloadOne(ev, nodeId, variantId, label) {
             if (ev) { ev.stopPropagation(); ev.preventDefault(); }
-            const node = (imgState.nodesById || {})[nodeId];
-            let variant = null;
-            if (node) {
-                const vs = node.variants || [];
-                variant = variantId
-                    ? vs.find(v => v.id === variantId)
-                    : (node.chosen_variant || vs[0]);
-            }
-            const url = variant ? variant.image_url : null;
+            const url = imgResolveVariantUrl(nodeId, variantId);
             if (!url) { imgShowToastError('Download', 'No image to download'); return; }
             const btn = ev && ev.currentTarget ? ev.currentTarget : null;
             const orig = btn ? btn.innerHTML : '';
             if (btn) { btn.innerHTML = '⏳'; btn.disabled = true; }
             try {
-                const res = await fetch(imgFullResUrl(url));
-                if (!res.ok) throw new Error('fetch failed (' + res.status + ')');
-                const blob = await res.blob();
-                let ext = 'png';
-                const ct = res.headers.get('content-type') || '';
-                if (ct.includes('webp')) ext = 'webp';
-                else if (ct.includes('jpeg') || ct.includes('jpg')) ext = 'jpg';
-                else {
-                    const m = imgFullResUrl(url).split('?')[0].match(/\.(png|jpe?g|webp)$/i);
-                    if (m) ext = m[1].toLowerCase().replace('jpeg', 'jpg');
-                }
-                const a = document.createElement('a');
-                a.href = URL.createObjectURL(blob);
-                a.download = imgSlug(label) + '.' + ext;
-                a.style.display = 'none';
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+                await imgSaveUrlAsFile(url, label);
             } catch (e) {
                 console.error('[v852] image download failed:', e);
                 imgShowToastError('Download failed', e.message);
             } finally {
                 if (btn) { btn.innerHTML = orig || '⬇ Download'; btn.disabled = false; }
             }
+        }
+
+        // v854.1 — download EVERY parent of a node as its own separate file (not
+        // a zip). Saves sequentially — some browsers collapse rapid-fire <a>.click()
+        // saves into one, so each waits for the prior to fire.
+        async function imgDownloadParents(ev, nodeId) {
+            if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+            const node = (imgState.nodesById || {})[nodeId];
+            const parents = (node && node.parents) || [];
+            const items = [];
+            parents.forEach((e, idx) => {
+                const p = (imgState.nodesById || {})[e.parent_node_id];
+                const url = p && p.chosen_variant ? p.chosen_variant.image_url : null;
+                if (!url) return;
+                const seq = String(idx + 1).padStart(2, '0');
+                items.push({ url, label: seq + '-parent-' + (p.name || ('node-' + p.id)) });
+            });
+            if (!items.length) { imgShowToastError('Download', 'No parent images to download'); return; }
+            const btn = ev && ev.currentTarget ? ev.currentTarget : null;
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) btn.disabled = true;
+            let ok = 0;
+            for (let i = 0; i < items.length; i++) {
+                if (btn) btn.innerHTML = `⏳ ${i + 1}/${items.length}`;
+                try { await imgSaveUrlAsFile(items[i].url, items[i].label); ok++; }
+                catch (e) { console.error('[v854.1] parent download failed:', items[i].label, e); }
+            }
+            if (btn) { btn.innerHTML = orig || '⬇ Download parents'; btn.disabled = false; }
+            if (ok < items.length) imgShowToastError('Download parents', `${ok}/${items.length} saved — some failed`);
         }
 
         // v649 — find which sidebar group key a node belongs to. Used by
@@ -21257,22 +21317,27 @@ Ambient: same kitchen room tone, soft pour sound.
 
             let parentsHtml = '';
             if (node.parents && node.parents.length) {
+                // v854.1 — one button downloads EVERY parent as its own separate
+                // file (not a zip). Shown only when at least one parent is loaded
+                // with a chosen variant to pull.
+                const anyDownloadable = node.parents.some(e => {
+                    const p = imgState.nodesById[e.parent_node_id];
+                    return p && p.chosen_variant;
+                });
+                const dlAllBtn = anyDownloadable
+                    ? `<button class="img-parent-dl" title="Download every parent image as a separate file" data-track="parent_download_all" onclick="imgDownloadParents(event, ${node.id})">⬇ Download parents</button>`
+                    : '';
                 parentsHtml = `
                     <div style="margin-bottom:16px;">
-                        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;font-weight:500;">Parents</div>
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+                            <div style="font-size:12px;color:var(--text-secondary);font-weight:500;">Parents</div>
+                            ${dlAllBtn}
+                        </div>
                         <div style="display:flex;gap:8px;flex-wrap:wrap;">
                             ${node.parents.map(e => {
                                 const p = imgState.nodesById[e.parent_node_id];
                                 const thumb = p && p.chosen_variant ? p.chosen_variant.image_url : null;
                                 const pname = p ? imgEscape(p.name || ('Node ' + p.id)) : `#${e.parent_node_id}`;
-                                // v854 — download THIS parent's original file. IDs only
-                                // (see imgDownloadOne); it stops propagation so the chip's
-                                // navigate-onclick doesn't also fire. Only when the parent
-                                // node is loaded AND has a chosen variant to pull.
-                                const pDlLabel = p ? imgSlug('parent-' + (p.name || ('node-' + p.id))) : 'parent';
-                                const pDlBtn = thumb
-                                    ? `<button class="img-parent-dl" title="Download this parent's original image" data-track="parent_download_one" onclick="imgDownloadOne(event, ${e.parent_node_id}, null, '${pDlLabel}')">⬇</button>`
-                                    : '';
                                 return `
                                     <div style="display:flex;align-items:center;gap:6px;background:var(--bg-input);padding:6px 10px;border-radius:6px;border:1px solid var(--border-color);cursor:pointer;" onclick="imgSelectNode(${e.parent_node_id})">
                                         <div style="width:32px;height:32px;border-radius:4px;overflow:hidden;background:var(--bg-elevated);">
@@ -21282,7 +21347,6 @@ Ambient: same kitchen room tone, soft pour sound.
                                             <div style="font-size:12px;">${pname}</div>
                                             ${e.role ? `<div style="font-size:10px;color:var(--text-muted);">${imgEscape(e.role)}</div>` : ''}
                                         </div>
-                                        ${pDlBtn}
                                     </div>`;
                             }).join('')}
                         </div>
