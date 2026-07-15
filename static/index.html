@@ -16927,9 +16927,9 @@ Ambient: same kitchen room tone, soft pour sound.
                 },
                 content: () => `
                     <div class="ob-step-num">3</div>
-                    <div class="ob-step-title">Simple Mode — Settings, Script & Generate</div>
+                    <div class="ob-step-title">Single Image Mode — Settings, Script & Generate</div>
                     <div class="ob-step-desc">
-                        <p>You uploaded <strong>1 image</strong> → <strong>Simple Mode</strong>. The same image is used as the starting frame for every clip.</p>
+                        <p>You uploaded <strong>1 image</strong> → <strong>Single Image Mode</strong>. The same image is used as the starting frame for every clip.</p>
                     </div>
                     
                     <div class="ob-step-desc"><strong style="color:var(--text-primary);font-size:14px;">⚙️ Settings (left panel)</strong></div>
@@ -16941,6 +16941,10 @@ Ambient: same kitchen room tone, soft pour sound.
                         <li><strong>Resolution</strong> — 720p or 1080p. Higher quality requires 8s duration.</li>
                         <li><strong>Interpolation</strong> — <strong>Turn ON</strong>. Creates smooth motion between frames. Requires 8s duration.</li>
                         <li><strong>AI Prompts</strong> — ON = the AI optimizes visual prompts automatically. OFF = you write your own prompts per clip.</li>
+                        <li><strong>Model</strong> — Which video model renders the clips (default Omni Flash; Quality is sharpest).</li>
+                        <li><strong>Gesture Enrichment</strong> — Only when AI Prompts is ON. AI adds content-matched gestures.</li>
+                        <li><strong>Kling (Higgsfield)</strong> — Optional alternate video backend instead of Flow.</li>
+                        <li><strong>Short Lines / Prefix Short</strong> — Handling for very short lines so Veo doesn't clip the first word.</li>
                     </ol>
                     
                     <div class="ob-step-desc" style="margin-top:16px;"><strong style="color:var(--text-primary);font-size:14px;">✍️ Dialogue Script</strong></div>
@@ -16984,11 +16988,13 @@ Ambient: same kitchen room tone, soft pour sound.
                         <li><strong>Resolution</strong> — 720p or 1080p (1080p requires 8s).</li>
                         <li><strong>Interpolation → ON</strong> — Especially important here: it creates the smooth morph effect as clips transition between different images.</li>
                         <li><strong>AI Prompts → ON</strong> — Let the AI optimize visual descriptions for each clip.</li>
+                        <li><strong>Model</strong> — Video model (default Omni Flash; Quality sharpest). <strong>Kling (Higgsfield)</strong> optional alternate backend.</li>
+                        <li><strong>Gesture Enrichment</strong> (AI Prompts ON) + <strong>Short Lines / Prefix Short</strong> — content-matched gestures and short-line handling.</li>
                     </ol>
                     
                     <div class="ob-step-desc" style="margin-top:12px;"><strong style="color:var(--text-primary);font-size:14px;">🔀 Generation Mode</strong></div>
                     <div class="ob-step-desc">
-                        <p>With 2+ images, you'll see a generation mode selector:</p>
+                        <p>In Auto-Cycle (2+ images) you'll see a Smart / Fast / Safe selector:</p>
                         <p><strong>🔀 Smart</strong> (recommended) — Generates odd clips first, then even clips use confirmed end frames for smooth transitions.</p>
                         <p><strong>⚡ Fast</strong> — All clips simultaneously. Fastest but transitions may be rougher.</p>
                         <p><strong>🔗 Safe</strong> — One at a time, sequentially. Slowest but maximum visual continuity.</p>
@@ -17030,6 +17036,7 @@ Ambient: same kitchen room tone, soft pour sound.
                         <li><strong>Interpolation → ON</strong> — Creates smooth morphs between scenes (especially for BLEND TO transitions).</li>
                         <li><strong>AI Prompts → ON</strong> recommended — Let AI optimize visual prompts.</li>
                         <li><strong>Language</strong> must match your script. Aspect ratio and resolution as needed.</li>
+                        <li><strong>Model</strong> — Video model (default Omni Flash). <strong>Gesture Enrichment</strong> (AI Prompts ON) adds content-matched gestures.</li>
                     </ol>
                     
                     <div class="ob-step-desc" style="margin-top:16px;"><strong style="color:var(--text-primary);font-size:14px;">🎬 How Storyboard Works</strong></div>
@@ -17234,7 +17241,7 @@ Ambient: same kitchen room tone, soft pour sound.
                         <li>Paste a markdown <strong>scene table</strong> (or upload a .md). Each <strong>### Scene N</strong> becomes one image.</li>
                         <li>Pick a <strong>Subject image</strong> (the person in every scene); optionally a <strong>Product image</strong>.</li>
                         <li>Set aspect ratio, resolution, model, and variants per scene.</li>
-                        <li>Click <strong>📋 Import</strong> — scenes are created and queued.</li>
+                        <li>Click <strong>✨ Create & Generate</strong> in the modal — scenes are created and queued.</li>
                     </ol>
                     <div class="ob-tip"><strong>💡 Tip:</strong> Add <strong>reference_image: Scene N</strong> to a scene to build it from an earlier one.</div>
                     <div class="ob-status waiting">
