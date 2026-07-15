@@ -7914,22 +7914,31 @@ def get_redo_clips():
     return []
 
 
-def clip_done_in_platform(clip_id):
+def clip_done_in_platform(clip_id, require_approved=False):
     """Authoritative check: does the platform ALREADY have a good render for this
-    clip (completed or approved in DB)? Used before queuing an auto-redo so we
-    NEVER regenerate a clip the platform already has. A false failure (e.g. a
-    late-bound good tile the HTTP-DL missed, or a drifted DOM tile read) was
-    flipping an already-good clip to flow_redo_queued → the server handed it back
-    as redo-pending → it regenerated → hit the policy filter → marked a GOOD clip
-    FAILED (operator: 'why redo it if we already had it in the platform', 2026-06-23).
-    The process_redo_clip guard (approval-status) only fires AFTER the status was
-    already flipped; this guards the SET side. Fail-open (False) on API error so a
-    genuine failure still redoes."""
+    clip? Used before queuing an auto-redo so we NEVER regenerate a clip the
+    platform already has. A false failure (e.g. a late-bound good tile the HTTP-DL
+    missed, or a drifted DOM tile read) was flipping an already-good clip to
+    flow_redo_queued → the server handed it back as redo-pending → it regenerated
+    → hit the policy filter → marked a GOOD clip FAILED (operator: 'why redo it if
+    we already had it in the platform', 2026-06-23). The process_redo_clip guard
+    (approval-status) only fires AFTER the status was already flipped; this guards
+    the SET side. Fail-open (False) on API error so a genuine failure still redoes.
+
+    require_approved=True (used by the v848 SUBMIT guards / 'normal worker'): treat
+    the clip as done ONLY when it is APPROVED. An uploaded-but-unapproved render
+    (Kling variant, operator mid-job upload) does NOT stop the normal worker — it
+    still generates its own Flow/Veo clip alongside. Default False keeps the redo
+    paths skipping any completed-or-approved clip (preserves the 2026-06-23 fix)."""
     if not clip_id:
         return False
     try:
         _f = api_request("GET", f"/clips/{clip_id}/approval-status")
-        return bool(_f and _f.get('status') in ('completed', 'approved'))
+        if not _f:
+            return False
+        if require_approved:
+            return _f.get('approval_status') == 'approved'
+        return _f.get('status') in ('completed', 'approved')
     except Exception:
         return False
 
@@ -17396,7 +17405,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         # clips_done so the skip branch below handles it (gallery + frame-key
         # bookkeeping included). clip_done_in_platform fails OPEN (False) on an API
         # error, so a genuinely-pending clip is still generated. (operator 2026-07-09)
-        if clip_index not in clips_done and clip_done_in_platform(clip.get('id')):
+        if clip_index not in clips_done and clip_done_in_platform(clip.get('id'), require_approved=True):
             print(f"[Flow] ↩ [v848] clip {clip_index+1} already has a render in the platform "
                   f"(uploaded / completed mid-job) — not regenerating", flush=True)
             clip_log(clip.get('id'), clip_index, "SKIP", "completed mid-job (operator upload) — not regenerating")
@@ -19082,7 +19091,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # UPLOAD a video for a clip MID-JOB (marking it completed); clips[] is
         # frozen at job-claim time, so re-check the platform live before submitting
         # and skip if it already has a good render. (operator 2026-07-09)
-        if clip_index not in clips_done and clip_done_in_platform(clip.get('id')):
+        if clip_index not in clips_done and clip_done_in_platform(clip.get('id'), require_approved=True):
             print(f"[Flow] ↩ [v848] clip {clip_index+1} already has a render in the platform "
                   f"(uploaded / completed mid-job) — not regenerating", flush=True)
             clip_log(clip.get('id'), clip_index, "SKIP", "completed mid-job (operator upload) — not regenerating")
