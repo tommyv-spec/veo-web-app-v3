@@ -840,6 +840,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/local-video-state",
         "/api/diag/set-local-fp",
         "/api/diag/run-rematch",
+        "/api/diag/apply-local-links",
         "/api/diag/jobs-export-index",
         # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
         "/api/diag/probe-job-fp",
@@ -5297,6 +5298,66 @@ def diag_revert_published(
     if not int(dry_run):
         db.commit()
     return {"dry_run": bool(int(dry_run)), "results": results}
+
+
+class ApplyLocalLinksRequest(BaseModel):
+    items: List[dict]   # [{file_hash, job_id}] — offline-proven matches
+    dry_run: int = 1
+
+
+@app.post("/api/diag/apply-local-links")
+def diag_apply_local_links(
+    req: ApplyLocalLinksRequest,
+    token: str = "",
+    db: DBSession = Depends(get_db_session),
+):
+    """v853 TEMPORARY: apply offline-proven file->job links directly (no sweep).
+
+    The rematch sweep runs the whole matcher per video and, over the widened pool,
+    is heavy enough that firing it in a loop saturated the single worker. But the
+    matches are ALREADY computed offline (waveform-proven), so this just writes
+    the links: find the LocalVideo by hash, find the Job, and link via the same
+    _advance_job_to_published + exclusivity path the sweep would have used — pure
+    DB, no R2, no ffmpeg. Safe to batch.
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+    from models import LocalVideo, Job
+    from local_transcribe import _advance_job_to_published, enforce_exclusivity
+    import instagram_match as _ig
+
+    linked = skipped = refused = 0
+    results = []
+    for it in req.items:
+        h = (it.get("file_hash") or "").strip().lower()
+        jid = it.get("job_id")
+        v = db.query(LocalVideo).filter_by(file_hash=h).first()
+        j = db.query(Job).filter_by(id=jid).first() if jid else None
+        if not v or not j:
+            skipped += 1
+            results.append({"hash": h[:8], "status": "SKIP", "why": "video or job not found"})
+            continue
+        if v.matched_job_id == j.id:
+            skipped += 1
+            results.append({"hash": h[:8], "status": "ALREADY", "job": j.id[:8]})
+            continue
+        if int(req.dry_run):
+            results.append({"hash": h[:8], "status": "WOULD LINK", "job": j.id[:8], "file": v.file_name})
+            continue
+        # Same exclusivity contract as the live path: a job has one source, but a
+        # folder duplicate of the same video links alongside (is_same_video).
+        ev = {"source": "waveform", "similarity": it.get("sim"), "dur_delta": None, "conflict": False}
+        if enforce_exclusivity(db, j, v, "local", ev) == "refuse":
+            refused += 1
+            results.append({"hash": h[:8], "status": "REFUSED", "job": j.id[:8], "why": "exclusivity"})
+            continue
+        _advance_job_to_published(v, j, float(it.get("sim") or 1.0), db, match_source="evidence")
+        linked += 1
+        results.append({"hash": h[:8], "status": "LINKED", "job": j.id[:8], "file": v.file_name})
+    return {"dry_run": bool(int(req.dry_run)), "linked": linked, "skipped": skipped,
+            "refused": refused, "results": results}
 
 
 @app.post("/api/diag/run-rematch")
