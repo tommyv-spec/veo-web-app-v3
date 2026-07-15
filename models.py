@@ -1097,7 +1097,30 @@ def init_db(database_url: str = None):
 def _run_migrations_postgresql(engine):
     """Add new columns to existing tables if they don't exist (PostgreSQL)"""
     from sqlalchemy import text
-    
+
+    # v860 — every DDL below takes a table lock (ADD COLUMN IF NOT EXISTS still
+    # grabs ACCESS EXCLUSIVE just to check; CREATE INDEX / ALTER TYPE rewrite).
+    # These run in the BLOCKING web-startup path (lifespan PHASE 1) before
+    # uvicorn binds the port. On a Render rolling deploy the OLD instance is
+    # still serving and holds locks on clips/jobs, so a lock wait here has no
+    # timeout and hangs forever → the new worker never binds → Render's port
+    # scan times out → dead deploy (the "No open HTTP ports detected" failure).
+    # Bound every migration session: fail the lock wait after 3s (caught by the
+    # try/except, retried on the next clean boot) instead of hanging.
+    # statement_timeout bounds the backfill UPDATEs the same way.
+    _is_sqlite = engine.url.drivername.startswith("sqlite")
+
+    def _guard(conn):
+        # Postgres-only session settings. This function is only reached on
+        # Postgres today (the caller branches on driver), but guard anyway so
+        # a future caller on SQLite can't error on the SET syntax — matches
+        # image_platform.run_image_platform_migrations._guard.
+        if _is_sqlite:
+            return
+        conn.execute(text("SET lock_timeout = '3s'"))
+        conn.execute(text("SET statement_timeout = '30s'"))
+        conn.commit()
+
     migrations = [
         # (table, column, sql)
         ("clips", "selected_variant", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS selected_variant INTEGER DEFAULT 1"),
@@ -1200,14 +1223,49 @@ def _run_migrations_postgresql(engine):
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS rendered_prompt_variant VARCHAR(1) DEFAULT 'A'"),
     ]
 
+    # v860 — steady-state boots (all columns already present, ~every deploy)
+    # should take ZERO table locks. Fetch the existing columns once and only
+    # run an ALTER for a genuinely-missing column. This removes the lock
+    # contention entirely for normal deploys; only a real new-column deploy
+    # takes a lock (and that one is bounded by _guard's lock_timeout).
+    existing_cols = {}
+    try:
+        with engine.connect() as conn:
+            _guard(conn)
+            for _t, _c in conn.execute(text(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public'"
+            )).fetchall():
+                existing_cols.setdefault(_t, set()).add(_c)
+    except Exception as e:
+        # Couldn't read the catalog — fall back to attempting every ALTER
+        # (still bounded by _guard). Never let this probe block the boot.
+        print(f"[Migration] PostgreSQL column-probe failed (attempting all): {e}", flush=True)
+
+    _n_skipped = 0
+    _n_altered = 0
     with engine.connect() as conn:
+        _guard(conn)
         for table, column, sql in migrations:
+            # "_create_table_" is a CREATE TABLE IF NOT EXISTS, not a column —
+            # always run it (cheap no-op if the table already exists).
+            if column != "_create_table_" and column in existing_cols.get(table, ()):
+                _n_skipped += 1
+                continue  # column already present → skip the ALTER + its lock
             try:
                 conn.execute(text(sql))
                 conn.commit()
+                _n_altered += 1
                 print(f"[Migration] PostgreSQL: ensured column {column} exists in {table}", flush=True)
             except Exception as e:
                 print(f"[Migration] PostgreSQL skipped {column}: {e}", flush=True)
+    # v860 diagnostic (temporary — remove once a clean deploy is confirmed):
+    # a healthy steady-state boot skips ~all columns and takes ~zero locks, so
+    # the port binds fast. If _n_altered is high on a boot that isn't a genuine
+    # schema change, the column-probe isn't matching (investigate before the
+    # next rolling deploy can hang).
+    print(f"[Migration][v860] columns: {_n_skipped} skipped (already present, no lock), "
+          f"{_n_altered} altered | lock_timeout=3s statement_timeout=30s active", flush=True)
 
     # v726: indexes for since_days date-window filter + v727 status diff endpoint.
     # Compound (user_id, created_at DESC) lets the ORDER BY + LIMIT path
@@ -1221,6 +1279,7 @@ def _run_migrations_postgresql(engine):
         "CREATE INDEX IF NOT EXISTS ix_jobs_instagram_video_id ON jobs (instagram_video_id)",
     ]
     with engine.connect() as conn:
+        _guard(conn)
         for sql in index_migrations:
             try:
                 conn.execute(text(sql))
@@ -1237,6 +1296,7 @@ def _run_migrations_postgresql(engine):
         "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS thumb_r2_key TEXT",
     ]
     with engine.connect() as conn:
+        _guard(conn)
         for sql in alter_migrations:
             try:
                 conn.execute(text(sql))
@@ -1261,6 +1321,7 @@ def _run_migrations_postgresql(engine):
           AND lifecycle_stage IS NULL
     """
     with engine.connect() as conn:
+        _guard(conn)
         try:
             result = conn.execute(text(backfill_sql))
             conn.commit()
@@ -1281,6 +1342,7 @@ def _run_migrations_postgresql(engine):
           AND lifecycle_stage = 'awaiting_approval'
     """
     with engine.connect() as conn:
+        _guard(conn)
         try:
             result = conn.execute(text(reclassify_sql))
             conn.commit()

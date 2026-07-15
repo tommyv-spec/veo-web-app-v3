@@ -32,6 +32,15 @@ def migrate():
         
         # Add column
         try:
+            # v860 — bound the ALTER's lock wait so a rolling-deploy lock held
+            # by the still-serving old instance can't hang this blocking
+            # PHASE-1 startup step before the port binds. No-op on SQLite (the
+            # SELECT probe above already returned on the common path where the
+            # column exists; this only runs on a genuine first-time add).
+            try:
+                db.execute(text("SET lock_timeout = '3s'"))
+            except Exception:
+                db.rollback()  # SQLite / unsupported — ignore
             db.execute(text(
                 "ALTER TABLE jobs ADD COLUMN clip_order_json TEXT"
             ))

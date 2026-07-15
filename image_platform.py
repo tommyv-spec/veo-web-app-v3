@@ -61,6 +61,20 @@ def run_image_platform_migrations():
         return
     is_sqlite = engine.url.drivername.startswith("sqlite")
 
+    def _guard(conn):
+        # v860 — same rolling-deploy lock-hang guard as
+        # _run_migrations_postgresql in models.py. These ALTERs run in the
+        # BLOCKING web-startup path before uvicorn binds the port; a lock wait
+        # against a still-serving old instance during a Render rolling deploy
+        # hangs forever with no timeout → new worker never binds → port scan
+        # times out → dead deploy. Bound every lock wait to 3s (Postgres only;
+        # SET lock_timeout has no meaning on SQLite and the syntax would error).
+        if is_sqlite:
+            return
+        conn.execute(text("SET lock_timeout = '3s'"))
+        conn.execute(text("SET statement_timeout = '30s'"))
+        conn.commit()
+
     # The full set of columns we may need to add if user is upgrading
     sqlite_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -431,12 +445,33 @@ def run_image_platform_migrations():
     except Exception:
         existing_tables = []
 
+    # v860 — Postgres: probe existing columns once so steady-state boots run
+    # ZERO ALTERs (and take ZERO ACCESS EXCLUSIVE locks). Mirrors the per-table
+    # PRAGMA skip the SQLite path already had. Without this, every column ALTER
+    # attempts the lock each boot even though the column exists — the exact
+    # rolling-deploy hang that killed the port bind.
+    existing_pg_cols = {}
+    if not is_sqlite:
+        try:
+            with engine.connect() as conn:
+                _guard(conn)
+                for _t, _c in conn.execute(text(
+                    "SELECT table_name, column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public'"
+                )).fetchall():
+                    existing_pg_cols.setdefault(_t, set()).add(_c)
+        except Exception as e:
+            log.warning(f"[image_platform] column-probe failed (attempting all): {e}")
+
     with engine.connect() as conn:
+        _guard(conn)
         for table, column, sql in migrations:
             if table not in existing_tables:
                 # Table doesn't exist yet — create_all will make it with the
                 # columns already in place, so skip.
                 continue
+            if not is_sqlite and column in existing_pg_cols.get(table, ()):
+                continue  # column already present → skip the ALTER + its lock
             try:
                 if is_sqlite:
                     result = conn.execute(text(f"PRAGMA table_info({table})"))
@@ -479,6 +514,7 @@ def run_image_platform_migrations():
          "CREATE INDEX IF NOT EXISTS ix_image_job_batches_user_created ON image_job_batches (user_id, created_at DESC)"),
     ]
     with engine.connect() as conn:
+        _guard(conn)
         for table, index_name, sql in index_migrations:
             if table not in existing_tables:
                 continue
