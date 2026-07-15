@@ -5494,6 +5494,7 @@ def diag_local_video_state(
         "with_fingerprint": with_fp, "no_fingerprint": total - with_fp,
         "transcribed": done,
         "unmatched_and_no_fp": unmatched_no_fp,
+        "unmatched_files": sorted(v.file_name for v in rows if not v.matched_job_id),
     }
 
 
