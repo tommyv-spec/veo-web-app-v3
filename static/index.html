@@ -738,6 +738,19 @@
         #imagesTab input.img-input:focus, #imagesTab select.img-select:focus { outline: none; border-color: var(--accent); }
         #imagesTab .settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
+        /* v854 — per-parent download button in the node-detail Parents row.
+           Small accent pill; stopPropagation keeps the chip's navigate click
+           from firing. */
+        .img-parent-dl {
+            margin-left: 4px; flex-shrink: 0;
+            background: var(--accent); color: #fff;
+            border: 1px solid rgba(255,255,255,0.5); border-radius: 999px;
+            padding: 4px 9px; font-size: 11px; font-weight: 700; line-height: 1;
+            cursor: pointer; transition: filter 0.12s, transform 0.12s;
+        }
+        .img-parent-dl:hover { filter: brightness(1.2); transform: translateY(-1px); }
+        .img-parent-dl:disabled { cursor: default; filter: none; }
+
         /* Parent-slot picker */
         .parent-slot {
             display: flex; align-items: center; gap: 10px; padding: 10px; background: var(--bg-input);
@@ -21252,6 +21265,14 @@ Ambient: same kitchen room tone, soft pour sound.
                                 const p = imgState.nodesById[e.parent_node_id];
                                 const thumb = p && p.chosen_variant ? p.chosen_variant.image_url : null;
                                 const pname = p ? imgEscape(p.name || ('Node ' + p.id)) : `#${e.parent_node_id}`;
+                                // v854 — download THIS parent's original file. IDs only
+                                // (see imgDownloadOne); it stops propagation so the chip's
+                                // navigate-onclick doesn't also fire. Only when the parent
+                                // node is loaded AND has a chosen variant to pull.
+                                const pDlLabel = p ? imgSlug('parent-' + (p.name || ('node-' + p.id))) : 'parent';
+                                const pDlBtn = thumb
+                                    ? `<button class="img-parent-dl" title="Download this parent's original image" data-track="parent_download_one" onclick="imgDownloadOne(event, ${e.parent_node_id}, null, '${pDlLabel}')">⬇</button>`
+                                    : '';
                                 return `
                                     <div style="display:flex;align-items:center;gap:6px;background:var(--bg-input);padding:6px 10px;border-radius:6px;border:1px solid var(--border-color);cursor:pointer;" onclick="imgSelectNode(${e.parent_node_id})">
                                         <div style="width:32px;height:32px;border-radius:4px;overflow:hidden;background:var(--bg-elevated);">
@@ -21261,6 +21282,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                             <div style="font-size:12px;">${pname}</div>
                                             ${e.role ? `<div style="font-size:10px;color:var(--text-muted);">${imgEscape(e.role)}</div>` : ''}
                                         </div>
+                                        ${pDlBtn}
                                     </div>`;
                             }).join('')}
                         </div>
