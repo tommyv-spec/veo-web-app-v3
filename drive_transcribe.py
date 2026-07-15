@@ -121,11 +121,16 @@ def _maybe_auto_match(video, account, db: Session) -> None:
 
         if not video.transcription:
             return
+        # Include published jobs: a Drive file is the export of a job that may
+        # already be posted, and gating on awaiting_finishing hid every such file.
+        # Matching a published job just associates the file; the reel is untouched.
         candidates = (
             db.query(Job)
             .filter(
                 Job.user_id == account.user_id,
-                Job.lifecycle_stage == "awaiting_finishing",
+                Job.status == "completed",
+                Job.archived == False,  # noqa: E712
+                Job.lifecycle_stage.in_(["awaiting_finishing", "published"]),
             )
             .all()
         )

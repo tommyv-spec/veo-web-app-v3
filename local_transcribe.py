@@ -605,11 +605,21 @@ def _maybe_auto_match(video, db: Session, candidates=None, dialogue_map=None,
         if not video.transcription:
             return
         if candidates is None:
+            # Include PUBLISHED jobs, not just awaiting_finishing. A folder file
+            # is the export of a job that may ALREADY be posted (its reel synced,
+            # or a prior local match). Gating on awaiting_finishing made every
+            # such file show "no match" even though its job sat right there —
+            # e.g. Posted-0710(3) waveform-matches published job 7f89d37e at
+            # 0.978 but was invisible. Matching an already-published job just
+            # ASSOCIATES the file (advance is a no-op on it, and the reel is
+            # untouched); an awaiting_finishing job still advances to published.
             candidates = (
                 db.query(Job)
                 .filter(
                     Job.user_id == video.user_id,
-                    Job.lifecycle_stage == "awaiting_finishing",
+                    Job.status == "completed",
+                    Job.archived == False,  # noqa: E712
+                    Job.lifecycle_stage.in_(["awaiting_finishing", "published"]),
                 )
                 .all()
             )
@@ -710,9 +720,17 @@ def rematch_unmatched(user_id, db: Session) -> dict:
         return {"checked": 0, "matched": 0, "skipped": "cooldown"}
     _last_sweep_at[user_id] = now_m
 
+    # Include published jobs so a file whose job is already posted still matches
+    # (see the per-video pool note above). The recency window + evidence gate keep
+    # it precise; the probe budget keeps it cheap.
     candidates = (
         db.query(Job)
-        .filter(Job.user_id == user_id, Job.lifecycle_stage == "awaiting_finishing")
+        .filter(
+            Job.user_id == user_id,
+            Job.status == "completed",
+            Job.archived == False,  # noqa: E712
+            Job.lifecycle_stage.in_(["awaiting_finishing", "published"]),
+        )
         .all()
     )
     if not candidates:
