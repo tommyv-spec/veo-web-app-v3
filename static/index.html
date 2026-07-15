@@ -15450,7 +15450,11 @@ Ambient: same kitchen room tone, soft pour sound.
                 bar.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:9999;background:var(--bg-elevated);border-top:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;gap:12px;box-shadow:0 -2px 12px rgba(0,0,0,0.3);';
                 document.body.appendChild(bar);
             }
-            const viewBtn = jobId === '_pending_' ? '' : `<button class="btn btn-primary btn-sm" onclick="selectJob('${jobId}')" style="white-space:nowrap;padding:8px 16px;">View Job →</button>`;
+            // Route through the 3-mode router (not bare selectJob): after job
+            // creation the app is in state-create, where selectJob's setActiveState()
+            // no-ops, so the view never switched. setAppMode review switches the
+            // view AND selects the job.
+            const viewBtn = jobId === '_pending_' ? '' : `<button class="btn btn-primary btn-sm" onclick="setAppMode({mode:'review', job:'${jobId}'})" style="white-space:nowrap;padding:8px 16px;">View Job →</button>`;
             bar.innerHTML = `
                 <div style="flex:1;">
                     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
