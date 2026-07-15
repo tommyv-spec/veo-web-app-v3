@@ -837,6 +837,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/resolve-basename",
         "/api/diag/backfill-basenames",
         "/api/diag/revert-published",
+        "/api/diag/local-video-state",
         "/api/diag/jobs-export-index",
         # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
         "/api/diag/probe-job-fp",
@@ -5294,6 +5295,41 @@ def diag_revert_published(
     if not int(dry_run):
         db.commit()
     return {"dry_run": bool(int(dry_run)), "results": results}
+
+
+@app.get("/api/diag/local-video-state")
+def diag_local_video_state(
+    token: str = "",
+    user_id: str = "",
+    db: DBSession = Depends(get_db_session),
+):
+    """v853 TEMPORARY: is a local video matchable at all? Counts fp / match state.
+
+    The waveform can only match a LocalVideo that HAS a fingerprint. Files uploaded
+    before fingerprinting existed have none — so widening the candidate pool does
+    nothing for them until they are re-fingerprinted. This says how many are in
+    that state.
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+    from models import LocalVideo
+    q = db.query(LocalVideo)
+    if user_id:
+        q = q.filter(LocalVideo.user_id == user_id)
+    rows = q.all()
+    total = len(rows)
+    matched = sum(1 for v in rows if v.matched_job_id)
+    with_fp = sum(1 for v in rows if v.audio_fp)
+    done = sum(1 for v in rows if v.transcription_status == "done")
+    unmatched_no_fp = sum(1 for v in rows if not v.matched_job_id and not v.audio_fp)
+    return {
+        "total": total, "matched": matched, "unmatched": total - matched,
+        "with_fingerprint": with_fp, "no_fingerprint": total - with_fp,
+        "transcribed": done,
+        "unmatched_and_no_fp": unmatched_no_fp,
+    }
 
 
 @app.get("/api/diag/backfill-basenames")
