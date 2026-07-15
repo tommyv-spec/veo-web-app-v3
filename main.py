@@ -838,6 +838,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/backfill-basenames",
         "/api/diag/revert-published",
         "/api/diag/local-video-state",
+        "/api/diag/set-local-fp",
         "/api/diag/jobs-export-index",
         # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
         "/api/diag/probe-job-fp",
@@ -5295,6 +5296,49 @@ def diag_revert_published(
     if not int(dry_run):
         db.commit()
     return {"dry_run": bool(int(dry_run)), "results": results}
+
+
+class SetLocalFpRequest(BaseModel):
+    items: List[dict]   # [{file_hash, fingerprint, duration_s}]
+
+
+@app.post("/api/diag/set-local-fp")
+def diag_set_local_fp(
+    req: SetLocalFpRequest,
+    token: str = "",
+    db: DBSession = Depends(get_db_session),
+):
+    """v853 TEMPORARY: stamp a LocalVideo's fingerprint + duration by file_hash.
+
+    123 of 127 local videos predate fingerprinting, so the waveform can't match
+    them and the widened pool is inert. The operator's actual files are on disk;
+    they are fingerprinted there (the file bytes never left their machine) and the
+    fingerprint pushed here by the file's SHA-256, which IS the LocalVideo key.
+    After this, the rematch sweep can prove each file against a job.
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+    from models import LocalVideo
+    updated = 0
+    misses = 0
+    for it in req.items:
+        h = (it.get("file_hash") or "").strip().lower()
+        fp = it.get("fingerprint") or ""
+        if not h or not fp:
+            continue
+        v = db.query(LocalVideo).filter_by(file_hash=h).first()
+        if not v:
+            misses += 1
+            continue
+        v.audio_fp = fp
+        v.audio_fp_at = datetime.utcnow()
+        if it.get("duration_s") is not None:
+            v.duration_s = it["duration_s"]
+        updated += 1
+    db.commit()
+    return {"updated": updated, "not_found": misses, "received": len(req.items)}
 
 
 @app.get("/api/diag/local-video-state")
