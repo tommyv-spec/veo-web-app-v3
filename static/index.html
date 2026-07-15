@@ -13950,8 +13950,9 @@ Ambient: same kitchen room tone, soft pour sound.
 
                                 </div>
 
-                                <!-- RIGHT COLUMN: Audio Enhancement -->
-                                <div style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
+                                <!-- RIGHT COLUMN: Audio Enhancement — hidden for now; toggles kept in DOM
+                                     (default OFF) so export reads them as disabled. -->
+                                <div style="display:none;background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
                                     <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px;">🔊 Audio Enhancement</div>
                                     
                                     <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border-color);">
@@ -14358,11 +14359,14 @@ Ambient: same kitchen room tone, soft pour sound.
             // Restore saved export settings from localStorage
             try {
                 const saved = JSON.parse(localStorage.getItem('exportSettings') || '{}');
-                // Audio toggles — default OFF unless explicitly saved as true
-                if (saved.remove_laughter === true) document.getElementById('modalRemoveLaughter')?.classList.add('active');
-                if (saved.apply_deepfilter === true) document.getElementById('modalDeepFilter')?.classList.add('active');
-                if (saved.apply_loudnorm === true) document.getElementById('modalLoudnorm')?.classList.add('active');
-                if (saved.apply_voice_filter === true) document.getElementById('modalVoiceFilter')?.classList.add('active');
+                // Audio Enhancement section is hidden for now and must ALWAYS be OFF
+                // by default — do NOT restore these 4 toggles from saved settings
+                // (no visible UI to turn them back off). Re-enable this block if the
+                // section is un-hidden.
+                // if (saved.remove_laughter === true) document.getElementById('modalRemoveLaughter')?.classList.add('active');
+                // if (saved.apply_deepfilter === true) document.getElementById('modalDeepFilter')?.classList.add('active');
+                // if (saved.apply_loudnorm === true) document.getElementById('modalLoudnorm')?.classList.add('active');
+                // if (saved.apply_voice_filter === true) document.getElementById('modalVoiceFilter')?.classList.add('active');
                 if (saved.remove_silence === true) {
                     document.getElementById('modalRemoveSilence')?.classList.add('active');
                     const sc = document.getElementById('silenceControlsSection');
