@@ -841,6 +841,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/diag/set-local-fp",
         "/api/diag/run-rematch",
         "/api/diag/apply-local-links",
+        "/api/diag/dump-job-fps",
         "/api/diag/jobs-export-index",
         # v854 — waveform backfill (export side + reel side). Same DIAG_TOKEN gate.
         "/api/diag/probe-job-fp",
@@ -5298,6 +5299,36 @@ def diag_revert_published(
     if not int(dry_run):
         db.commit()
     return {"dry_run": bool(int(dry_run)), "results": results}
+
+
+@app.get("/api/diag/dump-job-fps")
+def diag_dump_job_fps(
+    token: str = "",
+    user_id: str = "",
+    db: DBSession = Depends(get_db_session),
+):
+    """v853 TEMPORARY: dump every job's export fingerprint + duration + stage.
+
+    Read-only, ONE query, no ffmpeg/R2 (the fps are cached columns). Lets the
+    file<->job matching run entirely client-side against the operator's local
+    files, so it needs neither a per-file server call (the loop that overloaded
+    the worker) nor a fragile filename join.
+    """
+    import os as _os
+    expected = _os.environ.get("DIAG_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="not found")
+    from models import Job
+    q = db.query(
+        Job.id, Job.export_duration_s, Job.export_audio_fp, Job.lifecycle_stage,
+    ).filter(Job.status == "completed", Job.archived == False,  # noqa: E712
+             Job.export_audio_fp.isnot(None), Job.export_audio_fp != "")
+    if user_id:
+        q = q.filter(Job.user_id == user_id)
+    return {"jobs": [
+        {"job_id": jid, "export_duration_s": dur, "fp": fp, "stage": stage}
+        for (jid, dur, fp, stage) in q.all()
+    ]}
 
 
 class ApplyLocalLinksRequest(BaseModel):
