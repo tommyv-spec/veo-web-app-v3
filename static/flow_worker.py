@@ -4338,6 +4338,21 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
         print(f"[{label}] laptop copy error (continuing): {_pe}", flush=True)
 
 
+# Playwright/Patchright default chromium switches include --password-store=basic
+# and --use-mock-keychain (see chromiumSwitches.js). On macOS those force Chrome
+# to skip the real "Chrome Safe Storage" login-Keychain key, so the golden's
+# COPIED cookies (encrypted with that key, prefix v10) decrypt to nothing ->
+# "Not logged in". Windows OSCrypt uses DPAPI (key rides in the copied Local
+# State) and ignores both flags, so Windows is unaffected. Strip both on macOS
+# so the worker Chrome reads the same real Keychain key that encrypted the copy.
+# The channel='chrome' binary is the operator's own Google Chrome.app -> already
+# on the Keychain item's ACL -> access is silent (no GUI prompt).
+_IGNORE_DEFAULT_ARGS = ['--enable-automation']
+if sys.platform == 'darwin':
+    _IGNORE_DEFAULT_ARGS = _IGNORE_DEFAULT_ARGS + ['--password-store=basic',
+                                                   '--use-mock-keychain']
+
+
 def _worker_chrome_channel():
     """Chrome channel for the worker browser. Priority: WORKER_CHROME_CHANNEL
     env override, else the channel recorded by the laptop-profile pull (the
@@ -21306,7 +21321,7 @@ class AccountWorker(threading.Thread):
                 acct_launch_kwargs = {
                     'user_data_dir': self.session_folder,
                     'channel': _worker_chrome_channel(),
-                    'ignore_default_args': ['--enable-automation'],
+                    'ignore_default_args': _IGNORE_DEFAULT_ARGS,
                     'headless': False,
                     'viewport': {"width": 1280, "height": 720},
                     'args': launch_args,
@@ -21567,7 +21582,7 @@ class AccountWorker(threading.Thread):
                     relaunch_kwargs = {
                         'user_data_dir': self.session_folder,
                         'channel': _worker_chrome_channel(),
-                        'ignore_default_args': ['--enable-automation'],
+                        'ignore_default_args': _IGNORE_DEFAULT_ARGS,
                         'headless': False,
                         'viewport': {"width": 1280, "height": 720},
                         'args': launch_args,
@@ -21959,7 +21974,7 @@ class AccountWorker(threading.Thread):
                                     acct_launch_kwargs = {
                                         'user_data_dir': self.session_folder,
                                         'channel': _worker_chrome_channel(),
-                                        'ignore_default_args': ['--enable-automation'],
+                                        'ignore_default_args': _IGNORE_DEFAULT_ARGS,
                                         'headless': False,
                                         'viewport': {"width": 1280, "height": 720},
                                         'args': self._launch_args,
@@ -22080,7 +22095,7 @@ class AccountWorker(threading.Thread):
             kwargs = {
                 'user_data_dir': self.session_folder,
                 'channel': _worker_chrome_channel(),
-                'ignore_default_args': ['--enable-automation'],
+                'ignore_default_args': _IGNORE_DEFAULT_ARGS,
                 'headless': False,
                 'viewport': {"width": 1280, "height": 720},
                 'args': self._launch_args,
@@ -22538,7 +22553,7 @@ class AccountWorker(threading.Thread):
             relaunch_kwargs = {
                 'user_data_dir': self.session_folder,
                 'channel': _worker_chrome_channel(),
-                'ignore_default_args': ['--enable-automation'],
+                'ignore_default_args': _IGNORE_DEFAULT_ARGS,
                 'headless': False,
                 'viewport': {"width": 1280, "height": 720},
                 'args': launch_args,
@@ -23203,7 +23218,7 @@ def main(account_session=None, account_download=None, account_label=None):
             launch_kwargs = {
                 'user_data_dir': SESSION_FOLDER,
                 'channel': _worker_chrome_channel(),
-                'ignore_default_args': ['--enable-automation'],
+                'ignore_default_args': _IGNORE_DEFAULT_ARGS,
                 'headless': False,
                 'viewport': {"width": 1280, "height": 720},
                 'args': single_chrome_args,
@@ -23368,7 +23383,7 @@ def main(account_session=None, account_download=None, account_label=None):
                     relaunch_kwargs = {
                         'user_data_dir': SESSION_FOLDER,
                         'channel': _worker_chrome_channel(),
-                        'ignore_default_args': ['--enable-automation'],
+                        'ignore_default_args': _IGNORE_DEFAULT_ARGS,
                         'headless': False,
                         'viewport': {"width": 1280, "height": 720},
                         'args': single_chrome_args,
@@ -24066,7 +24081,7 @@ def main_multi_coordinator(accounts):
             launch_kwargs = {
                 'user_data_dir': session,
                 'channel': _worker_chrome_channel(),
-                'ignore_default_args': ['--enable-automation'],
+                'ignore_default_args': _IGNORE_DEFAULT_ARGS,
                 'headless': False,
                 'viewport': {"width": 1280, "height": 720},
                 'args': single_chrome_args,

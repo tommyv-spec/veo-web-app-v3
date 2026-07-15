@@ -642,6 +642,47 @@ def _lean_ignore(dirpath, names):
 _HANDSHAKE_SUBSTR = ("csrf-token", "callback-url", ".state", "pkce", "nonce")
 
 
+# Google/Flow auth cookies whose presence in the golden proves the login copied.
+_AUTH_COOKIE_NAMES = ("sid", "hsid", "ssid", "apisid", "sapisid", "lsid",
+                      "__secure-1psid", "__secure-3psid", "__secure-1psidts",
+                      "__secure-next-auth.session-token")
+
+
+def _diag_cookie_readiness(cookies_db, log=print, tag=""):
+    """Read-only sanity report on the freshly-built golden Cookies DB (NO
+    decrypt): how many rows, how many are Google/Flow auth cookies, and the
+    encryption scheme byte (v10/v11 = OS-keyring-encrypted; empty = plaintext).
+    Lets us tell 'cookies never copied' from 'copied but undecryptable at launch'
+    without leaking any secret value."""
+    if not cookies_db or not os.path.isfile(cookies_db):
+        log(f"{tag}cookie-diag: no Cookies DB at {cookies_db}")
+        return
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{cookies_db}?mode=ro&immutable=1", uri=True, timeout=5)
+        try:
+            rows = con.execute(
+                "SELECT name, length(encrypted_value), "
+                "hex(substr(encrypted_value,1,3)) FROM cookies").fetchall()
+        finally:
+            con.close()
+        total = len(rows)
+        auth = [(n, ln, hx) for (n, ln, hx) in rows
+                if (n or "").lower() in _AUTH_COOKIE_NAMES]
+        schemes = {}
+        for (_n, _ln, hx) in auth:
+            try:
+                pfx = bytes.fromhex(hx or "").decode("ascii", "replace")[:3]
+            except ValueError:
+                pfx = "?"
+            schemes[pfx] = schemes.get(pfx, 0) + 1
+        names = sorted({(n or "").lower() for (n, _l, _h) in auth})
+        log(f"{tag}cookie-diag: {total} cookies total, {len(auth)} auth "
+            f"(schemes={schemes or '{}'}, names={names or '[]'})")
+    except Exception as e:
+        log(f"{tag}cookie-diag: read failed: {e}")
+
+
 def _prune_handshake_cookies(cookies_db, log=print):
     """Delete stale next-auth handshake cookies from a copied golden Cookies DB
     (keeps the session token + Google SSO). Returns count deleted, -1 on error.
@@ -759,6 +800,11 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
         if _pruned > 0:
             log(f"{tag}lean golden: dropped {_pruned} stale next-auth handshake cookie(s) "
                 f"(kept session-token + Google SSO)")
+        # DIAG: prove the auth cookies actually landed in the golden (read-only,
+        # no decrypt). If these are present + v10 but Flow still says logged-out,
+        # the blocker is decryption at launch (mac keychain), not the copy.
+        _diag_cookie_readiness(
+            os.path.join(tmp, "Default", "Network", "Cookies"), log=log, tag=tag)
     except Exception as e:
         log(f"{tag}lean golden: copy failed: {e}")
         shutil.rmtree(tmp, ignore_errors=True)
