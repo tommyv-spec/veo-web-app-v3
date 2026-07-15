@@ -17,7 +17,7 @@
   *{margin:0;padding:0;box-sizing:border-box;}
   body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);line-height:1.75;font-size:15px;}
 
-  .hero{position:relative;overflow:hidden;padding:80px 24px 64px;text-align:center;border-bottom:1px solid var(--border);}
+  .hero{position:relative;overflow:hidden;padding:44px 24px 36px;text-align:center;border-bottom:1px solid var(--border);}
   .hero::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse 80% 60% at 50% 0%,rgba(124,111,255,0.18) 0%,transparent 70%),radial-gradient(ellipse 50% 40% at 80% 100%,rgba(45,212,191,0.08) 0%,transparent 60%);pointer-events:none;}
   .hero-badge{display:inline-flex;align-items:center;gap:8px;background:rgba(124,111,255,0.12);border:1px solid rgba(124,111,255,0.3);border-radius:99px;padding:5px 14px;font-size:12px;font-weight:500;color:var(--accent2);letter-spacing:0.5px;text-transform:uppercase;margin-bottom:20px;}
   .hero h1{font-family:'Syne',sans-serif;font-size:clamp(32px,6vw,56px);font-weight:800;line-height:1.1;background:linear-gradient(135deg,#C4B5FD 0%,#818CF8 40%,#2DD4BF 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:16px;}
@@ -27,15 +27,15 @@
   .hf-icon{font-size:20px;}.hf-label{font-size:11px;font-weight:600;color:var(--text-sec);letter-spacing:0.3px;}
   .hf-arrow{color:var(--text-dim);padding:0 8px;font-size:16px;}
 
-  .wrapper{display:flex;min-height:calc(100vh - 200px);}
-  .sidenav{width:240px;flex-shrink:0;position:sticky;top:0;height:100vh;overflow-y:auto;padding:32px 0 32px 24px;border-right:1px solid var(--border);background:var(--surface);}
+  .wrapper{display:flex;min-height:calc(100vh - 200px);max-width:1200px;margin:0 auto;}
+  .sidenav{width:240px;flex-shrink:0;position:sticky;top:0;height:auto;max-height:100vh;overflow-y:auto;padding:32px 0 32px 24px;border-right:1px solid var(--border);background:var(--surface);}
   .sidenav-title{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-dim);margin-bottom:16px;padding-right:24px;}
   .sidenav a{display:flex;align-items:center;gap:10px;padding:7px 12px 7px 0;color:var(--text-sec);text-decoration:none;font-size:13px;border-radius:0 6px 6px 0;transition:color 0.15s;border-left:2px solid transparent;margin-left:-2px;line-height:1.4;}
   .sidenav a:hover{color:var(--text);border-left-color:var(--accent);}
   .sidenav .sn-num{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);width:18px;flex-shrink:0;}
   .sidenav .sn-group{font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim);padding:16px 0 6px;}
 
-  .content{flex:1;min-width:0;padding:40px 48px 80px;max-width:860px;}
+  .content{flex:1;min-width:0;width:100%;padding:40px 48px 80px;max-width:920px;}
   section{margin-bottom:64px;}
   h2{font-family:'Syne',sans-serif;font-size:26px;font-weight:700;margin-bottom:20px;display:flex;align-items:center;gap:14px;padding-bottom:14px;border-bottom:1px solid var(--border);scroll-margin-top:32px;}
   .h2-num{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:500;color:var(--accent2);background:rgba(124,111,255,0.1);border:1px solid rgba(124,111,255,0.25);padding:3px 8px;border-radius:6px;flex-shrink:0;}
@@ -193,18 +193,21 @@
   <div class="table-wrap"><table><thead><tr><th>Setting</th><th>Options</th><th>What It Does</th></tr></thead><tbody>
     <tr><td><strong>Language</strong></td><td>EN, IT, ES, FR, DE</td><td>Affects auto-split word count and speaking rate per clip.</td></tr>
     <tr><td><strong>Words per Line</strong></td><td>10–35 (default: ~21)</td><td>Words per auto-split clip. Lower for slow speakers, higher for fast.</td></tr>
-    <tr><td><strong>Duration</strong></td><td>4s / 6s / 8s</td><td>Clip length. <strong>8s strongly recommended</strong> — required for interpolation and 1080p.</td></tr>
+    <tr><td><strong>Duration</strong></td><td>4s / 6s / 8s / 10s</td><td>Clip length. <strong>8s strongly recommended</strong> — required for interpolation and 1080p.</td></tr>
     <tr><td><strong>Aspect Ratio</strong></td><td>16:9 / 9:16</td><td>9:16 for TikTok/Reels/Shorts. 16:9 for YouTube/presentations.</td></tr>
     <tr><td><strong>Resolution</strong></td><td>720p / 1080p</td><td>1080p requires 8s duration.</td></tr>
     <tr><td><strong>Interpolation</strong></td><td>On / Off</td><td>Smooth motion between frames. Natural head movement and scene transitions. Requires 8s. <strong>Keep ON.</strong></td></tr>
-    <tr><td><strong>Model</strong></td><td>Omni Flash / Veo 3.1 Lite / Fast / Quality</td><td>Which video model renders the clips. Quality is sharpest; Lite is fastest. Default is a low-priority Lite tier.</td></tr>
+    <tr><td><strong>Model</strong></td><td>Omni Flash / Veo 3.1 Lite / Fast / Quality / Lite (Lower Priority)</td><td>Which video model renders the clips. Default is Omni Flash. Quality is sharpest; the low-priority Lite tier is slowest but cheapest.</td></tr>
     <tr><td><strong>AI Prompts</strong></td><td>On / Off</td><td>ON = AI analyzes your image and writes optimized visual prompts. OFF = you write your own prompts.</td></tr>
     <tr><td><strong>Gesture Enrichment</strong></td><td>On / Off</td><td>Only when AI Prompts is ON. AI adds content-matched gestures (mention the head → points at head, list three things → holds up three fingers). Small extra cost per clip.</td></tr>
+    <tr><td><strong>Kling (Higgsfield)</strong></td><td>Off / On</td><td>Routes clips to the Higgsfield / Kling video backend instead of Flow.</td></tr>
+    <tr><td><strong>Short Lines</strong></td><td>Timed / Fill</td><td>How very short lines (under ~13 words) are handled. Timed = ~2s of speech plus silent action; Fill = pad the wording toward 25 words.</td></tr>
+    <tr><td><strong>Prefix Short</strong></td><td>Off / On</td><td>Prepends a throwaway onset word to short lines so Veo doesn't clip the first consonant. Prefix word and length threshold are adjustable.</td></tr>
   </tbody></table></div>
   <h3>Context for AI (Optional)</h3>
   <p>A text area below the toggles lets you give the AI extra context: speaker role, tone, setting, voice style. Example: <em>"Professional doctor, confident tone, medical office background."</em></p>
   <div class="info"><span class="callout-icon">ℹ️</span><div><strong>Constraints are enforced automatically.</strong> Choosing 1080p locks duration to 8s. Enabling interpolation also requires 8s. You can't create an incompatible configuration.</div></div>
-  <h3>Generation Mode (Multi-Image Only)</h3>
+  <h3>Generation Mode (Auto-Cycle, 2+ images)</h3>
   <div class="table-wrap"><table><thead><tr><th>Mode</th><th>How It Works</th><th>Best For</th></tr></thead><tbody>
     <tr><td><strong>🔀 Smart</strong></td><td>Odd clips first, then even clips use confirmed end-frames from neighbors</td><td>Most cases — fast AND smooth transitions</td></tr>
     <tr><td><strong>⚡ Fast</strong></td><td>All clips simultaneously</td><td>Speed priority</td></tr>
@@ -264,6 +267,8 @@
   <div class="table-wrap"><table><thead><tr><th>Control</th><th>Default</th><th>Effect</th></tr></thead><tbody>
     <tr><td><strong>Trigger (min gap)</strong></td><td>0.3s</td><td>Only gaps longer than this are removed. Lower = more aggressive cutting.</td></tr>
     <tr><td><strong>Keep (padding)</strong></td><td>0.2s</td><td>Silence preserved at each cut point for natural breath pauses.</td></tr>
+    <tr><td><strong>Mode</strong></td><td>Energy / Whisper</td><td>Energy detects loudness gaps; Whisper times gaps from the transcription.</td></tr>
+    <tr><td><strong>Sensitivity</strong></td><td>0.75</td><td>Cut aggressiveness from lenient (0) to strict (1).</td></tr>
   </tbody></table></div>
   <h3>Speed Up</h3>
   <p>The <strong>⚡ Speed Up</strong> toggle increases playback speed from 1.01× to 1.50×. Makes content feel more energetic. <strong>1.10× is recommended</strong> — barely noticeable but shaves seconds off total runtime.</p>
@@ -271,10 +276,10 @@
   <p>Click <strong>✏️ Lineup</strong> to open the drag-and-drop reorder interface. Rearrange clips before export without changing the original clip_index assignments. The custom order is saved and used by Export Final.</p>
   <h3>Audio Enhancement</h3>
   <div class="table-wrap"><table><thead><tr><th>Toggle</th><th>Default</th><th>What It Does</th></tr></thead><tbody>
-    <tr><td><strong>😂 Remove Laughter</strong></td><td>ON</td><td>Suppresses laughter artifacts and background noise using RNNoise. Adjustable strength (50–100%).</td></tr>
-    <tr><td><strong>🎛️ DeepFilterNet</strong></td><td>ON</td><td>Removes hiss and static while preserving voice clarity. Uses adaptive FFT denoising.</td></tr>
+    <tr><td><strong>😂 Remove Laughter</strong></td><td>OFF (first run)</td><td>Suppresses laughter artifacts and background noise using RNNoise. Adjustable strength (50–100%). Your choice is remembered after the first export.</td></tr>
+    <tr><td><strong>🎛️ DeepFilterNet</strong></td><td>OFF (first run)</td><td>Removes hiss and static while preserving voice clarity. Uses adaptive FFT denoising.</td></tr>
     <tr><td><strong>🎚️ Voice Filter</strong></td><td>OFF</td><td>Compressor, noise gate, limiter. Can sound robotic — use only if audio needs heavy processing.</td></tr>
-    <tr><td><strong>📊 Loudness Norm</strong></td><td>ON</td><td>Normalizes volume to broadcast standard (-16 LUFS) for consistent playback.</td></tr>
+    <tr><td><strong>📊 Loudness Norm</strong></td><td>OFF (first run)</td><td>Normalizes volume to broadcast standard (-16 LUFS) for consistent playback.</td></tr>
   </tbody></table></div>
   <div class="info"><span class="callout-icon">ℹ️</span><div><strong>Settings are remembered.</strong> Your export settings are saved automatically so you don't need to re-configure on every export. The success banner after export shows exactly which settings were applied.</div></div>
 </section>
@@ -382,10 +387,15 @@
     <li>Pick a <strong>Subject image (image 1)</strong> — the person used across every scene. Pick or upload it from the dropdown.</li>
     <li>Optionally pick a <strong>Product image (image 2)</strong> — a branded product. It auto-binds to the scenes whose prompt names it. Leave empty if there's no product.</li>
     <li>Set aspect ratio, resolution, model, and variants per scene (see <a href="#img-settings">Settings &amp; Models</a>). An optional <strong>Prompt prefix</strong> is prepended to every scene — it defaults to quality rules.</li>
-    <li>Click <strong>📋 Import</strong>. The scenes are created and queued.</li>
+    <li>Click <strong>✨ Create &amp; Generate</strong> in the modal. The scenes are created and queued. (The top-bar <strong>📋 Import</strong> only opens this modal.)</li>
   </ol>
   <h3>Reference chains</h3>
-  <p>A scene can be built on top of an earlier scene by adding a <code>reference_image: Scene N</code> field. That links them parent → child.</p>
+  <p>A scene can be built on top of an earlier scene by adding a <code>reference_image: image_K</code> field (or <code>none</code>). That links them parent → child. (<code>Scene N</code> still works for legacy 1:1 tables.)</p>
+  <p>Two ways to set a reference without hand-writing the field:</p>
+  <ul>
+    <li><strong>+ Add Parent</strong> — a visual parent-slot picker inside the Import modal. Point a scene at the subject, the product, or an earlier scene.</li>
+    <li><strong>📤 Upload Reference Image</strong> — a left-panel button that adds your own image as a standalone reference node, outside scene-table import.</li>
+  </ul>
   <div class="info"><span class="callout-icon">ℹ️</span><div><strong>How scheduling works:</strong> scenes with <em>no</em> reference start generating right away. A scene that references an earlier one stays in <strong>draft</strong> until you pick a <strong>chosen variant</strong> of its parent — only then does it queue. So each scene in a chain is built from an approved predecessor.</div></div>
   <div class="tip"><span class="callout-icon">💡</span><div>It's the same <code>### Scene N</code> + prompt format used across the platform. Build the frames here, approve them, then promote to a video.</div></div>
 </section>
@@ -482,7 +492,7 @@
   <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">✍️ Write like you talk</h4><p>Contractions, natural sentence lengths, numbers as words ("twenty five"). The AI needs speech patterns, not written prose.</p></div>
   <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">✅ Review as you go</h4><p>Approve good clips immediately and Redo bad ones right away — redos process in parallel with remaining clips.</p></div>
   <div class="card" style="margin-bottom:12px;"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">✂️ Keep Smart Trim on</h4><p>Preserves natural openings for the first clip and scene cuts while trimming static frames at clip joins.</p></div>
-  <div class="card"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">🔇 Audio enhancement</h4><p>Keep Remove Laughter and DeepFilterNet ON for cleaner audio. Only enable Voice Filter if the audio specifically needs heavy compression.</p></div>
+  <div class="card"><h4 style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--text);">🔇 Audio enhancement</h4><p>Turn on Remove Laughter and DeepFilterNet for cleaner audio — they're off by default, and your choice is remembered. Only enable Voice Filter if the audio specifically needs heavy compression.</p></div>
 </section>
 
 <section id="troubleshooting">
