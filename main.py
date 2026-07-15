@@ -15023,11 +15023,25 @@ async def user_worker_upload_video(
             if clip.kling_variant_status in ('queued', 'processing'):
                 clip.kling_variant_status = 'done'
             if attempt == 9:
-                clip.status = ClipStatus.COMPLETED.value
-                if clip.approval_status not in ('approved', 'rejected'):
-                    clip.approval_status = 'pending_review'
-                clip.error_code = None
-                clip.error_message = None
+                # Kling variant is ADDITIVE, not a replacement. Only mark the clip
+                # completed when a PRIMARY Flow/Veo render (attempt < 9) already
+                # exists. If Kling races ahead and finishes first (common on
+                # 1-clip jobs), marking the clip completed made the Flow worker's
+                # clip_done_in_platform check skip the real render → the clip
+                # shipped Kling-only. Leaving it pending lets the Flow pass still
+                # generate; the Kling variant stays viewable via versions_json
+                # (approval-status has_video reads bool(versions)).
+                has_flow_render = any((v.get("attempt") or 1) < 9 for v in versions)
+                if has_flow_render:
+                    clip.status = ClipStatus.COMPLETED.value
+                    if clip.approval_status not in ('approved', 'rejected'):
+                        clip.approval_status = 'pending_review'
+                    clip.error_code = None
+                    clip.error_message = None
+                else:
+                    # TEMP diagnostic (remove after operator confirms Flow no longer skips)
+                    print(f"[kling] clip {clip_index} attempt 9 uploaded, no Flow render yet — "
+                          f"leaving clip pending so the Flow pass still generates (job {job_id[:8]})", flush=True)
 
             add_job_log(db, job_id, f"Clip {clip_index + 1} variant {attempt}.{variant} uploaded via user worker", "INFO", "flow")
             db.commit()
