@@ -1,4 +1,4 @@
-"""v857 — per-clip render duration picked from the spoken line's word count.
+"""v861 — per-clip render duration picked from the spoken line's word count.
 
 SINGLE SOURCE OF TRUTH for the bucket math. Imported by image_platform.py
 (resolve at import time) and main.py (validate the PATCH). worker.py and
@@ -20,7 +20,7 @@ import this module — so the number is deliberately NOT re-declared here as a
 constant free to drift out of step with the auditor's copy.
 
 Implied speech rate 2.67-3.0 words/sec (least-squares fit of the operator's
-four points = 2.8 w/s). Full deep-dive: template_reference.md §v857.
+four points = 2.8 w/s). Full deep-dive: template_reference.md §v861.
 """
 from typing import Optional
 
@@ -49,14 +49,14 @@ def _validated_duration_s(value, field_name: str) -> int:
     """
     if isinstance(value, bool) or value not in ALLOWED_CLIP_DURATIONS_S:
         raise ValueError(
-            "%s %r not in %r (v857)"
+            "%s %r not in %r (v861)"
             % (field_name, value, list(ALLOWED_CLIP_DURATIONS_S))
         )
     return int(value)
 
 
 def pick_clip_duration_s(word_count: int) -> int:
-    """Map a word count to its v857 duration bucket. Never returns None."""
+    """Map a word count to its v861 duration bucket. Never returns None."""
     for max_words, duration in _BUCKETS:
         if word_count <= max_words:
             return duration
@@ -95,10 +95,10 @@ def resolve_clip_duration_s(
 ) -> Optional[int]:
     """Final per-clip duration. Precedence, highest first:
 
-    1. ``explicit``      — the scene's `- **clip_duration_s:**` bullet (v857)
+    1. ``explicit``      — the scene's `- **clip_duration_s:**` bullet (v861)
     2. ``anchor_bucket`` — the v667 frame-anchor-derived bucket (transformation
                            montages; already ceil'd to [4,6,8] by the caller)
-    3. word count of ``line_text`` — the v857 table
+    3. word count of ``line_text`` — the v861 table
     4. None              — no line, no anchor: the job-level duration applies
 
     Both caller-supplied durations go through the same validation gate. Neither

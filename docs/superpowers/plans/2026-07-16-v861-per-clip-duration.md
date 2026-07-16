@@ -1,4 +1,6 @@
-# v857 — Per-clip duration from word count Implementation Plan
+# v861 — Per-clip duration from word count Implementation Plan
+
+> **Renumbered v857 → v861 (2026-07-16).** v857 was already the one-job-one-video gate (live in `main.py` / `drive_transcribe.py` / `instagram_match.py`, undocumented in `template_reference.md` — which is how the collision slipped through). v858 (image-regenerate), v859 (multi-reference chain), and v860 (rolling-deploy lock-hang guard) are also taken; v861 was verified free across both repos' code, docs, and full commit history. **Lesson: the v-number space lives in COMMIT HISTORY and CODE COMMENTS, not just `template_reference.md` — check all three before claiming a number.** Commits `a1cb294`, `7429630`, `c04ece9`, `4566ed3`, `c7dad6b` predate the renumber and still say v857 in their messages; history was deliberately not rewritten because a concurrent session's commit is interleaved in this branch.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -19,7 +21,7 @@
 | Markdown field | **Explicit + mandatory** at authoring (auditor hard-FAIL). Parser auto-computes as fallback so 180 legacy builds still import. |
 | Render paths | Flow **and** Veo API. The 1080p/interpolation 8s pin (`main.py:2006-2010`) stays as-is. |
 
-**The bucket table (v857):**
+**The bucket table (v861):**
 
 | words `W` | duration |
 |---|---|
@@ -39,13 +41,13 @@ Implied speech rate 2.67–3.0 words/sec; least-squares fit of the operator's 4 
 
 | File | Responsibility | Change |
 |---|---|---|
-| `code/clip_duration.py` | **NEW.** Sole owner of the v857 bucket math + the allowed-values constant. Pure functions, no imports from the app. | Create |
-| `code/tests/test_v857_clip_duration.py` | **NEW.** Unit tests for the bucket table + precedence resolver. | Create |
+| `code/clip_duration.py` | **NEW.** Sole owner of the v861 bucket math + the allowed-values constant. Pure functions, no imports from the app. | Create |
+| `code/tests/test_v861_clip_duration.py` | **NEW.** Unit tests for the bucket table + precedence resolver. | Create |
 | `code/image_platform.py` | Markdown parser + `prepare_batch_for_video` resolver. | Modify |
 | `code/main.py` | PATCH validator (allow 10) + Flow clips payload field. | Modify |
 | `code/worker.py` | Veo API path: per-clip `override_duration` + 10→8 clamp. | Modify |
 | `code/static/flow_worker.py` | Flow path: per-clip `page._duration` + per-clip prompt duration. | Modify |
-| `code/template_reference.md` | §v857 canonical deep-dive + v831 cap amendment. | Modify |
+| `code/template_reference.md` | §v861 canonical deep-dive + v831 cap amendment. | Modify |
 | `code/template_new_format.md` | Skeleton gains the field. | Modify |
 | `~/.claude/skills/build-video/audit_build.py` | New mandatory check + v831 cap 25→28. | Modify |
 | `wiki/patterns/conventions.md` | One-row index entry. | Modify |
@@ -59,21 +61,21 @@ Implied speech rate 2.67–3.0 words/sec; least-squares fit of the operator's 4 
 
 **Files:**
 - Create: `code/clip_duration.py`
-- Test: `code/tests/test_v857_clip_duration.py`
+- Test: `code/tests/test_v861_clip_duration.py`
 
 > **Amended after code review (2026-07-16).** The code blocks below are the FIRST DRAFT. Quality review found the module validated its front door (`explicit`) but left the side doors open, and the front-door check itself coerced before validating. The shipped module differs on five points — read `code/clip_duration.py` for the truth:
 > 1. `explicit` is validated BEFORE coercion (`6.7` raises instead of silently becoming `6`; bools rejected).
 > 2. `anchor_bucket` passes the same gate as `explicit` (was trusted blindly — a Task-3 wiring slip onto the adjacent `target_duration_s` float would have gone silent).
 > 3. `clamp_for_veo_api` → **renamed `veo_api_duration_s`** and made honest: folds only 10→8, passes 4/6/8 through as `int`, raises on anything else. The old catch-all `return 8` sent below-range input (`2`, `-5`) UP to the longest bucket.
-> 4. `LINE_WORD_CAP` **deleted** — nothing read it, and it duplicated a cap enforced in `audit_build.py` (outside this repo, cannot import). Exactly the drift this module exists to prevent. Cap now lives in the auditor + §v857 prose.
+> 4. `LINE_WORD_CAP` **deleted** — nothing read it, and it duplicated a cap enforced in `audit_build.py` (outside this repo, cannot import). Exactly the drift this module exists to prevent. Cap now lives in the auditor + §v861 prose.
 > 5. Tests extended to cover the above; the `"a b c" * 20` fixture (41 words, missing space — not the 60 intended) replaced with `" ".join(["w"] * 60)`.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `code/tests/test_v857_clip_duration.py`:
+Create `code/tests/test_v861_clip_duration.py`:
 
 ```python
-"""v857 — per-clip duration bucket math."""
+"""v861 — per-clip duration bucket math."""
 import pytest
 
 from clip_duration import (
@@ -145,7 +147,7 @@ def test_resolve_rejects_bad_explicit():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run from `code/`: `python -m pytest tests/test_v857_clip_duration.py -v`
+Run from `code/`: `python -m pytest tests/test_v861_clip_duration.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'clip_duration'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -153,7 +155,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'clip_duration'`
 Create `code/clip_duration.py`:
 
 ```python
-"""v857 — per-clip render duration picked from the spoken line's word count.
+"""v861 — per-clip render duration picked from the spoken line's word count.
 
 SINGLE SOURCE OF TRUTH for the bucket math. Imported by image_platform.py
 (resolve at import time) and main.py (validate the PATCH). worker.py and
@@ -170,7 +172,7 @@ Operator table (2026-07-16), literal upper bounds:
                      the /build auditor FAILs before a build gets this far)
 
 Implied speech rate 2.67-3.0 words/sec (least-squares fit of the operator's
-four points = 2.8 w/s). Full deep-dive: template_reference.md §v857.
+four points = 2.8 w/s). Full deep-dive: template_reference.md §v861.
 """
 from typing import Optional
 
@@ -191,7 +193,7 @@ LINE_WORD_CAP = 28
 
 
 def pick_clip_duration_s(word_count: int) -> int:
-    """Map a word count to its v857 duration bucket. Never returns None."""
+    """Map a word count to its v861 duration bucket. Never returns None."""
     for max_words, duration in _BUCKETS:
         if word_count <= max_words:
             return duration
@@ -214,10 +216,10 @@ def resolve_clip_duration_s(
 ) -> Optional[int]:
     """Final per-clip duration. Precedence, highest first:
 
-    1. ``explicit``      — the scene's `- **clip_duration_s:**` bullet (v857)
+    1. ``explicit``      — the scene's `- **clip_duration_s:**` bullet (v861)
     2. ``anchor_bucket`` — the v667 frame-anchor-derived bucket (transformation
                            montages; already ceil'd to [4,6,8] by the caller)
-    3. word count of ``line_text`` — the v857 table
+    3. word count of ``line_text`` — the v861 table
     4. None              — no line, no anchor: the job-level duration applies
 
     Raises ValueError on an explicit value outside ALLOWED_CLIP_DURATIONS_S.
@@ -225,7 +227,7 @@ def resolve_clip_duration_s(
     if explicit is not None:
         if int(explicit) not in ALLOWED_CLIP_DURATIONS_S:
             raise ValueError(
-                "clip_duration_s %r not in %r (v857)"
+                "clip_duration_s %r not in %r (v861)"
                 % (explicit, list(ALLOWED_CLIP_DURATIONS_S))
             )
         return int(explicit)
@@ -239,14 +241,14 @@ def resolve_clip_duration_s(
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run from `code/`: `python -m pytest tests/test_v857_clip_duration.py -v`
+Run from `code/`: `python -m pytest tests/test_v861_clip_duration.py -v`
 Expected: PASS — 17 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add code/clip_duration.py code/tests/test_v857_clip_duration.py
-git commit -m "feat(v857): clip duration bucket math from line word count
+git add code/clip_duration.py code/tests/test_v861_clip_duration.py
+git commit -m "feat(v861): clip duration bucket math from line word count
 
 Buckets: <=11w->4s, 12-16->6s, 17-24->8s, 25-28->10s. Operator table
 2026-07-16, literal upper bounds. Veo API clamps 10->8 (API has no 10s
@@ -261,13 +263,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `code/image_platform.py:4123-4155` (bullet loop), `:4196-4215` (scene dict)
-- Test: `code/tests/test_v857_clip_duration.py`
+- Test: `code/tests/test_v861_clip_duration.py`
 
 The bullet is PER LINE, attaching to the closest preceding `- **line:**` — same rule the v644 `pad` bullet already uses. A scene with two lines can hold two different durations.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `code/tests/test_v857_clip_duration.py`:
+Append to `code/tests/test_v861_clip_duration.py`:
 
 ```python
 from image_platform import _parse_scene_blocks_new
@@ -321,7 +323,7 @@ def test_parse_clip_duration_rejects_bad_value():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run from `code/`: `python -m pytest tests/test_v857_clip_duration.py -k parse -v`
+Run from `code/`: `python -m pytest tests/test_v861_clip_duration.py -k parse -v`
 Expected: FAIL — `KeyError: 'clip_durations'`
 
 - [ ] **Step 3: Add the module import**
@@ -349,7 +351,7 @@ In `code/image_platform.py`, replace the bullet-pattern block at `:4123-4142`:
 with:
 
 ```python
-        # v857 — `clip_duration_s` joins the per-line bullet set. Like v644's
+        # v861 — `clip_duration_s` joins the per-line bullet set. Like v644's
         # `pad` it attaches to the closest preceding `line`, so a two-line
         # scene can render its clips at two different durations.
         bullet_pattern = _re.compile(
@@ -359,7 +361,7 @@ with:
         lines_list: List[str] = []
         action_notes: List[Optional[str]] = []
         pads: List[Optional[str]] = []  # v644 parallel array
-        clip_durations: List[Optional[int]] = []  # v857 parallel array
+        clip_durations: List[Optional[int]] = []  # v861 parallel array
 ```
 
 Then in the same loop, replace the `if key == "line":` branch and add a new branch. Replace `:4139-4155`:
@@ -391,7 +393,7 @@ with:
                 lines_list.append(value)
                 action_notes.append(None)
                 pads.append(None)
-                clip_durations.append(None)  # v857
+                clip_durations.append(None)  # v861
             elif key == "action_note":
                 if lines_list:
                     # Attach to most recent line
@@ -406,20 +408,20 @@ with:
                     pads[-1] = value
                 # else: pad before any line — ignore, likely malformed
             elif key == "clip_duration_s":
-                # v857 — attach the render-duration bucket to most recent line.
+                # v861 — attach the render-duration bucket to most recent line.
                 m_dur = _re.match(r"\d+", value)
                 if not m_dur:
                     raise ValueError(
                         f"Scene {scene_index}: clip_duration_s {value!r} is not "
                         f"a number (expected one of "
                         f"{list(ALLOWED_CLIP_DURATIONS_S)} — see "
-                        f"template_reference.md §v857)"
+                        f"template_reference.md §v861)"
                     )
                 dur_val = int(m_dur.group())
                 if dur_val not in ALLOWED_CLIP_DURATIONS_S:
                     raise ValueError(
                         f"Scene {scene_index}: clip_duration_s {dur_val} not in "
-                        f"{list(ALLOWED_CLIP_DURATIONS_S)} (v857). Pick the bucket "
+                        f"{list(ALLOWED_CLIP_DURATIONS_S)} (v861). Pick the bucket "
                         f"the line's word count lands in: <=11w=4s, 12-16w=6s, "
                         f"17-24w=8s, 25-28w=10s."
                     )
@@ -427,7 +429,7 @@ with:
                     clip_durations[-1] = dur_val
                 else:
                     print(
-                        f"[v857/parse] scene_{scene_index} clip_duration_s="
+                        f"[v861/parse] scene_{scene_index} clip_duration_s="
                         f"{dur_val} appears before any `- **line:**` bullet — "
                         f"ignored (malformed)",
                         flush=True,
@@ -439,12 +441,12 @@ with:
 In `code/image_platform.py`, in the `scenes.append({...})` block, add one entry right after the `"pads": pads,` line:
 
 ```python
-            "clip_durations": clip_durations,  # v857 — parallel to lines; int (4|6|8|10) or None
+            "clip_durations": clip_durations,  # v861 — parallel to lines; int (4|6|8|10) or None
 ```
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run from `code/`: `python -m pytest tests/test_v857_clip_duration.py -v`
+Run from `code/`: `python -m pytest tests/test_v861_clip_duration.py -v`
 Expected: PASS — all parse tests green
 
 - [ ] **Step 7: Verify no legacy build regressed**
@@ -476,8 +478,8 @@ Expected: `failed: 0`. Any failure here is a regression from this task — fix b
 - [ ] **Step 8: Commit**
 
 ```bash
-git add code/image_platform.py code/tests/test_v857_clip_duration.py
-git commit -m "feat(v857): parse per-line clip_duration_s bullet
+git add code/image_platform.py code/tests/test_v861_clip_duration.py
+git commit -m "feat(v861): parse per-line clip_duration_s bullet
 
 Attaches to the closest preceding line, same rule as v644 pad. Rejects any
 value outside 4/6/8/10 at import with a message naming the bucket table.
@@ -491,13 +493,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `code/image_platform.py:7436-7442` (resolver), `:7584-7626` (silent flat row), `:7632-7662` (per-line flat row)
-- Test: `code/tests/test_v857_clip_duration.py`
+- Test: `code/tests/test_v861_clip_duration.py`
 
 Precedence: explicit bullet > v667 anchor bucket > word count > NULL. `_ceil_to_veo_bucket` stays on `(4, 6, 8)` — v667's anchor-trim behavior is NOT touched by this rule.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `code/tests/test_v857_clip_duration.py`:
+Append to `code/tests/test_v861_clip_duration.py`:
 
 ```python
 def test_resolver_is_the_one_used_by_prepare():
@@ -507,14 +509,14 @@ def test_resolver_is_the_one_used_by_prepare():
     import image_platform
     src = inspect.getsource(image_platform.prepare_batch_for_video)
     assert "resolve_clip_duration_s" in src, (
-        "prepare_batch_for_video must resolve v857 durations via "
+        "prepare_batch_for_video must resolve v861 durations via "
         "clip_duration.resolve_clip_duration_s")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run from `code/`: `python -m pytest tests/test_v857_clip_duration.py -k resolver_is_the_one -v`
-Expected: FAIL — `AssertionError: prepare_batch_for_video must resolve v857 durations`
+Run from `code/`: `python -m pytest tests/test_v861_clip_duration.py -k resolver_is_the_one -v`
+Expected: FAIL — `AssertionError: prepare_batch_for_video must resolve v861 durations`
 
 - [ ] **Step 3: Widen the import**
 
@@ -543,7 +545,7 @@ with:
 ```python
         target_duration_s: Optional[float] = None
         # v667 anchor-derived bucket — the trim duration for transformation
-        # montages. v857 treats this as the SECOND-priority input; an explicit
+        # montages. v861 treats this as the SECOND-priority input; an explicit
         # `- **clip_duration_s:**` bullet outranks it.
         anchor_bucket: Optional[int] = None
         if this_anchor is not None:
@@ -552,7 +554,7 @@ with:
                 target_duration_s = round(nxt - this_anchor, 3)
                 anchor_bucket = _ceil_to_veo_bucket(target_duration_s)
 
-        # v857 — per-line explicit durations parsed off the scene block.
+        # v861 — per-line explicit durations parsed off the scene block.
         # Parallel to `lines`; entries are int (4|6|8|10) or None.
         scene_clip_durations: List[Optional[int]] = scene.get("clip_durations") or []
 ```
@@ -568,7 +570,7 @@ Silent scenes have no lines, so the word-count input is empty and the anchor win
 with:
 
 ```python
-                # v857 — silent scenes have no spoken line, so the pick comes
+                # v861 — silent scenes have no spoken line, so the pick comes
                 # from an explicit bullet if the author set one, else the v667
                 # anchor bucket, else NULL (job-level duration applies).
                 "veo_render_duration_s": resolve_clip_duration_s(
@@ -589,46 +591,46 @@ In `code/image_platform.py`, replace the per-line flat row's duration entry at `
 with:
 
 ```python
-                # v857 — per-line pick: explicit bullet > v667 anchor bucket >
+                # v861 — per-line pick: explicit bullet > v667 anchor bucket >
                 # word count of THIS line > NULL. Each Clip row is 1:1 with a
                 # dialogue line, so each carries its own render duration.
-                "veo_render_duration_s": _v857_line_duration,
+                "veo_render_duration_s": _v861_line_duration,
 ```
 
 and immediately after the `for i_in_scene, (line_text, note, vp, pad) in enumerate(...)` loop header at `:7632-7634`, insert the resolve + log:
 
 ```python
-            _v857_explicit = (
+            _v861_explicit = (
                 scene_clip_durations[i_in_scene]
                 if i_in_scene < len(scene_clip_durations) else None
             )
-            _v857_line_duration = resolve_clip_duration_s(
-                explicit=_v857_explicit,
+            _v861_line_duration = resolve_clip_duration_s(
+                explicit=_v861_explicit,
                 anchor_bucket=anchor_bucket,
                 line_text=line_text,
             )
-            _v857_words = len((line_text or "").split())
-            if _v857_explicit is None and _v857_line_duration is not None:
+            _v861_words = len((line_text or "").split())
+            if _v861_explicit is None and _v861_line_duration is not None:
                 print(
-                    f"[v857/auto] scene_{scene['scene_index']} line {i_in_scene}: "
-                    f"{_v857_words}w → {_v857_line_duration}s "
-                    f"(no clip_duration_s bullet — auto-picked; declare it per v857)",
+                    f"[v861/auto] scene_{scene['scene_index']} line {i_in_scene}: "
+                    f"{_v861_words}w → {_v861_line_duration}s "
+                    f"(no clip_duration_s bullet — auto-picked; declare it per v861)",
                     flush=True,
                 )
-            elif _v857_explicit is not None:
-                _v857_auto = resolve_clip_duration_s(
+            elif _v861_explicit is not None:
+                _v861_auto = resolve_clip_duration_s(
                     explicit=None, anchor_bucket=None, line_text=line_text)
-                _flag = "" if _v857_auto in (None, _v857_explicit) else \
-                    f" ⚠ word count suggests {_v857_auto}s"
+                _flag = "" if _v861_auto in (None, _v861_explicit) else \
+                    f" ⚠ word count suggests {_v861_auto}s"
                 print(
-                    f"[v857/explicit] scene_{scene['scene_index']} line {i_in_scene}: "
-                    f"{_v857_words}w → {_v857_line_duration}s (declared){_flag}",
+                    f"[v861/explicit] scene_{scene['scene_index']} line {i_in_scene}: "
+                    f"{_v861_words}w → {_v861_line_duration}s (declared){_flag}",
                     flush=True,
                 )
-            if _v857_words > 28:
+            if _v861_words > 28:
                 print(
-                    f"[v857/warn] scene_{scene['scene_index']} line {i_in_scene}: "
-                    f"{_v857_words}w exceeds the 28-word cap (v831 amended) — "
+                    f"[v861/warn] scene_{scene['scene_index']} line {i_in_scene}: "
+                    f"{_v861_words}w exceeds the 28-word cap (v831 amended) — "
                     f"split into two clips",
                     flush=True,
                 )
@@ -636,7 +638,7 @@ and immediately after the `for i_in_scene, (line_text, note, vp, pad) in enumera
 
 - [ ] **Step 7: Run tests to verify they pass**
 
-Run from `code/`: `python -m pytest tests/test_v857_clip_duration.py -v`
+Run from `code/`: `python -m pytest tests/test_v861_clip_duration.py -v`
 Expected: PASS — all green
 
 - [ ] **Step 8: Verify the module actually imports (py_compile is not enough)**
@@ -652,8 +654,8 @@ Expected: `image_platform OK`
 - [ ] **Step 9: Commit**
 
 ```bash
-git add code/image_platform.py code/tests/test_v857_clip_duration.py
-git commit -m "feat(v857): resolve per-clip duration at prepare time
+git add code/image_platform.py code/tests/test_v861_clip_duration.py
+git commit -m "feat(v861): resolve per-clip duration at prepare time
 
 Precedence: explicit clip_duration_s > v667 anchor bucket > line word count >
 NULL (job default). Writes the already-existing clips.veo_render_duration_s
@@ -693,7 +695,7 @@ with:
 
 ```python
     # ─── veo_render_duration_s ───────────────────────────────────────────
-    # v857 — 10s joined the set (Flow's 2026-07 composer). The Veo API path
+    # v861 — 10s joined the set (Flow's 2026-07 composer). The Veo API path
     # clamps 10→8 at render time; Flow renders a real 10s clip.
     if req.veo_render_duration_s is not None:
         if int(req.veo_render_duration_s) not in ALLOWED_CLIP_DURATIONS_S:
@@ -710,7 +712,7 @@ Expected: `main OK`
 
 ```bash
 git add code/main.py
-git commit -m "feat(v857): PATCH accepts veo_render_duration_s=10
+git commit -m "feat(v861): PATCH accepts veo_render_duration_s=10
 
 Flow's composer has a 10s tab; the validator pinned 4/6/8 and blocked hand
 corrections on 10s clips.
@@ -732,7 +734,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 In `code/main.py`, in the `clip_data = {` dict, add right after the `"scene_index": clip.scene_index or 0,` line:
 
 ```python
-            # v857 — per-clip render duration (4|6|8|10). NULL → the worker
+            # v861 — per-clip render duration (4|6|8|10). NULL → the worker
             # falls back to the job-level duration (legacy / manual jobs).
             "veo_render_duration_s": clip.veo_render_duration_s,
 ```
@@ -746,7 +748,7 @@ Expected: `main OK`
 
 ```bash
 git add code/main.py
-git commit -m "feat(v857): send per-clip veo_render_duration_s to the flow worker
+git commit -m "feat(v861): send per-clip veo_render_duration_s to the flow worker
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -758,7 +760,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Files:**
 - Modify: `code/worker.py:3448-3475`
 
-Today only the LAST clip gets a word-count pick, using a hardcoded 2.5 words/sec and buckets 4/6/8. v857 replaces the whole block: EVERY clip reads its own resolved bucket off the Clip row. The Veo API has no 10s bucket, so 10 folds to 8 with a log line.
+Today only the LAST clip gets a word-count pick, using a hardcoded 2.5 words/sec and buckets 4/6/8. v861 replaces the whole block: EVERY clip reads its own resolved bucket off the Clip row. The Veo API has no 10s bucket, so 10 folds to 8 with a log line.
 
 - [ ] **Step 1: Add the import**
 
@@ -775,7 +777,7 @@ from clip_duration import pick_clip_duration_s, veo_api_duration_s
 In `code/worker.py`, replace `:3448-3475` (from `# Calculate dynamic duration for LAST CLIP` through the `print(f"[Worker] LAST CLIP: ...")` line) with:
 
 ```python
-                # v857 — per-clip render duration. Every clip (not just the
+                # v861 — per-clip render duration. Every clip (not just the
                 # last) renders at the bucket its line's word count lands in.
                 # The bucket was resolved at import time from the markdown's
                 # `- **clip_duration_s:**` bullet (explicit) or the word count
@@ -796,7 +798,7 @@ In `code/worker.py`, replace `:3448-3475` (from `# Calculate dynamic duration fo
                     _picked = _dur_clip.veo_render_duration_s if _dur_clip else None
 
                 if _picked is None and dialogue_text:
-                    # Legacy job imported before v857 — no stored pick. Derive
+                    # Legacy job imported before v861 — no stored pick. Derive
                     # from the word count so behavior matches a fresh import.
                     _picked = pick_clip_duration_s(len(dialogue_text.split()))
                     _picked_src = "auto (legacy row, no stored pick)"
@@ -804,7 +806,7 @@ In `code/worker.py`, replace `:3448-3475` (from `# Calculate dynamic duration fo
                     _picked_src = "clips.veo_render_duration_s"
 
                 if _picked is not None:
-                    # v857 — veo_api_duration_s RAISES on anything outside
+                    # v861 — veo_api_duration_s RAISES on anything outside
                     # 4/6/8/10. That is reachable in production, not theory:
                     # clips.veo_render_duration_s is a bare INTEGER with no
                     # CHECK constraint (image_platform.py:173) and main.py:2186
@@ -814,7 +816,7 @@ In `code/worker.py`, replace `:3448-3475` (from `# Calculate dynamic duration fo
                         _clamped = veo_api_duration_s(_picked)
                     except ValueError as _dur_err:
                         print(
-                            f"[v857/worker] clip {clip_index}: bad stored duration "
+                            f"[v861/worker] clip {clip_index}: bad stored duration "
                             f"{_picked!r} — {_dur_err}. Falling back to the "
                             f"job-level duration for this clip.",
                             flush=True,
@@ -826,7 +828,7 @@ In `code/worker.py`, replace `:3448-3475` (from `# Calculate dynamic duration fo
                     _note = "" if _clamped == _picked else \
                         f" (folded from {_picked}s — the Veo API has no {_picked}s bucket)"
                     print(
-                        f"[v857/worker] clip {clip_index}: "
+                        f"[v861/worker] clip {clip_index}: "
                         f"{len((dialogue_text or '').split())} words → "
                         f"{_clamped}s duration via {_picked_src}{_note}",
                         flush=True,
@@ -852,7 +854,7 @@ Expected: no output. Any hit means the old 2.5-wps block survived and will fight
 
 ```bash
 git add code/worker.py
-git commit -m "feat(v857): Veo API path renders every clip at its own duration
+git commit -m "feat(v861): Veo API path renders every clip at its own duration
 
 Replaces the last-clip-only 2.5-wps guess with the per-clip bucket resolved at
 import. Clamps 10->8: the Veo API's durationSeconds accepts 4/6/8 only.
@@ -884,14 +886,14 @@ with:
 
 ```python
             variants_count = job.get('flow_variants_count', 2)
-            # v857 — per-clip duration. The API resolved this clip's bucket
+            # v861 — per-clip duration. The API resolved this clip's bucket
             # from its line's word count; page._duration is what
             # select_frames_to_video_mode clicks in the 4s/6s/8s/10s tablist.
             # NULL (legacy/manual job) → keep the job-level duration.
             _clip_dur = clip.get('veo_render_duration_s')
             try:
                 page._duration = str(_clip_dur) if _clip_dur else job.get('duration', '8')
-                print(f"[v857/flow] clip {clip_index+1}: duration tab → {page._duration}s "
+                print(f"[v861/flow] clip {clip_index+1}: duration tab → {page._duration}s "
                       f"({'per-clip' if _clip_dur else 'job default'})", flush=True)
             except Exception:
                 pass
@@ -904,14 +906,14 @@ with:
 `process_job_submission` (`:18478`) is the non-failover twin of Step 1's function and has its own clip loop (from `:18808`) with its own `select_frames_to_video_mode(page, variants_count=...)` call. Insert the same guard immediately before that call:
 
 ```python
-            # v857 — per-clip duration. The API resolved this clip's bucket
+            # v861 — per-clip duration. The API resolved this clip's bucket
             # from its line's word count; page._duration is what
             # select_frames_to_video_mode clicks in the 4s/6s/8s/10s tablist.
             # NULL (legacy/manual job) → keep the job-level duration.
             _clip_dur = clip.get('veo_render_duration_s')
             try:
                 page._duration = str(_clip_dur) if _clip_dur else job.get('duration', '8')
-                print(f"[v857/flow] clip {clip_index+1}: duration tab → {page._duration}s "
+                print(f"[v861/flow] clip {clip_index+1}: duration tab → {page._duration}s "
                       f"({'per-clip' if _clip_dur else 'job default'})", flush=True)
             except Exception:
                 pass
@@ -926,12 +928,12 @@ Do NOT touch the `select_frames_to_video_mode` calls at `:16033` (rebuild), `:17
 In `code/static/flow_worker.py`, in `process_redo_clip` (`:16162`), immediately before the `select_frames_to_video_mode(page, context="REDO", variants_count=variants)` call at `:16477`, insert:
 
 ```python
-            # v857 — a redo re-renders ONE clip; use that clip's own duration.
+            # v861 — a redo re-renders ONE clip; use that clip's own duration.
             _redo_dur = clip.get('veo_render_duration_s')
             if _redo_dur:
                 try:
                     page._duration = str(_redo_dur)
-                    print(f"[v857/flow] REDO clip {clip.get('clip_index')}: "
+                    print(f"[v861/flow] REDO clip {clip.get('clip_index')}: "
                           f"duration tab → {_redo_dur}s", flush=True)
                 except Exception:
                     pass
@@ -948,7 +950,7 @@ In `code/static/flow_worker.py`, in `process_redo_clip` (`:16162`), immediately 
 with:
 
 ```python
-                # v857 — this clip's own duration drives the speech-timing
+                # v861 — this clip's own duration drives the speech-timing
                 # window in the prompt, not the job-level default.
                 duration=float(clip.get('veo_render_duration_s') or job_duration),
 ```
@@ -981,7 +983,7 @@ Expected: `page._duration` is set in `process_job_submission_with_failover`, `pr
 
 ```bash
 git add code/static/flow_worker.py
-git commit -m "feat(v857): flow worker clicks the duration tab per clip
+git commit -m "feat(v861): flow worker clicks the duration tab per clip
 
 page._duration was set once per job; now each clip sets its own resolved
 bucket before select_frames_to_video_mode, and its own duration feeds
@@ -1024,7 +1026,7 @@ with:
 def c_line_word_cap(B):
     """v831 - no spoken line over the word cap; split into 2 clips instead.
 
-    Cap was 25 (operator 2026-07-11); raised to 28 on 2026-07-16 so v857's 10s
+    Cap was 25 (operator 2026-07-11); raised to 28 on 2026-07-16 so v861's 10s
     bucket (25-28 words) is reachable. Forward-only - shipped builds untouched.
     """
     over = []
@@ -1035,16 +1037,16 @@ def c_line_word_cap(B):
     if over:
         return FAIL, "line(s) over the 28-word cap (v831 - split into 2 clips): " + ", ".join(
             "L%d=%dw" % x for x in over)
-    return PASS, "all spoken lines <= 28 words (v831, amended for v857)"
+    return PASS, "all spoken lines <= 28 words (v831, amended for v861)"
 ```
 
-- [ ] **Step 2: Add the v857 check**
+- [ ] **Step 2: Add the v861 check**
 
 In `audit_build.py`, immediately before the `# Check registry` banner comment at `:1105`, add:
 
 ```python
-def c_v857_clip_duration(B):
-    """v857 - every spoken line declares `- **clip_duration_s:**` and the value
+def c_v861_clip_duration(B):
+    """v861 - every spoken line declares `- **clip_duration_s:**` and the value
     matches the bucket its word count lands in.
 
     Table (operator 2026-07-16): <=11w=4s, 12-16w=6s, 17-24w=8s, 25-28w=10s.
@@ -1089,16 +1091,16 @@ def c_v857_clip_duration(B):
             wrong.append((ln, n, got, want))
 
     if bad_val:
-        return FAIL, "v857 clip_duration_s not in 4/6/8/10: " + ", ".join(
+        return FAIL, "v861 clip_duration_s not in 4/6/8/10: " + ", ".join(
             "L%d=%s" % x for x in bad_val)
     if missing:
-        return FAIL, ("v857 line(s) missing `- **clip_duration_s:**` (mandatory - "
+        return FAIL, ("v861 line(s) missing `- **clip_duration_s:**` (mandatory - "
                       "<=11w=4s, 12-16w=6s, 17-24w=8s, 25-28w=10s): " + ", ".join(
                           "L%d(%dw needs %ds)" % x for x in missing[:8]))
     if wrong:
-        return FAIL, ("v857 clip_duration_s does not match the word count: " + ", ".join(
+        return FAIL, ("v861 clip_duration_s does not match the word count: " + ", ".join(
             "L%d %dw declared %ds needs %ds" % x for x in wrong[:8]))
-    return PASS, "all %d spoken line(s) declare a clip_duration_s matching the v857 table" % len(
+    return PASS, "all %d spoken line(s) declare a clip_duration_s matching the v861 table" % len(
         B.line_fields)
 ```
 
@@ -1107,24 +1109,24 @@ def c_v857_clip_duration(B):
 In `audit_build.py`, in the `CHECKS` list, add immediately after the `("line_word_cap", ...)` row:
 
 ```python
-    ("v857_clip_duration", "v857 clip_duration_s on every line, matching the word-count bucket", c_v857_clip_duration),
+    ("v861_clip_duration", "v861 clip_duration_s on every line, matching the word-count bucket", c_v861_clip_duration),
 ```
 
 - [ ] **Step 4: Verify the auditor runs and the new check fires**
 
-Run from the repo root against a build that predates v857 — it MUST fail the new check and nothing else new:
+Run from the repo root against a build that predates v861 — it MUST fail the new check and nothing else new:
 
 ```bash
 python ~/.claude/skills/build-video/audit_build.py videos/nuri-korella-ed-5signs-bloodflow-walmart-banana-mic-insult-growth-v6.md
 ```
 
-Expected: a `FAIL` row for `v857_clip_duration` naming the missing lines, and `line_word_cap` reporting the 28-word cap.
+Expected: a `FAIL` row for `v861_clip_duration` naming the missing lines, and `line_word_cap` reporting the 28-word cap.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add ~/.claude/skills/build-video/audit_build.py
-git commit -m "feat(v857): auditor requires clip_duration_s per line; v831 cap 25->28
+git commit -m "feat(v861): auditor requires clip_duration_s per line; v831 cap 25->28
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -1136,21 +1138,21 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ### Task 9: Docs — canonical deep-dive, skeleton, index, timeline
 
 **Files:**
-- Modify: `code/template_reference.md` (append §v857; amend §v831)
+- Modify: `code/template_reference.md` (append §v861; amend §v831)
 - Modify: `code/template_new_format.md`
 - Modify: `wiki/patterns/conventions.md`
 - Modify: `wiki/log.md`
 
 Per `code/CLAUDE.md`, the deep-dive lives ONCE in `template_reference.md`; everything else points at it.
 
-- [ ] **Step 1: Append the v857 deep-dive**
+- [ ] **Step 1: Append the v861 deep-dive**
 
 Append to `code/template_reference.md`:
 
 ```markdown
 ---
 
-## v857 — Per-clip render duration from the line's word count
+## v861 — Per-clip render duration from the line's word count
 
 **Where it came from**: operator 2026-07-16 — *"we need to adapt the video markdown and the platform to also use the clip duration setting. so if we have around 28 words we 10 seconds, less than 12 words is 4 seconds and 16 is 6 seconds and 24 is 8 seconds."*
 
@@ -1166,7 +1168,7 @@ Append to `code/template_reference.md`:
 | `25 <= W <= 28` | 10s |
 | `W > 28` | v831 violation — split into two clips |
 
-Implied speech rate 2.67-3.0 words/sec; least-squares fit of the four points = 2.8 w/s. Compare v577's 158 wpm (2.63 w/s) budget — v857 is the same ballpark, stated as buckets.
+Implied speech rate 2.67-3.0 words/sec; least-squares fit of the four points = 2.8 w/s. Compare v577's 158 wpm (2.63 w/s) budget — v861 is the same ballpark, stated as buckets.
 
 **The markdown field** — one per spoken line, attaching to the closest preceding `- **line:**` (the same attach rule as v644's `pad`):
 
@@ -1182,16 +1184,16 @@ Implied speech rate 2.67-3.0 words/sec; least-squares fit of the four points = 2
 
 Legal values: `4` | `6` | `8` | `10`. Anything else HARD-FAILS at import.
 
-**Mandatory at authoring.** The `/build` auditor (`audit_build.py` check `v857_clip_duration`) FAILs a build when a line has no `clip_duration_s`, or when the declared value does not match the line's word-count bucket. The platform parser is deliberately more forgiving — it auto-computes when the bullet is absent and logs `[v857/auto]`, so the ~180 pre-v857 builds still import. Forward-only.
+**Mandatory at authoring.** The `/build` auditor (`audit_build.py` check `v861_clip_duration`) FAILs a build when a line has no `clip_duration_s`, or when the declared value does not match the line's word-count bucket. The platform parser is deliberately more forgiving — it auto-computes when the bullet is absent and logs `[v861/auto]`, so the ~180 pre-v861 builds still import. Forward-only.
 
 **Resolution precedence** (`clip_duration.resolve_clip_duration_s`):
 
-1. explicit `- **clip_duration_s:**` bullet (v857)
+1. explicit `- **clip_duration_s:**` bullet (v861)
 2. the v667 frame-anchor-derived bucket (transformation montages; `_ceil_to_veo_bucket` over [4,6,8] — UNCHANGED by this rule)
 3. the line's word count via the table above
 4. `None` — no line, no anchor → the job-level duration applies (legacy + manual UI jobs)
 
-The resolved integer lands on `clips.veo_render_duration_s` — a column that existed since v667 but that NO render path read until v857.
+The resolved integer lands on `clips.veo_render_duration_s` — a column that existed since v667 but that NO render path read until v861.
 
 **The 10s asymmetry (important).** The Veo API accepts `durationSeconds` of **4, 6, or 8 only** (https://ai.google.dev/gemini-api/docs/veo). 10s exists **only** in Flow's 2026-07 composer, whose settings menu carries a 4s/6s/8s/10s tablist. Therefore:
 
@@ -1202,7 +1204,7 @@ A build that leans on the 10s bucket should render on Flow.
 
 **Related rule change**: v831's spoken-line cap moved 25 → **28 words** on the same date, so the 10s bucket is reachable. Forward-only; shipped builds are not retro-edited.
 
-**Touched**: this deep-dive (canonical), `code/clip_duration.py` (NEW — the only home of the math), `code/tests/test_v857_clip_duration.py`, `code/image_platform.py` (parser + prepare-time resolver), `code/main.py` (PATCH validator + Flow payload), `code/worker.py` (Veo API path), `code/static/flow_worker.py` (Flow path), `code/template_new_format.md` (skeleton), `~/.claude/skills/build-video/audit_build.py` (`v857_clip_duration` check + v831 cap), `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
+**Touched**: this deep-dive (canonical), `code/clip_duration.py` (NEW — the only home of the math), `code/tests/test_v861_clip_duration.py`, `code/image_platform.py` (parser + prepare-time resolver), `code/main.py` (PATCH validator + Flow payload), `code/worker.py` (Veo API path), `code/static/flow_worker.py` (Flow path), `code/template_new_format.md` (skeleton), `~/.claude/skills/build-video/audit_build.py` (`v861_clip_duration` check + v831 cap), `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
 ```
 
 - [ ] **Step 2: Amend the v831 deep-dive**
@@ -1210,7 +1212,7 @@ A build that leans on the 10s bucket should render on Flow.
 In `code/template_reference.md`, in the `## v831` section, immediately under the `**The rule**:` sentence that names 25 words, insert:
 
 ```markdown
-> **Amended 2026-07-16 (v857)**: the cap is now **28 words**, not 25 — v857's 10s bucket covers 25-28 words and was unreachable under the old cap. Everything else about v831 is unchanged: split at a natural sentence boundary, both halves reuse the SAME start image. Forward-only; shipped builds are not retro-edited.
+> **Amended 2026-07-16 (v861)**: the cap is now **28 words**, not 25 — v861's 10s bucket covers 25-28 words and was unreachable under the old cap. Everything else about v831 is unchanged: split at a natural sentence boundary, both halves reuse the SAME start image. Forward-only; shipped builds are not retro-edited.
 ```
 
 - [ ] **Step 3: Add the field to the skeleton**
@@ -1218,7 +1220,7 @@ In `code/template_reference.md`, in the `## v831` section, immediately under the
 In `code/template_new_format.md`, in the `### Scene N` block spec, add the field under the `- **line:**` entry:
 
 ```markdown
-- **clip_duration_s:** 6      # v857 MANDATORY — 4|6|8|10, matches the line's word count
+- **clip_duration_s:** 6      # v861 MANDATORY — 4|6|8|10, matches the line's word count
                               # <=11w=4s · 12-16w=6s · 17-24w=8s · 25-28w=10s
                               # attaches to the line above it (same rule as `pad`)
 ```
@@ -1228,7 +1230,7 @@ In `code/template_new_format.md`, in the `### Scene N` block spec, add the field
 In `wiki/patterns/conventions.md`, add a row in v-number order:
 
 ```markdown
-| v857 | Per-clip render duration from the line's word count — mandatory `- **clip_duration_s:**` bullet (4/6/8/10); <=11w=4s, 12-16w=6s, 17-24w=8s, 25-28w=10s. Flow renders 10s; the Veo API clamps 10→8. Raises v831's line cap 25→28. | [template_reference.md §v857](../../code/template_reference.md) |
+| v861 | Per-clip render duration from the line's word count — mandatory `- **clip_duration_s:**` bullet (4/6/8/10); <=11w=4s, 12-16w=6s, 17-24w=8s, 25-28w=10s. Flow renders 10s; the Veo API clamps 10→8. Raises v831's line cap 25→28. | [template_reference.md §v861](../../code/template_reference.md) |
 ```
 
 - [ ] **Step 5: Add the timeline entry**
@@ -1236,14 +1238,14 @@ In `wiki/patterns/conventions.md`, add a row in v-number order:
 Prepend to the current section of `wiki/log.md`:
 
 ```markdown
-- **2026-07-16 — v857 per-clip duration.** Duration was one job-level setting; only the last clip got a word-count guess (hardcoded 2.5 wps). Now every clip declares `- **clip_duration_s:**` (4/6/8/10) matching its line's word count — <=11w=4s, 12-16w=6s, 17-24w=8s, 25-28w=10s (operator table, ~2.8 words/sec). Math lives in the new `code/clip_duration.py`; the resolved value fills `clips.veo_render_duration_s` (a column live since v667 that no render path read). Flow clicks a real 10s tab per clip; the Veo API has no 10s bucket so it clamps 10→8. v831's line cap moved 25→28 to make the 10s bucket reachable. Auditor check `v857_clip_duration` makes the field mandatory; the parser auto-computes for the ~180 legacy builds. Forward-only.
+- **2026-07-16 — v861 per-clip duration.** Duration was one job-level setting; only the last clip got a word-count guess (hardcoded 2.5 wps). Now every clip declares `- **clip_duration_s:**` (4/6/8/10) matching its line's word count — <=11w=4s, 12-16w=6s, 17-24w=8s, 25-28w=10s (operator table, ~2.8 words/sec). Math lives in the new `code/clip_duration.py`; the resolved value fills `clips.veo_render_duration_s` (a column live since v667 that no render path read). Flow clicks a real 10s tab per clip; the Veo API has no 10s bucket so it clamps 10→8. v831's line cap moved 25→28 to make the 10s bucket reachable. Auditor check `v861_clip_duration` makes the field mandatory; the parser auto-computes for the ~180 legacy builds. Forward-only.
 ```
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add code/template_reference.md code/template_new_format.md
-git commit -m "docs(v857): canonical deep-dive + skeleton field; v831 cap 25->28
+git commit -m "docs(v861): canonical deep-dive + skeleton field; v831 cap 25->28
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -1252,7 +1254,7 @@ Then from the wiki root:
 
 ```bash
 git add wiki/patterns/conventions.md wiki/log.md
-git commit -m "docs(v857): conventions index row + log entry
+git commit -m "docs(v861): conventions index row + log entry
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -1265,7 +1267,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: Unit tests green**
 
-Run from `code/`: `python -m pytest tests/test_v857_clip_duration.py -v`
+Run from `code/`: `python -m pytest tests/test_v861_clip_duration.py -v`
 Expected: all PASS
 
 - [ ] **Step 2: Existing test suite not regressed**
@@ -1324,9 +1326,9 @@ Render auto-deploys in 2-3 min. Then, per `code/CLAUDE.md`, spawn `caveman:cavec
 
 The diagnostic log lines added in Tasks 3, 6, and 7 are the evidence. On the next real render, the operator's logs must show:
 
-- `[v857/auto]` or `[v857/explicit]` per clip at import
-- `[v857/worker] clip N: Xw → Ys duration via clips.veo_render_duration_s` (API path), OR
-- `[v857/flow] clip N: duration tab → Ys (per-clip)` (Flow path)
+- `[v861/auto]` or `[v861/explicit]` per clip at import
+- `[v861/worker] clip N: Xw → Ys duration via clips.veo_render_duration_s` (API path), OR
+- `[v861/flow] clip N: duration tab → Ys (per-clip)` (Flow path)
 
 Confirm the rendered clip lengths match with `ffprobe` on the downloaded clips:
 
@@ -1339,7 +1341,7 @@ done
 
 Expected: clip durations track the picked buckets (Flow variants may run slightly long before trim — compare against the PICK, not the trimmed export).
 
-Only AFTER this evidence lands: report success, and open a follow-up to strip the temporary `[v857/*]` diagnostic prints.
+Only AFTER this evidence lands: report success, and open a follow-up to strip the temporary `[v861/*]` diagnostic prints.
 
 ---
 
@@ -1347,4 +1349,4 @@ Only AFTER this evidence lands: report success, and open a follow-up to strip th
 
 - **Manual UI jobs** (dialogue typed in the form, no markdown import) get `veo_render_duration_s = NULL` and keep the job-level duration. Operator scope was "the video markdown and the platform"; extending the auto-pick to manual jobs is a separate ask.
 - **The 1080p / interpolation 8s pin** (`main.py:2006-2010`) is untouched per the operator's decision. A 1080p job with a 4s clip pick will still be validated against the job-level 8s rule. If a real job trips this, raise it — do not silently relax it.
-- **`_ceil_to_veo_bucket` stays on `(4, 6, 8)`.** The v667 anchor path is not a v857 concern; widening it to 10 would change transformation-montage trim behavior with no ask.
+- **`_ceil_to_veo_bucket` stays on `(4, 6, 8)`.** The v667 anchor path is not a v861 concern; widening it to 10 would change transformation-montage trim behavior with no ask.
