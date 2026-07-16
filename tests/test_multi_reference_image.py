@@ -50,6 +50,26 @@ def _md(ref_line):
     return _MD_TEMPLATE.replace("__REF_LINE__", ref_line)
 
 
+def _md4(ref_line, on_image=3):
+    """4-image doc so a TRUE forward ref (ref > index) is expressible.
+
+    _md puts the ref on the highest image, which makes image_N a SELF ref
+    (==) and image_N+1 fail the existence check first — so the `>` half of
+    `ref >= image_index` is unreachable there. This fixture exists purely to
+    reach it.
+    """
+    blocks = []
+    for n in (1, 2, 3, 4):
+        ref = ref_line if n == on_image else (
+            "- **reference_image:** none" if n == 1 else "- **reference_image:** image_1"
+        )
+        blocks.append(
+            f"### Image {n}\n{ref}\n- **Image prompt:**\n"
+            "```\nA photo of a kitchen.\nAspect ratio 9:16.\n```\n"
+        )
+    return "## Images\n\n" + "\n".join(blocks)
+
+
 def _third(ref_line):
     imgs = _parse_image_blocks_new(_md(ref_line))
     return [i for i in imgs if i["image_index"] == 3][0]
@@ -132,13 +152,26 @@ def test_second_ref_unknown_is_rejected():
 
 def test_second_ref_self_is_rejected():
     # _md puts the ref line on Image 3, the HIGHEST image in the fixture, so
-    # "image_3" here is a SELF reference (ref == index) and reaches the >=
-    # guard. A genuine forward ref (ref > index, e.g. image_4) is not
-    # expressible with this fixture: it trips the existence check first and
-    # raises "doesn't exist" instead. So the > half of >= stays unreached
-    # here; test_second_ref_unknown_is_rejected covers image_4-shaped input.
+    # "image_3" here is a SELF ref: this test covers the == case of
+    # `ref >= image_index`. The > case (a TRUE forward ref) needs a doc with a
+    # higher image to point at — see test_true_forward_ref_is_rejected.
     with pytest.raises(ValueError, match="forward/self references not allowed"):
         _parse_image_blocks_new(_md("- **reference_image:** image_1, image_3"))
+
+
+def test_true_forward_ref_is_rejected():
+    # Reaches the `>` half of `ref >= image_index`: image_4 EXISTS here, so the
+    # existence check passes and the forward check is what must fire.
+    # Mutation check: this test dies if `>=` is weakened to `==`.
+    with pytest.raises(ValueError, match="forward/self references not allowed"):
+        _parse_image_blocks_new(_md4("- **reference_image:** image_1, image_4", on_image=3))
+
+
+def test_true_forward_ref_rejected_single_legacy_ref():
+    # Same branch via the LEGACY single-ref shape — proves v859 didn't only
+    # protect the new list form.
+    with pytest.raises(ValueError, match="forward/self references not allowed"):
+        _parse_image_blocks_new(_md4("- **reference_image:** image_3", on_image=2))
 
 
 def test_valid_two_refs_pass_validation():
