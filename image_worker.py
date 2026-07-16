@@ -230,6 +230,19 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label="IMAGE"):
         print(f"[{label}] laptop copy error (continuing): {_pe}", flush=True)
 
 
+# Parity with flow_worker._IGNORE_DEFAULT_ARGS. Playwright/Patchright default
+# chromium switches include --password-store=basic and --use-mock-keychain
+# (chromiumSwitches.js). On macOS those make Chrome skip the real "Chrome Safe
+# Storage" login-Keychain key, so the golden's COPIED cookies (encrypted with
+# that key, prefix v10) decrypt to nothing -> "Not logged in". Windows OSCrypt
+# uses DPAPI (key rides in the copied Local State) and ignores both flags, so
+# Windows is unaffected. Strip both on macOS only.
+_IGNORE_DEFAULT_ARGS = ['--enable-automation']
+if sys.platform == 'darwin':
+    _IGNORE_DEFAULT_ARGS = _IGNORE_DEFAULT_ARGS + ['--password-store=basic',
+                                                   '--use-mock-keychain']
+
+
 def _worker_chrome_channel():
     """v814 — Chrome channel for the worker browser (parity with flow_worker):
     WORKER_CHROME_CHANNEL env override, else the sidecar written by the
@@ -10248,7 +10261,7 @@ def launch_browser(session_folder=SESSION_FOLDER):
     browser = pw.chromium.launch_persistent_context(
         user_data_dir=session_folder,
         channel=_worker_chrome_channel(),  # v814 — sidecar/env, parity with flow_worker
-        ignore_default_args=['--enable-automation'],
+        ignore_default_args=_IGNORE_DEFAULT_ARGS,
         headless=False,
         viewport={"width": 1280, "height": 720},
         args=launch_args,
@@ -10436,7 +10449,7 @@ Examples:
                 browser = pw.chromium.launch_persistent_context(
                     user_data_dir=args.session,
                     channel=_worker_chrome_channel(),  # v814
-                    ignore_default_args=['--enable-automation'],
+                    ignore_default_args=_IGNORE_DEFAULT_ARGS,
                     headless=False,
                     viewport={"width": 1280, "height": 720},
                     args=['--disable-blink-features=AutomationControlled',
