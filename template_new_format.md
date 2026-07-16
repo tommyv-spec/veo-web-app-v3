@@ -868,6 +868,7 @@ The main character, same [setting anchor] as image 2, same framing — shot on i
 - **speaker:** the main character on-camera      # v681 — <character_name from Ingredients> <on-camera|silent>. (omitted) defaults to <persona> on-camera. NO `voiceover` in v681 (deferred to v682).
 - **cut_mode:** auto      # v668 — whisper | timeline | auto. v852: on a `speaker: silent` scene, OMIT for FULL-length export, or set `timeline` + `target_duration_s` to export the clip at the decoded beat duration. Silent clips are keep-protected from VAD either way (v852). Default `auto` picks `timeline` for bracket-annotation lines (`[music plays]`, `[SFX:...]`) and `whisper` otherwise. Set explicitly when overriding.
 - **line:** 
+- **clip_duration_s:** 4      # v861 — MANDATORY on every spoken line: 4 | 6 | 8 | 10, matching THIS line's word count (<=11w=4s · 12-16w=6s · 17-24w=8s · 25-28w=10s; over 28w is a v831 violation — split into 2 clips). Attaches to the `- **line:**` above it (same rule as `pad`), so a 2-line scene can hold 2 different durations. Bare integer only. Flow renders a real 10s clip; the Veo API has no 10s bucket and folds 10→8. Absent → the parser auto-picks from the word count and logs `[v861/auto]`, but the /build auditor FAILs the build.
 - **pad:**           # v644 — optional suffix added AFTER line in Veo prompt only (target line+pad ≈ 20 words; pad is cut from final video by whisper-VAD)
 - **action_note:** 
 
