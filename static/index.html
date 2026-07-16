@@ -19966,13 +19966,23 @@ Ambient: same kitchen room tone, soft pour sound.
                     const pads = sc.pads || [];
                     const notes = sc.action_notes || [];
                     const vps = sc.veo_prompts || [];
+                    // v861 — per-line render duration, resolved SERVER-SIDE.
+                    // clip_duration.py owns the bucket table; never re-do that
+                    // math here. 'declared' = the markdown's clip_duration_s
+                    // bullet; 'auto' = picked from the word count at import.
+                    const durs = sc.clip_durations_resolved || [];
+                    const durSrcs = sc.clip_duration_sources || [];
                     let lineRows = lines.map((ln, i) => {
                         const pad = pads[i];
                         const note = notes[i];
                         const vp = vps[i];
                         const lnWords = (ln||'').split(/\s+/).filter(Boolean).length;
                         const padWords = pad ? pad.split(/\s+/).filter(Boolean).length : 0;
-                        return `<div style="padding:6px 8px;background:var(--bg-input);border-radius:4px;font-size:11px;margin-top:4px;"><div><b>line ${i+1}</b> <span style="color:var(--text-muted);">(${lnWords}w)</span>: ${imgEscape(ln)}</div>${pad ? `<div style="margin-top:4px;color:#fbbf24;"><b>pad</b> <span style="color:var(--text-muted);">(${padWords}w · total ${lnWords+padWords}w)</span>: ${imgEscape(pad)}</div>` : ''}${note ? `<div style="margin-top:4px;color:var(--text-muted);"><b>action</b>: ${imgEscape(note)}</div>` : ''}${vp ? `<details style="margin-top:4px;"><summary style="cursor:pointer;color:#a78bfa;">veo prompt override</summary><pre style="margin-top:4px;padding:6px;background:var(--bg-elevated);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;">${imgEscape((vp.text_prompt||'') + (vp.negative_prompt ? '\n\nNegative: ' + vp.negative_prompt : ''))}</pre></details>` : ''}</div>`;
+                        const dur = durs[i], durSrc = durSrcs[i];
+                        const durBadge = dur
+                            ? ` <span style="color:${durSrc === 'declared' ? '#4ade80' : 'var(--text-muted)'};" title="${durSrc === 'declared' ? 'declared via clip_duration_s (v861)' : 'auto-picked from the word count at import — declare clip_duration_s (v861)'}">· ${dur}s${durSrc === 'auto' ? ' auto' : ''}</span>`
+                            : (durSrc === 'invalid' ? ` <span style="color:#f87171;" title="clip_duration_s is not 4/6/8/10 — this build HARD-FAILS at import (v861)">· invalid</span>` : '');
+                        return `<div style="padding:6px 8px;background:var(--bg-input);border-radius:4px;font-size:11px;margin-top:4px;"><div><b>line ${i+1}</b> <span style="color:var(--text-muted);">(${lnWords}w)</span>${durBadge}: ${imgEscape(ln)}</div>${pad ? `<div style="margin-top:4px;color:#fbbf24;"><b>pad</b> <span style="color:var(--text-muted);">(${padWords}w · total ${lnWords+padWords}w)</span>: ${imgEscape(pad)}</div>` : ''}${note ? `<div style="margin-top:4px;color:var(--text-muted);"><b>action</b>: ${imgEscape(note)}</div>` : ''}${vp ? `<details style="margin-top:4px;"><summary style="cursor:pointer;color:#a78bfa;">veo prompt override</summary><pre style="margin-top:4px;padding:6px;background:var(--bg-elevated);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;">${imgEscape((vp.text_prompt||'') + (vp.negative_prompt ? '\n\nNegative: ' + vp.negative_prompt : ''))}</pre></details>` : ''}</div>`;
                     }).join('');
 
                     // v682n — render a synthetic row for silent / text_card
@@ -19990,7 +20000,12 @@ Ambient: same kitchen room tone, soft pour sound.
                             sceneType === 'text_card' ? '[text card]' :
                             speaker === 'silent' ? '[silent]' :
                             '[no dialogue]';
-                        lineRows = `<div style="padding:6px 8px;background:var(--bg-input);border-radius:4px;font-size:11px;margin-top:4px;"><div style="color:var(--text-muted);font-style:italic;">${imgEscape(marker)}</div>${vp ? `<details style="margin-top:4px;"><summary style="cursor:pointer;color:#a78bfa;">veo prompt override</summary><pre style="margin-top:4px;padding:6px;background:var(--bg-elevated);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;">${imgEscape((vp.text_prompt||'') + (vp.negative_prompt ? '\n\nNegative: ' + vp.negative_prompt : ''))}</pre></details>` : ''}</div>`;
+                        // v861 — a silent / text_card scene has no line to
+                        // word-count but still renders a clip, and may declare
+                        // its own clip_duration_s.
+                        const silentDur = (sc.clip_durations_resolved || [])[0];
+                        const silentBadge = silentDur ? ` <span style="color:#4ade80;" title="declared via clip_duration_s (v861)">· ${silentDur}s</span>` : '';
+                        lineRows = `<div style="padding:6px 8px;background:var(--bg-input);border-radius:4px;font-size:11px;margin-top:4px;"><div style="color:var(--text-muted);font-style:italic;">${imgEscape(marker)}${silentBadge}</div>${vp ? `<details style="margin-top:4px;"><summary style="cursor:pointer;color:#a78bfa;">veo prompt override</summary><pre style="margin-top:4px;padding:6px;background:var(--bg-elevated);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;">${imgEscape((vp.text_prompt||'') + (vp.negative_prompt ? '\n\nNegative: ' + vp.negative_prompt : ''))}</pre></details>` : ''}</div>`;
                     }
 
                     return `<div style="padding:8px 10px;background:var(--bg-elevated);border-radius:4px;font-size:12px;"><b>Scene ${sc.scene_index}</b> · image_${sc.image_index} · ${imgEscape(sc.clip_mode||'fresh')}${sc.scene_transition ? ` · ${imgEscape(sc.scene_transition)}` : ''}${sc.speaker_mode ? ` · speaker: ${imgEscape(sc.speaker_mode)}` : ''}${sc.visual_register ? ` · register: ${imgEscape(sc.visual_register)}` : ''}${lineRows}</div>`;

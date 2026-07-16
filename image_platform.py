@@ -7334,6 +7334,49 @@ def get_batch_overview(
         for s in scenes_section
     )
 
+    # v861 — resolve each line's render duration for the overview UI, so the
+    # storyboard panel can show the seconds next to the word count.
+    #
+    # Resolved HERE rather than in JS on purpose: the bucket table has one
+    # home (clip_duration.py), and a copy in index.html would be a third one
+    # free to drift. It would also be WRONG whenever a build declares an
+    # explicit `- **clip_duration_s:**` that overrides the word count — which
+    # is the mandatory path for new builds.
+    #
+    # anchor_bucket is None here: frame anchors need the image_nodes, which
+    # this markdown-preview endpoint does not load. Only v667 transformation
+    # scenes carry anchors and those are silent (no line rows), so the
+    # per-line numbers shown here match what prepare_batch_for_video will
+    # store. `source` lets the UI mark an auto-pick as not-yet-declared.
+    for _s in scenes_section:
+        _lines = _s.get("lines") or []
+        _explicit = _s.get("clip_durations") or []
+        _resolved, _sources = [], []
+        for _i, _line in enumerate(_lines):
+            _exp = _explicit[_i] if _i < len(_explicit) else None
+            try:
+                _resolved.append(resolve_clip_duration_s(
+                    explicit=_exp, anchor_bucket=None, line_text=_line))
+            except ValueError:
+                # A bad bullet already hard-fails at import; the overview must
+                # still render so the operator can SEE the offending scene.
+                _resolved.append(None)
+                _sources.append("invalid")
+                continue
+            _sources.append("declared" if _exp is not None else "auto")
+        if not _lines and _explicit:
+            # Silent / text_card scene: no line to word-count, but it still
+            # renders a clip and may declare its own duration (the parser keeps
+            # it as a 1-entry list, mirroring v786's dangling action_note).
+            try:
+                _resolved = [resolve_clip_duration_s(
+                    explicit=_explicit[0], anchor_bucket=None, line_text=None)]
+                _sources = ["declared"]
+            except ValueError:
+                _resolved, _sources = [None], ["invalid"]
+        _s["clip_durations_resolved"] = _resolved
+        _s["clip_duration_sources"] = _sources
+
     return {
         **batch.to_dict(),
         "source_markdown": md,
