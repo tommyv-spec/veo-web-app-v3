@@ -270,6 +270,46 @@ def test_parse_pad_and_clip_duration_do_not_interfere():
     assert len(s["lines"]) == len(s["pads"]) == len(s["clip_durations"]) == 2
 
 
+# --- worker.py: the Veo API render path's consumption of the column ---------
+# The final review found the ONE defect here, in the gap the other 79 tests
+# left: everything covered clip_duration.py and the parser, nothing covered
+# what the render paths DO with the value.
+
+from worker import veo_override_duration
+
+
+def test_worker_null_means_job_level_duration():
+    """NULL → None → the job-level duration applies.
+
+    This is the contract that got broken once already. A NULL row is a manual
+    UI job (dialogue typed in the form, never parsed from markdown) or a
+    pre-v861 import. Word-counting it here would (a) run the bucket math a
+    second time outside clip_duration.py, (b) diverge from the Flow path's
+    `... or job_duration`, and (c) change a pre-v861 job's length mid-flight.
+    """
+    assert veo_override_duration(None, clip_index=0) is None
+    assert veo_override_duration(None, clip_index=3) is None
+
+
+def test_worker_returns_str_for_veo():
+    """Veo's duration_seconds wants a string, not an int."""
+    for stored in (4, 6, 8):
+        assert veo_override_duration(stored, clip_index=0) == str(stored)
+
+
+def test_worker_folds_10_to_8():
+    """The Veo API has no 10s bucket; Flow renders the real 10s."""
+    assert veo_override_duration(10, clip_index=0) == "8"
+
+
+@pytest.mark.parametrize("bad", [7, 0, -3, 99, 5.237, "8", [8], True])
+def test_worker_bad_row_costs_the_clip_not_the_job(bad):
+    """clips.veo_render_duration_s has no CHECK constraint and main.py writes
+    it unvalidated from the client payload, so bad rows are reachable. The
+    clip falls back to job-level; the job must not die."""
+    assert veo_override_duration(bad, clip_index=0) is None
+
+
 def test_resolver_is_the_one_used_by_prepare():
     """Guard: prepare_batch_for_video must call the shared resolver, not
     re-implement the table. Fails loudly if someone forks the math."""

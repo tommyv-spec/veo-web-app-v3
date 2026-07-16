@@ -332,9 +332,19 @@ class Clip(Base):
     # target_duration_s: derived at storyboard build from
     # image_N.frame_anchor_s vs the next image's anchor. NULL on pre-v667
     # clips; whisper path ignores it.
-    # veo_render_duration_s: ceil_to(target_duration_s, [4,6,8]); used to
-    # pick the Veo render bucket for transformation chains. NULL = no
-    # override (existing default duration logic applies).
+    # veo_render_duration_s: the clip's render length in seconds.
+    #   v667 (original): ceil_to(target_duration_s, [4,6,8]) — the Veo bucket
+    #     for transformation chains. Nothing read the column back then.
+    #   v861 (2026-07-16, current): the PER-CLIP pick, resolved at import by
+    #     image_platform.prepare_batch_for_video — the markdown's
+    #     `- **clip_duration_s:**` bullet, else the v667 anchor bucket above,
+    #     else the spoken line's word count (<=11w=4s, 12-16w=6s, 17-24w=8s,
+    #     25-28w=10s). 10 is legal now: Flow's composer renders a real 10s
+    #     clip; worker.py folds 10→8 because the Veo API has no 10s bucket.
+    # NULL = no override; the job-level duration applies (manual UI jobs and
+    # pre-v861 imports). Both render paths honor NULL the same way.
+    # Bare INTEGER, no CHECK constraint — readers must not trust the value.
+    # Canonical: code/template_reference.md §v861.
     cut_mode = Column(String(20), nullable=True)
     target_duration_s = Column(Float, nullable=True)
     veo_render_duration_s = Column(Integer, nullable=True)

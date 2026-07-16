@@ -41,7 +41,53 @@ from models import (
 )
 from veo_generator import VeoGenerator, list_images, GENAI_AVAILABLE, describe_subject_for_continuity
 from error_handler import VeoError, error_handler
-from clip_duration import pick_clip_duration_s, veo_api_duration_s
+from clip_duration import veo_api_duration_s
+
+
+def veo_override_duration(stored, clip_index=None):
+    """v861 — this clip's Veo `duration_seconds` override, or None for job-level.
+
+    `stored` is `clips.veo_render_duration_s`, resolved at IMPORT time by
+    image_platform.prepare_batch_for_video from the markdown's
+    `- **clip_duration_s:**` bullet or the line's word count.
+
+    NULL → None → the job-level duration applies. That covers manual UI jobs
+    (dialogue typed into the form, never parsed from markdown) and rows
+    imported before v861. This function deliberately does NOT word-count a
+    NULL row itself:
+
+      - the bucket math runs at import, in ONE place (clip_duration.py via
+        prepare_batch_for_video). Re-running it here would be a second site
+        free to drift — the exact thing that module exists to prevent;
+      - the Flow path treats NULL the same way (`... or job_duration`), so
+        both backends render the same job identically;
+      - a pre-v861 job renders exactly as it did before the deploy, instead of
+        changing length mid-flight. A legacy build picks v861 up on re-import.
+
+    The Veo API accepts durationSeconds of 4/6/8 ONLY
+    (ai.google.dev/gemini-api/docs/veo), so a 10s pick folds to 8 here. Flow's
+    composer renders a real 10s clip; this path cannot.
+
+    Returns a str (Veo's expected type) or None.
+    """
+    if stored is None:
+        return None
+    # veo_api_duration_s RAISES outside 4/6/8/10. Reachable, not theory:
+    # clips.veo_render_duration_s is a bare INTEGER with no CHECK constraint
+    # and main.py writes it from the client payload unvalidated. A bad row
+    # must cost THIS CLIP its pick, never the whole job.
+    try:
+        folded = veo_api_duration_s(stored, field_name="veo_render_duration_s")
+    except ValueError as err:
+        print(f"[v861/worker] clip {clip_index}: bad stored duration {stored!r} — "
+              f"{err}. Falling back to the job-level duration for this clip.",
+              flush=True)
+        return None
+    note = "" if folded == stored else (
+        f" (folded from {stored}s — the Veo API has no {stored}s bucket)")
+    print(f"[v861/worker] clip {clip_index}: {folded}s duration "
+          f"via clips.veo_render_duration_s{note}", flush=True)
+    return str(folded)
 
 
 # ============================================================
@@ -3446,19 +3492,8 @@ class JobWorker:
                 # This is the uploaded image for this scene (not the extracted frame in CONTINUE mode)
                 scene_image = images[start_index] if start_index < len(images) else images[0]
                 
-                # v861 — per-clip render duration. Every clip (not just the
-                # last) renders at the bucket its line's word count lands in.
-                # The bucket was resolved at import time from the markdown's
-                # `- **clip_duration_s:**` bullet (explicit) or the word count
-                # (auto) and stored on the Clip row. NULL → legacy/manual job
-                # with no per-clip pick: leave override_duration None so the
-                # job-level duration applies.
-                #
-                # The Veo API accepts durationSeconds of 4/6/8 ONLY
-                # (ai.google.dev/gemini-api/docs/veo) — a 10s pick folds to 8
-                # here. Flow's composer renders a real 10s clip; this path
-                # cannot.
-                override_duration = None
+                # v861 — per-clip render duration, resolved at IMPORT time and
+                # read straight off the Clip row. See veo_override_duration().
                 with get_db() as db:
                     _dur_clip = db.query(Clip).filter(
                         Clip.job_id == job_id,
@@ -3466,45 +3501,7 @@ class JobWorker:
                     ).first()
                     _picked = _dur_clip.veo_render_duration_s if _dur_clip else None
 
-                if _picked is None and dialogue_text:
-                    # Legacy job imported before v861 — no stored pick. Derive
-                    # from the word count so behavior matches a fresh import.
-                    _picked = pick_clip_duration_s(len(dialogue_text.split()))
-                    _picked_src = "auto (legacy row, no stored pick)"
-                else:
-                    _picked_src = "clips.veo_render_duration_s"
-
-                if _picked is not None:
-                    # v861 — veo_api_duration_s RAISES on anything outside
-                    # 4/6/8/10. That is reachable in production, not theory:
-                    # clips.veo_render_duration_s is a bare INTEGER with no
-                    # CHECK constraint and main.py writes it straight from the
-                    # client payload unvalidated. A bad row must fail THIS
-                    # CLIP's duration pick, never the whole job.
-                    try:
-                        _folded = veo_api_duration_s(
-                            _picked, field_name="veo_render_duration_s")
-                    except ValueError as _dur_err:
-                        print(
-                            f"[v861/worker] clip {clip_index}: bad stored duration "
-                            f"{_picked!r} — {_dur_err}. Falling back to the "
-                            f"job-level duration for this clip.",
-                            flush=True,
-                        )
-                        _folded = None
-
-                    if _folded is not None:
-                        override_duration = str(_folded)
-                        _note = "" if _folded == _picked else (
-                            f" (folded from {_picked}s — the Veo API has no "
-                            f"{_picked}s bucket)"
-                        )
-                        print(
-                            f"[v861/worker] clip {clip_index}: "
-                            f"{len((dialogue_text or '').split())} words → "
-                            f"{_folded}s duration via {_picked_src}{_note}",
-                            flush=True,
-                        )
+                override_duration = veo_override_duration(_picked, clip_index)
 
                 # CRITICAL: Log the actual start_frame being used for generation
                 actual_start_frame_name = start_frame.name if hasattr(start_frame, 'name') else str(start_frame)
