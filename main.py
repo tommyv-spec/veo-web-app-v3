@@ -13041,6 +13041,9 @@ async def local_worker_get_redo_clips(
             # Storyboard/Scene mode fields for continue mode support
             "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,
+            # v861 — per-clip render duration (4|6|8|10). NULL → the worker
+            # falls back to the job-level duration (legacy / manual jobs).
+            "veo_render_duration_s": clip.veo_render_duration_s,
             "short_dialogue_mode": job_config.get("short_dialogue_mode", "optimized"),
             "prefix_short_enabled": job_config.get("prefix_short_enabled", False),
             "prefix_short_word": job_config.get("prefix_short_word", "only"),
@@ -14142,6 +14145,9 @@ async def user_worker_get_pending_job(
             "end_frame_url": f"{base_url}/api/user-worker/frames/{job.id}/{end_filename}" if end_filename else None,
             "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,
+            # v861 — per-clip render duration (4|6|8|10). NULL → the worker
+            # falls back to the job-level duration (legacy / manual jobs).
+            "veo_render_duration_s": clip.veo_render_duration_s,
         })
     
     return {
@@ -14341,6 +14347,9 @@ async def user_worker_get_redo_clips(
             "claimed_by": clip.claimed_by_worker,
             "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,
+            # v861 — per-clip render duration (4|6|8|10). NULL → the worker
+            # falls back to the job-level duration (legacy / manual jobs).
+            "veo_render_duration_s": clip.veo_render_duration_s,
             "short_dialogue_mode": job_config.get("short_dialogue_mode", "optimized"),
             "prefix_short_enabled": job_config.get("prefix_short_enabled", False),
             "prefix_short_word": job_config.get("prefix_short_word", "only"),
