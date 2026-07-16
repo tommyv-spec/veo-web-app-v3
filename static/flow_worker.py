@@ -16474,6 +16474,15 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     if _need_new_project:
         try:
             variants = clip.get('flow_variants_count', 2)
+            # v861 — a redo re-renders ONE clip; use that clip's own duration.
+            _redo_dur = clip.get('veo_render_duration_s')
+            if _redo_dur:
+                try:
+                    page._duration = str(_redo_dur)
+                    print(f"[v861/flow] REDO clip {clip.get('clip_index')}: "
+                          f"duration tab → {_redo_dur}s", flush=True)
+                except Exception:
+                    pass
             select_frames_to_video_mode(page, context="REDO", variants_count=variants)
         except Exception as _se:
             print(f"[REDO] ⚠ Settings setup failed on new project: {_se}", flush=True)
@@ -17288,7 +17297,9 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                 dialogue_line=clip.get('dialogue_text', ''),
                 language=job_language,
                 voice_profile=job_voice_profile,
-                duration=job_duration,
+                # v861 — this clip's own duration drives the speech-timing
+                # window in the prompt, not the job-level default.
+                duration=float(clip.get('veo_render_duration_s') or job_duration),
                 short_dialogue_mode=job_short_dialogue_mode,
                 prefix_short_enabled=job_prefix_short_enabled,
                 prefix_short_word=job_prefix_short_word,
@@ -17636,7 +17647,9 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                 dialogue_line=clip.get('dialogue_text', ''),
                 language=job_language,
                 voice_profile=job_voice_profile,
-                duration=job_duration,
+                # v861 — this clip's own duration drives the speech-timing
+                # window in the prompt, not the job-level default.
+                duration=float(clip.get('veo_render_duration_s') or job_duration),
                 short_dialogue_mode=job_short_dialogue_mode,
                 prefix_short_enabled=job_prefix_short_enabled,
                 prefix_short_word=job_prefix_short_word,
@@ -17696,6 +17709,17 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                 pass
             human_delay(0.3, 0.6)
             variants_count = job.get('flow_variants_count', 2)
+            # v861 — per-clip duration. The API resolved this clip's bucket
+            # from its line's word count; page._duration is what
+            # select_frames_to_video_mode clicks in the 4s/6s/8s/10s tablist.
+            # NULL (legacy/manual job) → keep the job-level duration.
+            _clip_dur = clip.get('veo_render_duration_s')
+            try:
+                page._duration = str(_clip_dur) if _clip_dur else job.get('duration', '8')
+                print(f"[v861/flow] clip {clip_index+1}: duration tab → {page._duration}s "
+                      f"({'per-clip' if _clip_dur else 'job default'})", flush=True)
+            except Exception:
+                pass
             try:
                 select_frames_to_video_mode(page, variants_count=variants_count)
             except Exception as settings_err:
@@ -18813,7 +18837,9 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 dialogue_line=clip.get('dialogue_text', ''),
                 language=job_language,
                 voice_profile=job_voice_profile,
-                duration=job_duration,
+                # v861 — this clip's own duration drives the speech-timing
+                # window in the prompt, not the job-level default.
+                duration=float(clip.get('veo_render_duration_s') or job_duration),
                 short_dialogue_mode=job_short_dialogue_mode,
                 prefix_short_enabled=job_prefix_short_enabled,
                 prefix_short_word=job_prefix_short_word,
@@ -19398,7 +19424,9 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 dialogue_line=clip.get('dialogue_text', ''),
                 language=job_language,
                 voice_profile=job_voice_profile,
-                duration=job_duration,
+                # v861 — this clip's own duration drives the speech-timing
+                # window in the prompt, not the job-level default.
+                duration=float(clip.get('veo_render_duration_s') or job_duration),
                 short_dialogue_mode=job_short_dialogue_mode,
                 prefix_short_enabled=job_prefix_short_enabled,
                 prefix_short_word=job_prefix_short_word,
@@ -19496,6 +19524,17 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             human_delay(0.3, 0.6)
             variants_count = job.get('flow_variants_count', 2)
             print(f"[SUBMIT] Flow variants count from job config: {variants_count}", flush=True)
+            # v861 — per-clip duration. The API resolved this clip's bucket
+            # from its line's word count; page._duration is what
+            # select_frames_to_video_mode clicks in the 4s/6s/8s/10s tablist.
+            # NULL (legacy/manual job) → keep the job-level duration.
+            _clip_dur = clip.get('veo_render_duration_s')
+            try:
+                page._duration = str(_clip_dur) if _clip_dur else job.get('duration', '8')
+                print(f"[v861/flow] clip {clip_index+1}: duration tab → {page._duration}s "
+                      f"({'per-clip' if _clip_dur else 'job default'})", flush=True)
+            except Exception:
+                pass
             try:
                 select_frames_to_video_mode(page, variants_count=variants_count)
             except Exception as settings_err:
