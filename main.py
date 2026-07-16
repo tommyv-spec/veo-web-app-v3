@@ -12800,6 +12800,9 @@ async def local_worker_get_pending_job(
             # Storyboard/Scene mode fields for continue mode support
             "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,
+            # v861 — per-clip render duration (4|6|8|10). NULL → the worker
+            # falls back to the job-level duration (legacy / manual jobs).
+            "veo_render_duration_s": clip.veo_render_duration_s,
         }
         
         clips_data.append(clip_data)
