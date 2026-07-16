@@ -147,6 +147,7 @@ from models import (
     init_db, get_db_session, Job, Clip, JobLog, BlacklistEntry,
     get_job_logs_since, add_job_log, User, UserAPIKey, UserWorkerToken
 )
+from clip_duration import ALLOWED_CLIP_DURATIONS_S
 from lifecycle import apply_lifecycle_change, compute_stuck_days, apply_jobs_filters, _maybe_auto_enter_lifecycle, derive_effective_stage, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
 from auto_image_retry import parse_auto_image_retry_mode, VALID_RETRY_MODES, order_distinct_frames, pick_substitute
 from worker import worker, WORKER_VERSION
@@ -5978,12 +5979,14 @@ async def update_clip(
         clip.target_duration_s = float(req.target_duration_s)
 
     # ─── veo_render_duration_s ───────────────────────────────────────────
+    # v861 — 10s joined the set (Flow's 2026-07 composer). The Veo API path
+    # folds 10→8 at render time; Flow renders a real 10s clip.
     if req.veo_render_duration_s is not None:
-        if int(req.veo_render_duration_s) not in (4, 6, 8):
+        if int(req.veo_render_duration_s) not in ALLOWED_CLIP_DURATIONS_S:
             raise HTTPException(
                 400,
                 f"veo_render_duration_s {req.veo_render_duration_s} not in "
-                f"Veo render buckets [4, 6, 8]",
+                f"Veo render buckets {ALLOWED_CLIP_DURATIONS_S}",
             )
         clip.veo_render_duration_s = int(req.veo_render_duration_s)
 
@@ -12797,6 +12800,9 @@ async def local_worker_get_pending_job(
             # Storyboard/Scene mode fields for continue mode support
             "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,
+            # v861 — per-clip render duration (4|6|8|10). NULL → the worker
+            # falls back to the job-level duration (legacy / manual jobs).
+            "veo_render_duration_s": clip.veo_render_duration_s,
         }
         
         clips_data.append(clip_data)
@@ -13035,6 +13041,9 @@ async def local_worker_get_redo_clips(
             # Storyboard/Scene mode fields for continue mode support
             "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,
+            # v861 — per-clip render duration (4|6|8|10). NULL → the worker
+            # falls back to the job-level duration (legacy / manual jobs).
+            "veo_render_duration_s": clip.veo_render_duration_s,
             "short_dialogue_mode": job_config.get("short_dialogue_mode", "optimized"),
             "prefix_short_enabled": job_config.get("prefix_short_enabled", False),
             "prefix_short_word": job_config.get("prefix_short_word", "only"),
@@ -14136,6 +14145,9 @@ async def user_worker_get_pending_job(
             "end_frame_url": f"{base_url}/api/user-worker/frames/{job.id}/{end_filename}" if end_filename else None,
             "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,
+            # v861 — per-clip render duration (4|6|8|10). NULL → the worker
+            # falls back to the job-level duration (legacy / manual jobs).
+            "veo_render_duration_s": clip.veo_render_duration_s,
         })
     
     return {
@@ -14335,6 +14347,9 @@ async def user_worker_get_redo_clips(
             "claimed_by": clip.claimed_by_worker,
             "clip_mode": clip.clip_mode or "fresh",
             "scene_index": clip.scene_index or 0,
+            # v861 — per-clip render duration (4|6|8|10). NULL → the worker
+            # falls back to the job-level duration (legacy / manual jobs).
+            "veo_render_duration_s": clip.veo_render_duration_s,
             "short_dialogue_mode": job_config.get("short_dialogue_mode", "optimized"),
             "prefix_short_enabled": job_config.get("prefix_short_enabled", False),
             "prefix_short_word": job_config.get("prefix_short_word", "only"),

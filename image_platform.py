@@ -42,6 +42,11 @@ from sqlalchemy.orm import Session, relationship, joinedload, selectinload
 from models import Base, get_db_session, get_db, User, read_query_with_retry, UserWorkerToken
 from config import app_config
 from auth import get_current_user
+from clip_duration import (
+    ALLOWED_CLIP_DURATIONS_S,
+    pick_clip_duration_s,
+    resolve_clip_duration_s,
+)
 
 
 log = logging.getLogger("image_platform")
@@ -1604,6 +1609,31 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
       visible to both human and machine. This function only handles
       the slot-translation step that requires runtime knowledge of
       Flow's positional slot ordering.
+
+    KNOWN DEFECT — `scene_index_in_batch` has TWO conventions in one DB
+    (NOT fixed here; recorded so the next reader does not "clean it up"
+    without reading the sequencing note below). Line numbers drift — the
+    grep anchor after each one is the durable pointer:
+      * Column comment documents 0-based:
+        `scene_index_in_batch = Column`        -> "# 0, 1, 2, ..."
+      * The import path writes the 1-based N from `### Image N`:
+        `scene_index_in_batch=image_index`
+      * The backfill path writes `_scene_index(n)` — 1-based, parsed from the
+        node name "Scene N" — but falls back to the 0-based enumerate `idx`
+        when the name has no "Scene N", so BOTH conventions coexist in real
+        rows:  `n.scene_index_in_batch = _scene_index`
+      * The legacy pass below reads it as 0-based:
+        `md_image_num = parent.scene_index_in_batch + 1`
+    Net effect today: the `+1` is wrong for the dominant 1-based rows, and
+    that error is what makes `md == flow` (-> `continue`) in the common
+    persona+chain shape — i.e. the off-by-one ACCIDENTALLY suppresses the
+    legacy pass rather than the code being correct.
+
+    SEQUENCING — if the `+1` reader is ever corrected, `md != flow` starts
+    firing MORE often, which makes the v859 sentinel guard below MORE
+    necessary, not less. The guard must stay. Fix the conventions first (one
+    writer, one reader, backfill migration), keep the guard, then re-run the
+    old-vs-new differential over the fixture set.
     """
     body = (node.prompt or "")
     edges = sorted(node.parent_edges or [], key=lambda e: e.slot_order or 0)
@@ -1618,6 +1648,38 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
     slot_table = []
 
     import re as _re
+
+    # v859: park every slot number this function WRITES in a sentinel, and
+    # resolve them all back to "Image N" after the loop. The v581 legacy
+    # number pass below rewrites `\bImage K\b` anywhere in the body — it
+    # cannot tell an author-written "Image 2" from one a previous iteration
+    # just substituted in, so it ate its own output.
+    #
+    # This is a BUGFIX on a LIVE path, not a no-op guard for the new 2-ref
+    # feature. The smallest shipped shape it corrects is SINGLE-ref
+    # persona + product + `reference_image: image_1` on Image 3:
+    #     chain parent sib=1 -> md=2, flow=3 -> 2 != 3 -> `\bImage 2\b`
+    #     rewrote the PRODUCT's own substituted "Image 2" into "Image 3".
+    #     OLD: "Nuri from Image 1 holds the jar from Image 3, matching Image 3."
+    #     NEW: "Nuri from Image 1 holds the jar from Image 2, matching Image 3."
+    # The jar was bound to the chain slot. A 2-ref build widens the blast
+    # radius (persona+product+`image_3, image_1`: md=2 -> flow=4) but did
+    # not introduce it.
+    #
+    # Sentinels keep the legacy pass scoped to author-written text, which is
+    # all it ever meant to touch. Verified differentially old-vs-new over 28
+    # fixtures: 23 byte-identical; `persona + 1 chain` identical in every
+    # variant; the 5 deltas are all this bug being corrected.
+    #
+    # NUL is safe as the sentinel: Postgres `text` rejects 0x00, so it
+    # cannot occur in a stored `node.prompt`.
+    def _slot_token(n: int) -> str:
+        return f"\x00v859slot{n}\x00"
+
+    # v859: chain ORDER among the parent edges (0 = first declared
+    # reference_image entry, 1 = second). Distinct from `i`/slot_order.
+    chain_seq = 0
+
     for i, edge in enumerate(edges):
         flow_image_num = i + 1
         cls = _classify_edge_for_manifest(edge)
@@ -1626,13 +1688,13 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
         if cls == "persona":
             body = body.replace(
                 "the uploaded character reference image",
-                f"Image {flow_image_num}",
+                _slot_token(flow_image_num),
             )
 
         elif cls == "product":
             body = body.replace(
                 "the uploaded product reference image",
-                f"Image {flow_image_num}",
+                _slot_token(flow_image_num),
             )
 
         elif cls == "chain":
@@ -1642,14 +1704,48 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
             # ("the prior-scene reference image") is meaningful even
             # without substitution; the platform translation makes it
             # match Banana 2's positional view of the inputs at emission.
-            body = body.replace(
-                "the prior-scene reference image",
-                f"Image {flow_image_num}",
-            )
-            body = body.replace(
-                "the previous scene's reference image",
-                f"Image {flow_image_num}",
-            )
+            #
+            # v859: each chain edge owns a DISTINCT semantic phrase so a
+            # 2-ref image can bind pose/objects and body independently.
+            # Both edges previously targeted the same phrase — the first
+            # won, the second bound a reference the prompt never named,
+            # which Banana 2 blends as generic context. Keyed on chain
+            # ORDER, not slot number: persona/product take earlier slots,
+            # so slot number and chain order diverge whenever a product is
+            # bound. chain_seq 0 keeps the pre-v859 phrases verbatim, so
+            # every single-ref build translates byte-identically.
+            if chain_seq == 0:
+                body = body.replace(
+                    "the prior-scene reference image",
+                    _slot_token(flow_image_num),
+                )
+                body = body.replace(
+                    "the previous scene's reference image",
+                    _slot_token(flow_image_num),
+                )
+            elif chain_seq == 1:
+                body = body.replace(
+                    "the body reference image",
+                    _slot_token(flow_image_num),
+                )
+
+            # v859 TEMPORARY DIAGNOSTIC — remove once operator-side evidence
+            # lands. Emits the chain-order -> Flow-slot binding per chain
+            # edge. This function silently changes rendered prompts for a
+            # LIVE single-ref shape (persona+product+chain -> the product no
+            # longer gets eaten by the legacy pass), so operators need a log
+            # line that says which slot each chain ref actually claimed.
+            try:
+                log.info(
+                    f"[v859/chain-bind] node={node.id} "
+                    f"chain_seq={chain_seq} flow_slot=Image {flow_image_num} "
+                    f"role={(edge.role or '')[:32]!r} "
+                    f"phrase={'prior-scene' if chain_seq == 0 else 'body' if chain_seq == 1 else 'NONE(>2 refs)'}"
+                )
+            except Exception:
+                pass
+
+            chain_seq += 1
 
             # v581 LEGACY substitution — number-based reference. Kept
             # for backward compatibility with pre-v682 markdowns.
@@ -1667,7 +1763,7 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
             # Word-boundary substitution to avoid rewriting "Image 12"
             # when looking for "Image 1".
             pattern = rf"\bImage {md_image_num}\b"
-            replacement = f"Image {flow_image_num}"
+            replacement = _slot_token(flow_image_num)
             new_body = _re.sub(pattern, replacement, body)
             if new_body != body:
                 # v682 deprecation log — count legacy positional rewrites
@@ -1690,6 +1786,14 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
             # binding line for these; the role mapping happens via the
             # edge being attached to its slot at worker emission.
             pass
+
+    # v859: resolve the parked slot numbers now that every edge has had its
+    # pass. Runs before the diagnostic so `changed=` reports the real delta.
+    body = _re.sub(
+        r"\x00v859slot(\d+)\x00",
+        lambda m: f"Image {m.group(1)}",
+        body,
+    )
 
     # v681e.9 diagnostic emit — only when body actually changed OR an
     # 'other'-classified edge remained (potential bypass).
@@ -3455,6 +3559,16 @@ def _parse_scene_blocks_legacy(md_text: str) -> List[Dict[str, Any]]:
             block, flags=_re.MULTILINE,
         )
         ref_value = ref_match.group(1).strip() if ref_match else "none"
+        # v859: multi-reference is a NEW-FORMAT, image-block feature. The match
+        # below is unanchored, so "image_3, image_2" would capture "image_3,"
+        # and silently DROP entry 2 — a partial loss the author never sees.
+        # Refuse it instead of half-applying it.
+        if "," in ref_value:
+            raise ValueError(
+                f"Scene {scene_index}: multi-reference 'reference_image: {ref_value}' "
+                f"is a new-format feature (### Image N blocks) and is not supported "
+                f"in the legacy scene format"
+            )
         ref_parent: Optional[int] = None
         if ref_value.lower() not in ("none", "null", ""):
             m = _re.match(r"image_(\d+)", ref_value)
@@ -3538,9 +3652,13 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
     """New format: parse ``### Image N`` headers. Each is an image to generate.
 
     Returns a list of dicts with: image_index (int), prompt (str),
-    reference_image (Optional[int] — another image's index). Unlike the
-    legacy parser, scenes are in a separate section so these dicts
-    have no voiceover/clip_mode/action_note fields.
+    reference_image (Optional[int] — another image's index),
+    reference_images (List[int] — v859; ALL declared chain parents, in
+    declaration order, capped at 2). The scalar ``reference_image`` is
+    kept as the FIRST entry of that list (None when empty) so pre-v859
+    readers keep working unchanged — prefer ``reference_images`` in new
+    code. Unlike the legacy parser, scenes are in a separate section so
+    these dicts have no voiceover/clip_mode/action_note fields.
     """
     images: List[Dict[str, Any]] = []
     # Find every "### Image N" header and its block. Capture up to the
@@ -3575,16 +3693,48 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
             block = block[:cut_m.start()]
         image_index = int(header.group(1))
 
+        # v859 — reference_image accepts ONE or TWO chain parents:
+        #   image_3            -> [3]
+        #   image_3, image_2   -> [3, 2]  (slot 1 = pose/objects, slot 2 = body)
+        # The legacy scalar key stays = first entry so every pre-v859
+        # reader downstream keeps working unchanged.
         ref_match = _re.search(
-            r"^\s*[-*]\s*\*\*reference_image:\*\*\s*(\S+)",
+            # v859: bounded to spaces/tabs, NOT \s — `\s*(.+?)\s*$` bled across the
+            # newline on a blank value and captured the NEXT line, raising a
+            # "bad token" error that pointed at the wrong line. `(.*?)` allows the
+            # empty value, which falls through to None exactly like pre-v859.
+            r"^[ 	]*[-*][ 	]*\*\*reference_image:\*\*[ 	]*(.*?)[ 	]*$",
             block, flags=_re.MULTILINE,
         )
         ref_value = ref_match.group(1).strip() if ref_match else "none"
-        ref_parent: Optional[int] = None
-        if ref_value.lower() not in ("none", "null", ""):
-            m = _re.match(r"image_(\d+)", ref_value)
-            if m:
-                ref_parent = int(m.group(1))
+        ref_parents: List[int] = []
+        # v859: an entry may carry a trailing author note — "image_3 (keep the
+        # counter)" / "none (location shift)". The pre-v859 regex captured a
+        # single \S+ token, so only the first word ever mattered; preserve that
+        # exactly by taking the first whitespace-token of each comma entry.
+        entries = [p.strip() for p in ref_value.split(",") if p.strip()]
+        first_word = entries[0].split()[0].lower() if entries else "none"
+        if first_word not in ("none", "null"):
+            for entry in entries:
+                tok = entry.split()[0]
+                m = _re.match(r"^image_(\d+)$", tok)
+                if not m:
+                    raise ValueError(
+                        f"Image {image_index}: bad reference_image token {tok!r} "
+                        f"(expected 'image_N', 'none', or 'image_N, image_M')"
+                    )
+                ref_parents.append(int(m.group(1)))
+        if len(ref_parents) > 2:
+            raise ValueError(
+                f"Image {image_index}: {len(ref_parents)} reference images — "
+                f"at most 2 are allowed (slot 0 is the persona upload)"
+            )
+        if len(set(ref_parents)) != len(ref_parents):
+            raise ValueError(
+                f"Image {image_index}: duplicate reference_image entries {ref_parents} — "
+                f"Banana 2 down-weights duplicate refs and it wastes a slot"
+            )
+        ref_parent: Optional[int] = ref_parents[0] if ref_parents else None
 
         # v581: optional product_image field declares which product upload
         # this image binds. Value is the product ingredient name verbatim
@@ -3767,6 +3917,7 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
             "image_index": image_index,
             "prompt": prompt,
             "reference_image": ref_parent,
+            "reference_images": ref_parents,  # v859 — full list; scalar above = first
             "product_image": product_image,  # v581 — None if field absent
             "frame_anchor_s": frame_anchor_s,  # v667
             "visual_delta": visual_delta,      # v667
@@ -3785,14 +3936,17 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
     images.sort(key=lambda i: i["image_index"])
     known = {i["image_index"] for i in images}
     for i in images:
-        if i["reference_image"] is not None:
-            if i["reference_image"] not in known:
+        # v859: validate EVERY chain parent, not just the first. Pre-v859 only
+        # the scalar was checked, so a bad SECOND ref imported silently and
+        # blew up later at generation time with a confusing error.
+        for ref in i.get("reference_images") or []:
+            if ref not in known:
                 raise ValueError(
-                    f"Image {i['image_index']} references image_{i['reference_image']} which doesn't exist"
+                    f"Image {i['image_index']} references image_{ref} which doesn't exist"
                 )
-            if i["reference_image"] >= i["image_index"]:
+            if ref >= i["image_index"]:
                 raise ValueError(
-                    f"Image {i['image_index']} references image_{i['reference_image']} "
+                    f"Image {i['image_index']} references image_{ref} "
                     "— forward/self references not allowed"
                 )
         # v718j — paired_with validation: must reference known image, must
@@ -4120,19 +4274,28 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # lines, especially on Fast [Lower Priority] tier).
         #
         # We iterate through each matching bullet in source order.
+        # v861 — `clip_duration_s` joins the per-line bullet set. Like v644's
+        # `pad` it attaches to the closest preceding `line`, so a two-line
+        # scene can render its clips at two different durations.
         bullet_pattern = _re.compile(
-            r"^\s*[-*]\s*\*\*(line|action_note|pad)\s*:\*\*\s*(.+?)\s*$",
+            r"^\s*[-*]\s*\*\*(line|action_note|pad|clip_duration_s)\s*:\*\*\s*(.+?)\s*$",
             flags=_re.MULTILINE | _re.IGNORECASE,
         )
         lines_list: List[str] = []
         action_notes: List[Optional[str]] = []
         pads: List[Optional[str]] = []  # v644 parallel array
+        clip_durations: List[Optional[int]] = []  # v861 parallel array
         # v786 — silent / text_card scenes have an action_note but NO line
         # bullets, so the attach-to-most-recent-line rule below would drop
         # it. Hold it here; if the scene ends with zero lines, emit it as a
         # 1-entry action_notes list (the prepare_batch_for_video synthetic
         # flat-row injection reads notes[0] for exactly this case).
         dangling_action_note: Optional[str] = None
+        # v861 — same shape as dangling_action_note above, for the same reason:
+        # a silent / text_card scene has no `line` bullet to attach to, but it
+        # still renders a clip and may declare its own duration. Held here and
+        # emitted as a 1-entry clip_durations list when the scene has no lines.
+        dangling_clip_duration: Optional[int] = None
         for m in bullet_pattern.finditer(block):
             key = m.group(1).lower().replace(" ", "_")
             value = m.group(2).strip()
@@ -4140,6 +4303,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 lines_list.append(value)
                 action_notes.append(None)
                 pads.append(None)
+                clip_durations.append(None)  # v861
             elif key == "action_note":
                 if lines_list:
                     # Attach to most recent line
@@ -4153,6 +4317,43 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 if lines_list:
                     pads[-1] = value
                 # else: pad before any line — ignore, likely malformed
+            elif key == "clip_duration_s":
+                # v861 — attach the render-duration bucket to most recent line.
+                # fullmatch, NOT match: a leading-int match would silently
+                # truncate `6.5` → 6 and pick the first number out of `6 or 8`,
+                # which is exactly the coercion hole clip_duration.py's
+                # _validated_duration_s was written to close. An author can be
+                # WRONG about this value, so it must not be guessed at.
+                if not _re.fullmatch(r"\d+", value):
+                    raise ValueError(
+                        f"Scene {scene_index}: clip_duration_s {value!r} is not "
+                        f"a bare integer (expected one of "
+                        f"{list(ALLOWED_CLIP_DURATIONS_S)} — see "
+                        f"template_reference.md §v861)"
+                    )
+                dur_val = int(value)
+                if dur_val not in ALLOWED_CLIP_DURATIONS_S:
+                    # Compute the answer rather than reprinting the table: the
+                    # bucket math has ONE home (clip_duration.py) and a prose
+                    # copy here would drift silently the day _BUCKETS changes.
+                    _hint = ""
+                    if lines_list:
+                        _wc = len(lines_list[-1].split())
+                        _hint = (
+                            f" The line above it is {_wc} words → use "
+                            f"{pick_clip_duration_s(_wc)}."
+                        )
+                    raise ValueError(
+                        f"Scene {scene_index}: clip_duration_s {dur_val} not in "
+                        f"{list(ALLOWED_CLIP_DURATIONS_S)} (v861).{_hint}"
+                    )
+                if lines_list:
+                    clip_durations[-1] = dur_val
+                else:
+                    # v861 — no line to attach to. A silent / text_card scene
+                    # still renders a clip, so hold it (mirrors v786's dangling
+                    # action_note) rather than dropping it on the floor.
+                    dangling_clip_duration = dur_val
 
         # v786 — no-lines scene with a scene-level action_note: surface it
         # as a 1-entry list. Parallel-array invariants hold downstream:
@@ -4160,6 +4361,13 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # and the synthetic flat-row injection reads notes[0].
         if not lines_list and dangling_action_note:
             action_notes = [dangling_action_note]
+
+        # v861 — same for a no-lines scene's own duration: surface it as a
+        # 1-entry list so prepare_batch_for_video's silent flat-row branch can
+        # read clip_durations[0]. Without this the array stays empty and a
+        # silent scene could never declare its own render duration.
+        if not lines_list and dangling_clip_duration is not None:
+            clip_durations = [dangling_clip_duration]
 
         # v681 — text_card scenes AND silent scenes have no `- **line:**`
         # bullets by design. Tolerate missing lines on those. Other scenes
@@ -4203,6 +4411,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "lines": lines_list,
             "action_notes": action_notes,
             "pads": pads,  # v644 — parallel to lines/action_notes; entries are str or None
+            "clip_durations": clip_durations,  # v861 — parallel to lines; int (4|6|8|10) or None
             "speaker_mode": speaker_mode,  # v537
             "cut_mode": cut_mode,  # v668 — None | 'whisper' | 'timeline' | 'auto'
             "cast": scene_cast,           # v681 — None | list[str]
@@ -5057,6 +5266,206 @@ def import_scene_table(
 PLATFORM_AUTO_CHAIN_INLINE_INGREDIENTS = False
 
 
+def _v619_n5_drop_invalid_chain_refs(
+    img: Dict[str, Any],
+    image_index: int,
+    all_image_indices: Set[int],
+) -> List[int]:
+    """v619 N5 — drop forward/undeclared chain refs from ONE image dict.
+
+    Mutates ``img`` in place; returns the dropped refs so the caller can log
+    them (this stays pure of logging/DB so it is unit-testable).
+
+    v859 — two changes:
+
+    1. Reads the ``reference_images`` LIST, not just the scalar. Pre-v859 this
+       cleared ONLY ``reference_image``; the moment edge creation started
+       reading the list, an N5 drop was silently ignored and the dropped ref
+       came back. Both representations now move together, preserving T1's
+       invariant: ``reference_images == []`` iff scalar is None, and the
+       scalar is always ``reference_images[0]``.
+    2. Drops only the INVALID entries rather than the whole chain. This is a
+       strict generalization, not a behavior change: with a single ref (every
+       pre-v859 build) "drop the invalid entry" and "drop the chain" are the
+       same operation. Dropping a VALID sibling would discard a binding the
+       author explicitly asked for.
+
+    Legacy-format images (see ~L4592) carry only the scalar and no
+    ``reference_images`` key; the key is not invented for them.
+
+    NOTE — this repair is currently UNREACHABLE. Both parse paths already
+    raise ValueError on exactly these conditions before v619 runs
+    (``_parse_image_blocks_new`` ~L3839 for the new format,
+    ``_parse_scene_blocks_legacy`` ~L3535 for legacy), ``parse_scene_table``
+    is the only producer of the ``images`` list, and nothing mutates it in
+    between. It is kept — and kept correct — as v619's defence-in-depth
+    repair layer ("no HTTPException; bad markdown gets repaired"), so that
+    relaxing a parser gate later cannot silently resurrect a dropped ref.
+    """
+    ref_list = img.get("reference_images")
+    if ref_list is None:
+        scalar = img.get("reference_image")
+        ref_list = [scalar] if scalar is not None else []
+
+    kept: List[int] = []
+    dropped: List[int] = []
+    for ref in ref_list:
+        if ref >= image_index or ref not in all_image_indices:
+            dropped.append(ref)
+        else:
+            kept.append(ref)
+
+    if dropped:
+        if img.get("reference_images") is not None:
+            img["reference_images"] = kept
+        img["reference_image"] = kept[0] if kept else None
+    return dropped
+
+
+def _v859_plan_chain_edges(
+    ref_images: List[int],
+    parent_id_by_ref: Dict[int, Any],
+    attached_parents_count: int,
+    bound_parent_ids: Set[Any],
+    slot: int,
+    max_parents: int = 3,
+) -> Dict[str, Any]:
+    """v859 — decide the chain edges for ONE image. Pure: no DB, no logging.
+
+    The import handler owns the DB/log side effects; this owns the decision,
+    which is the part v859 changes and the part worth testing.
+
+    ``parent_id_by_ref`` maps a declared ref index to its already-created
+    parent node id. A ref ABSENT from the mapping means the node wasn't
+    created yet (the caller raises HTTPException 500).
+
+    Returns a plan dict::
+
+        edges     [{ref, parent_id, slot_order, chain_seq, total}, ...]
+        duplicates[ref, ...]   parent already bound — skipped (v520/v522)
+        capped    Optional[int]  first ref refused by the max_parents cap
+        missing   Optional[int]  first ref with no created parent node
+        attached_parents_count / slot / bound_parent_ids   post-state
+
+    Order of checks mirrors the pre-v859 single-ref block exactly: cap first
+    (so a capped ref warns rather than raising on a missing node), then the
+    node lookup, then the duplicate skip. ``bound_parent_ids`` is copied, not
+    mutated — the caller applies the post-state.
+    """
+    edges: List[Dict[str, Any]] = []
+    duplicates: List[int] = []
+    capped: Optional[int] = None
+    missing: Optional[int] = None
+
+    bound = set(bound_parent_ids)
+    count = attached_parents_count
+    next_slot = slot
+    total = len(ref_images)
+
+    for chain_seq, this_ref in enumerate(ref_images):
+        if count >= max_parents:
+            capped = this_ref
+            break
+        if this_ref not in parent_id_by_ref:
+            missing = this_ref
+            break
+        parent_id = parent_id_by_ref[this_ref]
+        # v520/v522: Banana 2 down-weights a duplicate reference AND it burns
+        # one of only 3 slots. Skip without consuming a slot.
+        if parent_id in bound:
+            duplicates.append(this_ref)
+            continue
+        edges.append({
+            "ref": this_ref,
+            "parent_id": parent_id,
+            "slot_order": next_slot,
+            "chain_seq": chain_seq + 1,
+            "total": total,
+        })
+        bound.add(parent_id)
+        count += 1
+        next_slot += 1
+
+    return {
+        "edges": edges,
+        "duplicates": duplicates,
+        "capped": capped,
+        "missing": missing,
+        "attached_parents_count": count,
+        "slot": next_slot,
+        "bound_parent_ids": bound,
+    }
+
+
+def _v859_collect_gating_parents(
+    img: Dict[str, Any],
+    ref_image: Optional[int],
+    created_nodes_by_image_index: Dict[int, Any],
+) -> Tuple[List[int], List[Any]]:
+    """v859 — resolve EVERY declared chain reference to its parent node.
+
+    Returns ``(gate_refs, parent_nodes)``. ``gate_refs`` is the declared ref
+    list (scalar fallback applied); ``parent_nodes`` is the subset that
+    resolved to a created node, in declaration order.
+
+    Why: job-start gating (``can_start``) previously re-derived its parents
+    from the SCALAR while edge creation wrote one edge per entry. Parent #2
+    was therefore never readiness-checked — the child went ``queued`` while
+    image_2 still had no ``chosen_variant_id``, and Banana 2 rendered against
+    an unready reference with correct edges and no error.
+    ``_promote_ready_children`` cannot rescue that case: it derives parents
+    from the real edges (correct) but only considers nodes still in ``draft``,
+    and this node is already ``queued``.
+
+    An unresolvable ref is skipped rather than appended as None — pre-v859
+    behavior (the missing-parent case raises in the edge loop instead).
+    """
+    gate_refs = img.get("reference_images")
+    if not gate_refs:
+        gate_refs = [ref_image] if ref_image is not None else []
+    parents: List[Any] = []
+    for r in gate_refs:
+        rp = created_nodes_by_image_index.get(r)
+        if rp is not None:
+            parents.append(rp)
+    return list(gate_refs), parents
+
+
+def _v859_all_parents_ready(parents: List[Any]) -> bool:
+    """Every parent must be ready AND have a chosen variant before a child can
+    start. Faithful extraction of the pre-v859 inline ``can_start`` loop; the
+    same predicate ``_promote_ready_children`` (~L9577) applies later.
+    """
+    for parent in parents:
+        if parent is None or parent.status != "ready" or parent.chosen_variant_id is None:
+            return False
+    return True
+
+
+def _v859_refuse_multiref_without_ingredients(
+    img: Dict[str, Any],
+    image_index: int,
+) -> None:
+    """v859 — refuse multi-reference on the legacy single-subject import path.
+
+    That path (no ``## Ingredients`` block) binds ONE ``role="reference"`` edge
+    from the scalar: different role vocabulary and different slot semantics
+    from the ingredients path's ``chain_from_image_N``. Generalizing it quietly
+    is how subtle breakage gets in — but silently binding only ref #1 is the
+    same silent-partial-loss class the legacy scene parser now refuses. So:
+    raise, and say what to do about it.
+    """
+    multi = img.get("reference_images") or []
+    if len(multi) > 1:
+        raise HTTPException(
+            400,
+            f"Image {image_index}: multi-reference "
+            f"(reference_image: {', '.join('image_%d' % r for r in multi)}) "
+            f"requires an '## Ingredients' block; the legacy single-subject "
+            f"import path binds only one reference"
+        )
+
+
 def _import_scene_table_impl(
     req: "ImportSceneTableRequest",
     db: Session,
@@ -5564,15 +5973,18 @@ def _import_scene_table_impl(
                 )
 
             # N5 — Drop forward / invalid chain refs
-            ref_idx = img.get("reference_image")
-            if ref_idx is not None:
-                if ref_idx >= image_index or ref_idx not in all_image_indices:
-                    log.warning(
-                        f"[image_platform] v619 N5: Image {image_index}: "
-                        f"reference_image={ref_idx} is invalid "
-                        f"(forward ref or undeclared) — dropping chain"
-                    )
-                    img["reference_image"] = None
+            # v859 — now drops from the `reference_images` LIST as well as the
+            # scalar, so the two can never disagree (edge creation reads the
+            # list). See _v619_n5_drop_invalid_chain_refs for why this block is
+            # unreachable today and kept anyway.
+            for _dropped_ref in _v619_n5_drop_invalid_chain_refs(
+                img, image_index, all_image_indices
+            ):
+                log.warning(
+                    f"[image_platform] v619 N5: Image {image_index}: "
+                    f"reference_image={_dropped_ref} is invalid "
+                    f"(forward ref or undeclared) — dropping chain"
+                )
 
     # v513: pre-pass to compute the anchor image index for each ingredient
     # WITHOUT creating any DB rows. This is done first so variant chains
@@ -6125,40 +6537,68 @@ def _import_scene_table_impl(
             # scene 8 (Salvora close-up after the reveal) anchored both
             # via "the Salvora Rhodiola Rosea bottle" AND via
             # reference_image: image_7 — both pointed at image 7.
-            if ref_image is not None and attached_parents_count < 3:
-                parent_node = created_nodes_by_image_index.get(ref_image)
-                if parent_node is None:
+            # v859: one chain edge PER declared reference. Order is
+            # authoritative — refs[0] is the prior-scene reference (pose +
+            # held objects), refs[1] the body reference; the slot translator
+            # maps them by chain order. Legacy-format images carry only the
+            # scalar, so fall back to it.
+            ref_images_declared = img.get("reference_images")
+            if not ref_images_declared:
+                ref_images_declared = [ref_image] if ref_image is not None else []
+
+            if ref_images_declared:
+                _parent_ids_by_ref = {
+                    r: created_nodes_by_image_index[r].id
+                    for r in ref_images_declared
+                    if created_nodes_by_image_index.get(r) is not None
+                }
+                _plan = _v859_plan_chain_edges(
+                    ref_images_declared,
+                    _parent_ids_by_ref,
+                    attached_parents_count,
+                    bound_parent_ids,
+                    slot,
+                )
+                if _plan["missing"] is not None:
                     raise HTTPException(
                         500,
-                        f"Image {image_index} references image_{ref_image} which wasn't created yet"
+                        f"Image {image_index} references image_{_plan['missing']} "
+                        f"which wasn't created yet"
                     )
-                # v522: use the same bound_parent_ids set the ingredient
-                # loop populated. Replaces the earlier db.new walk which
-                # had the same effect but read worse.
-                if parent_node.id in bound_parent_ids:
+                # v520/v522: parent already bound via an ingredient anchor —
+                # Banana 2 down-weights duplicate refs and it wastes a slot.
+                for _dup_ref in _plan["duplicates"]:
                     log.info(
-                        f"[import] Image {image_index}: ref_image image_{ref_image} "
+                        f"[import] Image {image_index}: ref_image image_{_dup_ref} "
                         f"already bound via ingredient match — skipping duplicate chain edge"
                     )
-                else:
+                if _plan["capped"] is not None:
+                    log.warning(
+                        f"[import] Image {image_index}: 3 parents already bound, "
+                        f"can't also chain to image_{_plan['capped']} (3-parent cap). "
+                        f"Setting/composition continuity may be reduced."
+                    )
+                for _edge in _plan["edges"]:
                     db.add(ImageEdge(
-                        parent_node_id=parent_node.id,
+                        parent_node_id=_edge["parent_id"],
                         child_node_id=node.id,
-                        role=f"chain_from_image_{ref_image}",
-                        slot_order=slot,
+                        role=f"chain_from_image_{_edge['ref']}",
+                        slot_order=_edge["slot_order"],
                         # v573: prior-scene reference for setting/composition
                         # continuity — drives the chain manifest line.
                         kind="chain",
                     ))
-                    bound_parent_ids.add(parent_node.id)
-                    attached_parents_count += 1
-                    slot += 1
-            elif ref_image is not None and attached_parents_count >= 3:
-                log.warning(
-                    f"[import] Image {image_index}: 3 parents already bound, "
-                    f"can't also chain to image_{ref_image} (3-parent cap). "
-                    f"Setting/composition continuity may be reduced."
-                )
+                    # v859 TEMPORARY DIAGNOSTIC — remove once operator-side
+                    # evidence confirms 2-ref binding renders correctly
+                    # (code/CLAUDE.md deploy discipline).
+                    log.info(
+                        f"[v859] Image {image_index}: chain edge "
+                        f"{_edge['chain_seq']}/{_edge['total']} -> "
+                        f"image_{_edge['ref']} at slot {_edge['slot_order']}"
+                    )
+                bound_parent_ids.update(_plan["bound_parent_ids"])
+                attached_parents_count = _plan["attached_parents_count"]
+                slot = _plan["slot"]
 
             # Safety net: if the scene mentions no ingredients AND has
             # no ref_image AND won't receive a deferred variant chain
@@ -6230,6 +6670,10 @@ def _import_scene_table_impl(
                 )
         else:
             # Legacy single-subject mode (no Ingredients block in markdown)
+            # v859: multi-reference needs the ingredients path (persona/product
+            # slot accounting). Refuse rather than silently binding only ref #1
+            # — same silent-partial-loss class the legacy scene parser refuses.
+            _v859_refuse_multiref_without_ingredients(img, image_index)
             if ref_image is None:
                 # Parent 0: subject upload (only for scenes with no prior-scene ref)
                 db.add(ImageEdge(
@@ -6295,12 +6739,18 @@ def _import_scene_table_impl(
                     # parent dependency to wait on here either.
                     attached_parents.append(anchor_scenes[ing_name])
                 # Else: this scene IS the anchor, or auto-chain disabled → no parent edge
-            if ref_image is not None:
-                rp = created_nodes_by_image_index.get(ref_image)
-                if rp is not None:
-                    attached_parents.append(rp)
-            # Safety-net case: no ingredients, no ref → subject upload
-            if not attached_parents and ref_image is None:
+            # v859: gate on EVERY declared reference, not just the scalar.
+            # An edge nothing waits on is not a working chain — see
+            # _v859_collect_gating_parents.
+            _gate_refs, _ref_parents = _v859_collect_gating_parents(
+                img, ref_image, created_nodes_by_image_index
+            )
+            attached_parents.extend(_ref_parents)
+            # Safety-net case: no ingredients, no ref → subject upload.
+            # v859: `not _gate_refs` == the old `ref_image is None` — T1
+            # guarantees reference_images == [] iff the scalar is None, and
+            # v619 N5 now preserves that invariant when it drops a ref.
+            if not attached_parents and not _gate_refs:
                 attached_parents.append(subject)
         else:
             if ref_image is None:
@@ -6310,11 +6760,7 @@ def _import_scene_table_impl(
                 if rp is not None:
                     attached_parents.append(rp)
 
-        can_start = True
-        for parent in attached_parents:
-            if parent is None or parent.status != "ready" or parent.chosen_variant_id is None:
-                can_start = False
-                break
+        can_start = _v859_all_parents_ready(attached_parents)
 
         if can_start:
             node.status = "queued"
@@ -7434,12 +7880,21 @@ def prepare_batch_for_video(
         this_node = nodes_by_id.get(node_id)
         this_anchor = getattr(this_node, "frame_anchor_s", None) if this_node else None
         target_duration_s: Optional[float] = None
-        veo_render_duration_s: Optional[int] = None
+        # v667 anchor-derived bucket — the trim duration for transformation
+        # montages. v861 treats this as the SECOND-priority input; an explicit
+        # `- **clip_duration_s:**` bullet outranks it.
+        anchor_bucket: Optional[int] = None
         if this_anchor is not None:
             nxt = _next_anchor_after(scene["scene_index"])
             if nxt is not None and nxt > this_anchor:
                 target_duration_s = round(nxt - this_anchor, 3)
-                veo_render_duration_s = _ceil_to_veo_bucket(target_duration_s)
+                anchor_bucket = _ceil_to_veo_bucket(target_duration_s)
+
+        # v861 — per-line explicit durations parsed off the scene block.
+        # Parallel to `lines`; entries are int (4|6|8|10) or None. A no-lines
+        # (silent / text_card) scene that declared the bullet yields a 1-entry
+        # list.
+        scene_clip_durations: List[Optional[int]] = scene.get("clip_durations") or []
 
         # v681 — text-card / caption / cast denorm. Scene-scoped fields
         # — same value across all dialogue lines in the scene.
@@ -7497,7 +7952,10 @@ def prepare_batch_for_video(
             "cut_mode": cut_mode,
             "frame_anchor_s": this_anchor,
             "target_duration_s": target_duration_s,
-            "veo_render_duration_s": veo_render_duration_s,
+            # v667 anchor-derived bucket, scene-scoped (the lift composer reads
+            # this). NOT the v861 per-line pick — that varies line by line and
+            # lives on the flat rows below.
+            "veo_render_duration_s": anchor_bucket,
             "visual_delta": getattr(this_node, "visual_delta", None) if this_node else None,
             # v681 — multi-character cast + text-card metadata.
             "cast": scene_cast,
@@ -7599,7 +8057,14 @@ def prepare_batch_for_video(
                 # downstream branch in video_processor handles it correctly.
                 "cut_mode": cut_mode if scene_is_silent else None,
                 "target_duration_s": target_duration_s if scene_is_silent else None,
-                "veo_render_duration_s": veo_render_duration_s if scene_is_silent else None,
+                # v861 — a silent scene has no spoken line, so the pick comes
+                # from an explicit bullet if the author set one, else the v667
+                # anchor bucket, else NULL (job-level duration applies).
+                "veo_render_duration_s": resolve_clip_duration_s(
+                    explicit=(scene_clip_durations[0] if scene_clip_durations else None),
+                    anchor_bucket=anchor_bucket,
+                    line_text=None,
+                ) if scene_is_silent else None,
                 # v681 — scene metadata. text_card carries caption+bg+duration;
                 # silent scenes carry scene_type=shot (or None) so the
                 # video processor doesn't try to drawtext-render them.
@@ -7633,6 +8098,43 @@ def prepare_batch_for_video(
             zip(lines, notes, veo_prompts, pads)
         ):
             dialogue_lines_flat.append(line_text or "")
+            # v861 — per-line pick: explicit bullet > v667 anchor bucket >
+            # this line's word count > NULL. Clip rows are 1:1 with dialogue
+            # lines, so each carries its own render duration.
+            _v861_explicit = (
+                scene_clip_durations[i_in_scene]
+                if i_in_scene < len(scene_clip_durations) else None
+            )
+            _v861_line_duration = resolve_clip_duration_s(
+                explicit=_v861_explicit,
+                anchor_bucket=anchor_bucket,
+                line_text=line_text,
+            )
+            _v861_words = len((line_text or "").split())
+            if _v861_explicit is None and _v861_line_duration is not None:
+                print(
+                    f"[v861/auto] scene_{scene['scene_index']} line {i_in_scene}: "
+                    f"{_v861_words}w → {_v861_line_duration}s "
+                    f"(no clip_duration_s bullet — auto-picked; declare it per v861)",
+                    flush=True,
+                )
+            elif _v861_explicit is not None:
+                _v861_auto = resolve_clip_duration_s(
+                    explicit=None, anchor_bucket=None, line_text=line_text)
+                _flag = "" if _v861_auto in (None, _v861_explicit) else \
+                    f" ⚠ word count suggests {_v861_auto}s"
+                print(
+                    f"[v861/explicit] scene_{scene['scene_index']} line {i_in_scene}: "
+                    f"{_v861_words}w → {_v861_line_duration}s (declared){_flag}",
+                    flush=True,
+                )
+            if _v861_words > 28:
+                print(
+                    f"[v861/warn] scene_{scene['scene_index']} line {i_in_scene}: "
+                    f"{_v861_words}w exceeds the 28-word cap (v831 amended) — "
+                    f"split into two clips",
+                    flush=True,
+                )
             scenes_metadata_flat.append({
                 "scene_index": scene["scene_index"],
                 "line_index_in_scene": i_in_scene,
@@ -7659,7 +8161,7 @@ def prepare_batch_for_video(
                 # branch.
                 "cut_mode": cut_mode,
                 "target_duration_s": target_duration_s,
-                "veo_render_duration_s": veo_render_duration_s,
+                "veo_render_duration_s": _v861_line_duration,
                 # v681 — text-card / caption denorm onto the flat row.
                 # Scene-scoped (same as clip_mode/transition convention):
                 # only the first line of a scene carries the values; later

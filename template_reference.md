@@ -15375,6 +15375,8 @@ Every DEFAULT flipped to v782 values (`clip_mode: fresh`, `transition: cut`):
 - Prompt B splits at the same boundary (each half's B = the reworded version of that half; v821 shape per clip).
 - Duration per half = ceil(words / 2.6), floor 4s (keeps v577 green).
 
+> **Amended 2026-07-16 (v861)**: the cap is now **28 words**, not the 25 named above — v861's 10s bucket covers 25-28 words and was unreachable under the old cap. Everything else about v831 is unchanged: split at a natural sentence boundary, both halves reuse the SAME start image, distribute the action, Prompt B splits at the same boundary. The auditor's `c_line_word_cap` now FAILs above 28. Forward-only; shipped builds are not retro-edited.
+
 **Why**: Veo renders fixed-length clips; a 30+ word line either rushes the delivery or overruns the clip and gets trimmed mid-sentence at export. Two short clips deliver clean speech AND double the visual beats (each half opens on its own action).
 
 **Enforcement**: the authoring auditor (`~/.claude/skills/build-video/audit_build.py` `c_line_word_cap`) HARD-FAILS any line over 25 words. v577's 2.6×duration budget stays as the per-clip fit check.
@@ -15635,3 +15637,118 @@ A 6.8 MB PNG, base64'd to ~9 MB of JSON, pushed through `page.evaluate` — **on
 Firing the 4 POSTs in parallel bought ~1.5×, not the 4× predicted. Flow **accepts** 4 concurrent `batchGenerateImages` POSTs but does **not render them concurrently** — they queue server-side. So the parallel-submit lever is spent; the remaining wins are in what we send (refs) and how many nodes are in flight, not in how hard we fire variants.
 
 Expected after v856: a 3-ref node ~98s → **~45s**. Tests: `code/test_v856_ref_cache.py` (8 cases — persistence, project scoping, LRU eviction, hot-ref survival, per-project drop, graceful disable, no-op drop, timing line).
+
+## v859 — Multi-reference chain: two parents on one image (pose+objects | body)
+
+**What it solves**: a frame that must inherit TWO different things from TWO different frames. Worked case (add-the-third v3, 2026-07-16): each "fit" frame needs the POSE + the HELD OBJECTS from its own beat's fat base frame, and the BODY from the one fit anchor. With a single chain parent you must pick one and re-describe the other in text. Operator: *"the fit should reference the previous fat and the overall fit — it gets the posing and the objects from the previous fat and the body of the fit."*
+
+**The rule**: `- **reference_image:**` accepts one OR two `image_N` entries, comma-separated. Order is authoritative:
+
+| Entry | Chain slot | The phrase the prompt MUST use |
+|---|---|---|
+| 1st | chain 0 | `the prior-scene reference image` (alias: `the previous scene's reference image`) |
+| 2nd | chain 1 | `the body reference image` |
+
+```
+- **reference_image:** image_3, image_2
+```
+```
+Keep the composition, the framing, the marks and the objects in his hands exactly as in the prior-scene reference image, but give the man the build shown in the body reference image.
+```
+
+- **Max 2 entries.** Slot 0 is always the persona upload and the model cap is 3 parents. A 3rd entry is a hard parse error, never a silent truncation.
+- **Duplicates are a hard error** — Banana 2 down-weights duplicate refs and it wastes a slot (the v520/v522 lesson).
+- **Every entry is validated**: must exist, must be `< this image's index`. Pre-v859 only the FIRST was checked.
+- **Both entries MUST be NAMED in the prompt body** via their phrase. This is the whole rule, not a nicety — see below.
+- **Single-ref markdowns are unaffected**: chain 0 keeps the pre-v859 phrases, so they translate identically.
+- **Legacy scene format REFUSES a comma-ref** (`_parse_scene_blocks_legacy`) rather than silently dropping entry 2 — its regex is unanchored and would have read `image_3, image_2` as just `3`.
+- **Multi-ref requires an `## Ingredients` block.** The legacy single-subject import path binds one reference and raises `HTTPException(400)` on a multi-ref rather than silently dropping entry 2.
+
+**AN UNNAMED REFERENCE IS DEAD WEIGHT — this is why the feature exists at all.** The slot translator (`_resolve_flow_prompt_bindings`) only rewrites the phrases above. A prompt saying "as in the reference image" matches nothing, so the reference is bound as an edge and **never named to the model** — and Banana 2 blends an unnamed reference as generic visual context (the v573 persona-bleed failure mode). At the time v859 landed only 39 of 182 shipped builds used a binding phrase. If your reference "isn't being used", check the phrase before blaming the model.
+
+**Job gating counts every reference.** A child is held in `draft` until ALL declared parents are `ready` with a chosen variant. Pre-v859 the gate read the scalar only, so a 2-ref child could be queued while parent 2 was still rendering — correct edges, unready reference, no error. `_promote_ready_children` could not rescue it (it only reconsiders `draft` nodes).
+
+**Why 2 and not 3**: slot 0 is the persona upload on every image; a product-bearing frame takes another. Two chain refs + persona = the cap. A frame needing product AND two chain refs logs the 3-parent-cap warning and drops the last.
+
+**Landmine for anyone touching `_resolve_flow_prompt_bindings`**: the v581 legacy number-based fallback rewrites `\bImage N\b` across the whole body and cannot tell author-written text from a slot number an earlier loop iteration just substituted. v859 parks substituted slots in sentinels so the legacy pass only sees author text. Fixing the `scene_index_in_batch` off-by-one (written 1-based, read 0-based) would make that pass fire MORE often — the sentinel guard must stay and must precede any such fix. See the KNOWN DEFECT note on the function.
+
+**Scope / gates**: GENERATE-side import + slot translation. The linter does not validate `reference_image` at all (pre-existing — it never validated single refs either), so this is not linter-gated.
+
+**FORWARD-ONLY (operator 2026-07-16: "make it applicable going forward, the ones we have are ok").** Apply v859 and the naming discipline to NEW builds only. Do NOT retro-edit shipped builds:
+- The ~143 builds whose prompts say "as in the reference image" instead of a binding phrase STAY AS THEY ARE. They render the way they have always rendered; the reference is blended as context rather than named. That is a known, accepted limitation of the back catalogue, not a bug list to work through.
+- Single-ref builds need no change — chain 0 keeps the pre-v859 phrases, so they translate identically.
+- The one exception is not an edit at all: the `persona + product + chain → image_1` product-misbinding fix rides in the platform code, so shipped builds of that shape simply start rendering CORRECTLY on their next generation. Nothing to touch, nothing to re-author.
+- When you touch a build for another reason, adopting the binding phrases is welcome but never required, and never a reason to open a file on its own.
+
+Per `feedback_rule-changes-forward-only`.
+
+**Touched**: `code/image_platform.py` (`_parse_image_blocks_new` parse + validate, `_parse_scene_blocks_legacy` refusal, chain-edge creation, job gating, v619 N5 consistency, `_resolve_flow_prompt_bindings`), `code/tests/test_multi_reference_image.py` (60 tests), `wiki/patterns/conventions.md`, `wiki/log.md`. First build: `videos/nuri-korella-ed-add-the-third-locked-pair-fat-fit-flip-korella-saffron-v3.md`. Surfaced 2026-07-16.
+
+---
+
+## v861 — Per-clip render duration from the line's word count
+
+**Where it came from**: operator 2026-07-16 — *"we need to adapt the video markdown and the platform to also use the clip duration setting. so if we have around 28 words we 10 seconds, less than 12 words is 4 seconds and 16 is 6 seconds and 24 is 8 seconds."*
+
+**What it fixes**: duration was a JOB-level setting. Every clip rendered at the job's one number (default 8s) no matter how many words its line held. Only the LAST clip got a word-count pick, off a hardcoded 2.5 words/sec table in `worker.py` (now gone). Short lines wasted seconds of dead air; long lines got cut off mid-sentence.
+
+**The rule**: every clip renders at the bucket its spoken line's word count lands in.
+
+| words `W` | duration |
+|---|---|
+| `W <= 11` | 4s |
+| `12 <= W <= 16` | 6s |
+| `17 <= W <= 24` | 8s |
+| `25 <= W <= 28` | 10s |
+| `W > 28` | a v831 violation — split the line into two clips |
+
+Word count = plain whitespace split, the same count v831 caps. Implied speech rate 2.67-3.0 words/sec (least-squares fit of the operator's four points = 2.8 w/s) — the same ballpark as v577's 158 wpm (2.63 w/s) budget, stated as buckets instead of a formula.
+
+**The markdown field**: one `- **clip_duration_s:**` per spoken line, attaching to the closest preceding `- **line:**` — the same attach rule as v644's `pad`, so a two-line scene can render its two clips at two different lengths.
+
+```
+### Scene 3
+- **image:** image_2
+- **clip_mode:** fresh
+- **transition:** cut
+- **line:** your soldier will not wake up in the morning anymore
+- **clip_duration_s:** 4
+- **action_note:** she lifts the banana to the lens. [Start beat]
+```
+
+That line is 10 words → the `W <= 11` row → `4`.
+
+Legal values: `4` | `6` | `8` | `10`. The parser wants a BARE INTEGER — `6.5`, `6s` and `6 or 8` all HARD-FAIL at import rather than being guessed at, and a value outside 4/6/8/10 fails with the bucket that line's word count actually calls for. A silent / text_card scene has no line to attach to; if it declares the bullet anyway the parser keeps it for that scene's one clip (mirrors v786's dangling action_note).
+
+**Mandatory at authoring, lenient at import.** Two different jobs, on purpose:
+
+- The `/build` auditor (`audit_build.py` check `v861_clip_duration`) FAILs a build when a spoken line has no `clip_duration_s`, or when the declared value does not match the line's word-count bucket. New builds declare it, always.
+- The platform parser auto-computes when the bullet is absent and logs `[v861/auto]`, so the ~184 builds written before v861 still import untouched. Forward-only, per `feedback_rule-changes-forward-only`.
+
+**Resolution precedence** (`clip_duration.resolve_clip_duration_s`), highest first:
+
+1. the explicit `- **clip_duration_s:**` bullet
+2. the v667 frame-anchor bucket (`_ceil_to_veo_bucket` over [4,6,8] — v861 does NOT touch it; transformation-montage trim behavior is unchanged)
+3. the line's word count, via the table above
+4. `None` — no line, no anchor → the job-level duration applies (legacy imports + manual UI jobs)
+
+Both caller-supplied numbers pass the same check, and the check runs on the RAW value BEFORE it is turned into an int: `6.7` raises instead of quietly becoming `6`, and a bool is rejected (`isinstance(True, int)` is True in Python, but a bool is not a duration). The resolved integer lands on `clips.veo_render_duration_s` — a column live since v667 that NO render path read until v861. The scene-level dict still carries the v667 anchor bucket in that same field (the lift composer reads it); the per-line pick lives on the flat rows that become Clip rows.
+
+**The 10s catch — Flow has it, the Veo API does not.** The Veo API accepts `durationSeconds` of **4, 6 or 8 ONLY** (https://ai.google.dev/gemini-api/docs/veo). 10s exists **only** in Flow's 2026-07 composer, whose settings menu carries a 4s/6s/8s/10s tablist. So:
+
+- **Flow path** (`static/flow_worker.py`) — renders a real 10s clip. `page._duration` is set from THIS clip before each `select_frames_to_video_mode` call (plain submit, failover submit, and redo), and the same number feeds `build_flow_prompt`'s speech-timing window, so a 6s clip is never handed an 8s timing block.
+- **Veo API path** (`worker.py`) — folds 10 → 8 and logs the fold. A 25-28 word line WILL be tight there.
+
+**A build that leans on the 10s bucket should render on Flow.**
+
+`veo_api_duration_s` RAISES on anything outside 4/6/8/10 rather than folding it. That is reachable, not theory: `clips.veo_render_duration_s` is a bare INTEGER with no CHECK constraint and `main.py` writes it straight from the client payload. A below-range value is an upstream bug, and quietly promoting it to the longest, most expensive bucket would hide that bug behind a bigger render bill. `worker.py` catches the raise and falls back to the job-level duration for THAT CLIP — never failing the whole job.
+
+`static/flow_worker.py` cannot import `clip_duration.py`; it ships standalone to the operator's machine. It reads the resolved integer off the API payload instead, so the table still lives in exactly one place.
+
+**Related rule change**: v831's spoken-line cap moved 25 → **28 words** the same day, so the 10s bucket is reachable at all. Forward-only; shipped builds are not retro-edited.
+
+**Numbering note**: built as v857, renumbered before merge. v857 was already the one-job-one-video gate (live in `main.py` / `drive_transcribe.py` / `instagram_match.py`, never written up here — which is how the collision slipped through); v858 (image-regenerate), v859 (multi-reference chain) and v860 (rolling-deploy lock-hang guard) were also taken. **The v-number space lives in COMMIT HISTORY and CODE COMMENTS, not just this file — check all three before claiming a number.** Commits predating the renumber still say v857 in their messages; history was deliberately not rewritten.
+
+**Scope / gates**: GENERATE-side authoring (every spoken line on every new build) + both render paths. The 1080p / interpolation 8s pin in `main.py` is untouched. Manual UI jobs (dialogue typed into the form, no markdown import) keep the job-level duration.
+
+**Touched**: this deep-dive (canonical), `code/clip_duration.py` (NEW — the only home of the bucket math), `code/tests/test_v861_clip_duration.py`, `code/image_platform.py` (per-line bullet parse + prepare-time resolve onto `clips.veo_render_duration_s`), `code/main.py` (PATCH validator accepts 10; all four worker payload builders ship the field — local + user worker × pending-jobs + redo-pending-clips), `code/worker.py` (Veo API path, per-clip duration + the 10→8 fold), `code/static/flow_worker.py` (Flow path, per-clip duration tab + prompt timing window), `code/template_new_format.md` (skeleton field), `~/.claude/skills/build-video/audit_build.py` (`v861_clip_duration` check + v831 cap 25→28), `wiki/patterns/conventions.md` (index row), `wiki/log.md`. Operator 2026-07-16.
