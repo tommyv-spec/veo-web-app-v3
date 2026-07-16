@@ -3538,9 +3538,13 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
     """New format: parse ``### Image N`` headers. Each is an image to generate.
 
     Returns a list of dicts with: image_index (int), prompt (str),
-    reference_image (Optional[int] — another image's index). Unlike the
-    legacy parser, scenes are in a separate section so these dicts
-    have no voiceover/clip_mode/action_note fields.
+    reference_image (Optional[int] — another image's index),
+    reference_images (List[int] — v858; ALL declared chain parents, in
+    declaration order, capped at 2). The scalar ``reference_image`` is
+    kept as the FIRST entry of that list (None when empty) so pre-v858
+    readers keep working unchanged — prefer ``reference_images`` in new
+    code. Unlike the legacy parser, scenes are in a separate section so
+    these dicts have no voiceover/clip_mode/action_note fields.
     """
     images: List[Dict[str, Any]] = []
     # Find every "### Image N" header and its block. Capture up to the
@@ -3586,8 +3590,15 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
         )
         ref_value = ref_match.group(1).strip() if ref_match else "none"
         ref_parents: List[int] = []
-        if ref_value.lower() not in ("none", "null", ""):
-            for tok in [p.strip() for p in ref_value.split(",") if p.strip()]:
+        # v858: an entry may carry a trailing author note — "image_3 (keep the
+        # counter)" / "none (location shift)". The pre-v858 regex captured a
+        # single \S+ token, so only the first word ever mattered; preserve that
+        # exactly by taking the first whitespace-token of each comma entry.
+        entries = [p.strip() for p in ref_value.split(",") if p.strip()]
+        first_word = entries[0].split()[0].lower() if entries else "none"
+        if first_word not in ("none", "null"):
+            for entry in entries:
+                tok = entry.split()[0]
                 m = _re.match(r"^image_(\d+)$", tok)
                 if not m:
                     raise ValueError(

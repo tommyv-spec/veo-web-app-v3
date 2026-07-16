@@ -76,3 +76,29 @@ def test_none_gives_empty_list():
 def test_three_refs_rejected():
     with pytest.raises(ValueError, match="at most 2"):
         _parse_image_blocks_new(_md("- **reference_image:** image_2, image_1, image_2"))
+
+
+# --- Backward-compat: DECORATED values (trailing author notes) -------------
+# The pre-v858 regex captured a single \S+ token, so a trailing note was
+# simply never seen: "none (location shift)" -> "none" -> None. v858 widened
+# the capture to reach a comma list, so it must re-drop the note explicitly
+# or it hard-fails a real input class that used to work. 10 decode docs in
+# raw/videos/ carry exactly this shape.
+
+def test_decorated_none_is_tolerated_like_pre_v858():
+    imgs = _parse_image_blocks_new(_md("- **reference_image:** none (location shift kitchen to office)"))
+    third = [i for i in imgs if i["image_index"] == 3][0]
+    assert third["reference_image"] is None
+    assert third["reference_images"] == []
+
+
+def test_decorated_ref_is_tolerated_like_pre_v858():
+    imgs = _parse_image_blocks_new(_md("- **reference_image:** image_1 (keep the counter)"))
+    third = [i for i in imgs if i["image_index"] == 3][0]
+    assert third["reference_image"] == 1
+    assert third["reference_images"] == [1]
+
+
+def test_malformed_token_still_raises():
+    with pytest.raises(ValueError, match="bad reference_image token"):
+        _parse_image_blocks_new(_md("- **reference_image:** image_x"))
