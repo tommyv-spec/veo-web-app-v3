@@ -1,4 +1,4 @@
-"""v857 — per-clip duration bucket math."""
+"""v861 — per-clip duration bucket math."""
 import pytest
 
 from clip_duration import (
@@ -62,19 +62,19 @@ def test_veo_api_duration_s_error_names_the_callers_field():
     hardcoded "clip_duration_s" would send the operator hunting through
     markdown for a value that came from the database.
     """
-    with pytest.raises(ValueError, match=r"veo_render_duration_s 7 not in .*v857"):
+    with pytest.raises(ValueError, match=r"veo_render_duration_s 7 not in .*v861"):
         veo_api_duration_s(7, field_name="veo_render_duration_s")
 
 
 def test_veo_api_duration_s_error_default_field_name():
-    with pytest.raises(ValueError, match=r"clip_duration_s 7 not in .*v857"):
+    with pytest.raises(ValueError, match=r"clip_duration_s 7 not in .*v861"):
         veo_api_duration_s(7)
 
 
 def test_resolve_errors_name_their_own_fields():
-    with pytest.raises(ValueError, match=r"clip_duration_s 7 not in .*v857"):
+    with pytest.raises(ValueError, match=r"clip_duration_s 7 not in .*v861"):
         resolve_clip_duration_s(explicit=7, anchor_bucket=None, line_text="hi")
-    with pytest.raises(ValueError, match=r"anchor_bucket 7 not in .*v857"):
+    with pytest.raises(ValueError, match=r"anchor_bucket 7 not in .*v861"):
         resolve_clip_duration_s(explicit=None, anchor_bucket=7, line_text="hi")
 
 
@@ -194,5 +194,77 @@ def test_parse_clip_duration_absent_is_none():
 
 def test_parse_clip_duration_rejects_bad_value():
     md = _MD_ONE.replace("- **clip_duration_s:** 6", "- **clip_duration_s:** 7")
+    with pytest.raises(ValueError, match="not in"):
+        _parse_scene_blocks_new(md, {1})
+
+
+@pytest.mark.parametrize("bad", ["6.5", "4.9", "10.9", "6 or 8", "6s", "6 seconds",
+                                 "8 (16 words)", "6,", "four", "-4", ""])
+def test_parse_clip_duration_rejects_anything_but_a_bare_int(bad):
+    """A leading-int regex would silently truncate `6.5` -> 6 and pick the first
+    number out of `6 or 8`. That is the exact coercion hole clip_duration.py's
+    _validated_duration_s closes; the parser must not reopen it one module away.
+    An author can be WRONG about this value, so it is never guessed at."""
+    md = _MD_ONE.replace("- **clip_duration_s:** 6", f"- **clip_duration_s:** {bad}")
     with pytest.raises(ValueError, match="clip_duration_s"):
         _parse_scene_blocks_new(md, {1})
+
+
+def test_parse_clip_duration_bad_value_names_the_right_bucket():
+    """The error computes the answer from the line's word count instead of
+    reprinting the bucket table (which would drift from _BUCKETS silently)."""
+    md = _MD_ONE.replace("- **clip_duration_s:** 6", "- **clip_duration_s:** 7")
+    with pytest.raises(ValueError) as exc:
+        _parse_scene_blocks_new(md, {1})
+    msg = str(exc.value)
+    # _MD_ONE's line is 10 words -> 4s bucket.
+    assert "10 words" in msg
+    assert "use 4" in msg
+
+
+_MD_SILENT = """### Scene 1
+- **image:** image_1
+- **speaker:** silent
+- **clip_duration_s:** 6
+- **action_note:** the banana rots on the counter. [Start beat]
+"""
+
+
+def test_parse_clip_duration_on_silent_scene_is_kept():
+    """v786's dangling action_note precedent: a silent scene has no `line` to
+    attach to but still renders a clip, so its duration must survive as a
+    1-entry list. Dropping it would make prepare_batch_for_video's silent
+    branch (which reads clip_durations[0]) permanently dead."""
+    scenes = _parse_scene_blocks_new(_MD_SILENT, {1})
+    assert scenes[0]["lines"] == []
+    assert scenes[0]["clip_durations"] == [6]
+
+
+def test_parse_clip_duration_silent_scene_still_validates():
+    md = _MD_SILENT.replace("- **clip_duration_s:** 6", "- **clip_duration_s:** 7")
+    with pytest.raises(ValueError, match="not in"):
+        _parse_scene_blocks_new(md, {1})
+
+
+_MD_PAD_AND_DURATION = """### Scene 1
+- **image:** image_1
+- **line:** first line here
+- **pad:** and that is the honest truth about it
+- **clip_duration_s:** 4
+- **line:** second line here
+- **clip_duration_s:** 6
+- **pad:** which is why it matters so much
+"""
+
+
+def test_parse_pad_and_clip_duration_do_not_interfere():
+    """Both attach to the closest preceding line, in either order. Proves the
+    two parallel arrays stay independent and index-aligned with lines."""
+    scenes = _parse_scene_blocks_new(_MD_PAD_AND_DURATION, {1})
+    s = scenes[0]
+    assert s["clip_durations"] == [4, 6]
+    assert s["pads"] == [
+        "and that is the honest truth about it",
+        "which is why it matters so much",
+    ]
+    assert len(s["lines"]) == len(s["pads"]) == len(s["clip_durations"]) == 2

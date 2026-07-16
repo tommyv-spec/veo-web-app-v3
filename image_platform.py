@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session, relationship, joinedload, selectinload
 from models import Base, get_db_session, get_db, User, read_query_with_retry, UserWorkerToken
 from config import app_config
 from auth import get_current_user
-from clip_duration import ALLOWED_CLIP_DURATIONS_S
+from clip_duration import ALLOWED_CLIP_DURATIONS_S, pick_clip_duration_s
 
 
 log = logging.getLogger("image_platform")
@@ -4270,7 +4270,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # lines, especially on Fast [Lower Priority] tier).
         #
         # We iterate through each matching bullet in source order.
-        # v857 — `clip_duration_s` joins the per-line bullet set. Like v644's
+        # v861 — `clip_duration_s` joins the per-line bullet set. Like v644's
         # `pad` it attaches to the closest preceding `line`, so a two-line
         # scene can render its clips at two different durations.
         bullet_pattern = _re.compile(
@@ -4280,13 +4280,18 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         lines_list: List[str] = []
         action_notes: List[Optional[str]] = []
         pads: List[Optional[str]] = []  # v644 parallel array
-        clip_durations: List[Optional[int]] = []  # v857 parallel array
+        clip_durations: List[Optional[int]] = []  # v861 parallel array
         # v786 — silent / text_card scenes have an action_note but NO line
         # bullets, so the attach-to-most-recent-line rule below would drop
         # it. Hold it here; if the scene ends with zero lines, emit it as a
         # 1-entry action_notes list (the prepare_batch_for_video synthetic
         # flat-row injection reads notes[0] for exactly this case).
         dangling_action_note: Optional[str] = None
+        # v861 — same shape as dangling_action_note above, for the same reason:
+        # a silent / text_card scene has no `line` bullet to attach to, but it
+        # still renders a clip and may declare its own duration. Held here and
+        # emitted as a 1-entry clip_durations list when the scene has no lines.
+        dangling_clip_duration: Optional[int] = None
         for m in bullet_pattern.finditer(block):
             key = m.group(1).lower().replace(" ", "_")
             value = m.group(2).strip()
@@ -4294,7 +4299,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 lines_list.append(value)
                 action_notes.append(None)
                 pads.append(None)
-                clip_durations.append(None)  # v857
+                clip_durations.append(None)  # v861
             elif key == "action_note":
                 if lines_list:
                     # Attach to most recent line
@@ -4309,32 +4314,42 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     pads[-1] = value
                 # else: pad before any line — ignore, likely malformed
             elif key == "clip_duration_s":
-                # v857 — attach the render-duration bucket to most recent line.
-                m_dur = _re.match(r"\d+", value)
-                if not m_dur:
+                # v861 — attach the render-duration bucket to most recent line.
+                # fullmatch, NOT match: a leading-int match would silently
+                # truncate `6.5` → 6 and pick the first number out of `6 or 8`,
+                # which is exactly the coercion hole clip_duration.py's
+                # _validated_duration_s was written to close. An author can be
+                # WRONG about this value, so it must not be guessed at.
+                if not _re.fullmatch(r"\d+", value):
                     raise ValueError(
                         f"Scene {scene_index}: clip_duration_s {value!r} is not "
-                        f"a number (expected one of "
+                        f"a bare integer (expected one of "
                         f"{list(ALLOWED_CLIP_DURATIONS_S)} — see "
-                        f"template_reference.md §v857)"
+                        f"template_reference.md §v861)"
                     )
-                dur_val = int(m_dur.group())
+                dur_val = int(value)
                 if dur_val not in ALLOWED_CLIP_DURATIONS_S:
+                    # Compute the answer rather than reprinting the table: the
+                    # bucket math has ONE home (clip_duration.py) and a prose
+                    # copy here would drift silently the day _BUCKETS changes.
+                    _hint = ""
+                    if lines_list:
+                        _wc = len(lines_list[-1].split())
+                        _hint = (
+                            f" The line above it is {_wc} words → use "
+                            f"{pick_clip_duration_s(_wc)}."
+                        )
                     raise ValueError(
                         f"Scene {scene_index}: clip_duration_s {dur_val} not in "
-                        f"{list(ALLOWED_CLIP_DURATIONS_S)} (v857). Pick the bucket "
-                        f"the line's word count lands in: <=11w=4s, 12-16w=6s, "
-                        f"17-24w=8s, 25-28w=10s."
+                        f"{list(ALLOWED_CLIP_DURATIONS_S)} (v861).{_hint}"
                     )
                 if lines_list:
                     clip_durations[-1] = dur_val
                 else:
-                    print(
-                        f"[v857/parse] scene_{scene_index} clip_duration_s="
-                        f"{dur_val} appears before any `- **line:**` bullet — "
-                        f"ignored (malformed)",
-                        flush=True,
-                    )
+                    # v861 — no line to attach to. A silent / text_card scene
+                    # still renders a clip, so hold it (mirrors v786's dangling
+                    # action_note) rather than dropping it on the floor.
+                    dangling_clip_duration = dur_val
 
         # v786 — no-lines scene with a scene-level action_note: surface it
         # as a 1-entry list. Parallel-array invariants hold downstream:
@@ -4342,6 +4357,13 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # and the synthetic flat-row injection reads notes[0].
         if not lines_list and dangling_action_note:
             action_notes = [dangling_action_note]
+
+        # v861 — same for a no-lines scene's own duration: surface it as a
+        # 1-entry list so prepare_batch_for_video's silent flat-row branch can
+        # read clip_durations[0]. Without this the array stays empty and a
+        # silent scene could never declare its own render duration.
+        if not lines_list and dangling_clip_duration is not None:
+            clip_durations = [dangling_clip_duration]
 
         # v681 — text_card scenes AND silent scenes have no `- **line:**`
         # bullets by design. Tolerate missing lines on those. Other scenes
@@ -4385,7 +4407,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "lines": lines_list,
             "action_notes": action_notes,
             "pads": pads,  # v644 — parallel to lines/action_notes; entries are str or None
-            "clip_durations": clip_durations,  # v857 — parallel to lines; int (4|6|8|10) or None
+            "clip_durations": clip_durations,  # v861 — parallel to lines; int (4|6|8|10) or None
             "speaker_mode": speaker_mode,  # v537
             "cut_mode": cut_mode,  # v668 — None | 'whisper' | 'timeline' | 'auto'
             "cast": scene_cast,           # v681 — None | list[str]
