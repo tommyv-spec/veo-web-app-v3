@@ -63,7 +63,10 @@ def pick_clip_duration_s(word_count: int) -> int:
     return 10  # over the cap — biggest bucket; caller should warn
 
 
-def veo_api_duration_s(duration_s: Optional[int]) -> Optional[int]:
+def veo_api_duration_s(
+    duration_s: Optional[int],
+    field_name: str = "clip_duration_s",
+) -> Optional[int]:
     """The Veo API's durationSeconds for an already-picked clip duration.
 
     The Veo API has no 10s bucket, Flow's composer does — so 10 folds down to
@@ -71,10 +74,15 @@ def veo_api_duration_s(duration_s: Optional[int]) -> Optional[int]:
     ALLOWED_CLIP_DURATIONS_S raises rather than folding: a below-range value is
     an upstream bug, and quietly promoting it to the longest, most expensive
     bucket would hide that bug behind a bigger render bill.
+
+    ``field_name`` names the field the value was read from, so the raised
+    message points at something the operator can actually find. Callers reading
+    a DB column pass its name (worker.py reads clips.veo_render_duration_s);
+    the default suits a caller holding the markdown bullet's value.
     """
     if duration_s is None:
         return None
-    picked = _validated_duration_s(duration_s, "clip_duration_s")
+    picked = _validated_duration_s(duration_s, field_name)
     if picked in VEO_API_DURATIONS_S:
         return picked
     return 8  # 10 is the only value left — the Veo-vs-Flow dialect fold

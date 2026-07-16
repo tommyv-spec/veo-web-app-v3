@@ -55,6 +55,29 @@ def test_veo_api_duration_s_rejects_out_of_range(bad):
         veo_api_duration_s(bad)
 
 
+def test_veo_api_duration_s_error_names_the_callers_field():
+    """The message must name the field the caller actually read from.
+
+    worker.py feeds this a DB column (clips.veo_render_duration_s), so a
+    hardcoded "clip_duration_s" would send the operator hunting through
+    markdown for a value that came from the database.
+    """
+    with pytest.raises(ValueError, match=r"veo_render_duration_s 7 not in .*v857"):
+        veo_api_duration_s(7, field_name="veo_render_duration_s")
+
+
+def test_veo_api_duration_s_error_default_field_name():
+    with pytest.raises(ValueError, match=r"clip_duration_s 7 not in .*v857"):
+        veo_api_duration_s(7)
+
+
+def test_resolve_errors_name_their_own_fields():
+    with pytest.raises(ValueError, match=r"clip_duration_s 7 not in .*v857"):
+        resolve_clip_duration_s(explicit=7, anchor_bucket=None, line_text="hi")
+    with pytest.raises(ValueError, match=r"anchor_bucket 7 not in .*v857"):
+        resolve_clip_duration_s(explicit=None, anchor_bucket=7, line_text="hi")
+
+
 def test_resolve_precedence_explicit_wins():
     assert resolve_clip_duration_s(
         explicit=6, anchor_bucket=8,
