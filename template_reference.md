@@ -15670,6 +15670,14 @@ Keep the composition, the framing, the marks and the objects in his hands exactl
 
 **Landmine for anyone touching `_resolve_flow_prompt_bindings`**: the v581 legacy number-based fallback rewrites `\bImage N\b` across the whole body and cannot tell author-written text from a slot number an earlier loop iteration just substituted. v859 parks substituted slots in sentinels so the legacy pass only sees author text. Fixing the `scene_index_in_batch` off-by-one (written 1-based, read 0-based) would make that pass fire MORE often — the sentinel guard must stay and must precede any such fix. See the KNOWN DEFECT note on the function.
 
-**Scope / gates**: GENERATE-side import + slot translation. Forward-only. The linter does not validate `reference_image` at all (pre-existing — it never validated single refs either), so this is not linter-gated.
+**Scope / gates**: GENERATE-side import + slot translation. The linter does not validate `reference_image` at all (pre-existing — it never validated single refs either), so this is not linter-gated.
+
+**FORWARD-ONLY (operator 2026-07-16: "make it applicable going forward, the ones we have are ok").** Apply v859 and the naming discipline to NEW builds only. Do NOT retro-edit shipped builds:
+- The ~143 builds whose prompts say "as in the reference image" instead of a binding phrase STAY AS THEY ARE. They render the way they have always rendered; the reference is blended as context rather than named. That is a known, accepted limitation of the back catalogue, not a bug list to work through.
+- Single-ref builds need no change — chain 0 keeps the pre-v859 phrases, so they translate identically.
+- The one exception is not an edit at all: the `persona + product + chain → image_1` product-misbinding fix rides in the platform code, so shipped builds of that shape simply start rendering CORRECTLY on their next generation. Nothing to touch, nothing to re-author.
+- When you touch a build for another reason, adopting the binding phrases is welcome but never required, and never a reason to open a file on its own.
+
+Per `feedback_rule-changes-forward-only`.
 
 **Touched**: `code/image_platform.py` (`_parse_image_blocks_new` parse + validate, `_parse_scene_blocks_legacy` refusal, chain-edge creation, job gating, v619 N5 consistency, `_resolve_flow_prompt_bindings`), `code/tests/test_multi_reference_image.py` (60 tests), `wiki/patterns/conventions.md`, `wiki/log.md`. First build: `videos/nuri-korella-ed-add-the-third-locked-pair-fat-fit-flip-korella-saffron-v3.md`. Surfaced 2026-07-16.
