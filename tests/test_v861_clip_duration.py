@@ -212,7 +212,7 @@ def test_parse_clip_duration_rejects_anything_but_a_bare_int(bad):
 
 def test_parse_clip_duration_bad_value_names_the_right_bucket():
     """The error computes the answer from the line's word count instead of
-    reprinting the bucket table (which would drift from _BUCKETS silently)."""
+    reprinting the bucket table (which would drift from CLIP_DURATION_BUCKETS silently)."""
     md = _MD_ONE.replace("- **clip_duration_s:** 6", "- **clip_duration_s:** 7")
     with pytest.raises(ValueError) as exc:
         _parse_scene_blocks_new(md, {1})

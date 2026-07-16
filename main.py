@@ -147,7 +147,11 @@ from models import (
     init_db, get_db_session, Job, Clip, JobLog, BlacklistEntry,
     get_job_logs_since, add_job_log, User, UserAPIKey, UserWorkerToken
 )
-from clip_duration import ALLOWED_CLIP_DURATIONS_S
+from clip_duration import (
+    ALLOWED_CLIP_DURATIONS_S,
+    CLIP_DURATION_BUCKETS,
+    VEO_API_DURATIONS_S,
+)
 from lifecycle import apply_lifecycle_change, compute_stuck_days, apply_jobs_filters, _maybe_auto_enter_lifecycle, derive_effective_stage, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
 from auto_image_retry import parse_auto_image_retry_mode, VALID_RETRY_MODES, order_distinct_frames, pick_substitute
 from worker import worker, WORKER_VERSION
@@ -270,6 +274,13 @@ class VideoConfigInput(BaseModel):
     aspect_ratio: str = "9:16"
     resolution: str = "720p"
     duration: str = "8"
+    # v861 — adaptive_duration ON (default): each clip renders at the bucket its
+    # line's word count lands in (<=11w=4s, 12-16w=6s, 17-24w=8s, 25-28w=10s),
+    # resolved at import onto clips.veo_render_duration_s. OFF: every clip
+    # renders at `duration` above — the Clip writer stores NULL, and NULL
+    # already means "job-level duration" on both render paths, so nothing
+    # downstream needs to know about this flag.
+    adaptive_duration: bool = True
     language: str = "English"
     use_interpolation: bool = True
     use_openai_prompt_tuning: bool = True
@@ -955,6 +966,28 @@ def get_version():
         "app": "veo-web-app",
         "worker_version": WORKER_VERSION,
         "render_commit": os.environ.get("RENDER_GIT_COMMIT", "not set"),
+    }
+
+
+@app.get("/api/clip-duration-buckets")
+def get_clip_duration_buckets():
+    """v861 — serve the duration bucket table to the frontend.
+
+    The new-job dialogue validator has to show each line's render length while
+    the operator types, which is too hot for a per-keystroke round trip. It
+    fetches this once at page load and picks locally.
+
+    Why an endpoint instead of just writing the table into index.html: the
+    table has ONE home (clip_duration.CLIP_DURATION_BUCKETS). A hardcoded copy in the page
+    would be a third site — after the module and the build auditor — free to
+    drift out of step silently. Serving it keeps the JS a renderer of server
+    data rather than a second implementation.
+    """
+    return {
+        "buckets": [list(b) for b in CLIP_DURATION_BUCKETS],   # [[max_words, seconds], ...]
+        "allowed": list(ALLOWED_CLIP_DURATIONS_S),     # 4/6/8/10 — Flow can do all
+        "veo_api": list(VEO_API_DURATIONS_S),          # 4/6/8 — the API folds 10→8
+        "word_cap": CLIP_DURATION_BUCKETS[-1][0],              # v831 cap, amended to 28
     }
 
 
@@ -2167,6 +2200,14 @@ async def _create_job_impl(
     db.commit()
     db.refresh(job)
     
+    # v861 — read once, outside the loop. Defaults to True so an older client
+    # that never sends the field keeps the adaptive behavior.
+    _adaptive_duration = bool(config_dict.get('adaptive_duration', True))
+    if not _adaptive_duration:
+        print(f"[v861/create] job {job_id}: adaptive length OFF — every clip "
+              f"renders at the job duration ({config_dict.get('duration', '8')}s); "
+              f"per-clip picks discarded", flush=True)
+
     # Create Clip rows for each dialogue line (fast — just DB inserts)
     for idx, line in enumerate(dialogue_list):
         line_text = line.get('text', '') if isinstance(line, dict) else str(line)
@@ -2181,10 +2222,20 @@ async def _create_job_impl(
         # 'whisper' (default behavior, NULL → whisper) | 'timeline' (skip
         # whisper-VAD; ffmpeg-trim to target_duration_s). target_duration_s
         # comes from frame_anchor_s diffs computed in prepare_batch_for_video.
-        # veo_render_duration_s is the ceil_to(target, [4,6,8]) bucket pick.
+        # veo_render_duration_s is the per-clip render length (v861; was the
+        # v667 ceil_to(target, [4,6,8]) bucket before that).
         cut_mode = line.get('cut_mode') if isinstance(line, dict) else None
         target_duration_s = line.get('target_duration_s') if isinstance(line, dict) else None
         veo_render_duration_s = line.get('veo_render_duration_s') if isinstance(line, dict) else None
+        # v861 — adaptive length OFF: every clip renders at the job's single
+        # `duration` setting. Storing NULL is the whole implementation: NULL
+        # already means "use the job-level duration" on both render paths
+        # (worker.veo_override_duration returns None; flow_worker falls back to
+        # job.duration), so no render code needs to know this flag exists.
+        # This deliberately discards any explicit `- **clip_duration_s:**` the
+        # markdown declared — the operator asked for ONE duration for ALL clips.
+        if not _adaptive_duration:
+            veo_render_duration_s = None
         # v681 — text-card / caption denorm onto Clip rows. scene_type
         # 'text_card' makes the video processor skip Veo and render
         # via ffmpeg drawtext at export time.

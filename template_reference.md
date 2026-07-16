@@ -15745,6 +15745,15 @@ Both caller-supplied numbers pass the same check, and the check runs on the RAW 
 
 `static/flow_worker.py` cannot import `clip_duration.py`; it ships standalone to the operator's machine. It reads the resolved integer off the API payload instead, so the table still lives in exactly one place.
 
+**The Adaptive-length switch (new-job form).** `adaptive_duration` — ON by default.
+
+- **ON** — what everything above describes: each clip renders at its own line's bucket.
+- **OFF** — every clip renders at the job's single `Duration` setting, exactly like pre-v861. This DISCARDS any explicit `- **clip_duration_s:**` the markdown declared; the operator asked for one duration for all clips and that is what they get.
+
+The whole implementation of OFF is one line in the Clip writer (`main.py`): store `veo_render_duration_s = NULL`. NULL already means "use the job-level duration" on both render paths, so no render code knows the switch exists. Absent on an older client → defaults to ON.
+
+**The new-job dialogue validator** shows each line's real render length (`21 words → 8s clip`), not the old `words ÷ 2.5` speech estimate, and totals the job. With adaptive ON it flags ONLY a line over the v831 cap — a short line is not a fault, it just gets a short clip, so the old "too short, add N more words" advice is retired in that mode (it still applies with adaptive OFF, where a line must fit one fixed length). The bucket table reaches the browser from `GET /api/clip-duration-buckets`, never hardcoded in `index.html` — same one-home rule as everywhere else. If that fetch fails the panel shows the word count and no duration rather than a guessed one.
+
 **Related rule change**: v831's spoken-line cap moved 25 → **28 words** the same day, so the 10s bucket is reachable at all. Forward-only; shipped builds are not retro-edited.
 
 **Numbering note**: built as v857, renumbered before merge. v857 was already the one-job-one-video gate (live in `main.py` / `drive_transcribe.py` / `instagram_match.py`, never written up here — which is how the collision slipped through); v858 (image-regenerate), v859 (multi-reference chain) and v860 (rolling-deploy lock-hang guard) were also taken. **The v-number space lives in COMMIT HISTORY and CODE COMMENTS, not just this file — check all three before claiming a number.** Commits predating the renumber still say v857 in their messages; history was deliberately not rewritten.

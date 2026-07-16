@@ -3169,8 +3169,18 @@
                                     <option>German</option>
                                 </select>
                             </div>
+                            <!-- v861 — adaptive length. ON: each clip renders at
+                                 the bucket its line's word count lands in. OFF:
+                                 every clip renders at the Duration below. -->
                             <div class="group">
-                                <div class="lbl">Duration</div>
+                                <div class="lbl">Adaptive length</div>
+                                <select id="adaptiveDuration" title="ON: each clip's length comes from its line's word count (<=11w=4s, 12-16w=6s, 17-24w=8s, 25-28w=10s). OFF: every clip uses the Duration setting.">
+                                    <option value="true" selected>On — per-line word count</option>
+                                    <option value="false">Off — one duration for all clips</option>
+                                </select>
+                            </div>
+                            <div class="group">
+                                <div class="lbl" id="durationLbl">Duration <span style="color:var(--text-muted);font-weight:400;">(fallback)</span></div>
                                 <select id="duration">
                                     <option value="8" selected>8 seconds</option>
                                     <option value="10">10 seconds</option>
@@ -9650,6 +9660,43 @@ Ambient: same kitchen room tone, soft pour sound.
             validateDialogueLines();
         }
         
+        // ---- v861 per-clip duration buckets -------------------------------
+        // The table is NOT written here. It has one home (clip_duration.py);
+        // a copy in this file would be a third site — after the module and the
+        // build auditor — free to drift out of step silently. We fetch it once
+        // and render server data. Until it lands, v861PickDuration returns null
+        // and the panel just shows the word count (no wrong number).
+        window._v861Buckets = null;
+        function v861LoadBuckets(){
+            return fetch('/api/clip-duration-buckets')
+                .then(r => r.ok ? r.json() : null)
+                .then(d => { if(d && d.buckets){ window._v861Buckets = d; try{ validateDialogueLines(); }catch(e){} } })
+                .catch(() => {});   // offline / old backend → word count only
+        }
+        function v861PickDuration(wordCount){
+            const t = window._v861Buckets;
+            if(!t || !t.buckets || !t.buckets.length) return null;
+            for(const [maxWords, secs] of t.buckets){ if(wordCount <= maxWords) return secs; }
+            return t.buckets[t.buckets.length-1][1];   // over cap → biggest bucket
+        }
+        function v861WordCap(){
+            const t = window._v861Buckets;
+            return (t && t.word_cap) ? t.word_cap : 28;
+        }
+        function syncAdaptiveDurationLabel(){
+            const on = (document.getElementById('adaptiveDuration')?.value||'true')==='true';
+            const lbl = document.getElementById('durationLbl');
+            if(lbl) lbl.innerHTML = on
+                ? `Duration <span style="color:var(--text-muted);font-weight:400;">(fallback)</span>`
+                : `Duration <span style="color:var(--text-muted);font-weight:400;">(all clips)</span>`;
+            try{ validateDialogueLines(); }catch(e){}
+        }
+        document.addEventListener('DOMContentLoaded', () => {
+            v861LoadBuckets();
+            document.getElementById('adaptiveDuration')?.addEventListener('change', syncAdaptiveDurationLabel);
+            document.getElementById('duration')?.addEventListener('change', () => { try{ validateDialogueLines(); }catch(e){} });
+        });
+
         function validateDialogueLines(){
             const input=document.getElementById('dialogueInput').value.trim(),container=document.getElementById('lineValidation'),language=document.getElementById('language').value;
             const lines=input.split('\n').filter(l=>l.trim()),formattedLines=lines.filter(l=>/^\d+\|/.test(l.trim()));
@@ -9660,6 +9707,16 @@ Ambient: same kitchen room tone, soft pour sound.
             const customWords = parseInt(document.getElementById('wordsPerLine')?.value) || 0;
             const targetWords = customWords > 0 ? customWords : Math.round(wps*6);
             const minWords=Math.max(8,targetWords-5),maxWords=targetWords+8;
+
+            // v861 — adaptive length changes what this panel should say.
+            //  ON : every clip is sized to ITS line, so "too short" is not a
+            //       problem to fix — a short line just gets a short clip. The
+            //       only real fault is going over the v831 word cap, which the
+            //       renderer cannot size for and which must be split in two.
+            //  OFF: every clip is locked to the one Duration setting, so the
+            //       old fit-the-fixed-length advice is what matters again.
+            const adaptiveOn = (document.getElementById('adaptiveDuration')?.value||'true')==='true';
+            const fixedDuration = parseInt(document.getElementById('duration')?.value,10)||8;
             
             // Calculate image assignments
             const numImages=uploadedImages.length;
@@ -9690,11 +9747,16 @@ Ambient: same kitchen room tone, soft pour sound.
                 } else if(isSilent){
                     const td = promoteMeta.target_duration_s;
                     sc='line-ok';st='✓ Silent';si=td ? `${td}s clip` : 'Veo silent render';okCount++;
-                } else if(isLastLine){
-                    // LAST LINE: Always OK - can be 4-8 seconds, pick best duration dynamically
-                    const estDuration = wordCount / wps;
-                    const bestDuration = estDuration <= 4 ? 4 : (estDuration <= 6 ? 6 : 8);
-                    sc='line-ok';st='✓ OK';si=`Last clip: ${bestDuration}s`;okCount++;
+                } else if(adaptiveOn){
+                    // v861 — the clip is sized to this line. Only the v831 cap
+                    // is a real fault: past it there is no bucket big enough
+                    // and the renderer would cut the line off mid-sentence.
+                    if(wordCount > v861WordCap()){
+                        sc='line-long';st='⚠️ Over cap';
+                        si=`${wordCount-v861WordCap()} over the ${v861WordCap()}-word cap — split into 2 lines`;issues++;
+                    } else {
+                        sc='line-ok';st='✓ OK';si='';okCount++;
+                    }
                 } else if(wordCount<minWords){
                     sc='line-short';st='⚠️ Too short';si=`Need ${minWords-wordCount}+ more`;issues++;
                 } else if(wordCount>maxWords){
@@ -9721,9 +9783,29 @@ Ambient: same kitchen room tone, soft pour sound.
                     }
                 }
                 
-                html+=`<div class="line-check ${sc}"><span class="line-num">#${lineNum}</span><span class="line-status">${st}</span>${imageInfo}<span class="line-info">${wordCount} words → ~${duration}s ${si?'('+si+')':''}</span></div>`;
+                // v861 — show the length the clip will ACTUALLY render at, not
+                // an estimate of how long the words take to say. Adaptive ON →
+                // this line's bucket. OFF → the one job Duration, same for all.
+                let renderInfo;
+                if(isTextCard || isSilent){
+                    renderInfo = `${wordCount} words`;
+                } else if(adaptiveOn){
+                    const b = v861PickDuration(wordCount);
+                    renderInfo = b ? `${wordCount} words → ${b}s clip` : `${wordCount} words`;
+                } else {
+                    renderInfo = `${wordCount} words → ${fixedDuration}s clip (fixed)`;
+                }
+                html+=`<div class="line-check ${sc}"><span class="line-num">#${lineNum}</span><span class="line-status">${st}</span>${imageInfo}<span class="line-info">${renderInfo} ${si?'('+si+')':''}</span></div>`;
             });
-            container.innerHTML=(issues===0?`<div class="validation-summary all-ok">✓ All ${okCount} lines ready (last clip: dynamic 4-8s)</div>`:`<div class="validation-summary has-issues">⚠️ ${issues} line${issues>1?'s':''} need adjustment</div>`)+'<div class="line-validation">'+html+'</div>';
+            const totalSecs = formattedLines.reduce((acc,line)=>{
+                const p=line.split('|'); if(p.length<2) return acc;
+                const wc=p.slice(1).join('|').trim().split(/\s+/).filter(w=>w).length;
+                return acc + (adaptiveOn ? (v861PickDuration(wc)||0) : fixedDuration);
+            },0);
+            const modeNote = adaptiveOn
+                ? `adaptive — each clip sized to its line · ~${totalSecs}s total`
+                : `fixed ${fixedDuration}s on every clip · ~${totalSecs}s total`;
+            container.innerHTML=(issues===0?`<div class="validation-summary all-ok">✓ All ${okCount} lines ready (${modeNote})</div>`:`<div class="validation-summary has-issues">⚠️ ${issues} line${issues>1?'s':''} need adjustment (${modeNote})</div>`)+'<div class="line-validation">'+html+'</div>';
             container.style.display='block';
         }
         // Language change is handled by setLanguageDefaults (registered above)
@@ -10077,7 +10159,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 
                 const selectedBackend = document.querySelector('#backendToggle button.active')?.dataset.value || 'flow';
                 const useGestures=useAI&&(document.querySelector('#gestureSeg button.active')?.dataset.value||'false')==='true';
-                const cfg={aspect_ratio:getSelectedAspect(),resolution:getSelectedResolution(),duration:document.getElementById('duration').value,language:document.getElementById('language').value,use_interpolation:useInterpolation,use_openai_prompt_tuning:useAI,use_frame_vision:useAI,custom_prompt:useAI?'':customPrompt,user_context:useAI?contextInput:'',single_image_mode:uploadedImages.length===1,max_retries_per_clip:5,parallel_clips:1,storyboard_mode:editorMode==='storyboard',generation_mode:generationMode,backend_preference:promptOnly?'prompt_only':selectedBackend,flow_variants_count:getFlowVariantsCount(),veo_model:getVeoModel(),kling_variant:(getVideoBackend()==='higgsfield'),use_gesture_enrichment:useGestures,short_dialogue_mode:document.querySelector('#shortDialogueSeg button.active')?.dataset.value||'optimized',prefix_short_enabled:(document.querySelector('#prefixShortSeg button.active')?.dataset.value||'off')==='on',prefix_short_word:(document.getElementById('prefixShortWord')?.value||'only').trim()||'only',prefix_short_threshold:(parseInt(document.getElementById('prefixShortThreshold')?.value,10)||15)};
+                const cfg={aspect_ratio:getSelectedAspect(),resolution:getSelectedResolution(),duration:document.getElementById('duration').value,adaptive_duration:(document.getElementById('adaptiveDuration')?.value||'true')==='true',language:document.getElementById('language').value,use_interpolation:useInterpolation,use_openai_prompt_tuning:useAI,use_frame_vision:useAI,custom_prompt:useAI?'':customPrompt,user_context:useAI?contextInput:'',single_image_mode:uploadedImages.length===1,max_retries_per_clip:5,parallel_clips:1,storyboard_mode:editorMode==='storyboard',generation_mode:generationMode,backend_preference:promptOnly?'prompt_only':selectedBackend,flow_variants_count:getFlowVariantsCount(),veo_model:getVeoModel(),kling_variant:(getVideoBackend()==='higgsfield'),use_gesture_enrichment:useGestures,short_dialogue_mode:document.querySelector('#shortDialogueSeg button.active')?.dataset.value||'optimized',prefix_short_enabled:(document.querySelector('#prefixShortSeg button.active')?.dataset.value||'off')==='on',prefix_short_word:(document.getElementById('prefixShortWord')?.value||'only').trim()||'only',prefix_short_threshold:(parseInt(document.getElementById('prefixShortThreshold')?.value,10)||15)};
                 
                 const payload = {config:cfg, dialogue_lines:lines, api_keys:{gemini_keys:[],openai_key:null}, job_id:uploadJobId};
                 if(scenesPayload) payload.scenes = scenesPayload;
@@ -16329,6 +16411,12 @@ Ambient: same kitchen room tone, soft pour sound.
                 // Duration
                 const durationEl = document.getElementById('duration');
                 if(durationEl && cfg.duration) durationEl.value = cfg.duration;
+
+                // v861 — adaptive length. Absent on jobs saved before v861 →
+                // default true, matching the backend's own default.
+                const adaptEl = document.getElementById('adaptiveDuration');
+                if(adaptEl) adaptEl.value = (cfg.adaptive_duration === false) ? 'false' : 'true';
+                if(typeof syncAdaptiveDurationLabel === 'function') syncAdaptiveDurationLabel();
 
                 // Veo model
                 const veoModelEl = document.getElementById('veoModel');

@@ -33,7 +33,7 @@ ALLOWED_CLIP_DURATIONS_S = (4, 6, 8, 10)
 VEO_API_DURATIONS_S = (4, 6, 8)
 
 # (max_words, duration_s) — first row whose max_words the count fits under wins.
-_BUCKETS = ((11, 4), (16, 6), (24, 8), (28, 10))
+CLIP_DURATION_BUCKETS = ((11, 4), (16, 6), (24, 8), (28, 10))
 
 
 def _validated_duration_s(value, field_name: str) -> int:
@@ -57,7 +57,7 @@ def _validated_duration_s(value, field_name: str) -> int:
 
 def pick_clip_duration_s(word_count: int) -> int:
     """Map a word count to its v861 duration bucket. Never returns None."""
-    for max_words, duration in _BUCKETS:
+    for max_words, duration in CLIP_DURATION_BUCKETS:
         if word_count <= max_words:
             return duration
     return 10  # over the cap — biggest bucket; caller should warn

@@ -4335,7 +4335,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 if dur_val not in ALLOWED_CLIP_DURATIONS_S:
                     # Compute the answer rather than reprinting the table: the
                     # bucket math has ONE home (clip_duration.py) and a prose
-                    # copy here would drift silently the day _BUCKETS changes.
+                    # copy here would drift silently the day CLIP_DURATION_BUCKETS changes.
                     _hint = ""
                     if lines_list:
                         _wc = len(lines_list[-1].split())
