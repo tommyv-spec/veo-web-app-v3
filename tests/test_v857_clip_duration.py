@@ -143,3 +143,56 @@ def test_resolve_wordcount_returns_int():
     result = resolve_clip_duration_s(
         explicit=None, anchor_bucket=None, line_text=" ".join(["w"] * 18))
     assert isinstance(result, int)
+
+
+# --- markdown parser: the `- **clip_duration_s:**` bullet -------------------
+# Per-LINE, not per-scene: it attaches to the closest preceding `- **line:**`,
+# the same rule v644's `pad` bullet uses.
+
+from image_platform import _parse_scene_blocks_new
+
+_MD_ONE = """### Scene 1
+- **image:** image_1
+- **clip_mode:** fresh
+- **line:** your soldier will not wake up in the morning anymore
+- **clip_duration_s:** 6
+- **action_note:** she lifts the banana. [Start beat]
+"""
+
+_MD_TWO_LINES = """### Scene 1
+- **image:** image_1
+- **line:** first line here
+- **clip_duration_s:** 4
+- **line:** second line is quite a lot longer than the first one right here
+- **clip_duration_s:** 8
+"""
+
+_MD_NONE = """### Scene 1
+- **image:** image_1
+- **line:** no duration bullet on this one
+"""
+
+
+def test_parse_clip_duration_single_line():
+    scenes = _parse_scene_blocks_new(_MD_ONE, {1})
+    assert scenes[0]["clip_durations"] == [6]
+
+
+def test_parse_clip_duration_attaches_per_line():
+    scenes = _parse_scene_blocks_new(_MD_TWO_LINES, {1})
+    assert scenes[0]["lines"] == [
+        "first line here",
+        "second line is quite a lot longer than the first one right here",
+    ]
+    assert scenes[0]["clip_durations"] == [4, 8]
+
+
+def test_parse_clip_duration_absent_is_none():
+    scenes = _parse_scene_blocks_new(_MD_NONE, {1})
+    assert scenes[0]["clip_durations"] == [None]
+
+
+def test_parse_clip_duration_rejects_bad_value():
+    md = _MD_ONE.replace("- **clip_duration_s:** 6", "- **clip_duration_s:** 7")
+    with pytest.raises(ValueError, match="clip_duration_s"):
+        _parse_scene_blocks_new(md, {1})
