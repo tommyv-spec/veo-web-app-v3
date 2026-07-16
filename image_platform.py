@@ -5272,6 +5272,75 @@ def _v859_plan_chain_edges(
     }
 
 
+def _v859_collect_gating_parents(
+    img: Dict[str, Any],
+    ref_image: Optional[int],
+    created_nodes_by_image_index: Dict[int, Any],
+) -> Tuple[List[int], List[Any]]:
+    """v859 — resolve EVERY declared chain reference to its parent node.
+
+    Returns ``(gate_refs, parent_nodes)``. ``gate_refs`` is the declared ref
+    list (scalar fallback applied); ``parent_nodes`` is the subset that
+    resolved to a created node, in declaration order.
+
+    Why: job-start gating (``can_start``) previously re-derived its parents
+    from the SCALAR while edge creation wrote one edge per entry. Parent #2
+    was therefore never readiness-checked — the child went ``queued`` while
+    image_2 still had no ``chosen_variant_id``, and Banana 2 rendered against
+    an unready reference with correct edges and no error.
+    ``_promote_ready_children`` cannot rescue that case: it derives parents
+    from the real edges (correct) but only considers nodes still in ``draft``,
+    and this node is already ``queued``.
+
+    An unresolvable ref is skipped rather than appended as None — pre-v859
+    behavior (the missing-parent case raises in the edge loop instead).
+    """
+    gate_refs = img.get("reference_images")
+    if not gate_refs:
+        gate_refs = [ref_image] if ref_image is not None else []
+    parents: List[Any] = []
+    for r in gate_refs:
+        rp = created_nodes_by_image_index.get(r)
+        if rp is not None:
+            parents.append(rp)
+    return list(gate_refs), parents
+
+
+def _v859_all_parents_ready(parents: List[Any]) -> bool:
+    """Every parent must be ready AND have a chosen variant before a child can
+    start. Faithful extraction of the pre-v859 inline ``can_start`` loop; the
+    same predicate ``_promote_ready_children`` (~L9577) applies later.
+    """
+    for parent in parents:
+        if parent is None or parent.status != "ready" or parent.chosen_variant_id is None:
+            return False
+    return True
+
+
+def _v859_refuse_multiref_without_ingredients(
+    img: Dict[str, Any],
+    image_index: int,
+) -> None:
+    """v859 — refuse multi-reference on the legacy single-subject import path.
+
+    That path (no ``## Ingredients`` block) binds ONE ``role="reference"`` edge
+    from the scalar: different role vocabulary and different slot semantics
+    from the ingredients path's ``chain_from_image_N``. Generalizing it quietly
+    is how subtle breakage gets in — but silently binding only ref #1 is the
+    same silent-partial-loss class the legacy scene parser now refuses. So:
+    raise, and say what to do about it.
+    """
+    multi = img.get("reference_images") or []
+    if len(multi) > 1:
+        raise HTTPException(
+            400,
+            f"Image {image_index}: multi-reference "
+            f"(reference_image: {', '.join('image_%d' % r for r in multi)}) "
+            f"requires an '## Ingredients' block; the legacy single-subject "
+            f"import path binds only one reference"
+        )
+
+
 def _import_scene_table_impl(
     req: "ImportSceneTableRequest",
     db: Session,
@@ -6476,6 +6545,10 @@ def _import_scene_table_impl(
                 )
         else:
             # Legacy single-subject mode (no Ingredients block in markdown)
+            # v859: multi-reference needs the ingredients path (persona/product
+            # slot accounting). Refuse rather than silently binding only ref #1
+            # — same silent-partial-loss class the legacy scene parser refuses.
+            _v859_refuse_multiref_without_ingredients(img, image_index)
             if ref_image is None:
                 # Parent 0: subject upload (only for scenes with no prior-scene ref)
                 db.add(ImageEdge(
@@ -6541,12 +6614,18 @@ def _import_scene_table_impl(
                     # parent dependency to wait on here either.
                     attached_parents.append(anchor_scenes[ing_name])
                 # Else: this scene IS the anchor, or auto-chain disabled → no parent edge
-            if ref_image is not None:
-                rp = created_nodes_by_image_index.get(ref_image)
-                if rp is not None:
-                    attached_parents.append(rp)
-            # Safety-net case: no ingredients, no ref → subject upload
-            if not attached_parents and ref_image is None:
+            # v859: gate on EVERY declared reference, not just the scalar.
+            # An edge nothing waits on is not a working chain — see
+            # _v859_collect_gating_parents.
+            _gate_refs, _ref_parents = _v859_collect_gating_parents(
+                img, ref_image, created_nodes_by_image_index
+            )
+            attached_parents.extend(_ref_parents)
+            # Safety-net case: no ingredients, no ref → subject upload.
+            # v859: `not _gate_refs` == the old `ref_image is None` — T1
+            # guarantees reference_images == [] iff the scalar is None, and
+            # v619 N5 now preserves that invariant when it drops a ref.
+            if not attached_parents and not _gate_refs:
                 attached_parents.append(subject)
         else:
             if ref_image is None:
@@ -6556,11 +6635,7 @@ def _import_scene_table_impl(
                 if rp is not None:
                     attached_parents.append(rp)
 
-        can_start = True
-        for parent in attached_parents:
-            if parent is None or parent.status != "ready" or parent.chosen_variant_id is None:
-                can_start = False
-                break
+        can_start = _v859_all_parents_ready(attached_parents)
 
         if can_start:
             node.status = "queued"

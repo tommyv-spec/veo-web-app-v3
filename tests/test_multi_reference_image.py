@@ -14,12 +14,16 @@ the fixture embeds triple-backtick fences, and keeping it a plain
 """
 
 import pytest
+from fastapi import HTTPException
 
 from image_platform import (
     _parse_image_blocks_new,
     _parse_scene_blocks_legacy,
     _v619_n5_drop_invalid_chain_refs,
+    _v859_all_parents_ready,
+    _v859_collect_gating_parents,
     _v859_plan_chain_edges,
+    _v859_refuse_multiref_without_ingredients,
 )
 
 
@@ -404,3 +408,136 @@ def test_n5_legacy_valid_scalar_untouched():
     assert _v619_n5_drop_invalid_chain_refs(img, 3, {1, 2, 3}) == []
     assert img["reference_image"] == 1
     assert "reference_images" not in img
+
+
+# ===========================================================================
+# v859 — job-start gating must wait on EVERY reference
+# ===========================================================================
+# The bug: attached_parents was built from the SCALAR only, so parent #2 was
+# never readiness-checked. can_start went True, the node went `queued`, and
+# Banana 2 rendered against a reference with no chosen variant — correct edges,
+# wrong render, no error. _promote_ready_children can NOT rescue it: it only
+# looks at nodes still in `draft`, and this one is already `queued`.
+
+
+class _FakeNode:
+    """Stands in for ImageNode. can_start reads exactly these 3 attrs."""
+
+    def __init__(self, node_id, status="ready", chosen_variant_id=7):
+        self.id = node_id
+        self.status = status
+        self.chosen_variant_id = chosen_variant_id
+
+
+def test_gating_waits_on_every_reference_not_just_the_first():
+    # THE RACE. refs [3, 2]: image_3 is ready, image_2 is NOT. Pre-fix the
+    # scalar (3) was the only gate -> can_start True -> queued against an
+    # unready image_2. This test FAILS on the old one-parent gating.
+    img = _img(4, [3, 2])
+    nodes = {3: _FakeNode(3), 2: _FakeNode(2, status="generating", chosen_variant_id=None)}
+    gate_refs, parents = _v859_collect_gating_parents(img, img["reference_image"], nodes)
+    assert gate_refs == [3, 2]
+    assert [p.id for p in parents] == [3, 2]      # BOTH are gating deps
+    assert _v859_all_parents_ready(parents) is False
+
+
+def test_gating_all_references_ready_starts():
+    img = _img(4, [3, 2])
+    nodes = {3: _FakeNode(3), 2: _FakeNode(2)}
+    _, parents = _v859_collect_gating_parents(img, img["reference_image"], nodes)
+    assert _v859_all_parents_ready(parents) is True
+
+
+def test_gating_single_ref_unchanged_from_pre_v859():
+    img = _img(3, [1])
+    nodes = {1: _FakeNode(1)}
+    gate_refs, parents = _v859_collect_gating_parents(img, img["reference_image"], nodes)
+    assert gate_refs == [1]
+    assert [p.id for p in parents] == [1]
+    assert _v859_all_parents_ready(parents) is True
+
+
+def test_gating_legacy_dict_without_list_key_uses_scalar():
+    img = {"image_index": 3, "reference_image": 1}
+    nodes = {1: _FakeNode(1)}
+    gate_refs, parents = _v859_collect_gating_parents(img, 1, nodes)
+    assert gate_refs == [1]
+    assert [p.id for p in parents] == [1]
+
+
+def test_gating_unresolvable_ref_is_skipped_not_none_appended():
+    # Pre-existing `if rp is not None` guard: a ref with no created node must
+    # not land in attached_parents as None (that would force can_start False
+    # forever rather than raising).
+    img = _img(4, [3, 2])
+    gate_refs, parents = _v859_collect_gating_parents(img, 3, {3: _FakeNode(3)})
+    assert gate_refs == [3, 2]
+    assert [p.id for p in parents] == [3]
+
+
+def test_all_parents_ready_rejects_unready_status():
+    assert _v859_all_parents_ready([_FakeNode(1, status="generating")]) is False
+
+
+def test_all_parents_ready_rejects_missing_chosen_variant():
+    assert _v859_all_parents_ready([_FakeNode(1, chosen_variant_id=None)]) is False
+
+
+def test_all_parents_ready_rejects_none_parent():
+    assert _v859_all_parents_ready([None]) is False
+
+
+def test_all_parents_ready_empty_is_true():
+    # Matches the pre-v859 inline loop: no parents -> nothing to wait on.
+    assert _v859_all_parents_ready([]) is True
+
+
+# --- Safety-net equivalence: `not gate_refs` must equal `ref_image is None` ---
+# The gating rewrite swaps the safety-net condition from `ref_image is None` to
+# `not gate_refs`. If those ever diverge, a normal single-ref build either
+# never queues or loses its subject fallback. The equivalence RESTS on T1
+# (reference_images == [] <=> scalar is None), which N5 now preserves.
+
+@pytest.mark.parametrize("refs", [[], [1], [2, 1]])
+def test_gate_refs_empty_iff_scalar_is_none_new_format(refs):
+    img = _img(3, refs)
+    gate_refs, _ = _v859_collect_gating_parents(img, img["reference_image"], {})
+    assert (not gate_refs) == (img["reference_image"] is None)
+
+
+@pytest.mark.parametrize("scalar", [None, 1])
+def test_gate_refs_empty_iff_scalar_is_none_legacy_format(scalar):
+    img = {"image_index": 3, "reference_image": scalar}
+    gate_refs, _ = _v859_collect_gating_parents(img, scalar, {})
+    assert (not gate_refs) == (scalar is None)
+
+
+# ===========================================================================
+# v859 — multi-ref REFUSED on the legacy single-subject path
+# ===========================================================================
+# The no-Ingredients import path binds one `role="reference"` edge from the
+# scalar. Different role vocabulary + slot semantics, so v859 is not
+# generalized there — but it must not silently drop ref #2 either (the exact
+# silent-partial-loss class T3 removed from the legacy scene parser).
+
+
+def test_multiref_without_ingredients_raises():
+    with pytest.raises(HTTPException) as exc:
+        _v859_refuse_multiref_without_ingredients(_img(3, [2, 1]), 3)
+    assert exc.value.status_code == 400
+    assert "requires an '## Ingredients' block" in exc.value.detail
+    assert "image_2, image_1" in exc.value.detail
+
+
+def test_single_ref_without_ingredients_still_works():
+    assert _v859_refuse_multiref_without_ingredients(_img(3, [1]), 3) is None
+
+
+def test_no_ref_without_ingredients_still_works():
+    assert _v859_refuse_multiref_without_ingredients(_img(3, []), 3) is None
+
+
+def test_legacy_dict_without_list_key_without_ingredients_still_works():
+    assert _v859_refuse_multiref_without_ingredients(
+        {"image_index": 3, "reference_image": 1}, 3
+    ) is None
