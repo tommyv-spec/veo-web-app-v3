@@ -41,6 +41,7 @@ from models import (
 )
 from veo_generator import VeoGenerator, list_images, GENAI_AVAILABLE, describe_subject_for_continuity
 from error_handler import VeoError, error_handler
+from clip_duration import pick_clip_duration_s, veo_api_duration_s
 
 
 # ============================================================
@@ -3445,35 +3446,66 @@ class JobWorker:
                 # This is the uploaded image for this scene (not the extracted frame in CONTINUE mode)
                 scene_image = images[start_index] if start_index < len(images) else images[0]
                 
-                # Calculate dynamic duration for LAST CLIP
-                # Last clip picks from 4, 6, or 8 seconds based on expected speech duration
+                # v861 — per-clip render duration. Every clip (not just the
+                # last) renders at the bucket its line's word count lands in.
+                # The bucket was resolved at import time from the markdown's
+                # `- **clip_duration_s:**` bullet (explicit) or the word count
+                # (auto) and stored on the Clip row. NULL → legacy/manual job
+                # with no per-clip pick: leave override_duration None so the
+                # job-level duration applies.
+                #
+                # The Veo API accepts durationSeconds of 4/6/8 ONLY
+                # (ai.google.dev/gemini-api/docs/veo) — a 10s pick folds to 8
+                # here. Flow's composer renders a real 10s clip; this path
+                # cannot.
                 override_duration = None
-                is_last_clip = clip_index == total_clips - 1
-                
-                if is_last_clip:
-                    # Estimate speech duration based on word count
-                    word_count = len(dialogue_text.split())
-                    language = generator.config.language if hasattr(generator.config, 'language') else 'English'
-                    
-                    # Words per second by language (approximate)
-                    wps_map = {
-                        "English": 2.5, "Italian": 2.8, "Spanish": 2.8, "French": 2.5, "German": 2.2,
-                        "Portuguese": 2.7, "Dutch": 2.4, "Polish": 2.3, "Russian": 2.2,
-                        "Japanese": 3.0, "Korean": 3.0, "Chinese": 3.2, "Arabic": 2.3, "Hindi": 2.6, "Turkish": 2.5
-                    }
-                    wps = wps_map.get(language, 2.5)
-                    estimated_duration = word_count / wps
-                    
-                    # Pick the duration slightly above the estimated (4, 6, or 8 seconds)
-                    if estimated_duration <= 3.5:
-                        override_duration = "4"
-                    elif estimated_duration <= 5.5:
-                        override_duration = "6"
-                    else:
-                        override_duration = "8"
-                    
-                    print(f"[Worker] LAST CLIP: {word_count} words, ~{estimated_duration:.1f}s speech → using {override_duration}s duration", flush=True)
-                
+                with get_db() as db:
+                    _dur_clip = db.query(Clip).filter(
+                        Clip.job_id == job_id,
+                        Clip.clip_index == clip_index
+                    ).first()
+                    _picked = _dur_clip.veo_render_duration_s if _dur_clip else None
+
+                if _picked is None and dialogue_text:
+                    # Legacy job imported before v861 — no stored pick. Derive
+                    # from the word count so behavior matches a fresh import.
+                    _picked = pick_clip_duration_s(len(dialogue_text.split()))
+                    _picked_src = "auto (legacy row, no stored pick)"
+                else:
+                    _picked_src = "clips.veo_render_duration_s"
+
+                if _picked is not None:
+                    # v861 — veo_api_duration_s RAISES on anything outside
+                    # 4/6/8/10. That is reachable in production, not theory:
+                    # clips.veo_render_duration_s is a bare INTEGER with no
+                    # CHECK constraint and main.py writes it straight from the
+                    # client payload unvalidated. A bad row must fail THIS
+                    # CLIP's duration pick, never the whole job.
+                    try:
+                        _folded = veo_api_duration_s(
+                            _picked, field_name="veo_render_duration_s")
+                    except ValueError as _dur_err:
+                        print(
+                            f"[v861/worker] clip {clip_index}: bad stored duration "
+                            f"{_picked!r} — {_dur_err}. Falling back to the "
+                            f"job-level duration for this clip.",
+                            flush=True,
+                        )
+                        _folded = None
+
+                    if _folded is not None:
+                        override_duration = str(_folded)
+                        _note = "" if _folded == _picked else (
+                            f" (folded from {_picked}s — the Veo API has no "
+                            f"{_picked}s bucket)"
+                        )
+                        print(
+                            f"[v861/worker] clip {clip_index}: "
+                            f"{len((dialogue_text or '').split())} words → "
+                            f"{_folded}s duration via {_picked_src}{_note}",
+                            flush=True,
+                        )
+
                 # CRITICAL: Log the actual start_frame being used for generation
                 actual_start_frame_name = start_frame.name if hasattr(start_frame, 'name') else str(start_frame)
                 print(f"[Worker] >>> GENERATING with start_frame: {actual_start_frame_name}", flush=True)
@@ -3490,7 +3522,7 @@ class JobWorker:
                     images_list=images,
                     current_end_index=end_index if end_index is not None else start_index,
                     scene_image=scene_image,  # Original scene image for prompt analysis
-                    override_duration=override_duration,  # Dynamic duration for last clip
+                    override_duration=override_duration,  # v861 per-clip duration; None → job-level
                     generation_mode=generation_mode,  # Pass generation mode for blacklist scoping
                 )
                 
