@@ -15635,3 +15635,41 @@ A 6.8 MB PNG, base64'd to ~9 MB of JSON, pushed through `page.evaluate` — **on
 Firing the 4 POSTs in parallel bought ~1.5×, not the 4× predicted. Flow **accepts** 4 concurrent `batchGenerateImages` POSTs but does **not render them concurrently** — they queue server-side. So the parallel-submit lever is spent; the remaining wins are in what we send (refs) and how many nodes are in flight, not in how hard we fire variants.
 
 Expected after v856: a 3-ref node ~98s → **~45s**. Tests: `code/test_v856_ref_cache.py` (8 cases — persistence, project scoping, LRU eviction, hot-ref survival, per-project drop, graceful disable, no-op drop, timing line).
+
+## v859 — Multi-reference chain: two parents on one image (pose+objects | body)
+
+**What it solves**: a frame that must inherit TWO different things from TWO different frames. Worked case (add-the-third v3, 2026-07-16): each "fit" frame needs the POSE + the HELD OBJECTS from its own beat's fat base frame, and the BODY from the one fit anchor. With a single chain parent you must pick one and re-describe the other in text. Operator: *"the fit should reference the previous fat and the overall fit — it gets the posing and the objects from the previous fat and the body of the fit."*
+
+**The rule**: `- **reference_image:**` accepts one OR two `image_N` entries, comma-separated. Order is authoritative:
+
+| Entry | Chain slot | The phrase the prompt MUST use |
+|---|---|---|
+| 1st | chain 0 | `the prior-scene reference image` (alias: `the previous scene's reference image`) |
+| 2nd | chain 1 | `the body reference image` |
+
+```
+- **reference_image:** image_3, image_2
+```
+```
+Keep the composition, the framing, the marks and the objects in his hands exactly as in the prior-scene reference image, but give the man the build shown in the body reference image.
+```
+
+- **Max 2 entries.** Slot 0 is always the persona upload and the model cap is 3 parents. A 3rd entry is a hard parse error, never a silent truncation.
+- **Duplicates are a hard error** — Banana 2 down-weights duplicate refs and it wastes a slot (the v520/v522 lesson).
+- **Every entry is validated**: must exist, must be `< this image's index`. Pre-v859 only the FIRST was checked.
+- **Both entries MUST be NAMED in the prompt body** via their phrase. This is the whole rule, not a nicety — see below.
+- **Single-ref markdowns are unaffected**: chain 0 keeps the pre-v859 phrases, so they translate identically.
+- **Legacy scene format REFUSES a comma-ref** (`_parse_scene_blocks_legacy`) rather than silently dropping entry 2 — its regex is unanchored and would have read `image_3, image_2` as just `3`.
+- **Multi-ref requires an `## Ingredients` block.** The legacy single-subject import path binds one reference and raises `HTTPException(400)` on a multi-ref rather than silently dropping entry 2.
+
+**AN UNNAMED REFERENCE IS DEAD WEIGHT — this is why the feature exists at all.** The slot translator (`_resolve_flow_prompt_bindings`) only rewrites the phrases above. A prompt saying "as in the reference image" matches nothing, so the reference is bound as an edge and **never named to the model** — and Banana 2 blends an unnamed reference as generic visual context (the v573 persona-bleed failure mode). At the time v859 landed only 39 of 182 shipped builds used a binding phrase. If your reference "isn't being used", check the phrase before blaming the model.
+
+**Job gating counts every reference.** A child is held in `draft` until ALL declared parents are `ready` with a chosen variant. Pre-v859 the gate read the scalar only, so a 2-ref child could be queued while parent 2 was still rendering — correct edges, unready reference, no error. `_promote_ready_children` could not rescue it (it only reconsiders `draft` nodes).
+
+**Why 2 and not 3**: slot 0 is the persona upload on every image; a product-bearing frame takes another. Two chain refs + persona = the cap. A frame needing product AND two chain refs logs the 3-parent-cap warning and drops the last.
+
+**Landmine for anyone touching `_resolve_flow_prompt_bindings`**: the v581 legacy number-based fallback rewrites `\bImage N\b` across the whole body and cannot tell author-written text from a slot number an earlier loop iteration just substituted. v859 parks substituted slots in sentinels so the legacy pass only sees author text. Fixing the `scene_index_in_batch` off-by-one (written 1-based, read 0-based) would make that pass fire MORE often — the sentinel guard must stay and must precede any such fix. See the KNOWN DEFECT note on the function.
+
+**Scope / gates**: GENERATE-side import + slot translation. Forward-only. The linter does not validate `reference_image` at all (pre-existing — it never validated single refs either), so this is not linter-gated.
+
+**Touched**: `code/image_platform.py` (`_parse_image_blocks_new` parse + validate, `_parse_scene_blocks_legacy` refusal, chain-edge creation, job gating, v619 N5 consistency, `_resolve_flow_prompt_bindings`), `code/tests/test_multi_reference_image.py` (60 tests), `wiki/patterns/conventions.md`, `wiki/log.md`. First build: `videos/nuri-korella-ed-add-the-third-locked-pair-fat-fit-flip-korella-saffron-v3.md`. Surfaced 2026-07-16.

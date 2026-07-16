@@ -203,6 +203,14 @@
     9:16 with burned-in captions.
   • reference_image: scene-to-scene visual parent. Image 1 = none. Sequential beats
     chain tightly. Register changes point back to image 1.
+  • reference_image (v859): ONE or TWO parents — `image_N` or `image_N, image_M`.
+    Two = the frame inherits different things from different parents:
+      entry 1 -> NAME it "the prior-scene reference image" in the prompt (pose/objects)
+      entry 2 -> NAME it "the body reference image" in the prompt (the body)
+    BOTH MUST BE NAMED or the unnamed one is blended as generic context — the
+    translator only rewrites those exact phrases; "as in the reference image"
+    binds nothing. Max 2 (slot 0 = the persona upload). Duplicates, forward refs
+    and a 3rd entry are hard errors. Canonical: template_reference.md §v859.
   • EXPLICIT REFERENCE BINDINGS (v581, supersedes v552 + v573 manifest auto-prepend):
     each `Image prompt:` fenced block MUST begin with explicit binding lines that
     declare which uploads are used for what. Three line types in this order:
