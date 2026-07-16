@@ -4,9 +4,9 @@ import pytest
 from clip_duration import (
     ALLOWED_CLIP_DURATIONS_S,
     VEO_API_DURATIONS_S,
-    clamp_for_veo_api,
     pick_clip_duration_s,
     resolve_clip_duration_s,
+    veo_api_duration_s,
 )
 
 
@@ -34,16 +34,31 @@ def test_allowed_values():
     assert VEO_API_DURATIONS_S == (4, 6, 8)
 
 
-def test_clamp_for_veo_api():
-    assert clamp_for_veo_api(4) == 4
-    assert clamp_for_veo_api(6) == 6
-    assert clamp_for_veo_api(8) == 8
-    assert clamp_for_veo_api(10) == 8   # Veo API has no 10s bucket
-    assert clamp_for_veo_api(None) is None
+def test_veo_api_duration_s():
+    assert veo_api_duration_s(4) == 4
+    assert veo_api_duration_s(6) == 6
+    assert veo_api_duration_s(8) == 8
+    assert veo_api_duration_s(10) == 8   # Veo API has no 10s bucket
+    assert veo_api_duration_s(None) is None
+
+
+def test_veo_api_duration_s_returns_int():
+    result = veo_api_duration_s(4.0)
+    assert result == 4
+    assert isinstance(result, int)
+
+
+@pytest.mark.parametrize("bad", [0, -5, 2, 7, 9, 12, 4.5, "8", "abc", [8], True])
+def test_veo_api_duration_s_rejects_out_of_range(bad):
+    """Below-range input must NOT silently fold UP to the longest bucket."""
+    with pytest.raises(ValueError, match="not in"):
+        veo_api_duration_s(bad)
 
 
 def test_resolve_precedence_explicit_wins():
-    assert resolve_clip_duration_s(explicit=6, anchor_bucket=8, line_text="a b c" * 20) == 6
+    assert resolve_clip_duration_s(
+        explicit=6, anchor_bucket=8,
+        line_text=" ".join(["w"] * 60)) == 6
 
 
 def test_resolve_precedence_anchor_beats_wordcount():
@@ -63,6 +78,45 @@ def test_resolve_returns_none_for_silent_scene():
     assert resolve_clip_duration_s(explicit=None, anchor_bucket=None, line_text=None) is None
 
 
+def test_resolve_returns_none_for_whitespace_only_line():
+    """A blank markdown bullet parses to whitespace -> silent scene."""
+    assert resolve_clip_duration_s(explicit=None, anchor_bucket=None, line_text="   ") is None
+    assert resolve_clip_duration_s(explicit=None, anchor_bucket=None, line_text="\n\t ") is None
+
+
 def test_resolve_rejects_bad_explicit():
     with pytest.raises(ValueError, match="not in"):
         resolve_clip_duration_s(explicit=7, anchor_bucket=None, line_text="hello")
+
+
+@pytest.mark.parametrize("bad", [7, 0, -3, 5.237, 6.7, 4.5, 10.9, "6", "abc", [6], True])
+def test_resolve_rejects_bad_explicit_types(bad):
+    """Validate the RAW value before coercing — 6.7 must not silently become 6."""
+    with pytest.raises(ValueError, match="not in"):
+        resolve_clip_duration_s(explicit=bad, anchor_bucket=None, line_text="hello")
+
+
+def test_resolve_explicit_float_whole_number_normalizes_to_int():
+    """4.0 is exactly 4 -> accepted, but returned as a real int."""
+    result = resolve_clip_duration_s(explicit=4.0, anchor_bucket=None, line_text="hello")
+    assert result == 4
+    assert isinstance(result, int)
+
+
+@pytest.mark.parametrize("bad", [7, 0, -3, 99, 5.237, 4.5, "8", "abc", [8], True])
+def test_resolve_rejects_bad_anchor_bucket(bad):
+    """Same gate as explicit — a wiring slip must not reach the render path."""
+    with pytest.raises(ValueError, match="not in"):
+        resolve_clip_duration_s(explicit=None, anchor_bucket=bad, line_text="two words")
+
+
+def test_resolve_anchor_bucket_normalizes_to_int():
+    result = resolve_clip_duration_s(explicit=None, anchor_bucket=8.0, line_text="two words")
+    assert result == 8
+    assert isinstance(result, int)
+
+
+def test_resolve_wordcount_returns_int():
+    result = resolve_clip_duration_s(
+        explicit=None, anchor_bucket=None, line_text=" ".join(["w"] * 18))
+    assert isinstance(result, int)

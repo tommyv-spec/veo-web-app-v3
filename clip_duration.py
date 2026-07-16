@@ -11,8 +11,13 @@ Operator table (2026-07-16), literal upper bounds:
     12..16        -> 6s
     17..24        -> 8s
     25..28        -> 10s
-    > 28          -> 10s + caller logs a warning (v831 caps lines at 28 words;
-                     the /build auditor FAILs before a build gets this far)
+    > 28          -> 10s + caller logs a warning
+
+The table tops out at 28 because a spoken line may not exceed 28 words (v831,
+amended 2026-07-16 from 25 so the 10s bucket is reachable). That cap is
+enforced by the /build auditor, which lives outside this repo and cannot
+import this module — so the number is deliberately NOT re-declared here as a
+constant free to drift out of step with the auditor's copy.
 
 Implied speech rate 2.67-3.0 words/sec (least-squares fit of the operator's
 four points = 2.8 w/s). Full deep-dive: template_reference.md §v857.
@@ -30,9 +35,24 @@ VEO_API_DURATIONS_S = (4, 6, 8)
 # (max_words, duration_s) — first row whose max_words the count fits under wins.
 _BUCKETS = ((11, 4), (16, 6), (24, 8), (28, 10))
 
-# v831 (amended 2026-07-16) — a spoken line over this many words must be split
-# into two clips. Was 25; raised to 28 so the 10s bucket is reachable.
-LINE_WORD_CAP = 28
+
+def _validated_duration_s(value, field_name: str) -> int:
+    """Gate every caller-supplied duration entering this module.
+
+    Accepts an int, or a value exactly equal to one of ALLOWED_CLIP_DURATIONS_S
+    (so ``4.0`` passes, ``4.5`` does not). Rejects bools — ``isinstance(True,
+    int)`` is True in Python, but a bool is not a duration. Returns a real int,
+    so a float can never reach the Veo durationSeconds payload.
+
+    Validation runs on the RAW value, BEFORE any int() coercion — otherwise
+    ``6.7`` would silently truncate into a valid-looking 6.
+    """
+    if isinstance(value, bool) or value not in ALLOWED_CLIP_DURATIONS_S:
+        raise ValueError(
+            "%s %r not in %r (v857)"
+            % (field_name, value, list(ALLOWED_CLIP_DURATIONS_S))
+        )
+    return int(value)
 
 
 def pick_clip_duration_s(word_count: int) -> int:
@@ -43,13 +63,21 @@ def pick_clip_duration_s(word_count: int) -> int:
     return 10  # over the cap — biggest bucket; caller should warn
 
 
-def clamp_for_veo_api(duration_s: Optional[int]) -> Optional[int]:
-    """Veo API has no 10s bucket — fold 10 down to 8. None passes through."""
+def veo_api_duration_s(duration_s: Optional[int]) -> Optional[int]:
+    """The Veo API's durationSeconds for an already-picked clip duration.
+
+    The Veo API has no 10s bucket, Flow's composer does — so 10 folds down to
+    8. 4/6/8 pass through unchanged; None passes through. Anything outside
+    ALLOWED_CLIP_DURATIONS_S raises rather than folding: a below-range value is
+    an upstream bug, and quietly promoting it to the longest, most expensive
+    bucket would hide that bug behind a bigger render bill.
+    """
     if duration_s is None:
         return None
-    if duration_s in VEO_API_DURATIONS_S:
-        return duration_s
-    return 8
+    picked = _validated_duration_s(duration_s, "clip_duration_s")
+    if picked in VEO_API_DURATIONS_S:
+        return picked
+    return 8  # 10 is the only value left — the Veo-vs-Flow dialect fold
 
 
 def resolve_clip_duration_s(
@@ -65,17 +93,17 @@ def resolve_clip_duration_s(
     3. word count of ``line_text`` — the v857 table
     4. None              — no line, no anchor: the job-level duration applies
 
-    Raises ValueError on an explicit value outside ALLOWED_CLIP_DURATIONS_S.
+    Both caller-supplied durations go through the same validation gate. Neither
+    is trusted: ``explicit`` arrives from a markdown parser, and at the
+    ``anchor_bucket`` call-site a float target_duration_s sits one line away
+    from the valid int, so a wiring slip must raise here, not reach a render.
+
+    Raises ValueError on a value outside ALLOWED_CLIP_DURATIONS_S.
     """
     if explicit is not None:
-        if int(explicit) not in ALLOWED_CLIP_DURATIONS_S:
-            raise ValueError(
-                "clip_duration_s %r not in %r (v857)"
-                % (explicit, list(ALLOWED_CLIP_DURATIONS_S))
-            )
-        return int(explicit)
+        return _validated_duration_s(explicit, "clip_duration_s")
     if anchor_bucket is not None:
-        return int(anchor_bucket)
+        return _validated_duration_s(anchor_bucket, "anchor_bucket")
     words = len((line_text or "").split())
     if words == 0:
         return None
