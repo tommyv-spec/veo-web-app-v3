@@ -5141,6 +5141,137 @@ def import_scene_table(
 PLATFORM_AUTO_CHAIN_INLINE_INGREDIENTS = False
 
 
+def _v619_n5_drop_invalid_chain_refs(
+    img: Dict[str, Any],
+    image_index: int,
+    all_image_indices: Set[int],
+) -> List[int]:
+    """v619 N5 — drop forward/undeclared chain refs from ONE image dict.
+
+    Mutates ``img`` in place; returns the dropped refs so the caller can log
+    them (this stays pure of logging/DB so it is unit-testable).
+
+    v859 — two changes:
+
+    1. Reads the ``reference_images`` LIST, not just the scalar. Pre-v859 this
+       cleared ONLY ``reference_image``; the moment edge creation started
+       reading the list, an N5 drop was silently ignored and the dropped ref
+       came back. Both representations now move together, preserving T1's
+       invariant: ``reference_images == []`` iff scalar is None, and the
+       scalar is always ``reference_images[0]``.
+    2. Drops only the INVALID entries rather than the whole chain. This is a
+       strict generalization, not a behavior change: with a single ref (every
+       pre-v859 build) "drop the invalid entry" and "drop the chain" are the
+       same operation. Dropping a VALID sibling would discard a binding the
+       author explicitly asked for.
+
+    Legacy-format images (see ~L4592) carry only the scalar and no
+    ``reference_images`` key; the key is not invented for them.
+
+    NOTE — this repair is currently UNREACHABLE. Both parse paths already
+    raise ValueError on exactly these conditions before v619 runs
+    (``_parse_image_blocks_new`` ~L3839 for the new format,
+    ``_parse_scene_blocks_legacy`` ~L3535 for legacy), ``parse_scene_table``
+    is the only producer of the ``images`` list, and nothing mutates it in
+    between. It is kept — and kept correct — as v619's defence-in-depth
+    repair layer ("no HTTPException; bad markdown gets repaired"), so that
+    relaxing a parser gate later cannot silently resurrect a dropped ref.
+    """
+    ref_list = img.get("reference_images")
+    if ref_list is None:
+        scalar = img.get("reference_image")
+        ref_list = [scalar] if scalar is not None else []
+
+    kept: List[int] = []
+    dropped: List[int] = []
+    for ref in ref_list:
+        if ref >= image_index or ref not in all_image_indices:
+            dropped.append(ref)
+        else:
+            kept.append(ref)
+
+    if dropped:
+        if img.get("reference_images") is not None:
+            img["reference_images"] = kept
+        img["reference_image"] = kept[0] if kept else None
+    return dropped
+
+
+def _v859_plan_chain_edges(
+    ref_images: List[int],
+    parent_id_by_ref: Dict[int, Any],
+    attached_parents_count: int,
+    bound_parent_ids: Set[Any],
+    slot: int,
+    max_parents: int = 3,
+) -> Dict[str, Any]:
+    """v859 — decide the chain edges for ONE image. Pure: no DB, no logging.
+
+    The import handler owns the DB/log side effects; this owns the decision,
+    which is the part v859 changes and the part worth testing.
+
+    ``parent_id_by_ref`` maps a declared ref index to its already-created
+    parent node id. A ref ABSENT from the mapping means the node wasn't
+    created yet (the caller raises HTTPException 500).
+
+    Returns a plan dict::
+
+        edges     [{ref, parent_id, slot_order, chain_seq, total}, ...]
+        duplicates[ref, ...]   parent already bound — skipped (v520/v522)
+        capped    Optional[int]  first ref refused by the max_parents cap
+        missing   Optional[int]  first ref with no created parent node
+        attached_parents_count / slot / bound_parent_ids   post-state
+
+    Order of checks mirrors the pre-v859 single-ref block exactly: cap first
+    (so a capped ref warns rather than raising on a missing node), then the
+    node lookup, then the duplicate skip. ``bound_parent_ids`` is copied, not
+    mutated — the caller applies the post-state.
+    """
+    edges: List[Dict[str, Any]] = []
+    duplicates: List[int] = []
+    capped: Optional[int] = None
+    missing: Optional[int] = None
+
+    bound = set(bound_parent_ids)
+    count = attached_parents_count
+    next_slot = slot
+    total = len(ref_images)
+
+    for chain_seq, this_ref in enumerate(ref_images):
+        if count >= max_parents:
+            capped = this_ref
+            break
+        if this_ref not in parent_id_by_ref:
+            missing = this_ref
+            break
+        parent_id = parent_id_by_ref[this_ref]
+        # v520/v522: Banana 2 down-weights a duplicate reference AND it burns
+        # one of only 3 slots. Skip without consuming a slot.
+        if parent_id in bound:
+            duplicates.append(this_ref)
+            continue
+        edges.append({
+            "ref": this_ref,
+            "parent_id": parent_id,
+            "slot_order": next_slot,
+            "chain_seq": chain_seq + 1,
+            "total": total,
+        })
+        bound.add(parent_id)
+        count += 1
+        next_slot += 1
+
+    return {
+        "edges": edges,
+        "duplicates": duplicates,
+        "capped": capped,
+        "missing": missing,
+        "attached_parents_count": count,
+        "slot": next_slot,
+        "bound_parent_ids": bound,
+    }
+
+
 def _import_scene_table_impl(
     req: "ImportSceneTableRequest",
     db: Session,
@@ -5648,15 +5779,18 @@ def _import_scene_table_impl(
                 )
 
             # N5 — Drop forward / invalid chain refs
-            ref_idx = img.get("reference_image")
-            if ref_idx is not None:
-                if ref_idx >= image_index or ref_idx not in all_image_indices:
-                    log.warning(
-                        f"[image_platform] v619 N5: Image {image_index}: "
-                        f"reference_image={ref_idx} is invalid "
-                        f"(forward ref or undeclared) — dropping chain"
-                    )
-                    img["reference_image"] = None
+            # v859 — now drops from the `reference_images` LIST as well as the
+            # scalar, so the two can never disagree (edge creation reads the
+            # list). See _v619_n5_drop_invalid_chain_refs for why this block is
+            # unreachable today and kept anyway.
+            for _dropped_ref in _v619_n5_drop_invalid_chain_refs(
+                img, image_index, all_image_indices
+            ):
+                log.warning(
+                    f"[image_platform] v619 N5: Image {image_index}: "
+                    f"reference_image={_dropped_ref} is invalid "
+                    f"(forward ref or undeclared) — dropping chain"
+                )
 
     # v513: pre-pass to compute the anchor image index for each ingredient
     # WITHOUT creating any DB rows. This is done first so variant chains
@@ -6209,40 +6343,68 @@ def _import_scene_table_impl(
             # scene 8 (Salvora close-up after the reveal) anchored both
             # via "the Salvora Rhodiola Rosea bottle" AND via
             # reference_image: image_7 — both pointed at image 7.
-            if ref_image is not None and attached_parents_count < 3:
-                parent_node = created_nodes_by_image_index.get(ref_image)
-                if parent_node is None:
+            # v859: one chain edge PER declared reference. Order is
+            # authoritative — refs[0] is the prior-scene reference (pose +
+            # held objects), refs[1] the body reference; the slot translator
+            # maps them by chain order. Legacy-format images carry only the
+            # scalar, so fall back to it.
+            ref_images_declared = img.get("reference_images")
+            if not ref_images_declared:
+                ref_images_declared = [ref_image] if ref_image is not None else []
+
+            if ref_images_declared:
+                _parent_ids_by_ref = {
+                    r: created_nodes_by_image_index[r].id
+                    for r in ref_images_declared
+                    if created_nodes_by_image_index.get(r) is not None
+                }
+                _plan = _v859_plan_chain_edges(
+                    ref_images_declared,
+                    _parent_ids_by_ref,
+                    attached_parents_count,
+                    bound_parent_ids,
+                    slot,
+                )
+                if _plan["missing"] is not None:
                     raise HTTPException(
                         500,
-                        f"Image {image_index} references image_{ref_image} which wasn't created yet"
+                        f"Image {image_index} references image_{_plan['missing']} "
+                        f"which wasn't created yet"
                     )
-                # v522: use the same bound_parent_ids set the ingredient
-                # loop populated. Replaces the earlier db.new walk which
-                # had the same effect but read worse.
-                if parent_node.id in bound_parent_ids:
+                # v520/v522: parent already bound via an ingredient anchor —
+                # Banana 2 down-weights duplicate refs and it wastes a slot.
+                for _dup_ref in _plan["duplicates"]:
                     log.info(
-                        f"[import] Image {image_index}: ref_image image_{ref_image} "
+                        f"[import] Image {image_index}: ref_image image_{_dup_ref} "
                         f"already bound via ingredient match — skipping duplicate chain edge"
                     )
-                else:
+                if _plan["capped"] is not None:
+                    log.warning(
+                        f"[import] Image {image_index}: 3 parents already bound, "
+                        f"can't also chain to image_{_plan['capped']} (3-parent cap). "
+                        f"Setting/composition continuity may be reduced."
+                    )
+                for _edge in _plan["edges"]:
                     db.add(ImageEdge(
-                        parent_node_id=parent_node.id,
+                        parent_node_id=_edge["parent_id"],
                         child_node_id=node.id,
-                        role=f"chain_from_image_{ref_image}",
-                        slot_order=slot,
+                        role=f"chain_from_image_{_edge['ref']}",
+                        slot_order=_edge["slot_order"],
                         # v573: prior-scene reference for setting/composition
                         # continuity — drives the chain manifest line.
                         kind="chain",
                     ))
-                    bound_parent_ids.add(parent_node.id)
-                    attached_parents_count += 1
-                    slot += 1
-            elif ref_image is not None and attached_parents_count >= 3:
-                log.warning(
-                    f"[import] Image {image_index}: 3 parents already bound, "
-                    f"can't also chain to image_{ref_image} (3-parent cap). "
-                    f"Setting/composition continuity may be reduced."
-                )
+                    # v859 TEMPORARY DIAGNOSTIC — remove once operator-side
+                    # evidence confirms 2-ref binding renders correctly
+                    # (code/CLAUDE.md deploy discipline).
+                    log.info(
+                        f"[v859] Image {image_index}: chain edge "
+                        f"{_edge['chain_seq']}/{_edge['total']} -> "
+                        f"image_{_edge['ref']} at slot {_edge['slot_order']}"
+                    )
+                bound_parent_ids.update(_plan["bound_parent_ids"])
+                attached_parents_count = _plan["attached_parents_count"]
+                slot = _plan["slot"]
 
             # Safety net: if the scene mentions no ingredients AND has
             # no ref_image AND won't receive a deferred variant chain
