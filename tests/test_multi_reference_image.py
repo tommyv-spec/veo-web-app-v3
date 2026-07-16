@@ -15,7 +15,7 @@ the fixture embeds triple-backtick fences, and keeping it a plain
 
 import pytest
 
-from image_platform import _parse_image_blocks_new
+from image_platform import _parse_image_blocks_new, _parse_scene_blocks_legacy
 
 
 _MD_TEMPLATE = """## Images
@@ -178,3 +178,33 @@ def test_valid_two_refs_pass_validation():
     imgs = _parse_image_blocks_new(_md("- **reference_image:** image_2, image_1"))
     third = [i for i in imgs if i["image_index"] == 3][0]
     assert third["reference_images"] == [2, 1]
+
+
+# --- v859 scope guard: multi-ref is NEW-FORMAT only -------------------------
+# The LEGACY scene parser is the other format: its scenes carry
+# reference_image directly (the new format binds via "- **image:** image_N"
+# and has no reference_image at all). Multi-ref is not ported there — but it
+# must not half-apply either.
+
+LEGACY_MULTIREF = '''### Scene 1
+- **reference_image:** none
+**Image prompt:**
+```
+A kitchen.
+```
+
+### Scene 2
+- **reference_image:** image_1, image_1
+**Image prompt:**
+```
+The same kitchen.
+```
+'''
+
+
+def test_legacy_scene_parser_refuses_multiref():
+    # Pre-v859 this silently captured "image_1," via an UNANCHORED regex -> 1,
+    # dropping entry 2 with no error. Multi-ref is a new-format image-block
+    # feature; refuse it here loudly rather than half-applying it.
+    with pytest.raises(ValueError, match="multi-reference"):
+        _parse_scene_blocks_legacy(LEGACY_MULTIREF)

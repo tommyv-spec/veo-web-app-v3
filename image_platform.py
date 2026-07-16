@@ -3456,6 +3456,16 @@ def _parse_scene_blocks_legacy(md_text: str) -> List[Dict[str, Any]]:
             block, flags=_re.MULTILINE,
         )
         ref_value = ref_match.group(1).strip() if ref_match else "none"
+        # v859: multi-reference is a NEW-FORMAT, image-block feature. The match
+        # below is unanchored, so "image_3, image_2" would capture "image_3,"
+        # and silently DROP entry 2 — a partial loss the author never sees.
+        # Refuse it instead of half-applying it.
+        if "," in ref_value:
+            raise ValueError(
+                f"Scene {scene_index}: multi-reference 'reference_image: {ref_value}' "
+                f"is a new-format feature (### Image N blocks) and is not supported "
+                f"in the legacy scene format"
+            )
         ref_parent: Optional[int] = None
         if ref_value.lower() not in ("none", "null", ""):
             m = _re.match(r"image_(\d+)", ref_value)
