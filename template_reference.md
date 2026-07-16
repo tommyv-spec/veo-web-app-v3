@@ -14658,7 +14658,29 @@ Dead Ingredients branches are kept in place. If Flow drops Omni-on-Frames, flip 
 
 ## v795 — No pointing fingers; hands always hold a prop (images + Veo prompts)
 
-**The rule**: a pointing finger never appears in an `### Image N` prompt body, a `### Clip N.M` Veo Text prompt, or an `action_note`. Hands HOLD or manipulate a prop instead — the drink, the bottle, the ginger, the shame-proxy. The hero prop sits dead-center IN the hand; there is no bare pointing gesture.
+> ### ⚠️ v795.1 — RELAXED 2026-07-16 (operator): POINTING IS ALLOWED AGAIN. FORWARD-ONLY.
+>
+> **Operator, 2026-07-16:** *"now we can point (update the rule)."* Said while staging the add-the-third base beat, where the persona needs to call out the objects the man is holding BEFORE the product enters.
+>
+> **What changed:** the hard BAN below is lifted. A deliberate point AT a prop, an object, a body zone or a screen element is now permitted in image prompts, Veo Text prompts and `action_note`s. The auditor's `v795_pointing` hard-FAIL is retired to a WARN-free no-op.
+>
+> **Why the ban existed** (v795.0, 2026-06-22) — three stated reasons, and only one is clearly obsolete:
+> 1. *"renders badly"* — the real driver. Banana 2 mangled pointing hands. The operator judges current renders good enough; he is the one looking at them, so this reason is spent.
+> 2. *"can trip hand filters"* — a risk, not a certainty; never isolated as the cause of a specific rejection.
+> 3. *"reads salesy"* — a taste call, and it was always about ONE sub-case: the CTA point-at-the-upper-right-corner. That remains a bad look, but it is now a judgment note, not a ban.
+>
+> **What SURVIVES the relaxation** (do not read this as a licence for empty flailing hands):
+> - **v736 stands untouched** — the hero prop still sits DEAD-CENTER and hands still manipulate it. Pointing is now an ADDITIONAL option, not a replacement for holding the hero prop.
+> - Prefer CONTACT over a bare point when the hand can reach the thing (laying an open hand on it, tapping it, steadying it) — contact reads warmer and renders at least as well.
+> - The CTA corner-point stays discouraged on taste grounds: "holds the product squared to the lens" still beats "points at the corner".
+>
+> **Forward-only** per `feedback_rule-changes-forward-only`: shipped builds that already replaced points with holds are CORRECT as they are and are NOT retro-edited. This lifts a constraint; it never invalidates a build that honoured it.
+>
+> **Touched by the relaxation**: this section, `wiki/patterns/conventions.md` (index row), `wiki/concepts/prompting/realistic-ugc-prompt-templates.md`, `wiki/meta/generate-video-checklist.md`, `~/.claude/skills/build-video/audit_build.py` (`c_v795_pointing` → no-op PASS), memory `feedback_no-pointing-hold-prop`, `wiki/log.md`.
+>
+> **The v795.0 text below is kept verbatim as history — it is NO LONGER ENFORCED.**
+
+**The rule** (v795.0 — SUPERSEDED by v795.1 above, kept for history): a pointing finger never appears in an `### Image N` prompt body, a `### Clip N.M` Veo Text prompt, or an `action_note`. Hands HOLD or manipulate a prop instead — the drink, the bottle, the ginger, the shame-proxy. The hero prop sits dead-center IN the hand; there is no bare pointing gesture.
 
 - **BAN** every finger-point: "points toward the upper-right corner" (CTA gesture), "raises one index finger in a listen gesture", "points at the lens", "points at the symptom/proxy", finger trace/tap on a body part.
 - **REPLACE** with a hold: CTA-point-at-corner → "holds the product squared to the lens"; "listen" index-finger → "holds the [prop] forward at chest level"; point-at-proxy → "holds the [proxy] dead-center toward the lens". The v578/v594 "camera forces the viewer to SEE the proxy" requirement (see §v598 / realistic-ugc shame-proxy) is satisfied by HOLDING the proxy front-and-center, NOT by pointing at it.
