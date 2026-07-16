@@ -42,6 +42,7 @@ from sqlalchemy.orm import Session, relationship, joinedload, selectinload
 from models import Base, get_db_session, get_db, User, read_query_with_retry, UserWorkerToken
 from config import app_config
 from auth import get_current_user
+from clip_duration import ALLOWED_CLIP_DURATIONS_S
 
 
 log = logging.getLogger("image_platform")
@@ -3539,9 +3540,9 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
 
     Returns a list of dicts with: image_index (int), prompt (str),
     reference_image (Optional[int] — another image's index),
-    reference_images (List[int] — v858; ALL declared chain parents, in
+    reference_images (List[int] — v859; ALL declared chain parents, in
     declaration order, capped at 2). The scalar ``reference_image`` is
-    kept as the FIRST entry of that list (None when empty) so pre-v858
+    kept as the FIRST entry of that list (None when empty) so pre-v859
     readers keep working unchanged — prefer ``reference_images`` in new
     code. Unlike the legacy parser, scenes are in a separate section so
     these dicts have no voiceover/clip_mode/action_note fields.
@@ -3579,10 +3580,10 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
             block = block[:cut_m.start()]
         image_index = int(header.group(1))
 
-        # v858 — reference_image accepts ONE or TWO chain parents:
+        # v859 — reference_image accepts ONE or TWO chain parents:
         #   image_3            -> [3]
         #   image_3, image_2   -> [3, 2]  (slot 1 = pose/objects, slot 2 = body)
-        # The legacy scalar key stays = first entry so every pre-v858
+        # The legacy scalar key stays = first entry so every pre-v859
         # reader downstream keeps working unchanged.
         ref_match = _re.search(
             r"^\s*[-*]\s*\*\*reference_image:\*\*\s*(.+?)\s*$",
@@ -3590,8 +3591,8 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
         )
         ref_value = ref_match.group(1).strip() if ref_match else "none"
         ref_parents: List[int] = []
-        # v858: an entry may carry a trailing author note — "image_3 (keep the
-        # counter)" / "none (location shift)". The pre-v858 regex captured a
+        # v859: an entry may carry a trailing author note — "image_3 (keep the
+        # counter)" / "none (location shift)". The pre-v859 regex captured a
         # single \S+ token, so only the first word ever mattered; preserve that
         # exactly by taking the first whitespace-token of each comma entry.
         entries = [p.strip() for p in ref_value.split(",") if p.strip()]
@@ -3799,7 +3800,7 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
             "image_index": image_index,
             "prompt": prompt,
             "reference_image": ref_parent,
-            "reference_images": ref_parents,  # v858 — full list; scalar above = first
+            "reference_images": ref_parents,  # v859 — full list; scalar above = first
             "product_image": product_image,  # v581 — None if field absent
             "frame_anchor_s": frame_anchor_s,  # v667
             "visual_delta": visual_delta,      # v667
@@ -4153,13 +4154,17 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # lines, especially on Fast [Lower Priority] tier).
         #
         # We iterate through each matching bullet in source order.
+        # v857 — `clip_duration_s` joins the per-line bullet set. Like v644's
+        # `pad` it attaches to the closest preceding `line`, so a two-line
+        # scene can render its clips at two different durations.
         bullet_pattern = _re.compile(
-            r"^\s*[-*]\s*\*\*(line|action_note|pad)\s*:\*\*\s*(.+?)\s*$",
+            r"^\s*[-*]\s*\*\*(line|action_note|pad|clip_duration_s)\s*:\*\*\s*(.+?)\s*$",
             flags=_re.MULTILINE | _re.IGNORECASE,
         )
         lines_list: List[str] = []
         action_notes: List[Optional[str]] = []
         pads: List[Optional[str]] = []  # v644 parallel array
+        clip_durations: List[Optional[int]] = []  # v857 parallel array
         # v786 — silent / text_card scenes have an action_note but NO line
         # bullets, so the attach-to-most-recent-line rule below would drop
         # it. Hold it here; if the scene ends with zero lines, emit it as a
@@ -4173,6 +4178,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 lines_list.append(value)
                 action_notes.append(None)
                 pads.append(None)
+                clip_durations.append(None)  # v857
             elif key == "action_note":
                 if lines_list:
                     # Attach to most recent line
@@ -4186,6 +4192,33 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 if lines_list:
                     pads[-1] = value
                 # else: pad before any line — ignore, likely malformed
+            elif key == "clip_duration_s":
+                # v857 — attach the render-duration bucket to most recent line.
+                m_dur = _re.match(r"\d+", value)
+                if not m_dur:
+                    raise ValueError(
+                        f"Scene {scene_index}: clip_duration_s {value!r} is not "
+                        f"a number (expected one of "
+                        f"{list(ALLOWED_CLIP_DURATIONS_S)} — see "
+                        f"template_reference.md §v857)"
+                    )
+                dur_val = int(m_dur.group())
+                if dur_val not in ALLOWED_CLIP_DURATIONS_S:
+                    raise ValueError(
+                        f"Scene {scene_index}: clip_duration_s {dur_val} not in "
+                        f"{list(ALLOWED_CLIP_DURATIONS_S)} (v857). Pick the bucket "
+                        f"the line's word count lands in: <=11w=4s, 12-16w=6s, "
+                        f"17-24w=8s, 25-28w=10s."
+                    )
+                if lines_list:
+                    clip_durations[-1] = dur_val
+                else:
+                    print(
+                        f"[v857/parse] scene_{scene_index} clip_duration_s="
+                        f"{dur_val} appears before any `- **line:**` bullet — "
+                        f"ignored (malformed)",
+                        flush=True,
+                    )
 
         # v786 — no-lines scene with a scene-level action_note: surface it
         # as a 1-entry list. Parallel-array invariants hold downstream:
@@ -4236,6 +4269,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "lines": lines_list,
             "action_notes": action_notes,
             "pads": pads,  # v644 — parallel to lines/action_notes; entries are str or None
+            "clip_durations": clip_durations,  # v857 — parallel to lines; int (4|6|8|10) or None
             "speaker_mode": speaker_mode,  # v537
             "cut_mode": cut_mode,  # v668 — None | 'whisper' | 'timeline' | 'auto'
             "cast": scene_cast,           # v681 — None | list[str]
