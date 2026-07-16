@@ -268,3 +268,14 @@ def test_parse_pad_and_clip_duration_do_not_interfere():
         "which is why it matters so much",
     ]
     assert len(s["lines"]) == len(s["pads"]) == len(s["clip_durations"]) == 2
+
+
+def test_resolver_is_the_one_used_by_prepare():
+    """Guard: prepare_batch_for_video must call the shared resolver, not
+    re-implement the table. Fails loudly if someone forks the math."""
+    import inspect
+    import image_platform
+    src = inspect.getsource(image_platform.prepare_batch_for_video)
+    assert "resolve_clip_duration_s" in src, (
+        "prepare_batch_for_video must resolve v861 durations via "
+        "clip_duration.resolve_clip_duration_s")

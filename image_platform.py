@@ -42,7 +42,11 @@ from sqlalchemy.orm import Session, relationship, joinedload, selectinload
 from models import Base, get_db_session, get_db, User, read_query_with_retry, UserWorkerToken
 from config import app_config
 from auth import get_current_user
-from clip_duration import ALLOWED_CLIP_DURATIONS_S, pick_clip_duration_s
+from clip_duration import (
+    ALLOWED_CLIP_DURATIONS_S,
+    pick_clip_duration_s,
+    resolve_clip_duration_s,
+)
 
 
 log = logging.getLogger("image_platform")
@@ -7876,12 +7880,21 @@ def prepare_batch_for_video(
         this_node = nodes_by_id.get(node_id)
         this_anchor = getattr(this_node, "frame_anchor_s", None) if this_node else None
         target_duration_s: Optional[float] = None
-        veo_render_duration_s: Optional[int] = None
+        # v667 anchor-derived bucket — the trim duration for transformation
+        # montages. v861 treats this as the SECOND-priority input; an explicit
+        # `- **clip_duration_s:**` bullet outranks it.
+        anchor_bucket: Optional[int] = None
         if this_anchor is not None:
             nxt = _next_anchor_after(scene["scene_index"])
             if nxt is not None and nxt > this_anchor:
                 target_duration_s = round(nxt - this_anchor, 3)
-                veo_render_duration_s = _ceil_to_veo_bucket(target_duration_s)
+                anchor_bucket = _ceil_to_veo_bucket(target_duration_s)
+
+        # v861 — per-line explicit durations parsed off the scene block.
+        # Parallel to `lines`; entries are int (4|6|8|10) or None. A no-lines
+        # (silent / text_card) scene that declared the bullet yields a 1-entry
+        # list.
+        scene_clip_durations: List[Optional[int]] = scene.get("clip_durations") or []
 
         # v681 — text-card / caption / cast denorm. Scene-scoped fields
         # — same value across all dialogue lines in the scene.
@@ -7939,7 +7952,10 @@ def prepare_batch_for_video(
             "cut_mode": cut_mode,
             "frame_anchor_s": this_anchor,
             "target_duration_s": target_duration_s,
-            "veo_render_duration_s": veo_render_duration_s,
+            # v667 anchor-derived bucket, scene-scoped (the lift composer reads
+            # this). NOT the v861 per-line pick — that varies line by line and
+            # lives on the flat rows below.
+            "veo_render_duration_s": anchor_bucket,
             "visual_delta": getattr(this_node, "visual_delta", None) if this_node else None,
             # v681 — multi-character cast + text-card metadata.
             "cast": scene_cast,
@@ -8041,7 +8057,14 @@ def prepare_batch_for_video(
                 # downstream branch in video_processor handles it correctly.
                 "cut_mode": cut_mode if scene_is_silent else None,
                 "target_duration_s": target_duration_s if scene_is_silent else None,
-                "veo_render_duration_s": veo_render_duration_s if scene_is_silent else None,
+                # v861 — a silent scene has no spoken line, so the pick comes
+                # from an explicit bullet if the author set one, else the v667
+                # anchor bucket, else NULL (job-level duration applies).
+                "veo_render_duration_s": resolve_clip_duration_s(
+                    explicit=(scene_clip_durations[0] if scene_clip_durations else None),
+                    anchor_bucket=anchor_bucket,
+                    line_text=None,
+                ) if scene_is_silent else None,
                 # v681 — scene metadata. text_card carries caption+bg+duration;
                 # silent scenes carry scene_type=shot (or None) so the
                 # video processor doesn't try to drawtext-render them.
@@ -8075,6 +8098,43 @@ def prepare_batch_for_video(
             zip(lines, notes, veo_prompts, pads)
         ):
             dialogue_lines_flat.append(line_text or "")
+            # v861 — per-line pick: explicit bullet > v667 anchor bucket >
+            # this line's word count > NULL. Clip rows are 1:1 with dialogue
+            # lines, so each carries its own render duration.
+            _v861_explicit = (
+                scene_clip_durations[i_in_scene]
+                if i_in_scene < len(scene_clip_durations) else None
+            )
+            _v861_line_duration = resolve_clip_duration_s(
+                explicit=_v861_explicit,
+                anchor_bucket=anchor_bucket,
+                line_text=line_text,
+            )
+            _v861_words = len((line_text or "").split())
+            if _v861_explicit is None and _v861_line_duration is not None:
+                print(
+                    f"[v861/auto] scene_{scene['scene_index']} line {i_in_scene}: "
+                    f"{_v861_words}w → {_v861_line_duration}s "
+                    f"(no clip_duration_s bullet — auto-picked; declare it per v861)",
+                    flush=True,
+                )
+            elif _v861_explicit is not None:
+                _v861_auto = resolve_clip_duration_s(
+                    explicit=None, anchor_bucket=None, line_text=line_text)
+                _flag = "" if _v861_auto in (None, _v861_explicit) else \
+                    f" ⚠ word count suggests {_v861_auto}s"
+                print(
+                    f"[v861/explicit] scene_{scene['scene_index']} line {i_in_scene}: "
+                    f"{_v861_words}w → {_v861_line_duration}s (declared){_flag}",
+                    flush=True,
+                )
+            if _v861_words > 28:
+                print(
+                    f"[v861/warn] scene_{scene['scene_index']} line {i_in_scene}: "
+                    f"{_v861_words}w exceeds the 28-word cap (v831 amended) — "
+                    f"split into two clips",
+                    flush=True,
+                )
             scenes_metadata_flat.append({
                 "scene_index": scene["scene_index"],
                 "line_index_in_scene": i_in_scene,
@@ -8101,7 +8161,7 @@ def prepare_batch_for_video(
                 # branch.
                 "cut_mode": cut_mode,
                 "target_duration_s": target_duration_s,
-                "veo_render_duration_s": veo_render_duration_s,
+                "veo_render_duration_s": _v861_line_duration,
                 # v681 — text-card / caption denorm onto the flat row.
                 # Scene-scoped (same as clip_mode/transition convention):
                 # only the first line of a scene carries the values; later
