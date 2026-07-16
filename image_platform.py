@@ -1605,6 +1605,31 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
       visible to both human and machine. This function only handles
       the slot-translation step that requires runtime knowledge of
       Flow's positional slot ordering.
+
+    KNOWN DEFECT — `scene_index_in_batch` has TWO conventions in one DB
+    (NOT fixed here; recorded so the next reader does not "clean it up"
+    without reading the sequencing note below). Line numbers drift — the
+    grep anchor after each one is the durable pointer:
+      * Column comment documents 0-based:
+        `scene_index_in_batch = Column`        -> "# 0, 1, 2, ..."
+      * The import path writes the 1-based N from `### Image N`:
+        `scene_index_in_batch=image_index`
+      * The backfill path writes `_scene_index(n)` — 1-based, parsed from the
+        node name "Scene N" — but falls back to the 0-based enumerate `idx`
+        when the name has no "Scene N", so BOTH conventions coexist in real
+        rows:  `n.scene_index_in_batch = _scene_index`
+      * The legacy pass below reads it as 0-based:
+        `md_image_num = parent.scene_index_in_batch + 1`
+    Net effect today: the `+1` is wrong for the dominant 1-based rows, and
+    that error is what makes `md == flow` (-> `continue`) in the common
+    persona+chain shape — i.e. the off-by-one ACCIDENTALLY suppresses the
+    legacy pass rather than the code being correct.
+
+    SEQUENCING — if the `+1` reader is ever corrected, `md != flow` starts
+    firing MORE often, which makes the v859 sentinel guard below MORE
+    necessary, not less. The guard must stay. Fix the conventions first (one
+    writer, one reader, backfill migration), keep the guard, then re-run the
+    old-vs-new differential over the fixture set.
     """
     body = (node.prompt or "")
     edges = sorted(node.parent_edges or [], key=lambda e: e.slot_order or 0)
@@ -1624,12 +1649,26 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
     # resolve them all back to "Image N" after the loop. The v581 legacy
     # number pass below rewrites `\bImage K\b` anywhere in the body — it
     # cannot tell an author-written "Image 2" from one a previous iteration
-    # just substituted in. With TWO chain edges that collision is reachable:
-    # persona+product+`reference_image: image_3, image_1` had chain #1's
-    # legacy pass (md=2 -> flow=4) rewrite the PRODUCT's own "Image 2" into
-    # "Image 4", pointing the jar at the body reference. Sentinels keep the
-    # legacy pass scoped to author-written text, which is all it ever meant
-    # to touch. No collision -> byte-identical output to pre-v859.
+    # just substituted in, so it ate its own output.
+    #
+    # This is a BUGFIX on a LIVE path, not a no-op guard for the new 2-ref
+    # feature. The smallest shipped shape it corrects is SINGLE-ref
+    # persona + product + `reference_image: image_1` on Image 3:
+    #     chain parent sib=1 -> md=2, flow=3 -> 2 != 3 -> `\bImage 2\b`
+    #     rewrote the PRODUCT's own substituted "Image 2" into "Image 3".
+    #     OLD: "Nuri from Image 1 holds the jar from Image 3, matching Image 3."
+    #     NEW: "Nuri from Image 1 holds the jar from Image 2, matching Image 3."
+    # The jar was bound to the chain slot. A 2-ref build widens the blast
+    # radius (persona+product+`image_3, image_1`: md=2 -> flow=4) but did
+    # not introduce it.
+    #
+    # Sentinels keep the legacy pass scoped to author-written text, which is
+    # all it ever meant to touch. Verified differentially old-vs-new over 28
+    # fixtures: 23 byte-identical; `persona + 1 chain` identical in every
+    # variant; the 5 deltas are all this bug being corrected.
+    #
+    # NUL is safe as the sentinel: Postgres `text` rejects 0x00, so it
+    # cannot occur in a stored `node.prompt`.
     def _slot_token(n: int) -> str:
         return f"\x00v859slot{n}\x00"
 
@@ -1685,6 +1724,23 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
                     "the body reference image",
                     _slot_token(flow_image_num),
                 )
+
+            # v859 TEMPORARY DIAGNOSTIC — remove once operator-side evidence
+            # lands. Emits the chain-order -> Flow-slot binding per chain
+            # edge. This function silently changes rendered prompts for a
+            # LIVE single-ref shape (persona+product+chain -> the product no
+            # longer gets eaten by the legacy pass), so operators need a log
+            # line that says which slot each chain ref actually claimed.
+            try:
+                log.info(
+                    f"[v859/chain-bind] node={node.id} "
+                    f"chain_seq={chain_seq} flow_slot=Image {flow_image_num} "
+                    f"role={(edge.role or '')[:32]!r} "
+                    f"phrase={'prior-scene' if chain_seq == 0 else 'body' if chain_seq == 1 else 'NONE(>2 refs)'}"
+                )
+            except Exception:
+                pass
+
             chain_seq += 1
 
             # v581 LEGACY substitution — number-based reference. Kept

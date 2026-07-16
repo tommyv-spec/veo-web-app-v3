@@ -569,18 +569,43 @@ from image_platform import _resolve_flow_prompt_bindings
 # NB: named _Slot* rather than _Fake* — `_FakeNode` is already taken above by
 # the gating stand-in, and a redefinition here would silently rebind it for
 # the earlier tests too (they resolve the global at call time).
+#
+# `sib` is the RAW `scene_index_in_batch` column value, spelled out rather
+# than derived, because the column has TWO live conventions and a fixture
+# that hides which one it is under a name like `parent_idx` tests nothing in
+# particular (see the KNOWN DEFECT note on _resolve_flow_prompt_bindings):
+#
+#   PRODUCTION (dominant)  `scene_index_in_batch=image_index`  -> 1-BASED.
+#       markdown `### Image 3` stores sib=3. Use _sib_prod().
+#   CODE-CONVENTION        `md = parent.scene_index_in_batch + 1` -> 0-BASED.
+#       the legacy pass's own reading; markdown Image 3 would be sib=2.
+#       Use _sib_code(). Only real for backfilled nodes whose name lacks
+#       "Scene N".
+#
+# Tests state which convention they mean. The production shape is the one
+# that ships, so it gets its own regression test below.
+
+
+def _sib_prod(md_image_num):
+    """RAW sib as the PRODUCTION import path writes it (1-based)."""
+    return md_image_num
+
+
+def _sib_code(md_image_num):
+    """RAW sib as the legacy pass's `+1` reader assumes (0-based)."""
+    return md_image_num - 1
 
 
 class _SlotParent:
-    def __init__(self, idx):
-        self.scene_index_in_batch = idx   # md image number = idx + 1
+    def __init__(self, sib):
+        self.scene_index_in_batch = sib   # RAW column value — see note above
         self.kind = "generated"
 
 
 class _SlotEdge:
-    def __init__(self, slot, kind, role, parent_idx=None):
+    def __init__(self, slot, kind, role, sib=None):
         self.slot_order, self.kind, self.role = slot, kind, role
-        self.parent = _SlotParent(parent_idx) if parent_idx is not None else None
+        self.parent = _SlotParent(sib) if sib is not None else None
 
 
 class _SlotNode:
@@ -595,8 +620,8 @@ def test_two_chain_phrases_map_to_distinct_slots():
             "Use the body reference image for his build.")
     node = _SlotNode([
         _SlotEdge(0, "character", "persona"),
-        _SlotEdge(1, "chain", "chain_from_image_3", parent_idx=2),
-        _SlotEdge(2, "chain", "chain_from_image_2", parent_idx=1),
+        _SlotEdge(1, "chain", "chain_from_image_3", sib=_sib_code(3)),
+        _SlotEdge(2, "chain", "chain_from_image_2", sib=_sib_code(2)),
     ], body)
     out = _resolve_flow_prompt_bindings(node)
     assert "Image 1 for the main character" in out
@@ -605,18 +630,71 @@ def test_two_chain_phrases_map_to_distinct_slots():
     assert "reference image" not in out.replace("uploaded character reference image", "")
 
 
-def test_single_chain_unchanged_pre_v859():
+def test_single_chain_binds_correctly():
+    """One chain edge -> persona=Image 1, chain=Image 2, body phrase untouched.
+
+    NOT named "unchanged_pre_v859": this asserts CORRECTNESS, not invariance.
+    Against pre-v859 code with this same fixture the old legacy pass emitted
+    "Use Image 2 for the main character" — it rewrote the PERSONA's own
+    substituted "Image 1" (md=1 -> flow=2). So old code FAILS this test. The
+    v859 sentinel guard is what makes it pass.
+    """
     body = ("Use the uploaded character reference image for the main character. "
             "Use the prior-scene reference image for the composition.")
     node = _SlotNode([
         _SlotEdge(0, "character", "persona"),
-        _SlotEdge(1, "chain", "chain_from_image_1", parent_idx=0),
+        _SlotEdge(1, "chain", "chain_from_image_1", sib=_sib_code(1)),
     ], body)
     out = _resolve_flow_prompt_bindings(node)
     assert "Image 1 for the main character" in out
     assert "Image 2 for the composition" in out
     # the body phrase must NOT be touched when there is only one chain edge
     assert "the body reference image" not in out
+
+
+# --- THE shipped regression: SINGLE-ref, production 1-based sib ------------
+# This is the shape v859's sentinel guard actually fixes in production, and
+# nothing else in this file pins it. `reference_image: image_1` on Image 3
+# with persona + product bound:
+#     chain parent sib=1 (1-based) -> md=2, flow=3 -> 2 != 3 -> the legacy
+#     `\bImage 2\b` pass ate the PRODUCT's own substituted "Image 2".
+#     OLD: "Nuri from Image 1 holds the jar from Image 3, matching Image 3."
+#     NEW: "Nuri from Image 1 holds the jar from Image 2, matching Image 3."
+# One chain edge, one ref — the 2-ref feature is not involved. Verified
+# against a70bc40^ in an isolated subprocess.
+
+def test_production_single_ref_persona_product_chain_product_keeps_its_slot():
+    body = ("Nuri from the uploaded character reference image holds the jar "
+            "from the uploaded product reference image, matching "
+            "the prior-scene reference image.")
+    node = _SlotNode([
+        _SlotEdge(0, "character", "persona"),
+        _SlotEdge(1, "product", "product"),
+        _SlotEdge(2, "chain", "chain_from_image_1", sib=_sib_prod(1)),
+    ], body)
+    out = _resolve_flow_prompt_bindings(node)
+    assert out == ("Nuri from Image 1 holds the jar from Image 2, "
+                   "matching Image 3.")
+    # the exact pre-v859 corruption, spelled out so a regression is legible
+    assert "holds the jar from Image 3" not in out
+
+
+def test_production_single_ref_persona_chain_only_is_the_masked_shape():
+    """persona + 1 chain, production sib: md == flow -> legacy `continue`.
+
+    This is the shape the off-by-one accidentally masks, which is why the bug
+    went unnoticed: sib=1 -> md=2, flow=2 -> equal -> the legacy pass never
+    fires. Byte-identical old vs new. Pinned so that correcting the
+    off-by-one later cannot quietly change it without a red test.
+    """
+    body = ("Nuri from the uploaded character reference image, matching "
+            "the prior-scene reference image.")
+    node = _SlotNode([
+        _SlotEdge(0, "character", "persona"),
+        _SlotEdge(1, "chain", "chain_from_image_1", sib=_sib_prod(1)),
+    ], body)
+    out = _resolve_flow_prompt_bindings(node)
+    assert out == "Nuri from Image 1, matching Image 2."
 
 
 def test_chain_zero_alias_phrase_still_translates():
@@ -626,7 +704,7 @@ def test_chain_zero_alias_phrase_still_translates():
             "Use the previous scene's reference image for the composition.")
     node = _SlotNode([
         _SlotEdge(0, "character", "persona"),
-        _SlotEdge(1, "chain", "chain_from_image_1", parent_idx=0),
+        _SlotEdge(1, "chain", "chain_from_image_1", sib=_sib_code(1)),
     ], body)
     out = _resolve_flow_prompt_bindings(node)
     assert "Image 2 for the composition" in out
@@ -639,8 +717,8 @@ def test_two_chain_edges_alias_form_for_chain_zero():
             "Use the body reference image for his build.")
     node = _SlotNode([
         _SlotEdge(0, "character", "persona"),
-        _SlotEdge(1, "chain", "chain_from_image_3", parent_idx=2),
-        _SlotEdge(2, "chain", "chain_from_image_2", parent_idx=1),
+        _SlotEdge(1, "chain", "chain_from_image_3", sib=_sib_code(3)),
+        _SlotEdge(2, "chain", "chain_from_image_2", sib=_sib_code(2)),
     ], body)
     out = _resolve_flow_prompt_bindings(node)
     assert "Image 2 for the pose" in out
@@ -658,7 +736,7 @@ def test_product_in_mix_chain_keys_on_order_not_slot():
     node = _SlotNode([
         _SlotEdge(0, "character", "persona"),
         _SlotEdge(1, "product", "product"),
-        _SlotEdge(2, "chain", "chain_from_image_1", parent_idx=0),
+        _SlotEdge(2, "chain", "chain_from_image_1", sib=_sib_code(1)),
     ], body)
     out = _resolve_flow_prompt_bindings(node)
     assert "Image 1 for the main character" in out
@@ -675,8 +753,8 @@ def test_product_plus_two_chains_all_four_slots():
     node = _SlotNode([
         _SlotEdge(0, "character", "persona"),
         _SlotEdge(1, "product", "product"),
-        _SlotEdge(2, "chain", "chain_from_image_4", parent_idx=3),
-        _SlotEdge(3, "chain", "chain_from_image_2", parent_idx=1),
+        _SlotEdge(2, "chain", "chain_from_image_4", sib=_sib_code(4)),
+        _SlotEdge(3, "chain", "chain_from_image_2", sib=_sib_code(2)),
     ], body)
     out = _resolve_flow_prompt_bindings(node)
     assert "Image 1 for the main character" in out
@@ -697,7 +775,7 @@ def test_body_phrase_untranslated_when_only_one_chain_edge():
             "Use the body reference image for his build.")
     node = _SlotNode([
         _SlotEdge(0, "character", "persona"),
-        _SlotEdge(1, "chain", "chain_from_image_1", parent_idx=0),
+        _SlotEdge(1, "chain", "chain_from_image_1", sib=_sib_code(1)),
     ], body)
     out = _resolve_flow_prompt_bindings(node)
     assert "Image 2 for the pose" in out
