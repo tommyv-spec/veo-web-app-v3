@@ -541,3 +541,164 @@ def test_legacy_dict_without_list_key_without_ingredients_still_works():
     assert _v859_refuse_multiref_without_ingredients(
         {"image_index": 3, "reference_image": 1}, 3
     ) is None
+
+
+# ===========================================================================
+# v859 — DISTINCT semantic phrase per chain ref in slot translation
+# ===========================================================================
+# _resolve_flow_prompt_bindings rewrites the author's semantic phrases into
+# Banana 2's positional slot numbers. Pre-v859 BOTH chain edges targeted the
+# same phrase ("the prior-scene reference image"): the first .replace() ate
+# every occurrence, the second found nothing and bound a reference the prompt
+# never names — which Banana 2 blends as generic visual context, exactly the
+# failure v859 exists to prevent.
+#
+# The phrase is keyed on chain ORDER, not slot number: persona/product occupy
+# earlier slots, so slot number and chain order diverge whenever a product is
+# bound (see test_product_in_mix_chain_keys_on_order_not_slot).
+#
+#   chain 0 -> "the prior-scene reference image"   (pose + held objects)
+#              alias "the previous scene's reference image"
+#   chain 1 -> "the body reference image"          (the body)
+#
+# The function takes only `node` and reads `node.prompt`, so fakes suffice.
+
+from image_platform import _resolve_flow_prompt_bindings
+
+
+# NB: named _Slot* rather than _Fake* — `_FakeNode` is already taken above by
+# the gating stand-in, and a redefinition here would silently rebind it for
+# the earlier tests too (they resolve the global at call time).
+
+
+class _SlotParent:
+    def __init__(self, idx):
+        self.scene_index_in_batch = idx   # md image number = idx + 1
+        self.kind = "generated"
+
+
+class _SlotEdge:
+    def __init__(self, slot, kind, role, parent_idx=None):
+        self.slot_order, self.kind, self.role = slot, kind, role
+        self.parent = _SlotParent(parent_idx) if parent_idx is not None else None
+
+
+class _SlotNode:
+    def __init__(self, edges, prompt):
+        self.parent_edges, self.id, self.prompt = edges, 1, prompt
+
+
+def test_two_chain_phrases_map_to_distinct_slots():
+    # persona=slot0 -> Image 1, chain#0=slot1 -> Image 2, chain#1=slot2 -> Image 3
+    body = ("Use the uploaded character reference image for the main character. "
+            "Use the prior-scene reference image for the pose. "
+            "Use the body reference image for his build.")
+    node = _SlotNode([
+        _SlotEdge(0, "character", "persona"),
+        _SlotEdge(1, "chain", "chain_from_image_3", parent_idx=2),
+        _SlotEdge(2, "chain", "chain_from_image_2", parent_idx=1),
+    ], body)
+    out = _resolve_flow_prompt_bindings(node)
+    assert "Image 1 for the main character" in out
+    assert "Image 2 for the pose" in out
+    assert "Image 3 for his build" in out
+    assert "reference image" not in out.replace("uploaded character reference image", "")
+
+
+def test_single_chain_unchanged_pre_v859():
+    body = ("Use the uploaded character reference image for the main character. "
+            "Use the prior-scene reference image for the composition.")
+    node = _SlotNode([
+        _SlotEdge(0, "character", "persona"),
+        _SlotEdge(1, "chain", "chain_from_image_1", parent_idx=0),
+    ], body)
+    out = _resolve_flow_prompt_bindings(node)
+    assert "Image 1 for the main character" in out
+    assert "Image 2 for the composition" in out
+    # the body phrase must NOT be touched when there is only one chain edge
+    assert "the body reference image" not in out
+
+
+def test_chain_zero_alias_phrase_still_translates():
+    # The pre-v859 alias must keep working for chain 0 — it is the same rung
+    # of the ladder as the primary phrase, just the author's other wording.
+    body = ("Use the uploaded character reference image for the main character. "
+            "Use the previous scene's reference image for the composition.")
+    node = _SlotNode([
+        _SlotEdge(0, "character", "persona"),
+        _SlotEdge(1, "chain", "chain_from_image_1", parent_idx=0),
+    ], body)
+    out = _resolve_flow_prompt_bindings(node)
+    assert "Image 2 for the composition" in out
+
+
+def test_two_chain_edges_alias_form_for_chain_zero():
+    # chain 0 written with the alias, chain 1 with the body phrase.
+    body = ("Use the uploaded character reference image for the main character. "
+            "Use the previous scene's reference image for the pose. "
+            "Use the body reference image for his build.")
+    node = _SlotNode([
+        _SlotEdge(0, "character", "persona"),
+        _SlotEdge(1, "chain", "chain_from_image_3", parent_idx=2),
+        _SlotEdge(2, "chain", "chain_from_image_2", parent_idx=1),
+    ], body)
+    out = _resolve_flow_prompt_bindings(node)
+    assert "Image 2 for the pose" in out
+    assert "Image 3 for his build" in out
+
+
+def test_product_in_mix_chain_keys_on_order_not_slot():
+    # persona=slot0 -> Image 1, product=slot1 -> Image 2, chain#0=slot2 -> Image 3.
+    # The chain edge is at slot 2 but is chain ORDER 0, so it must claim the
+    # chain-0 phrase. Keying the phrase on slot number would look for the
+    # chain-1 phrase here and bind an unnamed reference.
+    body = ("Use the uploaded character reference image for the main character. "
+            "Use the uploaded product reference image for the jar. "
+            "Use the prior-scene reference image for the pose.")
+    node = _SlotNode([
+        _SlotEdge(0, "character", "persona"),
+        _SlotEdge(1, "product", "product"),
+        _SlotEdge(2, "chain", "chain_from_image_1", parent_idx=0),
+    ], body)
+    out = _resolve_flow_prompt_bindings(node)
+    assert "Image 1 for the main character" in out
+    assert "Image 2 for the jar" in out
+    assert "Image 3 for the pose" in out
+
+
+def test_product_plus_two_chains_all_four_slots():
+    # persona=1, product=2, chain#0=3, chain#1=4 — the full v859 house.
+    body = ("Use the uploaded character reference image for the main character. "
+            "Use the uploaded product reference image for the jar. "
+            "Use the prior-scene reference image for the pose. "
+            "Use the body reference image for his build.")
+    node = _SlotNode([
+        _SlotEdge(0, "character", "persona"),
+        _SlotEdge(1, "product", "product"),
+        _SlotEdge(2, "chain", "chain_from_image_4", parent_idx=3),
+        _SlotEdge(3, "chain", "chain_from_image_2", parent_idx=1),
+    ], body)
+    out = _resolve_flow_prompt_bindings(node)
+    assert "Image 1 for the main character" in out
+    assert "Image 2 for the jar" in out
+    assert "Image 3 for the pose" in out
+    assert "Image 4 for his build" in out
+
+
+def test_body_phrase_untranslated_when_only_one_chain_edge():
+    # A body that names the chain-1 phrase but declares only ONE ref. The
+    # phrase stays LITERAL: there is no second image to bind it to, so
+    # translating it would point at a slot that does not exist. Leaving it
+    # readable ("the body reference image") degrades to a plain English
+    # instruction Banana 2 can still act on against the images it has —
+    # the same robustness argument v589.1 makes for the semantic phrases.
+    body = ("Use the uploaded character reference image for the main character. "
+            "Use the prior-scene reference image for the pose. "
+            "Use the body reference image for his build.")
+    node = _SlotNode([
+        _SlotEdge(0, "character", "persona"),
+        _SlotEdge(1, "chain", "chain_from_image_1", parent_idx=0),
+    ], body)
+    out = _resolve_flow_prompt_bindings(node)
+    assert "Image 2 for the pose" in out
+    assert "the body reference image for his build" in out

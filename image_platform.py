@@ -1619,6 +1619,24 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
     slot_table = []
 
     import re as _re
+
+    # v859: park every slot number this function WRITES in a sentinel, and
+    # resolve them all back to "Image N" after the loop. The v581 legacy
+    # number pass below rewrites `\bImage K\b` anywhere in the body — it
+    # cannot tell an author-written "Image 2" from one a previous iteration
+    # just substituted in. With TWO chain edges that collision is reachable:
+    # persona+product+`reference_image: image_3, image_1` had chain #1's
+    # legacy pass (md=2 -> flow=4) rewrite the PRODUCT's own "Image 2" into
+    # "Image 4", pointing the jar at the body reference. Sentinels keep the
+    # legacy pass scoped to author-written text, which is all it ever meant
+    # to touch. No collision -> byte-identical output to pre-v859.
+    def _slot_token(n: int) -> str:
+        return f"\x00v859slot{n}\x00"
+
+    # v859: chain ORDER among the parent edges (0 = first declared
+    # reference_image entry, 1 = second). Distinct from `i`/slot_order.
+    chain_seq = 0
+
     for i, edge in enumerate(edges):
         flow_image_num = i + 1
         cls = _classify_edge_for_manifest(edge)
@@ -1627,13 +1645,13 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
         if cls == "persona":
             body = body.replace(
                 "the uploaded character reference image",
-                f"Image {flow_image_num}",
+                _slot_token(flow_image_num),
             )
 
         elif cls == "product":
             body = body.replace(
                 "the uploaded product reference image",
-                f"Image {flow_image_num}",
+                _slot_token(flow_image_num),
             )
 
         elif cls == "chain":
@@ -1643,14 +1661,31 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
             # ("the prior-scene reference image") is meaningful even
             # without substitution; the platform translation makes it
             # match Banana 2's positional view of the inputs at emission.
-            body = body.replace(
-                "the prior-scene reference image",
-                f"Image {flow_image_num}",
-            )
-            body = body.replace(
-                "the previous scene's reference image",
-                f"Image {flow_image_num}",
-            )
+            #
+            # v859: each chain edge owns a DISTINCT semantic phrase so a
+            # 2-ref image can bind pose/objects and body independently.
+            # Both edges previously targeted the same phrase — the first
+            # won, the second bound a reference the prompt never named,
+            # which Banana 2 blends as generic context. Keyed on chain
+            # ORDER, not slot number: persona/product take earlier slots,
+            # so slot number and chain order diverge whenever a product is
+            # bound. chain_seq 0 keeps the pre-v859 phrases verbatim, so
+            # every single-ref build translates byte-identically.
+            if chain_seq == 0:
+                body = body.replace(
+                    "the prior-scene reference image",
+                    _slot_token(flow_image_num),
+                )
+                body = body.replace(
+                    "the previous scene's reference image",
+                    _slot_token(flow_image_num),
+                )
+            elif chain_seq == 1:
+                body = body.replace(
+                    "the body reference image",
+                    _slot_token(flow_image_num),
+                )
+            chain_seq += 1
 
             # v581 LEGACY substitution — number-based reference. Kept
             # for backward compatibility with pre-v682 markdowns.
@@ -1668,7 +1703,7 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
             # Word-boundary substitution to avoid rewriting "Image 12"
             # when looking for "Image 1".
             pattern = rf"\bImage {md_image_num}\b"
-            replacement = f"Image {flow_image_num}"
+            replacement = _slot_token(flow_image_num)
             new_body = _re.sub(pattern, replacement, body)
             if new_body != body:
                 # v682 deprecation log — count legacy positional rewrites
@@ -1691,6 +1726,14 @@ def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
             # binding line for these; the role mapping happens via the
             # edge being attached to its slot at worker emission.
             pass
+
+    # v859: resolve the parked slot numbers now that every edge has had its
+    # pass. Runs before the diagnostic so `changed=` reports the real delta.
+    body = _re.sub(
+        r"\x00v859slot(\d+)\x00",
+        lambda m: f"Image {m.group(1)}",
+        body,
+    )
 
     # v681e.9 diagnostic emit — only when body actually changed OR an
     # 'other'-classified edge remained (potential bypass).
