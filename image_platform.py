@@ -3575,16 +3575,37 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
             block = block[:cut_m.start()]
         image_index = int(header.group(1))
 
+        # v858 — reference_image accepts ONE or TWO chain parents:
+        #   image_3            -> [3]
+        #   image_3, image_2   -> [3, 2]  (slot 1 = pose/objects, slot 2 = body)
+        # The legacy scalar key stays = first entry so every pre-v858
+        # reader downstream keeps working unchanged.
         ref_match = _re.search(
-            r"^\s*[-*]\s*\*\*reference_image:\*\*\s*(\S+)",
+            r"^\s*[-*]\s*\*\*reference_image:\*\*\s*(.+?)\s*$",
             block, flags=_re.MULTILINE,
         )
         ref_value = ref_match.group(1).strip() if ref_match else "none"
-        ref_parent: Optional[int] = None
+        ref_parents: List[int] = []
         if ref_value.lower() not in ("none", "null", ""):
-            m = _re.match(r"image_(\d+)", ref_value)
-            if m:
-                ref_parent = int(m.group(1))
+            for tok in [p.strip() for p in ref_value.split(",") if p.strip()]:
+                m = _re.match(r"^image_(\d+)$", tok)
+                if not m:
+                    raise ValueError(
+                        f"Image {image_index}: bad reference_image token {tok!r} "
+                        f"(expected 'image_N', 'none', or 'image_N, image_M')"
+                    )
+                ref_parents.append(int(m.group(1)))
+        if len(ref_parents) > 2:
+            raise ValueError(
+                f"Image {image_index}: {len(ref_parents)} reference images — "
+                f"at most 2 are allowed (slot 0 is the persona upload)"
+            )
+        if len(set(ref_parents)) != len(ref_parents):
+            raise ValueError(
+                f"Image {image_index}: duplicate reference_image entries {ref_parents} — "
+                f"Banana 2 down-weights duplicate refs and it wastes a slot"
+            )
+        ref_parent: Optional[int] = ref_parents[0] if ref_parents else None
 
         # v581: optional product_image field declares which product upload
         # this image binds. Value is the product ingredient name verbatim
@@ -3767,6 +3788,7 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
             "image_index": image_index,
             "prompt": prompt,
             "reference_image": ref_parent,
+            "reference_images": ref_parents,  # v858 — full list; scalar above = first
             "product_image": product_image,  # v581 — None if field absent
             "frame_anchor_s": frame_anchor_s,  # v667
             "visual_delta": visual_delta,      # v667
