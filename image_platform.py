@@ -3823,14 +3823,17 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
     images.sort(key=lambda i: i["image_index"])
     known = {i["image_index"] for i in images}
     for i in images:
-        if i["reference_image"] is not None:
-            if i["reference_image"] not in known:
+        # v859: validate EVERY chain parent, not just the first. Pre-v859 only
+        # the scalar was checked, so a bad SECOND ref imported silently and
+        # blew up later at generation time with a confusing error.
+        for ref in i.get("reference_images") or []:
+            if ref not in known:
                 raise ValueError(
-                    f"Image {i['image_index']} references image_{i['reference_image']} which doesn't exist"
+                    f"Image {i['image_index']} references image_{ref} which doesn't exist"
                 )
-            if i["reference_image"] >= i["image_index"]:
+            if ref >= i["image_index"]:
                 raise ValueError(
-                    f"Image {i['image_index']} references image_{i['reference_image']} "
+                    f"Image {i['image_index']} references image_{ref} "
                     "— forward/self references not allowed"
                 )
         # v718j — paired_with validation: must reference known image, must
