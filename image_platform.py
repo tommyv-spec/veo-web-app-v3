@@ -3586,7 +3586,11 @@ def _parse_image_blocks_new(md_text: str) -> List[Dict[str, Any]]:
         # The legacy scalar key stays = first entry so every pre-v859
         # reader downstream keeps working unchanged.
         ref_match = _re.search(
-            r"^\s*[-*]\s*\*\*reference_image:\*\*\s*(.+?)\s*$",
+            # v859: bounded to spaces/tabs, NOT \s — `\s*(.+?)\s*$` bled across the
+            # newline on a blank value and captured the NEXT line, raising a
+            # "bad token" error that pointed at the wrong line. `(.*?)` allows the
+            # empty value, which falls through to None exactly like pre-v859.
+            r"^[ 	]*[-*][ 	]*\*\*reference_image:\*\*[ 	]*(.*?)[ 	]*$",
             block, flags=_re.MULTILINE,
         )
         ref_value = ref_match.group(1).strip() if ref_match else "none"

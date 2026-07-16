@@ -102,3 +102,20 @@ def test_decorated_ref_is_tolerated_like_pre_v859():
 def test_malformed_token_still_raises():
     with pytest.raises(ValueError, match="bad reference_image token"):
         _parse_image_blocks_new(_md("- **reference_image:** image_x"))
+
+
+def test_duplicate_refs_rejected():
+    # Exactly 2 entries, so the ">2" guard does NOT fire — this is the only
+    # test that actually reaches the duplicate branch. Banana 2 down-weights
+    # duplicate refs and it wastes a slot (the v520/v522 lesson).
+    with pytest.raises(ValueError, match="duplicate reference_image entries"):
+        _parse_image_blocks_new(_md("- **reference_image:** image_1, image_1"))
+
+
+def test_blank_value_is_none_like_pre_v859():
+    # Regression: the old capture bled onto the next line and raised
+    # "bad reference_image token '-'". Blank must fall through to None.
+    imgs = _parse_image_blocks_new(_md("- **reference_image:**"))
+    third = [i for i in imgs if i["image_index"] == 3][0]
+    assert third["reference_image"] is None
+    assert third["reference_images"] == []
