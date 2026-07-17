@@ -76,6 +76,17 @@ The platform parser regexes are STRICT and silent on failure — bad headers don
 - v752 INSTANT REACTION ON CONTACT catalyst pacing
 - v580 / v580.2 / v580.3 / v580.4 image inheritance modes
 
+- **v618b ingredient upload binding** — `type=character` / `type=product` mean **"HAS AN UPLOAD"**, not "speaks". Any character/product row with a NON-EMPTY Source cell is read as a declared Reference that must resolve to a real upload, and import HARD-FAILS if it does not (`(no upload)` is a non-empty string and still fails). A speaking non-persona with no upload = `type=extra` + Source `inline` + `speaker: on-camera`. Only the persona + branded product are ever uploaded (v573). Veo corollary: an extra's clip says "The man speaks…", never the v665 "The main AI generated character" (that binds the PERSONA upload → renders the persona's face on the extra).
+- **v791.3 struggle-is-the-focus** — on an incident/daily-struggle hook the struggling person is the frame's hero, dead-centre and close, **even when a second person holds the selfie camera**; the camera-holder never takes the foreground.
+- **chain depth ≤3 (`feedback_chain-depth-cap-describe-state`)** — a same-setting run of images anchors every frame to the run's FIRST frame (depth-1) and describes the changing state in the prompt; NEVER chain `5→6→7→8→…` frame-to-frame (generation loss compounds each hop). `reference_image: none` only at a real setting boundary. Auditor `reference_chain_depth` computes the hop distance and hard-FAILs past 3 — do not self-declare compliance in prose.
+
+**Run BOTH linters before every import — they check different things:**
+```bash
+python code/verify_video_format.py videos/<file>.md        # platform IMPORT gates (v698A/v738/v750/v808/role)
+python ~/.claude/skills/build-video/audit_build.py videos/<file>.md   # authoring rules + bridges to the above
+```
+`audit_build.py` now shells out to `verify_video_format.py` (check `platform_import_gates`), so **auditor 0 FAIL implies the parser will accept it** — unless that check reports SKIP (linter not found), in which case run it by hand. Why: 2026-07-17 a build hit 47 PASS / 0 FAIL on the auditor alone and was still rejected at import (v698A Gate 9). `template_reference.md:14555` had already said to run the linter every time; prose did not hold, so it became a check.
+
 **Pre-import verification** (always run before pushing):
 ```bash
 python -c "import re; t=open('videos/<file>.md',encoding='utf-8').read(); print('Images:', len(re.findall(r'^###\\s+Image\\s+(\\d+)', t, re.MULTILINE)), 'Scenes:', len(re.findall(r'^###\\s+Scene\\s+(\\d+)\\s*\$', t, re.MULTILINE)))"
