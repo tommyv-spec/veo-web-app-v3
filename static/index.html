@@ -10225,7 +10225,20 @@ Ambient: same kitchen room tone, soft pour sound.
                     // silently skipped if no batch id was passed). Clear
                     // the global so the NEXT job doesn't inherit this
                     // batch stamp.
+                    const _promotedBatchId = pendingImageBatchId;
                     pendingImageBatchId = null;
+                    // The server just stamped ImageJobBatch.promoted_video_job_id
+                    // for this batch. imgMaybeFetchBatchPromotionStatus caches its
+                    // answer per batch for the whole session — including the
+                    // "not promoted yet" answer it got before this job existed —
+                    // so the promoted status stayed stale until a manual page
+                    // reload. Drop the cache entry; the next image-tab render
+                    // re-fetches and picks up the promotion.
+                    if (_promotedBatchId) {
+                        try {
+                            imgState?._batchFetched?.delete(_promotedBatchId);
+                        } catch (e) { console.warn('[CreateJob] batch cache invalidate failed:', e); }
+                    }
                     showToast(promptOnly ? '✓ Prompts ready!' : '✓ Job created — building prompts...', 'var(--success)');
                     // Update preparing bar with real job ID (replaces the pending one)
                     if (!promptOnly) showPreparingBar(job.id);
