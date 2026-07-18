@@ -16170,6 +16170,23 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     job_id = clip['job_id']
     register_clip_prompt_b(clip)  # v805 — make Prompt B findable by clip_id
 
+    # v861 fix — set the duration tab for THIS redo clip up front, before any
+    # select_frames_to_video_mode runs. That helper reads page._duration, and
+    # it runs from TWO places on a redo: the _need_new_project settings block
+    # below AND rebuild_clip (which always calls it). The old code set
+    # page._duration only inside the _need_new_project branch, so a redo that
+    # REUSED an existing project (HAR replay) never set it — the duration tab
+    # kept whatever a previous clip left (job default 8s), so a 4s clip redid
+    # at 8s (operator 2026-07-18). Set it unconditionally here, with the
+    # job-level duration as the NULL fallback (mirrors the main submit path).
+    try:
+        _redo_dur = clip.get('veo_render_duration_s')
+        page._duration = str(_redo_dur) if _redo_dur else str(clip.get('duration', '8'))
+        print(f"[v861/flow] REDO clip {clip.get('clip_index')}: duration tab → "
+              f"{page._duration}s ({'per-clip' if _redo_dur else 'job default'})", flush=True)
+    except Exception:
+        pass
+
     # v849 (operator 2026-07-10: "clip 12 never retried with prompt b") — the
     # "rebuild with the reworded Prompt B" decision lived ONLY in the in-memory
     # _PROMPT_B_TRIED flag set when the PROMINENT/SEXUAL block was first detected.
@@ -16474,15 +16491,9 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     if _need_new_project:
         try:
             variants = clip.get('flow_variants_count', 2)
-            # v861 — a redo re-renders ONE clip; use that clip's own duration.
-            _redo_dur = clip.get('veo_render_duration_s')
-            if _redo_dur:
-                try:
-                    page._duration = str(_redo_dur)
-                    print(f"[v861/flow] REDO clip {clip.get('clip_index')}: "
-                          f"duration tab → {_redo_dur}s", flush=True)
-                except Exception:
-                    pass
+            # v861 — page._duration for this redo clip was set unconditionally at
+            # the top of process_redo_clip (covers project-reuse too, where this
+            # block does not run). select_frames_to_video_mode reads it here.
             select_frames_to_video_mode(page, context="REDO", variants_count=variants)
         except Exception as _se:
             print(f"[REDO] ⚠ Settings setup failed on new project: {_se}", flush=True)
