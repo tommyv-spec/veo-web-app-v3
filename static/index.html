@@ -2927,7 +2927,7 @@
         <!-- ============ Action Bar (second bar; context: video vs image) ============ -->
         <div class="action-bar" id="actionBar">
             <div class="action-group" id="videoActions">
-                <button class="btn btn-secondary btn-sm btn-new-job" onclick="setAppMode({mode:'create'})">➕ New Job</button>
+                <button class="btn btn-secondary btn-sm btn-new-job" onclick="newJob({confirmIfDirty:true})">➕ New Job</button>
                 <button class="btn btn-secondary btn-sm" onclick="openAssembleModal()" title="Upload clips + script → auto-order → export">📦 Assemble</button>
                 <button class="btn btn-secondary btn-sm" onclick="refreshJobs()">🔄 Refresh</button>
                 <button class="btn btn-secondary btn-sm" onclick="window.open('/static/my-worker.html?v=214', '_blank')" title="Set up your Flow worker">🖥️ My Worker</button>
@@ -6326,7 +6326,23 @@ Ambient: same kitchen room tone, soft pour sound.
             c.classList.add('state-initial');
         }
         
-        function newJob(){
+        function newJob(opts){
+            opts = opts || {};
+            // v863 — the nav "New Job" button passes {confirmIfDirty:true} so a
+            // misclick can't silently wipe an in-progress build. Only prompts
+            // when there is actual work to lose (uploaded images or typed
+            // script); an empty workspace resets with no dialog. cloneJob()
+            // still calls newJob() with no args → resets silently, because it is
+            // about to repopulate the form from the cloned config.
+            if (opts.confirmIfDirty) {
+                const _dlg = document.getElementById('dialogueInput');
+                const _hasScript = !!(_dlg && _dlg.value && _dlg.value.trim().length > 0);
+                const _hasImages = (typeof uploadedImages !== 'undefined') && uploadedImages.length > 0;
+                if ((_hasScript || _hasImages)
+                    && !confirm('Start a brand-new job? This clears the current images, script and scenes.')) {
+                    return;
+                }
+            }
             // collapseResults() FIRST: it clears the stale job selection and, if a
             // mode class is active, routes to Browse. Running it AFTER setAppMode
             // ('create') would bounce the just-set create state straight back to
