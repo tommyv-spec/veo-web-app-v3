@@ -2039,10 +2039,10 @@ async def _create_job_impl(
     
     if config.resolution == "1080p" and config.duration != "8":
         errors.append("1080p requires 8 second duration")
-    
-    if config.use_interpolation and config.duration != "8":
-        errors.append("Interpolation requires 8 second duration")
-    
+    # v861 — interpolation no longer forces 8s. Veo renders a 2-frame morph at
+    # any bucket (4/6/8/10); the old blanket 8s requirement fought per-clip
+    # durations. Removed on operator request 2026-07-18.
+
     if not request.dialogue_lines:
         errors.append("At least one dialogue line is required")
     

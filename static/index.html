@@ -17043,10 +17043,11 @@ Ambient: same kitchen room tone, soft pour sound.
                     <ol class="ob-step-list">
                         <li><strong>Language</strong> — Select the language your script is written in (EN, IT, ES, FR, DE). This affects auto-split word count and speaking rate.</li>
                         <li><strong>Words per line</strong> — How many words fit per clip (default ~21). Lower = shorter clips, higher = longer clips.</li>
-                        <li><strong>Duration</strong> — Length of each clip. <strong>Use 8 seconds</strong> — it's required for Interpolation and 1080p resolution.</li>
+                        <li><strong>Adaptive length</strong> — <strong>On</strong>: each clip's length comes from its line's word count (4/6/8/10s). <strong>Off</strong>: every clip uses the Duration below.</li>
+                        <li><strong>Duration</strong> — clip length when Adaptive length is Off (or the fallback when On). 1080p still requires 8s.</li>
                         <li><strong>Aspect Ratio</strong> — 16:9 for landscape (YouTube) or 9:16 for portrait (TikTok, Reels, Shorts).</li>
-                        <li><strong>Resolution</strong> — 720p or 1080p. Higher quality requires 8s duration.</li>
-                        <li><strong>Interpolation</strong> — <strong>Turn ON</strong>. Creates smooth motion between frames. Requires 8s duration.</li>
+                        <li><strong>Resolution</strong> — 720p or 1080p. 1080p requires 8s duration.</li>
+                        <li><strong>Interpolation</strong> — <strong>Turn ON</strong>. Creates smooth motion between frames. Works at any duration.</li>
                         <li><strong>AI Prompts</strong> — ON = the AI optimizes visual prompts automatically. OFF = you write your own prompts per clip.</li>
                         <li><strong>Model</strong> — Which video model renders the clips (default Omni Flash; Quality is sharpest).</li>
                         <li><strong>Gesture Enrichment</strong> — Only when AI Prompts is ON. AI adds content-matched gestures.</li>
@@ -17090,7 +17091,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     <div class="ob-step-desc"><strong style="color:var(--text-primary);font-size:14px;">⚙️ Settings</strong></div>
                     <ol class="ob-step-list">
                         <li><strong>Language</strong> — Must match your script's language. Affects auto-split and speaking rate.</li>
-                        <li><strong>Duration → 8 seconds</strong> — Required for Interpolation (smooth transitions between images) and 1080p.</li>
+                        <li><strong>Duration</strong> — with Adaptive length On, each clip is sized to its line (4/6/8/10s); Off uses this one value. 1080p still requires 8s.</li>
                         <li><strong>Aspect Ratio</strong> — 16:9 (landscape) or 9:16 (portrait).</li>
                         <li><strong>Resolution</strong> — 720p or 1080p (1080p requires 8s).</li>
                         <li><strong>Interpolation → ON</strong> — Especially important here: it creates the smooth morph effect as clips transition between different images.</li>
