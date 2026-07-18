@@ -2037,11 +2037,10 @@ async def _create_job_impl(
     print(f"[main.py] Received config from UI: language={config.language}, user_context='{config.user_context[:50] if config.user_context else 'empty'}'")
     errors = []
     
-    if config.resolution == "1080p" and config.duration != "8":
-        errors.append("1080p requires 8 second duration")
-    # v861 — interpolation no longer forces 8s. Veo renders a 2-frame morph at
-    # any bucket (4/6/8/10); the old blanket 8s requirement fought per-clip
-    # durations. Removed on operator request 2026-07-18.
+    # v861 (2026-07-18) — no duration coupling left. Resolution is no longer
+    # selectable (Flow always exports 720p), so the 1080p→8s rule was dead, and
+    # interpolation renders a 2-frame morph at any bucket, so its 8s rule fought
+    # per-clip durations. Both removed. 4/6/8/10 are all valid for any job.
 
     if not request.dialogue_lines:
         errors.append("At least one dialogue line is required")

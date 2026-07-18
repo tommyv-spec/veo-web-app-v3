@@ -17044,9 +17044,8 @@ Ambient: same kitchen room tone, soft pour sound.
                         <li><strong>Language</strong> — Select the language your script is written in (EN, IT, ES, FR, DE). This affects auto-split word count and speaking rate.</li>
                         <li><strong>Words per line</strong> — How many words fit per clip (default ~21). Lower = shorter clips, higher = longer clips.</li>
                         <li><strong>Adaptive length</strong> — <strong>On</strong>: each clip's length comes from its line's word count (4/6/8/10s). <strong>Off</strong>: every clip uses the Duration below.</li>
-                        <li><strong>Duration</strong> — clip length when Adaptive length is Off (or the fallback when On). 1080p still requires 8s.</li>
+                        <li><strong>Duration</strong> — clip length when Adaptive length is Off (or the fallback when On). Any of 4/6/8/10s.</li>
                         <li><strong>Aspect Ratio</strong> — 16:9 for landscape (YouTube) or 9:16 for portrait (TikTok, Reels, Shorts).</li>
-                        <li><strong>Resolution</strong> — 720p or 1080p. 1080p requires 8s duration.</li>
                         <li><strong>Interpolation</strong> — <strong>Turn ON</strong>. Creates smooth motion between frames. Works at any duration.</li>
                         <li><strong>AI Prompts</strong> — ON = the AI optimizes visual prompts automatically. OFF = you write your own prompts per clip.</li>
                         <li><strong>Model</strong> — Which video model renders the clips (default Omni Flash; Quality is sharpest).</li>
@@ -17091,9 +17090,8 @@ Ambient: same kitchen room tone, soft pour sound.
                     <div class="ob-step-desc"><strong style="color:var(--text-primary);font-size:14px;">⚙️ Settings</strong></div>
                     <ol class="ob-step-list">
                         <li><strong>Language</strong> — Must match your script's language. Affects auto-split and speaking rate.</li>
-                        <li><strong>Duration</strong> — with Adaptive length On, each clip is sized to its line (4/6/8/10s); Off uses this one value. 1080p still requires 8s.</li>
+                        <li><strong>Duration</strong> — with Adaptive length On, each clip is sized to its line (4/6/8/10s); Off uses this one value.</li>
                         <li><strong>Aspect Ratio</strong> — 16:9 (landscape) or 9:16 (portrait).</li>
-                        <li><strong>Resolution</strong> — 720p or 1080p (1080p requires 8s).</li>
                         <li><strong>Interpolation → ON</strong> — Especially important here: it creates the smooth morph effect as clips transition between different images.</li>
                         <li><strong>AI Prompts → ON</strong> — Let the AI optimize visual descriptions for each clip.</li>
                         <li><strong>Model</strong> — Video model (default Omni Flash; Quality sharpest). <strong>Kling (Higgsfield)</strong> optional alternate backend.</li>
@@ -17140,8 +17138,8 @@ Ambient: same kitchen room tone, soft pour sound.
                     
                     <div class="ob-step-desc"><strong style="color:var(--text-primary);font-size:14px;">⚙️ Settings (same as other modes)</strong></div>
                     <ol class="ob-step-list">
-                        <li><strong>Duration → 8 seconds</strong> — Required for Interpolation and 1080p.</li>
-                        <li><strong>Interpolation → ON</strong> — Creates smooth morphs between scenes (especially for BLEND TO transitions).</li>
+                        <li><strong>Adaptive length → On</strong> — each clip is sized to its line (4/6/8/10s); Off uses one fixed Duration.</li>
+                        <li><strong>Interpolation → ON</strong> — Creates smooth morphs between scenes (especially for BLEND TO transitions). Works at any duration.</li>
                         <li><strong>AI Prompts → ON</strong> recommended — Let AI optimize visual prompts.</li>
                         <li><strong>Language</strong> must match your script. Aspect ratio and resolution as needed.</li>
                         <li><strong>Model</strong> — Video model (default Omni Flash). <strong>Gesture Enrichment</strong> (AI Prompts ON) adds content-matched gestures.</li>

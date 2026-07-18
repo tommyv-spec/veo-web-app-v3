@@ -357,10 +357,10 @@ class VideoConfig:
         errors = []
         
         # Resolution/duration constraints
-        if self.resolution == Resolution.FULL_HD and self.duration != Duration.LONG:
-            errors.append("1080p resolution requires 8 second duration")
-        # v861 — interpolation no longer requires 8s (removed 2026-07-18);
-        # per-clip durations render a 2-frame morph at any bucket.
+        # v861 (2026-07-18) — duration is decoupled from resolution and
+        # interpolation. Resolution is no longer user-selectable (Flow exports
+        # 720p) and interpolation morphs at any bucket, so both 8s-requirement
+        # checks were removed. 4/6/8/10 are valid for every job.
 
         # EU compliance
         if self.person_generation == PersonGeneration.ALLOW_ALL:
