@@ -21395,30 +21395,36 @@ Ambient: same kitchen room tone, soft pour sound.
 
         // Switch to the Videos tab and select the given job_id so the user
         // lands right on the new video job after promotion.
-        function imgOpenPromotedJob(videoJobId) {
-            // Switch main tab
+        async function imgOpenPromotedJob(videoJobId) {
+            console.log('[imgOpenPromotedJob] opening video job', videoJobId); // diag — remove after verify
+            if (!videoJobId) { console.warn('imgOpenPromotedJob: no job id'); return; }
+            // Switch main tab first so the Videos panel is visible.
             try {
                 if (typeof switchMainTab === 'function') {
                     switchMainTab('videos');
                 }
             } catch (e) { console.warn('switchMainTab failed:', e); }
-            // Select the job in the video-tab UI. Different codebases name
-            // this differently — try a few conventions, fall back to a URL
-            // hash the video tab code might pick up.
+            // Force the job-detail panel visible. selectJob's early-return path
+            // (re-opening the already-selected job, line ~10557) only re-fetches
+            // clips — it does NOT restore this, so if the Videos tab was on the
+            // empty "no job" state we'd land there instead of the job. That was
+            // the reported "just switches to video section" bug.
             try {
-                if (typeof selectJob === 'function') {
-                    selectJob(videoJobId);
-                    return;
-                }
-                if (typeof loadJob === 'function') {
-                    loadJob(videoJobId);
-                    return;
-                }
-                if (typeof openJob === 'function') {
-                    openJob(videoJobId);
-                    return;
-                }
-            } catch (e) { console.warn('Job selector failed:', e); }
+                const noJobEl = document.getElementById('noJob');
+                const jobDetailsEl = document.getElementById('jobDetails');
+                if (noJobEl) noJobEl.style.display = 'none';
+                if (jobDetailsEl) jobDetailsEl.style.display = 'block';
+            } catch (e) {}
+            // Select the job. selectJob is async — AWAIT it so real errors
+            // surface here instead of becoming a silent unhandled rejection.
+            // (The old code wrapped the bare call in try/catch, but an async fn
+            // never throws synchronously, so the fallbacks below were dead code
+            // and any selectJob failure left the user on a blank Videos tab.)
+            try {
+                if (typeof selectJob === 'function') { await selectJob(videoJobId); return; }
+                if (typeof loadJob === 'function')   { await loadJob(videoJobId);   return; }
+                if (typeof openJob === 'function')   { await openJob(videoJobId);   return; }
+            } catch (e) { console.warn('imgOpenPromotedJob: job selector failed:', e); }
             // Last-resort: set a hash so the video tab can pick it up on load
             try {
                 window.location.hash = 'job=' + encodeURIComponent(videoJobId);
