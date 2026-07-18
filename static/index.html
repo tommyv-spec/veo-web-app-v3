@@ -21186,24 +21186,35 @@ Ambient: same kitchen room tone, soft pour sound.
                         if (transition === '' || transition === 'null') {
                             transition = null;
                         }
-                        // v862 — Option C continuous-morph fidelity. If the
-                        // PREVIOUS scene declares an explicit end_frame_image
-                        // (image_K → image_K+1 native interpolation), this scene
-                        // is arrived at via a continuous morph, not a hard cut —
-                        // so surface it with the existing "Blend to" transition
-                        // toggle instead of the default "Cut to", making the
-                        // Script Editor preview match what the markdown declares.
-                        // Display-only for Option C builds: worker.py (~L2699)
-                        // gives explicit end_frame_image priority over the
-                        // transition field, so generation is unaffected. Only
-                        // fills a NULL transition — an explicit markdown
-                        // transition still wins.
+                        // v862 — Option C continuous-morph fidelity. A scene that
+                        // is arrived at via a continuous morph (the PREVIOUS scene
+                        // declares an explicit end_frame_image → image_K+1 native
+                        // interpolation) should read as "Blend to", not the default
+                        // "Cut to", so the Script Editor preview matches the
+                        // markdown. Uses the existing transition toggle.
+                        //
+                        // SAFETY (v862.1): only auto-set blend when THIS scene ALSO
+                        // carries its own end_frame_image. That guarantees worker.py
+                        // (~L2700) short-circuits on the explicit end frame and
+                        // IGNORES the transition field, so generation is genuinely
+                        // unaffected. Without this guard, setting blend on a scene
+                        // that has NO end frame of its own would reach worker.py
+                        // ~L2747 and make it infer a morph to the NEXT scene's image
+                        // — an unintended generation change (transition is sent to
+                        // the backend on Generate). Only fills a NULL transition; an
+                        // explicit markdown transition still wins. Operators can
+                        // still manually toggle blend on an unguarded scene.
                         if (sceneOrder > 0 && transition === null) {
                             const prevSa = sceneAssignments[sceneOrder - 1];
                             const prevEnd = prevSa ? prevSa.end_frame_image_local_index : null;
-                            if (prevEnd !== null && prevEnd !== undefined) {
+                            const ownEnd = sa.end_frame_image_local_index;
+                            const prevHasEnd = (prevEnd !== null && prevEnd !== undefined);
+                            const ownHasEnd = (ownEnd !== null && ownEnd !== undefined);
+                            if (prevHasEnd && ownHasEnd) {
                                 transition = 'blend';
-                                console.log(`[storyboard/v862] Scene ${sceneOrder}: prev scene has end_frame_image (local ${prevEnd}) → default transition 'blend' (continuous morph)`); // diag — remove after verify
+                                console.log(`[storyboard/v862] Scene ${sceneOrder}: continuous morph (prev end=${prevEnd}, own end=${ownEnd}) → default transition 'blend'`); // diag — remove after verify
+                            } else if (prevHasEnd && !ownHasEnd) {
+                                console.log(`[storyboard/v862] Scene ${sceneOrder}: morph arrival but no own end_frame — left as cut to keep generation unchanged`); // diag — remove after verify
                             }
                         }
                         const brk = {
