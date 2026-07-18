@@ -5221,18 +5221,14 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
             print(f"{pfx}[flow_api] {len(captured_fife_urls)}/{variants} variant(s) captured; "
                   f"some failed transiently ({_last_fail_reason[-44:]}) — shipping what landed", flush=True)
         if _saw_unusual:
-            # v843 — operator: restore on ANY unusual sighting. Even though some
-            # variants landed, an unusual-activity block was SEEN → the account is
-            # being flagged (partial capture masked it before, so a 1/4 node kept
-            # grinding without ever restoring). Ship what captured, then flag a
-            # golden restore so the session resets before the next node — the
-            # caller (_submit_one_job) reads page._flow_api_unusual_reason after
-            # this returns True.
-            try:
-                page._flow_api_unusual_reason = _last_fail_reason or "unusual-activity (partial capture)"
-            except Exception:
-                pass
-            print(f"{pfx}[flow_api] ⚠ [v843] unusual seen ({len(captured_fife_urls)}/{variants} captured) — shipping, then golden restore before next node", flush=True)
+            # v864 — operator: golden restore ONLY when EVERY variant hit the
+            # unusual-activity block (0 captured — the `elif _saw_unusual` below).
+            # A partial capture (e.g. 1/4) proves the session still works, so ship
+            # what landed and do NOT flag a restore. This REVERSES v843's "restore
+            # on ANY unusual sighting", which reset the whole session every time a
+            # single variant got flagged. Do NOT set page._flow_api_unusual_reason
+            # here — leaving it clean is what keeps the caller from restoring.
+            print(f"{pfx}[flow_api] [v864] unusual seen on some variants ({len(captured_fife_urls)}/{variants} captured) — session still working, shipping without restore", flush=True)
     elif _saw_unusual:
         # EVERY variant blocked with unusual-activity after retries → genuine
         # account block → golden restore.
@@ -8975,17 +8971,20 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 ):
                     _save_state()
                     print(f"[API:submit] ✓ Node {node_id} submitted via flow_api (in_flight={len([j for j in in_flight.values() if j.status=='submitted'])})", flush=True)
-                    # v843 — the node shipped, but if an unusual-activity block was
-                    # SEEN during submit (partial capture), flag a golden restore
-                    # before the next node (operator: restore on ANY unusual). The
-                    # in-flight node re-queues via /release-claims after the restore.
+                    # v864 — DEFENSIVE ONLY. The submit helper no longer flags a
+                    # restore on partial capture (v843 did; reversed — restore now
+                    # fires only when EVERY variant is blocked, which returns False
+                    # and lands in the _ua_reason branch below, NOT here). So on a
+                    # True return _flow_api_unusual_reason is expected empty; this
+                    # guard just clears + honors any stray flag rather than leaking
+                    # it into the next node.
                     _ua_ship = getattr(page, "_flow_api_unusual_reason", "")
                     if _ua_ship:
                         try:
                             page._flow_api_unusual_reason = ""
                         except Exception:
                             pass
-                        print(f"[{ctx}] 🔁 [v843] unusual seen (node shipped) — golden restore before next node", flush=True)
+                        print(f"[{ctx}] 🔁 [v864] stray unusual flag on shipped node — clearing + restoring (defensive)", flush=True)
                         _restore_signal["golden"] = True
                     return True
 
