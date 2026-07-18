@@ -16159,7 +16159,77 @@ def submit_and_poll(page, start_frame_path, end_frame_path, prompt, clip_num,
 # REDO PROCESSING  
 # ============================================================
 
+class _RedoInFlightRegistry:
+    """v862 — process-wide per-clip in-flight guard for redo processing.
+
+    Two account threads in ONE worker process (Account1 + Account2), or a
+    dispatcher dispatch racing a golden-restore self-resume, can pick the SAME
+    redo clip before either marks it 'completed' in the DB. The DB completed-
+    check at the top of process_redo_clip is check-then-act with no lock, so
+    across the in-flight window BOTH pass it and BOTH regenerate + BOTH mark
+    the clip completed (operator 2026-07-18: 'both workers create the same
+    clip'). This registry serializes redo work on clip_id: the first caller
+    claims and runs, a concurrent second caller is told to skip.
+
+    In-memory only — the claim dies with the process, so a worker restart
+    starts clean (no stale cross-process lock). A TTL backstop frees a claim
+    leaked by a hard-killed thread; TTL (1200s) exceeds the dispatcher's 600s
+    STUCK_REDO_SECS max redo cycle so a normally-running redo is NEVER treated
+    as stale and stolen mid-flight."""
+
+    TTL_S = 1200.0
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._inflight = {}  # clip_id -> claim_epoch (float)
+
+    def try_claim(self, clip_id):
+        """Return True if the caller may proceed (fresh claim, or took over a
+        stale one), False if another thread holds a fresh claim and the caller
+        must skip. clip_id None -> fail-open (can't dedup an unidentified clip;
+        never worse than today)."""
+        if clip_id is None:
+            return True
+        now = time.time()
+        with self._lock:
+            ts = self._inflight.get(clip_id)
+            if ts is not None and (now - ts) < self.TTL_S:
+                return False
+            self._inflight[clip_id] = now
+            return True
+
+    def release(self, clip_id):
+        if clip_id is None:
+            return
+        with self._lock:
+            self._inflight.pop(clip_id, None)
+
+
+_redo_in_flight = _RedoInFlightRegistry()
+
+
 def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, http_session=None):
+    """v862 — process-wide in-flight guard around the real redo processor
+    (_process_redo_clip_impl). Serializes redo work on clip_id so two account
+    threads never regenerate the same clip concurrently. Signature mirrors the
+    impl so every call site (dispatcher, self-resume, coordinator, single-
+    account) is guarded with no call-site change."""
+    clip_id = clip.get('id')
+    if not _redo_in_flight.try_claim(clip_id):
+        print(f"[v862] Redo clip {clip.get('clip_index', '?')} "
+              f"(id={str(clip_id)[:8]}) already in flight on another account — "
+              f"skipping duplicate", flush=True)
+        return True
+    try:
+        return _process_redo_clip_impl(
+            page, clip, download_queue, cache,
+            http_dl_queue=http_dl_queue, http_session=http_session,
+        )
+    finally:
+        _redo_in_flight.release(clip_id)
+
+
+def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=None, http_session=None):
     """Process a single clip redo in the SAME project as the original job.
     
     When http_dl_queue is provided (single-account mode), the download happens
