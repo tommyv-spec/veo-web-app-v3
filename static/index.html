@@ -21186,6 +21186,26 @@ Ambient: same kitchen room tone, soft pour sound.
                         if (transition === '' || transition === 'null') {
                             transition = null;
                         }
+                        // v862 — Option C continuous-morph fidelity. If the
+                        // PREVIOUS scene declares an explicit end_frame_image
+                        // (image_K → image_K+1 native interpolation), this scene
+                        // is arrived at via a continuous morph, not a hard cut —
+                        // so surface it with the existing "Blend to" transition
+                        // toggle instead of the default "Cut to", making the
+                        // Script Editor preview match what the markdown declares.
+                        // Display-only for Option C builds: worker.py (~L2699)
+                        // gives explicit end_frame_image priority over the
+                        // transition field, so generation is unaffected. Only
+                        // fills a NULL transition — an explicit markdown
+                        // transition still wins.
+                        if (sceneOrder > 0 && transition === null) {
+                            const prevSa = sceneAssignments[sceneOrder - 1];
+                            const prevEnd = prevSa ? prevSa.end_frame_image_local_index : null;
+                            if (prevEnd !== null && prevEnd !== undefined) {
+                                transition = 'blend';
+                                console.log(`[storyboard/v862] Scene ${sceneOrder}: prev scene has end_frame_image (local ${prevEnd}) → default transition 'blend' (continuous morph)`); // diag — remove after verify
+                            }
+                        }
                         const brk = {
                             lineIndex: cumulativeLineIdx,
                             imgIndex: sa.image_local_index,
