@@ -734,6 +734,33 @@ def export_basename_from_filename(file_name):
     return m.group(1).lower() if m else None
 
 
+# v860 — the timestamp core, WITHOUT the trailing hash. Google Drive and copy
+# tools truncate long names, and the part they cut is the tail: the 6-hex hash.
+# The operator's real file
+#     Posted-0717 (2) - final_export_20260714_180256_2af6a.mp4
+# has a 5-char (cut) hash, so export_basename_from_filename (which needs the full
+# 6-hex) returns None and the file shows "no match" even though it carries the
+# export code. The DATE_TIME is intact and unique to the second, so it is enough
+# to find the job by a PREFIX match against Job.export_basename.
+_EXPORT_TS_PREFIX = re.compile(
+    r'(final_(?:export|broll)_(?:[0-9a-f]{8}_)?\d{8}_\d{6})', re.IGNORECASE,
+)
+
+
+def export_ts_prefix_from_filename(file_name):
+    """The export basename up to and INCLUDING the HHMMSS, hash dropped, or None.
+
+    Truncation-tolerant sibling of export_basename_from_filename: matches even
+    when a folder tool cut the trailing hash. The caller PREFIX-matches this
+    against Job.export_basename; the timestamp is unique to the second, so a
+    single hit is the job.
+    """
+    if not isinstance(file_name, str) or not file_name:
+        return None
+    m = _EXPORT_TS_PREFIX.search(file_name)
+    return m.group(1).lower() if m else None
+
+
 # ============================================================================
 # v857 — ONE JOB, ONE VIDEO. Ranking the claims on a job.
 #

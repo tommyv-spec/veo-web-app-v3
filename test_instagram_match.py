@@ -741,6 +741,46 @@ def test_export_basename_rejects_junk_between_prefix_and_timestamp():
 
 
 # ============================================================================
+# v860 — export_ts_prefix_from_filename. Truncation-tolerant lookup key: the
+# folder tool cut the trailing hash, so match on the timestamp core (prefix).
+# ============================================================================
+
+def test_ts_prefix_reads_the_truncated_operator_file():
+    """The real file that showed 'no match': the 6-hex hash was cut to 5 chars,
+    so the full-basename reader returns None, but the timestamp core is intact."""
+    m = _load()
+    name = "Posted-0717 (2) - final_export_20260714_180256_2af6a.mp4"
+    assert m.export_basename_from_filename(name) is None      # full hash missing
+    assert m.export_ts_prefix_from_filename(name) == "final_export_20260714_180256"
+
+
+def test_ts_prefix_handles_the_v856_truncated_shape():
+    m = _load()
+    assert m.export_ts_prefix_from_filename(
+        "Posted-0717 - final_export_9e3b5b5b_20260716_223213_.mp4"
+    ) == "final_export_9e3b5b5b_20260716_223213"
+
+
+def test_ts_prefix_on_an_intact_name_is_a_prefix_of_the_full_basename():
+    """On a whole name the core stops at the time (hash dropped), and it is a
+    genuine prefix of the real basename — so a prefix DB match hits the same job
+    whether the folder tool truncated the hash or not."""
+    m = _load()
+    full = "final_export_20260713_002341_026904.mp4"
+    key = m.export_ts_prefix_from_filename(full)
+    assert key == "final_export_20260713_002341"
+    assert m.export_basename_from_filename(full).startswith(key)
+
+
+def test_ts_prefix_needs_a_real_timestamp():
+    m = _load()
+    assert m.export_ts_prefix_from_filename("my saffron reel FINAL.mp4") is None
+    assert m.export_ts_prefix_from_filename("final_export_whatever.mp4") is None
+    assert m.export_ts_prefix_from_filename(None) is None
+    assert m.export_ts_prefix_from_filename("") is None
+
+
+# ============================================================================
 # v857 — ONE JOB, ONE VIDEO (except a repost).
 #
 # claim_strength ranks two videos claiming the SAME job, so the stronger one

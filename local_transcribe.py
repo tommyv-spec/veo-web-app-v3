@@ -247,6 +247,24 @@ def resolve_job_by_filename(db, file_name, user_id):
             return hits[0]
         print(f"[filename-match] basename={base} resolved to {len(hits)} jobs "
               f"-> falling back to evidence", flush=True)
+
+    # 3. v860 truncation-tolerant: a folder tool may have cut the trailing hash
+    #    (Posted-0717 (2) - final_export_20260714_180256_2af6a.mp4 — 5-char hash),
+    #    so match the timestamp core as a PREFIX. The `_` in the timestamp is a
+    #    LIKE wildcard, so escape it (and %, \) — otherwise it matches any char.
+    tsp = _ig_match.export_ts_prefix_from_filename(file_name)
+    if tsp:
+        esc = tsp.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%")
+        hits = (
+            db.query(Job)
+            .filter(Job.export_basename.like(esc + "%", escape="\\"),
+                    Job.user_id == user_id)
+            .all()
+        )
+        if len(hits) == 1:
+            return hits[0]
+        print(f"[filename-match] ts_prefix={tsp} resolved to {len(hits)} jobs "
+              f"-> falling back to evidence", flush=True)
     return None
 
 
