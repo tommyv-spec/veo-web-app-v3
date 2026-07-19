@@ -75,6 +75,14 @@ def indexed_rules(text: str) -> set[str]:
 
 
 def main() -> int:
+    # Windows consoles / piped stdout default to cp1252 and choke on the
+    # report glyphs (checkmarks, em-dashes copied from headings). Force UTF-8
+    # with replacement so the linter never crashes inside a git hook / CI pipe.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     ap = argparse.ArgumentParser(description="v-rule index coverage linter")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--quiet", action="store_true", help="exit code only, no report")

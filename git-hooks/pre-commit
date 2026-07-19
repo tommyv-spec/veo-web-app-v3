@@ -1,0 +1,20 @@
+#!/bin/sh
+# v-rule index coverage gate (tracked copy).
+# Blocks a commit that leaves wiki/patterns/conventions.md missing a rule
+# DEFINED in code/template_reference.md — stops the index-drift returning.
+# Bypass (rare, deliberate): git commit --no-verify
+#
+# INSTALL (from the wiki repo root, after a fresh clone):
+#   cp code/git-hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+
+python code/check_rule_index.py --quiet
+if [ $? -ne 0 ]; then
+  echo ""
+  echo "commit blocked: the v-rule index is incomplete."
+  python code/check_rule_index.py | tail -40
+  echo ""
+  echo "Fix: add the missing rows to wiki/patterns/conventions.md, then re-commit."
+  echo "(Deliberate bypass: git commit --no-verify)"
+  exit 1
+fi
+exit 0
