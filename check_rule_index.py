@@ -4,16 +4,21 @@
 Answers one question the four scattered ledgers could never answer reliably:
 "is EVERY defined v-rule listed in the index?"
 
-It compares:
+It compares the DEFINED rules against TWO indexes that both went stale the same
+way and now both get guarded:
   - MASTERS  = code/template_reference.md   (the deep-dive — a rule is DEFINED
                when its vNNN shows up in a markdown heading line `^#{1,4} `)
   - INDEX    = wiki/patterns/conventions.md (the one-row-per-rule table —
-               a rule is INDEXED when its vNNN is in a table row's first cell)
+               INDEXED when its vNNN is in a table row's first cell)
+  - BUILD_INDEX = wiki/meta/build-rule-index.md (the /build authoring
+               denominator — its §A is a table but §B/§C are prose lists, so a
+               rule is CLASSIFIED when its vNNN appears ANYWHERE in the file)
 
-Reports two gaps:
-  1. DEFINED but NOT INDEXED  -> the index is blind on these (the real disease)
-  2. INDEXED but NOT DEFINED  -> an index row whose deep-dive has no heading
-                                 anchor (dead pointer, or defined only in prose)
+Reports:
+  1. DEFINED but NOT INDEXED       -> conventions.md is blind on these
+  2. INDEXED but NOT DEFINED       -> an index row with no heading anchor
+  3. DEFINED but NOT CLASSIFIED    -> build-rule-index.md is blind on these
+Exit is nonzero if EITHER index has a gap.
 
 Rule numbers are BASE-normalized (v791.2 -> v791, v681e -> v681) so a family's
 sub-rules collapse onto the one row the index actually carries.
@@ -37,6 +42,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MASTERS = ROOT / "code" / "template_reference.md"
 INDEX = ROOT / "wiki" / "patterns" / "conventions.md"
+BUILD_INDEX = ROOT / "wiki" / "meta" / "build-rule-index.md"
 
 HEADING = re.compile(r"^#{1,4}\s+(.*)$")
 VTOKEN = re.compile(r"v(\d{3})(?:\.\d+|[a-z]+(?:\.\d+)?)?", re.IGNORECASE)
@@ -106,6 +112,16 @@ def indexed_rules(text: str) -> set[str]:
     return out
 
 
+def covered_anywhere(text: str) -> set[str]:
+    """base-rules that appear ANYWHERE in the text (table cells OR prose).
+
+    build-rule-index.md classifies §A in a table but §B (decode) and §C
+    (platform) as prose bullet lists, so 'classified' = the token shows up at
+    all — a superseded rule listed in the note counts as accounted-for too.
+    """
+    return {base(vm.group(1)) for vm in VTOKEN.finditer(text)}
+
+
 def main() -> int:
     # Windows consoles / piped stdout default to cp1252 and choke on the
     # report glyphs (checkmarks, em-dashes copied from headings). Force UTF-8
@@ -164,11 +180,23 @@ def main() -> int:
     missing = sorted(def_set - indexed, key=lambda r: int(r[1:]))   # defined, not indexed
     dangling = sorted(indexed - def_set, key=lambda r: int(r[1:]))  # indexed, no heading
 
+    # Second target: build-rule-index.md (the /build authoring denominator),
+    # which went stale exactly like conventions.md did.
+    bri_present = BUILD_INDEX.exists()
+    bri_missing: list[str] = []
+    if bri_present:
+        classified = covered_anywhere(BUILD_INDEX.read_text(encoding="utf-8"))
+        bri_missing = sorted(def_set - classified, key=lambda r: int(r[1:]))
+
+    fail = bool(missing) or bool(bri_missing)
+
     result = {
         "defined_count": len(def_set),
         "indexed_count": len(indexed),
         "missing_from_index": missing,
         "indexed_without_heading": dangling,
+        "build_index_present": bri_present,
+        "missing_from_build_index": bri_missing,
         "missing_detail": {
             r: {"line": best_location(r, defined[r])[0],
                 "heading": best_location(r, defined[r])[1]} for r in missing
@@ -177,27 +205,37 @@ def main() -> int:
 
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
-        return 1 if missing else 0
+        return 1 if fail else 0
 
     if not args.quiet:
         print(f"v-rule index coverage  —  masters: {len(def_set)} defined  "
-              f"|  index: {len(indexed)} listed\n")
+              f"|  conventions: {len(indexed)} listed\n")
+        # 1. conventions.md (the scan-before-inventing index)
         if missing:
-            print(f"✗ {len(missing)} DEFINED but MISSING from the index "
+            print(f"✗ {len(missing)} DEFINED but MISSING from conventions.md "
                   f"(the scan-before-inventing gate is blind on these):")
             for r in missing:
                 d = defined[r][0]
                 print(f"    {r:<7} L{d[0]:<6} {d[1][:78]}")
         else:
-            print("✓ every defined rule is in the index")
+            print("✓ conventions.md indexes every defined rule")
         if dangling:
             print(f"\n⚠ {len(dangling)} INDEXED but NO heading anchor in masters "
                   f"(dead pointer or prose-only def — verify):")
             print("    " + " ".join(dangling))
+        # 2. build-rule-index.md (the /build authoring denominator)
+        if not bri_present:
+            print("\n⚠ build-rule-index.md not found — skipped its coverage check")
+        elif bri_missing:
+            print(f"\n✗ {len(bri_missing)} DEFINED but NOT CLASSIFIED in build-rule-index.md "
+                  f"(the /build authoring denominator is blind on these):")
+            print("    " + " ".join(bri_missing))
+        else:
+            print("✓ build-rule-index.md classifies every defined rule")
         print()
-        print("RESULT:", "FAIL — index incomplete" if missing else "PASS")
+        print("RESULT:", "FAIL — coverage incomplete" if fail else "PASS")
 
-    return 1 if missing else 0
+    return 1 if fail else 0
 
 
 if __name__ == "__main__":
