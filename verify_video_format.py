@@ -125,7 +125,7 @@ def lint(path: str) -> int:
     sblocks = re.split(r"(?=^###\s+Scene\s+\d+\s*$)", t, flags=re.M)
     used_imgs: set[int] = set()
     end_frames: list[tuple[int, int]] = []
-    voiceover_anchor_targets: list[tuple[int, int]] = []  # (scene_no, target_img)
+    voiceover_anchor_targets: list[tuple[str, int]] = []  # (scene_no, target_img)
     line_count = 0
     for b in sblocks:
         h = re.match(r"^###\s+Scene\s+(\d+)\s*$", b, re.M)
