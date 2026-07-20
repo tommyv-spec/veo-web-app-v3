@@ -125,6 +125,7 @@ def lint(path: str) -> int:
     sblocks = re.split(r"(?=^###\s+Scene\s+\d+\s*$)", t, flags=re.M)
     used_imgs: set[int] = set()
     end_frames: list[tuple[int, int]] = []
+    voiceover_anchor_targets: list[tuple[int, int]] = []  # (scene_no, target_img)
     line_count = 0
     for b in sblocks:
         h = re.match(r"^###\s+Scene\s+(\d+)\s*$", b, re.M)
@@ -176,6 +177,8 @@ def lint(path: str) -> int:
                     f"will reject it (Gate 9). If the voice is diegetic "
                     f"(spoken in-scene, e.g. off-camera interviewer), use an "
                     f"in-scene speaker value instead of 'voiceover'")
+            else:
+                voiceover_anchor_targets.append((sn, int(anchor.group(1))))
 
     # end_frame_image validity (v718i)
     for start, end in end_frames:
@@ -194,6 +197,7 @@ def lint(path: str) -> int:
     # DECODE-side annotation only; builds must not carry it (b-roll images
     # are plain images, no role bullet).
     iblocks = re.split(r"(?=^###\s+Image\s+\d+)", t, flags=re.M)
+    role_anchor_images: set[int] = set()
     for b in iblocks:
         h = re.match(r"^###\s+Image\s+(\d+)", b, re.M)
         if not h:
@@ -206,6 +210,21 @@ def lint(path: str) -> int:
                 f"v698A: Image {h.group(1)} has role={rm.group(1).strip()!r} — "
                 f"platform import only accepts role=voiceover_anchor. "
                 f"Delete the role bullet (b-roll images carry no role)")
+        if rm and rm.group(1).strip().lower() == "voiceover_anchor":
+            role_anchor_images.add(int(h.group(1)))
+
+    # v698A Gate 10 mirror — the platform import HARD-FAILS when a scene points
+    # `voiceover_anchor_image: image_N` at an image whose block does NOT carry
+    # `- **role:** voiceover_anchor` (platform message: "must have `- **role:**
+    # voiceover_anchor` set in its image block (currently role='NONE')"). The
+    # anchor target image must be MARKED as the anchor, not just referenced.
+    for sn, tgt in voiceover_anchor_targets:
+        if tgt not in role_anchor_images:
+            fails.append(
+                f"v698A: Scene {sn} points voiceover_anchor_image at image_{tgt}, "
+                f"but image_{tgt} has no `- **role:** voiceover_anchor` bullet in "
+                f"its image block — platform import will reject it (Gate 10). Add "
+                f"`- **role:** voiceover_anchor` to the image_{tgt} block")
 
     # --- vocabulary (v693 lowercase + v615 em-dash) ---
     all_lines = re.findall(r"^-\s+\*\*line:\*\*\s+(.+)$", t, re.M)
