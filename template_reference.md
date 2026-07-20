@@ -4603,6 +4603,10 @@ Same image, same held pose. These are TWO scenes doing the work of ONE.
 - **action_note:** Same book-held pose, slight lean forward for emphasis...
 ```
 
+**The principle, stated plainly (operator 2026-07-20):** a clip/scene boundary follows **visual production needs, not semantic/outline labels**. Naming two beats `HOOK` and `PIVOT` is NOT a reason to split them — if the image, speaker, location, camera setup, physical action and visual state continue naturally within the duration ceiling (v861 bucket), they are ONE clip. Split only for a real image/state/speaker/location change, an action-continuity break, or the duration ceiling.
+
+**Fresh instance (2026-07-20):** `videos/nuri-korella-ed-stop-male-vitality-pills-shopping-cart-fire-blood-flow-booster-growth-v2.md` split "stop buying gnc performance pills…" (Scene 1) and "make this instead" (Scene 2) into two 4s clips. Both use image_1, the same speaker/setting/camera and one continuing cart-tip/fire action; 4s + 4s = one valid 8s generation. They should have been ONE clip — the split mapped the outline labels (HOOK, PIVOT) to clips even though nothing visual restarted. (The shipped build is NOT retro-merged: merging changes §7 scene/clip counts and needs operator ack; forward-only.) Do a MERGE PASS after drafting the storyboard: for each adjacent pair, ask "same image + speaker + location + one continuous action, and does the combined word count fit a single v861 bucket?" — if yes, merge into one scene/clip (the beats become `[Start]`/`[Mid]`/`[End]` markers in one action_note).
+
 ### Line granularity within a scene — don't over-split short scenes (v577)
 
 Companion rule to "Scene granularity" above. Same idea applied one level down: each `- **line:**` becomes ONE Veo clip = ONE 8-second generation. If a whole scene's dialogue fits inside one clip's word budget, it should be ONE line — not 2-4 short fragments.
@@ -11756,18 +11760,18 @@ Required Negatives: `No persona crop on the face` + `No persona-hidden-behind-pr
 - **Splitting dual / triple props** into separate `[Subject — Symptom A]` + `[Subject — Symptom B]` blocks. Single `[Subject — Symptom]` block treats them as ONE composition; split invites Banana 2 to render them MORE separated, losing cohesion. Frame 3 of corpus (dual prostate models) is one [Subject] block.
 - **Over-described persona blocking** (`stands behind in midground` / `left hand cupping from below, right hand cupping from below, both lifted to chest-level facing the lens`). Banana 2 just needs `holds X and Y at chest height with both hands`. Block-level positional verbosity past one sentence dilutes attention.
 - **Wardrobe / upload / framework callouts** in body prose (`Persona identity carried by upload` / `(no inline wardrobe per v722)`). Audit-only — Banana 2 doesn't read meta.
-- **Negative-block past 10 clauses**. Past ~10 the "no green elephant" hallucination class fires; pile-on dilutes signal. Pick the 5-8 negatives Banana 2 keeps violating in this niche.
+- **Separate negative-prompt blocks**. They repeat unwanted concepts and spend attention on them. State the wanted physical result in the main prose.
 
 **Image vs Scene separation (the structural fix)**: Image prompt body and Scene action_note are TWO artifacts feeding TWO models:
 
 | Artifact | Target | Discipline | Length |
 |---|---|---|---|
-| Image prompt body | Banana 2 still frame (start_frame) | LEAN — single-state composition, tight negatives, no meta, no beats | ≤400w hard ceiling, 200-350w ideal |
+| Image prompt body | Banana 2 still frame (start_frame) | LEAN — single-state composition, affirmative state, no separate negative block, no meta, no beats | ≤400w hard ceiling, 200-350w ideal |
 | Scene action_note + line + action_arc | Veo motion clip (8s) | VERBOSE-OK — beat structure, force-verb chain, lip-sync discipline | no ceiling — beats explicit |
 
 **For Banana 2 still**: `exaggerated shocked expression` outperforms `mouth open mid-utterance` because Banana 2's training prior is stronger on staged expressions. v721 lip-sync language (`mouth open mid-utterance, eyes locked to lens`) is for VEO RENDER lip-sync — lives in Scene action_note, NOT Image body.
 
-**Image body negative-block carve-out**: keep the 5-8 negatives Banana 2 keeps violating in this niche. Current-niche-priority lists per `code/template_reference.md` §"Negatives by niche" (forthcoming).
+**Physical-state correction**: when one model drift keeps recurring, add one short positive material or position cue inside the relevant sentence. Do not append a separate negative block.
 
 **DNA invariants enforced by content, not by labels**:
 
@@ -11776,7 +11780,7 @@ Required Negatives: `No persona crop on the face` + `No persona-hidden-behind-pr
 | 1 (dead-center) | "fills the immediate center-foreground, dominating the middle" | "(NOT viewer-left third, NOT viewer-right third — per Invariant 1, occupying 60% of vertical center axis)" |
 | 2 (active hands) | "both hands grip / squeeze / lift / wrap" | "(per Invariant 2)" |
 | 4 (face above) | "face is sharply visible just above the prop at chest-up framing" | "(per Invariant 4 + v736g)" |
-| 5 (background blurred) | "background fully blurred" | "(per v713 background-blur discipline)" |
+| 5 (background sharp) | "background remains fully sharp" | "(per v713 background discipline)" |
 
 **Pre-output validation gate (v736h)**:
 
@@ -15302,7 +15306,7 @@ Anchors may keep naming the **authored** (Prompt A) words — that is now the co
 
 **Why**: the store sign IS the US signal — the wild-confirmed Walmart-review reels carry the store sign on screen 4/4 and name the store in the hook about half the time (`wiki/concepts/script-adaptation/proven-frameworks-catalog.md` L50-51, `us-audience-priming-strategy.md`). A generic facade spends the setting without collecting the signal.
 
-**Boundary — locations ≠ packaging**: this covers LOCATIONS/settings and availability/price mentions ("from any walmart"). Branded PRODUCT packaging in frame still comes ONLY from an uploaded reference (never respec a label from memory — `feedback_uploaded-ref-dont-respec`); competitor product packs (CVS/GNC style) stay out of the render zone.
+**Boundary — locations and packaging use different accuracy checks**: Nano Banana may generate recognizable real branded PRODUCT packaging inline. Name the real brand + product category and request readable branding; use only current, verified pack details. Upload a reference only when exact SKU, label, pack shape, or product identity must match. When an upload exists, `feedback_uploaded-ref-dont-respec` still applies: the upload is the source of truth and must not be re-described from memory. Real failed-fix packs such as GNC may appear when the script names and uses that brand.
 
 **Scope / gates**: GENERATE-side authoring, forward-only (the shipped walmart-interview-keepup build keeps its generic facade — not retro-edited). Reference build: `videos/nuri-korella-ed-5signs-bloodflow-walmart-interview-heldprops-growth-v3.md`.
 
@@ -15511,11 +15515,11 @@ Second half of the bug: even if the retry HAD fired, the old backoff was `[2, 5,
 
 **Where it came from**: operator 2026-07-14, on the day1dayx lane's Nuri-turn frames (the WALMART paper bag standing on the counter beside her): *"the bags should be in the background if not really used — make it a general rule to apply to all the usa elements."*
 
-**The rule**: every US icon (retail bag/signage, flag, mason jar, pickup, americana props) defaults to the BACKGROUND PLANE — visible and sharp, but behind the subject, never in the foreground competing with the hero prop. An icon may enter the foreground ONLY when the beat actively USES it: held, poured from, scanned, tossed, played on. The honey jar is foreground in the beat where she dips from it; the same jar parks in the background every other frame. The Walmart bag behind the healer = background shelf, never on the counter beside the hero prop.
+**The rule**: every passive US icon (retail bag/signage, flag, mason jar, pickup, americana props) defaults to the BACKGROUND PLANE — small, behind the subject, and mentioned once with one short physical cue. Do not itemize a passive icon's parts: prompt detail gives it visual weight. An icon may receive foreground placement and fuller detail ONLY when the beat actively USES it: held, poured from, scanned, tossed, played on. The honey jar is foreground in the beat where she dips from it; the same jar parks quietly in the background every other frame. The Walmart bag behind the healer = background shelf, never on the counter beside the hero prop.
 
 **Why**: US signals are TEXTURE (us-iconic-blend "2-3 quiet icons per scene") — a passive icon in the foreground steals size and attention from the hero prop and reads as product placement instead of set dressing. The frame's foreground budget belongs to the hero prop + actively-used props only.
 
-**Scope / gates**: GENERATE-side authoring, every frame with US icons, forward-only (shipped builds keep their staging; new builds + new frames comply). Prompt-writing test: for each icon in the prompt, ask "does THIS beat use it?" — no → place it explicitly in the background sentence ("In the background, sharp and fully visible, ..."), never in the subject sentence.
+**Scope / gates**: GENERATE-side authoring, every frame with US icons, forward-only (shipped builds keep their staging; new builds + new frames comply). Prompt-writing test: for each icon, ask "does THIS beat use it?" — no → place it once in the background sentence with a short phrase, such as `a small real-cloth American flag hangs high in the far background.` Never give a passive icon a component-by-component description.
 
 **Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (§B note), `wiki/concepts/script-adaptation/us-iconic-blend-catalog.md` (placement note), memory `feedback_us-elements-background-unless-used`, `wiki/log.md`.
 
