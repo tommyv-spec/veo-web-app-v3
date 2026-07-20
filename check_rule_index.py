@@ -112,14 +112,180 @@ def indexed_rules(text: str) -> set[str]:
     return out
 
 
-def covered_anywhere(text: str) -> set[str]:
-    """base-rules that appear ANYWHERE in the text (table cells OR prose).
+# Rules that are real + classified in build-rule-index but have NO defining
+# heading in template_reference.md (they live in the decode pipeline / skeleton,
+# e.g. code/CLAUDE.md). Allow-listed so the unknown-ID check does not flag them.
+KNOWN_NON_HEADING_RULES = {"v578", "v585"}
 
-    build-rule-index.md classifies §A in a table but §B (decode) and §C
-    (platform) as prose bullet lists, so 'classified' = the token shows up at
-    all — a superseded rule listed in the note counts as accounted-for too.
+_SECTION_RX = {
+    "A": re.compile(r"^##\s+§A\b"),
+    "B": re.compile(r"^##\s+§B\b"),
+    "C": re.compile(r"^##\s+§C\b"),
+    "D": re.compile(r"^##\s+§D\b"),
+}
+_SUPERSEDED_RX = re.compile(r"\*\*Superseded\s*/\s*folded", re.IGNORECASE)
+
+
+def build_index_buckets(text: str) -> dict[str, set[str]]:
+    """Parse build-rule-index.md into {base-rule -> set of buckets it is
+    CLASSIFIED in}, using the CLASSIFICATION token only (not cross-references):
+
+      - §A: the FIRST table cell of each row (the rule's own row).
+      - §B / §C: every vNNN token BEFORE the first '(' in each '·'-separated
+        item (handles multi-rule items like 'v739 / v740 / v747 (UI...)').
+      - superseded: the FIRST vNNN token of each '·'-item on the
+        '**Superseded / folded ...**' line (the '→ vXXX' targets that follow
+        are cross-refs, not classifications).
+
+    Intro prose and §D (non-v-rule) are NOT buckets, so range-text like
+    'v176→v861' and descriptive cross-refs never count as a classification.
     """
-    return {base(vm.group(1)) for vm in VTOKEN.finditer(text)}
+    lines = text.splitlines()
+    pos: dict[str, int] = {}
+    sup_i = None
+    for i, l in enumerate(lines):
+        for name, rx in _SECTION_RX.items():
+            if rx.match(l):
+                pos[name] = i
+        if sup_i is None and _SUPERSEDED_RX.search(l):
+            sup_i = i
+    end = pos.get("D", len(lines))
+    out: dict[str, set[str]] = {}
+
+    def add(rule: str, bucket: str) -> None:
+        out.setdefault(rule, set()).add(bucket)
+
+    # §A — table first cells
+    a0, b0 = pos.get("A"), pos.get("B")
+    if a0 is not None:
+        for l in lines[a0: (b0 if b0 is not None else end)]:
+            s = l.lstrip()
+            if s.startswith("|") and s.count("|") >= 2:
+                for vm in VTOKEN.finditer(s.split("|")[1]):
+                    add(base(vm.group(1)), "A")
+
+    # §B / §C — leading tokens (before first '(') of each '·' item
+    def prose(start: int, stop: int, bucket: str) -> None:
+        for item in "\n".join(lines[start:stop]).split("·"):
+            head = item.split("(")[0]
+            for vm in VTOKEN.finditer(head):
+                add(base(vm.group(1)), bucket)
+
+    c0 = pos.get("C")
+    if b0 is not None:
+        prose(b0, (c0 if c0 is not None else end), "B")
+    if c0 is not None:
+        c_stop = sup_i if (sup_i is not None and c0 < sup_i < end) else end
+        prose(c0, c_stop, "C")
+
+    # superseded line — first vNNN of each '·' item (skip the header paren)
+    if sup_i is not None:
+        body = lines[sup_i].split(":**", 1)[-1]
+        for item in body.split("·"):
+            vm = VTOKEN.search(item)
+            if vm:
+                add(base(vm.group(1)), "superseded")
+    return out
+
+
+def build_index_report(def_set: set[str], text: str) -> dict:
+    """Compare build-rule-index classification against the defined rules.
+    Returns missing / unknown / conflict / contradiction lists + the map."""
+    buckets = build_index_buckets(text)
+    classified = set(buckets)
+    primary = {"A", "B", "C"}
+
+    missing = sorted(def_set - classified, key=lambda r: int(r[1:]))
+    unknown = sorted(
+        (r for r in classified - def_set if r not in KNOWN_NON_HEADING_RULES),
+        key=lambda r: int(r[1:]),
+    )
+    # a rule classified into more than one PRIMARY bucket (A/B/C)
+    conflict = sorted(
+        (r for r, bs in buckets.items() if len(bs & primary) > 1),
+        key=lambda r: int(r[1:]),
+    )
+    # a rule listed as superseded AND also active in a primary bucket
+    contradiction = sorted(
+        (r for r, bs in buckets.items() if "superseded" in bs and (bs & primary)),
+        key=lambda r: int(r[1:]),
+    )
+    return {
+        "buckets": {r: sorted(b) for r, b in buckets.items()},
+        "missing": missing,
+        "unknown": unknown,
+        "conflict": conflict,
+        "contradiction": contradiction,
+    }
+
+
+def _mini_index(a=(), b=(), c=(), superseded=()) -> str:
+    """Build a synthetic build-rule-index.md for self-tests."""
+    L = ["# idx", "", "## §A GENERATE-AUTHORING v-rules",
+         "| v-rule | one | scope |", "|---|---|---|"]
+    L += [f"| {r} | desc | scope |" for r in a]
+    L += ["", "## §B DECODE-AUTHORING v-rules",
+          " · ".join(f"{r} (decode)" for r in b) or "(none)"]
+    L += ["", "## §C PLATFORM-INTERNAL v-rules", "These ship in code/. Listed: "
+          + (" · ".join(f"{r} (platform)" for r in c) or "(none)")]
+    if superseded:
+        L += ["", "**Superseded / folded (note):** "
+              + " · ".join(f"{r} (→ v001 target)" for r in superseded)]
+    L += ["", "## §D Non-v-rule authoring rules", "- CLAUDE.md mentions v791 as a cross-ref"]
+    return "\n".join(L)
+
+
+def selftest() -> int:
+    """Inline tests for the build-rule-index bucket gate (no external deps)."""
+    cases = []
+
+    def check(name, cond):
+        cases.append((name, bool(cond)))
+
+    # 1. PASS — each defined rule classified in exactly one bucket
+    r = build_index_report({"v100", "v200", "v300"},
+                           _mini_index(a=["v100"], b=["v200"], c=["v300"]))
+    check("pass:no-missing", r["missing"] == [])
+    check("pass:no-unknown", r["unknown"] == [])
+    check("pass:no-conflict", r["conflict"] == [])
+    check("pass:no-contradiction", r["contradiction"] == [])
+
+    # 2. MISSING — a defined rule absent from every bucket
+    r = build_index_report({"v100", "v400"}, _mini_index(a=["v100"]))
+    check("missing:detected", r["missing"] == ["v400"])
+
+    # 3. UNKNOWN — classified id that is not defined + not allow-listed
+    r = build_index_report({"v100"}, _mini_index(a=["v100", "v999"]))
+    check("unknown:detected", r["unknown"] == ["v999"])
+
+    # 4. ALLOWLIST — v578 in §B, not defined, must NOT be unknown
+    r = build_index_report({"v100"}, _mini_index(a=["v100"], b=["v578"]))
+    check("allowlist:v578-not-unknown", r["unknown"] == [])
+
+    # 5. CONFLICT — same rule in two primary buckets (A and C)
+    r = build_index_report({"v100"}, _mini_index(a=["v100"], c=["v100"]))
+    check("conflict:detected", r["conflict"] == ["v100"])
+
+    # 6. CONTRADICTION — active in §A AND on the superseded line
+    r = build_index_report({"v100"}, _mini_index(a=["v100"], superseded=["v100"]))
+    check("contradiction:detected", r["contradiction"] == ["v100"])
+
+    # 7. cross-ref inside a description must NOT classify (no false conflict)
+    #    §A row for v100 whose summary mentions v200; v200 only lives in §B.
+    txt = _mini_index(a=["v100"], b=["v200"]).replace(
+        "| v100 | desc | scope |", "| v100 | see v200 for details | scope |")
+    r = build_index_report({"v100", "v200"}, txt)
+    check("xref:no-false-conflict", r["conflict"] == [] and r["missing"] == [])
+
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    ok = all(p for _, p in cases)
+    for name, passed in cases:
+        print(f"  {'PASS' if passed else 'FAIL'}  {name}")
+    print("\nSELFTEST:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
 
 
 def main() -> int:
@@ -136,7 +302,12 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true", help="exit code only, no report")
     ap.add_argument("--toc", action="store_true",
                     help="emit a jump-map (rule -> line + heading) of the rulebook to stdout")
+    ap.add_argument("--selftest", action="store_true",
+                    help="run the build-index gate self-tests (pass/missing/unknown/conflict)")
     args = ap.parse_args()
+
+    if args.selftest:
+        return selftest()
 
     if not MASTERS.exists() or not INDEX.exists():
         print(f"ERROR: missing file(s): {MASTERS if not MASTERS.exists() else INDEX}",
@@ -181,14 +352,16 @@ def main() -> int:
     dangling = sorted(indexed - def_set, key=lambda r: int(r[1:]))  # indexed, no heading
 
     # Second target: build-rule-index.md (the /build authoring denominator),
-    # which went stale exactly like conventions.md did.
+    # which went stale exactly like conventions.md did. Real bucket parsing
+    # (not presence-only): missing / unknown-ID / superseded-contradiction FAIL;
+    # multi-primary-bucket conflict is a WARN (some rules are legit dual-nature).
     bri_present = BUILD_INDEX.exists()
-    bri_missing: list[str] = []
+    bri = {"missing": [], "unknown": [], "conflict": [], "contradiction": []}
     if bri_present:
-        classified = covered_anywhere(BUILD_INDEX.read_text(encoding="utf-8"))
-        bri_missing = sorted(def_set - classified, key=lambda r: int(r[1:]))
+        bri = build_index_report(def_set, BUILD_INDEX.read_text(encoding="utf-8"))
 
-    fail = bool(missing) or bool(bri_missing)
+    fail = (bool(missing) or bool(bri["missing"]) or bool(bri["unknown"])
+            or bool(bri["contradiction"]))
 
     result = {
         "defined_count": len(def_set),
@@ -196,7 +369,10 @@ def main() -> int:
         "missing_from_index": missing,
         "indexed_without_heading": dangling,
         "build_index_present": bri_present,
-        "missing_from_build_index": bri_missing,
+        "missing_from_build_index": bri["missing"],
+        "build_index_unknown_ids": bri["unknown"],
+        "build_index_conflict": bri["conflict"],
+        "build_index_contradiction": bri["contradiction"],
         "missing_detail": {
             r: {"line": best_location(r, defined[r])[0],
                 "heading": best_location(r, defined[r])[1]} for r in missing
@@ -226,12 +402,30 @@ def main() -> int:
         # 2. build-rule-index.md (the /build authoring denominator)
         if not bri_present:
             print("\n⚠ build-rule-index.md not found — skipped its coverage check")
-        elif bri_missing:
-            print(f"\n✗ {len(bri_missing)} DEFINED but NOT CLASSIFIED in build-rule-index.md "
-                  f"(the /build authoring denominator is blind on these):")
-            print("    " + " ".join(bri_missing))
         else:
-            print("✓ build-rule-index.md classifies every defined rule")
+            clean = True
+            if bri["missing"]:
+                clean = False
+                print(f"\n✗ {len(bri['missing'])} DEFINED but NOT CLASSIFIED in build-rule-index.md "
+                      f"(the /build authoring denominator is blind on these):")
+                print("    " + " ".join(bri["missing"]))
+            if bri["unknown"]:
+                clean = False
+                print(f"\n✗ {len(bri['unknown'])} UNKNOWN rule id(s) in build-rule-index.md "
+                      f"(classified but not defined + not allow-listed — typo?):")
+                print("    " + " ".join(bri["unknown"]))
+            if bri["contradiction"]:
+                clean = False
+                print(f"\n✗ {len(bri['contradiction'])} rule(s) listed as SUPERSEDED yet also "
+                      f"active in a primary bucket (contradiction):")
+                print("    " + " ".join(bri["contradiction"]))
+            if bri["conflict"]:
+                print(f"\n⚠ {len(bri['conflict'])} rule(s) classified in MORE THAN ONE of §A/§B/§C "
+                      f"(dual-nature or mis-file — review):")
+                for r in bri["conflict"]:
+                    print(f"    {r:<7} in §" + " §".join(bri["buckets"][r]))
+            if clean:
+                print("✓ build-rule-index.md classifies every defined rule (no unknown/contradiction)")
         print()
         print("RESULT:", "FAIL — coverage incomplete" if fail else "PASS")
 
