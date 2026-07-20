@@ -107,6 +107,9 @@ python -c "import re; t=open('videos/<file>.md',encoding='utf-8').read(); print(
 - `py_compile` insufficient — `import <module>` before push
 - Bumping submodule pointer in wiki repo captures version stamp (`git add code && git commit` from wiki root)
 
+**Local workers (NOT on Render):**
+- **ChatGPT image backend** — `python code/static/chatgpt_image_worker.py --watch` claims `model=chatgpt` image jobs (lenient consumer filter; passes prompts Banana 2 / paid API refuse). LOCAL-ONLY, never on Render; session files gitignored. Runbook: `code/static/CHATGPT_IMAGE_WORKER.md`.
+
 ---
 
 ## Decode pipeline — Stage 4d VLM is LLM-agnostic (v595)
