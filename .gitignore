@@ -1,0 +1,4 @@
+# ChatGPT image worker — operator session material. NEVER commit (contains
+# logged-in ChatGPT cookies / profile). Local-only, per-machine.
+static/.chatgpt_profile/
+static/.chatgpt_cookies.json
