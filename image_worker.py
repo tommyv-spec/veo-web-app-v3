@@ -6212,8 +6212,16 @@ def _write_done_file(job_path, result):
         print(f"[WATCH] ❌ Can't write {done_path}: {e}", flush=True)
 
 
+def _flow_handles_model(job):
+    """Flow/Banana worker owns everything EXCEPT chatgpt (a separate local
+    worker claims those). Returns False -> Flow worker leaves the job alone."""
+    return (job or {}).get("model") != "chatgpt"
+
+
 def _process_watch_job(page, job_path, job):
     """Run a single watch-folder job end-to-end."""
+    if not _flow_handles_model(job):
+        return  # chatgpt job -> owned by chatgpt_image_worker; do NOT render or write .done.json
     jid = job.get('id', 'unknown')
     prompt = job.get('prompt', '')
     raw_input_images = job.get('input_images') or []
