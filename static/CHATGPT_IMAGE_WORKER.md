@@ -15,11 +15,11 @@ Files:
    ```bash
    pip install patchright
    ```
-2. Seed the session cookies. Run the netlog cookie capture (ABE-immune — grabs plaintext cookies from the network log) and log in manually to the dedicated ChatGPT profile when prompted. This writes `static/.chatgpt_cookies.json` (gitignored).
-   ```bash
-   python code/static/chatgpt_image_worker.py --login
-   ```
-   The cookies let the worker reuse your logged-in ChatGPT session without re-typing credentials each run.
+2. Seed the session cookies. The login the worker actually uses is a set of **plaintext cookies** injected on every launch, captured by a **netlog capture** step: a real Chrome (your Default profile, already logged into ChatGPT) is launched with `--log-net-log --net-log-capture-mode=IncludeSensitive`, which writes the *decrypted* Cookie headers to a log; those are parsed and saved to `static/.chatgpt_cookies.json` (gitignored). This is **ABE-immune** — it works even though Chrome's App-Bound Encryption makes copied cookie files undecryptable.
+
+   Today this capture is run as a **separate step** (a netlog-capture script), not a worker subcommand. A `--refresh-cookies` subcommand that runs the same capture is planned (see "When the session expires"). Chrome must be fully closed while the capture runs.
+
+   (`python code/static/chatgpt_image_worker.py --login` is a *different*, optional path — it opens the dedicated `.chatgpt_profile` for a manual interactive login and persists profile cookies there. The `--watch`/gen path relies on `.chatgpt_cookies.json`, not the dedicated profile, so the netlog capture above is the one that matters.)
 
 ## Serving platform jobs
 
@@ -51,12 +51,9 @@ python code/static/chatgpt_image_worker.py --jobs jobs.json
 
 ChatGPT rotates the session token, so the saved cookies expire (days to weeks). Symptom: jobs fail with `session expired — run --refresh-cookies`.
 
-To refresh **today**: re-run the netlog cookie capture (same step as setup) to rewrite `static/.chatgpt_cookies.json`:
-```bash
-python code/static/chatgpt_image_worker.py --login
-```
+To refresh **today**: fully close Chrome, then re-run the netlog cookie capture (same step as setup) to rewrite `static/.chatgpt_cookies.json`. The capture relaunches your Default profile briefly, reads the decrypted ChatGPT cookies, and saves them.
 
-> TODO: a dedicated `--refresh-cookies` subcommand is planned but NOT yet built. Until it lands, refresh by re-running the netlog capture above.
+> TODO: a dedicated `--refresh-cookies` subcommand that wraps this netlog capture is planned but NOT yet built. Until it lands, run the capture step directly.
 
 ## Failure behavior
 
