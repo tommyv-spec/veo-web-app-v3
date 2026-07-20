@@ -404,8 +404,9 @@ def main() -> int:
 
     # Second target: build-rule-index.md (the /build authoring denominator),
     # which went stale exactly like conventions.md did. Real bucket parsing
-    # (not presence-only): missing / unknown-ID / superseded-contradiction FAIL;
-    # multi-primary-bucket conflict is a WARN (some rules are legit dual-nature).
+    # (not presence-only): missing / unknown-ID / duplicate / superseded-
+    # contradiction all FAIL; a multi-primary-bucket conflict FAILs too unless
+    # the rule is in the reasoned DUAL_BUCKET_ALLOWLIST.
     bri_present = BUILD_INDEX.exists()
     bri = {"missing": [], "unknown": [], "duplicate": [], "conflict": [],
            "contradiction": [], "buckets": {}}
