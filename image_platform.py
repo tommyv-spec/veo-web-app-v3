@@ -10084,6 +10084,190 @@ Set-Location $WorkDir
     return FAResponse(content=script, media_type="text/plain")
 
 
+# ---- ChatGPT image worker distribution (additive) ------------------------
+# The ChatGPT worker is a multi-file bundle living under code/static/. The
+# operator sets it up from the UI: names the ChatGPT account, downloads +
+# runs the worker, which pulls that account's session and connects. Reuses
+# the SAME UserWorkerToken as the Flow image worker (one token per user).
+
+_CHATGPT_WORKER_FILES = {
+    "chatgpt_image_worker.py", "chatgpt_image_backend.py", "chatgpt_job_map.py",
+    "chatgpt_http_pull.py", "chatgpt_session_pull.py",
+    "worker_profile_pull.py", "worker_cookie_extract.py",
+}
+
+
+@router.get("/worker/download/chatgpt/{filename}")
+def download_chatgpt_worker_file(filename: str):
+    """Serve one whitelisted ChatGPT-worker source file from code/static/.
+    Called by the chatgpt-setup.ps1 script (one Invoke-WebRequest per file)."""
+    from fastapi.responses import Response as FAResponse
+    if filename not in _CHATGPT_WORKER_FILES:
+        raise HTTPException(404, "unknown file")
+    path = Path(__file__).parent / "static" / filename
+    if not path.is_file():
+        raise HTTPException(404, "not found")
+    return FAResponse(content=path.read_text(encoding="utf-8"),
+                      media_type="text/x-python")
+
+
+@router.get("/worker/download/chatgpt-setup.ps1")
+def serve_chatgpt_worker_setup_ps1(
+    request: Request,
+    chatgpt_email: str = Query(""),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db_session),
+):
+    """Serve a self-contained PowerShell script that:
+      1. Finds/installs Python
+      2. Installs patchright + requests (+ patchright install chromium)
+      3. Downloads the 7-file ChatGPT worker bundle from this server
+      4. Launches chatgpt_image_worker.py with --chatgpt-email <email>
+
+    Usage from Windows terminal:
+        powershell -c "irm <app>/api/images/worker/download/chatgpt-setup.ps1?chatgpt_email=you@example.com | iex"
+
+    Requires login — bakes the user's personal worker token into the script.
+    Reuses the SAME UserWorkerToken as the Flow image worker (one per user).
+    """
+    from fastapi.responses import Response as FAResponse
+
+    # Get or create the user's personal worker token (SAME token as the
+    # Flow image worker — one token per user, shared by both workers).
+    token = db.query(UserWorkerToken).filter(
+        UserWorkerToken.user_id == user.id,
+        UserWorkerToken.is_active == True,
+    ).first()
+    if not token:
+        token = UserWorkerToken(
+            id=secrets.token_urlsafe(48),
+            user_id=user.id,
+            name=f"ImageWorker-{datetime.utcnow().strftime('%Y%m%d-%H%M')}",
+        )
+        db.add(token)
+        db.commit()
+    default_key = token.id
+    app_url = str(request.base_url).rstrip("/")
+
+    script = r"""# KavenoBuilder ChatGPT Image Worker - Quick Setup (Windows)
+# Usage: powershell -c "irm __APP_URL__/api/images/worker/download/chatgpt-setup.ps1?chatgpt_email=you@example.com | iex"
+
+$ErrorActionPreference = 'Continue'
+$AppUrl       = '__APP_URL__'
+$ApiKey       = '__API_KEY__'
+$ChatgptEmail = '__CHATGPT_EMAIL__'
+$WorkDir      = "$env:USERPROFILE\KavenoChatGPTWorker"
+
+Write-Host "===============================================" -ForegroundColor Cyan
+Write-Host "  KavenoBuilder ChatGPT Image Worker - Setup"    -ForegroundColor Cyan
+Write-Host "===============================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "ChatGPT account: $ChatgptEmail"
+Write-Host "Working directory: $WorkDir"
+Write-Host ""
+
+# Ensure workdir exists
+if (-not (Test-Path $WorkDir)) {
+    New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+}
+
+# Find Windows Python (skip MSYS2/Cygwin/MinGW)
+function Find-WindowsPython {
+    $badPaths = @("msys", "cygwin", "mingw", "ucrt64", "clang64")
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if ($py) {
+        $pyPath = $py.Source
+        $lower = $pyPath.ToLower()
+        $isBad = $false
+        foreach ($bad in $badPaths) { if ($lower -like "*$bad*") { $isBad = $true } }
+        if (-not $isBad) {
+            $pipTest = & $pyPath -m pip --version 2>&1
+            if ($LASTEXITCODE -eq 0) { return $pyPath }
+        }
+    }
+    foreach ($name in @("python", "python3")) {
+        $cmds = Get-Command $name -ErrorAction SilentlyContinue -All
+        if ($cmds) {
+            foreach ($cmd in $cmds) {
+                $p = $cmd.Source
+                $lower = $p.ToLower().Replace("\", "/")
+                $isBad = $false
+                foreach ($bad in $badPaths) { if ($lower -like "*$bad*") { $isBad = $true } }
+                if ($isBad) { continue }
+                $pipTest = & $p -m pip --version 2>&1
+                if ($LASTEXITCODE -eq 0) { return $p }
+            }
+        }
+    }
+    return $null
+}
+
+Write-Host "Looking for Python..."
+$pythonPath = Find-WindowsPython
+if (-not $pythonPath) {
+    Write-Host "No Python found. Install from https://python.org/downloads" -ForegroundColor Red
+    Write-Host "Make sure to check 'Add Python to PATH' during installation." -ForegroundColor Yellow
+    exit 1
+}
+# Resolve py.exe to actual interpreter
+if ($pythonPath -like "*\py.EXE" -or $pythonPath -like "*\py.exe") {
+    $resolved = & $pythonPath -c "import sys; print(sys.executable)" 2>$null
+    if ($resolved -and (Test-Path $resolved)) { $pythonPath = $resolved }
+}
+Write-Host "Python: $pythonPath" -ForegroundColor Green
+
+# Install deps if missing
+Write-Host ""
+Write-Host "Checking packages (patchright, requests)..."
+$check = & $pythonPath -c "import patchright; import requests; print('ok')" 2>$null
+if ($check -ne "ok") {
+    Write-Host "Installing patchright + requests (first run, 1-3 min)..." -ForegroundColor Yellow
+    Start-Process -FilePath $pythonPath -ArgumentList "-m","pip","install","--no-input","patchright","requests" -NoNewWindow -Wait
+    # Patchright also needs Chromium binaries
+    Start-Process -FilePath $pythonPath -ArgumentList "-m","patchright","install","chromium" -NoNewWindow -Wait
+}
+
+# Download the worker bundle (7 files — always fresh so updates propagate)
+Write-Host ""
+Write-Host "Downloading ChatGPT worker bundle..."
+$files = @(
+    "chatgpt_image_worker.py", "chatgpt_image_backend.py", "chatgpt_job_map.py",
+    "chatgpt_http_pull.py", "chatgpt_session_pull.py",
+    "worker_profile_pull.py", "worker_cookie_extract.py"
+)
+foreach ($f in $files) {
+    Write-Host "  $f"
+    Invoke-WebRequest -Uri "$AppUrl/api/images/worker/download/chatgpt/$f" -OutFile (Join-Path $WorkDir $f) -UseBasicParsing
+}
+Write-Host "Saved to: $WorkDir" -ForegroundColor Green
+
+# Launch the worker
+Write-Host ""
+Write-Host "===============================================" -ForegroundColor Cyan
+Write-Host "  Starting ChatGPT worker..."                    -ForegroundColor Cyan
+Write-Host "  Chrome will open. Login to ChatGPT once."       -ForegroundColor Cyan
+Write-Host "  Keep this window open while generating!"        -ForegroundColor Cyan
+Write-Host "===============================================" -ForegroundColor Cyan
+Write-Host ""
+
+Set-Location $WorkDir
+& $pythonPath chatgpt_image_worker.py --api-url $AppUrl --api-key $ApiKey --chatgpt-email $ChatgptEmail
+"""
+
+    # Validate the ChatGPT account email; malformed => empty (worker prompts).
+    import re as _re
+    _ce = (chatgpt_email or "").strip()
+    if len(_ce) > 254 or not _re.match(
+            r'^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', _ce):
+        _ce = ""
+
+    # Substitute placeholders
+    script = (script.replace("__API_KEY__", default_key)
+                    .replace("__APP_URL__", app_url)
+                    .replace("__CHATGPT_EMAIL__", _ce))
+    return FAResponse(content=script, media_type="text/plain")
+
+
 # v492: downloadable installer mirroring the video worker pattern
 # (my-worker.html + /api/user-worker/download/installer). Users get a
 # .bat on Windows or a .command-in-.zip on Mac/Linux, with a reset

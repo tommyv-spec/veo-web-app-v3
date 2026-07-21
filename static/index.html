@@ -18628,7 +18628,27 @@ Ambient: same kitchen room tone, soft pour sound.
                 // keeping the stale offline UI in the DOM after the worker
                 // comes online (because the user happened to be hovering
                 // the card) was the visible bug.
-                const launcherIsShowing = !!body.querySelector('#imgOsPillWin, #imgResetSessions, [data-v681-worker-launcher]');
+                // ChatGPT worker one-liner installer (account email + irm|iex).
+                // Additive; mirrors the image-worker setup.ps1 fallback. Shows
+                // when the ChatGPT worker is offline.
+                let chatgptSetupBlock = '';
+                if (!chatgptOnline) {
+                    const cgUrl = window.location.origin;
+                    const cgCmd = `powershell -c "irm ${cgUrl}/api/images/worker/download/chatgpt-setup.ps1?chatgpt_email= | iex"`;
+                    chatgptSetupBlock = `
+                        <div style="margin-top:8px;padding:10px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:6px;font-size:11px;color:var(--text-secondary);line-height:1.5;">
+                            <div style="font-weight:600;margin-bottom:6px;">ChatGPT worker setup</div>
+                            <label style="display:block;margin-bottom:6px;">
+                                <span style="display:block;margin-bottom:3px;">ChatGPT account email:</span>
+                                <input type="email" id="chatgptWorkerEmail" oninput="chatgptUpdateSetupCmd()" placeholder="ChatGPT account email" autocomplete="off" style="width:100%;padding:5px 8px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-primary);color:var(--text-primary);font-size:11px;box-sizing:border-box;">
+                            </label>
+                            <div style="margin-bottom:4px;">Run this in Windows PowerShell:</div>
+                            <code id="chatgptSetupCmd" style="display:block;word-break:break-all;background:var(--bg-primary);padding:6px 8px;border-radius:4px;font-size:10px;color:var(--text-primary);">${cgCmd}</code>
+                            <button onclick="chatgptCopySetupCmd(event)" style="margin-top:6px;padding:5px 12px;border-radius:4px;border:1px solid var(--border-color);background:transparent;color:var(--text-secondary);cursor:pointer;font-size:11px;">📋 Copy command</button>
+                        </div>`;
+                }
+
+                const launcherIsShowing = !!body.querySelector('#imgOsPillWin, #imgResetSessions, [data-v681-worker-launcher], #chatgptWorkerEmail');
                 const ae = document.activeElement;
                 const focusInside = !!(ae && body.contains(ae) && ae !== document.body);
                 const hoverInside = !!body.matches(':hover') || !!body.querySelector(':hover');
@@ -18652,6 +18672,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 body.innerHTML = `
                     <div data-worker-online-line>${indicator}${ageStr}</div>
                     <div data-chatgpt-worker-online-line style="margin-top:4px;">${chatgptIndicator}${chatgptAgeStr}</div>
+                    ${chatgptSetupBlock}
                     ${onlineControls}
                     ${queueLine}
                     ${helpLine}
@@ -18678,6 +18699,43 @@ Ambient: same kitchen room tone, soft pour sound.
                 ta.select();
                 document.execCommand('copy');
                 document.body.removeChild(ta);
+            }
+        }
+
+        // ChatGPT worker one-liner installer helpers. Build the irm|iex
+        // command with the operator-entered account email and copy it.
+        // Mirrors imgCopyWorkerCmd; additive.
+        function chatgptBuildSetupCmd() {
+            const el = document.getElementById('chatgptWorkerEmail');
+            const email = ((el && el.value) || '').trim();
+            const url = window.location.origin
+                + '/api/images/worker/download/chatgpt-setup.ps1?chatgpt_email='
+                + encodeURIComponent(email);
+            return 'powershell -c "irm ' + url + ' | iex"';
+        }
+        function chatgptUpdateSetupCmd() {
+            const code = document.getElementById('chatgptSetupCmd');
+            if (code) code.textContent = chatgptBuildSetupCmd();
+        }
+        function chatgptCopySetupCmd(e) {
+            const cmd = chatgptBuildSetupCmd();
+            const btn = (e && e.target) || (window.event && window.event.target);
+            const done = () => {
+                if (!btn) return;
+                const orig = btn.textContent;
+                btn.textContent = '✓ Copied';
+                setTimeout(() => { btn.textContent = orig; }, 1500);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(cmd).then(done).catch(done);
+            } else {
+                const ta = document.createElement('textarea');
+                ta.value = cmd;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                done();
             }
         }
 
