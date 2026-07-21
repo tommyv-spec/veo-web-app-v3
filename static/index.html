@@ -18642,7 +18642,10 @@ Ambient: same kitchen room tone, soft pour sound.
                                 <span style="display:block;margin-bottom:3px;">ChatGPT account email:</span>
                                 <input type="email" id="chatgptWorkerEmail" oninput="chatgptUpdateSetupCmd()" placeholder="ChatGPT account email" autocomplete="off" style="width:100%;padding:5px 8px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-primary);color:var(--text-primary);font-size:11px;box-sizing:border-box;">
                             </label>
-                            <div style="margin-bottom:4px;">Run this in Windows PowerShell:</div>
+                            <button onclick="chatgptDownloadInstaller()" style="width:100%;padding:10px 16px;border-radius:6px;border:none;background:var(--accent);color:white;cursor:pointer;font-size:12px;font-weight:600;margin-bottom:8px;">
+                                ⬇ Download Installer (.bat)
+                            </button>
+                            <div style="margin-bottom:4px;color:var(--text-muted);">Or run this in Windows PowerShell:</div>
                             <code id="chatgptSetupCmd" style="display:block;word-break:break-all;background:var(--bg-primary);padding:6px 8px;border-radius:4px;font-size:10px;color:var(--text-primary);">${cgCmd}</code>
                             <button onclick="chatgptCopySetupCmd(event)" style="margin-top:6px;padding:5px 12px;border-radius:4px;border:1px solid var(--border-color);background:transparent;color:var(--text-secondary);cursor:pointer;font-size:11px;">📋 Copy command</button>
                         </div>`;
@@ -18741,6 +18744,21 @@ Ambient: same kitchen room tone, soft pour sound.
                 document.body.removeChild(ta);
                 done();
             }
+        }
+        function chatgptDownloadInstaller() {
+            // Downloadable .bat for the ChatGPT worker. Mirrors
+            // imgDownloadInstaller (v813 user-gesture <a> click, NOT iframe).
+            const emailEl = document.getElementById('chatgptWorkerEmail');
+            const email = ((emailEl && emailEl.value) || '').trim();
+            const url = '/api/images/worker/download/chatgpt-installer'
+                + '?chatgpt_email=' + encodeURIComponent(email);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = '';  // let server Content-Disposition name the file
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
         }
 
         // v492: image-worker installer helpers. Mirror the video worker

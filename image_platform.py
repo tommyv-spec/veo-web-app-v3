@@ -10268,6 +10268,57 @@ Set-Location $WorkDir
     return FAResponse(content=script, media_type="text/plain")
 
 
+@router.get("/worker/download/chatgpt-installer")
+def download_chatgpt_worker_installer(
+    request: Request,
+    chatgpt_email: str = Query(""),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db_session),
+):
+    """Serve a downloadable .bat installer for the ChatGPT image worker.
+    Mirrors download_image_worker_installer (the image-worker .bat route) but
+    targets the 7-file ChatGPT bundle. The chatgpt-setup.ps1 irm|iex route
+    above stays as a copy-paste fallback.
+
+    Requires login — bakes the user's personal worker token into the .bat.
+    Reuses the SAME UserWorkerToken as the Flow image worker (one per user).
+    """
+    from fastapi.responses import Response as FAResponse
+
+    token = db.query(UserWorkerToken).filter(
+        UserWorkerToken.user_id == user.id,
+        UserWorkerToken.is_active == True,
+    ).first()
+    if not token:
+        token = UserWorkerToken(
+            id=secrets.token_urlsafe(48),
+            user_id=user.id,
+            name=f"ImageWorker-{datetime.utcnow().strftime('%Y%m%d-%H%M')}",
+        )
+        db.add(token)
+        db.commit()
+    app_url = str(request.base_url).rstrip("/")
+    if "kavenobuilder.com" not in app_url and "localhost" not in app_url and "127.0.0.1" not in app_url:
+        app_url = "https://kavenobuilder.com"
+
+    # Validate the ChatGPT account email; malformed => empty (worker prompts).
+    import re as _re
+    _ce = (chatgpt_email or "").strip()
+    if len(_ce) > 254 or not _re.match(
+            r'^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', _ce):
+        _ce = ""
+
+    content = _generate_chatgpt_windows_installer(token.id, app_url, _ce)
+    return FAResponse(
+        content=content,
+        media_type="application/x-bat",
+        headers={
+            "Content-Disposition": "attachment; filename=KavenoChatGPTWorker-Setup.bat",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 # v492: downloadable installer mirroring the video worker pattern
 # (my-worker.html + /api/user-worker/download/installer). Users get a
 # .bat on Windows or a .command-in-.zip on Mac/Linux, with a reset
@@ -10514,6 +10565,120 @@ echo.
 echo   Worker stopped. Press any key to close.
 pause >nul
 '''
+
+
+def _generate_chatgpt_windows_installer(
+    api_key: str, app_url: str, chatgpt_email: str = "",
+) -> str:
+    """Windows .bat installer for the ChatGPT image worker. Mirrors
+    _generate_image_windows_installer's structure (Python-finding, deps,
+    download bundle, launch). Uses .replace() placeholders (NOT f-strings)
+    so literal %VAR% in the .bat body needs no escaping.
+
+    Folder layout:
+      %USERPROFILE%\\KavenoChatGPTWorker\\
+        chatgpt_image_worker.py  (+ 6 more bundle files)
+    """
+    files = sorted(_CHATGPT_WORKER_FILES)
+    # curl.exe download line per bundle file (Windows 10+ ships curl.exe).
+    dl_lines = "\n".join(
+        'echo         ' + f + '\n'
+        'curl.exe -fsSL "%APP_URL%/api/images/worker/download/chatgpt/' + f + '" -o "%WORKER_DIR%\\' + f + '"'
+        for f in files
+    )
+
+    template = r'''@echo off
+setlocal enabledelayedexpansion
+title KavenoBuilder ChatGPT Image Worker
+mode con: cols=64 lines=28
+color 1F
+
+echo.
+echo   ======================================================
+echo    KavenoBuilder ChatGPT Image Worker Setup
+echo   ======================================================
+echo.
+
+set "API_KEY=__API_KEY__"
+set "APP_URL=__APP_URL__"
+set "CHATGPT_EMAIL=__CHATGPT_EMAIL__"
+set "WORKER_DIR=%USERPROFILE%\KavenoChatGPTWorker"
+set "PY="
+
+echo   [1/5] Finding Python...
+
+where py >nul 2>nul
+if not errorlevel 1 (
+    for /f "tokens=*" %%p in ('py -c "import sys; print(sys.executable)" 2^>nul') do set "PY=%%p"
+    if defined PY goto :found_py
+)
+where python >nul 2>nul
+if not errorlevel 1 (
+    set "PY=python"
+    goto :found_py
+)
+for %%v in (313 312 311 310 39) do (
+    if exist "%LOCALAPPDATA%\Programs\Python\Python%%v\python.exe" (
+        set "PY=%LOCALAPPDATA%\Programs\Python\Python%%v\python.exe"
+        goto :found_py
+    )
+)
+echo         Not found - installing via winget...
+where winget >nul 2>nul
+if errorlevel 1 (
+    echo.
+    echo   ERROR: Python not found. Install from python.org/downloads
+    echo   Then double-click this file again.
+    echo.
+    pause
+    exit /b 1
+)
+winget install Python.Python.3.12 --accept-package-agreements --accept-source-agreements >nul 2>nul
+set "PATH=%LOCALAPPDATA%\Programs\Python\Python312;%LOCALAPPDATA%\Programs\Python\Python312\Scripts;%PATH%"
+set "PY=python"
+
+:found_py
+echo         OK
+
+echo   [2/5] Installing packages (may take a minute)...
+!PY! -m pip install patchright requests --quiet --disable-pip-version-check 2>nul
+if errorlevel 1 (
+    !PY! -m pip install patchright requests --quiet --user --disable-pip-version-check 2>nul
+)
+echo         OK
+
+echo         Installing Chromium for Patchright (first time only, ~150MB)...
+!PY! -m patchright install chromium >nul 2>nul
+echo         OK
+
+echo   [3/5] Downloading worker bundle...
+if not exist "%WORKER_DIR%" mkdir "%WORKER_DIR%"
+__DL_LINES__
+echo         OK
+
+echo   [4/5] Ready.
+echo.
+echo   ======================================================
+echo    Setup complete! Starting ChatGPT worker...
+echo   ======================================================
+echo.
+echo   Chrome will open. Log in to ChatGPT ONCE if prompted,
+echo   then keep this window open while generating.
+echo   Check status: %APP_URL%/
+echo.
+
+cd /d "%WORKER_DIR%"
+!PY! "%WORKER_DIR%\chatgpt_image_worker.py" --api-url %APP_URL% --api-key %API_KEY% --chatgpt-email %CHATGPT_EMAIL%
+
+echo.
+echo   Worker stopped. Press any key to close.
+pause >nul
+'''
+
+    return (template.replace("__DL_LINES__", dl_lines)
+                    .replace("__API_KEY__", api_key)
+                    .replace("__APP_URL__", app_url)
+                    .replace("__CHATGPT_EMAIL__", chatgpt_email))
 
 
 def _generate_image_unix_installer(
