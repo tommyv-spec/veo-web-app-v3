@@ -18653,8 +18653,12 @@ Ambient: same kitchen room tone, soft pour sound.
                 const focusInside = !!(ae && body.contains(ae) && ae !== document.body);
                 const hoverInside = !!body.matches(':hover') || !!body.querySelector(':hover');
                 const userInteracting = focusInside || hoverInside;
-                const stillOffline = !isOnline;
-                if (userInteracting && stillOffline && launcherIsShowing) {
+                // Skip the destructive re-render whenever the user is actively
+                // in the worker panel — regardless of which worker is online.
+                // The ChatGPT setup input lives here too, so gating on the image
+                // worker being offline wiped it mid-type when the image worker
+                // was online (launcherIsShowing already covers #chatgptWorkerEmail).
+                if (userInteracting && launcherIsShowing) {
                     // Skip this tick — preserve the open dropdown / focused
                     // input / hovered button. Keep the lightweight online
                     // indicator in sync.
