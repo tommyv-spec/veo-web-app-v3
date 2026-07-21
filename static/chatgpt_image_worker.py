@@ -124,7 +124,8 @@ def _scan_pending(watch_dir):
         if os.path.exists(jp.replace(".json", ".done.json")):
             continue
         try:
-            job = json.load(open(jp, encoding="utf-8"))
+            with open(jp, encoding="utf-8") as _f:
+                job = json.load(_f)
         except Exception:
             continue
         if _is_chatgpt_job(job):
@@ -132,8 +133,8 @@ def _scan_pending(watch_dir):
     return out
 
 def _write_done(job_path, payload):
-    open(job_path.replace(".json", ".done.json"), "w", encoding="utf-8").write(
-        json.dumps(payload))
+    with open(job_path.replace(".json", ".done.json"), "w", encoding="utf-8") as _f:
+        _f.write(json.dumps(payload))
 
 def _process_platform_job(page, job_path, job):
     """Generate ONE image (variants clamped to 1) and write the .done.json."""
@@ -162,7 +163,8 @@ def watch_mode(watch_dir, poll_s=5):
             while True:
                 for jp in _scan_pending(watch_dir):
                     try:
-                        job = json.load(open(jp, encoding="utf-8"))
+                        with open(jp, encoding="utf-8") as _f:
+                            job = json.load(_f)
                     except Exception:
                         continue
                     claim = jp.replace(".json", ".claim")
@@ -171,11 +173,13 @@ def watch_mode(watch_dir, poll_s=5):
                         os.close(fd)
                     except FileExistsError:
                         continue
-                    _process_platform_job(page, jp, job)
                     try:
-                        os.remove(claim)
-                    except OSError:
-                        pass
+                        _process_platform_job(page, jp, job)
+                    finally:
+                        try:
+                            os.remove(claim)
+                        except OSError:
+                            pass
                     jitter(4.0, 9.0)
                 _t.sleep(poll_s)
         finally:

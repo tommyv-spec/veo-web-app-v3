@@ -237,11 +237,10 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
         pass
     if not submitted:
         comp.press("Enter")
-    import time as _t
-    deadline = _t.time() + gen_timeout_s
+    deadline = time.time() + gen_timeout_s
     img = None
-    while _t.time() < deadline:
-        img = _wait_generation(page, timeout_s=min(15, int(deadline - _t.time()) + 1))
+    while time.time() < deadline:
+        img = _wait_generation(page, timeout_s=min(15, int(deadline - time.time()) + 1))
         cur = page.locator(SEL["gen_img"]).count()
         if img is not None and cur > baseline and page.locator(SEL["stop_btn"]).count() == 0:
             break
