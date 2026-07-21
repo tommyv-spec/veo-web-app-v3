@@ -1591,6 +1591,14 @@ def _node_has_chain_dependency(node) -> bool:
     return False
 
 
+def _node_eligible_for_backend(node, backend) -> bool:
+    """Routing: the chatgpt backend takes ONLY base images (no chain dependency);
+    banana / default takes everything (base + dependent)."""
+    if (backend or "banana") == "chatgpt":
+        return not _node_has_chain_dependency(node)
+    return True
+
+
 def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
     """v581: explicit reference bindings are written into the markdown body
     by the author. The platform no longer prepends a manifest header.
@@ -10787,6 +10795,7 @@ def worker_get_pending_job(
     worker_id: Optional[str] = None,
     prefer_batch: Optional[str] = None,
     exclude: Optional[str] = None,
+    backend: Optional[str] = None,
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db_session),
 ):
@@ -10868,7 +10877,12 @@ def worker_get_pending_job(
             )
             if exclude_ids:
                 q = q.filter(ImageNode.id.notin_(exclude_ids))
-            node = q.order_by(ImageNode.created_at.asc()).first()
+            # backend routing (chatgpt = base nodes only): iterate the ordered
+            # candidates and pick the first eligible one instead of blind .first()
+            for cand in q.order_by(ImageNode.created_at.asc()):
+                if _node_eligible_for_backend(cand, backend):
+                    node = cand
+                    break
 
     # Fall back to any queued node if no same-batch match (or no preference)
     if node is None:
@@ -10878,7 +10892,10 @@ def worker_get_pending_job(
         )
         if exclude_ids:
             q = q.filter(ImageNode.id.notin_(exclude_ids))
-        node = q.order_by(ImageNode.created_at.asc()).first()
+        for cand in q.order_by(ImageNode.created_at.asc()):
+            if _node_eligible_for_backend(cand, backend):
+                node = cand
+                break
 
     if node is None:
         return {"job": None}
