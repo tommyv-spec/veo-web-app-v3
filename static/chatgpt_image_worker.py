@@ -199,12 +199,27 @@ def main():
     ap.add_argument("--watch-dir", help="override the _image_jobs path")
     ap.add_argument("--api-url", help="HTTP-pull mode: base URL of the Render platform")
     ap.add_argument("--api-key", help="HTTP-pull mode: worker API key (Bearer)")
+    ap.add_argument("--chatgpt-email", help="pull a fresh ChatGPT session from the "
+                    "Chrome profile logged into this email (non-disruptive, reuses "
+                    "the Flow-worker netlog) before launching the browser")
     args = ap.parse_args()
 
     if args.user_data_dir:
         backend.USER_DATA_DIR = args.user_data_dir
     if args.profile_directory:
         backend.PROFILE_DIRECTORY = args.profile_directory
+
+    # Seed fresh ChatGPT cookies from the operator's account BEFORE any browser
+    # launch, so inject_cookies (at launch) picks them up. Non-disruptive: closes
+    # only the owning Chrome channel, never a blanket chrome kill. On miss we warn
+    # and continue — the existing .chatgpt_cookies.json may still be valid.
+    if args.chatgpt_email:
+        import chatgpt_session_pull
+        ok = chatgpt_session_pull.pull_chatgpt_cookies(args.chatgpt_email, COOKIES_FILE)
+        if not ok:
+            log(f"WARNING: ChatGPT session pull for {args.chatgpt_email!r} did not "
+                f"capture a session-token; continuing with existing cookies "
+                f"({COOKIES_FILE}) which may still be valid.")
 
     if args.api_url and args.api_key:
         import socket
