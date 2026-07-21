@@ -3534,7 +3534,7 @@ And every Image prompt MUST close with this exact tag:
 Natural ultra-realistic colors, deep focus.
 ```
 
-After the closing tag, the prompt's LAST line is `Aspect ratio 9:16.` — the house field-order template's final sentence (see §"Image prompt conventions" → Framing + `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §1).
+After the closing tag, the prompt's LAST line is `Aspect ratio 9:16.` — the house short six-block template's final sentence (see §"Image prompt conventions" → Framing + `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §1).
 
 This pair — opener style-lock + closing tag — anchors Banana 2 to the corpus UGC aesthetic. Without it, Banana 2 defaults to studio-clean which doesn't match what's already shipping on viral accounts. (The original v603 strings said "vibrant natural HDR daylight" / "iPhone HDR colors" — retired 2026-06-11 per the house standard: HDR-punchy color reads as an ad, not UGC. Colors stay ultra-realistic, not oversaturated, not too warm or cold.)
 
@@ -4440,7 +4440,7 @@ Generic short forms like `the product` or `the bottle` work too but are less spe
 See the **Product frames** section below the isolated-reference rule for the full per-scene decision flow.
 
 ### Framing — describe composition; close with the aspect-ratio line
-End every image prompt with `Aspect ratio 9:16.` as its FINAL sentence — that is the closing line of the house field-order template (`wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §1; the older "do NOT specify aspect ratio" guidance is retired). Beyond that one closing line, don't lean on aspect ratio to do composition work. Describe **composition** — how the main subject and other elements occupy the frame. Match the framing 1:1 to what the source video shows in that beat.
+End every image prompt with `Aspect ratio 9:16.` as its FINAL sentence — that is the closing line of the house short six-block template (`wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §1; the older "do NOT specify aspect ratio" guidance is retired). Beyond that one closing line, don't lean on aspect ratio to do composition work. Describe **composition** — how the main subject and other elements occupy the frame. Match the framing 1:1 to what the source video shows in that beat.
 
 Be specific about where things sit:
 - "His shoulders nearly span the full width of the frame"
@@ -7028,7 +7028,7 @@ Use the uploaded character reference image for the main character.
 Negatives: No desk visible. No top-down camera angle. No prop sinking to the lower-third. No balanced two-shot — the silicone teaching models dominate the center of the frame. No firm diseased model. The varicocele veins MUST be EXTREME and highly visible. No matching pair — the visible pathology contrast IS the entire teaching purpose. No sexualized framing. No erotic context. No bedroom or non-clinical setting. The anatomical models are silicone medical-school teaching props for clinical demonstration, not real flesh.
 ```
 
-Patterns active (8 of 18): #1 anatomical-model framing + #3 material spec ("silicone" / "demonstration models") + #4 educational-purpose tag ("for clinical varicocele teaching reference") + #6 persona-holding-model + #7 dual-contrast composition + #8 chest-level handling + #9 clinical setting reinforcement + #10 background blur + #11 persona-attention discipline + #12 medical-jargon anchor ("visible epididymis and vas deferens") + #13 anti-sexualization negatives stack. ~340w body, 11 negative clauses (within v736h ceiling). Renders consistently on Banana 2 + Veo Fast.
+Patterns active (8 of 18): #1 anatomical-model framing + #3 material spec ("silicone" / "demonstration models") + #4 educational-purpose tag ("for clinical varicocele teaching reference") + #6 persona-holding-model + #7 dual-contrast composition + #8 chest-level handling + #9 clinical setting reinforcement + #10 background blur + #11 persona-attention discipline + #12 medical-jargon anchor ("visible epididymis and vas deferens") + #13 anti-sexualization negatives stack. Historical ~340w body with 11 negative clauses: it passed the old ceiling but FAILS v736h.1 and must not be copied into a new/modified prompt.
 
 #### v738 Pre-Flight Checklist Section 5 amendment
 
@@ -11708,7 +11708,7 @@ The DNA does not change with niche. The hero object / texture / trend / force-ve
 | **v736e** (dead-center composition) | 1 | **amendment** |
 | **v736f** (active-hands mandate) | 2 | **amendment** |
 | **v736g** (face-above-OR-beside) | 4 | **amendment** |
-| **v736h** (prompt economy) | discipline gate (Banana 2 attention budget) | **amendment** |
+| **v736h.1** (short-prompt economy) | discipline gate (Banana 2 attention budget) | **2026-07-21 update** |
 
 #### v736e — Dead-center symptom composition rule
 
@@ -11748,9 +11748,29 @@ Required `[Composition]` block phrase: `the main character's face is sharply vis
 
 Required Negatives: `No persona crop on the face` + `No persona-hidden-behind-prop` + `No persona-displaced-to-corner`.
 
-#### v736h — Prompt-economy discipline (Banana 2 attention budget)
+#### v736h.1 — Short-prompt economy (Banana 2 attention budget; operator 2026-07-21)
 
-**Hard ceiling**: Image prompt body (the `[Composition]` → `[Tech]` + Negatives content under `### Image N`) MUST stay under 400 words. Ideal range 200-350. Past ~300 words Banana 2 fidelity drops because Banana 2's first-tokens-weighted-heaviest planner pushes hero description into low-attention zone (`wiki/generation/nano-banana-prompting.md:194` — "long text + photos fight each other").
+**Forward-only update.** The old v736h target of 200-350 words and 400-word ceiling is superseded for every new or modified Image prompt. Existing shipped prompts are not migrated in bulk.
+
+**Length gate**:
+
+- Simple one-action HOOK: target **80-150 words**.
+- Complex two-person or A/B frame: target **120-200 words**.
+- More than **200 words**: WARN and run the compression test below.
+- More than **250 words**: FAIL. The model is being asked to solve too many details at once.
+
+**Six-block render order** — use one short sentence per block when possible:
+
+1. **Camera** — format, lens, view.
+2. **Hero** — main object/person, size, state, exact position.
+3. **Action** — one visible action and the exact contact/landing point.
+4. **Character relationship** — where the supporting person is and what they touch/hold.
+5. **Composition** — no more than three depth layers + eye path (`first X, then Y, then Z`).
+6. **Look** — natural light, sharp deep focus, smartphone realism, aspect ratio.
+
+**Detail budget**: no more than three important visual traits per subject. Use one brand marker unless the brand itself is the hero. Keep the operator's literal action, hero scale, left/right/front/behind relationships, contact point, eye path, camera, and aspect ratio. Everything else must earn its place.
+
+**Compression test**: if removing a phrase does not materially change the visible frame, remove it. If the phrase explains why a choice matters rather than what the camera sees, move it to §0, an HTML comment, or the action note.
 
 **Hard bans inside Image prompt body**:
 
@@ -11766,7 +11786,7 @@ Required Negatives: `No persona crop on the face` + `No persona-hidden-behind-pr
 
 | Artifact | Target | Discipline | Length |
 |---|---|---|---|
-| Image prompt body | Banana 2 still frame (start_frame) | LEAN — single-state composition, affirmative state, no separate negative block, no meta, no beats | ≤400w hard ceiling, 200-350w ideal |
+| Image prompt body | Banana 2 still frame (start_frame) | LEAN — six blocks, single state/action, no more than three depth layers, no separate negative block, no meta, no beats | 80-150w simple; 120-200w complex; WARN >200w; FAIL >250w |
 | Scene action_note + line + action_arc | Veo motion clip (8s) | VERBOSE-OK — beat structure, force-verb chain, lip-sync discipline | no ceiling — beats explicit |
 
 **For Banana 2 still**: `exaggerated shocked expression` outperforms `mouth open mid-utterance` because Banana 2's training prior is stronger on staged expressions. v721 lip-sync language (`mouth open mid-utterance, eyes locked to lens`) is for VEO RENDER lip-sync — lives in Scene action_note, NOT Image body.
@@ -11782,19 +11802,18 @@ Required Negatives: `No persona crop on the face` + `No persona-hidden-behind-pr
 | 4 (face above) | "face is sharply visible just above the prop at chest-up framing" | "(per Invariant 4 + v736g)" |
 | 5 (background sharp) | "background remains fully sharp" | "(per v713 background discipline)" |
 
-**Pre-output validation gate (v736h)**:
+**Pre-output validation gate (v736h.1)**:
 
 ```bash
 # Word-count check on Image prompt body
 python -c "
 import re
 t = open('videos/<file>.md', encoding='utf-8').read()
-for m in re.finditer(r'^### Image \d+(.+?)(?=^###|\Z)', t, re.MULTILINE | re.DOTALL):
-    body = m.group(1)
-    body = re.sub(r'```.*?```', '', body, flags=re.DOTALL)  # strip fenced prompt block
-    words = len(body.split())
-    print(f'Image body words: {words} (ceiling 400, ideal 200-350)')
-    assert words <= 400, f'v736h FAIL — Image body {words} words exceeds 400 ceiling'
+for m in re.finditer(r'^### Image (\d+).*?^- \*\*Image prompt:\*\*\s*\n```[^\n]*\n(.*?)\n```', t, re.MULTILINE | re.DOTALL):
+    words = len(re.findall(r"\b[\w'-]+\b", m.group(2)))
+    level = 'PASS' if words <= 200 else ('WARN' if words <= 250 else 'FAIL')
+    print(f'Image {m.group(1)} prompt: {words} words ({level}; target 80-150 simple / 120-200 complex; ceiling 250)')
+    assert words <= 250, f'v736h.1 FAIL — Image {m.group(1)} prompt has {words} words; ceiling 250'
 "
 
 # Meta-commentary ban
@@ -11814,14 +11833,14 @@ grep -nE 'Across \d+ seconds|throughout the clip|\[Start beat|\[Mid-clip beat|\[
 
 | Version | Words in Image body | Banana 2 fidelity |
 |---|---|---|
-| Original lean draft | ~250w | high — dual organs cohesive, contrast clear, dripping fluid rendered |
+| Original lean draft (legacy test) | ~250w | high for that older dual-organ task, but now the absolute ceiling rather than the target |
 | Bloated rewrite (v736 a-d only, before v736h) | ~700w | low — dual organs separated, contrast diluted, persona oddly displaced |
 
-The lean original wins. v736h codifies why.
+The leaner version wins. v736h.1 now pushes the author to compress further before generation.
 
-**Touched (v736.1 amendment)**: this section in `code/template_reference.md`; updated `wiki/patterns/conventions.md` row to mention amendments; updated `code/innovate_bundle.sh` + `code/lift_bundle.sh` + `code/create_bundle.sh` V736 sections to add v736e/f/g/h sub-rules + word-count gate; updated `CLAUDE.md` quickref; `wiki/log.md` timeline entry. Migration zero required — pre-v736.1 `videos/*.md` valid (advisory lint flag only). New / modified `videos/*.md` from this commit forward MUST satisfy v736e + v736f + v736g (composition discipline) + v736h (prompt economy ceiling 400w + meta-ban + beat-ban inside Image body).
+**Touched (v736h.1 update)**: this section; `wiki/concepts/prompting/realistic-ugc-prompt-templates.md`; rule indexes/checklist; create/lift/innovate bundles; authoring auditor; `wiki/log.md`. Migration zero required — existing shipped `videos/*.md` remain valid until their Image prompts are modified. New / modified Image prompts MUST satisfy the short targets, 250-word ceiling, six-block order, three-layer limit, detail budget, meta-ban, and beat-ban.
 
-**Verification (mandatory before claiming v736.1 amendment correctly applied)**: open freshly-authored `videos/*.md` → confirm Image body word count ≤400 (run word-count check above) → grep Image bodies for `(per Invariant` / `(per v[0-9]+` — expect zero hits → grep Image bodies for `[Start beat` / `Across \d+ seconds` — expect zero hits inside `### Image N` blocks → confirm Scene action_note retains beat structure → confirm sandbox section preserved with 5 entries (3 struck + 1 SELECTED). Will not claim v736h applied until evidence per CLAUDE.md hard rule.
+**Verification (mandatory before claiming v736h.1 applied)**: open the freshly-authored Image prompt → confirm the correct target band and ≤250 words → confirm six-block render order, no more than three depth layers, one visible action/contact point, and eye path → grep for meta/beat language inside the fence (expect zero) → confirm motion, dialogue, caption placement, citations, and explanations live outside the Image prompt.
 
 
 ### v738 — Pre-Flight Checklist (mandatory thinking-prelude before authoring artifact)
@@ -11876,7 +11895,7 @@ The lean original wins. v736h codifies why.
 **Why the IF/THEN branch matters**: pre-2026-05-15 Section 5 was a flat command "Any forbidden v702 tokens? → swap" that triggered the sanitization reflex indiscriminately. Decoders following the checklist would incorrectly sanitize source-faithful anatomical descriptions, losing the corpus-grade prop specificity that downstream lifts need (the v705 prop-specificity collapse class). Output-type branch hardcodes the carve-out so decoders can't accidentally route generate-side rules onto observation prose.
 
 ### 6. Composition discipline check (v713 + v715 + v716/v717 + v720 + v736e/f/g/h + v718d Anti-Platonic Gate)
-- HOOK image: dead-center symptom (v736e) + persona hands actively manipulating (v736f) + face above-or-beside (v736g) + Image body ≤400w (v736h)?
+- HOOK image: dead-center symptom (v736e) + persona hands actively manipulating (v736f) + face above-or-beside (v736g) + six-block Image prompt ≤250w (v736h.1)?
 - B-roll images post-v737 decoupling: pure b-roll, no persona in [Subject]/[Composition]/[Action]?
 - Anchor image (if v698A.1 fires): role: voiceover_anchor + cast: persona handle + chest-up framing + open-palm gesture?
 - **Anti-Platonic Gate (v718d, NEW 2026-05-16)**: for EVERY hero object in this artifact's Image blocks, ask — **"Does the hero object in this shot look exactly like a normal, everyday version of that object?"** If YES → LOOK CLOSER. Viral hooks rely on ABNORMALITY. Identify how the object's state, texture, structure, volume, or color deviates from the default Platonic baseline (the version a stock-image library would show). Per v718d 4-axis check: Surface/Texture / Structural Integrity / Volume/Shape / Color/Illumination — at least ONE axis MUST deviate from the default baseline for HOOK + diagnostic-reveal scenes. If all 4 axes match the default Platonic version, the HOOK has no visceral payoff and the scroll-stop fails. Re-amp via the Pattern 21 + v716 + v717 + v719 + Pattern 23 diagnostic-anchor stack until at least ONE axis deviates measurably.

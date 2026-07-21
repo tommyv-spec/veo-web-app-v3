@@ -1329,15 +1329,21 @@ V736 — SPECTACLE-OVER-LOGIC DISCIPLINE (apply BEFORE writing markdown):
     Required Negatives: "No persona crop on the face. No persona-
     hidden-behind-prop. No persona-displaced-to-corner."
 
-  v736h — PROMPT-ECONOMY DISCIPLINE (the most-violated sub-rule):
+  v736h.1 — SHORT-PROMPT ECONOMY (the most-violated sub-rule):
 
-    HARD CEILING: Image prompt body (the [Composition] -> [Tech]
-    + Negatives content under "### Image N") MUST stay under 400
-    words. Ideal range 200-350. Past ~300w Banana 2 fidelity drops
-    because Banana 2's first-tokens-weighted-heaviest planner
-    pushes hero description into low-attention zone.
+    LENGTH: simple one-action HOOK 80-150 words; complex two-person
+    or A/B frame 120-200. WARN above 200. FAIL above 250. The old
+    200-350 target and 400-word ceiling are retired for new/modified
+    Image prompts because too many instructions dilute the hero.
     See wiki/generation/nano-banana-prompting.md line 194 ("long
     text + photos fight each other").
+
+    SIX-BLOCK ORDER: camera -> hero -> one action/contact point ->
+    character relationship -> max-three-layer eye path -> natural
+    smartphone look + aspect ratio. Use at most three important
+    visual traits per subject and one brand marker unless brand is
+    the hero. If deleting a phrase does not change the visible frame,
+    delete it.
 
     HARD BANS inside Image prompt body:
 
@@ -1370,8 +1376,8 @@ V736 — SPECTACLE-OVER-LOGIC DISCIPLINE (apply BEFORE writing markdown):
 
     IMAGE vs SCENE SEPARATION (the structural fix):
 
-      Image prompt body -> Banana 2 still frame (LEAN, single-state,
-        tight negatives, no meta, no beats, <=400 words).
+      Image prompt body -> Banana 2 still frame (LEAN, six blocks,
+        max three depth layers, no meta, no beats, <=250 words).
       Scene action_note + line + action_arc -> Veo motion clip
         (VERBOSE-OK with beats + force-verb chain + lip-sync
         discipline, no ceiling).
@@ -1393,11 +1399,12 @@ V736 — SPECTACLE-OVER-LOGIC DISCIPLINE (apply BEFORE writing markdown):
       Invariant 5 (background blurred) -> "background fully blurred".
         DROP listing every blurred element.
 
-    PRE-OUTPUT GATES (v736h, mandatory):
+    PRE-OUTPUT GATES (v736h.1, mandatory):
 
       gate 1 — word-count check on each "### Image N" body:
-        python -c "import re; t=open('videos/<file>.md',encoding='utf-8').read(); [print(f'Image {i}: {len(re.sub(r\"\`\`\`.*?\`\`\`\", \"\", m.group(1), flags=re.DOTALL).split())}w (ceiling 400)') for i,m in enumerate(re.finditer(r'^### Image \d+(.+?)(?=^###|\Z)', t, re.MULTILINE|re.DOTALL))]"
-        Expect: each Image body <=400w.
+        Count words inside each fenced Image prompt.
+        Expect: simple 80-150w; complex 120-200w; WARN >200w;
+        FAIL >250w.
 
       gate 2 — meta-commentary ban inside Image bodies:
         grep -nE '\(per (Invariant|v[0-9]+)' videos/<file>.md
@@ -1411,7 +1418,7 @@ V736 — SPECTACLE-OVER-LOGIC DISCIPLINE (apply BEFORE writing markdown):
   Validated 2026-05-14 via dual-prostate HOOK A/B test on Banana 2:
   lean ~250w original beat bloated ~700w rewrite on Banana 2 fidelity
   (dual organs cohesive vs separated; contrast clear vs diluted;
-  dripping fluid rendered vs lost). v736h codifies the lesson.
+  dripping fluid rendered vs lost). v736h.1 codifies the lesson.
 
 INNOVATION-SPECIFIC ANTI-PATTERNS (do NOT replicate):
 
@@ -1589,7 +1596,7 @@ visual_delta MORPHOLOGICAL-CHANGE MANDATE (v718d): every - **visual_delta:** fie
     8. Composition discipline check (v713 + v715 + v716/v717 + v720 +
        v736e/f/g/h)
        — HOOK: dead-center + active hands + face above-or-beside +
-       body <=400w. B-roll: pure (no persona). Anchor: role +
+       body <=250w. B-roll: pure (no persona). Anchor: role +
        cast + chest-up + open-palm.
 
     9. Image cardinality + use audit (v594 + v580)

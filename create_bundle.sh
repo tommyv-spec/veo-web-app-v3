@@ -1979,13 +1979,20 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
        "No persona crop on the face. No persona-hidden-behind-prop.
        No persona-displaced-to-corner."
 
-     v736h — PROMPT-ECONOMY DISCIPLINE (the most-violated sub-rule):
+     v736h.1 — SHORT-PROMPT ECONOMY (the most-violated sub-rule):
 
-       HARD CEILING: Image prompt body (the [Composition] -> [Tech] +
-       Negatives content under "### Image N") MUST stay under 400
-       words. Ideal range 200-350. Banana 2 fidelity drops past 300w
+       LENGTH: simple one-action HOOK 80-150 words; complex two-person
+       or A/B frame 120-200. WARN above 200. FAIL above 250. The old
+       200-350 target and 400-word ceiling are retired for new/modified
+       Image prompts. Banana 2 fidelity drops as instructions stack
        per wiki/generation/nano-banana-prompting.md line 194 ("long
        text + photos fight each other").
+
+       SIX-BLOCK ORDER: camera -> hero -> one action/contact point ->
+       character relationship -> max-three-layer eye path -> natural
+       smartphone look + aspect ratio. Use at most three important
+       visual traits per subject and one brand marker unless brand is
+       the hero. Delete any phrase that does not change the visible frame.
 
        HARD BANS inside Image prompt body:
          - Meta-commentary about rules ("per Invariant 1" / "per
@@ -2013,7 +2020,7 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
 
        IMAGE vs SCENE SEPARATION (the structural fix):
          Image prompt body -> Banana 2 still frame (LEAN, single-
-           state, tight negatives, no meta, no beats, <=400w).
+           state, max three depth layers, no meta, no beats, <=250w).
          Scene action_note + line + action_arc -> Veo motion clip
            (VERBOSE-OK with beats + force-verb chain + lip-sync,
            no ceiling).
@@ -2035,8 +2042,8 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
          Invariant 5 (background blurred) -> "background fully
            blurred". DROP listing every blurred element.
 
-     PRE-OUTPUT VALIDATION (v736.1):
-       YES Each "### Image N" body word count <=400 (ideal 200-350)?
+     PRE-OUTPUT VALIDATION (v736h.1):
+       YES Each "### Image N" prompt <=250w (simple 80-150; complex 120-200)?
        YES Zero "(per Invariant" / "(per v[0-9]+" tags inside Image
            bodies (audit tags are lint-only)?
        YES Zero "[Start beat" / "Across \d+ seconds" / "throughout

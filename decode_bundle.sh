@@ -1716,6 +1716,13 @@ produces an image that does NOT match source.
 v712 carves out decode side: raw/decoded_*.md Image prompt bodies use
 relational grammar anchored to SUBJECTS not frame grid.
 
+v736h.1 scope note (2026-07-21): its 80-200 word targets and 250-word
+ceiling govern Image prompts sent to Banana 2 in new/modified builds.
+Decode Image prompts are evidence records, not generation prompts, so do
+not delete an observed person/object/relationship merely to hit that word
+target. Still keep them free of rule commentary, citations, and motion
+beats that are not visible in the single frame.
+
 GRAMMAR ORDER (decode-side Image prompt body):
 
   1. Subject identity + visible features (race / age / build / hair /
