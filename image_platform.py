@@ -1575,6 +1575,22 @@ def _classify_edge_for_manifest(edge: "ImageEdge") -> str:
     return "other"
 
 
+def _node_has_chain_dependency(node) -> bool:
+    """True if the node builds on another node's GENERATED output (a chain edge),
+    i.e. it is a DEPENDENT image. Upload edges (persona/product refs, kind set) do
+    NOT count. Base images (no chain edge) return False."""
+    for e in getattr(node, "parent_edges", []) or []:
+        kind = getattr(e, "kind", None)
+        role = (getattr(e, "role", "") or "")
+        if kind:  # upload-backed edge (persona/product) -> not a chain dependency
+            continue
+        if role.startswith("variant_chain:") or role.startswith("chain_from_image_"):
+            return True
+        if not kind:  # kind NULL + not an upload role: treat as chain (conservative)
+            return True
+    return False
+
+
 def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
     """v581: explicit reference bindings are written into the markdown body
     by the author. The platform no longer prepends a manifest header.
