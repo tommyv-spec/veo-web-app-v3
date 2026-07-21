@@ -197,6 +197,8 @@ def main():
     ap.add_argument("--profile-directory", help="sub-profile to use, e.g. 'Profile 18'")
     ap.add_argument("--watch", action="store_true", help="poll the platform _image_jobs folder")
     ap.add_argument("--watch-dir", help="override the _image_jobs path")
+    ap.add_argument("--api-url", help="HTTP-pull mode: base URL of the Render platform")
+    ap.add_argument("--api-key", help="HTTP-pull mode: worker API key (Bearer)")
     args = ap.parse_args()
 
     if args.user_data_dir:
@@ -204,6 +206,17 @@ def main():
     if args.profile_directory:
         backend.PROFILE_DIRECTORY = args.profile_directory
 
+    if args.api_url and args.api_key:
+        import socket
+        from chatgpt_http_pull import run as http_run
+        sync_playwright, _ = _import_playwright()
+        with sync_playwright() as p:
+            ctx, page = launch(p)
+            try:
+                http_run(args.api_url, args.api_key, page, socket.gethostname())
+            finally:
+                ctx.close()
+        return
     if args.watch:
         wd = args.watch_dir or os.environ.get("IMAGE_JOBS_DIR") or os.path.join(
             os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "..", "..", "data")), "_image_jobs")
