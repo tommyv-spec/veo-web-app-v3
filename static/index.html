@@ -18517,6 +18517,16 @@ Ambient: same kitchen room tone, soft pour sound.
                     window._imgForceShowSetup = false;
                 }
 
+                // Second light: the ChatGPT image worker, distinct from the
+                // flow worker above. Mirrors the primary indicator's markup.
+                const chatgptOnline = !!s.chatgpt_worker_online;
+                const chatgptIndicator = chatgptOnline
+                    ? '<span style="color:var(--success);">ChatGPT worker: ● Online</span>'
+                    : '<span style="color:var(--error);">ChatGPT worker: ● Offline</span>';
+                const chatgptAgeStr = s.chatgpt_worker_heartbeat_age_seconds != null
+                    ? ` <span style="color:var(--text-muted);">(last heartbeat ${s.chatgpt_worker_heartbeat_age_seconds}s ago${s.chatgpt_worker_id ? ' · ' + s.chatgpt_worker_id : ''})</span>`
+                    : '';
+
                 const queueLine = (s.queued || s.generating)
                     ? `<div style="margin-top:6px;">⏳ Queued: <strong>${s.queued}</strong> · Generating: <strong>${s.generating}</strong></div>`
                     : '';
@@ -18632,11 +18642,16 @@ Ambient: same kitchen room tone, soft pour sound.
                     if (onlineEl) {
                         onlineEl.innerHTML = indicator + ageStr;
                     }
+                    const chatgptEl = body.querySelector('[data-chatgpt-worker-online-line]');
+                    if (chatgptEl) {
+                        chatgptEl.innerHTML = chatgptIndicator + chatgptAgeStr;
+                    }
                     return;
                 }
 
                 body.innerHTML = `
                     <div data-worker-online-line>${indicator}${ageStr}</div>
+                    <div data-chatgpt-worker-online-line style="margin-top:4px;">${chatgptIndicator}${chatgptAgeStr}</div>
                     ${onlineControls}
                     ${queueLine}
                     ${helpLine}

@@ -10488,6 +10488,11 @@ WORKER_HEARTBEAT_STALE_SECONDS = 20  # v545: loosened from 10s. The 10s
 # within one UI poll cycle (~2s).
 
 
+def _worker_kind(worker_id) -> str:
+    """Classify an HTTP worker by id prefix. ChatGPT workers use 'chatgpt-<host>'."""
+    return "chatgpt" if (worker_id or "").startswith("chatgpt-") else "flow"
+
+
 @router.get("/worker/status")
 def worker_status(
     db: Session = Depends(get_db_session),
@@ -10572,6 +10577,32 @@ def worker_status(
         and http_heartbeat_age < WORKER_HEARTBEAT_STALE_SECONDS
     )
 
+    # ChatGPT worker: scan fresh heartbeat rows (within the stale window) and
+    # surface the freshest one whose worker_id classifies as a chatgpt worker,
+    # so the UI can show a SECOND online/offline light distinct from flow.
+    chatgpt_worker_online = False
+    chatgpt_worker_id = None
+    chatgpt_worker_heartbeat_age = None
+    try:
+        fresh_cutoff = datetime.utcnow() - timedelta(seconds=WORKER_HEARTBEAT_STALE_SECONDS)
+        fresh_rows = (
+            db.query(ImageWorkerHeartbeat)
+            .filter(ImageWorkerHeartbeat.user_id == current_user.id)
+            .filter(ImageWorkerHeartbeat.last_heartbeat_at >= fresh_cutoff)
+            .order_by(ImageWorkerHeartbeat.last_heartbeat_at.desc())
+            .all()
+        )
+        for row in fresh_rows:
+            if row.last_heartbeat_at and _worker_kind(row.worker_id) == "chatgpt":
+                chatgpt_worker_online = True
+                chatgpt_worker_id = row.worker_id
+                chatgpt_worker_heartbeat_age = round(
+                    (datetime.utcnow() - row.last_heartbeat_at).total_seconds(), 1
+                )
+                break
+    except Exception:
+        db.rollback()
+
     return {
         "queued": n_queued,
         "generating": n_generating,
@@ -10585,6 +10616,10 @@ def worker_status(
         "http_worker_online": http_online,
         "http_worker_id": http_worker_id,
         "http_worker_heartbeat_age_seconds": http_heartbeat_age,
+        # ChatGPT worker (second light, distinct from flow)
+        "chatgpt_worker_online": chatgpt_worker_online,
+        "chatgpt_worker_id": chatgpt_worker_id,
+        "chatgpt_worker_heartbeat_age_seconds": chatgpt_worker_heartbeat_age,
     }
 
 
