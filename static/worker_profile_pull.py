@@ -464,16 +464,23 @@ def _close_target_profile_windows(user_data_dir, profile_folder, log=print, dry_
     if not name:
         log(f"  no display name for {profile_folder!r} -> cannot target its window")
         return 0
-    # Ambiguity guard: if two profiles share this avatar name, a close-by-name
-    # would close BOTH profiles' windows. Refuse rather than nuke the sibling.
-    sharing = _profiles_sharing_name(user_data_dir, name)
-    if len(sharing) > 1:
-        others = [p for p in sharing if p != profile_folder]
-        log(f"  AMBIGUOUS profile name {name!r}: shared by {sharing} — UIA cannot "
-            f"target only {profile_folder!r} without also closing {others}. "
-            f"Rename the target profile to a UNIQUE name in Chrome "
-            f"(profile menu -> Customize -> name) and retry. NOT closing anything.")
+    # Ambiguity guard: a close-by-name would close EVERY window whose avatar shows
+    # this name. That only harms a sibling profile if a same-named sibling is
+    # actually OPEN. So refuse ONLY when a same-named sibling is currently loaded
+    # (has lock-holders); if the siblings are closed, targeting by name is safe
+    # (only this profile has windows).
+    others = [p for p in _profiles_sharing_name(user_data_dir, name) if p != profile_folder]
+    loaded_others = [p for p in others
+                     if _profile_lock_holders(_profile_db_paths(user_data_dir, p))]
+    if loaded_others:
+        log(f"  AMBIGUOUS profile name {name!r}: also used by OPEN profile(s) "
+            f"{loaded_others} — closing by name would also close them. Rename the "
+            f"target profile to a unique name, or close {loaded_others} first. "
+            f"NOT closing anything.")
         return -1
+    if others:
+        log(f"  note: name {name!r} also used by {others}, but they are not open -> "
+            f"safe to close only {profile_folder!r}'s window(s).")
     folder = os.path.basename(os.path.dirname(os.path.normpath(user_data_dir)))
     needle = (os.sep + folder + os.sep).lower()
     try:

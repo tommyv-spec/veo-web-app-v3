@@ -28,8 +28,19 @@ def test_profiles_sharing_name_case_insensitive(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="UIA close is Windows-only")
-def test_close_refuses_ambiguous_name(tmp_path, monkeypatch):
+def test_close_refuses_when_samename_sibling_is_open(tmp_path, monkeypatch):
+    # A same-named sibling that is OPEN (non-empty lock-holders) -> refuse (-1).
     ud = _local_state(tmp_path, {"Default": "Tommaso", "Profile 21": "Tommaso"})
     monkeypatch.setattr(wpp, "_profile_display_name", lambda u, f: "Tommaso")
-    # ambiguous -> returns -1 sentinel WITHOUT closing anything (no PowerShell run)
+    monkeypatch.setattr(wpp, "_profile_lock_holders", lambda paths: {999})
     assert wpp._close_target_profile_windows(ud, "Default") == -1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="UIA close is Windows-only")
+def test_close_proceeds_when_samename_sibling_is_closed(tmp_path, monkeypatch):
+    # Sibling shares the name but is CLOSED (empty lock-holders) -> safe, proceed.
+    ud = _local_state(tmp_path, {"Default": "Tommaso", "Profile 21": "Tommaso"})
+    monkeypatch.setattr(wpp, "_profile_display_name", lambda u, f: "Tommaso")
+    monkeypatch.setattr(wpp, "_profile_lock_holders", lambda paths: set())
+    # proceeds past the guard into the (dry-run) UIA path -> returns >=0, not -1
+    assert wpp._close_target_profile_windows(ud, "Default", dry_run=True) != -1
