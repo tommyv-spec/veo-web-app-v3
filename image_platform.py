@@ -1628,6 +1628,18 @@ def _node_eligible_for_backend(node, backend) -> bool:
     return True
 
 
+def _seed_chatgpt_lane(node) -> None:
+    """Best-effort: on a BASE node (no chain dependency), open the ChatGPT lane so
+    a chatgpt worker will also render it. Skips dependent/chain nodes (Flow-only)
+    and never clobbers a lane already generating/ready/failed. Idempotent."""
+    if _node_has_chain_dependency(node):
+        return
+    if node.cg_status in (None, "queued"):
+        node.cg_status = "queued"
+        node.cg_claimed_by = None
+        node.cg_claimed_at = None
+
+
 def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
     """v581: explicit reference bindings are written into the markdown body
     by the author. The platform no longer prepends a manifest header.
@@ -2815,6 +2827,7 @@ def generate_node(
     node.chosen_variant_id = None
     node.error_message = None
     node.status = "queued"
+    _seed_chatgpt_lane(node)
     db.flush()
 
     try:
@@ -2856,6 +2869,7 @@ def regenerate_node(
     node.chosen_variant_id = None
     node.error_message = None
     node.status = "queued"
+    _seed_chatgpt_lane(node)
     db.flush()
 
     try:
@@ -6817,6 +6831,7 @@ def _import_scene_table_impl(
 
         if can_start:
             node.status = "queued"
+            _seed_chatgpt_lane(node)
             try:
                 write_generation_job(db, node)
                 queued_count += 1
