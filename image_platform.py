@@ -11496,10 +11496,18 @@ def worker_download_file(
     return FileResponse(p)
 
 
+def _variant_replaceable(v, backend) -> bool:
+    """A worker re-upload for `backend` may replace only AI variants of the SAME
+    backend. Manual variants and the other backend's variants are preserved."""
+    return (getattr(v, "source", "ai") or "ai") != "manual" and \
+           (getattr(v, "backend", "banana") or "banana") == (backend or "banana")
+
+
 @router.post("/worker/jobs/{node_id}/variants")
 def worker_upload_variants(
     node_id: int,
     files: List[UploadFile] = File(...),
+    backend: Optional[str] = "banana",
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db_session),
 ):
@@ -11525,7 +11533,12 @@ def worker_upload_variants(
     ).first()
     if not node:
         raise HTTPException(404, "Node not found")
-    if node.status != "generating":
+    # Dual-backend: a base node holds variants from BOTH backends at once. The
+    # banana lane owns node.status; the chatgpt lane owns node.cg_status. The
+    # "superseded" guards below must test the lane THIS upload belongs to.
+    is_cg = (backend or "banana") == "chatgpt"
+    lane_generating = (node.cg_status == "generating") if is_cg else (node.status == "generating")
+    if not lane_generating:
         # v757 — the node is no longer 'generating'. Only treat the worker's
         # upload as SUPERSEDED when there is actually a MANUAL variant to
         # protect: a user upload mid-flight sets status='ready' + a
@@ -11555,9 +11568,30 @@ def worker_upload_variants(
             f"variant — saving worker variants anyway (avoids empty-node 'no variants' failure)"
         )
 
-    # Clean any stale variants/files (defensive)
-    _delete_variant_files(node)
-    for v in list(node.variants):
+    # Scoped clean — remove ONLY this backend's AI variants (same-backend AI).
+    # The other backend's variants and any manual variant are preserved so a
+    # base node keeping e.g. 4 banana + 1 chatgpt is not clobbered by a
+    # single-lane re-upload. Mirrors the per-file removal in
+    # _delete_variant_files (R2 backup + local full-res + derived thumbs) but
+    # only for the replaceable subset — never the straggler glob sweep, which
+    # would take the other lane's files with it.
+    replaceable = [v for v in list(node.variants) if _variant_replaceable(v, backend)]
+    for v in replaceable:
+        try:
+            _storage_delete(v.image_path)
+            fp = images_root() / v.image_path
+            if fp.exists():
+                fp.unlink()
+        except Exception as ex:
+            log.warning(f"[image_platform] could not unlink variant file {v.image_path}: {ex}")
+        for thumb_rel in _thumb_rels_for(v.image_path):
+            try:
+                _storage_delete(thumb_rel)
+                tp = images_root() / thumb_rel
+                if tp.exists():
+                    tp.unlink()
+            except Exception as ex:
+                log.warning(f"[image_platform] could not unlink thumb {thumb_rel}: {ex}")
         db.delete(v)
     db.commit()
 
@@ -11610,7 +11644,8 @@ def worker_upload_variants(
         # node with ZERO variants → the completion POST marks it 'failed'
         # ("no variants uploaded"). That was the v754 regression. If there is no
         # manual variant, always insert so the node never ends up empty.
-        if node2.status != "generating":
+        lane_generating2 = (node2.cg_status == "generating") if is_cg else (node2.status == "generating")
+        if not lane_generating2:
             manual_exists = db2.query(ImageVariant).filter(
                 ImageVariant.node_id == node_id,
                 ImageVariant.source == "manual",
@@ -11618,18 +11653,20 @@ def worker_upload_variants(
             if manual_exists:
                 log.info(
                     f"[image_platform] Node {node_id} taken over during R2 phase "
-                    f"(status={node2.status}, manual variant present) — skipping {len(pending_variants)} worker variant row(s)"
+                    f"(status={node2.status}, cg_status={node2.cg_status}, manual variant present) — skipping {len(pending_variants)} worker variant row(s)"
                 )
                 return {"ok": True, "superseded": True, "saved_count": 0, "node_status": node2.status}
             log.info(
-                f"[image_platform] Node {node_id} status={node2.status} during R2 phase but no "
-                f"manual variant — inserting worker variants anyway (avoids empty-node 'no variants' failure)"
+                f"[image_platform] Node {node_id} lane not generating during R2 phase "
+                f"(status={node2.status}, cg_status={node2.cg_status}) but no manual variant — "
+                f"inserting worker variants anyway (avoids empty-node 'no variants' failure)"
             )
         for idx, filename, rel_str, target in pending_variants:
             v = ImageVariant(
                 node_id=node2.id,
                 variant_index=idx,
                 image_path=rel_str,
+                backend=(backend or "banana"),
             )
             db2.add(v)
             saved_count += 1
