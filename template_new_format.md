@@ -363,6 +363,19 @@
     forward MUST satisfy the v586 checklist. The v579 pipeline
     Stage 4 view-tool prompt is updated to walk the six blocks
     per frame.
+    v622 intensity-calibration amendment (2026-07-22): every new
+    decode MUST also emit this table under `## Adaptation-extraction`:
+
+      ### Hero-symptom intensity ledger
+      | Hero symptom / carrier | Literal observed scale + comparison anchor | Intensity | Exaggeration headroom |
+      |---|---|---|---|
+      | <symptom> | <frame/body/object relation> | <1/5-5/5> | <YES or NO> |
+
+    Use one row per hero symptom. `big`, `large`, or `bloated` alone
+    is not a comparison anchor. If no bodily symptom is visible, emit
+    `none observed | n/a | n/a | n/a`. A 5/5 viral-max symptom MUST
+    have headroom NO. The ledger records the SOURCE ceiling so a later
+    step-up does not invent intensity that was already present.
   • GENERATE-SIDE CHAIN OPTIONALITY (v590, parallel-generation
     enablement, GENERATE-SIDE ONLY):
     ASYMMETRIC RULE — applies to generate side ONLY (videos/*.md

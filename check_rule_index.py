@@ -127,6 +127,7 @@ KNOWN_NON_HEADING_RULES = {
 # multi-bucket rule not listed here is a real conflict and FAILs.
 DUAL_BUCKET_ALLOWLIST = {
     "v621": "v621b caption-ban is §A authoring; v621a decoder-narrative-lens is §B decode",
+    "v622": "base v622 preserves decoded symptom scale + intensity/headroom in §B; v622b applies geometric anti-normalization when authoring generated symptom frames in §A",
     "v708": "zero-word-loss contract is §A authoring; its export implementation is §C platform",
     "v712": "Banana-2 attached-ref composition is §A authoring; Stage-4d relational is §B decode",
     "v718": "morph-diagnostics §A authoring; VLM forensic-perception §B decode; plumbing §C platform",

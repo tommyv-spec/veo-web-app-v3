@@ -1614,6 +1614,27 @@ V622 SYMPTOM-FEATURE EXAGGERATION ON NON-PERSONA CHARACTERS:
     (4) Match framing intensity — tight crop on the symptom = loud
         description; wider framing = calmer, but still name the
         feature.
+    (5) Give the hero symptom a literal comparison anchor: fraction of
+        frame, relation to another body part or object, measured span,
+        coverage, count, or projection. "Big", "large", or "bloated"
+        may support the description but can never be its only scale.
+
+  HERO-SYMPTOM INTENSITY LEDGER (v622, required in every new decode):
+
+    Under `## Adaptation-extraction`, emit:
+
+      ### Hero-symptom intensity ledger
+      | Hero symptom / carrier | Literal observed scale + comparison anchor | Intensity | Exaggeration headroom |
+      |---|---|---|---|
+      | <symptom> | <source-visible frame/body/object relation> | <1/5-5/5> | <YES or NO> |
+
+    One row per hero symptom. Scale: 1/5 subtle; 2/5 clear; 3/5 heavy;
+    4/5 extreme; 5/5 viral-max / source ceiling. Headroom YES means the
+    same symptom can faithfully become more severe; NO means it is at
+    ceiling and a step-up must use motion, proof, or angle. 5/5 + YES
+    is contradictory and MUST fail. If there is no bodily symptom, emit
+    `none observed | n/a | n/a | n/a`. Read scale from source frames,
+    never from caption or script alone.
 
   REQUIRED examples (FORBIDDEN -> REQUIRED):
 
@@ -1668,6 +1689,10 @@ V622 SYMPTOM-FEATURE EXAGGERATION ON NON-PERSONA CHARACTERS:
     YES For every non-persona character with a body part being pointed
         at / pressed / framed / circled: description exaggerates the
         visible feature in concrete terms, not generic posture?
+    YES Every hero symptom has a ledger row with a comparison anchor,
+        1/5-5/5 intensity, and YES/NO headroom (or the explicit
+        `none observed | n/a | n/a | n/a` row)?
+    YES Every 5/5 symptom says headroom NO?
     YES Mechanical grep for forbidden filler phrases when a body part
         is being indicated — "chin raised slightly", "head tilted",
         "face turned", "eyes locked" (alone), "torso turned", "leg

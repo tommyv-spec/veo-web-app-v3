@@ -1605,14 +1605,35 @@ Owner: *"we need to exagerate the patient characteristics mentioned in the scene
 
 **Bug class.** v621 enforces lens classification (HEALER-SHOWING-CURE / AUGMENTED-SYMPTOMS / GRABBING-ATTENTION) but does not enforce *symptom-feature description* at the per-character level. The decoder identifies the lens correctly and then writes the patient as if the lens were neutral. v622 closes the gap.
 
+**2026-07-22 intensity-calibration amendment.** The same failure repeated in `raw/videos/decoded_Da_rej-DwZg.md`: a source belly that was already enormous, near-spherical, skin-taut, larger than the chest, and filling most of the lower frame was reduced to *"a big bloated belly."* That vague wording erased the source's ceiling and led the next step-up to propose a still-bigger belly. This amendment is supported by the literal source frames, the earlier v622 chin failure above, and the July 21 mentor step-up examples (`raw/calls/kaveno-meeting-2026-07-21-transcript.md`, 09:30-10:32). It extends v622; it does not create a new rule family.
+
 ### The rule
 
 When a scene's `narrative_lens` is `AUGMENTED-SYMPTOMS` OR `HEALER-SHOWING-CURE`, **OR** when the scene fits Pattern C (DIAGNOSTIC-PIVOT), **AND** the source frame shows a non-persona character with a body part being pointed at, pressed, framed, circled, magnified, or visually centered, the decoded character description MUST:
 
 1. **Name the body part** being indicated (chin, jowl, under-eye, neck, scalp, knuckle, calf, ankle, belly, cheek, forehead, hairline, lip, eyelid, etc.).
-2. **Describe its visually-emphasized state in specific exaggerated terms** — match what the source camera is forcing the viewer to see. The source video EXAGGERATED it for the hook; the decoded prompt must preserve that signal.
+2. **Describe its visually-emphasized state in specific exaggerated terms with a comparison anchor** — match what the source camera is forcing the viewer to see. Name at least one observable relation: fraction of frame, relation to another body part or object, measured span, coverage, count, or projection. *Big*, *large*, *bloated*, and similar vague size words may support the description, but can never be the only scale evidence.
 3. **Never use neutral posture filler** as a substitute for the actual symptom description. Phrases like *"chin raised slightly"*, *"head tilted"*, *"face turned toward the camera"*, *"eyes looking down"* are forbidden when the frame is a tight crop on a symptom — they describe the *pose*, not the *feature*.
 4. **Match the framing intensity.** If the source crops tight on the symptom, the description must be loud about it. If the source uses wider framing, the description can be calmer — but still names the feature.
+5. **Record the intensity ceiling in `## Adaptation-extraction`.** Every decode emits the hero-symptom ledger below so downstream step-ups know whether symptom exaggeration is still available.
+
+### Hero-symptom intensity ledger (required in every new decode)
+
+Under `## Adaptation-extraction`, emit:
+
+```markdown
+### Hero-symptom intensity ledger
+
+| Hero symptom / carrier | Literal observed scale + comparison anchor | Intensity | Exaggeration headroom |
+|---|---|---|---|
+| <symptom and who/what carries it> | <source-visible scale plus frame/body/object comparison> | <1/5 subtle, 2/5 clear, 3/5 heavy, 4/5 extreme, or 5/5 viral-max> | <YES or NO> |
+```
+
+- Make one row per hero symptom. If the source has no bodily symptom, emit `none observed | n/a | n/a | n/a`; do not invent one.
+- **Intensity is source observation, not generation advice:** 1/5 subtle; 2/5 clear; 3/5 heavy; 4/5 extreme; 5/5 viral-max/at the believable source ceiling.
+- **Headroom YES** means the same symptom can be made visibly more severe while the result still reads as a faithful stronger rung of this source. **Headroom NO** means it is already at the source's useful ceiling; a step-up must use motion, proof, or angle instead.
+- `5/5` with `YES` is a contradiction and fails the decode linter.
+- Do not infer from a caption or script alone. The literal scale and anchor must come from inspected source frames.
 
 ### REQUIRED examples
 
@@ -1621,7 +1642,7 @@ When a scene's `narrative_lens` is `AUGMENTED-SYMPTOMS` OR `HEALER-SHOWING-CURE`
 | Practitioner's finger pressed into a patient's full lower jaw | "her chin raised slightly" | "a full, sagging lower jaw with visible jowl drop, the practitioner's index finger pressed firmly into the soft underside of the chin" |
 | Camera tight on under-eye area | "her eyes looking down" | "puffy, swollen under-eye bags with dark hollows beneath, fine crepey skin visible" |
 | Practitioner pointing at a thinning scalp | "head tilted forward" | "a visibly thinning crown with sparse hair coverage and exposed scalp through the parting line" |
-| Hand on a distended belly | "torso turned toward the camera" | "a distended, bloated lower abdomen pushing against the waistband, the practitioner's palm flat against the swell" |
+| Hand on a distended belly | "torso turned toward the camera" or only "a big bloated belly" | "an enormous near-spherical lower abdomen projecting farther than the chest and filling the lower half of the frame, the practitioner's palm flat against the taut swell" |
 | Close-up on varicose veins | "her leg extended" | "ropey, bulging blue-purple varicose veins running down the calf, raised above the skin surface" |
 | Practitioner inspecting back acne | "her back facing the camera" | "an upper back covered in red, raised, inflamed acne lesions clustered across the shoulder blades" |
 | Hand on a swollen ankle | "foot resting on the floor" | "a noticeably swollen ankle with stretched, shiny skin and faint pitting, almost erasing the ankle bone" |
@@ -1642,6 +1663,8 @@ Before emitting any `raw/decoded_*.md`:
 
 - ✅ For every Image whose `narrative_lens:` is `AUGMENTED-SYMPTOMS` or `HEALER-SHOWING-CURE`: does the prompt body name the **specific body part** being indicated?
 - ✅ For every Image where the source frame shows a non-persona character with a body part being pointed at / pressed / framed / circled: does the description **exaggerate the visible feature** in concrete terms, not generic posture?
+- ✅ Does every hero symptom have a ledger row with a literal comparison anchor, a valid 1/5–5/5 intensity, and YES/NO headroom? If no hero symptom exists, is the explicit `none observed` row present?
+- ✅ Does every 5/5 row say headroom NO?
 - ✅ Mechanical check (negative): grep the body for these forbidden filler phrases when a body part is being indicated — `"chin raised slightly"`, `"head tilted"`, `"face turned"`, `"eyes locked"` (alone), `"torso turned"`, `"leg extended"`, `"foot resting"`. If present AND the source frame is a tight diagnostic crop, REWRITE.
 
 ### What v622 does NOT change
