@@ -13710,26 +13710,34 @@ Ambient: same kitchen room tone, soft pour sound.
         function _loadActiveExports() {
             try {
                 const raw = JSON.parse(localStorage.getItem(ACTIVE_EXPORTS_KEY) || '[]');
-                return Array.isArray(raw) ? raw.filter(e => e && e.jobId && e.exportId) : [];
+                // v864 — a PENDING record (jobId, no exportId yet) is valid: it is
+                // written before the 202 so a refresh during warm-up/POST can recover.
+                return Array.isArray(raw) ? raw.filter(e => e && e.jobId) : [];
             } catch (e) { return []; }
         }
         function _saveActiveExports(list) {
             try { localStorage.setItem(ACTIVE_EXPORTS_KEY, JSON.stringify(list)); } catch (e) {}
         }
         function _rememberActiveExport(exp) {
-            const list = _loadActiveExports().filter(e => e.exportId !== exp.exportId);
+            // v864 — keyed by jobId (one active export per job, matching the per-job
+            // guard). Called TWICE: once as a pending record before the POST (exportId
+            // null), then again after the 202 with the real id — the second replaces
+            // the first. exportId stays null until we know it.
+            const list = _loadActiveExports().filter(e => e.jobId !== exp.jobId);
             list.push({
                 jobId: exp.jobId,
-                exportId: exp.exportId,
+                exportId: exp.exportId || null,
                 jobTitle: exp.jobTitle || '',
                 settings: exp.settings || {},
                 startedAt: exp.startedAt || Date.now(),
             });
             _saveActiveExports(list);
         }
-        function _forgetActiveExport(exportId) {
-            if (!exportId) return;
-            _saveActiveExports(_loadActiveExports().filter(e => e.exportId !== exportId));
+        function _forgetActiveExport(jobId) {
+            // v864 — forget by jobId so it also clears a PENDING record (exportId null),
+            // which the old exportId-keyed forget could never match.
+            if (!jobId) return;
+            _saveActiveExports(_loadActiveExports().filter(e => e.jobId !== jobId));
         }
         // The per-JOB guard that replaced the global lock. A second export for the
         // SAME job would only join the same server-side run (the POST is idempotent),
@@ -13879,15 +13887,38 @@ Ambient: same kitchen room tone, soft pour sound.
             if (exp.stageInterval) { clearInterval(exp.stageInterval); exp.stageInterval = null; }
         }
         // Reload survival: the run keeps going on the server, so pick the poll back up.
-        function resumeActiveExports() {
+        async function resumeActiveExports() {
             const saved = _loadActiveExports();
             if (!saved.length) return;
-            console.log(`[Export/v855] resuming ${saved.length} export(s) after reload`);
+            console.log(`[Export/v864] resuming ${saved.length} export(s) after reload`);
             for (const s of saved) {
-                if (activeExports.has(s.exportId)) continue;
+                // v864 — PENDING record (no exportId): the page died before the 202, so
+                // we never learned the run id. Ask the server whether a run actually
+                // started for this job. export-status without export_id returns the most
+                // recent run; adopt it only if it is still live, else drop the stale
+                // pending record (the POST may never have reached the server).
+                let exportId = s.exportId;
+                if (!exportId) {
+                    try {
+                        const _pr = await fetch(`${API}/jobs/${s.jobId}/export-status`);
+                        if (!_pr.ok) { _forgetActiveExport(s.jobId); continue; }
+                        const _prun = await _pr.json();
+                        const _st = _prun && _prun.state;
+                        if (_st !== 'queued' && _st !== 'running') {
+                            _forgetActiveExport(s.jobId);   // done/failed/none — nothing live
+                            continue;
+                        }
+                        exportId = _prun.export_id;         // to_dict() names it export_id
+                        console.log(`[Export/v864] recovered orphaned export ${String(exportId).slice(0,8)} for job ${String(s.jobId).slice(0,8)}`);
+                    } catch (e) {
+                        _forgetActiveExport(s.jobId);
+                        continue;
+                    }
+                }
+                if (!exportId || activeExports.has(exportId)) continue;
                 const exp = {
-                    key: s.exportId,
-                    exportId: s.exportId,
+                    key: exportId,
+                    exportId: exportId,
                     jobId: s.jobId,
                     jobTitle: s.jobTitle || _exportJobLabel(s.jobId),
                     settings: s.settings || {},
@@ -13899,6 +13930,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     stageInterval: null,
                 };
                 activeExports.set(exp.key, exp);
+                if (!s.exportId) _rememberActiveExport(exp);   // v864 — upgrade pending → real id
                 exp.row = createExportRow(exp, '⏳ Reconnecting to your export...');
                 startExportTimer(exp);
                 runExport(exp);                // fire and forget — it owns its own row
@@ -14975,6 +15007,12 @@ Ambient: same kitchen room tone, soft pour sound.
                 stageInterval: null,
             };
             activeExports.set(exp.key, exp);
+            // v864 — persist a PENDING record NOW, before the up-to-20s server warm-up
+            // and the POST. A hard refresh in that window used to lose the banner (and
+            // orphan the run if the POST had already landed server-side). resumeActiveExports
+            // recovers it by probing export-status for this job. Re-saved with the real
+            // id once the 202 lands (L~15095).
+            _rememberActiveExport(exp);
 
             const _audioTags = [
                 exportSettings.remove_laughter ? '😂' : '',
@@ -15419,7 +15457,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 // success path already removed it, and a failure row stays for 10s.
                 stopExportTimers(exp);
                 activeExports.delete(exp.key);
-                _forgetActiveExport(exp.exportId);
+                _forgetActiveExport(exp.jobId);   // v864 — forget by jobId (clears pending too)
             }
         }
         
