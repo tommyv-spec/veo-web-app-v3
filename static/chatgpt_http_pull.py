@@ -15,7 +15,9 @@ import os, sys, time, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chatgpt_job_map as jobmap
 
-BACKEND = "chatgpt"
+WORKER_BACKEND = "chatgpt"
+# Backwards-compat alias (older callers referenced BACKEND).
+BACKEND = WORKER_BACKEND
 API_PATH_PREFIX = "/api/images/worker"
 
 
@@ -76,7 +78,7 @@ def run(api_url, api_key, page, host, poll_s=5, log=print):
                 log(f"heartbeat failed: {e}")
         try:
             r = requests.get(f"{base}/jobs/pending",
-                             params={"worker_id": wid, "backend": BACKEND},
+                             params={"worker_id": wid, "backend": WORKER_BACKEND},
                              headers=_auth(api_key), timeout=30)
             job = (r.json() or {}).get("job") if r.ok else None
         except Exception as e:
@@ -93,14 +95,17 @@ def run(api_url, api_key, page, host, poll_s=5, log=print):
                 generate(page, prompt, ref_paths, out_path)
                 with open(out_path, "rb") as f:
                     up = requests.post(f"{base}/jobs/{nid}/variants", headers=_auth(api_key),
+                                       params={"backend": WORKER_BACKEND},
                                        files=[("files", ("variant_1.png", f, "image/png"))], timeout=300)
                 up.raise_for_status()
                 requests.post(f"{base}/jobs/{nid}/status", headers=_auth(api_key),
+                              params={"backend": WORKER_BACKEND},
                               json=status_body("completed"), timeout=30)
                 log(f"  OK node {nid} uploaded")
             except Exception as e:
                 try:
                     requests.post(f"{base}/jobs/{nid}/status", headers=_auth(api_key),
+                                  params={"backend": WORKER_BACKEND},
                                   json=status_body("failed", str(e)), timeout=30)
                 except Exception:
                     pass
