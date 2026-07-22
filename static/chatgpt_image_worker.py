@@ -294,12 +294,13 @@ def main():
         import re as _re, glob as _glob, shutil as _shutil
         safe = _re.sub(r"[^A-Za-z0-9._-]", "_", args.chatgpt_email.strip().lower())
         backend.PROFILE_DIR = os.path.join(backend.BASE_DIR, f".chatgpt_profile_{safe}")
-        backend.COOKIES_FILE = os.path.join(backend.BASE_DIR, f".chatgpt_cookies_{safe}.json")
-        keep = {os.path.abspath(backend.PROFILE_DIR), os.path.abspath(backend.COOKIES_FILE)}
-        for _pat in (".chatgpt_profile*", ".chatgpt_cookies*.json"):
+        # No cookie-file injection in this model — the profile itself holds the login.
+        # Point COOKIES_FILE at a path that never exists so inject_cookies is a no-op.
+        backend.COOKIES_FILE = os.path.join(backend.BASE_DIR, ".chatgpt_cookies_unused")
+        for _pat in (".chatgpt_profile*", ".chatgpt_cookies*"):
             for _d in _glob.glob(os.path.join(backend.BASE_DIR, _pat)):
-                if os.path.abspath(_d) in keep:
-                    continue
+                if os.path.abspath(_d) == os.path.abspath(backend.PROFILE_DIR):
+                    continue  # keep THIS account's persistent profile
                 if os.path.isdir(_d):
                     _shutil.rmtree(_d, ignore_errors=True)
                 else:
@@ -309,15 +310,10 @@ def main():
                         pass
                 log(f"deleted stale: {os.path.basename(_d)}")
         log(f"using clean per-account profile: {os.path.basename(backend.PROFILE_DIR)}")
-        # AUTO-GRAB the session (netlog — worked in the first run) so no manual login.
-        try:
-            import chatgpt_session_pull
-            if chatgpt_session_pull.pull_chatgpt_cookies_netlog(args.chatgpt_email, backend.COOKIES_FILE):
-                log("auto-grabbed ChatGPT session — no manual login needed.")
-            else:
-                log("could not auto-grab session; will wait for a one-time login in the window.")
-        except Exception as _e:
-            log(f"auto-grab failed ({_e}); will wait for a one-time login.")
+        # NO grabbing from the user's Chrome — copy hits App-Bound Encryption and
+        # netlog closes all their Chrome; neither is clean/universal. The worker
+        # logs into ChatGPT ONCE in its OWN window (ensure_logged_in), persists it,
+        # and reuses it. Never touches the user's daily Chrome.
 
     # SESSION MODEL (universal, simple, no admin/registry/ABE): the worker uses its
     # OWN dedicated Chrome profile and the user logs into ChatGPT ONCE in the visible
