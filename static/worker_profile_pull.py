@@ -512,15 +512,21 @@ def _close_target_profile_windows(user_data_dir, profile_folder, log=print, dry_
         return 0
 
 
-def _release_target_profile(user_data_dir, profile_folder, close_chrome, log):
+def _release_target_profile(user_data_dir, profile_folder, close_chrome, log,
+                            allow_channel_close=True):
     """Unlock the target profile for copying with the LEAST disruption:
     1. If it is already unloaded -> copy live, kill NOTHING (common case: the
        account is not actively open in a window).
     2. Else gracefully close ONLY that profile's windows (UIA avatar match) and
        wait for it to unload -> still spares every other profile + the channel.
-    3. Else (UIA unavailable, profile pinned by a keep-alive, or won't unload)
-       fall back to closing the whole Chrome channel (previous behavior).
-    Raises nothing it cannot handle; propagates close_chrome failures."""
+    3. Else (UIA unavailable, profile pinned by a keep-alive, or won't unload):
+       if allow_channel_close, close the whole Chrome channel (previous behavior);
+       otherwise RAISE (a primary/daily profile with background apps never unloads
+       on window-close, and channel-closing it would kill the operator's whole
+       Chrome — refuse instead so the caller can tell them to use a dedicated,
+       closable profile).
+    Raises RuntimeError when it cannot unload without a channel kill and
+    allow_channel_close is False; propagates close_chrome failures otherwise."""
     if _wait_profile_unlocked(user_data_dir, profile_folder, wait_s=8, log=log):
         log(f"  {profile_folder!r} already unloaded -> copy without channel close "
             f"(nothing killed)")
@@ -540,6 +546,13 @@ def _release_target_profile(user_data_dir, profile_folder, close_chrome, log):
             f"copy without channel close (channel spared)")
         return
     # 3. last resort
+    if not allow_channel_close:
+        raise RuntimeError(
+            f"profile {profile_folder!r} would not unload after closing its "
+            f"window(s) — it is likely the PRIMARY/daily profile (background apps "
+            f"keep it loaded). Refusing to channel-close (that would kill ALL "
+            f"Chrome). Use a DEDICATED Chrome profile for this account and keep it "
+            f"closed, so it can be copied without killing your browser.")
     log(f"  {profile_folder!r} still loaded -> closing channel (fallback)")
     if close_chrome is not None:
         close_chrome(user_data_dir)
@@ -754,7 +767,8 @@ def _prune_handshake_cookies(cookies_db, log=print):
 
 
 def build_lean_golden_from_profile(email, golden_folder, label="",
-                                   user_data_dir=None, close_chrome=None, log=print):
+                                   user_data_dir=None, close_chrome=None, log=print,
+                                   allow_channel_close=True):
     """COPY-MODE (App-Bound Encryption must be OFF). Build `golden_folder` as a
     clean single-profile Chrome user-data-dir from the real laptop profile logged
     into `email`, copying ONLY the golden's durable file set (see _LEAN_EXCLUDE_*).
@@ -794,7 +808,8 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
     # v824: unlock the target profile with least disruption — copy live if it is
     # already unloaded (no kill), else fall back to closing this channel's Chrome.
     try:
-        _release_target_profile(user_data_dir, profile_folder, close_chrome, log=log)
+        _release_target_profile(user_data_dir, profile_folder, close_chrome, log=log,
+                                allow_channel_close=allow_channel_close)
     except Exception as e:
         log(f"{tag}lean golden: close chrome failed: {e}")
         return False

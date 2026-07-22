@@ -24,7 +24,11 @@ def pull_chatgpt_session(email, golden_folder, log=print):
     whole-channel taskkill), or a live copy when the profile is already unloaded.
     Returns the launch channel string on success, False on skip."""
     import worker_profile_pull
+    # allow_channel_close=False: NEVER kill the whole Chrome channel. If the target
+    # profile won't unload (e.g. it's the primary/daily profile with background
+    # apps), fail with a clear message instead of nuking the operator's browser.
+    # Use a DEDICATED, closable profile for the ChatGPT account.
     return worker_profile_pull.build_lean_golden_from_profile(
         email, golden_folder=golden_folder, label="CHATGPT",
         close_chrome=lambda _u: worker_profile_pull.close_laptop_chrome(_u, log=log),
-        log=log)
+        log=log, allow_channel_close=False)
