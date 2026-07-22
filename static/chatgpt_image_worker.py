@@ -199,9 +199,10 @@ def main():
     ap.add_argument("--watch-dir", help="override the _image_jobs path")
     ap.add_argument("--api-url", help="HTTP-pull mode: base URL of the Render platform")
     ap.add_argument("--api-key", help="HTTP-pull mode: worker API key (Bearer)")
-    ap.add_argument("--chatgpt-email", help="pull a fresh ChatGPT session from the "
-                    "Chrome profile logged into this email (non-disruptive, reuses "
-                    "the Flow-worker netlog) before launching the browser")
+    ap.add_argument("--chatgpt-email", help="pull a fresh ChatGPT session by COPYING "
+                    "the Chrome profile logged into this email into the worker's "
+                    "profile dir (copy-mode, targeted per-profile close, never a "
+                    "whole-channel kill) before launching the browser")
     args = ap.parse_args()
 
     if args.user_data_dir:
@@ -209,17 +210,21 @@ def main():
     if args.profile_directory:
         backend.PROFILE_DIRECTORY = args.profile_directory
 
-    # Seed fresh ChatGPT cookies from the operator's account BEFORE any browser
-    # launch, so inject_cookies (at launch) picks them up. Non-disruptive: closes
-    # only the owning Chrome channel, never a blanket chrome kill. On miss we warn
-    # and continue — the existing .chatgpt_cookies.json may still be valid.
-    if args.chatgpt_email:
+    # Seed the ChatGPT session BEFORE any browser launch by COPYING the operator's
+    # real Chrome profile into the worker's own PROFILE_DIR (which launch() uses as
+    # user_data_dir), so the worker comes up already logged in. Copy-mode: a single
+    # targeted per-profile close, never a whole-channel taskkill. On skip/miss we
+    # warn and continue — the existing profile / .chatgpt_cookies.json may still be
+    # valid.
+    if getattr(args, "chatgpt_email", None):
         import chatgpt_session_pull
-        ok = chatgpt_session_pull.pull_chatgpt_cookies(args.chatgpt_email, COOKIES_FILE)
-        if not ok:
-            log(f"WARNING: ChatGPT session pull for {args.chatgpt_email!r} did not "
-                f"capture a session-token; continuing with existing cookies "
-                f"({COOKIES_FILE}) which may still be valid.")
+        from chatgpt_image_backend import PROFILE_DIR
+        ch = chatgpt_session_pull.pull_chatgpt_session(args.chatgpt_email, PROFILE_DIR)
+        if ch:
+            log(f"pulled ChatGPT session for {args.chatgpt_email} (channel={ch}); launching golden profile")
+        else:
+            log(f"WARNING: could not pull ChatGPT session for {args.chatgpt_email}; "
+                f"falling back to existing profile/cookies")
 
     if args.api_url and args.api_key:
         import socket
