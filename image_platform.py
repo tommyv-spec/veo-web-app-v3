@@ -86,6 +86,12 @@ def run_image_platform_migrations():
          "ALTER TABLE image_nodes ADD COLUMN claimed_by_worker TEXT"),
         ("image_nodes", "claimed_at",
          "ALTER TABLE image_nodes ADD COLUMN claimed_at DATETIME"),
+        ("image_nodes", "cg_status",
+         "ALTER TABLE image_nodes ADD COLUMN cg_status TEXT"),
+        ("image_nodes", "cg_claimed_by",
+         "ALTER TABLE image_nodes ADD COLUMN cg_claimed_by TEXT"),
+        ("image_nodes", "cg_claimed_at",
+         "ALTER TABLE image_nodes ADD COLUMN cg_claimed_at TIMESTAMP"),
         # Scene-table import metadata (added v428 — supports "Promote to video")
         ("image_nodes", "batch_id",
          "ALTER TABLE image_nodes ADD COLUMN batch_id TEXT"),
@@ -266,6 +272,12 @@ def run_image_platform_migrations():
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS claimed_by_worker TEXT"),
         ("image_nodes", "claimed_at",
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP"),
+        ("image_nodes", "cg_status",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS cg_status VARCHAR(16)"),
+        ("image_nodes", "cg_claimed_by",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS cg_claimed_by VARCHAR(100)"),
+        ("image_nodes", "cg_claimed_at",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS cg_claimed_at TIMESTAMP"),
         ("image_nodes", "batch_id",
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS batch_id VARCHAR(36)"),
         ("image_nodes", "scene_index_in_batch",
@@ -896,6 +908,13 @@ class ImageNode(Base):
     claimed_by_worker = Column(String(100), nullable=True)
     claimed_at = Column(DateTime, nullable=True)
 
+    # Dual-backend ChatGPT satellite lane. Independent of status/claimed_by_worker
+    # (which the Banana/Flow lane owns). NULL = no chatgpt lane for this node
+    # (dependent/chain nodes never get one). 'queued'|'generating'|'ready'|'failed'.
+    cg_status = Column(String(16), nullable=True)
+    cg_claimed_by = Column(String(100), nullable=True)
+    cg_claimed_at = Column(DateTime, nullable=True)
+
     # Scene-table import metadata. Populated by import_scene_table for every
     # scene node so the Job Overview UI (and the later "Promote to video"
     # feature) can present structured per-scene info without re-parsing the
@@ -1048,6 +1067,8 @@ class ImageNode(Base):
             "chosen_variant": chosen,
             "error_message": self.error_message,
             "blocked_children_count": blocked_children_count,
+            # Dual-backend ChatGPT satellite lane (nullable — NULL = no cg lane).
+            "cg_status": self.cg_status,
             # Scene-table import metadata (nullable — only populated when
             # the node was created via import_scene_table)
             "batch_id": self.batch_id,
