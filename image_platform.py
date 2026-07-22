@@ -1620,14 +1620,6 @@ def _node_has_chain_dependency(node) -> bool:
     return False
 
 
-def _node_eligible_for_backend(node, backend) -> bool:
-    """Routing: the chatgpt backend takes ONLY base images (no chain dependency);
-    banana / default takes everything (base + dependent)."""
-    if (backend or "banana") == "chatgpt":
-        return not _node_has_chain_dependency(node)
-    return True
-
-
 def _select_for_backend(candidates, backend):
     """First claimable node for `backend` from an ordered candidate list.
     chatgpt -> first base node whose cg lane is 'queued'. banana -> first node
@@ -11337,12 +11329,9 @@ def worker_get_pending_job(
             if exclude_ids:
                 q = q.filter(ImageNode.id.notin_(exclude_ids))
             # backend routing: chatgpt claims cg-lane base nodes, banana claims
-            # status-queued nodes. Iterate the ordered candidates + pick the
-            # first claimable one instead of blind .first().
-            for cand in q.order_by(ImageNode.created_at.asc()):
-                if _select_for_backend([cand], backend) is not None:
-                    node = cand
-                    break
+            # status-queued nodes. The helper scans the ordered query and
+            # returns the first claimable node.
+            node = _select_for_backend(q.order_by(ImageNode.created_at.asc()), backend)
 
     # Fall back to any queued node if no same-batch match (or no preference)
     if node is None:
@@ -11352,10 +11341,7 @@ def worker_get_pending_job(
         q = q.filter(ImageNode.cg_status == "queued") if is_cg else q.filter(ImageNode.status == "queued")
         if exclude_ids:
             q = q.filter(ImageNode.id.notin_(exclude_ids))
-        for cand in q.order_by(ImageNode.created_at.asc()):
-            if _select_for_backend([cand], backend) is not None:
-                node = cand
-                break
+        node = _select_for_backend(q.order_by(ImageNode.created_at.asc()), backend)
 
     if node is None:
         return {"job": None}
@@ -11365,9 +11351,16 @@ def worker_get_pending_job(
         parent_paths = _resolve_parent_image_paths(db, node)
     except HTTPException as e:
         # A parent is no longer ready — fail this node so it doesn't
-        # wedge the queue.
-        node.status = "failed"
-        node.error_message = f"Parent resolution failed: {e.detail}"
+        # wedge the queue. Fork per-backend: a chatgpt worker must NOT write
+        # shared node.status (that would kill the banana lane rendering the
+        # same base node in parallel) — fail only its own cg lane.
+        if is_cg:
+            node.cg_status = "failed"
+            node.cg_claimed_by = None
+            node.cg_claimed_at = None
+        else:
+            node.status = "failed"
+            node.error_message = f"Parent resolution failed: {e.detail}"
         db.commit()
         return {"job": None}
 
