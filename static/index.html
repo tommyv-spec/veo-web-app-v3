@@ -13954,7 +13954,7 @@ Ambient: same kitchen room tone, soft pour sound.
         // DIAGNOSTIC (v864b): trivial always-present marker so the operator can confirm
         // which code the browser is running: type window.__EXPORT_RESUME_VERSION in the
         // console. undefined => still on old code (deploy not live / wrong app).
-        window.__EXPORT_RESUME_VERSION = 'v864b';
+        window.__EXPORT_RESUME_VERSION = 'v864c';
 
         async function exportFinalVideo(jobId) {
             // v855 per-JOB guard (replaces the old global export lock).
@@ -14714,8 +14714,49 @@ Ambient: same kitchen room tone, soft pour sound.
             return container.querySelector('.exports-section');
         }
         
+        // v864 — SERVER-TRUTH reconnect. loadExistingExports only lists FINISHED
+        // files, so an in-progress export (no file yet) is invisible to it and to
+        // the localStorage path if the record was lost. On every job open/refresh,
+        // ask the ExportRun table directly: if a run is queued/running for this job,
+        // re-show the progress banner and resume polling. No dependency on
+        // localStorage — survives a hard refresh, a new tab, even another device.
+        async function reconnectActiveExport(jobId) {
+            try {
+                if (findActiveExportForJob(jobId)) return;   // already showing a banner
+                const r = await fetch(`${API}/jobs/${jobId}/export-status`);
+                if (!r.ok) return;                           // 404 = none; 5xx = transient, retry next open
+                const run = await r.json();
+                const st = run && run.state;
+                if (st !== 'queued' && st !== 'running') return;   // only LIVE runs
+                const exportId = run.export_id;
+                if (!exportId || activeExports.has(exportId)) return;
+                const exp = {
+                    key: exportId,
+                    exportId: exportId,
+                    jobId: jobId,
+                    jobTitle: _exportJobLabel(jobId),
+                    settings: {},
+                    startedAt: run.created_at ? Date.parse(run.created_at) : Date.now(),
+                    resumed: true,
+                    vcErrorMsg: null,
+                    row: null,
+                    timerInterval: null,
+                    stageInterval: null,
+                };
+                activeExports.set(exp.key, exp);
+                _rememberActiveExport(exp);
+                exp.row = createExportRow(exp, '⏳ Reconnecting to your export...');
+                startExportTimer(exp);
+                runExport(exp);              // exportId set → skips POST, just polls
+                console.log(`[Export/v864] reconnected LIVE export ${String(exportId).slice(0,8)} for job ${String(jobId).slice(0,8)} from server (state=${st})`);
+            } catch (e) {
+                console.log('[Export/v864] reconnectActiveExport error (transient):', e);
+            }
+        }
+
         // Load existing exports when switching jobs
         async function loadExistingExports(jobId) {
+            reconnectActiveExport(jobId);    // v864 — fire-and-forget: re-show a live export banner even when no file exists yet
             try {
                 const response = await fetch(`${API}/jobs/${jobId}/list-outputs`);
                 if (!response.ok) return;
