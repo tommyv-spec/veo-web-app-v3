@@ -53,6 +53,33 @@ from chatgpt_image_backend import (
 )
 
 
+def ensure_logged_in(page, timeout_s=600):
+    """Universal, simple session: make sure the worker's OWN browser is logged into
+    ChatGPT. If not, the visible window is left open for the user to log in ONCE —
+    we poll until they do; the session then persists in the worker's own profile
+    dir. NO pulling from the user's main Chrome, NO admin/registry/ABE — works for
+    every user on any machine. Returns True once logged in, False on timeout."""
+    import time as _t
+    page.goto(CHATGPT_URL, wait_until="domcontentloaded", timeout=45000)
+    dismiss_cookie_banner(page)
+    if is_logged_in(page):
+        log("ChatGPT: already logged in.")
+        return True
+    log("=" * 60)
+    log("  ACTION NEEDED: log into ChatGPT in the Chrome window that opened.")
+    log("  This is a ONE-TIME login — the session is saved in the worker's own")
+    log("  profile and reused next time. Waiting up to 10 minutes...")
+    log("=" * 60)
+    deadline = _t.time() + timeout_s
+    while _t.time() < deadline:
+        if is_logged_in(page):
+            log("ChatGPT: login detected — session saved, continuing.")
+            return True
+        _t.sleep(3)
+    log("ChatGPT: login not completed in time. Re-run and log in.")
+    return False
+
+
 def login_flow():
     """Headful manual login. User logs into chatgpt.com, then Ctrl-C / closes."""
     sync_playwright, _ = _import_playwright()
@@ -159,6 +186,8 @@ def watch_mode(watch_dir, poll_s=5):
     with sync_playwright() as p:
         ctx, page = launch(p)
         try:
+            if not ensure_logged_in(page):
+                return
             import time as _t
             while True:
                 for jp in _scan_pending(watch_dir):
@@ -210,33 +239,10 @@ def main():
     if args.profile_directory:
         backend.PROFILE_DIRECTORY = args.profile_directory
 
-    # Seed the ChatGPT session BEFORE any browser launch by COPYING the operator's
-    # real Chrome profile into the worker's own PROFILE_DIR (which launch() uses as
-    # user_data_dir), so the worker comes up already logged in. Copy-mode: a single
-    # targeted per-profile close, never a whole-channel taskkill. On skip/miss we
-    # warn and continue — the existing profile / .chatgpt_cookies.json may still be
-    # valid.
-    if getattr(args, "chatgpt_email", None):
-        import chatgpt_session_pull
-        from chatgpt_image_backend import PROFILE_DIR
-        ch = chatgpt_session_pull.pull_chatgpt_session(args.chatgpt_email, PROFILE_DIR)
-        if ch:
-            # The golden profile carries the REAL logged-in ChatGPT cookies
-            # (the v10 session-token decrypts on this machine). A leftover
-            # .chatgpt_cookies.json from an old netlog run would be injected
-            # OVER them by inject_cookies() and clobber the fresh session-token
-            # -> "session expired". Drop it so only the golden's cookies are used.
-            try:
-                if os.path.exists(COOKIES_FILE):
-                    os.remove(COOKIES_FILE)
-                    log("removed stale .chatgpt_cookies.json (golden holds fresh session)")
-            except OSError:
-                pass
-            log(f"pulled ChatGPT session for {args.chatgpt_email} (channel={ch}); launching golden profile")
-        else:
-            log(f"WARNING: could not pull ChatGPT session for {args.chatgpt_email}; "
-                f"falling back to existing profile/cookies")
-
+    # SESSION MODEL (universal, simple, no admin/registry/ABE): the worker uses its
+    # OWN dedicated Chrome profile and the user logs into ChatGPT ONCE in the visible
+    # window (ensure_logged_in). The session persists in the worker's profile and is
+    # reused. No pulling from the user's main Chrome — works for every user.
     if args.api_url and args.api_key:
         import socket
         from chatgpt_http_pull import run as http_run
@@ -244,6 +250,8 @@ def main():
         with sync_playwright() as p:
             ctx, page = launch(p)
             try:
+                if not ensure_logged_in(page):
+                    return
                 http_run(args.api_url, args.api_key, page, socket.gethostname())
             finally:
                 ctx.close()

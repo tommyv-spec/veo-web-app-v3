@@ -24,11 +24,13 @@ def pull_chatgpt_session(email, golden_folder, log=print):
     whole-channel taskkill), or a live copy when the profile is already unloaded.
     Returns the launch channel string on success, False on skip."""
     import worker_profile_pull
-    # IDENTICAL to the video worker (flow_worker.py): copy the golden, closing the
-    # CHANNEL that owns the profile (close_laptop_chrome). Put the ChatGPT account
-    # in a SEPARATE Chrome channel (Chrome Beta) — exactly like the video worker's
-    # account — so "close the channel" only closes Beta, never the daily Chrome.
+    # Close ONLY the target profile's window (targeted UIA), NEVER the whole
+    # channel — allow_channel_close=False. If the profile is already unloaded it
+    # copies live with no close at all; if it has a window it closes just that one
+    # and copies once it unloads; if it will not unload (primary/background-pinned)
+    # it FAILS cleanly instead of killing the channel. Use a profile that unloads
+    # (non-primary, no background apps) — same as the video worker's accounts.
     return worker_profile_pull.build_lean_golden_from_profile(
         email, golden_folder=golden_folder, label="CHATGPT",
         close_chrome=lambda _u: worker_profile_pull.close_laptop_chrome(_u, log=log),
-        log=log)
+        log=log, allow_channel_close=False)
