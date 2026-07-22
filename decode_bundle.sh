@@ -1636,6 +1636,25 @@ V622 SYMPTOM-FEATURE EXAGGERATION ON NON-PERSONA CHARACTERS:
     `none observed | n/a | n/a | n/a`. Read scale from source frames,
     never from caption or script alone.
 
+  SHOWN BEATS LEDGER (v790, required in every new decode):
+
+    Under `## Adaptation-extraction`, emit:
+
+      ### Shown beats ledger
+      | Source beat ID | Frame / clip evidence | Shown action / process step | Meaningful objects visibly present |
+      |---|---|---|---|
+      | SB1 | <clip/frame> | <one visible action or process step> | <every meaningful object in that beat, or none> |
+
+    Read the source in order and list SB1, SB2, SB3... Do NOT compress a
+    shown make/apply sequence into one gist verb. Give separate rows to
+    pour, mix, press, rub/apply, hold/display, open, turn-to-camera, and
+    each other visible step. Name every meaningful object that appears:
+    labeled product boxes, bottles, tools, ingredients, and proxies count
+    even when the voice never names them. Every row MUST cite a source clip
+    or frame. If there is truly no demonstrated process and no meaningful
+    shown object, emit only `none observed | n/a | n/a | n/a`. Never omit
+    the ledger. This is the source list an adapt/step-up must mirror.
+
   REQUIRED examples (FORBIDDEN -> REQUIRED):
 
     Practitioner's finger pressed into patient's full lower jaw:

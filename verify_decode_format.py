@@ -6,9 +6,11 @@ This one lints the DECODE side: it proves the decode emitted the required
 structure INCLUDING the `## Adaptation-extraction` canary block (the per-frame
 register/prop/proxy/mood reads + the cross-frame chain/angle map) that the
 GENERATE rules depend on. It also proves the v622 hero-symptom intensity ledger
-exists and has a literal scale anchor, valid 1/5-5/5 intensity, and a consistent
-YES/NO exaggeration-headroom decision. The visual judgment stays human-confirmed
-(decode-grammar-checklist.md); this script catches missing or contradictory data.
+and the v790 shown-beats ledger exist. The shown-beats ledger gives every source
+process step and meaningful object a stable ID plus frame/clip evidence, so a
+later build can prove it did not compress the demonstration into a vague action.
+The visual judgment stays human-confirmed (decode-grammar-checklist.md); this
+script catches missing, empty, malformed, or contradictory data.
 
 Usage:  python code/verify_decode_format.py raw/videos/decoded_<id>.md
 Exit 0 = pass, 1 = fail, 2 = bad invocation.
@@ -100,6 +102,58 @@ def _lint_intensity_ledger(adaptation_body, fails):
             fails.append(f"{prefix} is 5/5 viral-max but says headroom YES")
 
 
+def _lint_shown_beats_ledger(adaptation_body, fails):
+    """Mechanical half of v790 source-beat capture. Frame truth stays human."""
+    m = re.search(
+        r"^###\s+Shown beats ledger\s*$\n(.*?)(?=^###\s|^##\s|\Z)",
+        adaptation_body,
+        re.S | re.M | re.I,
+    )
+    if not m:
+        fails.append("## Adaptation-extraction missing `### Shown beats ledger`")
+        return
+
+    rows = []
+    for line in m.group(1).splitlines():
+        if not line.strip().startswith("|"):
+            continue
+        cells = [_clean_cell(c) for c in line.strip().strip("|").split("|")]
+        if len(cells) != 4:
+            continue
+        if cells[0].lower() == "source beat id":
+            continue
+        if all(re.fullmatch(r":?-{3,}:?", c) for c in cells):
+            continue
+        rows.append(cells)
+
+    if not rows:
+        fails.append("shown-beats ledger has no four-column data row")
+        return
+
+    none_rows = [r for r in rows if r[0].strip().lower() == "none observed"]
+    if none_rows:
+        if len(rows) != 1 or any(c.strip().lower() != "n/a" for c in none_rows[0][1:]):
+            fails.append("`none observed` must be the only shown-beats row and use n/a in all other cells")
+        return
+
+    expected_ids = [f"SB{i}" for i in range(1, len(rows) + 1)]
+    actual_ids = [row[0].upper() for row in rows]
+    if actual_ids != expected_ids:
+        fails.append(
+            "shown-beats IDs must be unique and ordered SB1, SB2, SB3... "
+            f"(found: {', '.join(actual_ids)})"
+        )
+
+    for beat_id, evidence, action, objects in rows:
+        prefix = f"shown beat `{beat_id}`"
+        if not re.search(r"\b(?:clip|frame)\b", evidence, re.I):
+            fails.append(f"{prefix} evidence must name a source clip or frame")
+        if not action.strip() or action.strip().lower() in {"n/a", "none"}:
+            fails.append(f"{prefix} must name the visible action or process step")
+        if not objects.strip():
+            fails.append(f"{prefix} must name the visible objects, or say `none`")
+
+
 def lint(path):
     try:
         with open(path, encoding="utf-8") as source:
@@ -131,6 +185,7 @@ def lint(path):
             if kw not in body:
                 fails.append(f"## Adaptation-extraction missing the {label} (keyword '{kw}')")
         _lint_intensity_ledger(adaptation_body, fails)
+        _lint_shown_beats_ledger(adaptation_body, fails)
 
     # 3. NO negative-prompt block (2026-06-04 no-negatives standing rule)
     if re.search(r'^\s*\*\*Negative(\s+prompt)?:\*\*', t, re.M):

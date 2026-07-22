@@ -376,6 +376,21 @@
     `none observed | n/a | n/a | n/a`. A 5/5 viral-max symptom MUST
     have headroom NO. The ledger records the SOURCE ceiling so a later
     step-up does not invent intensity that was already present.
+    v790 shown-beats amendment (2026-07-22): every new decode MUST also
+    emit this table under `## Adaptation-extraction`:
+
+      ### Shown beats ledger
+      | Source beat ID | Frame / clip evidence | Shown action / process step | Meaningful objects visibly present |
+      |---|---|---|---|
+      | SB1 | <clip/frame> | <one visible action or process step> | <every meaningful object in that beat, or none> |
+
+    List the source in viewing order as SB1, SB2, SB3... Separate make,
+    mix, pour, press, hold/display, and apply steps instead of replacing
+    them with one gist verb. A named bottle, box, tool, product, or proxy
+    held or standing on screen is part of the row even when no line names
+    it. Every row cites a clip or frame. If the video truly shows no
+    demonstrated process and no meaningful object, emit one row:
+    `none observed | n/a | n/a | n/a`. Never omit the ledger.
   • GENERATE-SIDE CHAIN OPTIONALITY (v590, parallel-generation
     enablement, GENERATE-SIDE ONLY):
     ASYMMETRIC RULE — applies to generate side ONLY (videos/*.md
