@@ -1635,6 +1635,46 @@ def _select_for_backend(candidates, backend):
     return None
 
 
+def _norm_backend(backend) -> str:
+    """Normalize a worker's declared backend to exactly 'banana' or 'chatgpt'.
+    Unknown/blank -> 'banana' (the default lane)."""
+    be = (backend or "banana").strip().lower()
+    return be if be in ("banana", "chatgpt") else "banana"
+
+
+def _apply_worker_status(node, backend, status, has_variants, error):
+    """Mutate the correct lane. chatgpt -> cg_status; banana -> node.status.
+    Completion with no variants -> that lane fails. Preserves the other lane."""
+    is_cg = (backend or "banana") == "chatgpt"
+    if status == "completed":
+        done = "ready" if has_variants else "failed"
+        if is_cg:
+            node.cg_status = done
+            node.cg_claimed_by = None
+            node.cg_claimed_at = None
+        else:
+            node.status = done
+            node.error_message = None if has_variants else "Worker reported completion but no variants uploaded"
+            node.claimed_by_worker = None
+            node.claimed_at = None
+    elif status == "failed":
+        if is_cg:
+            node.cg_status = "failed"
+            node.cg_claimed_by = None
+            node.cg_claimed_at = None
+        else:
+            if node.status == "ready" and node.chosen_variant_id is not None:
+                node.claimed_by_worker = None
+                node.claimed_at = None
+            else:
+                node.status = "failed"
+                node.error_message = error or "Worker reported failure"
+                node.claimed_by_worker = None
+                node.claimed_at = None
+    else:
+        raise ValueError(f"Unknown status: {status}")
+
+
 def _seed_chatgpt_lane(node) -> None:
     """Best-effort: on a BASE node (no chain dependency), open the ChatGPT lane so
     a chatgpt worker will also render it. Skips dependent/chain nodes (Flow-only)
@@ -11265,6 +11305,7 @@ def worker_get_pending_job(
     reference inputs.
     """
     user_id = _verify_worker_user(authorization, db)
+    backend = _norm_backend(backend)
     _touch_worker_heartbeat(db, worker_id, user_id)
 
     # v753 — parse exclude list
@@ -11522,6 +11563,7 @@ def worker_upload_variants(
     uploads) done WITHOUT a DB connection held.
     """
     user_id = _verify_worker_user(authorization, db)
+    backend = _norm_backend(backend)
 
     # ==== Phase 1: quick DB validation + cleanup ====
     # Read node, verify state, clean stale variants. Commit, then
@@ -11691,10 +11733,18 @@ class WorkerJobStatusRequest(BaseModel):
 def worker_update_job_status(
     node_id: int,
     req: WorkerJobStatusRequest,
+    backend: Optional[str] = "banana",
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db_session),
 ):
-    """Worker marks a job done (success or failure)."""
+    """Worker marks a job done (success or failure).
+
+    Dual-backend: lane-aware. A chatgpt worker's completion/failure only
+    touches the cg lane (cg_status + cg claim); a banana worker's only touches
+    node.status + banana claim. Counting variants is scoped to the posting
+    backend so a chatgpt post can't flip the banana lane ready/failed on the
+    strength of banana variants (or vice versa).
+    """
     user_id = _verify_worker_user(authorization, db)
     # v759: scope by user_id so a worker can only update its owner's nodes.
     node = db.query(ImageNode).filter(
@@ -11703,35 +11753,15 @@ def worker_update_job_status(
     if not node:
         raise HTTPException(404, "Node not found")
 
-    if req.status == "completed":
-        # Only allow completion if there are variants saved
-        n_variants = db.query(ImageVariant).filter(
-            ImageVariant.node_id == node_id
-        ).count()
-        if n_variants == 0:
-            node.status = "failed"
-            node.error_message = "Worker reported completion but no variants uploaded"
-        else:
-            node.status = "ready"
-            node.error_message = None
-        node.claimed_by_worker = None
-        node.claimed_at = None
-    elif req.status == "failed":
-        # v754 — don't clobber a node that was already taken over. If a manual
-        # upload set this node 'ready' with a chosen variant while the worker
-        # was still rendering, a late 'failed' from that superseded render must
-        # not destroy the user's chosen image — just clear the stale claim.
-        if node.status == "ready" and node.chosen_variant_id is not None:
-            node.claimed_by_worker = None
-            node.claimed_at = None
-        else:
-            node.status = "failed"
-            node.error_message = req.error or "Worker reported failure"
-            node.claimed_by_worker = None
-            node.claimed_at = None
-    else:
-        raise HTTPException(400, f"Unknown status: {req.status}")
-
+    backend = _norm_backend(backend)
+    has_variants = db.query(ImageVariant).filter(
+        ImageVariant.node_id == node_id,
+        ImageVariant.backend == backend,
+    ).count() > 0
+    try:
+        _apply_worker_status(node, backend, req.status, has_variants, req.error)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     node.updated_at = datetime.utcnow()
     db.commit()
-    return {"ok": True, "node_status": node.status}
+    return {"ok": True, "node_status": node.status, "cg_status": node.cg_status}
