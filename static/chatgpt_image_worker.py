@@ -53,6 +53,22 @@ from chatgpt_image_backend import (
 )
 
 
+def _logged_in_email(page):
+    """The email of the currently logged-in ChatGPT account (via /backend-api/me),
+    or None if not logged in / unreadable."""
+    try:
+        return page.evaluate("""async () => {
+            try {
+                const r = await fetch('/backend-api/me', {credentials: 'include'});
+                if (!r.ok) return null;
+                const j = await r.json();
+                return (j && (j.email || (j.account && j.account.email))) || null;
+            } catch (e) { return null; }
+        }""")
+    except Exception:
+        return None
+
+
 def ensure_logged_in(page, email=None, timeout_s=600):
     """Universal, simple session: make sure the worker's OWN browser is logged into
     ChatGPT. Navigates to ChatGPT (with a Google login-hint for `email` so the
@@ -64,22 +80,49 @@ def ensure_logged_in(page, email=None, timeout_s=600):
     import time as _t
     page.goto(CHATGPT_URL, wait_until="domcontentloaded", timeout=45000)
     dismiss_cookie_banner(page)
-    if is_logged_in(page):
-        log(f"ChatGPT: already logged in{f' (target {email})' if email else ''}.")
+
+    def _ok():
+        """True when logged in AS THE TARGET account (or any account if no email, or
+        the account email is unreadable -> best-effort proceed). Returns the current
+        email string when it is READABLY WRONG (block + prompt to switch)."""
+        if not is_logged_in(page):
+            return False
+        if not email:
+            return True
+        cur = _logged_in_email(page)
+        if not cur:
+            return True  # unreadable -> can't verify, proceed (never hang)
+        if cur.strip().lower() == email.strip().lower():
+            return True
+        return cur  # readable + wrong account -> block
+
+    r = _ok()
+    if r is True:
+        log(f"ChatGPT: already logged in{f' as {email}' if email else ''}.")
         return True
+
     who = f" as {email}" if email else ""
     log("=" * 60)
-    log(f"  ACTION NEEDED: log into ChatGPT{who} in the Chrome window that opened —")
-    log(f"  click \"Continue{who}\" (or sign in). ONE-TIME: the session is saved in")
-    log("  the worker's own profile and reused next time. Waiting up to 10 min...")
+    if isinstance(r, str):
+        log(f"  WRONG ACCOUNT: logged in as {r}, but this worker needs {email}.")
+        log(f"  In the window: click your profile -> Log out, then Continue{who}.")
+    else:
+        log(f"  ACTION NEEDED: log into ChatGPT{who} in the Chrome window that opened —")
+        log(f"  click \"Continue{who}\" (or sign in).")
+    log("  ONE-TIME: the session is saved in the worker's own profile. Waiting 10 min...")
     log("=" * 60)
     deadline = _t.time() + timeout_s
+    warned = None
     while _t.time() < deadline:
-        if is_logged_in(page):
-            log("ChatGPT: login detected — session saved, continuing.")
+        r = _ok()
+        if r is True:
+            log(f"ChatGPT: logged in{f' as {email}' if email else ''} — session saved, continuing.")
             return True
+        if isinstance(r, str) and r != warned:
+            log(f"  still logged in as {r} — need {email}. Log out + Continue{who}.")
+            warned = r
         _t.sleep(3)
-    log("ChatGPT: login not completed in time. Re-run and log in.")
+    log("ChatGPT: correct-account login not completed in time. Re-run and log in.")
     return False
 
 
@@ -231,16 +274,35 @@ def main():
     ap.add_argument("--watch-dir", help="override the _image_jobs path")
     ap.add_argument("--api-url", help="HTTP-pull mode: base URL of the Render platform")
     ap.add_argument("--api-key", help="HTTP-pull mode: worker API key (Bearer)")
-    ap.add_argument("--chatgpt-email", help="pull a fresh ChatGPT session by COPYING "
-                    "the Chrome profile logged into this email into the worker's "
-                    "profile dir (copy-mode, targeted per-profile close, never a "
-                    "whole-channel kill) before launching the browser")
+    ap.add_argument("--chatgpt-email", help="target ChatGPT account. The worker uses "
+                    "a clean per-account profile folder and waits for you to log in "
+                    "as this account in its own browser window (persisted + reused).")
     args = ap.parse_args()
 
     if args.user_data_dir:
         backend.USER_DATA_DIR = args.user_data_dir
     if args.profile_directory:
         backend.PROFILE_DIRECTORY = args.profile_directory
+
+    # ROOT-CAUSE FIX for wrong-account sessions: use a CLEAN per-account profile
+    # folder (.chatgpt_profile_<email>) and DELETE the old/other profile folders so
+    # a stale session from a different account can never be reused. Each account
+    # keeps its own persistent folder; switching accounts never contaminates.
+    if getattr(args, "chatgpt_email", None):
+        import re as _re, glob as _glob, shutil as _shutil
+        safe = _re.sub(r"[^A-Za-z0-9._-]", "_", args.chatgpt_email.strip().lower())
+        backend.PROFILE_DIR = os.path.join(backend.BASE_DIR, f".chatgpt_profile_{safe}")
+        for _d in _glob.glob(os.path.join(backend.BASE_DIR, ".chatgpt_profile*")):
+            if os.path.abspath(_d) != os.path.abspath(backend.PROFILE_DIR):
+                _shutil.rmtree(_d, ignore_errors=True)
+                log(f"deleted stale profile folder: {os.path.basename(_d)}")
+        # also drop any legacy plaintext cookie file (never injected in this model)
+        try:
+            if os.path.exists(COOKIES_FILE):
+                os.remove(COOKIES_FILE)
+        except OSError:
+            pass
+        log(f"using clean per-account profile: {os.path.basename(backend.PROFILE_DIR)}")
 
     # SESSION MODEL (universal, simple, no admin/registry/ABE): the worker uses its
     # OWN dedicated Chrome profile and the user logs into ChatGPT ONCE in the visible
