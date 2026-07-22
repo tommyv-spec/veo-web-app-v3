@@ -994,6 +994,15 @@
             font-size: 13px;
             z-index: 2;
         }
+        /* dual-backend — ChatGPT lane variant badge. Top-RIGHT so it never
+           overlaps the manual "M" badge (top-left). Banana lane is unmarked. */
+        .img-variant .variant-badge-gpt {
+            position: absolute; top: 10px; right: 10px;
+            background: rgba(16, 163, 127, 0.95); color: white;
+            padding: 4px 8px; border-radius: 4px;
+            font-size: 10px; font-weight: 700; letter-spacing: 1px;
+            z-index: 2;
+        }
 
         /* v533 — Upload tile (always shown alongside variants).
            Click to browse or drop a file onto the grid to upload. */
@@ -3717,7 +3726,6 @@ Example: A realistic vertical video of a professional presenter speaking directl
                             <select class="img-select" id="imgModel">
                                 <option value="nano_banana_pro">Nano Banana Pro</option>
                                 <option value="nano_banana_2" selected>Nano Banana 2</option>
-                                <option value="chatgpt">ChatGPT (web · lenient filter)</option>
                                 <option value="imagen_4">Imagen 4</option>
                             </select>
                         </div>
@@ -4010,7 +4018,6 @@ Ambient: same kitchen room tone, soft pour sound.
                             <select class="img-select" id="imgImportModel">
                                 <option value="nano_banana_pro">Nano Banana Pro</option>
                                 <option value="nano_banana_2" selected>Nano Banana 2</option>
-                                <option value="chatgpt">ChatGPT (web · lenient filter)</option>
                                 <option value="imagen_4">Imagen 4</option>
                             </select>
                         </div>
@@ -21924,6 +21931,10 @@ Ambient: same kitchen room tone, soft pour sound.
                         ${node.variants.map(v => {
                             const chosen = v.id === node.chosen_variant_id;
                             const isManual = (v.source === 'manual');
+                            // dual-backend: badge the ChatGPT lane variant. Banana
+                            // (or missing backend) is the default/unmarked lane.
+                            const beBadge = (v.backend === 'chatgpt')
+                                ? '<div class="variant-badge-gpt" title="ChatGPT">GPT</div>' : '';
                             // v773.11.4 (2026-06-08): data-track makes the variant-card
                             // click readable in PostHog (autocapture stamps data-* attrs).
                             // 14d data showed 679 empty-text clicks dominated by these
@@ -21939,6 +21950,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                      onclick="imgChooseVariant(event, ${node.id}, ${v.id})">
                                     <img src="${imgThumbUrl(v.image_url, 256)}" loading="lazy" decoding="async" alt="variant ${v.variant_index}">
                                     ${isManual ? '<div class="manual-badge">M</div>' : ''}
+                                    ${beBadge}
                                     <span class="variant-label">${v.variant_index}</span>
                                     ${isManual ? '<div class="manual-icon" title="Manual upload">📁</div>' : ''}
                                     ${chosen ? '<div class="chosen-badge">✓</div>' : ''}
