@@ -437,17 +437,43 @@ Write-Output "DONE closed=$closed dry=$dry target=$target"
 '''
 
 
+def _profiles_sharing_name(user_data_dir, name):
+    """Profile folders whose info_cache display name == `name` (case-insensitive).
+    Used to detect an ambiguous avatar name (two profiles labelled the same), where
+    a UIA close-by-name would close BOTH profiles' windows."""
+    try:
+        with open(os.path.join(user_data_dir, "Local State"), "r", encoding="utf-8") as f:
+            ic = json.load(f).get("profile", {}).get("info_cache", {})
+    except (OSError, ValueError):
+        return []
+    t = (name or "").strip().lower()
+    return [folder for folder, info in ic.items()
+            if str(info.get("name", "")).strip().lower() == t]
+
+
 def _close_target_profile_windows(user_data_dir, profile_folder, log=print, dry_run=False):
     """Gracefully WM_CLOSE only the target profile's Chrome windows (matched by
     avatar-button name via UIA), sparing every other profile + the channel.
     Windows-only. Returns the count closed (0 on any failure -> caller falls back
-    to channel close). dry_run just reports which windows WOULD close."""
+    to channel close). Returns -1 when the avatar name is AMBIGUOUS (shared by
+    another profile) -> the caller must NOT close (would nuke the sibling) and must
+    NOT channel-fall-back. dry_run just reports which windows WOULD close."""
     if sys.platform != "win32":
         return 0
     name = _profile_display_name(user_data_dir, profile_folder)
     if not name:
         log(f"  no display name for {profile_folder!r} -> cannot target its window")
         return 0
+    # Ambiguity guard: if two profiles share this avatar name, a close-by-name
+    # would close BOTH profiles' windows. Refuse rather than nuke the sibling.
+    sharing = _profiles_sharing_name(user_data_dir, name)
+    if len(sharing) > 1:
+        others = [p for p in sharing if p != profile_folder]
+        log(f"  AMBIGUOUS profile name {name!r}: shared by {sharing} — UIA cannot "
+            f"target only {profile_folder!r} without also closing {others}. "
+            f"Rename the target profile to a UNIQUE name in Chrome "
+            f"(profile menu -> Customize -> name) and retry. NOT closing anything.")
+        return -1
     folder = os.path.basename(os.path.dirname(os.path.normpath(user_data_dir)))
     needle = (os.sep + folder + os.sep).lower()
     try:
@@ -494,6 +520,14 @@ def _release_target_profile(user_data_dir, profile_folder, close_chrome, log):
         return
     # 2. targeted graceful close of just this profile's windows
     n = _close_target_profile_windows(user_data_dir, profile_folder, log=log)
+    if n == -1:
+        # Ambiguous avatar name -> closing by name would nuke the sibling profile,
+        # and channel-closing would kill the operator's whole Chrome. Refuse both;
+        # fail the pull with a clear, actionable message.
+        raise RuntimeError(
+            f"profile {profile_folder!r} shares its Chrome avatar name with another "
+            f"profile — cannot close only its window. Rename this profile to a "
+            f"unique name in Chrome, then retry.")
     if n and _wait_profile_unlocked(user_data_dir, profile_folder, wait_s=12, log=log):
         log(f"  {profile_folder!r} unloaded after closing its {n} window(s) -> "
             f"copy without channel close (channel spared)")
