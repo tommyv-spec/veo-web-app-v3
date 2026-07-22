@@ -58,9 +58,12 @@ SEL = {
     "file_input": "input[type=file]",
     # send button
     "send": "button[data-testid=send-button], button[aria-label*='Send'], button[data-testid='composer-send-button']",
-    # a generated image inside the assistant turn. ChatGPT serves gen output from
+    # a generated image inside the assistant turn. ChatGPT serves gen OUTPUT from
     # backend-api/estuary/content?id=file-... (primary), sometimes oaiusercontent.
-    "gen_img": "img[src*='estuary/content'], img[src*='backend-api/files'], img[src*='oaiusercontent'], img[alt*='Generated']",
+    # DO NOT match backend-api/files — that is the USER-UPLOADED reference image;
+    # matching it made the worker capture the attached reference instead of the
+    # generation on a slow/still-rendering turn (node 3401 returned the parent).
+    "gen_img": "img[src*='estuary/content'], img[src*='oaiusercontent'], img[alt*='Generated']",
     # the "generating / stop" state — while present, still rendering
     "stop_btn": "button[data-testid='stop-button'], button[aria-label*='Stop']",
     # top-right auth button — PRESENT means logged OUT (composer alone is not proof).
