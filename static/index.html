@@ -13901,17 +13901,27 @@ Ambient: same kitchen room tone, soft pour sound.
                 if (!exportId) {
                     try {
                         const _pr = await fetch(`${API}/jobs/${s.jobId}/export-status`);
-                        if (!_pr.ok) { _forgetActiveExport(s.jobId); continue; }
+                        // Mirror the main poll loop's error split so a transient failure
+                        // never deletes a live run:
+                        //   4xx → definitive (no run for this job / session gone) → forget.
+                        //   5xx → the container is mid-restart (the exact v850 case) →
+                        //         KEEP the pending record and retry on the next reload.
+                        if (_pr.status >= 400 && _pr.status < 500) { _forgetActiveExport(s.jobId); continue; }
+                        if (!_pr.ok) continue;              // transient 5xx — keep, retry next reload
                         const _prun = await _pr.json();
                         const _st = _prun && _prun.state;
-                        if (_st !== 'queued' && _st !== 'running') {
-                            _forgetActiveExport(s.jobId);   // done/failed/none — nothing live
+                        if (_st === 'done' || _st === 'failed') { _forgetActiveExport(s.jobId); continue; }  // finished — nothing live
+                        if (_st !== 'queued' && _st !== 'running') continue;   // unknown/empty state — keep, retry
+                        exportId = _prun.export_id;         // to_dict() names it export_id
+                        if (!exportId) {                    // schema drift — keep record, do not lose it silently
+                            console.warn(`[Export/v864] job ${String(s.jobId).slice(0,8)} run has no export_id — will retry next reload`);
                             continue;
                         }
-                        exportId = _prun.export_id;         // to_dict() names it export_id
                         console.log(`[Export/v864] recovered orphaned export ${String(exportId).slice(0,8)} for job ${String(s.jobId).slice(0,8)}`);
                     } catch (e) {
-                        _forgetActiveExport(s.jobId);
+                        // Network blip — server likely restarting. Keep the record so a
+                        // later reload can still recover the run; never forget here.
+                        console.log('[Export/v864] resume probe network error — keeping pending record:', e);
                         continue;
                     }
                 }
