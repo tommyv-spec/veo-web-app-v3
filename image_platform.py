@@ -1628,6 +1628,21 @@ def _node_eligible_for_backend(node, backend) -> bool:
     return True
 
 
+def _select_for_backend(candidates, backend):
+    """First claimable node for `backend` from an ordered candidate list.
+    chatgpt -> first base node whose cg lane is 'queued'. banana -> first node
+    whose main status is 'queued'. Returns None if none."""
+    be = (backend or "banana")
+    for n in candidates:
+        if be == "chatgpt":
+            if getattr(n, "cg_status", None) == "queued" and not _node_has_chain_dependency(n):
+                return n
+        else:
+            if n.status == "queued":
+                return n
+    return None
+
+
 def _seed_chatgpt_lane(node) -> None:
     """Best-effort: on a BASE node (no chain dependency), open the ChatGPT lane so
     a chatgpt worker will also render it. Skips dependent/chain nodes (Flow-only)
@@ -11284,8 +11299,24 @@ def worker_get_pending_job(
         sj.claimed_by_worker = None
         sj.claimed_at = None
         log.info(f"[image_platform] Released stale claim on node {sj.id}")
-    if stale_jobs:
+    # cg-lane stale-release (chatgpt backend claims live on cg_status; the
+    # banana loop above never touches them). Same >10min cutoff.
+    cg_stale_jobs = db.query(ImageNode).filter(
+        ImageNode.cg_status == "generating",
+        ImageNode.cg_claimed_at.isnot(None),
+        ImageNode.cg_claimed_at < stale_cutoff,
+    ).all()
+    for sj in cg_stale_jobs:
+        sj.cg_status = "queued"
+        sj.cg_claimed_by = None
+        sj.cg_claimed_at = None
+        log.info(f"[image_platform] Released stale cg-lane claim on node {sj.id}")
+    if stale_jobs or cg_stale_jobs:
         db.commit()
+
+    # backend routing: chatgpt claims via cg_status lane (base nodes only),
+    # banana/default via node.status (all nodes).
+    is_cg = (backend or "banana") == "chatgpt"
 
     # Prefer same-batch nodes when the worker tells us which batch it's on.
     # The prefix is the name_prefix + "Scene" part — e.g. "Master Chen Batch "
@@ -11299,29 +11330,30 @@ def worker_get_pending_job(
             # Match nodes whose name starts with the prefix. SQLAlchemy's
             # startswith() emits a LIKE with autoescaped wildcards.
             q = db.query(ImageNode).filter(
-                ImageNode.status == "queued",
                 ImageNode.user_id == user_id,
                 ImageNode.name.startswith(pb),
             )
+            q = q.filter(ImageNode.cg_status == "queued") if is_cg else q.filter(ImageNode.status == "queued")
             if exclude_ids:
                 q = q.filter(ImageNode.id.notin_(exclude_ids))
-            # backend routing (chatgpt = base nodes only): iterate the ordered
-            # candidates and pick the first eligible one instead of blind .first()
+            # backend routing: chatgpt claims cg-lane base nodes, banana claims
+            # status-queued nodes. Iterate the ordered candidates + pick the
+            # first claimable one instead of blind .first().
             for cand in q.order_by(ImageNode.created_at.asc()):
-                if _node_eligible_for_backend(cand, backend):
+                if _select_for_backend([cand], backend) is not None:
                     node = cand
                     break
 
     # Fall back to any queued node if no same-batch match (or no preference)
     if node is None:
         q = db.query(ImageNode).filter(
-            ImageNode.status == "queued",
             ImageNode.user_id == user_id,
         )
+        q = q.filter(ImageNode.cg_status == "queued") if is_cg else q.filter(ImageNode.status == "queued")
         if exclude_ids:
             q = q.filter(ImageNode.id.notin_(exclude_ids))
         for cand in q.order_by(ImageNode.created_at.asc()):
-            if _node_eligible_for_backend(cand, backend):
+            if _select_for_backend([cand], backend) is not None:
                 node = cand
                 break
 
@@ -11374,10 +11406,16 @@ def worker_get_pending_job(
             "slot_order": edge.slot_order or 0,
         })
 
-    # Claim the job
-    node.status = "generating"
-    node.claimed_by_worker = worker_id or "unknown"
-    node.claimed_at = datetime.utcnow()
+    # Claim the job. chatgpt claims the cg lane (leaves node.status untouched so
+    # the banana backend can render it in parallel); banana claims node.status.
+    if is_cg:
+        node.cg_status = "generating"
+        node.cg_claimed_by = worker_id or "unknown"
+        node.cg_claimed_at = datetime.utcnow()
+    else:
+        node.status = "generating"
+        node.claimed_by_worker = worker_id or "unknown"
+        node.claimed_at = datetime.utcnow()
     db.commit()
 
     # Keep backwards-compat: still emit input_image_urls (flat list) for
@@ -11391,8 +11429,8 @@ def worker_get_pending_job(
             "prompt": _resolve_flow_prompt_bindings(node),
             "aspect_ratio": node.aspect_ratio,
             "resolution": node.resolution,
-            "model": node.model,
-            "variants": int(node.n_variants or 1),
+            "model": "chatgpt" if is_cg else node.model,
+            "variants": 1 if is_cg else int(node.n_variants or 1),
             "input_image_urls": [im["url"] for im in input_images],
             "input_images": input_images,
         }
