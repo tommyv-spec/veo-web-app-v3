@@ -11609,7 +11609,13 @@ def worker_upload_variants(
         ext = Path(uf.filename or "").suffix.lower() or ".png"
         if ext not in (".png", ".jpg", ".jpeg", ".webp"):
             ext = ".png"
-        filename = f"variant_{idx}{ext}"
+        # Dual-backend: a base node's dir holds files from BOTH backends and idx
+        # restarts at 1 per backend, so a bare variant_{idx} name collides on
+        # disk (chatgpt's variant_1 overwrites banana's variant_1). Namespace
+        # non-banana filenames by backend; keep banana names bare for
+        # backward-compat with already-ready nodes.
+        be = (backend or "banana")
+        filename = f"variant_{idx}{ext}" if be == "banana" else f"variant_{be}_{idx}{ext}"
         target = out_dir / filename
         try:
             content = uf.file.read()
