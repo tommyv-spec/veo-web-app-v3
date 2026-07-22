@@ -221,6 +221,17 @@ def main():
         from chatgpt_image_backend import PROFILE_DIR
         ch = chatgpt_session_pull.pull_chatgpt_session(args.chatgpt_email, PROFILE_DIR)
         if ch:
+            # The golden profile carries the REAL logged-in ChatGPT cookies
+            # (the v10 session-token decrypts on this machine). A leftover
+            # .chatgpt_cookies.json from an old netlog run would be injected
+            # OVER them by inject_cookies() and clobber the fresh session-token
+            # -> "session expired". Drop it so only the golden's cookies are used.
+            try:
+                if os.path.exists(COOKIES_FILE):
+                    os.remove(COOKIES_FILE)
+                    log("removed stale .chatgpt_cookies.json (golden holds fresh session)")
+            except OSError:
+                pass
             log(f"pulled ChatGPT session for {args.chatgpt_email} (channel={ch}); launching golden profile")
         else:
             log(f"WARNING: could not pull ChatGPT session for {args.chatgpt_email}; "
