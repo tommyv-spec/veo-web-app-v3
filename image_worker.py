@@ -6213,9 +6213,11 @@ def _write_done_file(job_path, result):
 
 
 def _flow_handles_model(job):
-    """Flow/Banana worker owns everything EXCEPT chatgpt (a separate local
-    worker claims those). Returns False -> Flow worker leaves the job alone."""
-    return (job or {}).get("model") != "chatgpt"
+    """Flow/Banana worker renders every node it is handed on the banana lane.
+    `chatgpt` is no longer a node model — it's a parallel lane claimed by the
+    separate chatgpt worker via backend=chatgpt (cg_status), so the flow worker
+    never sees those jobs. Kept as a hook (callers still invoke it); always True."""
+    return True
 
 
 def _process_watch_job(page, job_path, job):
@@ -7092,7 +7094,7 @@ def api_pull_mode(page, api_url, api_key, worker_id=None):
             try:
                 resp = _api_request(
                     api_url, api_key, "GET", "/jobs/pending",
-                    params={"worker_id": worker_id}, timeout=10,
+                    params={"worker_id": worker_id, "backend": "banana"}, timeout=10,
                 )
                 consecutive_errors = 0
                 consecutive_timeouts = 0
@@ -10025,7 +10027,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                         prefer_batch = None
 
                 try:
-                    _params = {"worker_id": worker_id}
+                    _params = {"worker_id": worker_id, "backend": "banana"}
                     if prefer_batch:
                         _params["prefer_batch"] = prefer_batch
                     # v753 — exclude nodes already in our local in_flight dict so the
