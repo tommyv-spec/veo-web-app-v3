@@ -310,10 +310,19 @@ def main():
                         pass
                 log(f"deleted stale: {os.path.basename(_d)}")
         log(f"using clean per-account profile: {os.path.basename(backend.PROFILE_DIR)}")
-        # NO grabbing from the user's Chrome — copy hits App-Bound Encryption and
-        # netlog closes all their Chrome; neither is clean/universal. The worker
-        # logs into ChatGPT ONCE in its OWN window (ensure_logged_in), persists it,
-        # and reuses it. Never touches the user's daily Chrome.
+        # COPY the session from the account in Chrome BETA (exactly like the video
+        # worker) — closes ONLY that one Beta profile's window, never the daily
+        # stable Chrome. Beta is ABE-off (v10 cookies) so the golden decrypts.
+        # If the account isn't in Beta (or copy fails), fall back to a one-time
+        # login in the worker's own window (ensure_logged_in).
+        try:
+            import chatgpt_session_pull
+            if chatgpt_session_pull.pull_chatgpt_session(args.chatgpt_email, backend.PROFILE_DIR):
+                log("copied ChatGPT session from Chrome Beta — no manual login needed.")
+            else:
+                log("no Beta session to copy; will wait for a one-time login in the window.")
+        except Exception as _e:
+            log(f"Beta copy failed ({_e}); will wait for a one-time login.")
 
     # SESSION MODEL (universal, simple, no admin/registry/ABE): the worker uses its
     # OWN dedicated Chrome profile and the user logs into ChatGPT ONCE in the visible
