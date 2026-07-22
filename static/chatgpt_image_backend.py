@@ -165,33 +165,44 @@ def is_logged_in(page):
         return True
 
 
-def _wait_generation(page, timeout_s):
-    """Wait until a fresh generated image is present AND rendering finished.
+# ROOT-CAUSE FIX (node 3401/3409 returned the reference): the uploaded REFERENCE
+# image and the GENERATED image are BOTH served from backend-api/estuary/content,
+# so a src-substring selector cannot tell them apart. The reference appears in the
+# DOM (inside the role="user" turn) BEFORE generation starts, and the old baseline/
+# count logic captured it during the pre-generation window. Positive-detect the
+# generation instead: a gen image is (a) NOT inside a role="user" turn, and (b) has
+# alt starting "Generated image" OR is an estuary/oaiusercontent image outside the
+# user turn. The uploaded reference (role="user", alt=filename) is excluded, so the
+# pre-gen window yields no candidate and the worker waits for the real output.
+_GEN_QUERY = r"""
+() => {
+  const isGen = (im) => {
+    const role = im.closest('[data-message-author-role]')
+                   ?.getAttribute('data-message-author-role');
+    if (role === 'user') return false;                 // uploaded reference lives here
+    const alt = im.alt || '';
+    if (alt.startsWith('Generated image')) return true;
+    const src = im.currentSrc || im.src || '';
+    return /estuary\/content|oaiusercontent/.test(src);
+  };
+  const cands = [...document.querySelectorAll('img')]
+    .filter(isGen)
+    .map(im => { const r = im.getBoundingClientRect();
+                 return { src: im.currentSrc || im.src, area: r.width * r.height }; })
+    .filter(c => c.src && c.area > 5000);              // the full render, not a thumb
+  cands.sort((a, b) => b.area - a.area);
+  return cands.length ? cands[0].src : null;
+};
+"""
 
-    Returns the image element handle, or None on timeout.
-    Strategy: count gen imgs BEFORE submit (done by caller via baseline), then
-    here poll until a NEW img shows AND the stop-button disappears.
-    """
-    deadline = time.time() + timeout_s
-    last = None
-    while time.time() < deadline:
-        # still generating?
-        generating = page.locator(SEL["stop_btn"]).count() > 0
-        imgs = page.locator(SEL["gen_img"])
-        n = imgs.count()
-        if n > 0:
-            last = imgs.nth(n - 1)
-            if not generating:
-                # give the src a beat to settle from blob -> final
-                jitter(0.8, 1.6)
-                return last
-        time.sleep(1.5)
-    return last  # may be a partial; caller validates
+
+def _find_gen_src(page):
+    """Src of the current generated image (NOT the uploaded reference), or None."""
+    return page.evaluate(_GEN_QUERY)
 
 
-def _download_img(page, img_handle, out_path):
-    """Fetch the image bytes in-page (handles blob: + oaiusercontent auth) and save."""
-    src = img_handle.get_attribute("src")
+def _download_img(page, src, out_path):
+    """Fetch the image bytes in-page (same-origin authed URL) and save."""
     if not src:
         raise RuntimeError("generated img has no src")
     # in-page fetch -> base64 (works for blob: URLs and same-origin authed URLs)
@@ -220,7 +231,6 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
     if not is_logged_in(page):
         raise RuntimeError("session expired — run --refresh-cookies")
     jitter()
-    baseline = page.locator(SEL["gen_img"]).count()
     for rp in ref_paths or []:
         if not os.path.exists(rp):
             raise FileNotFoundError(f"ref image not found: {rp}")
@@ -248,13 +258,20 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
     if not submitted:
         comp.press("Enter")
     deadline = time.time() + gen_timeout_s
-    img = None
+    gen_src = None
     while time.time() < deadline:
-        img = _wait_generation(page, timeout_s=min(15, int(deadline - time.time()) + 1))
-        cur = page.locator(SEL["gen_img"]).count()
-        if img is not None and cur > baseline and page.locator(SEL["stop_btn"]).count() == 0:
+        generating = page.locator(SEL["stop_btn"]).count() > 0
+        cand = _find_gen_src(page)
+        if cand and not generating:
+            jitter(0.8, 1.6)                    # let the src settle (blob -> final)
+            gen_src = _find_gen_src(page) or cand
             break
-    if img is None or page.locator(SEL["gen_img"]).count() <= baseline:
-        raise TimeoutError(f"no new image after {gen_timeout_s}s")
-    _download_img(page, img, out_path)
+        time.sleep(1.2)
+    if not gen_src:
+        # Do NOT fall back to whatever image is on the page — that is how the
+        # uploaded reference got uploaded as the "generation". Fail the node.
+        raise TimeoutError(
+            f"no generated image after {gen_timeout_s}s — ChatGPT produced no "
+            f"output (refusal or slow render); refusing to upload the reference")
+    _download_img(page, gen_src, out_path)
     return out_path
