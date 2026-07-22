@@ -118,6 +118,8 @@ def run_image_platform_migrations():
         # Existing rows are all AI-generated; default 'ai' backfills them.
         ("image_variants", "source",
          "ALTER TABLE image_variants ADD COLUMN source TEXT DEFAULT 'ai' NOT NULL"),
+        ("image_variants", "backend",
+         "ALTER TABLE image_variants ADD COLUMN backend TEXT DEFAULT 'banana' NOT NULL"),
         # v537: explicit per-scene speaker mode declared in the markdown.
         # NULL = auto-detect (preserves the existing _detect_voiceover_only
         # behavior). Non-NULL values: 'on-camera' | 'voiceover' | 'auto'.
@@ -352,6 +354,8 @@ def run_image_platform_migrations():
         # v530: source discriminator on image_variants — 'ai' | 'manual'.
         ("image_variants", "source",
          "ALTER TABLE image_variants ADD COLUMN IF NOT EXISTS source VARCHAR(16) DEFAULT 'ai' NOT NULL"),
+        ("image_variants", "backend",
+         "ALTER TABLE image_variants ADD COLUMN IF NOT EXISTS backend VARCHAR(16) DEFAULT 'banana' NOT NULL"),
         # v573: ingredient-type discriminator on image_edges (parallels
         # the SQLite migration above).
         ("image_edges", "kind",
@@ -1097,6 +1101,9 @@ class ImageVariant(Base):
     image_path = Column(String(500), nullable=False)  # relative to images_root()
     # v530: 'ai' | 'manual'. Default 'ai' so existing rows backfill correctly.
     source = Column(String(16), nullable=False, default='ai')
+    # Dual-backend: which renderer produced this variant. 'banana' (Flow/Banana,
+    # default) | 'chatgpt'. Base nodes carry both; the grid badges them.
+    backend = Column(String(16), nullable=False, default='banana')
     created_at = Column(DateTime, default=datetime.utcnow)
 
     node = relationship("ImageNode", back_populates="variants", foreign_keys=[node_id])
@@ -1120,6 +1127,7 @@ class ImageVariant(Base):
             # v530: source = 'ai' or 'manual'. UI uses this to render the
             # 'M' badge / folder icon on manual variants.
             "source": self.source or 'ai',
+            "backend": self.backend or 'banana',
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
