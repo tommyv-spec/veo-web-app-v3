@@ -53,22 +53,25 @@ from chatgpt_image_backend import (
 )
 
 
-def ensure_logged_in(page, timeout_s=600):
+def ensure_logged_in(page, email=None, timeout_s=600):
     """Universal, simple session: make sure the worker's OWN browser is logged into
-    ChatGPT. If not, the visible window is left open for the user to log in ONCE —
-    we poll until they do; the session then persists in the worker's own profile
-    dir. NO pulling from the user's main Chrome, NO admin/registry/ABE — works for
-    every user on any machine. Returns True once logged in, False on timeout."""
+    ChatGPT. Navigates to ChatGPT (with a Google login-hint for `email` so the
+    account chooser surfaces "Continue as <email>"). If not logged in, the visible
+    window is left open for the user to click "Continue as <email>" / sign in ONCE —
+    we poll until they do; the session then persists in the worker's own profile.
+    NO pulling from the user's main Chrome, NO admin/registry/ABE — works for every
+    user on any machine. Returns True once logged in, False on timeout."""
     import time as _t
     page.goto(CHATGPT_URL, wait_until="domcontentloaded", timeout=45000)
     dismiss_cookie_banner(page)
     if is_logged_in(page):
-        log("ChatGPT: already logged in.")
+        log(f"ChatGPT: already logged in{f' (target {email})' if email else ''}.")
         return True
+    who = f" as {email}" if email else ""
     log("=" * 60)
-    log("  ACTION NEEDED: log into ChatGPT in the Chrome window that opened.")
-    log("  This is a ONE-TIME login — the session is saved in the worker's own")
-    log("  profile and reused next time. Waiting up to 10 minutes...")
+    log(f"  ACTION NEEDED: log into ChatGPT{who} in the Chrome window that opened —")
+    log(f"  click \"Continue{who}\" (or sign in). ONE-TIME: the session is saved in")
+    log("  the worker's own profile and reused next time. Waiting up to 10 min...")
     log("=" * 60)
     deadline = _t.time() + timeout_s
     while _t.time() < deadline:
@@ -179,14 +182,14 @@ def _process_platform_job(page, job_path, job):
         _write_done(job_path, jobmap.done_payload(jid, "failed", [], str(e)))
         log(f"  ✗ {jid} failed: {e}")
 
-def watch_mode(watch_dir, poll_s=5):
+def watch_mode(watch_dir, poll_s=5, email=None):
     """Poll the platform job folder; process chatgpt jobs one at a time."""
     log(f"watch mode on {watch_dir}")
     sync_playwright, _ = _import_playwright()
     with sync_playwright() as p:
         ctx, page = launch(p)
         try:
-            if not ensure_logged_in(page):
+            if not ensure_logged_in(page, email):
                 return
             import time as _t
             while True:
@@ -250,7 +253,7 @@ def main():
         with sync_playwright() as p:
             ctx, page = launch(p)
             try:
-                if not ensure_logged_in(page):
+                if not ensure_logged_in(page, getattr(args, "chatgpt_email", None)):
                     return
                 http_run(args.api_url, args.api_key, page, socket.gethostname())
             finally:
@@ -259,7 +262,7 @@ def main():
     if args.watch:
         wd = args.watch_dir or os.environ.get("IMAGE_JOBS_DIR") or os.path.join(
             os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "..", "..", "data")), "_image_jobs")
-        watch_mode(wd)
+        watch_mode(wd, email=getattr(args, "chatgpt_email", None))
         return
     if args.login:
         login_flow()
