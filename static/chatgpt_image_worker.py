@@ -284,25 +284,40 @@ def main():
     if args.profile_directory:
         backend.PROFILE_DIRECTORY = args.profile_directory
 
-    # ROOT-CAUSE FIX for wrong-account sessions: use a CLEAN per-account profile
-    # folder (.chatgpt_profile_<email>) and DELETE the old/other profile folders so
-    # a stale session from a different account can never be reused. Each account
-    # keeps its own persistent folder; switching accounts never contaminates.
+    # PER-ACCOUNT clean folder + AUTO-GRAB. If an email is given: (1) use a clean
+    # per-account profile (.chatgpt_profile_<email>) and DELETE old/other folders so
+    # a stale session from another account can never be reused; (2) auto-grab the
+    # ChatGPT session via netlog (the method that worked first) so NO manual login is
+    # needed. If the auto-grab can't get it, the worker falls back to a one-time
+    # login in its own window (ensure_logged_in). Either way the account is verified.
     if getattr(args, "chatgpt_email", None):
         import re as _re, glob as _glob, shutil as _shutil
         safe = _re.sub(r"[^A-Za-z0-9._-]", "_", args.chatgpt_email.strip().lower())
         backend.PROFILE_DIR = os.path.join(backend.BASE_DIR, f".chatgpt_profile_{safe}")
-        for _d in _glob.glob(os.path.join(backend.BASE_DIR, ".chatgpt_profile*")):
-            if os.path.abspath(_d) != os.path.abspath(backend.PROFILE_DIR):
-                _shutil.rmtree(_d, ignore_errors=True)
-                log(f"deleted stale profile folder: {os.path.basename(_d)}")
-        # also drop any legacy plaintext cookie file (never injected in this model)
-        try:
-            if os.path.exists(COOKIES_FILE):
-                os.remove(COOKIES_FILE)
-        except OSError:
-            pass
+        backend.COOKIES_FILE = os.path.join(backend.BASE_DIR, f".chatgpt_cookies_{safe}.json")
+        keep = {os.path.abspath(backend.PROFILE_DIR), os.path.abspath(backend.COOKIES_FILE)}
+        for _pat in (".chatgpt_profile*", ".chatgpt_cookies*.json"):
+            for _d in _glob.glob(os.path.join(backend.BASE_DIR, _pat)):
+                if os.path.abspath(_d) in keep:
+                    continue
+                if os.path.isdir(_d):
+                    _shutil.rmtree(_d, ignore_errors=True)
+                else:
+                    try:
+                        os.remove(_d)
+                    except OSError:
+                        pass
+                log(f"deleted stale: {os.path.basename(_d)}")
         log(f"using clean per-account profile: {os.path.basename(backend.PROFILE_DIR)}")
+        # AUTO-GRAB the session (netlog — worked in the first run) so no manual login.
+        try:
+            import chatgpt_session_pull
+            if chatgpt_session_pull.pull_chatgpt_cookies_netlog(args.chatgpt_email, backend.COOKIES_FILE):
+                log("auto-grabbed ChatGPT session — no manual login needed.")
+            else:
+                log("could not auto-grab session; will wait for a one-time login in the window.")
+        except Exception as _e:
+            log(f"auto-grab failed ({_e}); will wait for a one-time login.")
 
     # SESSION MODEL (universal, simple, no admin/registry/ABE): the worker uses its
     # OWN dedicated Chrome profile and the user logs into ChatGPT ONCE in the visible
