@@ -13889,8 +13889,11 @@ Ambient: same kitchen room tone, soft pour sound.
         // Reload survival: the run keeps going on the server, so pick the poll back up.
         async function resumeActiveExports() {
             const saved = _loadActiveExports();
+            // DIAGNOSTIC (v864b): always log that the resume fired + what it saw, even
+            // with 0 saved records — distinguishes "listener never ran" from "nothing
+            // to resume". Remove once the hard-refresh path is confirmed operator-side.
+            console.log(`[Export/v864] resumeActiveExports fired — ${saved.length} saved record(s):`, JSON.stringify(saved));
             if (!saved.length) return;
-            console.log(`[Export/v864] resuming ${saved.length} export(s) after reload`);
             for (const s of saved) {
                 // v864 — PENDING record (no exportId): the page died before the 202, so
                 // we never learned the run id. Ask the server whether a run actually
@@ -13948,6 +13951,10 @@ Ambient: same kitchen room tone, soft pour sound.
             }
         }
         window.addEventListener('load', resumeActiveExports);
+        // DIAGNOSTIC (v864b): trivial always-present marker so the operator can confirm
+        // which code the browser is running: type window.__EXPORT_RESUME_VERSION in the
+        // console. undefined => still on old code (deploy not live / wrong app).
+        window.__EXPORT_RESUME_VERSION = 'v864b';
 
         async function exportFinalVideo(jobId) {
             // v855 per-JOB guard (replaces the old global export lock).
