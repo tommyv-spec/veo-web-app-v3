@@ -225,8 +225,15 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
         page.locator(SEL["file_input"]).first.set_input_files(ref_paths)
         jitter(2.0, 4.0)
     comp = page.locator(SEL["composer"]).first
-    comp.click(); jitter(0.4, 0.9); comp.fill("")
-    comp.type(prompt, delay=6)
+    comp.click(); jitter(0.4, 0.9)
+    # Insert the whole prompt in ONE op — char-by-char .type() times out on the
+    # ProseMirror editor for the platform's long (2000+ char) prompts. insert_text
+    # fires a single insertText event ProseMirror handles instantly.
+    try:
+        comp.evaluate("el => { el.focus(); }")
+        page.keyboard.insert_text(prompt)
+    except Exception:
+        comp.fill(prompt)
     jitter()
     submitted = False
     try:
