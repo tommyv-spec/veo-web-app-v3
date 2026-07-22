@@ -13954,7 +13954,7 @@ Ambient: same kitchen room tone, soft pour sound.
         // DIAGNOSTIC (v864b): trivial always-present marker so the operator can confirm
         // which code the browser is running: type window.__EXPORT_RESUME_VERSION in the
         // console. undefined => still on old code (deploy not live / wrong app).
-        window.__EXPORT_RESUME_VERSION = 'v864c';
+        window.__EXPORT_RESUME_VERSION = 'v864d';
 
         async function exportFinalVideo(jobId) {
             // v855 per-JOB guard (replaces the old global export lock).
@@ -14730,13 +14730,23 @@ Ambient: same kitchen room tone, soft pour sound.
                 if (st !== 'queued' && st !== 'running') return;   // only LIVE runs
                 const exportId = run.export_id;
                 if (!exportId || activeExports.has(exportId)) return;
+                // Server created_at is NAIVE UTC (datetime.utcnow().isoformat(), no tz
+                // suffix). Date.parse would read it as LOCAL time — showed 120:21 for a
+                // 10s-old export in UTC+2. Append 'Z' when no tz is present so it parses
+                // as UTC and the elapsed timer is real.
+                let _startedAt = Date.now();
+                if (run.created_at) {
+                    const _iso = /[zZ]|[+-]\d\d:?\d\d$/.test(run.created_at) ? run.created_at : run.created_at + 'Z';
+                    const _p = Date.parse(_iso);
+                    if (!isNaN(_p)) _startedAt = _p;
+                }
                 const exp = {
                     key: exportId,
                     exportId: exportId,
                     jobId: jobId,
                     jobTitle: _exportJobLabel(jobId),
                     settings: {},
-                    startedAt: run.created_at ? Date.parse(run.created_at) : Date.now(),
+                    startedAt: _startedAt,
                     resumed: true,
                     vcErrorMsg: null,
                     row: null,
