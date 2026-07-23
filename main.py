@@ -10653,6 +10653,30 @@ async def _do_export_final(
                         if _mg866b is not None:
                             _mg866b.set_phase(f"support:ffmpeg {_ar} ({len(_grp)} stills @{_w}x{_h})")
                             _mg866b._sample_once(force=True, tag=f"before-track-{_ar}")
+                        # v867 — HARD SAFETY GATE. The support track is a
+                        # best-effort post-production convenience; it must NEVER
+                        # be able to OOM-kill a finished export. If the CONTAINER
+                        # (cgroup, not host) is already tight right before we
+                        # spawn ffmpeg, skip this track and keep the export. The
+                        # operator still has the stills in the image job. This
+                        # reads the correct number (v865) at the correct point
+                        # (immediately pre-ffmpeg), unlike the v864 pre-whisper
+                        # check which measured the wrong thing at the wrong step.
+                        try:
+                            import mem_guard as _mgg
+                            import os as _osg867
+                            _need = int(_osg867.environ.get("SUPPORT_TRACK_MIN_AVAIL_MB", "700"))
+                            _snap = _mgg.snapshot()
+                            if _snap["source"] == "cgroup" and _snap["avail_mb"] is not None \
+                                    and _snap["avail_mb"] < _need:
+                                print(f"[Export][v867] SKIP support-track {_ar}: "
+                                      f"avail={_snap['avail_mb']}MB < {_need}MB "
+                                      f"(used={_snap['used_mb']}MB/{_snap['limit_mb']}MB) — "
+                                      f"export kept, still PNGs available in the image job",
+                                      flush=True)
+                                continue
+                        except Exception:
+                            pass
                         _est(_grp, _mdur, _sup_out, width=_w, height=_h)
                         if _mg866b is not None:
                             _mg866b._sample_once(force=True, tag=f"after-track-{_ar}")

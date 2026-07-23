@@ -5021,12 +5021,34 @@ def export_support_track(support_clips: list, master_duration: float,
         if i + 1 < len(clips):
             c["end"] = min(c["end"], clips[i + 1]["start"])
 
-    # One black base (input 0) of exact master_duration + one looped image input
-    # per still. Overlay each still gated to its absolute [start,end] window.
+    # v867 — MEMORY. On Render's ~1-vCPU 2GB box this filtergraph OOM-killed the
+    # WHOLE container (2026-07-23: [Mem/v866] showed cgroup used climbing 708MB
+    # -> 2044MB in a steady linear ramp across this exact render while Python
+    # RSS stayed flat ~557MB — i.e. the growth is inside ffmpeg, not us). Cause:
+    # x264 on one slow CPU cannot drain frames as fast as the N-overlay chain
+    # produces them, so ffmpeg's internal filter->encoder queue grows unbounded
+    # for the whole render. Two changes attack exactly that, both verified to
+    # keep byte-exact still placement (the v825.3 anti-drift guarantee):
+    #
+    #   1. FINITE inputs. Each still was `-loop 1 -i img` = an INFINITE full-
+    #      master-length stream (N x master_duration x fps frames can be in
+    #      flight). Replace with `-itsoffset START -loop 1 -framerate fps -t SPAN
+    #      -i img`: the image exists only for its own visible window (~3s), so
+    #      after it ends `overlay ...:eof_action=pass` passes the base through.
+    #      Frames-in-flight drop from N*master to N*span (~24x less here).
+    #   2. `ultrafast`. The encoder drains far faster than `veryfast`, so the
+    #      queue cannot build on a slow consumer. crf 20 (was 18) — this is a
+    #      SILENT overlay track the operator composites in post, so a hair more
+    #      quantization is invisible and irrelevant.
+    #   Plus `-threads 1 -filter_threads 1`: one slow vCPU gains nothing from
+    #   more threads, and each thread carries its own frame buffers.
     inputs = ["-f", "lavfi", "-i",
               f"color=c=black:s={width}x{height}:r={fps}:d={master_duration:.6f}"]
     for c in clips:
-        inputs += ["-loop", "1", "-i", str(c["path"])]
+        _span = max(0.05, float(c["end"]) - float(c["start"]))
+        inputs += ["-itsoffset", f"{float(c['start']):.6f}",
+                   "-loop", "1", "-framerate", str(fps), "-t", f"{_span:.6f}",
+                   "-i", str(c["path"])]
 
     fc = []
     for idx in range(len(clips)):
@@ -5043,14 +5065,14 @@ def export_support_track(support_clips: list, master_duration: float,
         prev = f"o{idx}"
 
     map_lbl = f"[{prev}]" if clips else "0:v"
-    cmd = [FFMPEG_BIN, "-y"] + inputs
+    cmd = [FFMPEG_BIN, "-y", "-threads", "1", "-filter_threads", "1"] + inputs
     if fc:
         cmd += ["-filter_complex", ";".join(fc)]
     cmd += [
         "-map", map_lbl,
         "-t", f"{master_duration:.6f}",
         "-r", str(fps),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-an",
         "-movflags", "+faststart", str(output_path),
     ]
