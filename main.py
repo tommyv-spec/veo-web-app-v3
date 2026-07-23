@@ -8905,6 +8905,50 @@ def _next_queued_export_ids(limit: int) -> list:
             return []
 
 
+# v864 — memory guards for the v825 support-track step (see the call site in
+# the export runner). Stdlib only: Render is Linux, so /proc is authoritative
+# and psutil is not worth a new dependency.
+_V864_SUPPORT_LOCK = asyncio.Lock()  # module-level `import asyncio` (L20); 3.11 binds no loop at creation
+
+
+def _v864_mem():
+    """(MemAvailable_MB, self_RSS_MB) from /proc. (None, None) off Linux."""
+    _avail = _rss = None
+    try:
+        with open("/proc/meminfo", "r") as _f:
+            for _line in _f:
+                if _line.startswith("MemAvailable:"):
+                    _avail = int(_line.split()[1]) // 1024
+                    break
+    except Exception:
+        pass
+    try:
+        with open("/proc/self/status", "r") as _f:
+            for _line in _f:
+                if _line.startswith("VmRSS:"):
+                    _rss = int(_line.split()[1]) // 1024
+                    break
+    except Exception:
+        pass
+    return _avail, _rss
+
+
+def _v864_release():
+    """Return freed heap to the OS so MemAvailable reflects reality before we
+    decide whether a ~250MB model load is safe. Mirrors the v701z sequencing
+    that transcribe_master_audio's own memory budget assumes has already run."""
+    try:
+        import gc as _gc
+        _gc.collect()
+    except Exception:
+        pass
+    try:
+        import ctypes as _ct
+        _ct.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 async def _export_dispatcher():
     """v855 — THE ONLY PLACE A RUNNER IS EVER SPAWNED.
 
@@ -10434,6 +10478,23 @@ async def _do_export_final(
         # v825 — timed support-image inserts: emit a second SILENT track
         # (stills at their word-spans) beside the talking-head master, for
         # post-production compositing. Fully guarded — never breaks export.
+        #
+        # v864 — MEMORY SAFETY. This step loads faster-whisper "small"
+        # (~250MB resident) to word-align the master audio. Its own comment in
+        # video_processor.transcribe_master_audio assumes "the speaker's tiny is
+        # disposed + malloc_trim before this load runs" — the export path never
+        # honoured that contract. On 2026-07-23 a 12-clip export ran this while
+        # an image job was uploading variants on the same instance: the box was
+        # OOM-killed mid-align (log: MasterAlign transcribed 240 words, two
+        # [Support] placements, then "Starting gunicorn" + instance restarted).
+        # The try/except below never fired because the process died outright,
+        # so the whole export result was lost with it.
+        #
+        # Three guards, cheapest first:
+        #   1. release memory to the OS BEFORE the model load (gc + malloc_trim)
+        #   2. refuse to load when MemAvailable is too low — skip the track and
+        #      KEEP the export, instead of killing the instance
+        #   3. serialize the step so two exports never hold a model at once
         support_track_info = {}
         try:
             from image_platform import ImageJobBatch, ImageNode, ImageVariant, parse_scene_table as _pst, images_root as _iroot, _storage_download_to_local as _dl2
@@ -10460,7 +10521,27 @@ async def _do_export_final(
                 if _acr.returncode != 0 or not _sup_audio.exists():
                     raise RuntimeError(f"support master-audio extract failed: {(_acr.stderr or '')[-300:]}")
                 # 2) word timestamps + phrase spans
-                _mw = await asyncio.to_thread(_tma, _sup_audio)
+                # v864 — release first, then measure, then refuse if too tight.
+                _v864_release()
+                _avail_mb, _rss_mb = _v864_mem()
+                _min_mb = int(os.environ.get("SUPPORT_TRACK_MIN_AVAIL_MB", "600"))
+                print(f"[Export][v864] pre-whisper mem: avail={_avail_mb}MB "
+                      f"rss={_rss_mb}MB (need >={_min_mb}MB)", flush=True)
+                if _avail_mb is not None and _avail_mb < _min_mb:
+                    # Skipping keeps the finished export. Loading anyway risks an
+                    # OOM kill that destroys it. Bump the instance or lower
+                    # SUPPORT_TRACK_MIN_AVAIL_MB to re-enable.
+                    raise RuntimeError(
+                        f"insufficient memory for support-track whisper load: "
+                        f"avail={_avail_mb}MB < {_min_mb}MB — export kept, track skipped"
+                    )
+                # v864 — serialize: never let two exports hold a whisper model
+                # at the same time on this instance.
+                async with _V864_SUPPORT_LOCK:
+                    _mw = await asyncio.to_thread(_tma, _sup_audio)
+                _v864_release()
+                _a2, _r2 = _v864_mem()
+                print(f"[Export][v864] post-whisper mem: avail={_a2}MB rss={_r2}MB", flush=True)
                 # v825.9 — hand the resolver each scene's spoken-line candidates
                 # (Prompt A line + the Prompt-B reworded line) so a support is
                 # placed INSIDE its owning line's master span, correct whether A
