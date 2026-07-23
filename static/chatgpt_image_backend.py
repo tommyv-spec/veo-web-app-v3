@@ -206,6 +206,54 @@ def _find_gen_src(page):
     return page.evaluate(_GEN_QUERY)
 
 
+def _conversation_id(page):
+    """The active conversation UUID from the URL (chatgpt.com/c/<uuid>), or None.
+    The URL only gains /c/<id> once the turn has actually started server-side."""
+    try:
+        url = page.url or ""
+        if "/c/" not in url:
+            return None
+        cid = url.rstrip("/").split("/c/")[-1].split("?")[0].strip()
+        return cid or None
+    except Exception:
+        return None
+
+
+def _stream_status(page, cid):
+    """ChatGPT's OWN turn status: GET /backend-api/conversation/<id>/stream_status
+    -> {"status": "COMPLETE"|...}. Returns the status string, or None if the
+    endpoint is unavailable.
+
+    This is the authoritative "is the turn finished" signal and replaces the
+    stop-button heuristic. Measured 2026-07-23: SEL['stop_btn'] matches a
+    persistent control — it read 1 before the turn began AND while the finished
+    image was already on screen — so gating on it is a race that intermittently
+    failed nodes whose image was actually present. stream_status returned a clean
+    200 {"status":"COMPLETE"} on the same turn.
+
+    (The full conversation JSON is NOT usable here: /backend-api/conversation/<id>
+    returns 404 conversation_inaccessible for these worker chats, and the
+    conversations list stays empty because they live under a Project.)
+    """
+    if not cid:
+        return None
+    try:
+        return page.evaluate(
+            """async (cid) => {
+                try {
+                    const r = await fetch('/backend-api/conversation/' + cid + '/stream_status',
+                                          {credentials: 'include'});
+                    if (!r.ok) return null;
+                    const j = await r.json();
+                    return (j && j.status) ? String(j.status) : null;
+                } catch (e) { return null; }
+            }""",
+            cid,
+        )
+    except Exception:
+        return None
+
+
 def _download_img(page, src, out_path):
     """Fetch the image bytes in-page (same-origin authed URL) and save."""
     if not src:
@@ -267,8 +315,9 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
     ever_cand = False          # did a generation image EVER appear?
     last_cand = None           # last candidate src seen
     cand_since = None          # when the CURRENT candidate src first appeared
+    last_status = None         # last stream_status seen (authoritative turn state)
+    stop_n = -1
     while time.time() < deadline:
-        stop_n = page.locator(SEL["stop_btn"]).count()
         cand = _find_gen_src(page)
         if cand:
             ever_cand = True
@@ -276,19 +325,33 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
                 last_cand, cand_since = cand, time.time()
         else:
             last_cand, cand_since = None, None
-        if cand and stop_n == 0:
-            jitter(0.8, 1.6)                    # let the src settle (blob -> final)
-            gen_src = _find_gen_src(page) or cand
-            break
-        # Wedge escape: the image is up and has not changed for STALL_ACCEPT_S, yet
-        # the stop/generating indicator never cleared. That is a stuck (or drifted)
-        # stop-button selector, not an in-progress render — take the image. Nodes
-        # were failing with "no generated image" while the picture sat in the chat.
-        if cand and cand_since and (time.time() - cand_since) >= STALL_ACCEPT_S:
-            log(f"stop indicator still present (count={stop_n}) but gen image stable "
-                f"{STALL_ACCEPT_S}s — accepting it")
-            gen_src = cand
-            break
+
+        if cand:
+            # PRIMARY: ChatGPT's own turn status. Accept as soon as the turn is
+            # COMPLETE and a generated image is on screen.
+            status = _stream_status(page, _conversation_id(page))
+            if status:
+                last_status = status
+            if status is not None:
+                if status.upper() == "COMPLETE":
+                    jitter(0.8, 1.6)            # let the src settle (blob -> final)
+                    gen_src = _find_gen_src(page) or cand
+                    break
+            else:
+                # FALLBACK (stream_status unavailable): legacy stop-button gate.
+                stop_n = page.locator(SEL["stop_btn"]).count()
+                if stop_n == 0:
+                    jitter(0.8, 1.6)
+                    gen_src = _find_gen_src(page) or cand
+                    break
+            # Last resort: image up and unchanged for STALL_ACCEPT_S while neither
+            # signal ever said "done" — take it rather than fail a node whose
+            # picture is sitting in the chat.
+            if cand_since and (time.time() - cand_since) >= STALL_ACCEPT_S:
+                log(f"gen image stable {STALL_ACCEPT_S}s (stream_status={last_status}, "
+                    f"stop={stop_n}) — accepting it")
+                gen_src = cand
+                break
         time.sleep(1.2)
     if not gen_src:
         # Do NOT fall back to whatever image is on the page — that is how the
@@ -306,10 +369,12 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
                 " big:a.filter(i=>{const r=i.getBoundingClientRect(); return r.width*r.height>5000;}).length}; }")
         except Exception as _e:
             inv = f"<inventory failed: {_e}>"
+        _cid = _conversation_id(page)
         raise TimeoutError(
             f"no generated image after {gen_timeout_s}s — ChatGPT produced no "
             f"output (refusal or slow render); refusing to upload the reference "
-            f"[diag: stop_btn={stop_n} ever_candidate={ever_cand} imgs={inv}]")
+            f"[diag: stream_status={_stream_status(page, _cid)} last_seen={last_status} "
+            f"conv={_cid} stop_btn={stop_n} ever_candidate={ever_cand} imgs={inv}]")
     _download_img(page, gen_src, out_path)
     _tone_correct(out_path)
     return out_path
