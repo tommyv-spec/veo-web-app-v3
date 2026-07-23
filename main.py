@@ -662,6 +662,18 @@ async def lifespan(app: FastAPI):
 
     _purge_task = _asyncio.create_task(_purge_old_logs())
 
+    # v866 — continuous memory sampler. The 2026-07-23 OOMs left no trace of
+    # WHAT allocated: the log simply stopped mid-export and the instance
+    # restarted. This samples the cgroup on a daemon THREAD (an asyncio task
+    # would not be scheduled while sync ffmpeg/whisper work blocks the loop)
+    # and speaks up past 60% of the limit, carrying a phase label and the
+    # high-water mark, so the last line before a kill is actually informative.
+    try:
+        import mem_guard as _mg866
+        _mg866.start_sampler(interval=3.0)
+    except Exception as _e866:
+        print(f"[Mem/v866] sampler failed to start (non-fatal): {_e866}", flush=True)
+
     # v850 — durable export queue: re-fire anything a dead container orphaned.
     # Covers the hard-kill path (OOM/SIGKILL) where the shutdown hook below
     # never ran.
@@ -9321,6 +9333,7 @@ async def _do_export_final(
     # bracket the heavy phases so the next incident names its own culprit.
     try:
         import mem_guard as _mg865
+        _mg865.set_phase(f"export {job_id[:8]}")
         _mg865.log(f"export-start job={job_id[:8]}")
     except Exception:
         pass
@@ -10577,6 +10590,15 @@ async def _do_export_final(
                             _cands.append(_bl.strip())
                     _scene_lines.append({"authored": _auth, "candidates": _cands})
                 _spans = _rss(_mw, _sup, _scene_lines if any(sl["authored"] for sl in _scene_lines) else None)
+                # v866 — the 2026-07-23 kill happened somewhere after this point
+                # with no further log line. Label every remaining stage so the
+                # sampler attributes the spike.
+                try:
+                    import mem_guard as _mg866b
+                    _mg866b.set_phase("support:fetch-stills")
+                    _mg866b._sample_once(force=True, tag="after-span-resolve")
+                except Exception:
+                    _mg866b = None
                 # 3) image_index -> approved still path (batch nodes named "... Scene N")
                 _nodes = db.query(ImageNode).filter(ImageNode.batch_id == _sb.id).all()
                 _idx_to_path = {}
@@ -10628,7 +10650,12 @@ async def _do_export_final(
                         _w, _h = _canvas.get(_ar, (1080, 1920))
                         _fn = f"support_track_{_ar.replace(':', 'x')}_{_stem}.mp4"
                         _sup_out = output_dir / _fn
+                        if _mg866b is not None:
+                            _mg866b.set_phase(f"support:ffmpeg {_ar} ({len(_grp)} stills @{_w}x{_h})")
+                            _mg866b._sample_once(force=True, tag=f"before-track-{_ar}")
                         _est(_grp, _mdur, _sup_out, width=_w, height=_h)
+                        if _mg866b is not None:
+                            _mg866b._sample_once(force=True, tag=f"after-track-{_ar}")
                         try:
                             if storage is not None:
                                 await asyncio.to_thread(storage.upload_file, str(_sup_out),
@@ -10644,6 +10671,12 @@ async def _do_export_final(
                     print("[Export][v825] no resolvable support stills; skipping track", flush=True)
         except Exception as _sup_e:
             print(f"[Export][v825] support-track skipped (non-fatal): {_sup_e}", flush=True)
+        try:
+            import mem_guard as _mg866c
+            _mg866c._sample_once(force=True, tag="export-done")
+            _mg866c.set_phase("idle")
+        except Exception:
+            pass
 
         return {
             "success": True,

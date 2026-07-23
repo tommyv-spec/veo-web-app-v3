@@ -170,3 +170,79 @@ def log(tag):
         print(format_line(tag), flush=True)
     except Exception:
         pass
+
+
+# === v866 — continuous sampler ==============================================
+# WHY A THREAD, NOT AN ASYNCIO TASK: the export runs sync ffmpeg/whisper work
+# via asyncio.to_thread, but plenty of other code blocks the event loop
+# outright. An asyncio sampler would simply not be scheduled during exactly the
+# window we need to observe, and the trace would go dark right before the OOM —
+# which is what happened on 2026-07-23: the last line before the instance
+# restarted was a [Support] placement, leaving no idea what allocated next.
+#
+# The sampler also records a PHASE label so a spike can be attributed to the
+# code that caused it, and it prints the peak seen so far, so even the LAST
+# line before an OOM kill carries the high-water mark.
+
+_PHASE = "idle"
+_PEAK_USED_MB = 0
+_sampler_started = False
+
+
+def set_phase(phase):
+    """Label what the process is doing; appears in every sample line."""
+    global _PHASE
+    _PHASE = str(phase)
+
+
+def peak_used_mb():
+    return _PEAK_USED_MB
+
+
+def _sample_once(force=False, tag="sample"):
+    global _PEAK_USED_MB
+    s = snapshot()
+    used = s.get("used_mb")
+    if used is not None and used > _PEAK_USED_MB:
+        _PEAK_USED_MB = used
+    pct = None
+    if used is not None and s.get("limit_mb"):
+        pct = int(100 * used / s["limit_mb"])
+    # Only speak up when it matters: crossing 60% of the limit, or on force.
+    if force or (pct is not None and pct >= 60):
+        level = "WARN" if (pct is not None and pct >= 80) else "info"
+        print(
+            f"[Mem/v866] {tag} {level} phase={_PHASE} used={used}MB "
+            f"({pct}% of {s.get('limit_mb')}MB) avail={s.get('avail_mb')}MB "
+            f"rss={s.get('rss_mb')}MB peak={_PEAK_USED_MB}MB",
+            flush=True,
+        )
+    return s
+
+
+def start_sampler(interval=3.0):
+    """Start the background memory sampler exactly once. Never raises."""
+    global _sampler_started
+    if _sampler_started:
+        return
+    _sampler_started = True
+    try:
+        import threading
+
+        def _loop():
+            while True:
+                try:
+                    _sample_once()
+                except Exception:
+                    pass
+                try:
+                    import time
+                    time.sleep(interval)
+                except Exception:
+                    return
+
+        t = threading.Thread(target=_loop, name="mem-sampler", daemon=True)
+        t.start()
+        log("sampler started")
+    except Exception:
+        pass
