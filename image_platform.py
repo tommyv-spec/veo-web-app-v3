@@ -1675,11 +1675,37 @@ def _apply_worker_status(node, backend, status, has_variants, error):
         raise ValueError(f"Unknown status: {status}")
 
 
+def _is_approved(node) -> bool:
+    """The user already picked (approved) a variant on this node.
+
+    An approved node must never be handed back to a worker: regenerating it
+    burns a generation and can replace the image the user deliberately chose.
+    Note the explicit generate/regenerate endpoints CLEAR chosen_variant_id
+    before queueing, so a user-initiated re-render is unaffected by this guard —
+    only involuntary re-queues (worker release-claims on restart, single-claim
+    release, the 10-min stale sweep) are blocked.
+    """
+    return getattr(node, "chosen_variant_id", None) is not None
+
+
+def _release_claim_to(node, *, cg: bool) -> str:
+    """Status an involuntarily-released node should return to.
+
+    Approved -> 'ready' (it already has the user's chosen image; parking it in
+    'queued' would both re-generate it and, with the claim guard below, strand
+    it as permanently unclaimable). Otherwise -> 'queued' to be re-rendered.
+    """
+    return "ready" if _is_approved(node) else "queued"
+
+
 def _seed_chatgpt_lane(node) -> None:
     """Best-effort: on a BASE node (no chain dependency), open the ChatGPT lane so
     a chatgpt worker will also render it. Skips dependent/chain nodes (Flow-only)
-    and never clobbers a lane already generating/ready/failed. Idempotent."""
+    and never clobbers a lane already generating/ready/failed. Idempotent.
+    Never opens the lane on an already-approved node."""
     if _node_has_chain_dependency(node):
+        return
+    if _is_approved(node):
         return
     if node.cg_status in (None, "queued"):
         node.cg_status = "queued"
@@ -11198,7 +11224,9 @@ def worker_release_claims(
     ).all()
     n = len(stale_own)
     for node in stale_own:
-        node.status = "queued"
+        # Approved nodes go back to 'ready', not 'queued' — a worker restart must
+        # not re-render an image the user already picked.
+        node.status = _release_claim_to(node, cg=False)
         node.claimed_by_worker = None
         node.claimed_at = None
         node.error_message = None
@@ -11255,13 +11283,13 @@ def worker_release_single_claim(
 
     released = False
     if node.status == "generating" and node.claimed_by_worker == worker_id:
-        node.status = "queued"
+        node.status = _release_claim_to(node, cg=False)   # approved -> 'ready', never re-queued
         node.claimed_by_worker = None
         node.claimed_at = None
         node.error_message = None
         db.commit()
         released = True
-        log.info(f"[image_platform] Worker '{worker_id}' released single claim on node {node_id}")
+        log.info(f"[image_platform] Worker '{worker_id}' released single claim on node {node_id} -> {node.status}")
 
     return {"released": released, "node_id": node_id, "status": node.status}
 
@@ -11330,10 +11358,12 @@ def worker_get_pending_job(
         ImageNode.claimed_at < stale_cutoff,
     ).all()
     for sj in stale_jobs:
-        sj.status = "queued"
+        # An approved node goes back to 'ready', never 'queued' — re-rendering it
+        # would burn a generation and could replace the user's chosen image.
+        sj.status = _release_claim_to(sj, cg=False)
         sj.claimed_by_worker = None
         sj.claimed_at = None
-        log.info(f"[image_platform] Released stale claim on node {sj.id}")
+        log.info(f"[image_platform] Released stale claim on node {sj.id} -> {sj.status}")
     # cg-lane stale-release (chatgpt backend claims live on cg_status; the
     # banana loop above never touches them). Same >10min cutoff.
     cg_stale_jobs = db.query(ImageNode).filter(
@@ -11342,10 +11372,10 @@ def worker_get_pending_job(
         ImageNode.cg_claimed_at < stale_cutoff,
     ).all()
     for sj in cg_stale_jobs:
-        sj.cg_status = "queued"
+        sj.cg_status = _release_claim_to(sj, cg=True)
         sj.cg_claimed_by = None
         sj.cg_claimed_at = None
-        log.info(f"[image_platform] Released stale cg-lane claim on node {sj.id}")
+        log.info(f"[image_platform] Released stale cg-lane claim on node {sj.id} -> {sj.cg_status}")
     if stale_jobs or cg_stale_jobs:
         db.commit()
 
@@ -11369,6 +11399,11 @@ def worker_get_pending_job(
                 ImageNode.name.startswith(pb),
             )
             q = q.filter(ImageNode.cg_status == "queued") if is_cg else q.filter(ImageNode.status == "queued")
+            # NEVER hand an already-approved node to a worker (either lane). The
+            # user picked that image; re-rendering burns a generation and can
+            # replace it. generate/regenerate clear chosen_variant_id first, so a
+            # deliberate re-render still gets through.
+            q = q.filter(ImageNode.chosen_variant_id.is_(None))
             if exclude_ids:
                 q = q.filter(ImageNode.id.notin_(exclude_ids))
             # backend routing: chatgpt claims cg-lane base nodes, banana claims
@@ -11382,6 +11417,7 @@ def worker_get_pending_job(
             ImageNode.user_id == user_id,
         )
         q = q.filter(ImageNode.cg_status == "queued") if is_cg else q.filter(ImageNode.status == "queued")
+        q = q.filter(ImageNode.chosen_variant_id.is_(None))   # approved -> never re-served
         if exclude_ids:
             q = q.filter(ImageNode.id.notin_(exclude_ids))
         node = _select_for_backend(q.order_by(ImageNode.created_at.asc()), backend)
