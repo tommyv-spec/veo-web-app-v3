@@ -10524,7 +10524,14 @@ async def _do_export_final(
                 # v864 — release first, then measure, then refuse if too tight.
                 _v864_release()
                 _avail_mb, _rss_mb = _v864_mem()
-                _min_mb = int(os.environ.get("SUPPORT_TRACK_MIN_AVAIL_MB", "600"))
+                # v864.1 — `import os as _os864`, NOT bare `os`. _do_export_final
+                # has a function-local `import os` further down, which makes `os`
+                # local for the WHOLE function scope, so reading it here raised
+                # UnboundLocalError and skipped the track ("cannot access local
+                # variable 'os'"). Same workaround the function already uses at
+                # its other local-import site.
+                import os as _os864
+                _min_mb = int(_os864.environ.get("SUPPORT_TRACK_MIN_AVAIL_MB", "600"))
                 print(f"[Export][v864] pre-whisper mem: avail={_avail_mb}MB "
                       f"rss={_rss_mb}MB (need >={_min_mb}MB)", flush=True)
                 if _avail_mb is not None and _avail_mb < _min_mb:
