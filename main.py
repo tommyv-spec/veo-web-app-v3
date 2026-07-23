@@ -8906,31 +8906,29 @@ def _next_queued_export_ids(limit: int) -> list:
 
 
 # v864 — memory guards for the v825 support-track step (see the call site in
-# the export runner). Stdlib only: Render is Linux, so /proc is authoritative
-# and psutil is not worth a new dependency.
+# the export runner).
 _V864_SUPPORT_LOCK = asyncio.Lock()  # module-level `import asyncio` (L20); 3.11 binds no loop at creation
 
 
 def _v864_mem():
-    """(MemAvailable_MB, self_RSS_MB) from /proc. (None, None) off Linux."""
-    _avail = _rss = None
+    """(avail_MB, rss_MB) — CONTAINER headroom, not the host's.
+
+    v865 — this used to read /proc/meminfo MemAvailable. Inside a Render
+    container that reports the HOST's free memory, which has nothing to do with
+    the 2GB cgroup limit we are actually OOM-killed against: it returned tens of
+    GB on a box that was seconds from being killed, so the guard below could
+    never fire. mem_guard reads the cgroup limit first and only falls back to
+    the host figure when there is genuinely no limit (local dev).
+    """
     try:
-        with open("/proc/meminfo", "r") as _f:
-            for _line in _f:
-                if _line.startswith("MemAvailable:"):
-                    _avail = int(_line.split()[1]) // 1024
-                    break
+        import mem_guard as _mg
+        _s = _mg.snapshot()
+        # A host-fallback number is NOT container headroom. Return None so the
+        # caller treats headroom as unknown and proceeds rather than refusing
+        # (or worse, trusting) a meaningless figure.
+        return (_s["avail_mb"] if _s["source"] == "cgroup" else None), _s["rss_mb"]
     except Exception:
-        pass
-    try:
-        with open("/proc/self/status", "r") as _f:
-            for _line in _f:
-                if _line.startswith("VmRSS:"):
-                    _rss = int(_line.split()[1]) // 1024
-                    break
-    except Exception:
-        pass
-    return _avail, _rss
+        return None, None
 
 
 def _v864_release():
@@ -9317,7 +9315,16 @@ async def _do_export_final(
     - Never trim start frames from clips that start a "cut" transition scene
     """
     from video_processor import export_final_video as process_export, check_vad_available
-    
+
+    # v865 — phase memory trace. The 2026-07-23 OOMs (2GB cgroup) gave no clue
+    # which phase peaked because nothing measured container memory. These lines
+    # bracket the heavy phases so the next incident names its own culprit.
+    try:
+        import mem_guard as _mg865
+        _mg865.log(f"export-start job={job_id[:8]}")
+    except Exception:
+        pass
+
     job = get_user_job(db, job_id, current_user)
     
     # Determine output directory
@@ -10532,8 +10539,13 @@ async def _do_export_final(
                 # its other local-import site.
                 import os as _os864
                 _min_mb = int(_os864.environ.get("SUPPORT_TRACK_MIN_AVAIL_MB", "600"))
+                try:
+                    import mem_guard as _mg865
+                    _mg865.log("pre-whisper (support-track)")
+                except Exception:
+                    pass
                 print(f"[Export][v864] pre-whisper mem: avail={_avail_mb}MB "
-                      f"rss={_rss_mb}MB (need >={_min_mb}MB)", flush=True)
+                      f"rss={_rss_mb}MB (need >={_min_mb}MB, None=unknown/dev)", flush=True)
                 if _avail_mb is not None and _avail_mb < _min_mb:
                     # Skipping keeps the finished export. Loading anyway risks an
                     # OOM kill that destroys it. Bump the instance or lower

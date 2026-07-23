@@ -301,11 +301,23 @@ _WHISPER_BASE_MODEL = None
 
 
 def _ensure_whisper_base():
-    """Lazy-load faster-whisper base int8 model. Cached for the process lifetime."""
+    """Lazy-load faster-whisper base int8 model. Cached for the process lifetime.
+
+    v865 — this ~150MB stays resident until the process dies, so it is part of
+    the permanent baseline on a 2GB box. Logged on the one load that creates it
+    so the baseline step is visible in the trace.
+    """
     global _WHISPER_BASE_MODEL
     if _WHISPER_BASE_MODEL is None:
         from faster_whisper import WhisperModel
+        try:
+            import mem_guard as _mg865
+            _mg865.log("before whisper-base load (permanent ~150MB)")
+        except Exception:
+            _mg865 = None
         _WHISPER_BASE_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+        if _mg865 is not None:
+            _mg865.log("after whisper-base load (now permanent)")
     return _WHISPER_BASE_MODEL
 
 
