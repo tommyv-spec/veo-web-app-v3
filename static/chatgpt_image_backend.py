@@ -30,8 +30,13 @@ CHATGPT_URL = "https://chatgpt.com/"
 # the netlog capture to refresh when the session-token expires.
 COOKIES_FILE = os.path.join(BASE_DIR, ".chatgpt_cookies.json")
 
-# generation can be slow (thinking model + image render)
-GEN_TIMEOUT_S = int(os.environ.get("CHATGPT_GEN_TIMEOUT_S", "180"))
+# generation can be slow (thinking model + image render). Raised 180 -> 300 after
+# nodes failed with "no generated image" while the image WAS present in the chat.
+GEN_TIMEOUT_S = int(os.environ.get("CHATGPT_GEN_TIMEOUT_S", "300"))
+# If a generated image is on screen and UNCHANGED this long but the stop/generating
+# indicator never clears, accept it anyway — that combination means the stop button
+# is wedged (or its selector drifted), not that the render is still running.
+STALL_ACCEPT_S = int(os.environ.get("CHATGPT_STALL_ACCEPT_S", "45"))
 # human jitter between actions (min, max seconds)
 JITTER = (float(os.environ.get("CHATGPT_JITTER_MIN", "1.2")),
           float(os.environ.get("CHATGPT_JITTER_MAX", "3.5")))
@@ -259,20 +264,52 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
         comp.press("Enter")
     deadline = time.time() + gen_timeout_s
     gen_src = None
+    ever_cand = False          # did a generation image EVER appear?
+    last_cand = None           # last candidate src seen
+    cand_since = None          # when the CURRENT candidate src first appeared
     while time.time() < deadline:
-        generating = page.locator(SEL["stop_btn"]).count() > 0
+        stop_n = page.locator(SEL["stop_btn"]).count()
         cand = _find_gen_src(page)
-        if cand and not generating:
+        if cand:
+            ever_cand = True
+            if cand != last_cand:
+                last_cand, cand_since = cand, time.time()
+        else:
+            last_cand, cand_since = None, None
+        if cand and stop_n == 0:
             jitter(0.8, 1.6)                    # let the src settle (blob -> final)
             gen_src = _find_gen_src(page) or cand
+            break
+        # Wedge escape: the image is up and has not changed for STALL_ACCEPT_S, yet
+        # the stop/generating indicator never cleared. That is a stuck (or drifted)
+        # stop-button selector, not an in-progress render — take the image. Nodes
+        # were failing with "no generated image" while the picture sat in the chat.
+        if cand and cand_since and (time.time() - cand_since) >= STALL_ACCEPT_S:
+            log(f"stop indicator still present (count={stop_n}) but gen image stable "
+                f"{STALL_ACCEPT_S}s — accepting it")
+            gen_src = cand
             break
         time.sleep(1.2)
     if not gen_src:
         # Do NOT fall back to whatever image is on the page — that is how the
         # uploaded reference got uploaded as the "generation". Fail the node.
+        # Diagnostics so the NEXT failure says WHICH condition wedged.
+        try:
+            stop_n = page.locator(SEL["stop_btn"]).count()
+        except Exception:
+            stop_n = -1
+        try:
+            inv = page.evaluate(
+                "() => { const a=[...document.querySelectorAll('img')];"
+                " return {total:a.length, user:a.filter(i=>i.closest('[data-message-author-role]')"
+                "?.getAttribute('data-message-author-role')==='user').length,"
+                " big:a.filter(i=>{const r=i.getBoundingClientRect(); return r.width*r.height>5000;}).length}; }")
+        except Exception as _e:
+            inv = f"<inventory failed: {_e}>"
         raise TimeoutError(
             f"no generated image after {gen_timeout_s}s — ChatGPT produced no "
-            f"output (refusal or slow render); refusing to upload the reference")
+            f"output (refusal or slow render); refusing to upload the reference "
+            f"[diag: stop_btn={stop_n} ever_candidate={ever_cand} imgs={inv}]")
     _download_img(page, gen_src, out_path)
     _tone_correct(out_path)
     return out_path
