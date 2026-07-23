@@ -61,6 +61,9 @@ def correct_bytes(data: bytes, fmt: str | None = None) -> bytes:
         src_fmt = (fmt or im.format or "PNG").upper()
         if src_fmt == "JPG":
             src_fmt = "JPEG"
+        # Preserve an alpha channel if present (correct only the RGB, re-attach A).
+        has_alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
+        alpha = im.convert("RGBA").getchannel("A") if has_alpha else None
         rgb = im.convert("RGB")
         arr = np.asarray(rgb).astype(np.float64)
         if arr.ndim != 3 or arr.shape[2] != 3 or arr.shape[0] < 4 or arr.shape[1] < 4:
@@ -68,6 +71,8 @@ def correct_bytes(data: bytes, fmt: str | None = None) -> bytes:
 
         corrected = _correct_array(arr).astype("uint8")
         out_im = Image.fromarray(corrected)
+        if alpha is not None:
+            out_im.putalpha(alpha)
 
         buf = io.BytesIO()
         save_kwargs = {}

@@ -284,6 +284,7 @@ def _tone_correct(out_path):
     (reverse-engineered from gpt-tone.com — per-channel auto-levels). Fail-safe: any
     error leaves the original file untouched. Toggle with TONE_CORRECT_CHATGPT=0."""
     try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # ensure sibling import
         import tone_correct
         if not tone_correct.is_enabled():
             return
@@ -292,8 +293,11 @@ def _tone_correct(out_path):
         ext = os.path.splitext(out_path)[1].lstrip(".").upper() or "PNG"
         fixed = tone_correct.correct_bytes(raw, fmt=ext)
         if fixed and fixed != raw:
-            with open(out_path, "wb") as f:
+            # atomic write — a mid-write failure must not corrupt/lose the download
+            tmp = out_path + ".tone.tmp"
+            with open(tmp, "wb") as f:
                 f.write(fixed)
+            os.replace(tmp, out_path)
             log(f"tone-correct applied ({len(raw)}->{len(fixed)} bytes) {os.path.basename(out_path)}")
     except Exception as e:
         log(f"tone-correct skipped ({e})")
