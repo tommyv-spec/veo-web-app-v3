@@ -16208,6 +16208,26 @@ class _RedoInFlightRegistry:
 _redo_in_flight = _RedoInFlightRegistry()
 
 
+def _fetch_clip_status_with_retry(clip_id, attempts=3):
+    """v863 — read a clip's approval-status, retrying transient API failures.
+
+    api_request_ex has NO retry: one 30s timeout and it returns None WITHOUT
+    raising. The redo pre-check treated that None as "nothing to skip on" and
+    regenerated the clip (operator 2026-07-23: a clip that was already
+    TERMINALLY content-rejected AND already replaced by the operator got
+    resurrected after two `Read timed out` lines). Retry with a short backoff;
+    return None only if every attempt failed, so the caller can DEFER instead
+    of guessing."""
+    _fresh = None
+    for _attempt in range(attempts):
+        _fresh = api_request("GET", f"/clips/{clip_id}/approval-status")
+        if _fresh:
+            return _fresh
+        if _attempt < attempts - 1:
+            time.sleep(2 * (_attempt + 1))
+    return None
+
+
 def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, http_session=None):
     """v862 — process-wide in-flight guard around the real redo processor
     (_process_redo_clip_impl). Serializes redo work on clip_id so two account
@@ -16283,7 +16303,17 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
     # Check DB first — clip may have been completed by HTTP worker before
     # this redo was retried (e.g. after proactive restore self-resume)
     try:
-        _fresh = api_request("GET", f"/clips/{clip_id}/approval-status")
+        _fresh = _fetch_clip_status_with_retry(clip_id)
+        if not _fresh:
+            # v863 — DEFER, don't fail-open. Regenerating a clip whose state we
+            # cannot read is destructive: it can resurrect a TERMINAL content
+            # reject and overwrite a replacement the operator already uploaded,
+            # and it burns Veo credits. Returning here leaves the clip in
+            # redo-pending so the dispatcher re-dispatches it once the API is
+            # reachable — one poll cycle late instead of wrong.
+            print(f"[v863] Redo clip {clip.get('clip_index', '?')} — status unreadable after "
+                  f"3 tries (API timeout); deferring instead of regenerating", flush=True)
+            return True
         if _fresh and _fresh.get('status') in ('completed', 'approved'):
             print(f"[REDO] Clip {clip.get('clip_index', '?')} already completed in DB — skipping", flush=True)
             return True
@@ -16312,7 +16342,12 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                 pass
             return True
     except Exception:
-        pass  # DB check failed — proceed with redo (safe fallback)
+        # v863 — fail CLOSED (defer), not open. Proceeding on an unreadable
+        # status is what resurrected a terminally-rejected, operator-replaced
+        # clip; deferring costs one poll cycle and loses nothing.
+        print(f"[v863] Redo clip {clip.get('clip_index', '?')} — status check errored; "
+              f"deferring instead of regenerating", flush=True)
+        return True
     
     # Immediately mark as generating so frontend shows "in progress" instead of "failed"
     update_clip_status(clip_id, 'generating')
