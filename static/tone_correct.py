@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tone_correct.py — server-side yellow/warm-tint correction for GPT-4o images.
+tone_correct.py — yellow/warm-tint correction for GPT-4o images (ChatGPT worker).
 
 Reverse-engineered from gpt-tone.com (see tools/gpt-tone/CODEX-HANDOFF.md). Their
 correction is a per-channel linear levels stretch (out = a*in + b, R^2 > 0.99, no
@@ -10,13 +10,16 @@ cross-channel mixing). We reproduce it generally as per-channel auto-levels:
   - the RED channel gets a harder black clip (~7th percentile) than green/blue
     (~0.8th) — that shadow crush is the site's contrast "punch".
 
-Used by image_platform.worker_upload_variants to correct ChatGPT-backend variants
-on the server (Render) right before they are stored — so every user's ChatGPT
-images are de-yellowed without any local worker changes.
+Called by chatgpt_image_backend.generate() on the freshly downloaded image, in
+place, before it is uploaded to the platform.
+
+DEPENDENCIES: Pillow only. Deliberately NO numpy — the worker is a light
+distributed bundle, and a 256-bin histogram + a per-channel LUT does the same
+job (and is faster on large images than percentile over a full pixel array).
 
 Fail-safe by contract: correct_bytes NEVER raises. On any error (bad bytes,
-missing numpy, tiny image) it returns the ORIGINAL bytes unchanged, so a
-correction problem can never break an upload.
+missing Pillow, tiny image) it returns the ORIGINAL bytes unchanged, so a
+correction problem can never break a generation or an upload.
 """
 from __future__ import annotations
 
@@ -25,24 +28,36 @@ import logging
 
 log = logging.getLogger("tone_correct")
 
-# Reverse-engineered defaults (robust general levels; see handoff doc).
+# Reverse-engineered defaults (see handoff doc).
 PLO = 0.8      # green/blue black-point percentile
 PHI = 99.9     # white-point percentile (all channels)
 RED_LO = 7.0   # red black-point percentile = the contrast punch
 
 
-def _correct_array(img, plo=PLO, phi=PHI, red_lo=RED_LO):
-    import numpy as np
-    los = [red_lo, plo, plo]
-    out = np.empty_like(img)
-    for c in range(3):
-        ch = img[..., c]
-        a = np.percentile(ch, los[c])
-        b = np.percentile(ch, phi)
-        if b <= a:
-            b = a + 1
-        out[..., c] = np.clip((ch - a) * 255.0 / (b - a), 0, 255)
-    return out
+def _percentile_from_hist(hist, pct):
+    """Value (0..255) at `pct` percentile of a 256-bin channel histogram."""
+    total = sum(hist)
+    if total <= 0:
+        return 0
+    target = total * (pct / 100.0)
+    cum = 0
+    for v, c in enumerate(hist):
+        cum += c
+        if cum >= target:
+            return v
+    return 255
+
+
+def _levels_lut(lo, hi):
+    """256-entry LUT mapping [lo, hi] -> [0, 255], clipped."""
+    if hi <= lo:
+        hi = lo + 1
+    scale = 255.0 / (hi - lo)
+    lut = []
+    for v in range(256):
+        x = int(round((v - lo) * scale))
+        lut.append(0 if x < 0 else (255 if x > 255 else x))
+    return lut
 
 
 def correct_bytes(data: bytes, fmt: str | None = None) -> bytes:
@@ -54,23 +69,29 @@ def correct_bytes(data: bytes, fmt: str | None = None) -> bytes:
     if not data:
         return data
     try:
-        import numpy as np
         from PIL import Image
 
         im = Image.open(io.BytesIO(data))
         src_fmt = (fmt or im.format or "PNG").upper()
         if src_fmt == "JPG":
             src_fmt = "JPEG"
-        # Preserve an alpha channel if present (correct only the RGB, re-attach A).
+
+        # Preserve an alpha channel if present (correct only RGB, re-attach A).
         has_alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
         alpha = im.convert("RGBA").getchannel("A") if has_alpha else None
-        rgb = im.convert("RGB")
-        arr = np.asarray(rgb).astype(np.float64)
-        if arr.ndim != 3 or arr.shape[2] != 3 or arr.shape[0] < 4 or arr.shape[1] < 4:
-            return data  # not a normal color raster — leave it alone
 
-        corrected = _correct_array(arr).astype("uint8")
-        out_im = Image.fromarray(corrected)
+        rgb = im.convert("RGB")
+        if rgb.width < 4 or rgb.height < 4:
+            return data  # too small to level meaningfully
+
+        los = (RED_LO, PLO, PLO)          # red crushed harder than green/blue
+        out_channels = []
+        for ch, plo in zip(rgb.split(), los):
+            hist = ch.histogram()
+            lo = _percentile_from_hist(hist, plo)
+            hi = _percentile_from_hist(hist, PHI)
+            out_channels.append(ch.point(_levels_lut(lo, hi)))
+        out_im = Image.merge("RGB", out_channels)
         if alpha is not None:
             out_im.putalpha(alpha)
 
@@ -78,6 +99,8 @@ def correct_bytes(data: bytes, fmt: str | None = None) -> bytes:
         save_kwargs = {}
         if src_fmt in ("JPEG", "WEBP"):
             save_kwargs["quality"] = 95
+        if src_fmt == "JPEG" and out_im.mode == "RGBA":
+            out_im = out_im.convert("RGB")   # JPEG has no alpha
         try:
             out_im.save(buf, format=src_fmt, **save_kwargs)
         except Exception:
@@ -90,6 +113,6 @@ def correct_bytes(data: bytes, fmt: str | None = None) -> bytes:
 
 
 def is_enabled() -> bool:
-    """Server toggle. ON by default; set TONE_CORRECT_CHATGPT=0 to disable."""
+    """Toggle. ON by default; set TONE_CORRECT_CHATGPT=0 to disable."""
     import os
     return os.environ.get("TONE_CORRECT_CHATGPT", "1").strip().lower() not in ("0", "false", "no", "off")

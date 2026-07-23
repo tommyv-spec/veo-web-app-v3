@@ -10185,6 +10185,8 @@ _CHATGPT_WORKER_FILES = {
     "chatgpt_image_worker.py", "chatgpt_image_backend.py", "chatgpt_job_map.py",
     "chatgpt_http_pull.py", "chatgpt_session_pull.py",
     "worker_profile_pull.py", "worker_cookie_extract.py",
+    # de-yellows GPT-4o output before upload (generate() -> _tone_correct); Pillow-only
+    "tone_correct.py",
 }
 
 
@@ -10309,22 +10311,22 @@ Write-Host "Python: $pythonPath" -ForegroundColor Green
 
 # Install deps if missing
 Write-Host ""
-Write-Host "Checking packages (patchright, requests)..."
-$check = & $pythonPath -c "import patchright; import requests; print('ok')" 2>$null
+Write-Host "Checking packages (patchright, requests, pillow)..."
+$check = & $pythonPath -c "import patchright; import requests; import PIL; print('ok')" 2>$null
 if ($check -ne "ok") {
-    Write-Host "Installing patchright + requests (first run, 1-3 min)..." -ForegroundColor Yellow
-    Start-Process -FilePath $pythonPath -ArgumentList "-m","pip","install","--no-input","patchright","requests" -NoNewWindow -Wait
+    Write-Host "Installing patchright + requests + pillow (first run, 1-3 min)..." -ForegroundColor Yellow
+    Start-Process -FilePath $pythonPath -ArgumentList "-m","pip","install","--no-input","patchright","requests","pillow" -NoNewWindow -Wait
     # Patchright also needs Chromium binaries
     Start-Process -FilePath $pythonPath -ArgumentList "-m","patchright","install","chromium" -NoNewWindow -Wait
 }
 
-# Download the worker bundle (7 files — always fresh so updates propagate)
+# Download the worker bundle (8 files — always fresh so updates propagate)
 Write-Host ""
 Write-Host "Downloading ChatGPT worker bundle..."
 $files = @(
     "chatgpt_image_worker.py", "chatgpt_image_backend.py", "chatgpt_job_map.py",
     "chatgpt_http_pull.py", "chatgpt_session_pull.py",
-    "worker_profile_pull.py", "worker_cookie_extract.py"
+    "worker_profile_pull.py", "worker_cookie_extract.py", "tone_correct.py"
 )
 foreach ($f in $files) {
     Write-Host "  $f"
@@ -10368,7 +10370,7 @@ def download_chatgpt_worker_installer(
 ):
     """Serve a downloadable .bat installer for the ChatGPT image worker.
     Mirrors download_image_worker_installer (the image-worker .bat route) but
-    targets the 7-file ChatGPT bundle. The chatgpt-setup.ps1 irm|iex route
+    targets the 8-file ChatGPT bundle. The chatgpt-setup.ps1 irm|iex route
     above stays as a copy-paste fallback.
 
     Requires login — bakes the user's personal worker token into the .bat.
@@ -10668,7 +10670,7 @@ def _generate_chatgpt_windows_installer(
 
     Folder layout:
       %USERPROFILE%\\KavenoChatGPTWorker\\
-        chatgpt_image_worker.py  (+ 6 more bundle files)
+        chatgpt_image_worker.py  (+ 7 more bundle files)
     """
     files = sorted(_CHATGPT_WORKER_FILES)
     # curl.exe download line per bundle file (Windows 10+ ships curl.exe).
@@ -10732,9 +10734,9 @@ set "PY=python"
 echo         OK
 
 echo   [2/5] Installing packages (may take a minute)...
-!PY! -m pip install patchright requests --quiet --disable-pip-version-check 2>nul
+!PY! -m pip install patchright requests pillow --quiet --disable-pip-version-check 2>nul
 if errorlevel 1 (
-    !PY! -m pip install patchright requests --quiet --user --disable-pip-version-check 2>nul
+    !PY! -m pip install patchright requests pillow --quiet --user --disable-pip-version-check 2>nul
 )
 echo         OK
 
