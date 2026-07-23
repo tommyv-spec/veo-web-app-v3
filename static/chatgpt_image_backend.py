@@ -274,4 +274,26 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
             f"no generated image after {gen_timeout_s}s — ChatGPT produced no "
             f"output (refusal or slow render); refusing to upload the reference")
     _download_img(page, gen_src, out_path)
+    _tone_correct(out_path)
     return out_path
+
+
+def _tone_correct(out_path):
+    """De-yellow the just-generated ChatGPT image IN PLACE, before it is handed to
+    the platform. GPT-4o output carries a warm/yellow cast; tone_correct removes it
+    (reverse-engineered from gpt-tone.com — per-channel auto-levels). Fail-safe: any
+    error leaves the original file untouched. Toggle with TONE_CORRECT_CHATGPT=0."""
+    try:
+        import tone_correct
+        if not tone_correct.is_enabled():
+            return
+        with open(out_path, "rb") as f:
+            raw = f.read()
+        ext = os.path.splitext(out_path)[1].lstrip(".").upper() or "PNG"
+        fixed = tone_correct.correct_bytes(raw, fmt=ext)
+        if fixed and fixed != raw:
+            with open(out_path, "wb") as f:
+                f.write(fixed)
+            log(f"tone-correct applied ({len(raw)}->{len(fixed)} bytes) {os.path.basename(out_path)}")
+    except Exception as e:
+        log(f"tone-correct skipped ({e})")
