@@ -25,7 +25,9 @@ REQUIRED_SECTIONS = [
     "## Storyboard",
     "## Comprehension",
     "## Adaptation-extraction",      # NEW 2026-06-04 canary — the extraction layer
-    "## Veo 3.1 Final Prompts",
+    # v865 — either title is valid: the legacy Veo name or the Google Omni name
+    # (Omni Flash is the live render model). A tuple = "any variant present passes".
+    ("## Veo 3.1 Final Prompts", "## Google Omni Final Prompts"),
 ]
 
 ANCHOR_RE = re.compile(
@@ -163,9 +165,11 @@ def lint(path):
     fails, warns = [], []
 
     # 1. required top-level sections present (incl the canary)
+    # v865 — a tuple entry passes when ANY of its title variants is present.
     for s in REQUIRED_SECTIONS:
-        if s not in t:
-            fails.append(f"missing required section: {s}")
+        variants = s if isinstance(s, tuple) else (s,)
+        if not any(v in t for v in variants):
+            fails.append("missing required section: " + " or ".join(variants))
 
     # 2. the canary block must be non-empty + carry the extraction content
     m = re.search(r'^##\s+Adaptation-extraction.*?$(.*?)(?=^##\s|\Z)', t,
