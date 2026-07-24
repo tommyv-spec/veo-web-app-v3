@@ -15827,4 +15827,30 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 
 **Scope / gates**: GENERATE-side authoring (every spoken line on every new build) + both render paths. The 1080p / interpolation 8s pin in `main.py` is untouched. Manual UI jobs (dialogue typed into the form, no markdown import) keep the job-level duration.
 
+## v865 — Google Omni master prompt is the per-clip body format (SUPERSEDES the v750/v718h-A anchor prose for new builds)
+
+**What we now know**: Omni Flash has been the live render model since v784 put it on Frames mode (`static/flow_worker.py:4999` model pick, `:7418` dropdown selector, `:1421-1422` `abra_t2v_8s` / `abra_r2v_8s`). Its native clip length is 8 seconds — exactly what the operator's master prompt opens with. The section the platform parses did not change; only the prose inside each clip does.
+
+**The new rule**: every `### Clip N.M` Text prompt is the twelve-block Omni master — `Create an 8-second vertical 9:16 realistic UGC video.` then `Quality / Fidelity Lock:`, `Reference:`, `Scene:`, `Camera:`, `Ending Camera Beat:`, `Performance / Action:`, `Voice:`, `Dialogue:`, `Audio:`, `Style:`, `Negative Constraints:`. Canonical fill map: `code/template_omni_master.md`.
+
+**Fenced bodies (hard requirement)**: both the Prompt A body and the Prompt B body sit inside a triple-backtick fence, exactly like every shipped build. `veo_prompt_overrides.py:396` extracts Prompt B with `_extract_fenced_content` ONLY — it has NO unfenced fallback (Text prompt A got one in v750.1; Prompt B never did). An unfenced Prompt B parses to `None`, the v821 gate hard-fails, and the worker loses the fallback line. The `**Start frame:**` / `**End frame:**` / `**Text prompt:**` / `**Prompt B …:**` labels stay OUTSIDE the fence; the prose body goes INSIDE.
+
+**What is DROPPED**: the v718h-A `IMMEDIATE ACTION:` / `TERMINAL STATE:` anchors. `Performance / Action:` + `Ending Camera Beat:` carry that job now. Operator directive 2026-07-24.
+
+**What is KEPT and why it looks like a contradiction**: the `Negative Constraints:` block. The thing retired on 2026-06-04 (`feedback_no-negative-prompts`, v750 note) was the separately-parsed `**Negative prompt:**` FIELD, which mapped to its own API parameter. v865's negatives are prose inside the positive Text prompt. Different mechanism — keep them verbatim. Do not "clean this up" later.
+
+**Section header**: `## Google Omni Final Prompts` on new builds. `## Veo 3.1 Final Prompts` stays accepted forever — `veo_prompt_overrides.py:68` matches both, and `verify_video_format.py` + `verify_decode_format.py` accept both. Forward-only; do NOT retro-rename shipped builds.
+
+**Prompt B (v821) is UNCHANGED in contract, new in shape**: Prompt B is the full Omni Prompt A copied byte-for-byte with only the quoted dialogue line reworded. The worker's retry ladder, the `clips.prompt_text_b` path, and the three v821 hard-fail gates all still apply.
+
+**The quote trap (new failure class)**: the v821 gate reads the LAST double-quoted span as the dialogue line (`verify_video_format.py`, `veo_prompt_overrides.py:404`). The Omni block puts `Audio:`, `Style:`, and `Negative Constraints:` AFTER the `Dialogue:` block. If any of them contains a double-quoted phrase, it steals the line and the Prompt B comparison silently checks the wrong strings. **The dialogue line must be the only double-quoted span in each prompt.** `verify_video_format.py` hard-fails this (Omni-titled sections) as of v865, checking Prompt A and Prompt B independently.
+
+**Dialogue wording is not free-form**: it must contain the literal tokens `saying exactly:` (v810) and `American accent` (`audit_build.py` FAILs when the two counts differ), and it ends with the post-speech silence cue so Omni does not loop filler. The master's original "He says exactly, with accurate lip sync" does not satisfy this and is reworded in the template.
+
+**Still applies to the line inside the quotes**: v693 lowercase, v831 25-word cap, v806 image-attached banned tokens, v796 deceptive-claim framing, v615 no em-dash.
+
+**Scope / gates**: GENERATE-side authoring, every clip of every NEW build. Forward-only — existing builds keep the v750 anchor prose and keep rendering; the linter holds only Omni-titled sections to the twelve-block shape.
+
+**Touched**: `code/template_omni_master.md` (NEW canonical master), `code/template_reference.md` §v865 (this deep-dive), `code/template_new_format.md` (skeleton), `code/veo_prompt_overrides.py` (header regex), `code/verify_video_format.py` (header + v865 gates, anchor warns removed), `code/verify_decode_format.py` (header list), `code/test_omni_section_header.py` (NEW tests), `~/.claude/skills/build-video/SKILL.md` + `audit_build.py` (authoring note), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline). Operator directive 2026-07-24.
+
 **Touched**: this deep-dive (canonical), `code/clip_duration.py` (NEW — the only home of the bucket math), `code/tests/test_v861_clip_duration.py`, `code/image_platform.py` (per-line bullet parse + prepare-time resolve onto `clips.veo_render_duration_s`), `code/main.py` (PATCH validator accepts 10; all four worker payload builders ship the field — local + user worker × pending-jobs + redo-pending-clips), `code/worker.py` (Veo API path, per-clip duration + the 10→8 fold), `code/static/flow_worker.py` (Flow path, per-clip duration tab + prompt timing window), `code/template_new_format.md` (skeleton field), `~/.claude/skills/build-video/audit_build.py` (`v861_clip_duration` check + v831 cap 25→28), `wiki/patterns/conventions.md` (index row), `wiki/log.md`. Operator 2026-07-16.
