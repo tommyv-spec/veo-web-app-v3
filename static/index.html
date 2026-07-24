@@ -20853,6 +20853,20 @@ Ambient: same kitchen room tone, soft pour sound.
                 && generatedNodes.every(n => n.status === 'ready' && n.chosen_variant_id);
             const batchIds = new Set(generatedNodes.map(n => n.batch_id).filter(Boolean));
             const sharedBatchId = batchIds.size === 1 ? Array.from(batchIds)[0] : null;
+            // v866b — the 📋 Batch overview button used to appear ONLY when the
+            // whole group shared one batch_id. A re-import (e.g. a v4.3 rebuild)
+            // creates a SECOND batch alongside the first, so batchIds.size>1 and
+            // the button silently vanished. Fall back to the batch most nodes
+            // belong to so the overview stays reachable. Promote gating below is
+            // unchanged — it still requires a single shared batch.
+            let primaryBatchId = sharedBatchId;
+            if (!primaryBatchId && batchIds.size > 0) {
+                const _bcount = {};
+                for (const n of generatedNodes) {
+                    if (n.batch_id) _bcount[n.batch_id] = (_bcount[n.batch_id] || 0) + 1;
+                }
+                primaryBatchId = Object.keys(_bcount).sort((a, b) => _bcount[b] - _bcount[a])[0] || null;
+            }
 
             if (allReadyChosen && sharedBatchId) {
                 // Consult the batch cache to see if this batch has already
@@ -20909,8 +20923,8 @@ Ambient: same kitchen room tone, soft pour sound.
             // v648 — batch overview lives on the JOB page (here), not the
             // per-node detail view. Shown when the group shares a single
             // batch_id (i.e. came from a markdown import).
-            if (sharedBatchId) {
-                bulkActions.push(`<button class="btn btn-secondary" onclick="imgOpenBatchOverview('${sharedBatchId}')" title="View the full source markdown + parsed sections (ingredients, images, scenes, lines, pads, action notes, Veo prompts)">📋 Batch overview</button>`);
+            if (primaryBatchId) {
+                bulkActions.push(`<button class="btn btn-secondary" onclick="imgOpenBatchOverview('${primaryBatchId}')" title="View the full source markdown + parsed sections (ingredients, images, scenes, lines, pads, action notes, Veo prompts)">📋 Batch overview</button>`);
             }
             // v773.11.4 (2026-06-08): 📋 Export list had 0 clicks / 14d. Removed
             // from the bulk-actions row. imgBulkExportList handler kept in case a
