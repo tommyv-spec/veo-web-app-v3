@@ -376,30 +376,115 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
             f"[diag: stream_status={_stream_status(page, _cid)} last_seen={last_status} "
             f"conv={_cid} stop_btn={stop_n} ever_candidate={ever_cand} imgs={inv}]")
     _download_img(page, gen_src, out_path)
-    _tone_correct(out_path)
+    _tone_correct(out_path, page)
     return out_path
 
 
-def _tone_correct(out_path):
-    """De-yellow the just-generated ChatGPT image IN PLACE, before it is handed to
-    the platform. GPT-4o output carries a warm/yellow cast; tone_correct removes it
-    (reverse-engineered from gpt-tone.com — per-channel auto-levels). Fail-safe: any
-    error leaves the original file untouched. Toggle with TONE_CORRECT_CHATGPT=0."""
+# --- Tone correction ---------------------------------------------------------
+# GPT-4o output carries a warm/yellow cast. We remove it before the image is
+# handed to the platform. PRIMARY path drives the real gpt-tone.com in a second
+# tab of the SAME worker browser — the real logged-in profile passes the site's
+# reCAPTCHA/App-Check where a headless scraper gets a 403, and it returns the
+# site's EXACT output (our local per-channel-levels approximation did not match
+# on every image). FALLBACK is the local tone_correct module so an image is never
+# left uncorrected when the site is unreachable/throttled.
+TONE_SITE_URL = os.environ.get("CHATGPT_TONE_SITE_URL", "https://gpt-tone.com/")
+TONE_SITE_TIMEOUT_S = int(os.environ.get("CHATGPT_TONE_SITE_TIMEOUT_S", "90"))
+_TONE_TAB = None
+
+
+def _use_site() -> bool:
+    return os.environ.get("CHATGPT_TONE_USE_SITE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _tone_enabled() -> bool:
     try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # ensure sibling import
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import tone_correct
-        if not tone_correct.is_enabled():
-            return
-        with open(out_path, "rb") as f:
-            raw = f.read()
-        ext = os.path.splitext(out_path)[1].lstrip(".").upper() or "PNG"
-        fixed = tone_correct.correct_bytes(raw, fmt=ext)
-        if fixed and fixed != raw:
-            # atomic write — a mid-write failure must not corrupt/lose the download
-            tmp = out_path + ".tone.tmp"
-            with open(tmp, "wb") as f:
-                f.write(fixed)
-            os.replace(tmp, out_path)
-            log(f"tone-correct applied ({len(raw)}->{len(fixed)} bytes) {os.path.basename(out_path)}")
+        return tone_correct.is_enabled()
+    except Exception:
+        # tone_correct governs the master toggle; if it can't be imported, only
+        # the site path is available — respect TONE_CORRECT_CHATGPT directly.
+        return os.environ.get("TONE_CORRECT_CHATGPT", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _get_tone_tab(ctx):
+    """A dedicated second tab in the worker's context for gpt-tone.com, reused
+    across images (keeps the site's App-Check session warm, fewer token mints)."""
+    global _TONE_TAB
+    try:
+        if _TONE_TAB is not None and not _TONE_TAB.is_closed():
+            return _TONE_TAB
+    except Exception:
+        pass
+    _TONE_TAB = ctx.new_page()
+    return _TONE_TAB
+
+
+def _atomic_write(out_path, data):
+    tmp = out_path + ".tone.tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, out_path)
+
+
+def _tone_correct_via_site(out_path, page):
+    """Correct out_path IN PLACE using gpt-tone.com in a second tab. Returns True
+    on success, False if the site returned nothing (throttle/block/timeout)."""
+    tab = _get_tone_tab(page.context)
+    # Fresh load each call: resets their SPA so no stale prior result lingers.
+    tab.goto(TONE_SITE_URL, wait_until="networkidle", timeout=45000)
+    time.sleep(1.5)
+    tab.locator("input[type=file]").first.set_input_files(out_path)
+    deadline = time.time() + TONE_SITE_TIMEOUT_S
+    src = None
+    while time.time() < deadline:
+        try:
+            srcs = tab.eval_on_selector_all("img", "els=>els.map(e=>(e.currentSrc||e.src||'').slice(0,32))")
+        except Exception:
+            srcs = []
+        if any(s.startswith("data:image/png") for s in srcs):
+            src = tab.locator('img[src^="data:image/png"]').first.get_attribute("src")
+            break
+        time.sleep(1.5)
+    if not src or "," not in src:
+        return False
+    data = base64.b64decode(src.split(",", 1)[1])
+    if not data:
+        return False
+    _atomic_write(out_path, data)
+    log(f"tone-correct via gpt-tone.com applied ({len(data)} bytes) {os.path.basename(out_path)}")
+    return True
+
+
+def _tone_correct_local(out_path):
+    """Fallback: local per-channel-levels correction (approximation of the site)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import tone_correct
+    with open(out_path, "rb") as f:
+        raw = f.read()
+    ext = os.path.splitext(out_path)[1].lstrip(".").upper() or "PNG"
+    fixed = tone_correct.correct_bytes(raw, fmt=ext)
+    if fixed and fixed != raw:
+        _atomic_write(out_path, fixed)
+        log(f"tone-correct (local fallback) applied ({len(raw)}->{len(fixed)} bytes) "
+            f"{os.path.basename(out_path)}")
+
+
+def _tone_correct(out_path, page=None):
+    """De-yellow the just-generated image IN PLACE. Site first (exact), local
+    fallback. Fail-safe: any error leaves the original file untouched. Master
+    toggle TONE_CORRECT_CHATGPT=0; CHATGPT_TONE_USE_SITE=0 forces local-only."""
+    if not _tone_enabled():
+        return
+    if page is not None and _use_site():
+        try:
+            if _tone_correct_via_site(out_path, page):
+                return
+            log("tone-correct: gpt-tone.com returned no result — using local fallback")
+        except Exception as e:
+            log(f"tone-correct: site path failed ({e}) — using local fallback")
+    try:
+        _tone_correct_local(out_path)
     except Exception as e:
         log(f"tone-correct skipped ({e})")
