@@ -37,6 +37,10 @@ GEN_TIMEOUT_S = int(os.environ.get("CHATGPT_GEN_TIMEOUT_S", "300"))
 # indicator never clears, accept it anyway — that combination means the stop button
 # is wedged (or its selector drifted), not that the render is still running.
 STALL_ACCEPT_S = int(os.environ.get("CHATGPT_STALL_ACCEPT_S", "45"))
+# stream_status can read COMPLETE (text stream done) BEFORE the image finishes
+# rendering into the message. Keep polling for the image this long after COMPLETE
+# before concluding there is none (refusal / usage cap).
+POST_COMPLETE_GRACE_S = int(os.environ.get("CHATGPT_POST_COMPLETE_GRACE_S", "90"))
 # human jitter between actions (min, max seconds)
 JITTER = (float(os.environ.get("CHATGPT_JITTER_MIN", "1.2")),
           float(os.environ.get("CHATGPT_JITTER_MAX", "3.5")))
@@ -180,14 +184,16 @@ def is_logged_in(page):
 # user turn. The uploaded reference (role="user", alt=filename) is excluded, so the
 # pre-gen window yields no candidate and the worker waits for the real output.
 _GEN_QUERY = r"""
-() => {
+(excl) => {
+  const ex = new Set(excl || []);
   const isGen = (im) => {
     const role = im.closest('[data-message-author-role]')
                    ?.getAttribute('data-message-author-role');
     if (role === 'user') return false;                 // uploaded reference lives here
+    const src = im.currentSrc || im.src || '';
+    if (ex.has(src)) return false;                     // present BEFORE submit = reference
     const alt = im.alt || '';
     if (alt.startsWith('Generated image')) return true;
-    const src = im.currentSrc || im.src || '';
     return /estuary\/content|oaiusercontent/.test(src);
   };
   const cands = [...document.querySelectorAll('img')]
@@ -201,9 +207,10 @@ _GEN_QUERY = r"""
 """
 
 
-def _find_gen_src(page):
-    """Src of the current generated image (NOT the uploaded reference), or None."""
-    return page.evaluate(_GEN_QUERY)
+def _find_gen_src(page, exclude=None):
+    """Src of the current generated image (NOT the uploaded reference), or None.
+    `exclude` = srcs present before submit (the reference preview) — never picked."""
+    return page.evaluate(_GEN_QUERY, list(exclude or []))
 
 
 # Loose fallback: the largest image that is NOT inside a role=user turn and not a
@@ -213,7 +220,8 @@ def _find_gen_src(page):
 # path or with an alt text the strict _GEN_QUERY doesn't recognize (node 3613:
 # stream_status=COMPLETE, a big image present, but ever_candidate=False).
 _GEN_QUERY_LOOSE = r"""
-() => {
+(excl) => {
+  const ex = new Set(excl || []);
   const cands = [...document.querySelectorAll('img')]
     .filter(im => {
       const role = im.closest('[data-message-author-role]')
@@ -221,6 +229,7 @@ _GEN_QUERY_LOOSE = r"""
       if (role === 'user') return false;                 // uploaded reference
       const src = im.currentSrc || im.src || '';
       if (!src || src.startsWith('data:')) return false;  // no inline placeholders
+      if (ex.has(src)) return false;                      // present BEFORE submit = reference
       if (/\/avatar|profile|favicon|logo|sprite/i.test(src)) return false;
       return true;
     })
@@ -233,12 +242,46 @@ _GEN_QUERY_LOOSE = r"""
 """
 
 
-def _find_gen_src_loose(page):
-    """Largest non-user, non-icon image. Use ONLY when the turn is COMPLETE."""
+def _find_gen_src_loose(page, exclude=None):
+    """Largest non-user, non-icon image not present before submit. COMPLETE only."""
     try:
-        return page.evaluate(_GEN_QUERY_LOOSE)
+        return page.evaluate(_GEN_QUERY_LOOSE, list(exclude or []))
     except Exception:
         return None
+
+
+def _all_img_srcs(page):
+    """Every <img> src currently on the page (for the pre-submit reference snapshot)."""
+    try:
+        return page.evaluate(
+            "() => [...document.querySelectorAll('img')]"
+            ".map(i => i.currentSrc || i.src || '').filter(Boolean)")
+    except Exception:
+        return []
+
+
+def _looks_like_reference(out_path, ref_paths):
+    """True if the downloaded image is pixel-(near)-identical to an uploaded
+    reference at the SAME dimensions — i.e. ChatGPT served the input back instead
+    of a generation. A real generation, even one that closely follows the
+    reference, differs by far more than this (it is a fresh render, not the same
+    pixels). Pillow-only; never raises."""
+    try:
+        from PIL import Image, ImageChops, ImageStat
+        a = Image.open(out_path).convert("RGB")
+        for rp in ref_paths or []:
+            try:
+                b = Image.open(rp).convert("RGB")
+            except Exception:
+                continue
+            if a.size != b.size:
+                continue
+            mad = sum(ImageStat.Stat(ImageChops.difference(a, b)).mean) / 3.0
+            if mad < 1.0:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _conversation_id(page):
@@ -347,6 +390,11 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
     except Exception:
         comp.fill(prompt)
     jitter()
+    # Snapshot every image on the page BEFORE submit — these include the uploaded
+    # reference preview (served from estuary/content with no user-role wrapper, so
+    # the strict detector would otherwise pick it). The generation is a NEW image
+    # that appears AFTER submit; anything in this set is never a candidate.
+    pre_srcs = set(_all_img_srcs(page))
     submitted = False
     try:
         send = page.locator(SEL["send"]).first
@@ -365,7 +413,7 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
     stop_n = -1
     complete_since = None      # when stream_status first read COMPLETE
     while time.time() < deadline:
-        cand = _find_gen_src(page)
+        cand = _find_gen_src(page, pre_srcs)
         if cand:
             ever_cand = True
             if cand != last_cand:
@@ -386,14 +434,14 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
         if cand:
             if complete:
                 jitter(0.8, 1.6)            # let the src settle (blob -> final)
-                gen_src = _find_gen_src(page) or cand
+                gen_src = _find_gen_src(page, pre_srcs) or cand
                 break
             if status is None:
                 # stream_status unavailable: legacy stop-button gate.
                 stop_n = page.locator(SEL["stop_btn"]).count()
                 if stop_n == 0:
                     jitter(0.8, 1.6)
-                    gen_src = _find_gen_src(page) or cand
+                    gen_src = _find_gen_src(page, pre_srcs) or cand
                     break
             # Last resort: image up + unchanged for STALL_ACCEPT_S while nothing
             # ever said "done" — take it rather than fail a node whose picture is
@@ -404,20 +452,22 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
                 gen_src = cand
                 break
         elif complete:
-            # Turn is done but the STRICT detector found nothing — ChatGPT served
-            # the output from a path/alt _GEN_QUERY doesn't recognize. Give the
-            # image a moment to attach, then take the largest non-user image.
-            loose = _find_gen_src_loose(page)
+            # stream_status COMPLETE means the TEXT stream finished — the image can
+            # still render into the message a while later (operator: "sometimes the
+            # image takes time to appear in the UI"). So keep polling (strict, then
+            # loose) for a generous window after COMPLETE before concluding there is
+            # genuinely no image (content refusal / usage cap).
+            loose = _find_gen_src_loose(page, pre_srcs)
             if loose:
-                log("strict gen-detect empty but turn COMPLETE — using largest "
-                    "non-user image (loose fallback)")
+                log("turn COMPLETE, image appeared — using largest non-user image "
+                    "(loose fallback)")
                 gen_src = loose
                 break
-            # COMPLETE, still nothing after a grace window -> genuine no-image
-            # (text-only refusal). Stop waiting the full timeout.
-            if complete_since and (time.time() - complete_since) >= 12:
+            if complete_since and (time.time() - complete_since) >= POST_COMPLETE_GRACE_S:
+                log(f"turn COMPLETE for {POST_COMPLETE_GRACE_S}s with no image — "
+                    f"giving up (likely refusal / usage cap)")
                 break
-        time.sleep(1.2)
+        time.sleep(1.5)
     if not gen_src:
         # Do NOT fall back to whatever image is on the page — that is how the
         # uploaded reference got uploaded as the "generation". Fail the node.
@@ -434,13 +484,34 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
                 " big:a.filter(i=>{const r=i.getBoundingClientRect(); return r.width*r.height>5000;}).length}; }")
         except Exception as _e:
             inv = f"<inventory failed: {_e}>"
+        # The assistant's last text — when no image is produced this usually SAYS
+        # why (rate/usage cap, content refusal). Surfaces cap-vs-refusal-vs-slow.
+        try:
+            reply = page.evaluate(
+                "() => { const t=[...document.querySelectorAll("
+                "'[data-message-author-role=assistant]')]; const e=t[t.length-1];"
+                " return e ? (e.innerText||'').slice(0,160) : ''; }")
+        except Exception:
+            reply = ""
         _cid = _conversation_id(page)
         raise TimeoutError(
             f"no generated image after {gen_timeout_s}s — ChatGPT produced no "
-            f"output (refusal or slow render); refusing to upload the reference "
+            f"output (refusal / usage cap / slow render); refusing to upload the reference "
             f"[diag: stream_status={_stream_status(page, _cid)} last_seen={last_status} "
-            f"conv={_cid} stop_btn={stop_n} ever_candidate={ever_cand} imgs={inv}]")
+            f"conv={_cid} stop_btn={stop_n} ever_candidate={ever_cand} imgs={inv} "
+            f"reply={reply!r}]")
     _download_img(page, gen_src, out_path)
+    # Final safety net: never hand the platform an input image. If what we captured
+    # is pixel-(near)-identical to an uploaded reference, ChatGPT echoed the input
+    # (refusal / detection slip) — fail the node instead of uploading the reference.
+    if _looks_like_reference(out_path, ref_paths):
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        raise TimeoutError(
+            "captured image is identical to an uploaded reference — ChatGPT echoed "
+            "the input instead of generating; refusing to upload the reference")
     _tone_correct(out_path, page)
     return out_path
 
