@@ -1040,7 +1040,7 @@ Performance / Action: Nuri pours the thin dark oil stream from the amber bottle 
 
 Voice: A warm, confident, playful woman's voice, lived-in and natural. Delivery is warm and playful, unpolished, not acted or announcer-like.
 
-Dialogue: The main AI generated character speaks clearly in a warm playful American accent, saying exactly: "this is what black seed oil does to your soldier" then stops speaking and holds the final expression in silence for the rest of the clip.
+Dialogue: The main AI generated character speaks clearly in a warm playful American accent, saying exactly: "this is what black seed oil does to your soldier" then stops speaking and stays silent for the rest of the clip, holding the final expression.
 
 Audio: no music, no background noise (clean isolated voice). The voice sounds close and real to the phone microphone, not studio-polished.
 
@@ -1050,7 +1050,7 @@ Negative Constraints: No text overlays. No captions. No subtitles. No logos. No 
 ```
 **Prompt B (policy fallback — Prompt A with the spoken line reworded, v821):**
 ```
-[Prompt A written out in FULL, byte-identical, EXCEPT the Dialogue line, which reads: The main AI generated character speaks clearly in a warm playful American accent, saying exactly: "watch what black seed oil can do for your soldier" then stops speaking and holds the final expression in silence for the rest of the clip.]
+[Prompt A written out in FULL, byte-identical, EXCEPT the Dialogue line, which reads: The main AI generated character speaks clearly in a warm playful American accent, saying exactly: "watch what black seed oil can do for your soldier" then stops speaking and stays silent for the rest of the clip, holding the final expression.]
 ```
 
 *(One Clip block per `- **line:**` in the Storyboard. Multi-line scenes get one Clip block per line, sharing the same Start frame. EVERY shot scene with a spoken line carries a `**Prompt B ...:**` label + its own fence directly under the Text-prompt fence — Prompt B is the FULL Prompt A copied byte-identical EXCEPT the quoted line, which is REWORDED (different words, same meaning + same selling power). `verify_video_format.py` hard-FAILs if B is missing, if B's body differs from A's body, or if B's line equals A's line. When a source has a known failure mode, bake the guard into the positive Text prompt as an affirmative sentence — e.g. "he is alone in frame for the full clip" for solo videos. Deep-dive: template_reference.md §v865 + §v821, prior Prompt-B shape §v805.)*
