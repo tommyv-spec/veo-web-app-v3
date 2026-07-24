@@ -10,11 +10,18 @@ Create an 8-second vertical 9:16 realistic UGC video. Quality / Fidelity Lock: U
 
 ## The v865 per-clip block
 
-```markdown
+**Fencing is mandatory.** Both the Prompt A body and the Prompt B body sit inside a triple-backtick fence, exactly like every shipped build. The parser extracts Prompt B with `_extract_fenced_content` only — it has NO unfenced fallback (`code/veo_prompt_overrides.py:396`), so an unfenced Prompt B parses to `None`, the v821 gate hard-fails, and the worker never gets the fallback line. The `**Start frame:**` / `**End frame:**` / `**Text prompt:**` / `**Prompt B …:**` labels stay OUTSIDE the fence; the prose body goes INSIDE it.
+
+**Two literal strings the auditor hard-checks in the `Dialogue:` block — do not reword them away** (`audit_build.py` `c_v810_form`): every dialogue clip body must contain `saying exactly:` AND `stays silent for the rest of the clip`. The block below carries both; keep them verbatim when you fill the slot.
+
+(The example below is wrapped in a 4-backtick outer fence only so the inner 3-backtick fences render literally. In a real build you write plain 3-backtick fences.)
+
+````markdown
 ### Clip N.M — Scene N, Line M (REGISTER_LABEL)
 **Start frame:** Image K
 **End frame:** Image K+1
 **Text prompt:**
+```
 Create an 8-second vertical 9:16 realistic UGC video.
 
 Quality / Fidelity Lock: Use the exact same lighting, texture, and iPhone image quality as the attached start-frame image. Do not sharpen the footage. Do not enhance skin texture. Do not apply any AI beauty filter, skin smoothing, HDR effect, cinematic polish, artificial clarity, or stylized color grade. Keep the video raw, organic, and true to the reference image, with the same {{LIGHTING}}, natural softness, realistic exposure, imperfect smartphone texture, and authentic {{SETTING_ATMOSPHERE}}.
@@ -31,17 +38,19 @@ Performance / Action: {{ACTION_PROSE}}. Natural blinking, subtle head movement, 
 
 Voice: {{VOICE_TEXTURE}}. Delivery is {{DELIVERY_REGISTER}}, unpolished, not acted or announcer-like.
 
-Dialogue: The main AI generated character speaks clearly in a {{REGISTER}} American accent, saying exactly: "{{LINE_LOWERCASE}}" then stops speaking and holds the final expression in silence for the rest of the clip.
+Dialogue: The main AI generated character speaks clearly in a {{REGISTER}} American accent, saying exactly: "{{LINE_LOWERCASE}}" then stops speaking and stays silent for the rest of the clip, holding the final expression.
 
 Audio: {{AUDIO_MODE}}. {{MIC_PROXIMITY}}.
 
 Style: Authentic TikTok/Reels UGC. Raw smartphone footage. Natural skin texture. Slightly imperfect realism.
 
 Negative Constraints: No text overlays. No captions. No subtitles. No logos. No VFX. No 3D. No cartoon. No beauty filter. No face morphing. No identity drift. No flicker. No jitter. No warped hands. No extra fingers. Do not change {{LOCKED_WARDROBE_PROPS_LAYOUT}}. Avoid excessive camera movement{{EXCEPT_END_BEAT}}.
-
-**Prompt B (policy fallback — use ONLY if Prompt A trips a policy violation; identical prompt with the spoken line reworded):**
-[every block above, byte-identical, EXCEPT the text inside the quotes]
 ```
+**Prompt B (policy fallback — Prompt A with the spoken line reworded, v821):**
+```
+[Prompt A body byte-identical, EXCEPT the text inside the quotes on the Dialogue line]
+```
+````
 
 ## Fill map
 
