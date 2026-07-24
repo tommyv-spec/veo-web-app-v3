@@ -277,11 +277,18 @@ def lint(path: str) -> int:
             if not re.search(rf"^###\s+{n}\.", t, re.M):
                 warns.append(f"v738: Pre-Flight section {n} not found")
 
-    # --- Veo Final Prompts format (v750) ---
-    if "## Veo 3.1 Final Prompts" not in t:
-        fails.append("v750: missing `## Veo 3.1 Final Prompts` section")
+    # --- Final Prompts section (v750 structure, v865 Omni body) ---
+    # v865 — new builds title this `## Google Omni Final Prompts`; the legacy
+    # Veo title stays valid (every shipped build uses it).
+    _sec_hdr = re.search(
+        r"^##\s+(?:Veo\s*3\.?1|Google\s+Omni|Omni)\s+Final\s+Prompts\b.*$",
+        t, re.M | re.I,
+    )
+    _is_omni_section = bool(_sec_hdr and "omni" in _sec_hdr.group(0).lower())
+    if not _sec_hdr:
+        fails.append("v750/v865: missing `## Google Omni Final Prompts` (or legacy `## Veo 3.1 Final Prompts`) section")
     else:
-        veo = t.split("## Veo 3.1 Final Prompts", 1)[1]
+        veo = t[_sec_hdr.end():]
         if re.search(r"^###\s+Scene\s+\d+\s+—", veo, re.M):
             fails.append("v750: Veo section uses legacy `### Scene N —` headers (use `### Clip N.M`)")
         beats = re.findall(r"\[(?:Start|Mid-clip|End)\s+beat[^\]]*\]", veo)
@@ -310,10 +317,15 @@ def lint(path: str) -> int:
             for fld in ("Start frame:", "Text prompt:"):
                 if f"**{fld}**" not in blk:
                     fails.append(f"v750: Clip {n}.{m} missing **{fld}**")
-            if "IMMEDIATE ACTION:" not in blk:
-                warns.append(f"v750: Clip {n}.{m} missing IMMEDIATE ACTION:")
-            if "TERMINAL STATE:" not in blk:
-                warns.append(f"v750: Clip {n}.{m} missing TERMINAL STATE:")
+            # v865 — the Omni master block replaces the v718h-A IMMEDIATE
+            # ACTION / TERMINAL STATE anchors (operator 2026-07-24). Only new
+            # Omni-titled sections are held to the twelve-block Omni shape;
+            # legacy Veo-titled builds keep rendering untouched (forward-only).
+            if _is_omni_section:
+                for _lbl in ("Quality / Fidelity Lock:", "Camera:",
+                             "Performance / Action:", "Negative Constraints:"):
+                    if _lbl not in blk:
+                        warns.append(f"v865: Clip {n}.{m} missing `{_lbl}` block")
 
     # --- v821: reworded Prompt B mandatory on every dialogue clip ---
     # Prompt B (v821) = Prompt A verbatim EXCEPT the quoted dialogue line,
@@ -335,6 +347,31 @@ def lint(path: str) -> int:
         for (_si, _li), _cd in sorted(_clip_map.items()):
             _a = _cd.get("text_prompt")
             _q = re.findall(r'"([^"]+)"', _a or "")
+            # v865 quote-trap — when a prompt carries a spoken line
+            # (`saying exactly:`), that line must be the ONLY double-quoted
+            # span, because the v821 comparison below reads the LAST quoted
+            # span as the dialogue line. A stray quote in Audio / Style /
+            # Negative Constraints would silently steal it. A and B are
+            # separate parsed strings — check each on its own.
+            _b = _cd.get("prompt_b")
+            # Restricted to Omni-titled sections only (operator 2026-07-24
+            # regression run): legacy Veo-titled builds legitimately carry a
+            # second quoted span in some prompts and must stay untouched
+            # (forward-only) — only new Omni-shaped prompts are held to the
+            # single-quoted-span discipline.
+            if _is_omni_section:
+                if _a and "saying exactly:" in _a and len(_q) != 1:
+                    fails.append(
+                        f"v865: Clip {_si}.{_li} Prompt A has {len(_q)} double-quoted spans "
+                        "— the spoken line must be the only quoted text (v821 reads the last quoted span)"
+                    )
+                if _b and "saying exactly:" in _b:
+                    _qb = re.findall(r'"([^"]+)"', _b)
+                    if len(_qb) != 1:
+                        fails.append(
+                            f"v865: Clip {_si}.{_li} Prompt B has {len(_qb)} double-quoted spans "
+                            "— the spoken line must be the only quoted text (v821 reads the last quoted span)"
+                        )
             _pb_clips.append({
                 "a_prompt": _a,
                 "a_line": _q[-1].strip() if _q else None,
