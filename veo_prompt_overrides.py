@@ -65,8 +65,12 @@ from typing import Any, Dict, List, Optional, Tuple
 # --- Regex anchors ---------------------------------------------------------
 
 # Header for the section. Tolerant of capitalization and trailing punctuation.
+# v865 — the render model is Google Omni Flash (v784 put it on Frames mode),
+# so new builds title the section `## Google Omni Final Prompts`. The legacy
+# `## Veo 3.1 Final Prompts` title stays accepted forever: every shipped build
+# uses it and this parser feeds the live render path.
 _SECTION_HEADER_RE = re.compile(
-    r"^##\s+Veo\s*3\.?1\s+Final\s+Prompts\b.*$",
+    r"^##\s+(?:Veo\s*3\.?1|Google\s+Omni|Omni)\s+Final\s+Prompts\b.*$",
     re.MULTILINE | re.IGNORECASE,
 )
 
