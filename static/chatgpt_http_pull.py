@@ -86,8 +86,14 @@ def run(api_url, api_key, page, host, poll_s=5, log=print):
         if not job:
             time.sleep(poll_s); continue
         nid = job["id"]
-        log(f"claimed node {nid}")
+        nname = job.get("name") or ""
         prompt, refs = job_to_prompt_and_refspec(job)
+        # Match the image worker's claim line so the operator can tell WHICH node
+        # (and what) was claimed: name + ref count + prompt preview.
+        preview = " ".join((prompt or "").split())[:70]
+        log(f"-> claimed node {nid}" + (f" ({nname})" if nname else "")
+            + (f" | {len(refs)} ref(s)" if refs else "")
+            + (f' | "{preview}..."' if preview else ""))
         with tempfile.TemporaryDirectory() as td:
             try:
                 ref_paths = _download_refs(refs, api_key, td)
@@ -101,7 +107,7 @@ def run(api_url, api_key, page, host, poll_s=5, log=print):
                 requests.post(f"{base}/jobs/{nid}/status", headers=_auth(api_key),
                               params={"backend": WORKER_BACKEND},
                               json=status_body("completed"), timeout=30)
-                log(f"  OK node {nid} uploaded")
+                log(f"  OK node {nid}" + (f" ({nname})" if nname else "") + " uploaded")
             except Exception as e:
                 try:
                     requests.post(f"{base}/jobs/{nid}/status", headers=_auth(api_key),
@@ -109,5 +115,5 @@ def run(api_url, api_key, page, host, poll_s=5, log=print):
                                   json=status_body("failed", str(e)), timeout=30)
                 except Exception:
                     pass
-                log(f"  FAIL node {nid}: {e}")
+                log(f"  FAIL node {nid}" + (f" ({nname})" if nname else "") + f": {e}")
         time.sleep(poll_s)
