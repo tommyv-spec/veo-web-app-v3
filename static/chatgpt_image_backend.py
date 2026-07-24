@@ -206,6 +206,41 @@ def _find_gen_src(page):
     return page.evaluate(_GEN_QUERY)
 
 
+# Loose fallback: the largest image that is NOT inside a role=user turn and not a
+# tiny avatar/icon. Only safe to use when the turn is COMPLETE (render finished),
+# because before completion the strict src/alt gate is what keeps us from grabbing
+# the still-loading reference. Handles ChatGPT serving a generation from a CDN
+# path or with an alt text the strict _GEN_QUERY doesn't recognize (node 3613:
+# stream_status=COMPLETE, a big image present, but ever_candidate=False).
+_GEN_QUERY_LOOSE = r"""
+() => {
+  const cands = [...document.querySelectorAll('img')]
+    .filter(im => {
+      const role = im.closest('[data-message-author-role]')
+                     ?.getAttribute('data-message-author-role');
+      if (role === 'user') return false;                 // uploaded reference
+      const src = im.currentSrc || im.src || '';
+      if (!src || src.startsWith('data:')) return false;  // no inline placeholders
+      if (/\/avatar|profile|favicon|logo|sprite/i.test(src)) return false;
+      return true;
+    })
+    .map(im => { const r = im.getBoundingClientRect();
+                 return { src: im.currentSrc || im.src, area: r.width * r.height }; })
+    .filter(c => c.area > 40000);                        // a real render, not an icon
+  cands.sort((a, b) => b.area - a.area);
+  return cands.length ? cands[0].src : null;
+};
+"""
+
+
+def _find_gen_src_loose(page):
+    """Largest non-user, non-icon image. Use ONLY when the turn is COMPLETE."""
+    try:
+        return page.evaluate(_GEN_QUERY_LOOSE)
+    except Exception:
+        return None
+
+
 def _conversation_id(page):
     """The active conversation UUID from the URL (chatgpt.com/c/<uuid>), or None.
     The URL only gains /c/<id> once the turn has actually started server-side."""
@@ -282,7 +317,18 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
     page.goto(CHATGPT_URL, wait_until="domcontentloaded")
     dismiss_cookie_banner(page)
     if not is_logged_in(page):
-        raise RuntimeError("session expired — run --refresh-cookies")
+        # One reload + recheck before failing — the login probe flickers (a
+        # navigation/network blip returns a transient False, then the very next
+        # node succeeds). Don't fail a node on a one-shot false negative.
+        log("login check failed — reloading once before giving up")
+        try:
+            page.goto(CHATGPT_URL, wait_until="domcontentloaded")
+            dismiss_cookie_banner(page)
+            time.sleep(2)
+        except Exception:
+            pass
+        if not is_logged_in(page):
+            raise RuntimeError("session expired — run --refresh-cookies")
     jitter()
     for rp in ref_paths or []:
         if not os.path.exists(rp):
@@ -317,6 +363,7 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
     cand_since = None          # when the CURRENT candidate src first appeared
     last_status = None         # last stream_status seen (authoritative turn state)
     stop_n = -1
+    complete_since = None      # when stream_status first read COMPLETE
     while time.time() < deadline:
         cand = _find_gen_src(page)
         if cand:
@@ -326,31 +373,49 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
         else:
             last_cand, cand_since = None, None
 
+        # ChatGPT's own turn status — read every iteration, not just when a
+        # candidate is present (node 3613: COMPLETE + a big image on screen but
+        # the strict detector never matched, so the loop must still act on it).
+        status = _stream_status(page, _conversation_id(page))
+        if status:
+            last_status = status
+        complete = status is not None and status.upper() == "COMPLETE"
+        if complete and complete_since is None:
+            complete_since = time.time()
+
         if cand:
-            # PRIMARY: ChatGPT's own turn status. Accept as soon as the turn is
-            # COMPLETE and a generated image is on screen.
-            status = _stream_status(page, _conversation_id(page))
-            if status:
-                last_status = status
-            if status is not None:
-                if status.upper() == "COMPLETE":
-                    jitter(0.8, 1.6)            # let the src settle (blob -> final)
-                    gen_src = _find_gen_src(page) or cand
-                    break
-            else:
-                # FALLBACK (stream_status unavailable): legacy stop-button gate.
+            if complete:
+                jitter(0.8, 1.6)            # let the src settle (blob -> final)
+                gen_src = _find_gen_src(page) or cand
+                break
+            if status is None:
+                # stream_status unavailable: legacy stop-button gate.
                 stop_n = page.locator(SEL["stop_btn"]).count()
                 if stop_n == 0:
                     jitter(0.8, 1.6)
                     gen_src = _find_gen_src(page) or cand
                     break
-            # Last resort: image up and unchanged for STALL_ACCEPT_S while neither
-            # signal ever said "done" — take it rather than fail a node whose
-            # picture is sitting in the chat.
+            # Last resort: image up + unchanged for STALL_ACCEPT_S while nothing
+            # ever said "done" — take it rather than fail a node whose picture is
+            # sitting in the chat.
             if cand_since and (time.time() - cand_since) >= STALL_ACCEPT_S:
                 log(f"gen image stable {STALL_ACCEPT_S}s (stream_status={last_status}, "
                     f"stop={stop_n}) — accepting it")
                 gen_src = cand
+                break
+        elif complete:
+            # Turn is done but the STRICT detector found nothing — ChatGPT served
+            # the output from a path/alt _GEN_QUERY doesn't recognize. Give the
+            # image a moment to attach, then take the largest non-user image.
+            loose = _find_gen_src_loose(page)
+            if loose:
+                log("strict gen-detect empty but turn COMPLETE — using largest "
+                    "non-user image (loose fallback)")
+                gen_src = loose
+                break
+            # COMPLETE, still nothing after a grace window -> genuine no-image
+            # (text-only refusal). Stop waiting the full timeout.
+            if complete_since and (time.time() - complete_since) >= 12:
                 break
         time.sleep(1.2)
     if not gen_src:
