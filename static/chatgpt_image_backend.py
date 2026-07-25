@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import random
+import re
 import sys
 import time
 
@@ -300,6 +301,57 @@ def _looks_like_reference(out_path, ref_paths):
     return False
 
 
+# ChatGPT's transient image-tool failure, worded as assistant TEXT (no Retry
+# button). Seen EN "Something went wrong" and IT "Non sono riuscito a generare
+# l'immagine perché si è verificato un errore durante la generazione". Matches
+# ERROR wording only — NOT a content refusal ("I can't create that…"), which
+# should fail fast rather than burn retries.
+_GEN_ERROR_RE = re.compile(
+    r"(went wrong|an error occurred|error (occurred|during|while)|"
+    r"errore|si è verificato|problem generating|couldn'?t generate the image|"
+    r"non sono riuscit\w+ a genera)", re.I)
+
+
+def _last_assistant_text(page):
+    try:
+        return page.evaluate(
+            "() => { const t=[...document.querySelectorAll("
+            "'[data-message-author-role=assistant]')]; const e=t[t.length-1];"
+            " return e ? (e.innerText||'') : ''; }") or ""
+    except Exception:
+        return ""
+
+
+def _reply_is_gen_error(page):
+    """True if the assistant's last message reads as a transient generation error
+    (retryable), not a content refusal."""
+    return bool(_GEN_ERROR_RE.search(_last_assistant_text(page)))
+
+
+def _resubmit(page, prompt):
+    """Re-send the prompt in the same chat — the retry for a text-form generation
+    error, where ChatGPT offers no Retry button. Refs already live in the
+    conversation, so 'the attached image' still resolves."""
+    try:
+        comp = page.locator(SEL["composer"]).first
+        comp.click()
+        try:
+            comp.evaluate("el => el.focus()")
+            page.keyboard.insert_text(prompt)
+        except Exception:
+            comp.fill(prompt)
+        time.sleep(0.5)
+        s = page.locator(SEL["send"]).first
+        if s.count() > 0 and s.is_enabled():
+            s.click()
+        else:
+            comp.press("Enter")
+        return True
+    except Exception as e:
+        log(f"resubmit failed: {e}")
+        return False
+
+
 def _conversation_id(page):
     """The active conversation UUID from the URL (chatgpt.com/c/<uuid>), or None.
     The URL only gains /c/<id> once the turn has actually started server-side."""
@@ -498,9 +550,22 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
                     "(loose fallback)")
                 gen_src = loose
                 break
+            # Text-form generation error (no Retry button, e.g. "…si è verificato
+            # un errore durante la generazione"): resubmit the prompt immediately —
+            # don't wait out the grace, the image is not coming for this attempt.
+            if retries_left > 0 and _reply_is_gen_error(page):
+                retries_left -= 1
+                log(f"generation-error reply — resubmitting "
+                    f"({ERROR_RETRIES - retries_left}/{ERROR_RETRIES})")
+                if _resubmit(page, prompt):
+                    deadline = time.time() + gen_timeout_s
+                    last_cand = cand_since = last_status = complete_since = None
+                    ever_cand = False
+                    time.sleep(3)
+                    continue
             if complete_since and (time.time() - complete_since) >= POST_COMPLETE_GRACE_S:
                 log(f"turn COMPLETE for {POST_COMPLETE_GRACE_S}s with no image — "
-                    f"giving up (likely refusal / usage cap)")
+                    f"giving up (likely content refusal / usage cap)")
                 break
         time.sleep(1.5)
     if not gen_src:
