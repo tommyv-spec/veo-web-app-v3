@@ -18772,14 +18772,13 @@ Ambient: same kitchen room tone, soft pour sound.
                                 <span style="display:block;margin-bottom:3px;">ChatGPT account email:</span>
                                 <input type="email" id="chatgptWorkerEmail" oninput="chatgptUpdateSetupCmd()" placeholder="ChatGPT account email" autocomplete="off" style="width:100%;padding:5px 8px;border-radius:4px;border:1px solid var(--border-color);background:var(--bg-primary);color:var(--text-primary);font-size:11px;box-sizing:border-box;">
                             </label>
-                            <div style="margin-bottom:7px;color:var(--text-muted);">Open this from the Chrome profile already signed into that ChatGPT account.</div>
-                            <button onclick="chatgptConnectExtension()" style="width:100%;padding:10px 16px;border-radius:6px;border:none;background:var(--accent);color:white;cursor:pointer;font-size:12px;font-weight:600;margin-bottom:8px;">
-                                Connect existing Chrome (recommended)
+                            <div style="margin-bottom:7px;color:var(--text-muted);">Have the ChatGPT account signed in on Chrome Beta. Download + run this — it copies that session automatically.</div>
+                            <button onclick="chatgptDownloadInstaller()" style="width:100%;padding:10px 16px;border-radius:6px;border:none;background:var(--accent);color:white;cursor:pointer;font-size:12px;font-weight:600;margin-bottom:8px;">
+                                Download ChatGPT worker (recommended)
                             </button>
                             <details>
-                            <summary style="cursor:pointer;color:var(--text-muted);">Advanced: separate Python worker</summary>
-                            <button onclick="chatgptDownloadInstaller()" style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid var(--border-color);background:transparent;color:var(--text-secondary);cursor:pointer;font-size:11px;font-weight:600;margin:8px 0;">Download Windows installer</button>
-                            <div style="margin-bottom:4px;color:var(--text-muted);">Or run this in Windows PowerShell:</div>
+                            <summary style="cursor:pointer;color:var(--text-muted);">Advanced: PowerShell one-liner</summary>
+                            <div style="margin:8px 0 4px;color:var(--text-muted);">Run this in Windows PowerShell:</div>
                             <code id="chatgptSetupCmd" style="display:block;word-break:break-all;background:var(--bg-primary);padding:6px 8px;border-radius:4px;font-size:10px;color:var(--text-primary);">${cgCmd}</code>
                             <button onclick="chatgptCopySetupCmd(event)" style="margin-top:6px;padding:5px 12px;border-radius:4px;border:1px solid var(--border-color);background:transparent;color:var(--text-secondary);cursor:pointer;font-size:11px;">Copy command</button>
                             </details>
@@ -18860,22 +18859,10 @@ Ambient: same kitchen room tone, soft pour sound.
             if (code) code.textContent = chatgptBuildSetupCmd();
         }
         function chatgptConnectExtension() {
-            const emailEl = document.getElementById('chatgptWorkerEmail');
-            const email = ((emailEl && emailEl.value) || '').trim();
-            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-                alert('Enter the email of the ChatGPT account to connect.');
-                if (emailEl) emailEl.focus();
-                return;
-            }
-            const url = '/api/images/worker/extension/install?chatgpt_email=' + encodeURIComponent(email);
-            const link = document.createElement('a');
-            link.href = url;
-            link.target = '_blank';
-            link.rel = 'noopener';
-            link.style.display = 'none';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+            // The browser-extension path was retired; the .bat installer (Chrome-Beta
+            // session copy) is the supported path. Kept as an alias so any lingering
+            // caller downloads the installer instead of hitting the dead 404 route.
+            chatgptDownloadInstaller();
         }
         function chatgptCopySetupCmd(e) {
             const cmd = chatgptBuildSetupCmd();
