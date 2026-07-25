@@ -6016,6 +6016,18 @@ Ambient: same kitchen room tone, soft pour sound.
 
         window.addEventListener("DOMContentLoaded", async () => {
           _kanbanOriginalHTML = document.getElementById("jobsList")?.innerHTML || null;
+          // Auto re-render Instagram + local-folder panels on every page load /
+          // hard refresh (operator 2026-07-25). Both are FREE backend re-fetches
+          // (/api/instagram/accounts + /api/local-videos) — NO paid IG sync, NO
+          // repeating timer. Pre-populates both panels so opening the chip shows
+          // fresh stored data with zero clicks. refreshLocalPanel also silently
+          // re-grants folder permission when the browser still holds it (PWA
+          // persisted) via _verifyDirPermission(handle, false) — queryPermission
+          // only, never prompts — auto-resuming the 30s poll without a click.
+          // Placed before the mode branches (which early-return) so it runs on
+          // every path. Fire-and-forget: both have internal try/catch.
+          if (typeof refreshInstagramPanel === "function") refreshInstagramPanel();
+          if (typeof refreshLocalPanel === "function") refreshLocalPanel();
           const params = parseModeFromURL();
           if (params.q) {
             const inp = document.getElementById("lifecycleSearch");
