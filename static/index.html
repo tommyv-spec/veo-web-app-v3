@@ -20282,6 +20282,13 @@ Ambient: same kitchen room tone, soft pour sound.
         // (ingredients, images, scenes with lines/pads/action_notes/
         // veo_prompts) and aggregate stats. Renders a fixed-position modal
         // with section toggles + scrollable raw-md viewer.
+        let _batchOverviewData = null;
+        let _batchOverviewPromptMode = 'omni';
+        function imgToggleOverviewPrompts(){
+            _batchOverviewPromptMode = (_batchOverviewPromptMode === 'omni') ? 'anchor' : 'omni';
+            if (_batchOverviewData) imgRenderBatchOverview(_batchOverviewData);
+        }
+
         async function imgOpenBatchOverview(batchId) {
             // Tear down any existing overview modal first
             const existing = document.getElementById('batchOverviewModal');
@@ -20308,6 +20315,7 @@ Ambient: same kitchen room tone, soft pour sound.
         function imgRenderBatchOverview(data) {
             const body = document.getElementById('batchOverviewBody');
             if (!body) return;
+            _batchOverviewData = data;
             const stats = data.stats || {};
             const parsed = data.parsed || {};
             const ingredients = parsed.ingredients || [];
@@ -20345,13 +20353,17 @@ Ambient: same kitchen room tone, soft pour sound.
                         const pad = pads[i];
                         const note = notes[i];
                         const vp = vps[i];
+                        const _useAnchor = _batchOverviewPromptMode === 'anchor' && Array.isArray(sc.reference_prompts) && sc.reference_prompts.length;
+                        const _refTxt = _useAnchor ? (sc.reference_prompts[i] || null) : null;
+                        const _shownVp = _useAnchor ? (_refTxt ? { text_prompt: _refTxt } : null) : vp;
+                        const _vpLabel = _useAnchor ? 'anchor-format prompt (reference)' : 'veo prompt override';
                         const lnWords = (ln||'').split(/\s+/).filter(Boolean).length;
                         const padWords = pad ? pad.split(/\s+/).filter(Boolean).length : 0;
                         const dur = durs[i], durSrc = durSrcs[i];
                         const durBadge = dur
                             ? ` <span style="color:${durSrc === 'declared' ? '#4ade80' : 'var(--text-muted)'};" title="${durSrc === 'declared' ? 'declared via clip_duration_s (v861)' : 'auto-picked from the word count at import — declare clip_duration_s (v861)'}">· ${dur}s${durSrc === 'auto' ? ' auto' : ''}</span>`
                             : (durSrc === 'invalid' ? ` <span style="color:#f87171;" title="clip_duration_s is not 4/6/8/10 — this build HARD-FAILS at import (v861)">· invalid</span>` : '');
-                        return `<div style="padding:6px 8px;background:var(--bg-input);border-radius:4px;font-size:11px;margin-top:4px;"><div><b>line ${i+1}</b> <span style="color:var(--text-muted);">(${lnWords}w)</span>${durBadge}: ${imgEscape(ln)}</div>${pad ? `<div style="margin-top:4px;color:#fbbf24;"><b>pad</b> <span style="color:var(--text-muted);">(${padWords}w · total ${lnWords+padWords}w)</span>: ${imgEscape(pad)}</div>` : ''}${note ? `<div style="margin-top:4px;color:var(--text-muted);"><b>action</b>: ${imgEscape(note)}</div>` : ''}${vp ? `<details style="margin-top:4px;"><summary style="cursor:pointer;color:#a78bfa;">veo prompt override</summary><pre style="margin-top:4px;padding:6px;background:var(--bg-elevated);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;">${imgEscape((vp.text_prompt||'') + (vp.negative_prompt ? '\n\nNegative: ' + vp.negative_prompt : ''))}</pre></details>` : ''}</div>`;
+                        return `<div style="padding:6px 8px;background:var(--bg-input);border-radius:4px;font-size:11px;margin-top:4px;"><div><b>line ${i+1}</b> <span style="color:var(--text-muted);">(${lnWords}w)</span>${durBadge}: ${imgEscape(ln)}</div>${pad ? `<div style="margin-top:4px;color:#fbbf24;"><b>pad</b> <span style="color:var(--text-muted);">(${padWords}w · total ${lnWords+padWords}w)</span>: ${imgEscape(pad)}</div>` : ''}${note ? `<div style="margin-top:4px;color:var(--text-muted);"><b>action</b>: ${imgEscape(note)}</div>` : ''}${_shownVp ? `<details style="margin-top:4px;"><summary style="cursor:pointer;color:#a78bfa;">${_vpLabel}</summary><pre style="margin-top:4px;padding:6px;background:var(--bg-elevated);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;">${imgEscape((_shownVp.text_prompt||'') + (_shownVp.negative_prompt ? '\n\nNegative: ' + _shownVp.negative_prompt : ''))}</pre></details>` : ''}</div>`;
                     }).join('');
 
                     // v682n — render a synthetic row for silent / text_card
@@ -20363,6 +20375,10 @@ Ambient: same kitchen room tone, soft pour sound.
                     // marker + the veo prompt toggle.
                     if (!lines.length && vps && vps[0]) {
                         const vp = vps[0];
+                        const _useAnchor0 = _batchOverviewPromptMode === 'anchor' && Array.isArray(sc.reference_prompts) && sc.reference_prompts.length;
+                        const _refTxt0 = _useAnchor0 ? (sc.reference_prompts[0] || null) : null;
+                        const _shownVp0 = _useAnchor0 ? (_refTxt0 ? { text_prompt: _refTxt0 } : null) : vp;
+                        const _vpLabel0 = _useAnchor0 ? 'anchor-format prompt (reference)' : 'veo prompt override';
                         const speaker = (sc.speaker_mode || '').toLowerCase();
                         const sceneType = (sc.scene_type || '').toLowerCase();
                         const marker =
@@ -20374,7 +20390,7 @@ Ambient: same kitchen room tone, soft pour sound.
                         // its own clip_duration_s.
                         const silentDur = (sc.clip_durations_resolved || [])[0];
                         const silentBadge = silentDur ? ` <span style="color:#4ade80;" title="declared via clip_duration_s (v861)">· ${silentDur}s</span>` : '';
-                        lineRows = `<div style="padding:6px 8px;background:var(--bg-input);border-radius:4px;font-size:11px;margin-top:4px;"><div style="color:var(--text-muted);font-style:italic;">${imgEscape(marker)}${silentBadge}</div>${vp ? `<details style="margin-top:4px;"><summary style="cursor:pointer;color:#a78bfa;">veo prompt override</summary><pre style="margin-top:4px;padding:6px;background:var(--bg-elevated);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;">${imgEscape((vp.text_prompt||'') + (vp.negative_prompt ? '\n\nNegative: ' + vp.negative_prompt : ''))}</pre></details>` : ''}</div>`;
+                        lineRows = `<div style="padding:6px 8px;background:var(--bg-input);border-radius:4px;font-size:11px;margin-top:4px;"><div style="color:var(--text-muted);font-style:italic;">${imgEscape(marker)}${silentBadge}</div>${_shownVp0 ? `<details style="margin-top:4px;"><summary style="cursor:pointer;color:#a78bfa;">${_vpLabel0}</summary><pre style="margin-top:4px;padding:6px;background:var(--bg-elevated);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;">${imgEscape((_shownVp0.text_prompt||'') + (_shownVp0.negative_prompt ? '\n\nNegative: ' + _shownVp0.negative_prompt : ''))}</pre></details>` : ''}</div>`;
                     }
 
                     return `<div style="padding:8px 10px;background:var(--bg-elevated);border-radius:4px;font-size:12px;"><b>Scene ${sc.scene_index}</b> · image_${sc.image_index} · ${imgEscape(sc.clip_mode||'fresh')}${sc.scene_transition ? ` · ${imgEscape(sc.scene_transition)}` : ''}${sc.speaker_mode ? ` · speaker: ${imgEscape(sc.speaker_mode)}` : ''}${sc.visual_register ? ` · register: ${imgEscape(sc.visual_register)}` : ''}${lineRows}</div>`;
@@ -20384,7 +20400,11 @@ Ambient: same kitchen room tone, soft pour sound.
             // Raw markdown
             const rawHtml = `<details style="margin-bottom:12px;"><summary style="cursor:pointer;font-weight:600;padding:6px 0;">📄 Raw markdown source (${(data.source_markdown_chars||0).toLocaleString()} chars)</summary><pre style="margin-top:8px;padding:12px;background:var(--bg-input);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.4;max-height:600px;overflow:auto;">${imgEscape(data.source_markdown||'')}</pre></details>`;
 
-            body.innerHTML = header + statRow + ingredientsHtml + imagesHtml + scenesHtml + rawHtml;
+            const toggleHtml = data.has_reference_prompts
+                ? `<button class="btn btn-secondary" onclick="imgToggleOverviewPrompts()" style="margin-bottom:12px;">Prompts shown: <b>${_batchOverviewPromptMode === 'omni' ? 'Google Omni (rendered)' : 'Anchor-format (reference)'}</b> — click to switch</button>`
+                : '';
+
+            body.innerHTML = header + statRow + toggleHtml + ingredientsHtml + imagesHtml + scenesHtml + rawHtml;
         }
 
         // ---- Parent slot picker -----------------------------------------------
