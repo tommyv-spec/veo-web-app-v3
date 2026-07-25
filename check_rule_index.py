@@ -131,6 +131,7 @@ DUAL_BUCKET_ALLOWLIST = {
     "v708": "zero-word-loss contract is §A authoring; its export implementation is §C platform",
     "v712": "Banana-2 attached-ref composition is §A authoring; Stage-4d relational is §B decode",
     "v718": "morph-diagnostics §A authoring; VLM forensic-perception §B decode; plumbing §C platform",
+    "v867": "test-axis fields: §0 TEST AXES declaration line is §A authoring; the YAML frontmatter keys on new decodes are §B decode",
 }
 
 _SECTION_RX = {
