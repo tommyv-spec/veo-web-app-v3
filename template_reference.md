@@ -15918,3 +15918,26 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 **Scope / gates:** hook image + clip 1 of real+mannequin comparison builds. Forward-only. §0 declares the two carve-outs + the v867 TEST AXES line (`proxy=mini-torso-mannequin` + the second proxy instance).
 
 **Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (workflow note), `wiki/log.md` (timeline), gbrain `rules/v869`. Origin: operator direction + sketch 2026-07-25 on `decoded_mannequin-day0-day30-torsos-cowboy-cabin-belly-comment-yes-ig`.
+
+## v870 — UPPER-CENTER SAFE-ZONE COMPOSITION (generic, every image; operator 2026-07-25)
+
+**The rule (applies to EVERY `### Image N`, not just the hook).** The load-bearing content of a frame — the avatar's FACE, the hero PROP, and the key ACTION / contact point — must sit in the **upper two thirds** of the vertical 9:16 frame, **centered high**. The **lower third is reserved dead space** and must carry nothing story-relevant.
+
+**WHY (the generic logic — this is what makes it a rule, not a preference):**
+1. **UI occlusion.** Vertical feeds (Reels / TikTok / Shorts) paint their own UI over the bottom ~25-30% of the frame — caption, @handle, audio ticker, like / comment / share / follow buttons. Anything load-bearing placed there is physically HIDDEN behind the platform chrome.
+2. **Caption collision.** Our own burned-in karaoke word captions sit lower-center. A low subject/action collides with them.
+3. **Scroll gravity.** A fast scroll lands the eye on the UPPER-center first — the highest-attention zone. The scroll-stop must be where the eye already is.
+4. **One-glance read.** Action at the subject's chest-to-face height puts the emotion (face) and the payload (prop / action) together in the same glance, both above the UI.
+
+**METHOD (the part builds get wrong — load-bearing):**
+- **RAISE the subject/action to camera-eye height** so it naturally sits high: stand the prop on a raised surface (a dresser / counter at chest height), or HOLD it up at chest-to-face height, or stage the action at that height.
+- **Camera AT that height** (eye / chest level with the action), **NOT a low camera tilted up.** A low camera leaves low objects low regardless of tilt. Caught 2026-07-25 on the club-smash build: "handheld held below the console, tilted up" dropped the mannequin + the smash to the bottom-left corner; the fix was to stand the mannequin on the dresser at the couple's chest height AND move the camera to chest height — raising the SUBJECT, not tilting the lens.
+- **BAN on any frame that carries the main subject:** "filling the lower half of the frame", "at the bottom edge", "on the floor / low counter" for the hero. A prop parked low reads small/secondary and buries the scroll-stop.
+
+**SCOPE:** every image in every build. The HOOK is the strictest case (the scroll-stop lives or dies here), but body and CTA frames also keep the face / prop / action out of the lower third.
+
+**CHECK:** the **square-test** (Rule 30) — put the frame beside the standard-doc square, draw the line; the subject / action / controversy must sit inside the UPPER square. In the prompt, place the subject/action in "the upper two thirds" and reserve "the lower third" (empty), OR raise the subject to chest height by construction.
+
+**Relationship to existing rules:** generalizes `feedback_hook-prop-mid-upper-frame` (which was HOOK-only) to ALL frames and writes in the UI-safe-zone logic. Pairs with §v791.2 (foreshortened hero dead-centre, head touching the top edge), §v869 clause 3 (the comparison sits in the mid-upper band), and Rule 30 (square-test). A §v791 or §v869 carve-out never lifts v870 — the upper-two-thirds placement holds under every carve-out.
+
+**Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/build-rule-index.md` (§A classification), `wiki/meta/generate-video-checklist.md` (workflow note), `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` (§ upper-center safe-zone), memory `feedback_hook-prop-mid-upper-frame` (generalized + v870 pointer), `wiki/log.md`, gbrain `rules/v870`. Forward-only. Operator 2026-07-25 ("the action, the focus of the image needs to be always in the top 2/3 … make it generic for the logic to be applied in the rule").
