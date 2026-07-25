@@ -822,6 +822,12 @@ Support-image stills usually differ from the 9:16 talking head — set their rea
 **Video mode:** storyboard
 **Auto-split:** off
 
+<!-- v867: every NEW build declares its test axes in §0 (one line, 10 keys, kebab-case values,
+     `none` when absent — never omit a key). Value bank: wiki/synthesis/video-variable-taxonomy.md.
+     - **TEST AXES:** shell=talking-head | chore=none | observer=none | hero_age=64 | proxy=banana | destruction=none | recipe_stack=none | voiced=vo | setting_anchor=attic-studio | caption_style=yellow-highlight
+     Decode side: same 11 fields (plus `watermark: present|absent`) as YAML frontmatter keys. -->
+
+
 ---
 
 ## Ingredients

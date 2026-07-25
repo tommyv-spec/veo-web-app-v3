@@ -15854,3 +15854,35 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 **Touched**: `code/template_omni_master.md` (NEW canonical master), `code/template_reference.md` §v865 (this deep-dive), `code/template_new_format.md` (skeleton), `code/veo_prompt_overrides.py` (header regex), `code/verify_video_format.py` (header + v865 gates, anchor warns removed), `code/verify_decode_format.py` (header list), `code/test_omni_section_header.py` (NEW tests), `~/.claude/skills/build-video/SKILL.md` + `audit_build.py` (authoring note), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline). Operator directive 2026-07-24.
 
 **Touched**: this deep-dive (canonical), `code/clip_duration.py` (NEW — the only home of the bucket math), `code/tests/test_v861_clip_duration.py`, `code/image_platform.py` (per-line bullet parse + prepare-time resolve onto `clips.veo_render_duration_s`), `code/main.py` (PATCH validator accepts 10; all four worker payload builders ship the field — local + user worker × pending-jobs + redo-pending-clips), `code/worker.py` (Veo API path, per-clip duration + the 10→8 fold), `code/static/flow_worker.py` (Flow path, per-clip duration tab + prompt timing window), `code/template_new_format.md` (skeleton field), `~/.claude/skills/build-video/audit_build.py` (`v861_clip_duration` check + v831 cap 25→28), `wiki/patterns/conventions.md` (index row), `wiki/log.md`. Operator 2026-07-16.
+
+## v867 — Test-axis fields: 11 controlled variables on every new decode + build §0
+
+**Problem this solves**: 11 axes PROVEN to vary between real videos lived only in filenames + free-text prose — never a structured field. Strongest evidence: the SAME cortisol/chest/Salvora concept exists as 4 decoded shell variants (podcast-splitscreen / gym-seminar-PiP / cowboy-seminar-PiP / gym-seminar-plain) plus chore variants (axe-woodsplit / cement-bag / lawnmower) plus observer variants (wife / new-neighbor / jogger) plus hero-age variants (48 / 63 / 64) — a live A/B family nobody could query or attribute. Single-variable testing needs the axis DECLARED, or the measurement can't say what changed.
+
+**The 11 fields** (kebab-case values; canonical value bank + tier map = `wiki/synthesis/video-variable-taxonomy.md` — open enums, a NEW value is legal but MUST be appended to the taxonomy page in the same commit):
+
+| Field | What it names | Starter vocabulary |
+|---|---|---|
+| `shell` | production wrapper | talking-head / podcast-splitscreen / gym-seminar / cowboy-seminar / barn-seminar / pip-inset / green-screen / slideshow / interview / two-act / music-only / silent-listicle |
+| `chore` | vitality-proof activity in the hook | axe-woodsplit / cement-bag / lawnmower / groceries-one-trip / kettlebell / push-ups / pull-ups / none |
+| `observer` | jealous-witness identity | wife / new-neighbor / jealous-jogger / neighbors-wife / none |
+| `hero_age` | stated/read age of symptom owner | integer, or none |
+| `proxy` | the failing-part stand-in | banana / rotten-banana / cucumber / geoduck / eggplant / python / balloon / silicone-belly / mannequin-pelvis / clay-torso / anatomy-diagram / wilting-sunflower / none |
+| `destruction` | failed-fix destruction mechanic | cement-truck / cart-fire / pestle-smash / club-smash / bounce-off / none |
+| `recipe_stack` | ingredient list of the demo | YAML list (e.g. `[beet, watermelon, pomegranate]`), or none |
+| `voiced` | whole-video audio mode | vo / silent-karaoke / music-only |
+| `setting_anchor` | the one named location | attic-studio / designer-kitchen / helipad / yacht / garage / porch / gym / barn / costco / walmart / home-depot-lot / … |
+| `caption_style` | burned-in text treatment | karaoke-caps / yellow-highlight / orange-box / capcut / none |
+| `watermark` | AI-disclosure overlay observed (DECODE side only) | present / absent |
+
+**DECODE side**: all 11 as YAML frontmatter keys on every NEW `raw/videos/decoded_*.md`. `watermark:` records what the COMPETITOR shows. `none` is mandatory when an axis is absent — a missing key means "not tracked", `none` means "checked, absent". Forward-only: never retro-edit existing decodes (`raw/` is read-only).
+
+**BUILD side**: one §0 line on every NEW `videos/*.md`:
+`- **TEST AXES:** shell=talking-head | chore=kettlebell | observer=none | hero_age=64 | proxy=banana | destruction=none | recipe_stack=none | voiced=vo | setting_anchor=helipad | caption_style=yellow-highlight`
+(10 fields — `watermark` is N/A build-side; our disclosure is mandatory per §14.1.) Two builds whose TEST AXES lines differ on EXACTLY ONE key = a clean single-variable test cell; pairs with the §7.2.1 DIRECTION LOCK (the changed key SHOULD be a locked changed-section) and with the PAIRED VARIANT / STEP-UP declarations.
+
+**What this is NOT**: not a new frontmatter home for concepts that already have fields — niche / product / persona / angle / cta keep their existing keys. The 11 fields cover ONLY the previously-untracked axes. Phase 1 is declaration-only: `audit_build.py` + `verify_video_format.py` + `verify_decode_format.py` are NOT changed by v867 (no new hard-fails); enforcement can be added later once the vocab settles.
+
+**Scope / gates**: every NEW decode (frontmatter) + every NEW build (§0 TEST AXES line). Forward-only. Open-enum discipline: new value → same-commit append to `wiki/synthesis/video-variable-taxonomy.md`.
+
+**Touched**: this deep-dive (canonical), `code/template_new_format.md` (skeleton §0 TEST AXES line), `wiki/meta/decode-grammar-checklist.md` (decode workflow note), `wiki/meta/generate-video-checklist.md` (build workflow note), `wiki/patterns/conventions.md` (index row), `wiki/synthesis/video-variable-taxonomy.md` (value bank, gap list → promoted), `wiki/log.md` (timeline). Operator directive 2026-07-25 ("option 1" on the variable-taxonomy gap list).
