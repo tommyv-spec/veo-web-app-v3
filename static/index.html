@@ -10262,6 +10262,22 @@ Ambient: same kitchen room tone, soft pour sound.
                     if (_promotedBatchId) {
                         try {
                             imgState?._batchFetched?.delete(_promotedBatchId);
+                            // The promote-button render (imgRenderJobOverview ~L20874)
+                            // reads imgState.batchesById, a SEPARATE cache from
+                            // _batchFetched. Deleting _batchFetched only re-arms the
+                            // node-stamp path; batchesById keeps its stale
+                            // {promoted_video_job_id: null} entry, so the image-overview
+                            // button stayed "🎬 Promote to video" until a full reload.
+                            // Stamp the new video job id straight into batchesById and
+                            // re-render so the button flips to "↗ View video job" live.
+                            if (imgState && imgState.batchesById) {
+                                const _prev = imgState.batchesById[_promotedBatchId] || { id: _promotedBatchId };
+                                imgState.batchesById[_promotedBatchId] = { ..._prev, promoted_video_job_id: job.id };
+                            }
+                            console.log('[CreateJob] batchesById stamped promoted_video_job_id', job.id, 'for batch', _promotedBatchId); // diag — remove after verify
+                            if (imgState && imgState.selectedJobKey && typeof imgRenderJobOverview === 'function') {
+                                imgRenderJobOverview(imgState.selectedJobKey);
+                            }
                         } catch (e) { console.warn('[CreateJob] batch cache invalidate failed:', e); }
                     }
                     showToast(promptOnly ? '✓ Prompts ready!' : '✓ Job created — building prompts...', 'var(--success)');
