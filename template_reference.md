@@ -15886,3 +15886,16 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 **Scope / gates**: every NEW decode (frontmatter) + every NEW build (§0 TEST AXES line). Forward-only. Open-enum discipline: new value → same-commit append to `wiki/synthesis/video-variable-taxonomy.md`.
 
 **Touched**: this deep-dive (canonical), `code/template_new_format.md` (skeleton §0 TEST AXES line), `wiki/meta/decode-grammar-checklist.md` (decode workflow note), `wiki/meta/generate-video-checklist.md` (build workflow note), `wiki/patterns/conventions.md` (index row), `wiki/synthesis/video-variable-taxonomy.md` (value bank, gap list → promoted), `wiki/log.md` (timeline). Operator directive 2026-07-25 ("option 1" on the variable-taxonomy gap list).
+
+## v833.1 — RELAXED 2026-07-25: dated day stamps allowed again (§14.2.1)
+
+**Operator 2026-07-25: "we can use days."** The §14.2 / v833-clause-1 hard ban on dated day stamps (2026-07-01) is RETIRED. "Day 1 vs Day 30", D1-DX checkpoint ladders, and before/after over time are ALLOWED again. Driver: mentor content plans actively push them — "definitely test this day 1, day 30, they grow accounts very fast" (2026-07-23 call) and transformations run >50% direct-sale ratio (2026-07-19 call).
+
+**All three time framings are now legal, per-test choices** (checkpoint COUNT is its own test axis — 2 vs 3 waypoints, `wiki/synthesis/video-variable-taxonomy.md`):
+1. dated timeline (Day 1 → Day 30 / D1→45→90)
+2. "how it started / how it's going" present-state panels (stays the v833 meme-grammar form)
+3. same-scene A/B contrast (pills-fail-vs-works, limp-vs-firm one moment, catalyst demo)
+
+**Unchanged:** §14.1 disclosure on every post; v833 clauses 2-4 (full-health transform on the person, tight crop + classic hook prompt rules, proxy bound to the zone) still bind meme-panel builds; v852 silent-clip handling for meme beats. `audit_build.py` `c_no_time_transformation` is now a no-op PASS (v795.1 pattern). Forward-only — builds converted to started/going during 07-01→07-25 stay as shipped.
+
+**Touched**: this deep-dive (canonical), root `CLAUDE.md` §14.2 quickref, `wiki/concepts/script-adaptation/synthetic-disclosure-and-cta-rules.md` (canonical §14 page), `~/.claude/skills/build-video/audit_build.py` (no-op), `wiki/patterns/conventions.md` (row note), `wiki/synthesis/video-variable-taxonomy.md` (time-anchor + checkpoint rows), memory `feedback_synthetic-disclosure-and-improved-cta`, `wiki/log.md`. Operator directive 2026-07-25.
