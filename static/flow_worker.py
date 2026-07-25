@@ -7080,6 +7080,12 @@ def select_frames_to_video_mode(page, context="", **kwargs):
     """
     prefix = f"{context} " if context else ""
     variants_count = kwargs.get('variants_count', 2)
+    # v861 — duration_only: reuse this function's proven open→(set)→close dropdown
+    # sequence to click JUST the duration tab, skipping the model/variants/mode/
+    # portrait tabs. Used on the per-clip reuse path, where the duration bucket
+    # can change between consecutive clips but re-running the full settings pass
+    # is wasteful (and the reuse path was built to skip it).
+    _duration_only = kwargs.get('duration_only', False)
     _agent_off_tried = False  # only force Agent OFF once (it reloads the page)
     _marketing_recovered = False  # v836 — click through the marketing landing once
 
@@ -7300,6 +7306,33 @@ def select_frames_to_video_mode(page, context="", **kwargs):
 
             print(f"{prefix}✓ Opened settings dropdown", flush=True)
             time.sleep(2)  # Wait for Radix portal to mount
+
+            # v861 — duration-only fast path: dropdown is open, click just the
+            # duration tab, close, done. Same tab logic as the full pass below.
+            if _duration_only:
+                _dur_ok = False
+                try:
+                    _durraw = getattr(page, "_duration", "8")
+                    _durn = int(float(str(_durraw).lower().rstrip('s') or "8"))
+                    _dtab = page.locator(
+                        f"button.flow_tab_slider_trigger:text-is('{_durn}s'), "
+                        f"button.flow_tab_slider_trigger[aria-controls$='-content-{_durn}']"
+                    ).first
+                    _dtab.wait_for(state="visible", timeout=3000)
+                    if _dtab.get_attribute("aria-selected") != "true":
+                        human_click_element(page, _dtab, f"{prefix}Duration {_durn}s")
+                        time.sleep(0.5)
+                    _dur_ok = True
+                    print(f"{prefix}✓ Duration {_durn}s OK (duration-only)", flush=True)
+                except Exception:
+                    print(f"{prefix}⚠ Duration-only tab not set "
+                          f"({getattr(page,'_duration','?')}s tab missing)", flush=True)
+                try:
+                    page.keyboard.press("Escape")
+                    time.sleep(0.3)
+                except Exception:
+                    pass
+                return _dur_ok
 
             # ---- Configure each setting ----
             settings_applied = {}
@@ -17800,7 +17833,26 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         print(f"  has_new_start={has_new_start}, has_new_end={has_new_end}, has_new_frames={has_new_frames}")
         print(f"  clip_mode={clip_mode}, scene={scene_index}, dialogue=\"{clip.get('dialogue_text', '')[:40]}...\"", flush=True)
         print(f"  clip_mode={clip_mode}, scene_index={scene_index}")
-        
+
+        # v861 — keep the Flow duration tab in sync with THIS clip's bucket.
+        # The FULL settings pass (which clicks the duration tab) runs ONLY on the
+        # first submission in a project; every later clip reuses the composer and
+        # skipped it, so clips 2..N inherited clip 1's duration tab (operator
+        # 2026-07-18: scene-1 was 6s, so 8s clips submitted as abra_i2v_6s). Set
+        # page._duration for every clip; when the project already has settings
+        # AND the bucket changed from the last-applied one, re-click just the
+        # duration tab via the duration-only fast path.
+        _this_dur = str(clip.get('veo_render_duration_s') or job.get('duration', '8'))
+        page._duration = _this_dur
+        if not first_submission_in_project and _this_dur != getattr(page, '_duration_applied', None):
+            try:
+                if select_frames_to_video_mode(page, context=f"[dur c{clip_index+1}]", duration_only=True):
+                    page._duration_applied = _this_dur
+                    print(f"[v861/flow] clip {clip_index+1}: duration tab re-set → "
+                          f"{_this_dur}s (reuse path, bucket changed)", flush=True)
+            except Exception as _de:
+                print(f"[v861/flow] ⚠ clip {clip_index+1} duration re-set failed: {_de}", flush=True)
+
         if first_submission_in_project:
             # First clip actually submitted — needs frames and full setup.
             # May be i>0 if earlier clips were skipped (already completed). In that case
@@ -17825,19 +17877,15 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                 pass
             human_delay(0.3, 0.6)
             variants_count = job.get('flow_variants_count', 2)
-            # v861 — per-clip duration. The API resolved this clip's bucket
-            # from its line's word count; page._duration is what
-            # select_frames_to_video_mode clicks in the 4s/6s/8s/10s tablist.
-            # NULL (legacy/manual job) → keep the job-level duration.
-            _clip_dur = clip.get('veo_render_duration_s')
-            try:
-                page._duration = str(_clip_dur) if _clip_dur else job.get('duration', '8')
-                print(f"[v861/flow] clip {clip_index+1}: duration tab → {page._duration}s "
-                      f"({'per-clip' if _clip_dur else 'job default'})", flush=True)
-            except Exception:
-                pass
+            # v861 — page._duration was set for this clip in the hoisted block
+            # just above the branch. The full settings pass applies it (the
+            # duration tab is one of the tabs it clicks). Record it as applied so
+            # later reuse clips only re-click when the bucket actually changes.
+            print(f"[v861/flow] clip {clip_index+1}: duration tab → {page._duration}s "
+                  f"(first submission, full settings)", flush=True)
             try:
                 select_frames_to_video_mode(page, variants_count=variants_count)
+                page._duration_applied = page._duration
             except Exception as settings_err:
                 print(f"[Flow] ⚠ Settings failed for clip {clip_index+1} — skipping clip: {settings_err}", flush=True)
                 update_clip_status(clip['id'], 'failed', error_message=f"Settings dropdown failed: {str(settings_err)[:100]}")
@@ -19613,7 +19661,24 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         if not first_submission_in_project and _tiles_in_this_project == 0:
             print(f"[Flow] ⚠ Zero tiles in project — re-arming full upload path for clip {i+1} (safety net)", flush=True)
             first_submission_in_project = True
-        
+
+        # v861 — keep the Flow duration tab in sync with THIS clip's bucket. The
+        # full settings pass clicks the tab ONLY on the first submission; reuse
+        # clips skipped it and inherited clip 1's duration (operator 2026-07-18:
+        # 8s clips submitted as abra_i2v_6s). Runs AFTER the safety net above so
+        # first_submission_in_project is final. When the project already has
+        # settings AND the bucket changed, re-click just the duration tab.
+        _this_dur = str(clip.get('veo_render_duration_s') or job.get('duration', '8'))
+        page._duration = _this_dur
+        if not first_submission_in_project and _this_dur != getattr(page, '_duration_applied', None):
+            try:
+                if select_frames_to_video_mode(page, context=f"[dur c{clip_index+1}]", duration_only=True):
+                    page._duration_applied = _this_dur
+                    print(f"[v861/flow] clip {clip_index+1}: duration tab re-set → "
+                          f"{_this_dur}s (reuse path, bucket changed)", flush=True)
+            except Exception as _de:
+                print(f"[v861/flow] ⚠ clip {clip_index+1} duration re-set failed: {_de}", flush=True)
+
         if first_submission_in_project:
             # First clip actually being submitted to this project — needs frames and full setup.
             # NOTE: after restore, clips_done may skip clips 0..N, so i>0 here but the project
@@ -19640,19 +19705,14 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             human_delay(0.3, 0.6)
             variants_count = job.get('flow_variants_count', 2)
             print(f"[SUBMIT] Flow variants count from job config: {variants_count}", flush=True)
-            # v861 — per-clip duration. The API resolved this clip's bucket
-            # from its line's word count; page._duration is what
-            # select_frames_to_video_mode clicks in the 4s/6s/8s/10s tablist.
-            # NULL (legacy/manual job) → keep the job-level duration.
-            _clip_dur = clip.get('veo_render_duration_s')
-            try:
-                page._duration = str(_clip_dur) if _clip_dur else job.get('duration', '8')
-                print(f"[v861/flow] clip {clip_index+1}: duration tab → {page._duration}s "
-                      f"({'per-clip' if _clip_dur else 'job default'})", flush=True)
-            except Exception:
-                pass
+            # v861 — page._duration was set for this clip in the hoisted block
+            # above the branch. The full settings pass applies the tab here;
+            # record it so later reuse clips only re-click when the bucket changes.
+            print(f"[v861/flow] clip {clip_index+1}: duration tab → {page._duration}s "
+                  f"(first submission, full settings)", flush=True)
             try:
                 select_frames_to_video_mode(page, variants_count=variants_count)
+                page._duration_applied = page._duration
             except Exception as settings_err:
                 print(f"[Flow] ⚠ Settings failed for clip {clip_index+1} — skipping clip: {settings_err}", flush=True)
                 update_clip_status(clip['id'], 'failed', error_message=f"Settings dropdown failed: {str(settings_err)[:100]}")
