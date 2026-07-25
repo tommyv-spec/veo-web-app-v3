@@ -172,8 +172,16 @@ def is_logged_in(page):
     NOTE: the composer alone is NOT proof — logged-out ChatGPT shows an
     anonymous composer, but image-gen + file upload require login.
     """
+    # 20s (was 8s): under load the composer can take >8s to attach, which
+    # produced frequent false "session expired" flickers on an account that is
+    # actually logged in. If the login button is already visible, don't wait.
     try:
-        page.wait_for_selector(SEL["composer"], timeout=8000)
+        if page.locator(SEL["login_btn"]).count() > 0:
+            return False
+    except Exception:
+        pass
+    try:
+        page.wait_for_selector(SEL["composer"], timeout=20000)
     except Exception:
         return False
     try:
@@ -601,8 +609,13 @@ def _tone_correct_via_site(out_path, page):
     on success, False if the site returned nothing (throttle/block/timeout)."""
     tab = _get_tone_tab(page.context)
     # Fresh load each call: resets their SPA so no stale prior result lingers.
-    tab.goto(TONE_SITE_URL, wait_until="networkidle", timeout=45000)
-    time.sleep(1.5)
+    # NOTE: wait_until="domcontentloaded", NOT "networkidle" — gpt-tone.com keeps
+    # long-lived connections (recaptcha/analytics) so it never reaches network
+    # idle, which was timing out at 45s and forcing the local fallback. Instead we
+    # explicitly wait for the file input to be ready.
+    tab.goto(TONE_SITE_URL, wait_until="domcontentloaded", timeout=45000)
+    tab.locator("input[type=file]").first.wait_for(state="attached", timeout=30000)
+    time.sleep(1.0)
     tab.locator("input[type=file]").first.set_input_files(out_path)
     deadline = time.time() + TONE_SITE_TIMEOUT_S
     src = None
