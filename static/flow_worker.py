@@ -16842,10 +16842,9 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
         # the same dialogue (from the original generation). Scanning all tiles
         # would return the OLD tile's videos instead of the new redo's.
         # This mirrors check_recent_clip_failure() which also targets data-index=0.
-        _max_scan_attempts = 20  # v817: waiting for the FULL batch (+ a sibling retry) needs headroom
+        _max_scan_attempts = 20  # v870: MAIN parity exits on first good scan; headroom kept for empty-batch retries
         _urls_found = False
         _retried_in_place = False
-        _sibling_retried = False  # v817: one retry for a failed sibling variant
         for _scan_attempt in range(_max_scan_attempts):
             try:
                 ensure_videos_tab_selected(page)
@@ -16952,62 +16951,21 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                 _video_count = _tile_info.get('videoCount', 0)
                 _failed_count = _tile_info.get('failedCount', 0)
 
-                # v817 — take URLs only when the batch is SETTLED. Previously
-                # the FIRST finished variant was taken while its sibling was
-                # still ACTIVE → clip completed with 1/N variants and the
-                # sibling's errors were never handled (operator report: "redo
-                # doesn't catch the errors and all the variants like the
-                # normal process does").
-                if _video_urls and _has_generating:
-                    print(f"[REDO] Scan {_scan_attempt + 1}/{_max_scan_attempts}: "
-                          f"{_video_count} video(s) ready but a sibling variant is still "
-                          f"generating — waiting for the full batch (v817)", flush=True)
-                    time.sleep(15)
-                    continue
+                # v870 — MAIN parity (v802 partial-ok, check_recent_clip_failure
+                # ~L10432): the FIRST rendered variant wins. Never wait for a
+                # still-generating sibling, never retry a failed sibling once a
+                # good video exists. v817 did wait-for-full-batch + sibling-retry
+                # ("catch every variant's errors like the normal process"), but
+                # the normal process does NOT catch sibling errors when a video
+                # exists — it takes it and moves on. v817's wait pushed redos past
+                # STUCK_REDO_SECS (600s) → dispatcher re-queue churn. Empty-batch
+                # (no video) still walks the full v816/v838 Prompt-B ladder below.
 
-                if _video_urls and _has_failed:
-                    # Batch settled with some videos + some failed siblings.
-                    # Terminal sibling (SEXUAL/... API record) → retrying is
-                    # pointless, take the good videos. Otherwise retry the
-                    # failed sibling once, then take what's there.
-                    _sib_uuids = _tile_info.get('failedUuids') or []
-                    _sib_term = _terminal_reason_for_uuids(_sib_uuids)
-                    if _sib_term:
-                        print(f"[REDO] ⛔ Sibling variant terminal ({_sib_term}) — taking the "
-                              f"{_video_count} good video(s) (v817)", flush=True)
-                    elif not _sibling_retried:
-                        _clicked = 0
-                        try:
-                            _clicked = page.evaluate("""() => {
-                                const c = document.querySelector("div[data-index='0']");
-                                if (!c) return 0;
-                                let clicked = 0;
-                                const seen = new Set();
-                                c.querySelectorAll('[data-tile-id]').forEach(t => {
-                                    const id = t.getAttribute('data-tile-id');
-                                    if (!id || seen.has(id)) return;
-                                    seen.add(id);
-                                    if (t.querySelector('video')) return;
-                                    const btn = Array.from(t.querySelectorAll('button')).find(b =>
-                                        Array.from(b.querySelectorAll('i')).some(i => i.textContent.trim() === 'refresh'));
-                                    if (btn) { btn.click(); clicked++; }
-                                });
-                                return clicked;
-                            }""")
-                        except Exception as _sre:
-                            print(f"[REDO] ⚠ Sibling retry click failed: {_sre}", flush=True)
-                        _sibling_retried = True
-                        if _clicked:
-                            print(f"[REDO] ↻ Retried {_clicked} failed sibling variant(s) — "
-                                  f"waiting for regeneration (v817)", flush=True)
-                            time.sleep(15)
-                            continue
-                    else:
-                        print(f"[REDO] ⚠ Sibling variant still failed after retry — taking the "
-                              f"{_video_count} good video(s) (v817)", flush=True)
-
-                # SUCCESS: batch settled — queue ALL downloadable URLs
+                # SUCCESS: ≥1 variant rendered — TAKE IT NOW (partial-ok, MAIN parity)
                 if _video_urls:
+                    print(f"[REDO] ✓ partial-ok (MAIN parity v870) — taking {_video_count} good "
+                          f"video(s) at scan {_scan_attempt + 1}, not waiting/retrying sibling "
+                          f"(generating={_has_generating}, failed={_failed_count})", flush=True)
                     http_dl_queue.put({
                         'job_id': job_id,
                         'clip_index': clip_index,
