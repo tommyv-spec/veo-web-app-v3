@@ -45,6 +45,12 @@ POST_COMPLETE_GRACE_S = int(os.environ.get("CHATGPT_POST_COMPLETE_GRACE_S", "90"
 # How many times to click ChatGPT's "Retry" on a transient generation error
 # ("Something went wrong") before failing the node.
 ERROR_RETRIES = int(os.environ.get("CHATGPT_ERROR_RETRIES", "3"))
+# The worker tab's live stream can go stale: the turn finishes server-side (a
+# fresh browser shows the image/error) but the worker's DOM stays "Thinking" /
+# stream_status stuck. If no image after this long while NOT COMPLETE, reload the
+# conversation page (== opening a fresh browser) to pull the true server state.
+STUCK_RELOAD_S = int(os.environ.get("CHATGPT_STUCK_RELOAD_S", "100"))
+STUCK_RELOADS = int(os.environ.get("CHATGPT_STUCK_RELOADS", "2"))
 # human jitter between actions (min, max seconds)
 JITTER = (float(os.environ.get("CHATGPT_JITTER_MIN", "1.2")),
           float(os.environ.get("CHATGPT_JITTER_MAX", "3.5")))
@@ -87,11 +93,13 @@ SEL = {
     # cookie-consent banner buttons (overlay blocks clicks until dismissed) — EN/IT
     "cookie_dismiss": "button:has-text('Reject non-essential'), button:has-text('Accept all'), "
                       "button:has-text('Rifiuta opzionali'), button:has-text('Accetta tutto')",
-    # transient generation error bubble ("Something went wrong… Retry") — ChatGPT
-    # server-errors mid-render; the Retry button regenerates the SAME turn.
-    "retry_btn": "button:has-text('Retry'), button:has-text('Riprova'), "
+    # transient generation error bubble — ChatGPT server-errors mid-render; the
+    # button regenerates the SAME turn. Seen as "Retry" AND "Try again" ("Image
+    # generation failed … Try again"); IT "Riprova".
+    "retry_btn": "button:has-text('Try again'), button:has-text('Retry'), "
+                 "button:has-text('Riprova'), button:has-text('Prova di nuovo'), "
                  "button[data-testid='regenerate-thread-error-button'], "
-                 "button[aria-label*='Retry']",
+                 "button[aria-label*='Retry'], button[aria-label*='Try again']",
 }
 
 
@@ -307,8 +315,9 @@ def _looks_like_reference(out_path, ref_paths):
 # ERROR wording only — NOT a content refusal ("I can't create that…"), which
 # should fail fast rather than burn retries.
 _GEN_ERROR_RE = re.compile(
-    r"(went wrong|an error occurred|error (occurred|during|while)|"
-    r"errore|si è verificato|problem generating|couldn'?t generate the image|"
+    r"(image generation failed|generazione.*non riuscit|went wrong|"
+    r"an error occurred|error (occurred|during|while)|errore|si è verificato|"
+    r"problem generating|couldn'?t generate the image|"
     r"non sono riuscit\w+ a genera)", re.I)
 
 
@@ -326,6 +335,19 @@ def _reply_is_gen_error(page):
     """True if the assistant's last message reads as a transient generation error
     (retryable), not a content refusal."""
     return bool(_GEN_ERROR_RE.search(_last_assistant_text(page)))
+
+
+def _gen_failed(page):
+    """True only when a real generation-ERROR indicator is visible in the recent
+    turn ("Image generation failed", "Something went wrong", "si è verificato un
+    errore"…). Used to gate the Retry-button click so we never click a normal
+    regenerate/"Try again" affordance on a healthy turn (that false-click wasted a
+    generation). Scans the tail of the page text, not just the button."""
+    try:
+        tail = page.evaluate("() => (document.body.innerText || '').slice(-1500)")
+    except Exception:
+        tail = ""
+    return bool(_GEN_ERROR_RE.search(tail or ""))
 
 
 def _resubmit(page, prompt):
@@ -481,23 +503,50 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
     stop_n = -1
     complete_since = None      # when stream_status first read COMPLETE
     retries_left = ERROR_RETRIES
+    reloads_left = STUCK_RELOADS
+    attempt_start = time.time()  # reset on submit / retry / reload
     while time.time() < deadline:
-        # ChatGPT server-errors mid-generation ("Something went wrong … Retry").
-        # Click Retry and reset this attempt instead of waiting out the timeout.
-        if gen_src is None and retries_left > 0:
+        # Stale-tab recovery: the worker's live stream can hang — the turn finishes
+        # server-side (a fresh browser shows the image/error) but this tab stays
+        # "Thinking" / stream_status stuck non-COMPLETE. Reload the conversation
+        # (== opening a fresh browser) to pull the true server state, then re-detect.
+        if (gen_src is None and reloads_left > 0 and not complete_since
+                and (time.time() - attempt_start) >= STUCK_RELOAD_S):
+            reloads_left -= 1
+            log(f"tab stuck {STUCK_RELOAD_S}s (status={last_status}, no image) — "
+                f"reloading conversation ({STUCK_RELOADS - reloads_left}/{STUCK_RELOADS})")
             try:
+                page.reload(wait_until="domcontentloaded", timeout=45000)
+            except Exception as _re:
+                log(f"reload failed: {_re}")
+            last_cand = cand_since = last_status = complete_since = None
+            ever_cand = False
+            attempt_start = time.time()
+            time.sleep(3)
+            continue
+        # ChatGPT generation error ("Something went wrong … Retry" / "Image
+        # generation failed … Try again" / IT "…si è verificato un errore").
+        # GATED on a real error indicator in the DOM — never click a healthy
+        # turn's regenerate/"Try again" affordance (that false-click wasted a
+        # generation). Click the button if present, else resubmit the prompt.
+        if gen_src is None and retries_left > 0 and _gen_failed(page):
+            try:
+                retries_left -= 1
                 rb = page.locator(SEL["retry_btn"]).first
                 if rb.count() > 0 and rb.is_visible():
-                    retries_left -= 1
-                    log(f"ChatGPT error bubble — clicking Retry "
+                    log(f"generation error — clicking Retry/Try-again "
                         f"({ERROR_RETRIES - retries_left}/{ERROR_RETRIES})")
                     rb.click()
-                    # reset per-attempt state; give the fresh attempt full time
-                    deadline = time.time() + gen_timeout_s
-                    last_cand = cand_since = last_status = complete_since = None
-                    ever_cand = False
-                    time.sleep(3)
-                    continue
+                else:
+                    log(f"generation error (no button) — resubmitting "
+                        f"({ERROR_RETRIES - retries_left}/{ERROR_RETRIES})")
+                    _resubmit(page, prompt)
+                deadline = time.time() + gen_timeout_s
+                last_cand = cand_since = last_status = complete_since = None
+                ever_cand = False
+                attempt_start = time.time()
+                time.sleep(3)
+                continue
             except Exception:
                 pass
         cand = _find_gen_src(page, pre_srcs)
@@ -550,19 +599,9 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
                     "(loose fallback)")
                 gen_src = loose
                 break
-            # Text-form generation error (no Retry button, e.g. "…si è verificato
-            # un errore durante la generazione"): resubmit the prompt immediately —
-            # don't wait out the grace, the image is not coming for this attempt.
-            if retries_left > 0 and _reply_is_gen_error(page):
-                retries_left -= 1
-                log(f"generation-error reply — resubmitting "
-                    f"({ERROR_RETRIES - retries_left}/{ERROR_RETRIES})")
-                if _resubmit(page, prompt):
-                    deadline = time.time() + gen_timeout_s
-                    last_cand = cand_since = last_status = complete_since = None
-                    ever_cand = False
-                    time.sleep(3)
-                    continue
+            # A text/button generation error is handled at the top of the loop
+            # (gated on _gen_failed). Here we only wait out the grace for a
+            # genuinely image-less COMPLETE (content refusal / usage cap).
             if complete_since and (time.time() - complete_since) >= POST_COMPLETE_GRACE_S:
                 log(f"turn COMPLETE for {POST_COMPLETE_GRACE_S}s with no image — "
                     f"giving up (likely content refusal / usage cap)")
@@ -603,7 +642,8 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
             f"output (refusal / usage cap / slow render); refusing to upload the reference "
             f"[diag: stream_status={_stream_status(page, _cid)} last_seen={last_status} "
             f"conv={_cid} stop_btn={stop_n} ever_candidate={ever_cand} imgs={inv} "
-            f"retries_used={ERROR_RETRIES - retries_left} error_bubble={err_bubble} "
+            f"retries_used={ERROR_RETRIES - retries_left} "
+            f"reloads_used={STUCK_RELOADS - reloads_left} error_bubble={err_bubble} "
             f"reply={reply!r}]")
     _download_img(page, gen_src, out_path)
     # Final safety net: never hand the platform an input image. If what we captured
