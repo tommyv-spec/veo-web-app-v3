@@ -305,8 +305,9 @@
 
         /* ============ Images tab layout ============ */
         #imagesTab {
+            position: relative;
             display: grid;
-            grid-template-columns: 380px 1fr;
+            grid-template-columns: var(--img-sidebar-w, 380px) 1fr;
             gap: 0;
             flex: 1;
             min-height: 0;
@@ -320,6 +321,21 @@
             flex-direction: column;
             gap: 12px;
         }
+        /* Drag handle sitting on the sidebar/results column boundary — widen the
+           sidebar to read full job titles. Width persists to localStorage
+           (imgSidebarWidth). Anchored to #imagesTab (not the scrolling panel) so
+           it stays fixed on the edge and never scrolls or clips. */
+        .img-sidebar-resizer {
+            position: absolute; top: 0; bottom: 0;
+            left: var(--img-sidebar-w, 380px);
+            width: 7px; margin-left: -3px;
+            cursor: col-resize; z-index: 20;
+            background: transparent;
+        }
+        @media (max-width: 900px) { .img-sidebar-resizer { display: none; } }
+        .img-sidebar-resizer:hover,
+        .img-sidebar-resizer.dragging { background: var(--accent-glow, rgba(120,120,255,0.25)); }
+        body.img-sidebar-resizing { cursor: col-resize; user-select: none; }
         /* Node list has its own scroll cap so a long list doesn't push
            the new-node button, worker status, and toolbar off the top */
         #imagesTab .img-config-panel .img-sidebar-list {
@@ -495,7 +511,11 @@
             display: flex; align-items: flex-start; justify-content: space-between;
             gap: 16px; margin-bottom: 16px; flex-wrap: wrap;
         }
-        .img-job-overview-title h2 { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
+        .img-job-overview-title { flex: 1 1 260px; min-width: 0; }
+        .img-job-overview-title h2 {
+            font-size: 22px; font-weight: 600; margin-bottom: 4px;
+            overflow-wrap: anywhere; word-break: break-word; line-height: 1.25;
+        }
         .img-job-overview-title .stats {
             display: flex; gap: 12px; font-size: 12px; color: var(--text-muted);
             flex-wrap: wrap;
@@ -3683,6 +3703,8 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         <!-- ============ Images Tab ============ -->
         <div id="imagesTab">
+            <!-- Drag handle on the sidebar edge — widen to read full job titles -->
+            <div class="img-sidebar-resizer" id="imgSidebarResizer" title="Drag to resize · double-click to reset"></div>
             <!-- Left sidebar: new-node button (collapsible), worker status, toolbar, job list -->
             <div class="img-config-panel">
                 <!-- New-Node form (toggled by the #imgToggleNewNodeBtn button in the action bar) -->
@@ -19889,7 +19911,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                   title="${isExpanded ? 'Collapse' : 'Expand'}">▶</span>
                             <button class="img-group-title-btn ${isActiveJob ? 'active' : ''}"
                                     onclick="imgSelectJob('${jobKeyAttr}')"
-                                    title="Open job overview">
+                                    title="${imgEscape(labelFor(k))}">
                                 <span>${imgEscape(labelFor(k))}</span>
                             </button>
                             <div class="img-group-badges">${badges.join('')}</div>
@@ -21016,7 +21038,7 @@ Ambient: same kitchen room tone, soft pour sound.
             area.innerHTML = `
                 <div class="img-job-overview-header">
                     <div class="img-job-overview-title">
-                        <h2>${imgEscape(title)}</h2>
+                        <h2 title="${imgEscape(title)}">${imgEscape(title)}</h2>
                         <div class="stats">${stats.join('<span style="color:var(--text-muted);">·</span>')}</div>
                     </div>
                     <div class="img-job-overview-actions">${bulkActions.join('')}</div>
@@ -23205,6 +23227,48 @@ Ambient: same kitchen room tone, soft pour sound.
                 container.classList.add('tab-videos');
             }
             imgRenderParentSlots();
+        })();
+
+        // Draggable image-tab sidebar — widen it to read full job titles.
+        // Width persists to localStorage; double-click the handle to reset.
+        (function imgSidebarResizeInit() {
+            const KEY = 'imgSidebarWidth';
+            const MIN = 260, MAX = 1000, DEFAULT = 380;
+            const tab = document.getElementById('imagesTab');
+            const handle = document.getElementById('imgSidebarResizer');
+            if (!tab || !handle) return;
+            const clamp = (w) => Math.max(MIN, Math.min(MAX, w));
+            const apply = (w) => tab.style.setProperty('--img-sidebar-w', w + 'px');
+            const saved = parseInt(localStorage.getItem(KEY), 10);
+            if (!isNaN(saved)) apply(clamp(saved));
+            let dragging = false;
+            const onMove = (e) => {
+                if (!dragging) return;
+                const rect = tab.getBoundingClientRect();
+                apply(clamp(e.clientX - rect.left));
+            };
+            const onUp = () => {
+                if (!dragging) return;
+                dragging = false;
+                handle.classList.remove('dragging');
+                document.body.classList.remove('img-sidebar-resizing');
+                const px = parseInt(getComputedStyle(tab).getPropertyValue('--img-sidebar-w'), 10);
+                if (!isNaN(px)) localStorage.setItem(KEY, px);
+                window.removeEventListener('pointermove', onMove);
+                window.removeEventListener('pointerup', onUp);
+            };
+            handle.addEventListener('pointerdown', (e) => {
+                e.preventDefault();
+                dragging = true;
+                handle.classList.add('dragging');
+                document.body.classList.add('img-sidebar-resizing');
+                window.addEventListener('pointermove', onMove);
+                window.addEventListener('pointerup', onUp);
+            });
+            handle.addEventListener('dblclick', () => {
+                tab.style.removeProperty('--img-sidebar-w');
+                localStorage.removeItem(KEY);
+            });
         })();
     </script>
 </body>
