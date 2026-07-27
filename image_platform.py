@@ -7423,13 +7423,18 @@ def get_batch(
     }
 
 
-def _parse_anchor_reference_prompts(md_text: str) -> Dict[Tuple[int, int], str]:
+def _parse_anchor_reference_prompts(md_text: str) -> Dict[Tuple[int, int], Dict[str, Optional[str]]]:
     """v867 — overview-only parse of the inert `## Anchor-Format Prompts …`
     reference section. That section uses bold `**Clip N.M**` labels (NOT
     `### Clip`) so the render parser + clip-counter ignore it; here we read it
     purely to DISPLAY the alternate prompt set in the Batch overview. Returns
-    {(scene_index, line_index): text_prompt}; empty dict when absent. NEVER
-    feeds the render path."""
+    {(scene_index, line_index): {"text": text_prompt, "text_b": text_prompt_b
+    or None}}; empty dict when absent.
+
+    v868 — ALSO the source the render path reads from when a batch's
+    prompt_variant == 'anchor' (see main.py job-prep). "text" backs
+    veo_prompt_override, "text_b" backs veo_prompt_b, mirroring the Omni
+    section's Prompt A / Prompt B pair."""
     import re as _re2
     m = _re2.search(r"^##\s+Anchor-Format Prompts\b.*$", md_text, _re2.M | _re2.I)
     if not m:
@@ -7437,7 +7442,7 @@ def _parse_anchor_reference_prompts(md_text: str) -> Dict[Tuple[int, int], str]:
     body_start = m.end()
     nxt = _re2.search(r"^##\s+(?!#)", md_text[body_start:], _re2.M)
     body = md_text[body_start: body_start + nxt.start()] if nxt else md_text[body_start:]
-    out: Dict[Tuple[int, int], str] = {}
+    out: Dict[Tuple[int, int], Dict[str, Optional[str]]] = {}
     blocks = _re2.split(r"(?=^\*\*Clip\s+\d+(?:\.\d+)?\b)", body, flags=_re2.M)
     for blk in blocks:
         hm = _re2.match(r"^\*\*Clip\s+(\d+)(?:\.(\d+))?", blk)
@@ -7446,8 +7451,11 @@ def _parse_anchor_reference_prompts(md_text: str) -> Dict[Tuple[int, int], str]:
         scene_idx = int(hm.group(1))
         line_idx = int(hm.group(2)) if hm.group(2) else 1
         fm = _re2.search(r"\*\*Text prompt:\*\*\s*\n+```[a-zA-Z]*\n(.*?)\n```", blk, _re2.S)
-        if fm:
-            out[(scene_idx, line_idx)] = fm.group(1).strip()
+        bm = _re2.search(r"\*\*Prompt\s+B\b[^*]*:\*\*\s*\n+```[a-zA-Z]*\n(.*?)\n```", blk, _re2.S)
+        text = fm.group(1).strip() if fm else None
+        text_b = bm.group(1).strip() if bm else None
+        if text:
+            out[(scene_idx, line_idx)] = {"text": text, "text_b": text_b}
     return out
 
 
@@ -7523,7 +7531,9 @@ def get_batch_overview(
         for _sc in scenes_section:
             _si = _sc.get("scene_index")
             _n_lines = len(_sc.get("lines") or []) or 1
-            _sc["reference_prompts"] = [_anchor_refs.get((_si, _li)) for _li in range(1, _n_lines + 1)]
+            _sc["reference_prompts"] = [
+                (_anchor_refs.get((_si, _li)) or {}).get("text") for _li in range(1, _n_lines + 1)
+            ]
     has_reference_prompts = bool(_anchor_refs)
 
     # v861 — resolve each line's render duration for the overview UI, so the
