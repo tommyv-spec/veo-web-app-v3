@@ -451,7 +451,7 @@
 
         /* Collapsible group header in sidebar */
         .img-group-header {
-            display: flex; align-items: center; gap: 6px;
+            display: flex; align-items: flex-start; gap: 6px;
             padding: 8px 4px 6px 4px;
             user-select: none;
         }
@@ -465,14 +465,18 @@
         .img-group-chevron:hover { background: var(--bg-elevated); color: var(--text-primary); }
         .img-group-chevron.expanded { transform: rotate(90deg); }
         .img-group-title-btn {
-            flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px;
+            flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 6px;
             background: transparent; border: none; padding: 4px 6px;
             border-radius: var(--radius-sm);
             color: var(--text-secondary);
             font-size: 12px; font-weight: 600; text-align: left;
             cursor: pointer;
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            /* Full title wraps to as many lines as it needs — no ellipsis clip.
+               Drag the sidebar wider to fit more per line. */
+            white-space: normal; overflow: visible; text-overflow: clip;
+            overflow-wrap: anywhere; word-break: break-word; line-height: 1.35;
         }
+        .img-group-title-btn > span { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
         .img-group-title-btn:hover {
             background: var(--bg-elevated); color: var(--text-primary);
         }
