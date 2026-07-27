@@ -20323,7 +20323,7 @@ Ambient: same kitchen room tone, soft pour sound.
             if (_batchOverviewData) imgRenderBatchOverview(_batchOverviewData);
         }
 
-        // v868 — render selector: switches the displayed prompt set AND POSTs
+        // v871 — render selector: switches the displayed prompt set AND POSTs
         // the choice to /api/images/batches/{id}/prompt-variant so the
         // platform actually RENDERS that set (job-prep reads
         // batch.prompt_variant — see image_platform.py's job-prep swap).
@@ -20375,7 +20375,7 @@ Ambient: same kitchen room tone, soft pour sound.
             const body = document.getElementById('batchOverviewBody');
             if (!body) return;
             _batchOverviewData = data;
-            // v868 — initialize the shown/selected variant from the batch's
+            // v871 — initialize the shown/selected variant from the batch's
             // saved render choice (default 'omni'). One source of truth.
             _batchOverviewPromptMode = (data.prompt_variant === 'anchor') ? 'anchor' : 'omni';
             const stats = data.stats || {};
@@ -20462,7 +20462,7 @@ Ambient: same kitchen room tone, soft pour sound.
             // Raw markdown
             const rawHtml = `<details style="margin-bottom:12px;"><summary style="cursor:pointer;font-weight:600;padding:6px 0;">📄 Raw markdown source (${(data.source_markdown_chars||0).toLocaleString()} chars)</summary><pre style="margin-top:8px;padding:12px;background:var(--bg-input);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.4;max-height:600px;overflow:auto;">${imgEscape(data.source_markdown||'')}</pre></details>`;
 
-            // v868 — render-variant selector: switches the DISPLAYED prompt
+            // v871 — render-variant selector: switches the DISPLAYED prompt
             // AND posts the choice so the platform RENDERS that set. Batch id
             // comes from data.id (ImageJobBatch.to_dict() — there is no
             // separate data.batch_id key on the overview payload).

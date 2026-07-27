@@ -266,7 +266,7 @@ def run_image_platform_migrations():
         # the audit trail of the previous rejected frame.
         ("clips", "replacement_start_frame",
          "ALTER TABLE clips ADD COLUMN replacement_start_frame VARCHAR(512)"),
-        # v868: which per-clip prompt set the render uses (omni | anchor).
+        # v871: which per-clip prompt set the render uses (omni | anchor).
         ("image_job_batches", "prompt_variant",
          "ALTER TABLE image_job_batches ADD COLUMN prompt_variant TEXT NOT NULL DEFAULT 'omni'"),
     ]
@@ -408,7 +408,7 @@ def run_image_platform_migrations():
         # v701: see SQLite migration above for the rationale.
         ("clips", "replacement_start_frame",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS replacement_start_frame VARCHAR(512)"),
-        # v868: which per-clip prompt set the render uses (omni | anchor).
+        # v871: which per-clip prompt set the render uses (omni | anchor).
         ("image_job_batches", "prompt_variant",
          "ALTER TABLE image_job_batches ADD COLUMN IF NOT EXISTS prompt_variant TEXT NOT NULL DEFAULT 'omni'"),
     ]
@@ -1250,7 +1250,7 @@ class ImageJobBatch(Base):
     # ON when the video-tab lands from a prepare-for-video call. Default: False.
     video_mode = Column(String(20), nullable=True)
     auto_split = Column(Boolean, default=False, nullable=True)
-    # v868 — which per-clip prompt set the render uses: 'omni' (the
+    # v871 — which per-clip prompt set the render uses: 'omni' (the
     # `## Google Omni Final Prompts` section, default) or 'anchor' (the
     # `## Anchor-Format Prompts` reference section). Operator-selectable per
     # video in the Batch overview; never auto-changes.
@@ -7431,7 +7431,7 @@ def _parse_anchor_reference_prompts(md_text: str) -> Dict[Tuple[int, int], Dict[
     {(scene_index, line_index): {"text": text_prompt, "text_b": text_prompt_b
     or None}}; empty dict when absent.
 
-    v868 — ALSO the source the render path reads from when a batch's
+    v871 — ALSO the source the render path reads from when a batch's
     prompt_variant == 'anchor' (see main.py job-prep). "text" backs
     veo_prompt_override, "text_b" backs veo_prompt_b, mirroring the Omni
     section's Prompt A / Prompt B pair."""
@@ -7590,7 +7590,7 @@ def get_batch_overview(
         },
         "assignments": assignment_dicts,
         "has_reference_prompts": has_reference_prompts,
-        "prompt_variant": batch.prompt_variant,  # v868
+        "prompt_variant": batch.prompt_variant,  # v871
         "stats": {
             "total_images": len(images_section),
             "total_scenes": len(scenes_section),
@@ -7610,7 +7610,7 @@ def set_batch_prompt_variant(
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """v868 — operator-selectable per-video render source.
+    """v871 — operator-selectable per-video render source.
 
     Body: {"variant": "omni" | "anchor"}. 'omni' (default) renders the
     `## Google Omni Final Prompts` section as before; 'anchor' renders the

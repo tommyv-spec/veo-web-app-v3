@@ -1044,7 +1044,7 @@ Negative Constraints: No text overlays. No captions. No subtitles. No logos. No 
 
 ## Anchor-Format Prompts (IMMEDIATE ACTION / TERMINAL STATE — reference, selectable)
 
-> **v868 — every build emits this second section too; bold labels keep it inert to the render parser + clip-count; the operator selects which set renders per video in the Batch overview.** The same clips as the Omni section, written in the prior anchor format. Bold `**Clip N.M**` labels (NOT `### Clip`) + a header carrying no "Final Prompts" token, so the render parser and clip-counter ignore it. Both Prompt A and Prompt B are fenced. Deep-dive: `code/template_reference.md` §v868.
+> **v871 — every build emits this second section too; bold labels keep it inert to the render parser + clip-count; the operator selects which set renders per video in the Batch overview.** The same clips as the Omni section, written in the prior anchor format. Bold `**Clip N.M**` labels (NOT `### Clip`) + a header carrying no "Final Prompts" token, so the render parser and clip-counter ignore it. Both Prompt A and Prompt B are fenced. Deep-dive: `code/template_reference.md` §v871.
 
 **Clip 1.1 — Scene 1, Line 1 (HOOK)**
 **Start frame:** Image 1
