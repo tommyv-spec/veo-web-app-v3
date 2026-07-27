@@ -9159,9 +9159,18 @@ def _dump_generate_disabled_state(page, prefix=""):
             const bt = document.body ? (document.body.innerText||'') : '';
             const m = bt.match(/.{0,60}(out of credits|no credits|upgrade to|quota|limit reached|not available|unavailable)\\b.{0,60}/i);
             out.body_err = m ? m[0].replace(/\\s+/g,' ') : null;
+            // v871 — the 2026-07 composer-chip redesign made gen_btn/model_btn/tabs
+            // read NOT-FOUND/empty (stale selectors); capture the fields that still
+            // mean something on the new UI so the next live run is diagnosable.
+            const tb = document.querySelector("div[role='textbox']");
+            out.textbox_len = tb ? (tb.innerText||'').length : -1;  // Slate box the paste targets (vs stale <textarea>)
+            out.open_menus = document.querySelectorAll("[role='menu'][data-state='open'], [data-radix-popper-content-wrapper]").length;  // v861 dropdown left open?
+            const chip = document.querySelector("[aria-haspopup='menu']");
+            out.chip_text = chip ? (chip.innerText||'').replace(/\\n/g,' ').trim().slice(0,50) : 'NONE';  // replaces stale model_btn
             return out;
         }""")
         print(f"{prefix}[v788-diag] generate-disabled page state: {state}", flush=True)
+        print(f"{prefix}[v788-diag] slot-probe (v871): {_frame_slot_probe(page)}", flush=True)
     except Exception as _dge:
         print(f"{prefix}[v788-diag] dump failed: {_dge}", flush=True)
 
@@ -15552,6 +15561,24 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                         pass
                 return False
 
+            def _bind_real():
+                # v871 — the frame-button count-drop is a FALSE-POSITIVE bind on the
+                # 2026-07 composer-chip UI: the slot button re-renders (count drops)
+                # without a thumbnail ever binding → Generate never arms → 3×60s wait
+                # → v788 strike → job FAILED (the reuse-path generate-disabled bug).
+                # Verify a real thumbnail before accepting. Reject ONLY the confirmed-
+                # negative verdict (A_not_bound = zero bound thumbnails anywhere);
+                # accept any B_* verdict OR a probe error (fail-open) so a new-UI
+                # thumbnail the probe doesn't recognise still passes fast. On reject,
+                # the caller's v776 _force_upload path does a real file upload.
+                if _omni:
+                    return True  # Omni chips confirmed separately; probe is frame-slot only
+                try:
+                    _p = _frame_slot_probe(page)
+                    return _p.get('verdict') != 'A_not_bound'
+                except Exception:
+                    return True
+
             def _try_all_instances(label):
                 for sel in candidate_selectors:
                     try:
@@ -15586,8 +15613,14 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                         except Exception:
                             continue
                         if _confirm_bind():
-                            print(f"[Gallery] ✓ Frame slot filled from gallery (instance {j+1}/{n}{label})", flush=True)
-                            return True
+                            if _bind_real():
+                                print(f"[Gallery] ✓ Frame slot filled from gallery (instance {j+1}/{n}{label})", flush=True)
+                                return True
+                            # v871 — count dropped but no thumbnail bound (false
+                            # positive). Keep trying other duplicate instances; a
+                            # later live one may bind. If none do, return False →
+                            # caller forces a real file upload.
+                            print(f"[Gallery] ⚠ v871: count-drop but probe=A_not_bound (false bind) — trying next instance / will file-upload", flush=True)
                 return False
 
             if _try_all_instances(""):
@@ -15622,8 +15655,13 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
                     continue
                 remaining = page.locator(frame_selector).count()
                 if remaining < expected_btn_count:
-                    print(f"[Gallery] ✓ Frame slot filled from gallery ({w+1}s)", flush=True)
-                    return True
+                    if _bind_real():
+                        print(f"[Gallery] ✓ Frame slot filled from gallery ({w+1}s)", flush=True)
+                        return True
+                    # v871 — count dropped but no thumbnail bound. Stop polling
+                    # (probe won't flip without a bind) → fall through to file upload.
+                    print(f"[Gallery] ⚠ v871: count-drop ({w+1}s) but probe=A_not_bound — will file-upload", flush=True)
+                    break
             except Exception:
                 pass
 
@@ -19771,7 +19809,40 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             time.sleep(random.uniform(1.5, 3))
             
             # Click Generate (includes human movements, model check, button-enabled wait)
-            click_generate_button(page, f"Clip {i+1}")
+            try:
+                click_generate_button(page, f"Clip {i+1}")
+            except Exception as _gen_err:
+                # v871 — this has_new_frames branch had NO recovery (unlike the reuse
+                # `else` branch's v195 fallback). A stuck-disabled Generate (frame
+                # never armed — see the gallery false-positive Layer A fixes) raised
+                # straight to the account thread → v788 strike → at cap 6 the whole
+                # JOB was marked FAILED. Recover like the else branch: reload for a
+                # clean composer, re-upload frames (Layer A now forces a real file
+                # upload when the gallery bind was fake), re-paste, regenerate ONCE.
+                print(f"[Flow] ⚠ Clip {i+1}: Generate failed ({_gen_err}) — reload + fresh re-submit (v871)", flush=True)
+                page.reload(wait_until="domcontentloaded", timeout=30000)
+                time.sleep(3)
+                ensure_logged_into_flow(page, "SUBMIT")
+                check_and_dismiss_popup(page)
+                ensure_videos_tab_selected(page)
+                time.sleep(2)
+                _s_img = start_frame if start_frame else None
+                _e_img = end_frame if end_frame else None
+                ok, _s_img, _e_img, start_frame_key, end_frame_key = upload_frames_with_retry(
+                    page, clip, clip_index, clips, i, _s_img, _e_img,
+                    start_frame_key, end_frame_key, blacklisted_images,
+                    image_pool, ordered_image_keys, permanently_failed_clips,
+                    context=f"Clip {i+1} recover ",
+                    gallery_cache=gallery_cache, frames_busy_flag=frames_busy_flag)
+                if not ok:
+                    raise Exception(f"Clip {i+1} recover: frame upload failed after Generate-disabled")
+                start_frame = clip.get('start_frame_local', start_frame)
+                end_frame = clip.get('end_frame_local', end_frame)
+                human_delay(1, 2)
+                fill_prompt_textarea(page, prompt)
+                time.sleep(random.uniform(1.5, 3))
+                click_generate_button(page, f"Clip {i+1} recover")  # re-raises to account thread if still stuck
+                print(f"[Flow] ✓ Clip {i+1}: recovered via reload + fresh re-submit (v871)", flush=True)
             print(f"✓ Clicked Generate for clip {i+1}", flush=True)
             human_delay(1, 2)
             _tiles_in_this_project += 1
