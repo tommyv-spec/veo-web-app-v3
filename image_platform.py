@@ -266,6 +266,9 @@ def run_image_platform_migrations():
         # the audit trail of the previous rejected frame.
         ("clips", "replacement_start_frame",
          "ALTER TABLE clips ADD COLUMN replacement_start_frame VARCHAR(512)"),
+        # v868: which per-clip prompt set the render uses (omni | anchor).
+        ("image_job_batches", "prompt_variant",
+         "ALTER TABLE image_job_batches ADD COLUMN prompt_variant TEXT NOT NULL DEFAULT 'omni'"),
     ]
     postgres_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -405,6 +408,9 @@ def run_image_platform_migrations():
         # v701: see SQLite migration above for the rationale.
         ("clips", "replacement_start_frame",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS replacement_start_frame VARCHAR(512)"),
+        # v868: which per-clip prompt set the render uses (omni | anchor).
+        ("image_job_batches", "prompt_variant",
+         "ALTER TABLE image_job_batches ADD COLUMN IF NOT EXISTS prompt_variant TEXT NOT NULL DEFAULT 'omni'"),
     ]
 
     # v479: widen ImageJobBatch string columns to TEXT. The previous
@@ -1244,6 +1250,11 @@ class ImageJobBatch(Base):
     # ON when the video-tab lands from a prepare-for-video call. Default: False.
     video_mode = Column(String(20), nullable=True)
     auto_split = Column(Boolean, default=False, nullable=True)
+    # v868 — which per-clip prompt set the render uses: 'omni' (the
+    # `## Google Omni Final Prompts` section, default) or 'anchor' (the
+    # `## Anchor-Format Prompts` reference section). Operator-selectable per
+    # video in the Batch overview; never auto-changes.
+    prompt_variant = Column(String, nullable=False, server_default="omni")
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
