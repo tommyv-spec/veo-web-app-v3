@@ -7590,6 +7590,7 @@ def get_batch_overview(
         },
         "assignments": assignment_dicts,
         "has_reference_prompts": has_reference_prompts,
+        "prompt_variant": batch.prompt_variant,  # v868
         "stats": {
             "total_images": len(images_section),
             "total_scenes": len(scenes_section),
@@ -7600,6 +7601,37 @@ def get_batch_overview(
             "total_ingredients": len(ingredients_section),
         },
     }
+
+
+@router.post("/batches/{batch_id}/prompt-variant")
+def set_batch_prompt_variant(
+    batch_id: str,
+    body: dict = Body(...),
+    db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v868 — operator-selectable per-video render source.
+
+    Body: {"variant": "omni" | "anchor"}. 'omni' (default) renders the
+    `## Google Omni Final Prompts` section as before; 'anchor' renders the
+    `## Anchor-Format Prompts` reference section instead (see
+    _parse_anchor_reference_prompts + main.py's _setup_job_background swap).
+    The user must own the batch.
+    """
+    variant = body.get("variant")
+    if variant not in ("omni", "anchor"):
+        raise HTTPException(400, "variant must be 'omni' or 'anchor'")
+
+    batch = db.query(ImageJobBatch).filter(
+        ImageJobBatch.id == batch_id,
+        ImageJobBatch.user_id == current_user.id,
+    ).first()
+    if not batch:
+        raise HTTPException(404, f"Batch {batch_id} not found")
+
+    batch.prompt_variant = variant
+    db.commit()
+    return {"ok": True, "prompt_variant": variant}
 
 
 @router.post("/batches/{batch_id}/prepare-for-video")
