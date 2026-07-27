@@ -2686,9 +2686,51 @@ async def _setup_job_background(
             add_job_log(db, job_id, f"Building prompts for {total_clips} clips...", "INFO", "system")
             db.commit()
 
+            # v868 — render-selectable prompt variant. Resolved ONCE per job
+            # (not per clip). The batch that promoted this job is found via
+            # ImageJobBatch.promoted_video_job_id (stamped synchronously in
+            # the request handler, before this background task was spawned —
+            # see the `if request.image_batch_id:` block above in the create
+            # endpoint). Default 'omni' (no linked batch, or
+            # batch.prompt_variant unset/'omni') leaves _v868_anchor_map EMPTY,
+            # so the per-clip swap below is a strict no-op and
+            # _veo_prompt_override / _veo_prompt_b resolve exactly as they did
+            # pre-v868 — this is the regression-critical default path.
+            from image_platform import ImageJobBatch, _parse_anchor_reference_prompts
+            _v868_batch = db.query(ImageJobBatch).filter(
+                ImageJobBatch.promoted_video_job_id == job_id
+            ).first()
+            _v868_variant = (getattr(_v868_batch, "prompt_variant", None) or "omni") if _v868_batch else "omni"
+            _v868_anchor_map: Dict[Any, Any] = (
+                _parse_anchor_reference_prompts(_v868_batch.source_markdown or "")
+                if _v868_batch is not None and _v868_variant == "anchor"
+                else {}
+            )
+            # Running per-scene counter — the anchor/omni sections both key
+            # their `Clip N.M` labels as (scene_index, 1-based position of
+            # this line within scene N), matching attach_veo_prompts_to_scenes
+            # in veo_prompt_overrides.py. dialogue_raw preserves scene order,
+            # so a running counter reproduces that same M ordinal here.
+            _v868_scene_line_counter: Dict[int, int] = {}
+            print(
+                f"[v868] job {job_id[:8]} render variant={_v868_variant} "
+                f"anchor_prompts={len(_v868_anchor_map)}",
+                flush=True,
+            )
+
             for idx in range(total_clips):
                 line_data = dialogue_raw[idx] if isinstance(dialogue_raw[idx], dict) else {"text": dialogue_raw[idx]}
                 dialogue_text = line_data.get("text", "")
+                # v868 — track this line's (scene_index, ordinal-within-scene)
+                # for the anchor-map lookup below. Cheap; runs regardless of
+                # variant so numbering stays correct if the operator flips
+                # the toggle on a redo.
+                _v868_scene_idx = line_data.get("scene_index") if isinstance(line_data, dict) else None
+                if _v868_scene_idx is not None:
+                    _v868_scene_line_counter[_v868_scene_idx] = _v868_scene_line_counter.get(_v868_scene_idx, 0) + 1
+                    _v868_line_ordinal = _v868_scene_line_counter[_v868_scene_idx]
+                else:
+                    _v868_line_ordinal = 1
                 clip_mode = line_data.get("clip_mode", "fresh")  # v782 default fresh (was blend) — no silent self/cross-scene start/end interpolation
                 action_note = line_data.get("action_note", None)
 
@@ -2764,6 +2806,19 @@ async def _setup_job_background(
                 # v821 — reworded dialogue line inside Prompt B (the spoken
                 # line only). Carried onto clip.dialogue_text_b below.
                 _veo_prompt_b_line = (line_data.get("veo_prompt_b_line") or "").strip() or None
+                # v868 — render-variant swap. _v868_anchor_map is {} for every
+                # 'omni' job (the default), so this whole block is skipped and
+                # _veo_prompt_override / _veo_prompt_b keep the values resolved
+                # above unchanged — that's the regression-critical guarantee.
+                # Only when the linked batch declared prompt_variant='anchor'
+                # do we look up this clip's (scene, ordinal) in the parsed
+                # `## Anchor-Format Prompts` section and substitute its text
+                # (Prompt A) / text_b (Prompt B) for the Omni-derived values.
+                if _v868_variant == "anchor":
+                    _v868_a = _v868_anchor_map.get((_v868_scene_idx, _v868_line_ordinal))
+                    if _v868_a and _v868_a.get("text"):
+                        _veo_prompt_override = _v868_a["text"]
+                        _veo_prompt_b = _v868_a.get("text_b") or _veo_prompt_b
                 # v537 — explicit speaker_mode from markdown overrides the
                 # auto-detection in build_prompt. Empty string or 'auto' →
                 # leave as None so build_prompt's _detect_voiceover_only()
