@@ -20323,6 +20323,31 @@ Ambient: same kitchen room tone, soft pour sound.
             if (_batchOverviewData) imgRenderBatchOverview(_batchOverviewData);
         }
 
+        // v868 — render selector: switches the displayed prompt set AND POSTs
+        // the choice to /api/images/batches/{id}/prompt-variant so the
+        // platform actually RENDERS that set (job-prep reads
+        // batch.prompt_variant — see image_platform.py's job-prep swap).
+        // Per-video granularity: one toggle per batch, operator's call.
+        async function imgSetPromptVariant(batchId, variant){
+            _batchOverviewPromptMode = (variant === 'anchor') ? 'anchor' : 'omni';
+            if (_batchOverviewData) {
+                _batchOverviewData.prompt_variant = _batchOverviewPromptMode;
+                imgRenderBatchOverview(_batchOverviewData);
+            }
+            try {
+                const res = await fetch(`/api/images/batches/${encodeURIComponent(batchId)}/prompt-variant`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ variant: _batchOverviewPromptMode })
+                });
+                const el = document.getElementById('promptVariantSaved');
+                if (el) el.textContent = res.ok ? '✓ saved — this set will render' : '✗ save failed';
+            } catch (e) {
+                const el = document.getElementById('promptVariantSaved');
+                if (el) el.textContent = '✗ save failed';
+            }
+        }
+
         async function imgOpenBatchOverview(batchId) {
             // Tear down any existing overview modal first
             const existing = document.getElementById('batchOverviewModal');
@@ -20350,6 +20375,9 @@ Ambient: same kitchen room tone, soft pour sound.
             const body = document.getElementById('batchOverviewBody');
             if (!body) return;
             _batchOverviewData = data;
+            // v868 — initialize the shown/selected variant from the batch's
+            // saved render choice (default 'omni'). One source of truth.
+            _batchOverviewPromptMode = (data.prompt_variant === 'anchor') ? 'anchor' : 'omni';
             const stats = data.stats || {};
             const parsed = data.parsed || {};
             const ingredients = parsed.ingredients || [];
@@ -20434,8 +20462,17 @@ Ambient: same kitchen room tone, soft pour sound.
             // Raw markdown
             const rawHtml = `<details style="margin-bottom:12px;"><summary style="cursor:pointer;font-weight:600;padding:6px 0;">📄 Raw markdown source (${(data.source_markdown_chars||0).toLocaleString()} chars)</summary><pre style="margin-top:8px;padding:12px;background:var(--bg-input);border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.4;max-height:600px;overflow:auto;">${imgEscape(data.source_markdown||'')}</pre></details>`;
 
+            // v868 — render-variant selector: switches the DISPLAYED prompt
+            // AND posts the choice so the platform RENDERS that set. Batch id
+            // comes from data.id (ImageJobBatch.to_dict() — there is no
+            // separate data.batch_id key on the overview payload).
             const toggleHtml = data.has_reference_prompts
-                ? `<button class="btn btn-secondary" onclick="imgToggleOverviewPrompts()" style="margin-bottom:12px;">Prompts shown: <b>${_batchOverviewPromptMode === 'omni' ? 'Google Omni (rendered)' : 'Anchor-format (reference)'}</b> — click to switch</button>`
+                ? `<div style="margin-bottom:12px;padding:10px 12px;background:var(--bg-elevated);border-radius:6px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                     <span style="font-size:12px;color:var(--text-muted);">🎬 Render this video with:</span>
+                     <button class="btn ${_batchOverviewPromptMode === 'omni' ? 'btn-primary' : 'btn-secondary'}" style="padding:5px 12px;" onclick="imgSetPromptVariant('${imgEscape(data.id||'')}','omni')">Google Omni</button>
+                     <button class="btn ${_batchOverviewPromptMode === 'anchor' ? 'btn-primary' : 'btn-secondary'}" style="padding:5px 12px;" onclick="imgSetPromptVariant('${imgEscape(data.id||'')}','anchor')">Anchor-format</button>
+                     <span id="promptVariantSaved" style="font-size:11px;color:#4ade80;"></span>
+                   </div>`
                 : '';
 
             body.innerHTML = header + statRow + toggleHtml + ingredientsHtml + imagesHtml + scenesHtml + rawHtml;
