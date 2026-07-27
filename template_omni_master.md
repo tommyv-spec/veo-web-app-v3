@@ -2,6 +2,16 @@
 
 Canonical per-clip render-prompt body for Google Omni Flash. Fill the slot markers from the build's own fields. Deep-dive: code/template_reference.md §v865.
 
+## Both sections are standard (v868)
+
+Every build emits BOTH prompt sections: the Omni section (`## Google Omni Final Prompts (per clip)` — RENDERED by default) AND an anchor-format reference section (inert; the operator can select it to render per video via the Batch overview — batch `prompt_variant`). Deep-dive: code/template_reference.md §v868. Template for the anchor section:
+
+```
+## Anchor-Format Prompts (IMMEDIATE ACTION / TERMINAL STATE — reference, selectable)
+
+The same clips in the prior anchor format. Bold `**Clip N.M**` labels (NOT `### Clip`) + a header with no "Final Prompts" token, so the render parser and clip-counter ignore it. The operator can select this set to render per video (batch prompt_variant, v868). Each clip: `**Clip N.M — …**` / `**Start frame:** Image K` / `**Text prompt:**` fenced (IMMEDIATE ACTION: … TERMINAL STATE: … + the v810 dialogue sentence) / `**Prompt B (…):**` fenced.
+```
+
 ## Locked master (verbatim)
 
 ```
