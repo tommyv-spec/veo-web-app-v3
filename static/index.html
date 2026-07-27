@@ -19547,19 +19547,23 @@ Ambient: same kitchen room tone, soft pour sound.
                 const m = name.match(/^(.*?)Scene\s+\d+/i);
                 if (m) {
                     let prefix = m[1].replace(/[\s\-—:]+$/, '').trim();
-                    // v506: cap prefix at 100 chars when forming the
-                    // groupKey. Without this, a malformed import (e.g.
-                    // user pasted the entire markdown into name_prefix)
-                    // produces an 8000-char prefix containing quotes,
-                    // newlines, and ** markers — embedded in the
-                    // onclick handler's single-quoted string at line
-                    // ~12468, this breaks the HTML attribute parsing
-                    // and the click does nothing. Also strip newlines
-                    // and other control chars that would never appear
-                    // in a sane prefix anyway.
+                    // v506: cap prefix length when forming the groupKey.
+                    // Without a cap, a malformed import (e.g. user pasted the
+                    // entire markdown into name_prefix) produces an 8000-char
+                    // prefix containing quotes, newlines, and ** markers —
+                    // embedded in the onclick handler's single-quoted string,
+                    // this breaks the HTML attribute parsing and the click does
+                    // nothing. Newlines/control chars are stripped below.
+                    //
+                    // Cap raised 100 → 200 (2026-07-27): real build filenames run
+                    // 110-121 chars ("...saffron-selling-v1"). At 100 the title
+                    // clipped mid-token AND — worse — two builds differing only
+                    // after char 100 (…-v1 vs …-v2) collapsed into ONE group,
+                    // hiding scenes. 200 fits real names and still bounds the
+                    // attribute against the pathological full-markdown paste.
                     prefix = prefix.replace(/[\r\n\t]/g, ' ').trim();
-                    if (prefix.length > 100) {
-                        prefix = prefix.slice(0, 100);
+                    if (prefix.length > 200) {
+                        prefix = prefix.slice(0, 200);
                     }
                     if (prefix) return 'prefix::' + prefix;
                 }
