@@ -15946,6 +15946,122 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 
 Every NEW decode's Comprehension section ends with `### Variable ledger`: walk `wiki/synthesis/video-variable-taxonomy.md` (all tiers + modifier + cross-decode-diff tables) and record one `- axis: value` line per axis the video expresses; skip non-applicable axes; a value missing from the taxonomy MUST be appended there in the same commit (open-enum rule). Complements v867 (the 11 YAML fields stay mandatory). Declaration-only, forward-only. **Canonical detail:** `wiki/meta/decode-grammar-checklist.md` §8-part structure item 7 + `.claude/skills/decode-reel/SKILL.md`; index row `wiki/patterns/conventions.md`. This section exists as the masters heading anchor (operator 2026-07-25; anchor added 2026-07-28 to satisfy `check_rule_index.py`).
 
+## v872 — One speaker per SCENE and per CLIP; the prompt says `<descriptor> says, "<line>"` and nothing more
+
+**CONFIRMED 2026-07-29 (two first-try renders).** The rule has TWO layers and both are mandatory:
+
+**LAYER 1 — SCENE STRUCTURE (authoring time, before any prompt is written).** A beat where two people speak becomes **TWO scenes**, never one scene with a merged `- **line:**`. One `### Scene N` = one `- **line:**` = one mouth. A question and its answer are two scenes, two clips, two durations, and each speaker gets a start frame that FAVOURS them (the answer scene needs its own reverse-angle image — an image that favours the other speaker cannot be reused for it). This is a design-time constraint: if a decode's source shot holds an exchange in one continuous take, the BUILD still splits it, and the extra image is authored up front rather than discovered at render time. Practical cost: +1 scene, +1 clip, +1 line, +1 image, and the duration sum grows by that clip (recompute per v861 word buckets). Because those are §7 invariants, converting an existing merged build routes as a BUILD → new `vN+1` file (§7.2), not an in-place edit.
+
+**LAYER 2 — PROMPT BODY (per clip).** The spoken part is ONE sentence in Google's documented grammar:
+
+```
+The <visual descriptor> says, "<line>"
+```
+
+Descriptor LEADS, `says,` then the quote. Nothing else. No `TURN` labels, no timestamps, no `saying exactly:`, no turn-order plumbing, no silent-cast lock. Around it, keep ONLY what the start frame cannot supply (see the short-body shape below).
+
+**THE EVIDENCE (why the scaffolding was retired the day after it was written).** 2026-07-28 the merged two-speaker clip was authored with the full escalation — visual descriptors, `TURN 1 [00:00-00:04]` labels, per-turn `saying exactly:`, mouth-close beats, silent-cast lock, twelve-block body. Operator: *"they keep alternating and messing up the dialogue lines."* 2026-07-29 the same beat, SPLIT into one clip per speaker, rendered with the whole spoken instruction being `the woman in blue says, "that is my husband"` — **perfect first try**. The full split hook (question clip + reveal clip, short bodies) then also landed first try: *"works perfectly"*. Two renders, two hits, zero re-rolls.
+
+Three readings, all now load-bearing:
+
+1. **The documented form IS the mechanism, not a starting point.** `A woman says, "We have to leave now."` is Google's own example; leading with the visual descriptor is GlobalGPT's documented fix for wrong-mouth attribution. Our `speaks clearly in a <register> American accent, saying exactly:` was a mutation of it with no measured benefit and a measured cost.
+2. **Length dilutes.** A four-hundred-word body that re-describes what the start frame already shows competes with the frame and buries the one instruction that matters. The frame carries STATE; the prompt carries the DELTA.
+3. **Naming silent mouths CAUSES mis-attribution.** "the muscular climber and the heavy man never speak and keep their lips closed" puts three extra mouths into a sentence about speech. Same failure family §v808 already records — *"no negative mentions either ('no children' seeds renders)"*. **Never name a non-speaker inside a dialogue instruction.** If someone must stay quiet, the way to achieve it is to not mention them at all.
+
+**THE SHORT BODY (the shape that shipped).** Five short blocks. Everything the start frame already carries is CUT:
+
+```
+Animate the attached start-frame image into a <N>-second vertical 9:16 realistic UGC video. Handheld iPhone at chest height with slight natural drift. One continuous take, no cuts, no zooms.
+
+Keep the exact lighting, texture and imperfect iPhone quality of the attached image. No sharpening, no skin smoothing, no beauty filter, no HDR, no cinematic polish, no colour grade. Keep every face, outfit and object as in the image.
+
+<ONE sentence of motion — only what changes over the clip.>
+
+The <visual descriptor> says, "<line>"
+
+<Ambient audio in one line>. No music. No subtitles, no captions.
+```
+
+CUT (frame-derivable): the `Reference:` identity paragraph, the `Scene:` environment paragraph, the t=0 camera layout, `Ending Camera Beat`, `Style:`, and the long negative-constraint list. KEPT (not in the frame): duration + ratio, take discipline, the fidelity lock (stops Omni "improving" the frame into HDR/beauty-filter video), the motion delta, the spoken sentence, ambient audio, and the no-subtitles ban (Omni burns captions unprompted). `Animate the attached start-frame image into…` replaces `Create a … video` — "create" reads as generate-from-scratch; this names the job as continuation of the frame. Pairs with the v784 Frames-mode submit shape (`shape=startImage` in the `[flow-api-capture]` log line) — the prompt cannot fix a clip submitted as `referenceImages`.
+
+**Descriptor rule.** The descriptor is what the frame shows — garment colour first ("the woman in the blue dress", "the curly-haired woman in the white top", "the muscular man in the canvas overalls"). Never a name; the model has never seen "Nuri". A bare "the woman" / "the man" is a FAIL whenever two of that gender share the frame. This is the one clause that survived from the 2026-07-28 draft, and it is the clause that was doing the work all along.
+
+**Voice / accent.** The proven bodies carried no `American accent` token and the delivery still read American. Where the accent must be locked, add it as a SEPARATE short sentence before the speech line ("Her voice is casual American, not acted") — never as a clause inserted between `says,` and the quote, which breaks the binding.
+
+**Linter position (updated 2026-07-29).** `audit_build.py` accepts BOTH forms: the short `says, "…"` and the legacy `saying exactly:`. `dialogue_turn_grammar` HARD-FAILS a clip carrying two speech spans (that is a Layer-1 violation reaching the artifact — split the scene). The `American accent` count no longer has to equal the speech-marker count; one voice token per dialogue clip is enough, and its absence is a WARN. The v810 post-speech-silence clause is optional on a short body (WARN, not FAIL) — the proven prompts had none.
+
+**Legacy.** Builds shipped before 2026-07-29 keep their twelve-block bodies; forward-only. The `## Anchor-Format Prompts` (v871) reference section keeps its generic `The assigned on-camera speaker says exactly:` line, which violates the descriptor rule whenever more than one person is in frame — name the garment there too.
+
+## v872-legacy — the retired turn-list scaffolding (kept for history, DO NOT author new builds with it)
+
+**Problem (operator 2026-07-28, "we have a problem with the prompt when multiple characters are talking… we have to divide who says what and when").** A clip with two speakers was written as ONE quoted blob covering both lines:
+
+```
+Dialogue: The neighbour speaks first and Nuri answers second, both clearly in American accents,
+saying exactly: "hey. is that your dad climbing next door? he is in great shape for his age. that is my husband."
+```
+
+Nothing in that string tells the model which mouth owns which sentence. Omni hands the whole span to one face — Nuri asks "is that your dad", or the neighbour delivers the wife-reveal, and the hook's whole misattribution mechanism dies. Same class of bug, one person quieter: a single-speaker clip written as "The woman speaks…" while TWO women stand in frame, or "The man speaks…" with two men — an ambiguous speaker noun picks a mouth at random.
+
+**Sources (§2 two-source floor):** Google Cloud, *Ultimate prompting guide for Veo 3.1* (2025-10-15) — "**Dialogue:** Use quotation marks for specific speech (e.g., A woman says, "We have to leave now.")", and lists "multi-person conversations" as a supported audio capability. GlobalGPT, *How to Make Characters Speak in Veo 3.1* — "**Wrong Character Speaks:** In scenes with two people, the AI might give the dialogue to the wrong person. To avoid this, always start your dialogue prompt with the character's specific name, like 'The woman in the red jacket says…'" and "**Timestamp Prompting:** … you can use timestamp prompts like `[00:03-00:08]`". Skywork (citing Replicate's Veo guide) — explicit scripts (`Alex says: "…"`) beat implicit ("Alex introduces himself"), and one speaker per short clip is the most reliable form for tight lip-sync. Matches our own §v643.2 / §v643.4.
+
+**MINIMAL GRAMMAR BEAT THE SCAFFOLDING (operator render evidence, 2026-07-29 — read this before authoring a dialogue block).** On the SPLIT single-speaker reveal clip, the whole prompt was:
+
+```
+the woman in blue says, "that is my husband"
+```
+
+It landed **perfectly on the first try**, where the full twelve-block body with TURN labels, timestamps, mouth-close beats and a silent-cast lock had been failing. Three readings, all forward-only until the A/B below runs:
+
+1. **The documented form is the mechanism, not a starting point.** `<VISUAL DESCRIPTOR> says, "<line>"` is Google's own example grammar (`A woman says, "We have to leave now."`) plus the positional fix (descriptor LEADS). Our `speaks clearly in a <register> American accent, saying exactly:` is a mutation of it, and the mutation carries no proven benefit.
+2. **Length dilutes.** A 400-word body that re-describes what the start frame already shows competes with the frame and buries the one instruction that matters. The frame carries STATE; the prompt should carry only the DELTA.
+3. **The silent-cast lock is the prime suspect for actively causing mis-attribution.** Naming three non-speaking mouths inside a sentence about speech seeds them as speech candidates — the same failure family §v808 already records ("no negative mentions either — 'no children' seeds renders"). Do not add more mouths to a dialogue block.
+
+**Scope of this evidence:** the clip was ALREADY SPLIT to one speaker. It confirms the one-speaker-per-clip default below; it says nothing about rescuing a merged two-speaker clip, and the merged form stays discouraged.
+
+**Unresolved conflict — do not drift, decide it.** The minimal prompt above FAILS our current gates: `saying exactly:` (`audit_build.py:614`), the `American accent` / `saying exactly:` count match (`:643`), the v810 post-speech silence clause, and the v865 twelve-block body. Resolution path is a controlled A/B (same frame, same line, 3 clips each: full v865 body vs minimal body + Quality/Fidelity Lock only, scored on first-try success). If minimal wins or ties: v865 gains a short-body variant, v810's mandated clauses become optional on short bodies, and the turn-list scaffolding below is retired. Until that runs, the gates stand and the scaffolding stays MANDATORY-BY-LINTER but is no longer claimed to help.
+
+**THE DEFAULT IS ONE SPEAKER PER CLIP (operator render evidence, 2026-07-28: "they keep alternating and messing up the dialogue lines").** On the v6 scaffold hook the full escalation was authored — visual descriptors, TURN labels, per-turn `saying exactly:`, timestamps, mouth-close beats, silent-cast lock — and Omni STILL alternated the mouths and swapped the lines. Treat that as settled: a two-speaker exchange inside one ≤8s clip is NOT reliable, whatever the prompt says. Matches Skywork/Replicate ("one speaker per short clip is the most reliable approach for tight lip-sync") and our own §v643.4. So:
+
+- **Author every exchange as one clip per speaker.** Question clip, then answer clip, alternating over-the-shoulder angles (§`feedback_dialogue-shot-reverse-switching`). Cost: one extra clip and a cut. Benefit: lip-sync and attribution stop being a lottery.
+- **The in-clip turn list below is the FALLBACK**, used only when the operator explicitly wants the exchange in one continuous take and accepts the re-roll risk. It is also the correct shape for the transitional case where a clip has one speaker but several people in frame.
+- `feedback_merge-qa-into-one-clip` (2026-07-24, "we can also put together the question and answers together") is SUPERSEDED as a default by this render evidence: merging is allowed, but it is no longer the recommended form, and a merged clip that mis-attributes twice gets split rather than re-prompted a third time.
+
+**THE TURN-LIST SHAPE — every Omni `Dialogue:` block is a turn list.** One TURN line per speaker, in spoken order:
+
+```
+Dialogue: <N> speaker(s), <N> separate turn(s), strict order, no overlap and no interruption.
+TURN 1 [00:00-00:04] — SPEAKER: <VISUAL DESCRIPTOR>. <staging>, in a <register> American accent, saying exactly: “<line 1>” <mouth-close beat>
+TURN 2 [00:04-00:07] — SPEAKER: <VISUAL DESCRIPTOR>. <staging>, in a <register> American accent, saying exactly: "<line 2>"
+<silent-cast lock>. Immediately after finishing <the line / her answer>, <last speaker> stops speaking, holds a <expression>, and stays silent for the rest of the clip.
+```
+
+Six clauses, all load-bearing:
+
+1. **SPEAKER = a VISUAL DESCRIPTOR, not a name.** "the curly-haired neighbour in the white athletic top", "Nuri, the woman in the cobalt-blue dress", "the muscular older man with the shaved head, grey moustache and canvas overalls". The model cannot resolve a name it has never seen; it CAN resolve hair, garment and build against the start frame. A bare "the woman" / "the man" is a FAIL whenever two of that gender share the frame.
+2. **The descriptor leads the turn, immediately before the quote.** The GlobalGPT fix is positional — attribution trailing the quote binds weakly.
+3. **Timestamps bracket every turn** (`[00:00-00:04]`), plus an explicit mouth-close beat at the boundary ("Her mouth closes at 00:04 and stays closed" / "Her mouth stays closed until 00:04"). Without them the model infers turn length from the text and routinely starts speaker 2 over speaker 1's tail. Timestamps are the difference between "no overlap" as a wish and as a spec.
+4. **Silent-cast lock, always.** Name every non-speaking adult in frame and state they never speak and keep their lips closed for the whole clip. Non-speakers left unmentioned drift into mouthing along.
+5. **`Voice:` mirrors the turn list** — one voice spec per speaker, plus "Never blend the two voices into one narrator" on a multi-speaker clip.
+6. **`Performance / Action:` mirrors it too** — the turn split is restated in staging terms ("the two women take strict turns and never overlap… the muscular climber and the heavy man keep their lips closed").
+
+Single-speaker clips take the same shape with one turn (`Dialogue: One speaker, one turn.` / `TURN 1 — SPEAKER: …`); timestamps optional there, silent-cast lock still mandatory whenever anyone else is in frame.
+
+**THE QUOTE-CHARACTER CONSTRAINT (interacts with §v865/§v821 — read before authoring).** §v865 hard-fails an Omni prompt carrying `saying exactly:` with anything other than EXACTLY ONE ASCII double-quoted span, because §v821 reads the LAST quoted span as the dialogue line. So a two-turn block CANNOT put both lines in `"…"`. Resolution:
+
+- **TURN 1 (and any turn that is not last) uses typographic quotes `“…”`** — invisible to the `r'"([^"]+)"'` scan in `verify_video_format.py:363`, fully legible as speech to Omni.
+- **The LAST turn uses ASCII `"…"`** — it becomes the v821 line, so Prompt B rewords ONLY the last speaker's line and every earlier turn stays byte-identical between A and B.
+- Consequence, unchanged from `feedback_merge-qa-into-one-clip`: a policy trip caused by the FIRST speaker's line cannot be rescued by Prompt B. Fallback is the single-speaker split for that one clip.
+- `saying exactly:` stays on EVERY turn and each turn carries its own "American accent" token — `audit_build.py:614` hard-fails a dialogue prompt missing `saying exactly:`, and `audit_build.py:643` hard-fails when the `American accent` count and the `saying exactly:` count diverge.
+
+**Escalation ladder when a merged render puts the words in the wrong mouth** (cheapest first): plain descriptor-first prose → TURN labels → TURN labels + timestamps → **split the clip so each speaker gets its own clip**. Operator evidence 2026-07-28: the first three rungs all failed on the same 8s two-speaker hook, so do not spend more than two re-rolls on the merged form — go to the split. The split IS the reliable form (§v643.4), and splitting is a §7 STRUCTURAL change (clip / scene / line counts move) → it needs a `## PROPOSAL: STRUCTURAL` block and operator ack, and produces a new `vN+1` file per §7.2.
+
+**Worked example** — `videos/nuri-korella-cortisol-chest-scaffold-climb-father-misattribution-wife-reveal-korella-saffron-selling-v6.md` Clip 1.1 (8s, two speakers) and its Clips 2-7 (one speaker each, four adults in frame throughout).
+
+**Scope:** GENERATE-side authoring, every Omni dialogue clip. Forward-only — shipped builds keep their old blocks. Auditor gate: `dialogue_turn_grammar` (see `audit_build.py`).
+
+**Touched**: this deep-dive (canonical), `code/template_new_format.md` (skeleton — Dialogue block shape), `~/.claude/skills/build-video/audit_build.py` (`dialogue_turn_grammar` check), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (workflow note), root `CLAUDE.md` (§9 tripwire row), `wiki/log.md`, memory `feedback_multi-speaker-turn-grammar`. Operator 2026-07-28.
+
 ## v871 — Render-selectable prompt variant (Omni default + inert Anchor-Format reference section)
 
 Every build emits BOTH prompt sections: `## Google Omni Final Prompts` (rendered by DEFAULT — v865 twelve-block bodies, parse path unchanged) AND a `## Anchor-Format Prompts` reference section (bold `**Clip N.M**` labels, INERT — invisible to the clip-count parser and the render path). The operator picks per video which set renders via the Batch-overview selector: batch column `prompt_variant` (`omni` default / `anchor`); job-prep swaps the prompt text onto the clips when `anchor` is selected. Default `omni` = render path byte-identical to pre-v871 behavior. Forward-only; authored 2026-07-25 as "v868" and RENUMBERED to v871 after colliding with the Variable-ledger v868 (v-number space lives in commit history — both repos). Platform side: batch `prompt_variant` column + Batch-overview selector + job-prep swap (`image_platform.py` / `main.py`, commits `926ec6f`-era + `7de03d4`/`6d0aa95` UI). Index rows: `wiki/patterns/conventions.md` + `wiki/meta/build-rule-index.md`. Docs plan: `docs/superpowers/plans/2026-07-25-render-selectable-prompt-variant.md`.

@@ -1046,7 +1046,8 @@ Performance / Action: Nuri pours the thin dark oil stream from the amber bottle 
 
 Voice: A warm, confident, playful woman's voice, lived-in and natural. Delivery is warm and playful, unpolished, not acted or announcer-like.
 
-Dialogue: The main AI generated character speaks clearly in a warm playful American accent, saying exactly: "this is what black seed oil does to your soldier" then stops speaking and stays silent for the rest of the clip, holding the final expression.
+Dialogue: One speaker, one turn.
+TURN 1 — SPEAKER: the main AI generated character. She speaks clearly in a warm playful American accent, saying exactly: "this is what black seed oil does to your soldier" then stops speaking and stays silent for the rest of the clip, holding the final expression.
 
 Audio: no music, no background noise (clean isolated voice). The voice sounds close and real to the phone microphone, not studio-polished.
 
@@ -1058,5 +1059,33 @@ Negative Constraints: No text overlays. No captions. No subtitles. No logos. No 
 ```
 [Prompt A written out in FULL, byte-identical, EXCEPT the Dialogue line, which reads: The main AI generated character speaks clearly in a warm playful American accent, saying exactly: "watch what black seed oil can do for your soldier" then stops speaking and stays silent for the rest of the clip, holding the final expression.]
 ```
+
+**Two people talking — split the SCENE, then use the short body (v872, confirmed by two first-try renders 2026-07-29).**
+
+**Scene level first.** A beat where two people speak is **TWO scenes**, never one scene with a merged `- **line:**`. One `### Scene N` = one `- **line:**` = one mouth. The answer scene needs its OWN start frame favouring that speaker (a reverse angle) — an image that favours the other speaker cannot be reused. Budget +1 scene, +1 clip, +1 line, +1 image, and recompute the duration sum (v861 buckets). The auditor HARD-FAILS a clip prompt carrying two speech spans, because that is a merged scene reaching the artifact.
+
+**Prompt level.** The spoken part is ONE sentence — Google's documented grammar, descriptor first:
+
+```
+The <visual descriptor> says, "<line>"
+```
+
+Descriptor = what the frame shows, garment colour first ("the woman in the blue dress", "the muscular man in the canvas overalls"). NEVER a name — the model has never seen "Nuri". NEVER a bare "the woman"/"the man" when two of that gender are in frame. NO `TURN` labels, NO timestamps, NO `saying exactly:`, NO turn-order plumbing, and **NEVER name a non-speaker** ("X and Y keep their lips closed" seeds those mouths — the §v808 negative-mention trap).
+
+The whole short body that shipped:
+
+```
+Animate the attached start-frame image into a <N>-second vertical 9:16 realistic UGC video. Handheld iPhone at chest height with slight natural drift. One continuous take, no cuts, no zooms.
+
+Keep the exact lighting, texture and imperfect iPhone quality of the attached image. No sharpening, no skin smoothing, no beauty filter, no HDR, no cinematic polish, no colour grade. Keep every face, outfit and object as in the image.
+
+<ONE sentence of motion — only what changes over the clip.>
+
+The <visual descriptor> says, "<line>"
+
+<Ambient audio in one line>. No music. No subtitles, no captions.
+```
+
+CUT because the start frame already carries them: the `Reference:` identity paragraph, the `Scene:` environment paragraph, the t=0 camera layout, `Ending Camera Beat`, `Style:`, the long negative list. Accent, when it must be locked, goes in its OWN sentence before the speech line — never between `says,` and the quote. Legacy twelve-block bodies still parse and still need their `saying exactly:` + silence clause; forward-only. Deep-dive: template_reference.md §v872.
 
 *(One Clip block per `- **line:**` in the Storyboard. Multi-line scenes get one Clip block per line, sharing the same Start frame. EVERY shot scene with a spoken line carries a `**Prompt B ...:**` label + its own fence directly under the Text-prompt fence — Prompt B is the FULL Prompt A copied byte-identical EXCEPT the quoted line, which is REWORDED (different words, same meaning + same selling power). `verify_video_format.py` hard-FAILs if B is missing, if B's body differs from A's body, or if B's line equals A's line. When a source has a known failure mode, bake the guard into the positive Text prompt as an affirmative sentence — e.g. "he is alone in frame for the full clip" for solo videos. Deep-dive: template_reference.md §v865 + §v821, prior Prompt-B shape §v805.)*
