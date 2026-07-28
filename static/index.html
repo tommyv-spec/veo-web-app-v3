@@ -21839,8 +21839,14 @@ Ambient: same kitchen room tone, soft pour sound.
             // remains in the title attribute and the raw value is still
             // editable via API.
             const rawName = node.name || ('Node ' + node.id);
-            const displayName = rawName.length > 80
-                ? rawName.slice(0, 80) + '…'
+            // Cap raised 80 → 200 (2026-07-28): real build names run ~110-130
+            // chars and were clipping in the node-detail header. The h2 now wraps
+            // (overflow-wrap:anywhere) so a long name grows down, not off-screen,
+            // and the delete button (flex-shrink:0) stays put. 200 still bounds
+            // the pathological "<entire markdown>Scene 1" name. Full name lives
+            // in the title attribute regardless.
+            const displayName = rawName.length > 200
+                ? rawName.slice(0, 200) + '…'
                 : rawName;
             const nameSafe = imgEscape(displayName);
             const nameTitleSafe = imgEscape(rawName);
