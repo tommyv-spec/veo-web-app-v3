@@ -134,14 +134,30 @@ def run(api_url, api_key, page, host, poll_s=5, log=print):
                 # even though the image was ready.
                 with open(out_path, "rb") as f:
                     data = f.read()
-                _post_retry(f"{base}/jobs/{nid}/variants", headers=_auth(api_key),
-                            params={"backend": WORKER_BACKEND},
-                            files=[("files", ("variant_1.png", data, "image/png"))],
-                            timeout=300, log=log)
-                _post_retry(f"{base}/jobs/{nid}/status", headers=_auth(api_key),
-                            params={"backend": WORKER_BACKEND},
-                            json=status_body("completed"), timeout=30, tries=3, log=log)
-                log(f"  OK node {nid}" + (f" ({nname})" if nname else "") + " uploaded")
+                up = _post_retry(f"{base}/jobs/{nid}/variants", headers=_auth(api_key),
+                                 params={"backend": WORKER_BACKEND},
+                                 files=[("files", ("variant_1.png", data, "image/png"))],
+                                 timeout=300, log=log)
+                st = _post_retry(f"{base}/jobs/{nid}/status", headers=_auth(api_key),
+                                 params={"backend": WORKER_BACKEND},
+                                 json=status_body("completed"), timeout=30, tries=3, log=log)
+                # Surface the SERVER's verdict so a dropped/superseded chatgpt
+                # variant is visible in the worker log (not a silent loss).
+                try:
+                    uj = up.json() if up is not None else {}
+                    sj = st.json() if st is not None else {}
+                except Exception:
+                    uj, sj = {}, {}
+                saved = uj.get("saved_count")
+                sup = uj.get("superseded")
+                cg = sj.get("cg_status")
+                tail = f" [saved={saved} superseded={sup} cg_status={cg}]"
+                if sup or (saved == 0) or (cg == "failed"):
+                    log(f"  ⚠ node {nid}" + (f" ({nname})" if nname else "")
+                        + f" uploaded but server DROPPED it{tail}")
+                else:
+                    log(f"  OK node {nid}" + (f" ({nname})" if nname else "")
+                        + f" uploaded{tail}")
             except Exception as e:
                 try:
                     requests.post(f"{base}/jobs/{nid}/status", headers=_auth(api_key),
