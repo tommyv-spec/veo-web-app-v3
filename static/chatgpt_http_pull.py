@@ -43,6 +43,36 @@ def _auth(api_key):
     return {"Authorization": f"Bearer {api_key}"}
 
 
+def _post_retry(url, tries=4, timeout=300, log=print, **kw):
+    """POST with retry on TRANSIENT failures — network drops (Connection aborted /
+    RemoteDisconnected), timeouts, and 5xx. A 4xx is NOT retried (client error).
+    The caller must pass file bytes (not an open handle) so the body can be resent.
+    Raises the last error if all attempts fail."""
+    import time as _t
+    import requests
+    from requests.exceptions import (ConnectionError as _CE, Timeout as _TO,
+                                     ChunkedEncodingError as _CEE, HTTPError as _HE)
+    last = None
+    for i in range(tries):
+        try:
+            r = requests.post(url, timeout=timeout, **kw)
+            r.raise_for_status()
+            return r
+        except _HE as e:
+            code = getattr(getattr(e, "response", None), "status_code", 0) or 0
+            if not (500 <= code < 600):
+                raise                    # 4xx — don't retry
+            last = e
+        except (_CE, _TO, _CEE) as e:
+            last = e
+        if i < tries - 1:
+            wait = min(2 ** i, 15)
+            log(f"  upload transient fail ({type(last).__name__}); retry "
+                f"{i + 1}/{tries - 1} in {wait}s")
+            _t.sleep(wait)
+    raise last
+
+
 def _download_refs(refs, api_key, dest_dir):
     import requests
     paths = []
@@ -99,14 +129,18 @@ def run(api_url, api_key, page, host, poll_s=5, log=print):
                 ref_paths = _download_refs(refs, api_key, td)
                 out_path = os.path.join(td, "variant_1.png")
                 generate(page, prompt, ref_paths, out_path)
+                # Read bytes once so the upload body can be resent on retry — a
+                # dropped connection (RemoteDisconnected) used to fail the node
+                # even though the image was ready.
                 with open(out_path, "rb") as f:
-                    up = requests.post(f"{base}/jobs/{nid}/variants", headers=_auth(api_key),
-                                       params={"backend": WORKER_BACKEND},
-                                       files=[("files", ("variant_1.png", f, "image/png"))], timeout=300)
-                up.raise_for_status()
-                requests.post(f"{base}/jobs/{nid}/status", headers=_auth(api_key),
-                              params={"backend": WORKER_BACKEND},
-                              json=status_body("completed"), timeout=30)
+                    data = f.read()
+                _post_retry(f"{base}/jobs/{nid}/variants", headers=_auth(api_key),
+                            params={"backend": WORKER_BACKEND},
+                            files=[("files", ("variant_1.png", data, "image/png"))],
+                            timeout=300, log=log)
+                _post_retry(f"{base}/jobs/{nid}/status", headers=_auth(api_key),
+                            params={"backend": WORKER_BACKEND},
+                            json=status_body("completed"), timeout=30, tries=3, log=log)
                 log(f"  OK node {nid}" + (f" ({nname})" if nname else "") + " uploaded")
             except Exception as e:
                 try:
