@@ -9928,6 +9928,11 @@ async def _do_export_final(
 
     from concurrent.futures import ThreadPoolExecutor as _TPE
     print(f"[Export] Downloading {len(clips)} clips from R2 in parallel (3 workers)...")
+    try:
+        import video_processor as _vp872
+        _vp872.mem_phase(f"export:download ({len(clips)} clips, 3 workers)")
+    except Exception:
+        pass
     with _TPE(max_workers=3) as pool:
         results = list(pool.map(_download_clip, list(enumerate(clips))))
 
@@ -10554,7 +10559,13 @@ async def _do_export_final(
                 if settings.apply_voice_filter: enabled_steps.append("voicefilter")
                 if settings.apply_loudnorm: enabled_steps.append("loudnorm")
                 print(f"[Export] Applying audio enhancement: {', '.join(enabled_steps)}")
-                
+                try:
+                    import video_processor as _vp872b
+                    _vp872b.mem_phase(f"export:audio ({', '.join(enabled_steps)})")
+                except Exception:
+                    pass
+
+
                 # Enhance the exported video
                 enhanced_path = output_dir / f"enhanced_{output_filename}"
                 
@@ -10731,6 +10742,11 @@ async def _do_export_final(
                 print(f"[Export] Speed change error (non-fatal): {e}", flush=True)
 
         # Upload to R2 for persistence (voice swap needs this as input after Render restarts)
+        try:
+            import video_processor as _vp872c
+            _vp872c.mem_phase("export:upload")
+        except Exception:
+            pass
         try:
             from backends.storage import is_storage_configured, get_storage
             if is_storage_configured():

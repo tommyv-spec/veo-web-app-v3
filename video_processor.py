@@ -335,6 +335,24 @@ def _ensure_silero_vad():
     return _SILERO_VAD_MODEL
 
 
+def mem_phase(label):
+    """v872 — name the export STEP we are in, and force a memory sample now.
+
+    v866 gave us a continuous trace but a single phase label ("export <id>")
+    for the whole run, so both OOM kills (be09f595 mid-concat, e0e02bea at
+    4:01PM which died during the trim pass with avail=1689MB at start) told us
+    THAT memory climbed and never WHERE. These labels + a forced sample at each
+    transition give the before-number for every step, so the next incident
+    names its own culprit instead of costing another export.
+    """
+    try:
+        import mem_guard as _mg872
+        _mg872.set_phase(label)
+        _mg872._sample_once(force=True, tag="phase")
+    except Exception:
+        pass
+
+
 def release_cached_models(tag="release"):
     """v872 — drop the process-lifetime model singletons and hand the pages back.
 
@@ -3648,6 +3666,7 @@ def concat_videos(files: List[Path], output: Path) -> None:
     bug for mixed-framerate inputs. Concat filter resolves both.
     """
     print(f"[VideoProcessor] concat_videos: {len(files)} files -> {output}")
+    mem_phase(f"export:concat ({len(files)} files)")
     n = len(files)
     if n == 0:
         raise RuntimeError("concat_videos: no files to concatenate")
@@ -3734,6 +3753,10 @@ def concat_videos(files: List[Path], output: Path) -> None:
                 f"-> {norm_out.name}",
                 flush=True,
             )
+            # v872 — per-slot label. The be09f595 kill happened inside THIS loop
+            # (last line before the restart was `normalize slot=22`), so the
+            # slot number is the attribution we want in the trace.
+            mem_phase(f"export:normalize slot={i}/{n}")
             code, _, err = run(cmd_norm)
             if code != 0:
                 err_tail = err[-1500:] if err else "<no stderr>"
@@ -5293,6 +5316,7 @@ def export_final_video(
             # Each process uses -threads 1 so memory stays bounded:
             # 4 workers × ~80MB each = ~320MB + Python baseline ~150MB ≈ 470MB (safe for 512MB).
             print(f"[VideoProcessor] Parallel trimming: {len(clip_info)} clips, 2 workers")
+            mem_phase(f"export:trim ({len(clip_info)} clips, 2 workers)")
             files_to_concat = [None] * len(clip_info)  # pre-allocate to preserve order
 
             def _trim_one(idx_info):
@@ -5436,6 +5460,7 @@ def export_final_video(
                         f"{len(vad_targets)} clip(s) (single model load)",
                         flush=True,
                     )
+                    mem_phase(f"export:vad ({len(vad_targets)} clips)")
                     # v701x — malloc_trim(0) helper. After each per-clip
                     # apply_vad, glibc holds onto freed pages instead of
                     # returning them to the OS. Render's 2GB ceiling is

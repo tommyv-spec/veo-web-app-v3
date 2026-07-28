@@ -282,8 +282,12 @@ def _sample_once(force=False, tag="sample"):
     pct = None
     if used is not None and s.get("limit_mb"):
         pct = int(100 * used / s["limit_mb"])
-    # Only speak up when it matters: crossing 60% of the limit, or on force.
-    if force or (pct is not None and pct >= 60):
+    # Only speak up when it matters: crossing 40% of the limit, or on force.
+    # v872 dropped this from 60%: the 2026-07-28 4:01PM kill (job e0e02bea)
+    # started at used=358MB and died during the trim pass with NOT ONE sample
+    # line in between worth reading — 60% is already 1229MB on this box, i.e.
+    # most of the climb happens below the threshold and is never recorded.
+    if force or (pct is not None and pct >= 40):
         level = "WARN" if (pct is not None and pct >= 80) else "info"
         print(
             f"[Mem/v866] {tag} {level} phase={_PHASE} used={used}MB "
