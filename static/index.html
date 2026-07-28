@@ -20128,17 +20128,25 @@ Ambient: same kitchen room tone, soft pour sound.
         }
 
         function imgSidebarRowHtml(n, selectedId) {
+            // Show the first READY variant as the thumb even before it's chosen and
+            // even while the other lane still generates (dual-backend) — the
+            // operator wants uploaded images visible immediately, not hidden behind
+            // the "Generating…" overlay.
             const thumbUrl = n.chosen_variant ? n.chosen_variant.image_url
-                           : (n.kind === 'upload' && n.variants && n.variants.length ? n.variants[0].image_url : null);
+                           : (n.variants && n.variants.length ? n.variants[0].image_url : null);
             const statusLabel = n.kind === 'upload' ? 'upload' : n.status;
             const isGenerating = n.status === 'generating' || n.status === 'queued';
             const isSelected = n.id === selectedId;
             // v858 — optimistic regenerate feedback (see imgRegenerate).
-            const isRegen = isGenerating || (imgState.regeneratingIds && imgState.regeneratingIds.has(n.id));
+            const _optimisticRegen = imgState.regeneratingIds && imgState.regeneratingIds.has(n.id);
+            const isRegen = isGenerating || _optimisticRegen;
             const _rowImg = thumbUrl
                 ? `<img src="${thumbUrl}" alt="" onerror="this.outerHTML='<div style=\\'display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:var(--error);\\'>⚠</div>'">`
                 : (isRegen ? '' : (n.status === 'failed' ? '❌' : '🖼'));
-            const _rowRegen = isRegen
+            // Overlay only when there's nothing to show yet, or an optimistic
+            // regenerate is replacing the current image. A ready variant during
+            // generation shows through (status badge still reads "generating").
+            const _rowRegen = (isRegen && (!thumbUrl || _optimisticRegen))
                 ? `<div class="regen-overlay"><div class="regen-ring"></div><div class="regen-label">${n.status === 'generating' ? 'Generating…' : 'Regenerating…'}</div></div>`
                 : '';
             const thumbContent = _rowImg + _rowRegen;
@@ -21053,11 +21061,14 @@ Ambient: same kitchen room tone, soft pour sound.
                 const statusLabel = n.kind === 'upload' ? 'upload' : n.status;
                 const isGenerating = n.status === 'generating' || n.status === 'queued';
                 // v858 — optimistic regenerate feedback (see imgRegenerate).
-                const isRegen = isGenerating || (imgState.regeneratingIds && imgState.regeneratingIds.has(n.id));
+                const _optimisticRegen = imgState.regeneratingIds && imgState.regeneratingIds.has(n.id);
+                const isRegen = isGenerating || _optimisticRegen;
                 const _tileImg = thumbUrl
                     ? `<img src="${thumbUrl}" loading="lazy" decoding="async" alt="" onerror="this.outerHTML='<div>⚠</div>'">`
                     : (isRegen ? '' : (n.status === 'failed' ? '❌' : '🖼'));
-                const _tileRegen = isRegen
+                // Overlay only when nothing to show yet, or an optimistic regen is
+                // replacing the current image. A ready variant shows through.
+                const _tileRegen = (isRegen && (!thumbUrl || _optimisticRegen))
                     ? `<div class="regen-overlay"><div class="regen-ring"></div><div class="regen-label">${n.status === 'generating' ? 'Generating…' : 'Regenerating…'}</div></div>`
                     : '';
                 const thumbContent = _tileImg + _tileRegen;
@@ -21950,9 +21961,16 @@ Ambient: same kitchen room tone, soft pour sound.
             }
 
             let variantsHtml = '';
+            const _optimisticRegen = imgState.regeneratingIds && imgState.regeneratingIds.has(node.id);
             const isGenerating = node.status === 'generating' || node.status === 'queued'
-                || (imgState.regeneratingIds && imgState.regeneratingIds.has(node.id)); // v858 optimistic
-            if (isGenerating) {
+                || _optimisticRegen; // v858 optimistic
+            // Dual-backend: a base node renders on BOTH lanes (Banana + ChatGPT).
+            // Show whatever variants are ALREADY uploaded immediately — don't hide
+            // them behind the "Generating…" hourglass until the slower lane also
+            // finishes. Skip this during an optimistic regenerate (old variants are
+            // being replaced, so the hourglass is correct there).
+            const _hasShowableVariants = node.variants && node.variants.length && !_optimisticRegen;
+            if (isGenerating && !_hasShowableVariants) {
                 // Stuck-claim escape hatch: if the worker crashed mid-job, the node
                 // sits in 'generating' forever until the 10-min server TTL sweep
                 // picks it up (and only then if a worker is actively polling).
@@ -21995,7 +22013,7 @@ Ambient: same kitchen room tone, soft pour sound.
                             <div class="upload-label">Upload<br>image</div>
                         </div>
                     </div>`;
-            } else if (node.status === 'failed') {
+            } else if (node.status === 'failed' && !_hasShowableVariants) {
                 variantsHtml = `
                     <div class="img-empty-state">
                         <div class="icon">❌</div>
@@ -22080,6 +22098,9 @@ Ambient: same kitchen room tone, soft pour sound.
                 }
 
                 variantsHtml = `
+                    ${isGenerating ? `<div style="font-size:12px;color:var(--accent);margin-bottom:8px;font-weight:600;display:flex;align-items:center;gap:6px;">
+                        <span class="regen-ring" style="width:12px;height:12px;"></span> Still generating more variants… (showing what's ready)
+                    </div>` : ''}
                     <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;font-weight:500;">
                         ${refTileHtml ? 'Reference + Variants' : 'Variants'} — ${node.chosen_variant_id ? 'click to change selection' : 'click to select'} · drag &amp; drop an image to upload
                     </div>
