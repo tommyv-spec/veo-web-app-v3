@@ -420,7 +420,8 @@
         .img-sidebar-row .row-body { flex: 1; min-width: 0; }
         .img-sidebar-row .row-name {
             font-size: 13px; color: var(--text-primary); font-weight: 500;
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            white-space: normal; overflow-wrap: anywhere; word-break: break-word;
+            line-height: 1.3;
         }
         .img-sidebar-row .row-meta {
             display: flex; gap: 4px; align-items: center; margin-top: 3px;
@@ -917,7 +918,7 @@
         }
         .img-node-card .node-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
         .img-node-card .node-body { padding: 10px 12px; }
-        .img-node-card .node-name { font-size: 13px; font-weight: 500; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .img-node-card .node-name { font-size: 13px; font-weight: 500; color: var(--text-primary); white-space: normal; overflow-wrap: anywhere; word-break: break-word; line-height: 1.3; }
         .img-node-card .node-meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; display: flex; gap: 6px; align-items: center; }
         .img-node-card .node-status-badge {
             padding: 2px 7px; border-radius: 10px; font-size: 10px; font-weight: 600;
@@ -22137,7 +22138,7 @@ Ambient: same kitchen room tone, soft pour sound.
             area.innerHTML = `
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;position:sticky;top:0;background:var(--bg-surface);padding:8px 0;z-index:10;border-bottom:1px solid var(--border-color);">
                     ${backToJobBtn}
-                    <h2 title="${nameTitleSafe}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;">${nameSafe}${titleSuffix}</h2>
+                    <h2 title="${nameTitleSafe}" style="overflow-wrap:anywhere;word-break:break-word;line-height:1.25;flex:1;min-width:0;">${nameSafe}${titleSuffix}</h2>
                     ${deleteBtnTop}
                 </div>
                 <div style="font-size:11px;color:var(--text-muted);display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
