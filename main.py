@@ -439,10 +439,17 @@ async def lifespan(app: FastAPI):
     # gets ~1s then stalls/re-buffers. These threads are IO-bound (blocked on
     # R2 network reads), NOT CPU-bound, so raising the cap is safe on 1 CPU and
     # directly relieves the saturation. Must run inside the event loop.
+    #
+    # v872 — the memory cost of a large pool is now bounded by MALLOC_ARENA_MAX=2
+    # (Dockerfile): glibc's default is one arena PER THREAD, so 256 threads used
+    # to mean up to 256 heaps each hoarding their own freed pages. With the cap
+    # in place the pool size no longer drives RSS, so 256 stays — it is a
+    # deliberate playback fix, not an accident. Tunable if that ever changes.
     try:
         import anyio
-        anyio.to_thread.current_default_thread_limiter().total_tokens = 256
-        print("[startup][v75x] anyio thread limiter total_tokens=256 (video stream relief)", flush=True)
+        _tokens = int(os.environ.get("ANYIO_THREAD_TOKENS", "256"))
+        anyio.to_thread.current_default_thread_limiter().total_tokens = _tokens
+        print(f"[startup][v75x] anyio thread limiter total_tokens={_tokens} (video stream relief)", flush=True)
     except Exception as _tle:
         print(f"[startup][v75x] thread limiter bump failed: {_tle}", flush=True)
 
@@ -683,6 +690,13 @@ async def lifespan(app: FastAPI):
     _export_sweeper_task = _asyncio.create_task(_export_sweeper())
     print("[App][Export/v850] stale-export sweeper started (every 60s)", flush=True)
 
+    # v872 — idle recycle backstop (see _idle_memory_watchdog).
+    _mem_watchdog_task = _asyncio.create_task(_idle_memory_watchdog())
+    print(f"[App][Mem/v872] idle memory watchdog started "
+          f"(recycle when idle and rss >= {RECYCLE_IDLE_RSS_MB}MB, "
+          f"min uptime {RECYCLE_MIN_UPTIME_S}s; export gate at "
+          f"{EXPORT_MIN_AVAIL_MB}MB avail)", flush=True)
+
     # Image platform: background poller for .done.json files from image_worker.py
     _image_stop_event = _asyncio.Event()
     _image_watch_task = _asyncio.create_task(_image_watch_done_files_loop(_image_stop_event))
@@ -694,6 +708,7 @@ async def lifespan(app: FastAPI):
     _purge_task.cancel()
     _export_sweeper_task.cancel()
     _export_dispatcher_task.cancel()
+    _mem_watchdog_task.cancel()
     _image_stop_event.set()
     try:
         await _asyncio.wait_for(_image_watch_task, timeout=3.0)
@@ -8227,17 +8242,21 @@ async def assemble_job(
     # Phase 1: Save clip files to temp (fast — just reading upload buffers)
     clip_files = []  # [{temp_path, original_filename, index, size}]
     for i, clip_file in enumerate(clips):
-        content = await clip_file.read()
-        if len(content) == 0:
-            continue
+        # v872 — stream to disk; never hold the clip in RAM (see _spool_upload_to_path)
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4', dir=str(output_dir))
-        tmp.write(content)
         tmp.close()
+        size = await asyncio.to_thread(_spool_upload_to_path, clip_file, tmp.name)
+        if size == 0:
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
+            continue
         clip_files.append({
             'temp_path': tmp.name,
             'original_filename': clip_file.filename or f"clip_{i}.mp4",
             'index': i,
-            'size': len(content),
+            'size': size,
         })
     
     if not clip_files:
@@ -8550,17 +8569,21 @@ async def attach_clips_to_job(
     # Save uploaded clips to temp
     clip_data = []
     for i, clip_file in enumerate(clips):
-        content = await clip_file.read()
-        if len(content) == 0:
-            continue
+        # v872 — stream to disk; never hold the clip in RAM (see _spool_upload_to_path)
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4', dir=str(output_dir))
-        tmp.write(content)
         tmp.close()
+        size = await asyncio.to_thread(_spool_upload_to_path, clip_file, tmp.name)
+        if size == 0:
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
+            continue
         clip_data.append({
             'temp_path': tmp.name,
             'original_filename': clip_file.filename or f"clip_{i}.mp4",
             'index': i,
-            'size': len(content),
+            'size': size,
         })
     
     if not clip_data:
@@ -8998,10 +9021,48 @@ def _v864_mem():
         return None, None
 
 
-def _v864_release():
-    """Return freed heap to the OS so MemAvailable reflects reality before we
-    decide whether a ~250MB model load is safe. Mirrors the v701z sequencing
-    that transcribe_master_audio's own memory budget assumes has already run."""
+def _spool_upload_to_path(upload_file, dst_path, chunk_bytes=1 << 20) -> int:
+    """v872 — stream an UploadFile to disk. Returns bytes written. SYNC: call
+    via asyncio.to_thread.
+
+    `await file.read()` materialises the ENTIRE upload as one bytes object.
+    Starlette has already spooled anything over 1MB to a temp file, so that
+    read buys nothing and costs a full copy in RAM — for a 20-clip attach that
+    is up to 2GB of transient allocation, and the workers upload finished mp4s
+    while an export is running (see the be09f595 log: upload-video POSTs
+    interleaved with the concat phase, at 95%+ of the cgroup limit). Copying in
+    1MB chunks keeps the peak flat regardless of file size.
+    """
+    import shutil
+
+    src = upload_file.file
+    try:
+        src.seek(0)
+    except Exception:
+        pass
+    with open(dst_path, "wb") as out:
+        shutil.copyfileobj(src, out, chunk_bytes)
+    return os.path.getsize(dst_path)
+
+
+def _v864_release(tag=None):
+    """Return freed heap to the OS so the headroom figure reflects reality
+    before we decide whether a ~250MB model load is safe. Mirrors the v701z
+    sequencing that transcribe_master_audio's own memory budget assumes has
+    already run.
+
+    v872 — one implementation, in mem_guard.trim(). This wrapper stays because
+    several call sites already use the v864 name; it now also logs the RSS
+    actually returned, which is the number that tells us whether the trim is
+    doing anything at all.
+    """
+    try:
+        import mem_guard as _mg872
+        _mg872.trim(tag)
+        return
+    except Exception:
+        pass
+    # Fallback if mem_guard is somehow unavailable (never on Render).
     try:
         import gc as _gc
         _gc.collect()
@@ -9012,6 +9073,144 @@ def _v864_release():
         _ct.CDLL("libc.so.6").malloc_trim(0)
     except Exception:
         pass
+
+
+# v872 — how much container headroom an export needs before it may START.
+# Exports are durable (v850): a run that waits stays queued and fires on the
+# next tick. A run that starts into 150MB of headroom takes the whole container
+# down with it and loses every finished clip of work — that is what happened to
+# job be09f595 on 2026-07-28.
+EXPORT_MIN_AVAIL_MB = int(os.environ.get("EXPORT_MIN_AVAIL_MB", "600"))
+
+_last_export_gate_log = 0.0
+# Monotonic timestamp of the first tick where the gate held an export back and
+# has been holding it ever since; None when the gate is not blocking. The idle
+# watchdog reads this: memory we cannot reclaim WITH work waiting is the one
+# case where recycling early beats waiting out the uptime floor.
+_export_gate_blocked_since = None
+
+
+def _export_headroom_ok() -> bool:
+    """True when there is room to start an export. Logs at most once a minute
+    while it is holding runs back, so a stalled queue is visible but the log is
+    not flooded at the 2s dispatch tick."""
+    global _last_export_gate_log, _export_gate_blocked_since
+    try:
+        import mem_guard as _mg872
+        ok, snap = _mg872.headroom_ok(EXPORT_MIN_AVAIL_MB)
+    except Exception:
+        return True  # never let the gate itself block exports
+    import time as _t
+    if ok:
+        _export_gate_blocked_since = None
+    else:
+        if _export_gate_blocked_since is None:
+            _export_gate_blocked_since = _t.monotonic()
+    if not ok:
+        now = _t.monotonic()
+        if now - _last_export_gate_log > 60:
+            _last_export_gate_log = now
+            print(
+                f"[Export/v872] HOLD — avail={snap.get('avail_mb')}MB < "
+                f"{EXPORT_MIN_AVAIL_MB}MB required (used={snap.get('used_mb')}MB "
+                f"of {snap.get('limit_mb')}MB, rss={snap.get('rss_mb')}MB). "
+                f"Queued exports stay queued until memory frees up.",
+                flush=True,
+            )
+    return ok
+
+
+# v872 — idle recycle backstop.
+#
+# Everything else in v872 makes the process give memory back. This is what
+# happens when it STILL doesn't. A gunicorn worker that exits is respawned by
+# the arbiter (that is how --max-requests already works), and a fresh worker
+# starts at the ~173MB baseline. Firing it ONLY when nothing is running turns
+# the old failure mode — "container OOM-killed mid-export, 15 minutes of work
+# lost" — into "5 seconds of 502 while idle".
+RECYCLE_IDLE_RSS_MB = int(os.environ.get("RECYCLE_IDLE_RSS_MB", "1000"))
+RECYCLE_MIN_UPTIME_S = int(os.environ.get("RECYCLE_MIN_UPTIME_S", "900"))
+import time as _time_v872
+_PROCESS_START_MONO = _time_v872.monotonic()
+
+
+def _container_is_idle() -> bool:
+    """No export running on this container and no video-generation job in
+    flight. Image-platform pollers are external processes that retry, so they
+    do not hold the recycle back."""
+    if _LOCAL_EXPORT_IDS:
+        return False
+    try:
+        if getattr(worker, "running_jobs", None):
+            return False
+    except Exception:
+        return False  # can't prove idle → not idle
+    return True
+
+
+async def _idle_memory_watchdog():
+    """Recycle this worker when it is idle and still fat. Never fires during an
+    export or a job — those are the two things worth protecting."""
+    import time as _t
+    import signal as _sig
+
+    hot_checks = 0
+    while True:
+        await asyncio.sleep(60)
+        try:
+            if RECYCLE_IDLE_RSS_MB <= 0:
+                continue
+            # The uptime floor stops a boot-time blip from restarting the
+            # worker. It is waived when the export gate has been holding a run
+            # back for 3+ minutes: at that point memory we cannot reclaim is
+            # actively blocking work, and a 5-second respawn is the fix.
+            blocked_for = (
+                _t.monotonic() - _export_gate_blocked_since
+                if _export_gate_blocked_since is not None else 0
+            )
+            if (_t.monotonic() - _PROCESS_START_MONO < RECYCLE_MIN_UPTIME_S
+                    and blocked_for < 180):
+                continue
+            if not _container_is_idle():
+                hot_checks = 0
+                continue
+
+            import mem_guard as _mg872
+            _mg872.trim()
+            snap = _mg872.snapshot()
+            rss = snap.get("rss_mb") or 0
+            if rss < RECYCLE_IDLE_RSS_MB:
+                hot_checks = 0
+                continue
+
+            # Two consecutive fat-and-idle minutes before acting, so a single
+            # sample taken mid-teardown can't trigger a pointless restart.
+            hot_checks += 1
+            if hot_checks < 2:
+                print(
+                    f"[Mem/v872] idle but fat: rss={rss}MB >= {RECYCLE_IDLE_RSS_MB}MB "
+                    f"(check {hot_checks}/2) — trim did not reclaim it",
+                    flush=True,
+                )
+                continue
+
+            if not _container_is_idle():   # last look before pulling the pin
+                hot_checks = 0
+                continue
+
+            print(
+                f"[Mem/v872] RECYCLING WORKER — idle, rss={rss}MB "
+                f"(used={snap.get('used_mb')}MB of {snap.get('limit_mb')}MB) stayed "
+                f"above {RECYCLE_IDLE_RSS_MB}MB after a trim. Gunicorn respawns a "
+                f"fresh worker; no export or job is running.",
+                flush=True,
+            )
+            os.kill(os.getpid(), _sig.SIGTERM)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as _we:
+            print(f"[Mem/v872] idle watchdog tick failed (non-fatal): {_we}", flush=True)
 
 
 async def _export_dispatcher():
@@ -9036,6 +9235,12 @@ async def _export_dispatcher():
     while True:
         try:
             free = _eq.slots_free(len(_LOCAL_EXPORT_IDS))
+            # v872 — memory admission gate. A free SLOT is not the same thing as
+            # free MEMORY: on 2026-07-28 the slot was free, the container had
+            # ~130MB of headroom left from the previous run's un-returned heap,
+            # and the export started anyway and was OOM-killed at 99%.
+            if free > 0 and not _export_headroom_ok():
+                free = 0
             if free > 0:
                 for _rid in await asyncio.to_thread(_next_queued_export_ids, free):
                     print(f"[Export/v855] DISPATCH run={_rid[:8]} "
@@ -10330,7 +10535,14 @@ async def _do_export_final(
                 )
 
         print(f"[Export] Success! Stats: {stats}")
-        
+
+        # v872 — phase boundary. The concat pass is done and its Whisper models,
+        # decoded-audio buffers and ffmpeg temp churn are dead objects now; the
+        # audio-enhancement and support-track phases below are the next big
+        # allocators. Give the pages back BEFORE they run rather than stacking
+        # one phase's garbage under the next phase's peak.
+        _v864_release("post-concat")
+
         # Apply audio enhancement if any audio toggle is enabled
         any_audio_enabled = settings.remove_laughter or settings.apply_deepfilter or settings.apply_voice_filter or settings.apply_loudnorm
         
@@ -10771,6 +10983,28 @@ async def _do_export_final(
         print(f"[Export] ERROR: {str(e)}")
         print(f"[Export] Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+    finally:
+        # v872 — HAND THE MEMORY BACK, on the failure path too.
+        #
+        # Before this, an export left its Whisper models, its torch/soundfile
+        # buffers and glibc's un-returned heap resident for the life of the
+        # container: boot rss=173MB, post-export rss~1.6GB, and the NEXT export
+        # started from there. That ratchet is what finally hit the 2GB cgroup
+        # ceiling on job be09f595. Releasing here makes each export start from
+        # roughly the same baseline instead of the previous export's high-water
+        # mark, and the trim is what actually returns the pages to the kernel.
+        try:
+            import video_processor as _vp872
+            _vp872.release_cached_models("export-end")
+        except Exception as _rel_e:
+            print(f"[Export/v872] model release failed (non-fatal): {_rel_e}", flush=True)
+        try:
+            import mem_guard as _mg872
+            _mg872.trim("export-end")
+            _mg872.set_phase("idle")
+            _mg872._sample_once(force=True, tag="export-released")
+        except Exception:
+            pass
 
 
 @app.post("/api/jobs/{job_id}/export-final")
@@ -13980,13 +14214,15 @@ async def local_worker_upload_video(
         
         print(f"[LocalWorker] Uploading clip {clip_index}, attempt {attempt}, variant {variant}", flush=True)
         
-        # Save uploaded file temporarily
+        # Save uploaded file temporarily.
+        # v872 — streamed in 1MB chunks, not read() into one bytes object. These
+        # POSTs land WHILE an export is running (be09f595 log), i.e. at the
+        # worst possible moment for a 10-40MB transient allocation.
         import tempfile
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
-            content = await file.read()
-            tmp.write(content)
             tmp_path = tmp.name
-        
+        await asyncio.to_thread(_spool_upload_to_path, file, tmp_path)
+
         # Upload to R2 with unique key including attempt.variant.
         # NO DB connection held during this slow operation.
         r2_key = f"jobs/{job_id}/outputs/clip_{clip_index}_{attempt}.{variant}.mp4"
@@ -15247,12 +15483,12 @@ async def user_worker_upload_video(
         attempt = int(match.group(2)) if match else 1
         variant = int(match.group(3)) if match else 1
         
+        # v872 — streamed to disk in 1MB chunks (see _spool_upload_to_path).
         import tempfile
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
-            content = await file.read()
-            tmp.write(content)
             tmp_path = tmp.name
-        
+        await asyncio.to_thread(_spool_upload_to_path, file, tmp_path)
+
         r2_key = f"jobs/{job_id}/outputs/clip_{clip_index}_{attempt}.{variant}.mp4"
         # asyncio.to_thread frees the event loop while R2 uploads.
         await asyncio.to_thread(storage.upload_file, tmp_path, r2_key, 'video/mp4')

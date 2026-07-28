@@ -335,6 +335,68 @@ def _ensure_silero_vad():
     return _SILERO_VAD_MODEL
 
 
+def release_cached_models(tag="release"):
+    """v872 — drop the process-lifetime model singletons and hand the pages back.
+
+    "Cached for the process lifetime" was written when the process was assumed
+    to be doing exports back to back. On a 2GB cgroup it means an export's
+    ~150MB Whisper-base, plus whatever torch pulled in for silero, stays
+    resident forever — so every later export starts closer to the ceiling than
+    the one before it. Reloading costs a couple of seconds at the next export;
+    being OOM-killed at 99% mid-concat costs the whole run (job be09f595,
+    2026-07-28).
+
+    Called from the export's finally-block, so it runs on the failure path too.
+    """
+    global _WHISPER_BASE_MODEL, _SILERO_VAD_MODEL
+    dropped = []
+    if _WHISPER_BASE_MODEL is not None:
+        _WHISPER_BASE_MODEL = None
+        dropped.append("whisper-base")
+    if _SILERO_VAD_MODEL is not None:
+        _SILERO_VAD_MODEL = None
+        dropped.append("silero-vad")
+    try:
+        import mem_guard as _mg872
+        _mg872.trim(f"{tag} ({', '.join(dropped) if dropped else 'no models held'})")
+    except Exception:
+        pass
+    return dropped
+
+
+def drop_page_cache(path):
+    """v872 — evict a file we just finished writing from the page cache.
+
+    An export writes one normalized intermediate per clip (23 of them on the
+    be09f595 run) plus the concat output. Those pages are charged to OUR cgroup,
+    and until writeback completes they are NOT reclaimable — which is exactly
+    the window where the export is also at its RSS peak. Flushing, then telling
+    the kernel we will not read the file again, keeps that pressure off the
+    limit. Best-effort: a no-op where posix_fadvise does not exist.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except Exception:
+        return False
+    try:
+        try:
+            os.fsync(fd)
+        except Exception:
+            pass
+        fadvise = getattr(os, "posix_fadvise", None)
+        if fadvise is None:
+            return False
+        fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+
+
 # v773.10.12 — aeneas DTW fallback removed: aeneas 1.7.3.0 (2017) uses
 # numpy.distutils which numpy 2.x deleted, so the wheel build fails on
 # modern Python. Quality upgrade is now carried entirely by the
@@ -3683,6 +3745,12 @@ def concat_videos(files: List[Path], output: Path) -> None:
                 raise RuntimeError(
                     f"v692e normalize failed for slot {i}: {err_tail[-300:]}"
                 )
+            # v872 — flush this intermediate out of the page cache before
+            # encoding the next one. 23 clips x ~20MB of freshly written mp4 is
+            # ~450MB charged to the cgroup at exactly the moment RSS peaks;
+            # pass 2 reads them back through the concat demuxer sequentially, so
+            # keeping them cached buys nothing.
+            drop_page_cache(norm_out)
             normalized.append(norm_out)
 
         # Pass 2: concat demuxer + stream-copy on identical-spec files
@@ -3714,6 +3782,9 @@ def concat_videos(files: List[Path], output: Path) -> None:
             raise RuntimeError(
                 f"v692e concat failed: {err_tail[-300:]}"
             )
+        # v872 — the finished export is the single biggest file we write; it is
+        # uploaded to R2 by a separate read pass and never re-read here.
+        drop_page_cache(output)
         # v782 diagnostic — confirm final export resolution after the 1080p
         # normalize bump. Remove once operator-side evidence lands that
         # uploaded HD clips export at 1080x1920 (not the old 720x1280).

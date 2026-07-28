@@ -8,6 +8,25 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
+# v872 — glibc allocator settings. These are set HERE, not only in render.yaml,
+# because they must apply whether or not the blueprint is synced.
+#
+# Why: the 2026-07-28 export OOM traced to RSS that climbed from 173MB at boot
+# to ~1.7GB during one export and never came back down, on a 2GB cgroup. Two
+# glibc defaults cause exactly that:
+#   * one malloc arena PER THREAD (up to 8x cores, and this app runs a large
+#     anyio thread pool) — each arena keeps its own freed pages forever
+#   * a DYNAMIC mmap threshold that grows to 32MB, so the big short-lived
+#     buffers this app allocates (audio blobs, uploaded mp4s, model weights)
+#     land on the heap, where free() cannot return them to the kernel
+# ARENA_MAX=2 caps arena sprawl. A fixed 128KB mmap threshold sends every large
+# allocation to mmap, where free() unmaps it immediately. TRIM_THRESHOLD keeps
+# the main heap from sitting on a large idle top.
+ENV MALLOC_ARENA_MAX=2
+ENV MALLOC_MMAP_THRESHOLD_=131072
+ENV MALLOC_TRIM_THRESHOLD_=131072
+ENV MALLOC_TOP_PAD_=131072
+
 # Install system dependencies including ffmpeg.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \

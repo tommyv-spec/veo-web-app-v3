@@ -2,3 +2,8 @@
 # logged-in ChatGPT cookies / profile). Local-only, per-machine.
 static/.chatgpt_profile/
 static/.chatgpt_cookies.json
+
+# Byte-compiled files. Produced by any local `import main` check (the deploy
+# discipline requires one before every push) and never wanted in the repo.
+__pycache__/
+*.pyc

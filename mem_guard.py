@@ -199,6 +199,80 @@ def peak_used_mb():
     return _PEAK_USED_MB
 
 
+def reset_peak():
+    """Forget the high-water mark (call when a heavy phase starts)."""
+    global _PEAK_USED_MB
+    _PEAK_USED_MB = 0
+
+
+# === v872 — give memory BACK, and refuse work when there is none ============
+# The 2026-07-28 export OOM (job be09f595) showed the shape of the problem:
+# boot rss=173MB, then every single sample for the whole export sat at
+# rss=1545-1717MB and NEVER came down, until used hit 2031MB of 2048MB and the
+# container was killed mid-concat. Python was not leaking objects — glibc was
+# holding freed pages (one arena per thread, and the anyio pool was allowed 256
+# threads) and nothing ever asked for them back outside one loop in
+# video_processor's per-clip VAD pass.
+#
+# trim() is that ask, in one place, callable from anywhere. The Dockerfile now
+# also pins MALLOC_ARENA_MAX / MALLOC_MMAP_THRESHOLD_ so the heap has far less
+# room to ratchet in the first place.
+
+
+def trim(tag=None):
+    """Return freed heap to the OS. Logs the RSS delta when `tag` is given.
+
+    Safe to call from any thread, never raises. On non-glibc (local dev/macOS)
+    the malloc_trim call simply fails and only the gc.collect() takes effect.
+    """
+    before = rss_bytes()
+    try:
+        import gc
+
+        gc.collect()
+    except Exception:
+        pass
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+    after = rss_bytes()
+    if tag:
+        try:
+            _mb = lambda v: None if v is None else int(v // (1024 * 1024))  # noqa: E731
+            freed = None
+            if before is not None and after is not None:
+                freed = _mb(max(0, before - after))
+            print(
+                f"[Mem/v872] trim {tag}: rss {_mb(before)}MB -> {_mb(after)}MB "
+                f"(returned {freed}MB)",
+                flush=True,
+            )
+        except Exception:
+            pass
+    return after
+
+
+def headroom_ok(min_avail_mb):
+    """(ok, snapshot) — is there room to START a heavy job right now?
+
+    Trims first: a stale heap makes free memory look scarcer than it is, and
+    refusing an export over memory we already own would be its own bug. When
+    the limit is unknown (`meminfo-host`, i.e. local dev) this always says yes
+    — the host figure is not a container headroom number (see snapshot()).
+    """
+    trim()
+    s = snapshot()
+    if s.get("source") != "cgroup" or not s.get("limit_mb"):
+        return True, s
+    avail = s.get("avail_mb")
+    if avail is None:
+        return True, s
+    return avail >= min_avail_mb, s
+
+
 def _sample_once(force=False, tag="sample"):
     global _PEAK_USED_MB
     s = snapshot()

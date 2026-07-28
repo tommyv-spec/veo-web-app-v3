@@ -77,6 +77,29 @@ services:
       - key: PYTHONUNBUFFERED
         value: "1"
 
+      # v872 — glibc allocator caps. Authoritative copy lives in the Dockerfile
+      # (applies even when this blueprint is not synced); mirrored here so the
+      # deploy config shows them. See the Dockerfile comment for the why.
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+      - key: MALLOC_MMAP_THRESHOLD_
+        value: "131072"
+      - key: MALLOC_TRIM_THRESHOLD_
+        value: "131072"
+
+      # v872 — export admission gate. An export will not START unless the
+      # container has this much headroom, measured against the cgroup limit
+      # after a trim. Queued exports are durable (v850), so waiting costs
+      # nothing; starting an export into 200MB of headroom costs the whole run.
+      - key: EXPORT_MIN_AVAIL_MB
+        value: "600"
+
+      # v872 — idle worker recycle. When no export/job is running and RSS is
+      # still above this, the worker exits and gunicorn respawns it, returning
+      # the ratcheted heap to the OS. 0 disables.
+      - key: RECYCLE_IDLE_RSS_MB
+        value: "1000"
+
       # v773 — forced-alignment pipeline (MMS_FA + silero-VAD + distil-large-v3)
       # 1 = route detect_speech_segments_whisper to transcript_alignment module
       # 0 / unset = legacy V708/V731 Whisper-tiny fuzzy-match path
