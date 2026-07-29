@@ -1638,7 +1638,11 @@ def _select_for_backend(candidates, backend):
     be = (backend or "banana")
     for n in candidates:
         if be == "chatgpt":
-            if getattr(n, "cg_status", None) == "queued" and not _node_has_chain_dependency(n):
+            # cg_status=='queued' is enough. Auto-seed (_seed_chatgpt_lane) only
+            # queues BASE nodes, so a CHAIN node in the cg queue got there via the
+            # explicit "Generate with ChatGPT" button — honor that (its parent's
+            # chosen variant resolves as a ref, same as the banana lane).
+            if getattr(n, "cg_status", None) == "queued":
                 return n
         else:
             if n.status == "queued":
@@ -3018,6 +3022,44 @@ def abort_node(
         f"(was claimed by {prev_worker or 'none'}, now re-queued)"
     )
     return node.to_dict()
+
+
+@router.post("/nodes/{node_id}/chatgpt-generate")
+def chatgpt_generate_node(
+    node_id: int,
+    db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Manually open the ChatGPT lane on ANY node (incl. non-first / chain
+    scenes, which the auto-seed skips) so a ChatGPT worker renders + uploads a
+    variant for it.
+
+    Additive + non-destructive: it only sets the CG lane to 'queued' (a fresh
+    claim), never touches node.status, the Banana variants, or the chosen one.
+    Works even on a 'ready'/approved node — the cg render just adds a GPT
+    variant. The worker resolves this node's parent chain (each parent's chosen
+    variant) as reference images, same as the Banana lane.
+
+    Requires a ChatGPT worker to be online to actually run; otherwise the node
+    simply sits cg-queued until one polls.
+    """
+    node = db.query(ImageNode).filter(
+        ImageNode.id == node_id,
+        ImageNode.user_id == current_user.id,
+    ).first()
+    if not node:
+        raise HTTPException(404, "Node not found")
+    if node.kind == "upload":
+        raise HTTPException(400, "Upload nodes can't be generated")
+    if node.cg_status == "generating":
+        raise HTTPException(409, "ChatGPT lane already generating for this node")
+    node.cg_status = "queued"
+    node.cg_claimed_by = None
+    node.cg_claimed_at = None
+    node.updated_at = datetime.utcnow()
+    db.commit()
+    log.info(f"[image_platform] Node {node_id} — ChatGPT lane manually queued by user")
+    return {"ok": True, "node_id": node_id, "cg_status": node.cg_status}
 
 
 @router.post("/nodes/{node_id}/choose")
@@ -11493,11 +11535,13 @@ def worker_get_pending_job(
                 ImageNode.name.startswith(pb),
             )
             q = q.filter(ImageNode.cg_status == "queued") if is_cg else q.filter(ImageNode.status == "queued")
-            # NEVER hand an already-approved node to a worker (either lane). The
-            # user picked that image; re-rendering burns a generation and can
-            # replace it. generate/regenerate clear chosen_variant_id first, so a
-            # deliberate re-render still gets through.
-            q = q.filter(ImageNode.chosen_variant_id.is_(None))
+            # Never re-serve an approved node to the BANANA lane — re-rendering
+            # replaces the chosen image. The CG lane is exempt: it only reaches
+            # 'queued' on an approved node via the explicit "Generate with ChatGPT"
+            # button, and a cg render is ADDITIVE (adds a cg variant, never touches
+            # the chosen one). generate/regenerate clear chosen_variant_id first.
+            if not is_cg:
+                q = q.filter(ImageNode.chosen_variant_id.is_(None))
             if exclude_ids:
                 q = q.filter(ImageNode.id.notin_(exclude_ids))
             # backend routing: chatgpt claims cg-lane base nodes, banana claims
@@ -11511,7 +11555,8 @@ def worker_get_pending_job(
             ImageNode.user_id == user_id,
         )
         q = q.filter(ImageNode.cg_status == "queued") if is_cg else q.filter(ImageNode.status == "queued")
-        q = q.filter(ImageNode.chosen_variant_id.is_(None))   # approved -> never re-served
+        if not is_cg:
+            q = q.filter(ImageNode.chosen_variant_id.is_(None))   # banana: approved -> never re-served
         if exclude_ids:
             q = q.filter(ImageNode.id.notin_(exclude_ids))
         node = _select_for_backend(q.order_by(ImageNode.created_at.asc()), backend)

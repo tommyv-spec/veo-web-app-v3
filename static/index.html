@@ -22179,6 +22179,12 @@ Ambient: same kitchen room tone, soft pour sound.
                 if (node.status === 'ready' && node.chosen_variant_id) {
                     actionBtns.push(`<button class="btn btn-secondary" onclick="imgUseAsParent(${node.id})">↘ Use as parent for new node</button>`);
                 }
+                // Manually run the ChatGPT lane on THIS node (incl. non-first /
+                // chain scenes the auto-seed skips). Additive — adds a GPT variant.
+                if (node.status !== 'draft') {
+                    const cgBusy = node.cg_status === 'generating' || node.cg_status === 'queued';
+                    actionBtns.push(`<button class="btn btn-secondary" ${cgBusy ? 'disabled' : ''} onclick="imgChatgptGenerate(${node.id})" title="Render this node with the ChatGPT worker and upload the result as a GPT variant">${cgBusy ? '⏳ ChatGPT queued…' : '🤖 Generate with ChatGPT'}</button>`);
+                }
             }
             // v648 — batch overview button moved from node detail to
             // the job overview page (per owner directive 2026-05-07).
@@ -22640,6 +22646,21 @@ Ambient: same kitchen room tone, soft pour sound.
             if (!confirm('Re-queue this node?\n\nThis clears any stale worker claim and puts the node back in the queue. Safe to do if the worker crashed or is no longer running.')) return;
             try {
                 const res = await fetch(`/api/images/nodes/${nodeId}/abort`, { method: 'POST' });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${res.status}`);
+                }
+                await imgRefreshNodes();
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function imgChatgptGenerate(nodeId) {
+            // Manually open the ChatGPT lane on this node (additive — adds a GPT
+            // variant; never touches the Banana variants or the chosen one).
+            try {
+                const res = await fetch(`/api/images/nodes/${nodeId}/chatgpt-generate`, { method: 'POST' });
                 if (!res.ok) {
                     const err = await res.json().catch(() => ({}));
                     throw new Error(err.detail || `HTTP ${res.status}`);
