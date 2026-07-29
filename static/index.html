@@ -429,6 +429,16 @@
         .img-sidebar-row .row-status-badge {
             padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 600;
         }
+        /* Approve-this-first marker: this row's pick is holding up N chained
+           images. Amber = the same "needs you" colour as the summary counter. */
+        .img-sidebar-row .row-chain-chip {
+            padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 700;
+            background: rgba(245, 158, 11, 0.18); color: rgb(245, 158, 11);
+            white-space: nowrap;
+        }
+        .img-sidebar-row.blocks-others {
+            border-left: 2px solid rgba(245, 158, 11, 0.75);
+        }
         .img-sidebar-row.is-generating .row-thumb::after {
             content: ''; position: absolute;
         }
@@ -19153,6 +19163,102 @@ Ambient: same kitchen room tone, soft pour sound.
             document.body.removeChild(a);
         }
 
+        // ---------------------------------------------------------------
+        // Approval queue — how many images still need a pick, and which one
+        // the operator should clear FIRST.
+        // ---------------------------------------------------------------
+
+        // "Waiting to be approved" = finished rendering, no chosen variant yet.
+        // Same test the ready-for-choice notification, imgAutoSelectIfNeeded
+        // and imgNextPendingNode already use.
+        function imgIsAwaitingApproval(n) {
+            return !!n && n.kind === 'generated'
+                && n.status === 'ready' && !n.chosen_variant_id;
+        }
+
+        // parent_node_id -> [child node id]. Nodes serialise `parents` but not
+        // children, so the reverse index is built client-side. Cached against
+        // the imgState.nodes array identity: every refresh path reassigns that
+        // array, so a new array is exactly when the index goes stale.
+        function _imgChildIndex() {
+            if (imgState._childIdxFor === imgState.nodes && imgState._childIdx) {
+                return imgState._childIdx;
+            }
+            const idx = {};
+            for (const n of (imgState.nodes || [])) {
+                for (const e of (n.parents || [])) {
+                    (idx[e.parent_node_id] = idx[e.parent_node_id] || []).push(n.id);
+                }
+            }
+            imgState._childIdx = idx;
+            imgState._childIdxFor = imgState.nodes;
+            return idx;
+        }
+
+        // How many images downstream are stuck waiting on THIS node's pick.
+        //
+        // The server's blocked_children_count counts DIRECT draft children
+        // only, so a chain image_1 -> image_2 -> image_3 reports 1 for image_1
+        // when 2 images are really waiting on it. Walk the chain so a longer
+        // chain outranks a shorter one. Recursion stops at any non-draft
+        // descendant: a child that already rendered is not waiting on this
+        // pick, and neither is anything behind it.
+        function imgDownstreamWaiting(nodeId) {
+            const idx = _imgChildIndex();   // also refreshes the epoch below
+            // Memoised on the same nodes-array identity as the child index:
+            // this runs once per sidebar row on every 2s render plus once per
+            // queue entry, and re-walking each chain every time is pure waste.
+            if (imgState._dsCacheFor !== imgState.nodes || !imgState._dsCache) {
+                imgState._dsCache = {};
+                imgState._dsCacheFor = imgState.nodes;
+            }
+            if (imgState._dsCache[nodeId] !== undefined) return imgState._dsCache[nodeId];
+            const seen = new Set([nodeId]);
+            const queue = (idx[nodeId] || []).slice();
+            let count = 0;
+            while (queue.length) {
+                const id = queue.pop();
+                if (seen.has(id)) continue;   // also guards a cyclic edge set
+                seen.add(id);
+                const n = imgState.nodesById[id];
+                if (!n || n.status !== 'draft') continue;
+                count++;
+                for (const cid of (idx[id] || [])) queue.push(cid);
+            }
+            imgState._dsCache[nodeId] = count;
+            return count;
+        }
+
+        // The approval queue in the order the operator should clear it:
+        // anything with images CHAINED BEHIND IT first (most-blocked first),
+        // then the rest in build + scene order. Operator 2026-07-29: "always
+        // make me approve first the one chained to some other future images"
+        // — approving a chain head releases its whole downstream chain into
+        // the render queue, so that pick is worth strictly more than a
+        // terminal scene's and should never sit behind one.
+        function imgApprovalQueue() {
+            const si = n => (n.scene_index_in_batch ?? 0);
+            return (imgState.nodes || [])
+                .filter(imgIsAwaitingApproval)
+                .map(n => ({ n, blocks: imgDownstreamWaiting(n.id) }))
+                .sort((a, b) =>
+                    (b.blocks - a.blocks)
+                    || String(a.n.batch_id || '').localeCompare(String(b.n.batch_id || ''))
+                    || (si(a.n) - si(b.n))
+                )
+                .map(x => x.n);
+        }
+
+        // Click target for the "N need approval" counter.
+        window.imgJumpToNextApproval = function() {
+            const q = imgApprovalQueue();
+            if (!q.length) {
+                if (typeof imgShowToast === 'function') imgShowToast('Nothing waiting for approval');
+                return;
+            }
+            imgFocusNode(q[0].id);
+        };
+
         function imgUpdateTabCount() {
             const el = document.getElementById('imagesTabCount');
             const n = imgState.nodes.length;
@@ -19183,6 +19289,24 @@ Ambient: same kitchen room tone, soft pour sound.
                 if (grpNotReady > 0) batchesIncomplete++;
             });
             const parts = [];
+            // "N ready" counts every rendered node including the ones already
+            // approved, so it never answered "how many still need me?".
+            // This does, and it leads the line because it is the only number
+            // here that is a to-do. Click jumps to the one to do first.
+            const approvalQueue = imgApprovalQueue();
+            if (approvalQueue.length) {
+                const chained = approvalQueue.filter(n => imgDownstreamWaiting(n.id) > 0).length;
+                const chainedNote = chained ? ` · ⛓ ${chained} chained` : '';
+                const tip = chained
+                    ? `${approvalQueue.length} image${approvalQueue.length === 1 ? '' : 's'} waiting for your pick — ${chained} of them block other images. Click to open the one to approve first.`
+                    : `${approvalQueue.length} image${approvalQueue.length === 1 ? '' : 's'} waiting for your pick. Click to open the first.`;
+                parts.push(
+                    `<button onclick="imgJumpToNextApproval()" title="${tip}"`
+                    + ` style="background:none;border:none;padding:0;font:inherit;cursor:pointer;`
+                    + `color:rgb(245,158,11);font-weight:700;text-decoration:underline">`
+                    + `${approvalQueue.length} need approval${chainedNote}</button>`
+                );
+            }
             if (batchesTotal > 0) {
                 if (batchesIncomplete === 0) {
                     parts.push(`<span style="color:var(--success);font-weight:700">All ${batchesTotal} batches complete</span>`);
@@ -20235,13 +20359,22 @@ Ambient: same kitchen room tone, soft pour sound.
             const thumbContent = _rowImg + _rowRegen;
             const thumbClass = isRegen ? 'row-thumb is-regenerating' : 'row-thumb';
             const nameSafe = imgEscape(n.name || ('Node ' + n.id));
+            // Mark the rows that hold up other images, so "approve the chained
+            // one first" is visible in the list and not only implied by which
+            // node auto-selects. Only on rows actually awaiting a pick — a
+            // chain head that's already approved holds up nothing.
+            const _blocks = imgIsAwaitingApproval(n) ? imgDownstreamWaiting(n.id) : 0;
+            const chainChip = _blocks > 0
+                ? `<span class="row-chain-chip" title="Approve this first — ${_blocks} chained image${_blocks === 1 ? '' : 's'} cannot start until you pick a variant here">⛓ ${_blocks}</span>`
+                : '';
             return `
-                <div class="img-sidebar-row ${isSelected ? 'selected' : ''} ${isGenerating ? 'is-generating' : ''}" data-node-id="${n.id}" onclick="imgSelectNode(${n.id})">
+                <div class="img-sidebar-row ${isSelected ? 'selected' : ''} ${isGenerating ? 'is-generating' : ''} ${_blocks > 0 ? 'blocks-others' : ''}" data-node-id="${n.id}" onclick="imgSelectNode(${n.id})">
                     <div class="${thumbClass}">${thumbContent}</div>
                     <div class="row-body">
                         <div class="row-name" title="${nameSafe}">${nameSafe}</div>
                         <div class="row-meta">
                             <span class="row-status-badge status-${statusLabel}">${statusLabel}</span>
+                            ${chainChip}
                             ${n.variants && n.variants.length > 1 ? `<span style="font-size:10px;color:var(--text-muted);">${n.variants.length}v</span>` : ''}
                         </div>
                     </div>
@@ -20923,10 +21056,9 @@ Ambient: same kitchen room tone, soft pour sound.
             // Only auto-select if nothing is currently selected AND we have nodes
             if (imgState.detailNodeId || imgState.selectedJobKey) return;
             if (!imgState.nodes || !imgState.nodes.length) return;
-            // Prefer: first ready node without a chosen variant (user needs to pick)
-            const pending = imgState.nodes.find(n =>
-                n.status === 'ready' && !n.chosen_variant_id && n.kind !== 'upload'
-            );
+            // Prefer: the top of the approval queue — a node needing a pick,
+            // chain heads first (see imgApprovalQueue).
+            const pending = imgApprovalQueue()[0];
             if (pending) {
                 imgSelectNode(pending.id);
                 return;
@@ -20960,11 +21092,16 @@ Ambient: same kitchen room tone, soft pour sound.
             const all = imgState.nodes || [];
             const cur = all.find(n => n.id === afterNodeId);
             const si = n => (n.scene_index_in_batch ?? 0);
-            const isPending = n => n && n.kind === 'generated'
-                && n.status === 'ready' && !n.chosen_variant_id
-                && n.id !== afterNodeId;
+            const isPending = n => imgIsAwaitingApproval(n) && n.id !== afterNodeId;
             const pending = all.filter(isPending);
             if (!pending.length) return null;
+            // Chained images outrank build-order (operator 2026-07-29): if
+            // ANYTHING anywhere is blocking other images, go there next even
+            // when it means leaving this build mid-way. Only once nothing is
+            // blocking does the same-build scene walk below resume.
+            const blocking = imgApprovalQueue()
+                .filter(n => n.id !== afterNodeId && imgDownstreamWaiting(n.id) > 0);
+            if (blocking.length) return blocking[0];
             // Prefer the same build, in scene order: next scene after the one
             // just approved, else the earliest still-waiting scene in it.
             if (cur && cur.batch_id) {
