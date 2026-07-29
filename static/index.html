@@ -1028,6 +1028,33 @@
             font-size: 10px; font-weight: 700; letter-spacing: 1px;
             z-index: 2;
         }
+        /* dual-backend — "still waiting on the ChatGPT lane" placeholder tile.
+           The Banana lane owns node.status and usually finishes first, so a
+           node reads 'ready' with its Banana variants on screen while the
+           ChatGPT variant is still queued/generating. Without this tile the
+           grid looks final and the operator has no way to tell more is coming
+           — the disabled "⏳ ChatGPT queued…" action button is at the bottom
+           of the page, nowhere near the variants. Driven by ImageNode.cg_status. */
+        .img-variant.img-cg-pending {
+            border-style: dashed;
+            border-color: rgba(16, 163, 127, 0.55);
+            background: rgba(16, 163, 127, 0.06);
+            color: var(--text-secondary);
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            gap: 8px;
+            min-height: 120px;
+            cursor: default;
+        }
+        .img-variant.img-cg-pending .cg-ring {
+            width: 22px; height: 22px;
+            border: 3px solid rgba(16, 163, 127, 0.25);
+            border-top-color: rgba(16, 163, 127, 0.95);
+            border-radius: 50%;
+            animation: img-upload-spin 0.7s linear infinite;
+        }
+        .img-variant.img-cg-pending .cg-label {
+            font-size: 11px; text-align: center; line-height: 1.35;
+        }
 
         /* v533 — Upload tile (always shown alongside variants).
            Click to browse or drop a file onto the grid to upload. */
@@ -18016,6 +18043,14 @@ Ambient: same kitchen room tone, soft pour sound.
                 const activeNodes = data.nodes || [];
                 const newActiveIds = new Set(activeNodes.map(n => n.id));
                 const prevActiveIds = imgState._prevActiveIds || new Set();
+                // dual-backend — main-lane status of every row seen last tick.
+                // /nodes/active returns nodes kept alive by EITHER lane, so a
+                // node STAYS in the active set after its Banana lane finishes
+                // while its ChatGPT lane is still open. Plain set-membership
+                // therefore misses that completion: the ready-for-choice
+                // notification and the detail re-render both sat waiting on
+                // the slower GPT lane.
+                const prevActiveMain = imgState._prevActiveMain || new Map();
 
                 // Merge active rows into the cache (replace each by id).
                 for (const n of activeNodes) {
@@ -18026,9 +18061,20 @@ Ambient: same kitchen room tone, soft pour sound.
                 // are no longer in the active response → they transitioned
                 // to a terminal state (ready/failed). Force one full refresh
                 // so we pick up the new state + fire notifications via the
-                // existing imgRefreshNodes notification block.
-                const transitioned = [...prevActiveIds].filter(id => !newActiveIds.has(id));
+                // existing imgRefreshNodes notification block. Plus nodes
+                // still in the set whose MAIN lane just went terminal (see
+                // prevActiveMain above).
+                const MAIN_TERMINAL = ['ready', 'failed'];
+                const mainFinished = activeNodes.filter(n =>
+                    prevActiveMain.has(n.id)
+                    && !MAIN_TERMINAL.includes(prevActiveMain.get(n.id))
+                    && MAIN_TERMINAL.includes(n.status)
+                ).map(n => n.id);
+                const transitioned = [...prevActiveIds]
+                    .filter(id => !newActiveIds.has(id))
+                    .concat(mainFinished);
                 imgState._prevActiveIds = newActiveIds;
+                imgState._prevActiveMain = new Map(activeNodes.map(n => [n.id, n.status]));
 
                 if (transitioned.length > 0) {
                     console.log('[images] active-poll transitions → full refresh + notify:', transitioned);
@@ -18245,8 +18291,12 @@ Ambient: same kitchen room tone, soft pour sound.
                 // path.
                 // imgMaybeAutoBackfillVideoLinks();
 
+                // dual-backend — cg_status is part of the key so a ChatGPT-lane
+                // flip (queued → generating → ready/failed) re-renders the
+                // detail. Without it the pending-GPT loader tile kept a stale
+                // label until the variant count happened to change.
                 const prevDetailStatus = imgState.detailNodeId
-                    ? (imgState.nodesById[imgState.detailNodeId]?.status + '/' + (imgState.nodesById[imgState.detailNodeId]?.variants?.length ?? 0))
+                    ? (imgState.nodesById[imgState.detailNodeId]?.status + '/' + (imgState.nodesById[imgState.detailNodeId]?.variants?.length ?? 0) + '/' + (imgState.nodesById[imgState.detailNodeId]?.cg_status ?? ''))
                     : null;
 
                 // --- Ready-for-choice detection ---
@@ -18339,7 +18389,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 if (imgState.detailNodeId) {
                     const current = imgState.nodesById[imgState.detailNodeId];
                     if (current) {
-                        const newStatusKey = current.status + '/' + (current.variants?.length ?? 0);
+                        const newStatusKey = current.status + '/' + (current.variants?.length ?? 0) + '/' + (current.cg_status ?? '');
                         // Only re-render if something meaningful changed (avoids
                         // flashing while user is looking at/clicking variants)
                         if (newStatusKey !== prevDetailStatus) {
@@ -21914,6 +21964,37 @@ Ambient: same kitchen room tone, soft pour sound.
             });
         }
 
+        // dual-backend — HTML for the "ChatGPT image still coming" loader tile,
+        // or '' when there is nothing to wait for.
+        //
+        // node.cg_status is the ChatGPT satellite lane (ImageNode.cg_status):
+        // null | 'queued' | 'generating' | 'ready' | 'failed'. null means this
+        // node has no GPT lane at all (the auto-seed skips chain nodes; the
+        // manual "Generate with ChatGPT" button can still open one). The lane
+        // is independent of node.status, which the Banana lane owns.
+        //
+        // Show the loader only while the lane is queued/generating AND no
+        // backend='chatgpt' variant has actually landed — the worker can upload
+        // its variant a moment before the status POST, and once the real tile
+        // is on screen the loader would be a lie.
+        function imgCgPendingTileHtml(node) {
+            if (!node || node.kind !== 'generated') return '';
+            const cg = node.cg_status;
+            if (cg !== 'queued' && cg !== 'generating') return '';
+            const hasCgVariant = (node.variants || []).some(v => v.backend === 'chatgpt');
+            if (hasCgVariant) return '';
+            const label = cg === 'queued'
+                ? 'ChatGPT image<br>queued…'
+                : 'ChatGPT image<br>generating…';
+            return `
+                <div class="img-variant img-cg-pending"
+                     title="The ChatGPT lane for this node is ${cg}. Its variant appears here when it lands — any variants already shown are usable now.">
+                    <div class="variant-badge-gpt">GPT</div>
+                    <div class="cg-ring"></div>
+                    <div class="cg-label">${label}</div>
+                </div>`;
+        }
+
         function imgRenderNodeDetail(node) {
             const area = document.getElementById('imgDetailArea');
             if (!area) return;
@@ -22009,6 +22090,12 @@ Ambient: same kitchen room tone, soft pour sound.
             // finishes. Skip this during an optimistic regenerate (old variants are
             // being replaced, so the hourglass is correct there).
             const _hasShowableVariants = node.variants && node.variants.length && !_optimisticRegen;
+            // ...and the flip side of showing the fast lane's variants early:
+            // say out loud that the slow lane is still running. Computed once
+            // and dropped into every grid branch below, because the two lanes
+            // finish independently — any of these four states can coexist with
+            // a pending GPT render.
+            const cgPendingTile = imgCgPendingTileHtml(node);
             if (isGenerating && !_hasShowableVariants) {
                 // Stuck-claim escape hatch: if the worker crashed mid-job, the node
                 // sits in 'generating' forever until the 10-min server TTL sweep
@@ -22045,6 +22132,7 @@ Ambient: same kitchen room tone, soft pour sound.
                         </button>
                     </div>
                     <div class="img-variants-grid" data-node-id="${node.id}" style="margin-top:12px;">
+                        ${cgPendingTile}
                         <div class="img-variant img-upload-tile"
                              onclick="imgManualUploadClick(${node.id})"
                              title="Click to browse, or drag &amp; drop an image">
@@ -22063,6 +22151,7 @@ Ambient: same kitchen room tone, soft pour sound.
                         </p>
                     </div>
                     <div class="img-variants-grid" data-node-id="${node.id}" style="margin-top:12px;">
+                        ${cgPendingTile}
                         <div class="img-variant img-upload-tile"
                              onclick="imgManualUploadClick(${node.id})"
                              title="Click to browse, or drag &amp; drop an image">
@@ -22175,6 +22264,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                             onclick="imgDownloadOne(event, ${node.id}, ${v.id}, '${vLabel}')">⬇ Download</button>
                                 </div>`;
                         }).join('')}
+                        ${cgPendingTile}
                         <div class="img-variant img-upload-tile"
                              data-track="variant_manual_upload"
                              onclick="imgManualUploadClick(${node.id})"
@@ -22192,6 +22282,7 @@ Ambient: same kitchen room tone, soft pour sound.
                         <p>Click "Generate" below to kick off generation, or drop an image here to add a manual variant.</p>
                     </div>
                     <div class="img-variants-grid" data-node-id="${node.id}" style="margin-top:12px;">
+                        ${cgPendingTile}
                         <div class="img-variant img-upload-tile"
                              onclick="imgManualUploadClick(${node.id})"
                              title="Click to browse, or drag &amp; drop an image">
