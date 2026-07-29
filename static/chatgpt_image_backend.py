@@ -603,8 +603,27 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
             # (gated on _gen_failed). Here we only wait out the grace for a
             # genuinely image-less COMPLETE (content refusal / usage cap).
             if complete_since and (time.time() - complete_since) >= POST_COMPLETE_GRACE_S:
-                log(f"turn COMPLETE for {POST_COMPLETE_GRACE_S}s with no image — "
-                    f"giving up (likely content refusal / usage cap)")
+                # The tab may be STALE: turn COMPLETE server-side + the image is in
+                # the chat (operator confirmed), but this tab never rendered it.
+                # Reload the conversation (== a fresh browser) and re-detect before
+                # giving up. The non-COMPLETE stuck-reload above can't fire here
+                # (it's gated on `not complete_since`), so do it explicitly.
+                if reloads_left > 0:
+                    reloads_left -= 1
+                    log(f"turn COMPLETE {POST_COMPLETE_GRACE_S}s, no image in this tab "
+                        f"— reloading to pull server state "
+                        f"({STUCK_RELOADS - reloads_left}/{STUCK_RELOADS})")
+                    try:
+                        page.reload(wait_until="domcontentloaded", timeout=45000)
+                    except Exception as _re:
+                        log(f"reload failed: {_re}")
+                    last_cand = cand_since = last_status = complete_since = None
+                    ever_cand = False
+                    attempt_start = time.time()
+                    time.sleep(3)
+                    continue
+                log(f"turn COMPLETE for {POST_COMPLETE_GRACE_S}s with no image "
+                    f"(reloads exhausted) — giving up (likely content refusal / usage cap)")
                 break
         time.sleep(1.5)
     if not gen_src:
