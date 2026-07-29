@@ -18049,7 +18049,9 @@ Ambient: same kitchen room tone, soft pour sound.
                 const hasInFlight = imgState.nodes.some(n =>
                     n.status === 'queued' ||
                     n.status === 'generating' ||
-                    n.status === 'draft'   // draft = waiting on a parent choice
+                    n.status === 'draft' ||   // draft = waiting on a parent choice
+                    n.cg_status === 'queued' ||      // ChatGPT satellite lane active
+                    n.cg_status === 'generating'
                 );
                 if (!onImagesTab) {
                     // v789 — the v656 hard gate silently re-broke the v558

@@ -2428,9 +2428,19 @@ def list_active_nodes(
     client cache. ETag/304 short-circuits idle polls when nothing changes.
     """
     ACTIVE_STATUSES = ("queued", "generating", "draft")
+    CG_ACTIVE = ("queued", "generating")
+    # A node is "active" if EITHER lane can still change: the Banana lane
+    # (node.status) OR the ChatGPT satellite lane (cg_status). Without the cg
+    # clause, a node that's failed/ready on Banana but still rendering on ChatGPT
+    # (e.g. the manual "Generate with ChatGPT" button on a chain node) never
+    # appeared in the 2s poll, so its GPT variant only showed after a full page
+    # refresh.
     nodes = read_query_with_retry(db, lambda: db.query(ImageNode).filter(
         ImageNode.user_id == current_user.id,
-        ImageNode.status.in_(ACTIVE_STATUSES),
+        or_(
+            ImageNode.status.in_(ACTIVE_STATUSES),
+            ImageNode.cg_status.in_(CG_ACTIVE),
+        ),
     ).options(
         selectinload(ImageNode.variants),
         selectinload(ImageNode.parent_edges).joinedload(ImageEdge.parent),
