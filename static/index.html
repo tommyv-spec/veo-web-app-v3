@@ -4865,6 +4865,20 @@ Ambient: same kitchen room tone, soft pour sound.
           return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
         }
 
+        // v878 — the last 12 calendar months as <option>s. Value is prefixed
+        // "month:" so ONE select carries both the rolling windows and a
+        // specific month; the handler splits on the prefix.
+        function igExportMonthOptions(now = new Date()) {
+          const out = [];
+          for (let i = 0; i < 12; i++) {
+            const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+            const val = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+            const label = d.toLocaleString(undefined, { month: "long", year: "numeric" });
+            out.push(`<option value="month:${val}">${label}</option>`);
+          }
+          return out.join("");
+        }
+
         function igRenderAccountBlock(acc, videos) {
           const lastSync = acc.last_synced_at ? new Date(acc.last_synced_at).toLocaleString() : "never";
           const vCards = igSortNewestFirst(videos).map(v => igRenderVideoCard(v)).join("");
@@ -4875,6 +4889,12 @@ Ambient: same kitchen room tone, soft pour sound.
               <button class="btn btn-secondary btn-sm ig-sync-btn" data-id="${acc.id}">Sync</button>
               <button class="btn btn-secondary btn-sm ig-refresh-views-btn" data-id="${acc.id}" title="Re-pull views/likes for reels posted in the last 7 days">↻ Views 7d</button>
               <button class="btn btn-secondary btn-sm ig-retry-failed-btn" data-id="${acc.id}" title="Re-queue every failed video for transcription">Retry failed</button>
+              <select class="ig-export-range" data-id="${acc.id}" title="Window to export" style="font-size:11px;padding:2px 4px;">
+                <option value="last_week">Last week</option>
+                <option value="last_month">Last month</option>
+                ${igExportMonthOptions()}
+              </select>
+              <button class="btn btn-secondary btn-sm ig-export-btn" data-id="${acc.id}" title="Download name / URL / id / posting date / views as CSV">⭳ CSV</button>
               <button class="btn btn-danger btn-sm ig-delete-btn" data-id="${acc.id}">✕</button>
             </div>
             <div class="ig-videos-grid">${vCards || '<div class="empty" style="padding:8px;color:#888;font-size:11px;">No videos yet — click Sync.</div>'}</div>
@@ -5733,6 +5753,47 @@ Ambient: same kitchen room tone, soft pour sound.
             const data = r.ok ? await r.json() : null;
             await refreshInstagramPanel();
             if (data) console.log(`[ig] requeued ${data.requeued} failed videos`);
+            return;
+          }
+          // v878 — CSV export. fetch+blob, not a plain link: the endpoint is
+          // cookie-authed and a navigation would leave the panel on an error page.
+          const exportBtn = ev.target.closest(".ig-export-btn[data-id]");
+          if (exportBtn) {
+            const block = exportBtn.closest(".ig-account-block");
+            const raw = block?.querySelector(".ig-export-range")?.value || "last_week";
+            const isMonth = raw.startsWith("month:");
+            const qs = isMonth ? `range=month&month=${encodeURIComponent(raw.slice(6))}` : `range=${encodeURIComponent(raw)}`;
+            const oldLabel = exportBtn.textContent;
+            exportBtn.disabled = true;
+            exportBtn.textContent = "…";
+            try {
+              const r = await fetch(`/api/instagram/accounts/${exportBtn.dataset.id}/export?${qs}`, { credentials: "include" });
+              if (!r.ok) {
+                const err = await r.json().catch(() => ({}));
+                alert("Export failed: " + (err.detail || r.status));
+                return;
+              }
+              const rowCount = parseInt(r.headers.get("X-IG-Export-Rows") || "0", 10);
+              const skipped = parseInt(r.headers.get("X-IG-Export-Undated-Skipped") || "0", 10);
+              const blob = await r.blob();
+              const cd = r.headers.get("Content-Disposition") || "";
+              const nameMatch = cd.match(/filename="?([^"]+)"?/);
+              const a = document.createElement("a");
+              a.href = URL.createObjectURL(blob);
+              a.download = nameMatch ? nameMatch[1] : "instagram-export.csv";
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+              if (!rowCount) {
+                alert("No reels posted in that window" + (skipped ? ` (${skipped} reel(s) have no posting date and were skipped — run Sync).` : "."));
+              } else if (skipped) {
+                console.log(`[ig] exported ${rowCount} rows; ${skipped} reel(s) with no posting date skipped`);
+              }
+            } finally {
+              exportBtn.disabled = false;
+              exportBtn.textContent = oldLabel;
+            }
             return;
           }
           const delBtn = ev.target.closest(".ig-delete-btn[data-id]");

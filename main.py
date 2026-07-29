@@ -4241,6 +4241,127 @@ def refresh_instagram_stats(
     }
 
 
+# === v878 — CSV export of posted-reel stats (2026-07-30) ===
+# The panel shows views per card but there is no way to get the numbers OUT.
+# Operator wants three columns over a chosen window: what the video is (name /
+# URL / id), when it posted, how many views. CSV on purpose — opens in Sheets
+# and Excel with no extra tooling.
+def _ig_export_window(range_: str, month: Optional[str] = None):
+    """(start, end, label) in UTC. `end` is EXCLUSIVE.
+
+    A calendar month is NOT "30 days ago": asking for 2026-06 must return June
+    only, so the month branch snaps to the 1st and rolls the year over.
+    """
+    now = datetime.utcnow()
+    if range_ == "last_week":
+        return now - timedelta(days=7), now, "last-7d"
+    if range_ == "last_month":
+        return now - timedelta(days=30), now, "last-30d"
+    if range_ == "month":
+        if not month:
+            raise HTTPException(status_code=400, detail="range=month needs month=YYYY-MM")
+        try:
+            y_s, m_s = str(month).split("-")[:2]
+            start = datetime(int(y_s), int(m_s), 1)
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"bad month '{month}' — want YYYY-MM")
+        end = datetime(start.year + 1, 1, 1) if start.month == 12 else datetime(start.year, start.month + 1, 1)
+        return start, end, start.strftime("%Y-%m")
+    raise HTTPException(status_code=400, detail=f"bad range '{range_}' — want last_week|last_month|month")
+
+
+def _ig_export_rows(db, account_id: int, start, end):
+    """Reels of one account posted in [start, end), newest first, as CSV rows.
+
+    Name resolution, in order: the matched job's FIRST clip line (that is what
+    the Jobs board titles a job with, see _build_job_response first_dialogue) →
+    first line of the caption → the shortcode. A reel with no posted_at cannot
+    be placed in a window, so it is dropped and counted.
+    """
+    from models import InstagramVideo, Clip
+    videos = (
+        db.query(InstagramVideo)
+        .filter(
+            InstagramVideo.account_id == account_id,
+            InstagramVideo.posted_at.isnot(None),
+            InstagramVideo.posted_at >= start,
+            InstagramVideo.posted_at < end,
+        )
+        .order_by(InstagramVideo.posted_at.desc(), InstagramVideo.id.desc())
+        .all()
+    )
+    job_ids = [v.matched_job_id for v in videos if v.matched_job_id]
+    job_name = {}
+    if job_ids:
+        clips = (
+            db.query(Clip.job_id, Clip.clip_index, Clip.dialogue_text)
+            .filter(Clip.job_id.in_(job_ids))
+            .order_by(Clip.job_id, Clip.clip_index)
+            .all()
+        )
+        for c in clips:
+            # setdefault → the LOWEST clip_index wins (rows come in asc order).
+            job_name.setdefault(c.job_id, (c.dialogue_text or "").strip()[:80])
+
+    rows = []
+    for v in videos:
+        name = job_name.get(v.matched_job_id) or ""
+        if not name and v.caption:
+            name = v.caption.strip().splitlines()[0][:80] if v.caption.strip() else ""
+        rows.append([
+            name or v.shortcode or "",
+            v.url or "",
+            v.id,
+            v.posted_at.strftime("%Y-%m-%d %H:%M") if v.posted_at else "",
+            v.views or 0,
+        ])
+    undated = (
+        db.query(InstagramVideo)
+        .filter(InstagramVideo.account_id == account_id, InstagramVideo.posted_at.is_(None))
+        .count()
+    )
+    return rows, undated
+
+
+@app.get("/api/instagram/accounts/{account_id}/export")
+def export_instagram_videos(
+    account_id: int,
+    range: str = "last_week",
+    month: Optional[str] = None,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Download name / URL / id / posting date / views as CSV for one account."""
+    import csv as _csv
+    import io as _io
+
+    acc = _get_user_ig_account(db, account_id, current_user)
+    start, end, label = _ig_export_window(range, month)
+    rows, undated = _ig_export_rows(db, acc.id, start, end)
+
+    buf = _io.StringIO()
+    w = _csv.writer(buf, lineterminator="\n")
+    w.writerow(["video_name", "video_url", "video_id", "posted_at", "views"])
+    w.writerows(rows)
+    print(
+        f"[ig-export] account={acc.id} @{acc.handle} range={range} month={month} "
+        f"window={start.date()}..{end.date()} rows={len(rows)} undated_skipped={undated}",
+        flush=True,
+    )
+    fname = f"ig-{acc.handle}-{label}.csv"
+    # utf-8-sig: Excel on Windows reads a BOM-less utf-8 csv as latin-1 and
+    # mangles any accented caption text.
+    return Response(
+        content=buf.getvalue().encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "X-IG-Export-Rows": str(len(rows)),
+            "X-IG-Export-Undated-Skipped": str(undated),
+        },
+    )
+
+
 @app.post("/api/instagram/videos/{video_id}/transcribe")
 async def retry_transcribe_video(
     video_id: int,
