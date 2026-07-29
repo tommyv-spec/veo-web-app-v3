@@ -34,9 +34,9 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, H
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float, or_
+    Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float, or_, func
 )
-from sqlalchemy.orm import Session, relationship, joinedload, selectinload
+from sqlalchemy.orm import Session, relationship, joinedload, selectinload, aliased
 
 # Reuse the existing SQLAlchemy Base so init_db() picks up these models
 from models import Base, get_db_session, get_db, User, read_query_with_retry, UserWorkerToken
@@ -2463,6 +2463,76 @@ def list_active_nodes(
     if request.headers.get("if-none-match") == etag:
         return _FAResponse(status_code=304, headers=headers)
     return _FAResponse(content=body, media_type="application/json", headers=headers)
+
+
+@router.get("/nodes/approval-summary")
+def approval_summary(
+    db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """How many images are waiting for a variant pick, across ALL time.
+
+    Why this is a server count and not derived in the browser: the sidebar's
+    ``/nodes`` fetch is windowed (``since_days``, default 3), so anything
+    counted off that array silently omits every unapproved image older than
+    the window — the operator sees "3 need approval" while older picks sit
+    forgotten, with nothing on screen saying the number was scoped.
+
+    "Waiting" = a generated node that finished rendering and has no chosen
+    variant. Mirrors the frontend's imgIsAwaitingApproval exactly.
+
+    ``blocks`` per row = how many DIRECT children sit in draft, i.e. are
+    stuck until this pick lands. Direct is enough to decide *whether* a node
+    is a chain head: the frontend's transitive walk only recurses through
+    draft descendants, so transitive > 0 implies at least one direct draft
+    child. The frontend refines the exact depth for nodes it has loaded;
+    this ordering is what lets the counter jump to an out-of-window one.
+    """
+    awaiting = read_query_with_retry(db, lambda: db.query(ImageNode).filter(
+        ImageNode.user_id == current_user.id,
+        ImageNode.kind == "generated",
+        ImageNode.status == "ready",
+        ImageNode.chosen_variant_id.is_(None),
+    ).all())
+
+    blocks_by_parent: Dict[int, int] = {}
+    if awaiting:
+        ids = [n.id for n in awaiting]
+        child = aliased(ImageNode)
+        rows = read_query_with_retry(db, lambda: db.query(
+            ImageEdge.parent_node_id, func.count(ImageEdge.id)
+        ).join(
+            child, child.id == ImageEdge.child_node_id
+        ).filter(
+            ImageEdge.parent_node_id.in_(ids),
+            child.status == "draft",
+        ).group_by(ImageEdge.parent_node_id).all())
+        blocks_by_parent = {pid: cnt for pid, cnt in rows}
+
+    queue = [{
+        "id": n.id,
+        "batch_id": n.batch_id,
+        "scene_index_in_batch": n.scene_index_in_batch,
+        "name": n.name,
+        "blocks": blocks_by_parent.get(n.id, 0),
+    } for n in awaiting]
+    # Chain heads first, then build + scene order — same rule as the
+    # frontend's imgApprovalQueue so the two agree on what comes first.
+    queue.sort(key=lambda r: (
+        -r["blocks"],
+        str(r["batch_id"] or ""),
+        r["scene_index_in_batch"] if r["scene_index_in_batch"] is not None else 0,
+    ))
+
+    return {
+        "awaiting_total": len(queue),
+        "chained_total": sum(1 for r in queue if r["blocks"] > 0),
+        # Capped: the counter only needs the head of the queue to jump to,
+        # and an operator with hundreds of unapproved images does not need
+        # them all serialised into a status poll.
+        "queue": queue[:200],
+        "queue_truncated": len(queue) > 200,
+    }
 
 
 @router.get("/nodes/{node_id}")

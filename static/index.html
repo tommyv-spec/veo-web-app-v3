@@ -18275,6 +18275,14 @@ Ambient: same kitchen room tone, soft pour sound.
                 // Fire-and-forget — don't block node refresh on these.
                 imgMaybeRefreshPromotionIndex();
 
+                // All-time approval totals. Fire-and-forget for the same
+                // reason as the line above — the node render must not wait on
+                // it. One hook covers every path that can change the total:
+                // imgChooseVariant awaits imgRefreshNodes after each pick, and
+                // a render finishing lands here via the poll's transition
+                // detection. It repaints the counter itself when it resolves.
+                imgRefreshApprovalSummary();
+
                 // v480: auto-backfill the 🎥 promoted-to-video links on
                 // first load of the images tab this session.
                 //
@@ -19249,14 +19257,48 @@ Ambient: same kitchen room tone, soft pour sound.
                 .map(x => x.n);
         }
 
-        // Click target for the "N need approval" counter.
-        window.imgJumpToNextApproval = function() {
-            const q = imgApprovalQueue();
-            if (!q.length) {
-                if (typeof imgShowToast === 'function') imgShowToast('Nothing waiting for approval');
-                return;
+        // Server-side approval totals, across ALL time.
+        //
+        // The local queue above can only see imgState.nodes, which is windowed
+        // by since_days (default 3) — so a count taken from it silently drops
+        // every unapproved image older than the window. /nodes/approval-summary
+        // counts the lot. Refreshed on full refreshes and after each pick; a
+        // network blip just leaves the last known totals in place, and the
+        // counter falls back to the local (windowed) count if it never lands.
+        async function imgRefreshApprovalSummary() {
+            try {
+                const res = await fetch('/api/images/nodes/approval-summary');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                imgState.approvalSummary = await res.json();
+                // Repaint now — the caller is fire-and-forget, so the render
+                // that kicked this off already drew the local-only number.
+                if (typeof imgUpdateTabCount === 'function') imgUpdateTabCount();
+            } catch (e) {
+                /* keep whatever we had; the counter degrades to local counts */
             }
-            imgFocusNode(q[0].id);
+        }
+
+        // Click target for the "N need approval" counter. Prefers the server
+        // queue so it can reach an image OUTSIDE the loaded date window —
+        // that node isn't in imgState yet, so pull its batch in first.
+        window.imgJumpToNextApproval = async function() {
+            const srvQueue = (imgState.approvalSummary && imgState.approvalSummary.queue) || [];
+            const local = imgApprovalQueue();
+            // Local ordering is the more precise one (transitive chain depth,
+            // see imgDownstreamWaiting) — trust it whenever the server's head
+            // is already loaded, and only fall through to the server entry for
+            // the out-of-window case it exists to handle.
+            const head = srvQueue[0];
+            if (head && imgState.nodesById[head.id]) return imgFocusNode(local.length ? local[0].id : head.id);
+            if (head) {
+                if (head.batch_id && typeof imgFetchBatchNodes === 'function') {
+                    if (typeof imgShowToast === 'function') imgShowToast('Loading older image…');
+                    try { await imgFetchBatchNodes(head.batch_id); } catch (_) {}
+                }
+                return imgFocusNode(head.id);
+            }
+            if (local.length) return imgFocusNode(local[0].id);
+            if (typeof imgShowToast === 'function') imgShowToast('Nothing waiting for approval');
         };
 
         function imgUpdateTabCount() {
@@ -19284,27 +19326,46 @@ Ambient: same kitchen room tone, soft pour sound.
                 if (k === SUBJECTS_KEY) return;
                 batchesTotal++;
                 const grp = groupsByKey[k];
-                const grpReady = grp.filter(n => n.status === 'ready').length;
-                const grpNotReady = grp.length - grpReady;
-                if (grpNotReady > 0) batchesIncomplete++;
+                // A batch is only DONE when every image has both rendered AND
+                // been approved. Testing status alone reported "ALL N batches
+                // complete" on the same line as "3 need approval" — the line
+                // called the same work finished and outstanding at once. An
+                // image still waiting for a pick is unfinished work.
+                const grpUnfinished = grp.filter(n =>
+                    n.status !== 'ready' || imgIsAwaitingApproval(n)
+                ).length;
+                if (grpUnfinished > 0) batchesIncomplete++;
             });
             const parts = [];
             // "N ready" counts every rendered node including the ones already
             // approved, so it never answered "how many still need me?".
             // This does, and it leads the line because it is the only number
             // here that is a to-do. Click jumps to the one to do first.
-            const approvalQueue = imgApprovalQueue();
-            if (approvalQueue.length) {
-                const chained = approvalQueue.filter(n => imgDownstreamWaiting(n.id) > 0).length;
+            const localQueue = imgApprovalQueue();
+            const localChained = localQueue.filter(n => imgDownstreamWaiting(n.id) > 0).length;
+            // Server totals span all time; the local ones only span the loaded
+            // window. Prefer the server's, fall back to local if it never
+            // landed, and never report fewer than we can already see locally.
+            const srv = imgState.approvalSummary;
+            const total = srv ? Math.max(srv.awaiting_total, localQueue.length) : localQueue.length;
+            const chained = srv ? Math.max(srv.chained_total, localChained) : localChained;
+            if (total) {
                 const chainedNote = chained ? ` · ⛓ ${chained} chained` : '';
-                const tip = chained
-                    ? `${approvalQueue.length} image${approvalQueue.length === 1 ? '' : 's'} waiting for your pick — ${chained} of them block other images. Click to open the one to approve first.`
-                    : `${approvalQueue.length} image${approvalQueue.length === 1 ? '' : 's'} waiting for your pick. Click to open the first.`;
+                // Flag the ones the sidebar isn't even showing, so a count
+                // bigger than the visible list doesn't read as a bug.
+                const sinceD = (imgState && typeof imgState.sinceDays === 'number') ? imgState.sinceDays : 3;
+                const hidden = total - localQueue.length;
+                const hiddenNote = (hidden > 0 && sinceD !== 0)
+                    ? ` (${hidden} older than ${sinceD}d)` : '';
+                const tipParts = [`${total} image${total === 1 ? '' : 's'} waiting for your pick`];
+                if (chained) tipParts.push(`${chained} of them block other images`);
+                if (hidden > 0 && sinceD !== 0) tipParts.push(`${hidden} sit outside the ${sinceD}-day window shown in the list`);
+                tipParts.push('Click to open the one to approve first');
                 parts.push(
-                    `<button onclick="imgJumpToNextApproval()" title="${tip}"`
+                    `<button onclick="imgJumpToNextApproval()" title="${imgEscape(tipParts.join(' — '))}"`
                     + ` style="background:none;border:none;padding:0;font:inherit;cursor:pointer;`
                     + `color:rgb(245,158,11);font-weight:700;text-decoration:underline">`
-                    + `${approvalQueue.length} need approval${chainedNote}</button>`
+                    + `${total} need approval${chainedNote}${hiddenNote}</button>`
                 );
             }
             if (batchesTotal > 0) {
