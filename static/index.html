@@ -22659,15 +22659,28 @@ Ambient: same kitchen room tone, soft pour sound.
         async function imgChatgptGenerate(nodeId) {
             // Manually open the ChatGPT lane on this node (additive — adds a GPT
             // variant; never touches the Banana variants or the chosen one).
+            const node = imgState.nodesById && imgState.nodesById[nodeId];
+            // INSTANT optimistic feedback: flip cg_status to 'queued' + repaint
+            // BEFORE the round-trip, so the button shows "⏳ ChatGPT queued…"
+            // (disabled) and a spinner the moment it's clicked — not after the
+            // next poll. Revert on error.
+            const prevCg = node ? node.cg_status : undefined;
+            if (node) { node.cg_status = 'queued'; }
+            if (!imgState.regeneratingIds) imgState.regeneratingIds = new Set();
+            try { imgReflectRegenerating(); } catch (e) {}
+            try { imgShowToast('🤖 ChatGPT queued', 'Rendering this node with the ChatGPT worker — the GPT variant appears here when it uploads.'); } catch (e) {}
             try {
                 const res = await fetch(`/api/images/nodes/${nodeId}/chatgpt-generate`, { method: 'POST' });
                 if (!res.ok) {
                     const err = await res.json().catch(() => ({}));
                     throw new Error(err.detail || `HTTP ${res.status}`);
                 }
-                await imgRefreshNodes();
+                await imgRefreshNodes();   // real cg_status now owns the button state
             } catch (e) {
-                alert('Error: ' + e.message);
+                if (node) { node.cg_status = prevCg; }   // revert optimistic flip
+                try { imgReflectRegenerating(); } catch (_) {}
+                try { imgShowToastError('ChatGPT generation failed to queue', e.message); }
+                catch (_) { alert('Error: ' + e.message); }
             }
         }
 
