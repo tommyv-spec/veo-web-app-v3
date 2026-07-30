@@ -14604,9 +14604,21 @@ Dead Ingredients branches are kept in place. If Flow drops Omni-on-Frames, flip 
 
 **Half B starts AT THE DECODE STEP — that is the PRIMARY gate (operator 2026-06-12: "why don't we do it already at the decode step? describe the actual image from the very beginning, so if I use that prompt in nano banana I should get a copy of that specific frame").** The frames are already open during a decode — so every `### Image N` prompt in a decoded_*.md is written as a RENDER-READY recreation of one NAMED frame: the zoom frame open via Read WHILE writing (not the contact-sheet thumbnail, not memory of it), the inspected frame named in the block (`visual_delta: ... per frame_NNN`), and the 6-point look checklist above pinned from it. **Acceptance test: paste the prompt into NB2 alone → a copy of that specific frame.** A decode prompt that contradicts its own frame is a BROKEN decode (the live error: "full-body scale seated, about two meters" written while the frame showed a knees-up close crop) — downstream builds copy it and render wrong. Build-side consequence: a build MAY reuse a decode's image prompt when the decode names its frame — the build check shrinks to a SPOT-VERIFY (open the named frame once; confirm distance/crop + prop position + light + angle + eyeline still hold after the build's swaps, since a persona/setting swap can change what the composition needs). A decode prompt with NO frame citation gets no trust — write the build prompt from the frames directly. Decode-side workflow gate: `wiki/meta/decode-grammar-checklist.md` §Image-prompt rule (v790 RENDER-READY gate); ships inside `decode_bundle.sh` automatically. Forward-only per `feedback_rule-changes-forward-only`: existing decoded_*.md docs are NOT retro-edited; the gate applies from the next decode on (and to any decode prompt being reused by a build — spot-verify or rewrite).
 
+**Half C — source-shown beats are ground truth too (2026-07-22).** A source can show more than its transcript or topic summary says: ingredients held beside the symptom, a paste mixed in the palm, a tool opened, a product box turned to camera, then the mixture applied. Compressing those actions to a gist such as "rubs saffron" loses the source's demonstration even when the script still sounds right. Every new decode therefore emits an ordered `### Shown beats ledger` inside `## Adaptation-extraction`:
+
+```text
+| Source beat ID | Frame / clip evidence | Shown action / process step | Meaningful objects visibly present |
+|---|---|---|---|
+| SB1 | clip 1, frames f_001-f_004 | tips the ingredient into oil in the palm | labeled ingredient pack; oil bottle |
+| SB2 | clip 2, frame f_005 | mixes it into a thick paste | paste in palm |
+| SB3 | clip 2, frames f_006-f_009 | rubs the paste onto the symptom | paste; symptom carrier |
+```
+
+Give every visible process step and every meaningful on-screen object its own ordered row. A held or displayed object is a beat: name the presentation action and the object. Evidence must name the source clip or frame. If there truly is no demonstrated process and no meaningful shown object, emit the single row `none observed | n/a | n/a | n/a`; never omit the ledger. `verify_decode_format.py` hard-fails a missing, empty, unordered, or unevidenced ledger. The build-side twin is `### SOURCE VISUAL BEATS`: `ADAPT-NEW-STRUCTURE` and `STEP-UP-SAME-SOURCE` builds map every `SBn` to a concrete Scene/Image or write `DROP: <specific reason>`. This restores the older two-column SOURCE-FIDELITY MAP gate from `feedback_adapt-mirror-source-not-reinterpret` and makes §6.9 beat parity mechanical. It is not a new creative rule; it closes the storage/checker gap inside v790.
+
 **The meta-rule (the "completely unrelated cases" half):** before authoring artifact B from artifact A, ask what A actually IS. If A is an observation/summary/derived text, it is NOT ground truth for B — go one level down to the source A describes (frames, parser code, raw transcript, live platform behavior) and verify there. Same family as root `CLAUDE.md` §2 read-current-state; this rule pins it to the decode→build authoring path specifically.
 
-**Touched**: this deep-dive, `code/verify_video_format.py` (c5463a0, the two mirrored gates), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (authoring-step note), `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` (§conversation staging + §recreate-from-frames), root `CLAUDE.md` (gotcha row), `wiki/log.md`.
+**Touched**: original 2026-06-12 work — this deep-dive, `code/verify_video_format.py` (c5463a0, the two mirrored gates), `wiki/patterns/conventions.md`, `wiki/meta/generate-video-checklist.md`, `wiki/concepts/prompting/realistic-ugc-prompt-templates.md`, root `CLAUDE.md`, `wiki/log.md`. 2026-07-22 shown-beats amendment — `code/verify_decode_format.py`, `code/template_new_format.md`, `code/decode_bundle.sh`, `wiki/meta/decode-grammar-checklist.md`, `wiki/concepts/script-adaptation/script-adaptation-workflow.md`, both decode/build skills, both authoring auditors, and the v790 index/checklist rows. Root `CLAUDE.md` was not changed for the amendment.
 
 ## v791 — HOOK safe-area composition grammar (camera-first + layered foreground + scale cheat)
 
@@ -15843,14 +15855,379 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 
 **Touched**: this deep-dive (canonical), `code/clip_duration.py` (NEW — the only home of the bucket math), `code/tests/test_v861_clip_duration.py`, `code/image_platform.py` (per-line bullet parse + prepare-time resolve onto `clips.veo_render_duration_s`), `code/main.py` (PATCH validator accepts 10; all four worker payload builders ship the field — local + user worker × pending-jobs + redo-pending-clips), `code/worker.py` (Veo API path, per-clip duration + the 10→8 fold), `code/static/flow_worker.py` (Flow path, per-clip duration tab + prompt timing window), `code/template_new_format.md` (skeleton field), `~/.claude/skills/build-video/audit_build.py` (`v861_clip_duration` check + v831 cap 25→28), `wiki/patterns/conventions.md` (index row), `wiki/log.md`. Operator 2026-07-16.
 
-## v871 — Render-selectable prompt variant: every build carries BOTH prompt sections; the operator picks which renders (per video)
+## v867 — Test-axis fields: 11 controlled variables on every new decode + build §0
 
-**What / why**: v865 made the Google Omni block the per-clip render body. Operators want the prior anchor-format (IMMEDIATE ACTION / TERMINAL STATE) prompts KEPT and, per video, selectable as the actual render input. v871 makes every build emit BOTH sections and adds a platform selector. Operator directive 2026-07-25.
+**Problem this solves**: 11 axes PROVEN to vary between real videos lived only in filenames + free-text prose — never a structured field. Strongest evidence: the SAME cortisol/chest/Salvora concept exists as 4 decoded shell variants (podcast-splitscreen / gym-seminar-PiP / cowboy-seminar-PiP / gym-seminar-plain) plus chore variants (axe-woodsplit / cement-bag / lawnmower) plus observer variants (wife / new-neighbor / jogger) plus hero-age variants (48 / 63 / 64) — a live A/B family nobody could query or attribute. Single-variable testing needs the axis DECLARED, or the measurement can't say what changed.
 
-**Authoring standard (forward-only)**: every build emits:
-- `## Google Omni Final Prompts (per clip)` — the v865 twelve-block set, RENDERED BY DEFAULT (`### Clip N.M` headers; parsed for render + clip count).
-- `## Anchor-Format Prompts (… reference …)` — the same clips in anchor format, INERT to the render parser + clip-counter (bold `**Clip N.M**` labels; the header carries NO "Final Prompts" token; placed after `## Comprehension` / at EOF). Both Prompt A and Prompt B are fenced.
+**The 11 fields** (kebab-case values; canonical value bank + tier map = `wiki/synthesis/video-variable-taxonomy.md` — open enums, a NEW value is legal but MUST be appended to the taxonomy page in the same commit):
 
-**Platform**: `ImageJobBatch.prompt_variant` (`omni` default | `anchor`), auto-migrated. Batch overview shows a per-video selector ("Render with: Google Omni | Anchor-format") that POSTs to `/api/images/batches/{id}/prompt-variant`. At job-prep (`main.py` `_setup_job_background`), when variant=='anchor', each clip's `veo_prompt_override` + Prompt B are swapped from the anchor section parsed off the stored `source_markdown` (`_parse_anchor_reference_prompts`, keyed `(scene_index, per-scene 1-based line ordinal)` — the same key the Omni attach uses). Default `omni` leaves the render path byte-for-byte unchanged (regression-critical).
+| Field | What it names | Starter vocabulary |
+|---|---|---|
+| `shell` | production wrapper | talking-head / podcast-splitscreen / gym-seminar / cowboy-seminar / barn-seminar / pip-inset / green-screen / slideshow / interview / two-act / music-only / silent-listicle |
+| `chore` | vitality-proof activity in the hook | axe-woodsplit / cement-bag / lawnmower / groceries-one-trip / kettlebell / push-ups / pull-ups / none |
+| `observer` | jealous-witness identity | wife / new-neighbor / jealous-jogger / neighbors-wife / none |
+| `hero_age` | stated/read age of symptom owner | integer, or none |
+| `proxy` | the failing-part stand-in | banana / rotten-banana / cucumber / geoduck / eggplant / python / balloon / silicone-belly / mannequin-pelvis / clay-torso / anatomy-diagram / wilting-sunflower / none |
+| `destruction` | failed-fix destruction mechanic | cement-truck / cart-fire / pestle-smash / club-smash / bounce-off / none |
+| `recipe_stack` | ingredient list of the demo | YAML list (e.g. `[beet, watermelon, pomegranate]`), or none |
+| `voiced` | whole-video audio mode | vo / silent-karaoke / music-only |
+| `setting_anchor` | the one named location | attic-studio / designer-kitchen / helipad / yacht / garage / porch / gym / barn / costco / walmart / home-depot-lot / … |
+| `caption_style` | burned-in text treatment | karaoke-caps / yellow-highlight / orange-box / capcut / none |
+| `watermark` | AI-disclosure overlay observed (DECODE side only) | present / absent |
 
-**Touched**: `image_platform.py` (column + auto-migrate + anchor parser returns Prompt B + `POST /prompt-variant` endpoint + overview payload), `main.py` (job-prep swap + `[v871]` diagnostic log), `static/index.html` (selector), `template_omni_master.md` + `template_new_format.md` (both-sections standard), `template_reference.md` §v871 (this), `~/.claude/skills/build-video/SKILL.md` (gate line), `wiki/patterns/conventions.md` + `wiki/meta/build-rule-index.md` + `wiki/log.md` (index/timeline). Forward-only.
+**DECODE side**: all 11 as YAML frontmatter keys on every NEW `raw/videos/decoded_*.md`. `watermark:` records what the COMPETITOR shows. `none` is mandatory when an axis is absent — a missing key means "not tracked", `none` means "checked, absent". Forward-only: never retro-edit existing decodes (`raw/` is read-only).
+
+**BUILD side**: one §0 line on every NEW `videos/*.md`:
+`- **TEST AXES:** shell=talking-head | chore=kettlebell | observer=none | hero_age=64 | proxy=banana | destruction=none | recipe_stack=none | voiced=vo | setting_anchor=helipad | caption_style=yellow-highlight`
+(10 fields — `watermark` is N/A build-side; our disclosure is mandatory per §14.1.) Two builds whose TEST AXES lines differ on EXACTLY ONE key = a clean single-variable test cell; pairs with the §7.2.1 DIRECTION LOCK (the changed key SHOULD be a locked changed-section) and with the PAIRED VARIANT / STEP-UP declarations.
+
+**What this is NOT**: not a new frontmatter home for concepts that already have fields — niche / product / persona / angle / cta keep their existing keys. The 11 fields cover ONLY the previously-untracked axes. Phase 1 is declaration-only: `audit_build.py` + `verify_video_format.py` + `verify_decode_format.py` are NOT changed by v867 (no new hard-fails); enforcement can be added later once the vocab settles.
+
+**Scope / gates**: every NEW decode (frontmatter) + every NEW build (§0 TEST AXES line). Forward-only. Open-enum discipline: new value → same-commit append to `wiki/synthesis/video-variable-taxonomy.md`.
+
+**Touched**: this deep-dive (canonical), `code/template_new_format.md` (skeleton §0 TEST AXES line), `wiki/meta/decode-grammar-checklist.md` (decode workflow note), `wiki/meta/generate-video-checklist.md` (build workflow note), `wiki/patterns/conventions.md` (index row), `wiki/synthesis/video-variable-taxonomy.md` (value bank, gap list → promoted), `wiki/log.md` (timeline). Operator directive 2026-07-25 ("option 1" on the variable-taxonomy gap list).
+
+## v833.1 — RELAXED 2026-07-25: dated day stamps allowed again (§14.2.1)
+
+**Operator 2026-07-25: "we can use days."** The §14.2 / v833-clause-1 hard ban on dated day stamps (2026-07-01) is RETIRED. "Day 1 vs Day 30", D1-DX checkpoint ladders, and before/after over time are ALLOWED again. Driver: mentor content plans actively push them — "definitely test this day 1, day 30, they grow accounts very fast" (2026-07-23 call) and transformations run >50% direct-sale ratio (2026-07-19 call).
+
+**All three time framings are now legal, per-test choices** (checkpoint COUNT is its own test axis — 2 vs 3 waypoints, `wiki/synthesis/video-variable-taxonomy.md`):
+1. dated timeline (Day 1 → Day 30 / D1→45→90)
+2. "how it started / how it's going" present-state panels (stays the v833 meme-grammar form)
+3. same-scene A/B contrast (pills-fail-vs-works, limp-vs-firm one moment, catalyst demo)
+
+**Unchanged:** §14.1 disclosure on every post; v833 clauses 2-4 (full-health transform on the person, tight crop + classic hook prompt rules, proxy bound to the zone) still bind meme-panel builds; v852 silent-clip handling for meme beats. `audit_build.py` `c_no_time_transformation` is now a no-op PASS (v795.1 pattern). Forward-only — builds converted to started/going during 07-01→07-25 stay as shipped.
+
+**Touched**: this deep-dive (canonical), root `CLAUDE.md` §14.2 quickref, `wiki/concepts/script-adaptation/synthetic-disclosure-and-cta-rules.md` (canonical §14 page), `~/.claude/skills/build-video/audit_build.py` (no-op), `wiki/patterns/conventions.md` (row note), `wiki/synthesis/video-variable-taxonomy.md` (time-anchor + checkpoint rows), memory `feedback_synthetic-disclosure-and-improved-cta`, `wiki/log.md`. Operator directive 2026-07-25.
+
+## v869 — Real+mannequin dual-carrier comparison hook: the comparison sits at frame CENTER (operator 2026-07-25)
+
+**The step-up this encodes (operator, on the DAY0/DAY30 torso decode):** the saturated mannequin-pair format shows two dummies; the step-up puts a MANNEQUIN and a REAL PERSON in the same frame. The real-vs-fake gap is the LIFE axis: mannequin carrier = the failing state, real person = the restored state. Second attestation family: Day-0/Day-X dual-proxy held-comparison (`decoded_day0_day7_geoduck_bear_ed` + `decoded_mannequin-day0-day30-torsos-cowboy-cabin-belly-comment-yes-ig`).
+
+**Clauses (all bind the hook image + clip 1 of any real+mannequin comparison build):**
+
+1. **Proxy on BOTH carriers when the symptom is unshowable (ED).** The failing proxy hangs at the MANNEQUIN's pelvis zone; the healthy proxy sits at the REAL man's pelvis zone. Operator literal: *"Real man's confidence/posture = the after — it also needs the proxy."* Posture alone NEVER encodes the after in a proxy niche. (Showable niches — belly, skin — may put the real symptom/real fitness on the person directly; the mannequin still carries the failing state.)
+2. **Failing proxy = SMALL + ROTTING; healthy proxy = BIG + FIRM.** Two gaps stack in one glance: size AND state (operator sketch: "the bad banana should be small and rotting"). Rot is legal at this intensity because it sits on a PROP carrier — the carrier decides the disgust ceiling (`feedback_carrier-decides-disgust-ceiling`); stay viral-exaggerated, never body-horror.
+3. **The comparison sits horizontally centered and vertically in the MID-UPPER band — nothing story-relevant in the lower third (operator refinement 2026-07-25 on the first render: "nuri's face and the action should be a bit higher, like the camera is a bit lower and points a bit higher; nothing relevant for the scene should be in the lower third").** The two proxies meet almost touching, nose-to-nose, horizontally centered. Camera: lens slightly BELOW the standing man's hips, tilted slightly UP — the low camera pushes the meeting point + both proxies + the protagonist's face into the upper two-thirds. The lower third holds only falloff (her legs/dress, floor). Pairs with `feedback_hook-prop-mid-upper-frame`. (This replaces the v791.2 "lens level with the raised hand" lock for this staging — the lens-height lock pins BELOW the comparison point, aimed up at it.)
+4. **The protagonist LOWERS to the comparison level, face beside-or-just-above the meeting point.** Nuri kneels/crouches at the man's pelvic height, her face right next to and slightly above the two proxies, mouth mid-line (she stays the speaker). She HOLDS the mannequin and POINTS at the real man's prop (pointing legal per v795.1).
+5. **The real man may be cropped.** Standing at the frame edge, waist-to-chest in frame, head OUT of frame is legal — the towering cropped body reads as the after; his proxy does the talking.
+6. **Declared carve-outs vs v791.2 (each lifts ONLY its named clause):** `CARVE-OUT: v791 hero-face-at-top-edge — comparison-center staging` + `CARVE-OUT: v791 single-hero-prop — dual-state comparison`. Every other v791.2 clause HOLDS: named ultra-wide 0.5x lens sentence first, lens-height lock (at the hips), foreshortening does the size work, deep focus / everything sharp, no thirds-vocabulary, no "immediate foreground" wording, plain state-words on each proxy's first mention ("small and rotting", "large and firm").
+7. **Catalyst opens clip 1 (§6.7):** the CONTACT between the two proxies is the opening action — she pushes the mannequin's small rotten proxy up against his big firm one, it taps and flops, line 1 names the pain over the rotten one. Never a static posed hold.
+8. **Labels:** burned-wood physical signs on the carriers (never overlay text). Dated ("DAY 0/DAY 30") vs state text ("MOST MEN"/"ME") = a per-test choice per v833.1 (§14.2.1).
+
+**Scope / gates:** hook image + clip 1 of real+mannequin comparison builds. Forward-only. §0 declares the two carve-outs + the v867 TEST AXES line (`proxy=mini-torso-mannequin` + the second proxy instance).
+
+**Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (workflow note), `wiki/log.md` (timeline), gbrain `rules/v869`. Origin: operator direction + sketch 2026-07-25 on `decoded_mannequin-day0-day30-torsos-cowboy-cabin-belly-comment-yes-ig`.
+
+## v870 — UPPER-CENTER SAFE-ZONE COMPOSITION (generic, every image; operator 2026-07-25)
+
+**The rule (applies to EVERY `### Image N`, not just the hook).** The load-bearing content of a frame — the avatar's FACE, the hero PROP, and the key ACTION / contact point — must sit in the **upper two thirds** of the vertical 9:16 frame, **centered high**. The **lower third is reserved dead space** and must carry nothing story-relevant.
+
+**WHY (the generic logic — this is what makes it a rule, not a preference):**
+1. **UI occlusion.** Vertical feeds (Reels / TikTok / Shorts) paint their own UI over the bottom ~25-30% of the frame — caption, @handle, audio ticker, like / comment / share / follow buttons. Anything load-bearing placed there is physically HIDDEN behind the platform chrome.
+2. **Caption collision.** Our own burned-in karaoke word captions sit lower-center. A low subject/action collides with them.
+3. **Scroll gravity.** A fast scroll lands the eye on the UPPER-center first — the highest-attention zone. The scroll-stop must be where the eye already is.
+4. **One-glance read.** Action at the subject's chest-to-face height puts the emotion (face) and the payload (prop / action) together in the same glance, both above the UI.
+
+**METHOD (the part builds get wrong — load-bearing):**
+- **RAISE the subject/action to camera-eye height** so it naturally sits high: stand the prop on a raised surface (a dresser / counter at chest height), or HOLD it up at chest-to-face height, or stage the action at that height.
+- **Camera AT that height** (eye / chest level with the action), **NOT a low camera tilted up.** A low camera leaves low objects low regardless of tilt. Caught 2026-07-25 on the club-smash build: "handheld held below the console, tilted up" dropped the mannequin + the smash to the bottom-left corner; the fix was to stand the mannequin on the dresser at the couple's chest height AND move the camera to chest height — raising the SUBJECT, not tilting the lens.
+- **BAN on any frame that carries the main subject:** "filling the lower half of the frame", "at the bottom edge", "on the floor / low counter" for the hero. A prop parked low reads small/secondary and buries the scroll-stop.
+
+**SCOPE:** every image in every build. The HOOK is the strictest case (the scroll-stop lives or dies here), but body and CTA frames also keep the face / prop / action out of the lower third.
+
+**CHECK:** the **square-test** (Rule 30) — put the frame beside the standard-doc square, draw the line; the subject / action / controversy must sit inside the UPPER square. In the prompt, place the subject/action in "the upper two thirds" and reserve "the lower third" (empty), OR raise the subject to chest height by construction.
+
+**Relationship to existing rules:** generalizes `feedback_hook-prop-mid-upper-frame` (which was HOOK-only) to ALL frames and writes in the UI-safe-zone logic. Pairs with §v791.2 (foreshortened hero dead-centre, head touching the top edge), §v869 clause 3 (the comparison sits in the mid-upper band), and Rule 30 (square-test). A §v791 or §v869 carve-out never lifts v870 — the upper-two-thirds placement holds under every carve-out.
+
+**Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/build-rule-index.md` (§A classification), `wiki/meta/generate-video-checklist.md` (workflow note), `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` (§ upper-center safe-zone), memory `feedback_hook-prop-mid-upper-frame` (generalized + v870 pointer), `wiki/log.md`, gbrain `rules/v870`. Forward-only. Operator 2026-07-25 ("the action, the focus of the image needs to be always in the top 2/3 … make it generic for the logic to be applied in the rule").
+
+## v868 — Decode Variable ledger (anchor; canonical = decode-grammar-checklist)
+
+Every NEW decode's Comprehension section ends with `### Variable ledger`: walk `wiki/synthesis/video-variable-taxonomy.md` (all tiers + modifier + cross-decode-diff tables) and record one `- axis: value` line per axis the video expresses; skip non-applicable axes; a value missing from the taxonomy MUST be appended there in the same commit (open-enum rule). Complements v867 (the 11 YAML fields stay mandatory). Declaration-only, forward-only. **Canonical detail:** `wiki/meta/decode-grammar-checklist.md` §8-part structure item 7 + `.claude/skills/decode-reel/SKILL.md`; index row `wiki/patterns/conventions.md`. This section exists as the masters heading anchor (operator 2026-07-25; anchor added 2026-07-28 to satisfy `check_rule_index.py`).
+
+## v872 — One speaker per SCENE and per CLIP; the prompt says `<descriptor> says, "<line>"` and nothing more
+
+**CONFIRMED 2026-07-29 (two first-try renders).** The rule has TWO layers and both are mandatory:
+
+**LAYER 1 — SCENE STRUCTURE (authoring time, before any prompt is written).** A beat where two people speak becomes **TWO scenes**, never one scene with a merged `- **line:**`. One `### Scene N` = one `- **line:**` = one mouth. A question and its answer are two scenes, two clips, two durations, and each speaker gets a start frame that FAVOURS them (the answer scene needs its own reverse-angle image — an image that favours the other speaker cannot be reused for it). This is a design-time constraint: if a decode's source shot holds an exchange in one continuous take, the BUILD still splits it, and the extra image is authored up front rather than discovered at render time. Practical cost: +1 scene, +1 clip, +1 line, +1 image, and the duration sum grows by that clip (recompute per v861 word buckets). Because those are §7 invariants, converting an existing merged build routes as a BUILD → new `vN+1` file (§7.2), not an in-place edit.
+
+**LAYER 2 — PROMPT BODY (per clip).** The spoken part is ONE sentence in Google's documented grammar:
+
+```
+The <visual descriptor> says, "<line>"
+```
+
+Descriptor LEADS, `says,` then the quote. Nothing else. No `TURN` labels, no timestamps, no `saying exactly:`, no turn-order plumbing, no silent-cast lock. Around it, keep ONLY what the start frame cannot supply (see the short-body shape below).
+
+**THE EVIDENCE (why the scaffolding was retired the day after it was written).** 2026-07-28 the merged two-speaker clip was authored with the full escalation — visual descriptors, `TURN 1 [00:00-00:04]` labels, per-turn `saying exactly:`, mouth-close beats, silent-cast lock, twelve-block body. Operator: *"they keep alternating and messing up the dialogue lines."* 2026-07-29 the same beat, SPLIT into one clip per speaker, rendered with the whole spoken instruction being `the woman in blue says, "that is my husband"` — **perfect first try**. The full split hook (question clip + reveal clip, short bodies) then also landed first try: *"works perfectly"*. Two renders, two hits, zero re-rolls.
+
+Three readings, all now load-bearing:
+
+1. **The documented form IS the mechanism, not a starting point.** `A woman says, "We have to leave now."` is Google's own example; leading with the visual descriptor is GlobalGPT's documented fix for wrong-mouth attribution. Our `speaks clearly in a <register> American accent, saying exactly:` was a mutation of it with no measured benefit and a measured cost.
+2. **Length dilutes.** A four-hundred-word body that re-describes what the start frame already shows competes with the frame and buries the one instruction that matters. The frame carries STATE; the prompt carries the DELTA.
+3. **Naming silent mouths CAUSES mis-attribution.** "the muscular climber and the heavy man never speak and keep their lips closed" puts three extra mouths into a sentence about speech. Same failure family §v808 already records — *"no negative mentions either ('no children' seeds renders)"*. **Never name a non-speaker inside a dialogue instruction.** If someone must stay quiet, the way to achieve it is to not mention them at all.
+
+**THE SHORT BODY (the shape that shipped).** Five short blocks. Everything the start frame already carries is CUT:
+
+```
+Animate the attached start-frame image into a <N>-second vertical 9:16 realistic UGC video. Handheld iPhone at chest height with slight natural drift. One continuous take, no cuts, no zooms.
+
+Keep the exact lighting, texture and imperfect iPhone quality of the attached image. No sharpening, no skin smoothing, no beauty filter, no HDR, no cinematic polish, no colour grade. Keep every face, outfit and object as in the image.
+
+<ONE sentence of motion — only what changes over the clip.>
+
+The <visual descriptor> says, "<line>"
+
+<Ambient audio in one line>. No music. No subtitles, no captions.
+```
+
+CUT (frame-derivable): the `Reference:` identity paragraph, the `Scene:` environment paragraph, the t=0 camera layout, `Ending Camera Beat`, `Style:`, and the long negative-constraint list. KEPT (not in the frame): duration + ratio, take discipline, the fidelity lock (stops Omni "improving" the frame into HDR/beauty-filter video), the motion delta, the spoken sentence, ambient audio, and the no-subtitles ban (Omni burns captions unprompted). `Animate the attached start-frame image into…` replaces `Create a … video` — "create" reads as generate-from-scratch; this names the job as continuation of the frame. Pairs with the v784 Frames-mode submit shape (`shape=startImage` in the `[flow-api-capture]` log line) — the prompt cannot fix a clip submitted as `referenceImages`.
+
+**Descriptor rule.** The descriptor is what the frame shows — garment colour first ("the woman in the blue dress", "the curly-haired woman in the white top", "the muscular man in the canvas overalls"). Never a name; the model has never seen "Nuri". A bare "the woman" / "the man" is a FAIL whenever two of that gender share the frame. This is the one clause that survived from the 2026-07-28 draft, and it is the clause that was doing the work all along.
+
+**Voice / accent.** The proven bodies carried no `American accent` token and the delivery still read American. Where the accent must be locked, add it as a SEPARATE short sentence before the speech line ("Her voice is casual American, not acted") — never as a clause inserted between `says,` and the quote, which breaks the binding.
+
+**Linter position (updated 2026-07-29).** `audit_build.py` accepts BOTH forms: the short `says, "…"` and the legacy `saying exactly:`. `dialogue_turn_grammar` HARD-FAILS a clip carrying two speech spans (that is a Layer-1 violation reaching the artifact — split the scene). The `American accent` count no longer has to equal the speech-marker count; one voice token per dialogue clip is enough, and its absence is a WARN. The v810 post-speech-silence clause is optional on a short body (WARN, not FAIL) — the proven prompts had none.
+
+**Legacy.** Builds shipped before 2026-07-29 keep their twelve-block bodies; forward-only. The `## Anchor-Format Prompts` (v871) reference section keeps its generic `The assigned on-camera speaker says exactly:` line, which violates the descriptor rule whenever more than one person is in frame — name the garment there too.
+
+## v872-legacy — the retired turn-list scaffolding (kept for history, DO NOT author new builds with it)
+
+**Problem (operator 2026-07-28, "we have a problem with the prompt when multiple characters are talking… we have to divide who says what and when").** A clip with two speakers was written as ONE quoted blob covering both lines:
+
+```
+Dialogue: The neighbour speaks first and Nuri answers second, both clearly in American accents,
+saying exactly: "hey. is that your dad climbing next door? he is in great shape for his age. that is my husband."
+```
+
+Nothing in that string tells the model which mouth owns which sentence. Omni hands the whole span to one face — Nuri asks "is that your dad", or the neighbour delivers the wife-reveal, and the hook's whole misattribution mechanism dies. Same class of bug, one person quieter: a single-speaker clip written as "The woman speaks…" while TWO women stand in frame, or "The man speaks…" with two men — an ambiguous speaker noun picks a mouth at random.
+
+**Sources (§2 two-source floor):** Google Cloud, *Ultimate prompting guide for Veo 3.1* (2025-10-15) — "**Dialogue:** Use quotation marks for specific speech (e.g., A woman says, "We have to leave now.")", and lists "multi-person conversations" as a supported audio capability. GlobalGPT, *How to Make Characters Speak in Veo 3.1* — "**Wrong Character Speaks:** In scenes with two people, the AI might give the dialogue to the wrong person. To avoid this, always start your dialogue prompt with the character's specific name, like 'The woman in the red jacket says…'" and "**Timestamp Prompting:** … you can use timestamp prompts like `[00:03-00:08]`". Skywork (citing Replicate's Veo guide) — explicit scripts (`Alex says: "…"`) beat implicit ("Alex introduces himself"), and one speaker per short clip is the most reliable form for tight lip-sync. Matches our own §v643.2 / §v643.4.
+
+**MINIMAL GRAMMAR BEAT THE SCAFFOLDING (operator render evidence, 2026-07-29 — read this before authoring a dialogue block).** On the SPLIT single-speaker reveal clip, the whole prompt was:
+
+```
+the woman in blue says, "that is my husband"
+```
+
+It landed **perfectly on the first try**, where the full twelve-block body with TURN labels, timestamps, mouth-close beats and a silent-cast lock had been failing. Three readings, all forward-only until the A/B below runs:
+
+1. **The documented form is the mechanism, not a starting point.** `<VISUAL DESCRIPTOR> says, "<line>"` is Google's own example grammar (`A woman says, "We have to leave now."`) plus the positional fix (descriptor LEADS). Our `speaks clearly in a <register> American accent, saying exactly:` is a mutation of it, and the mutation carries no proven benefit.
+2. **Length dilutes.** A 400-word body that re-describes what the start frame already shows competes with the frame and buries the one instruction that matters. The frame carries STATE; the prompt should carry only the DELTA.
+3. **The silent-cast lock is the prime suspect for actively causing mis-attribution.** Naming three non-speaking mouths inside a sentence about speech seeds them as speech candidates — the same failure family §v808 already records ("no negative mentions either — 'no children' seeds renders"). Do not add more mouths to a dialogue block.
+
+**Scope of this evidence:** the clip was ALREADY SPLIT to one speaker. It confirms the one-speaker-per-clip default below; it says nothing about rescuing a merged two-speaker clip, and the merged form stays discouraged.
+
+**Unresolved conflict — do not drift, decide it.** The minimal prompt above FAILS our current gates: `saying exactly:` (`audit_build.py:614`), the `American accent` / `saying exactly:` count match (`:643`), the v810 post-speech silence clause, and the v865 twelve-block body. Resolution path is a controlled A/B (same frame, same line, 3 clips each: full v865 body vs minimal body + Quality/Fidelity Lock only, scored on first-try success). If minimal wins or ties: v865 gains a short-body variant, v810's mandated clauses become optional on short bodies, and the turn-list scaffolding below is retired. Until that runs, the gates stand and the scaffolding stays MANDATORY-BY-LINTER but is no longer claimed to help.
+
+**THE DEFAULT IS ONE SPEAKER PER CLIP (operator render evidence, 2026-07-28: "they keep alternating and messing up the dialogue lines").** On the v6 scaffold hook the full escalation was authored — visual descriptors, TURN labels, per-turn `saying exactly:`, timestamps, mouth-close beats, silent-cast lock — and Omni STILL alternated the mouths and swapped the lines. Treat that as settled: a two-speaker exchange inside one ≤8s clip is NOT reliable, whatever the prompt says. Matches Skywork/Replicate ("one speaker per short clip is the most reliable approach for tight lip-sync") and our own §v643.4. So:
+
+- **Author every exchange as one clip per speaker.** Question clip, then answer clip, alternating over-the-shoulder angles (§`feedback_dialogue-shot-reverse-switching`). Cost: one extra clip and a cut. Benefit: lip-sync and attribution stop being a lottery.
+- **The in-clip turn list below is the FALLBACK**, used only when the operator explicitly wants the exchange in one continuous take and accepts the re-roll risk. It is also the correct shape for the transitional case where a clip has one speaker but several people in frame.
+- `feedback_merge-qa-into-one-clip` (2026-07-24, "we can also put together the question and answers together") is SUPERSEDED as a default by this render evidence: merging is allowed, but it is no longer the recommended form, and a merged clip that mis-attributes twice gets split rather than re-prompted a third time.
+
+**THE TURN-LIST SHAPE — every Omni `Dialogue:` block is a turn list.** One TURN line per speaker, in spoken order:
+
+```
+Dialogue: <N> speaker(s), <N> separate turn(s), strict order, no overlap and no interruption.
+TURN 1 [00:00-00:04] — SPEAKER: <VISUAL DESCRIPTOR>. <staging>, in a <register> American accent, saying exactly: “<line 1>” <mouth-close beat>
+TURN 2 [00:04-00:07] — SPEAKER: <VISUAL DESCRIPTOR>. <staging>, in a <register> American accent, saying exactly: "<line 2>"
+<silent-cast lock>. Immediately after finishing <the line / her answer>, <last speaker> stops speaking, holds a <expression>, and stays silent for the rest of the clip.
+```
+
+Six clauses, all load-bearing:
+
+1. **SPEAKER = a VISUAL DESCRIPTOR, not a name.** "the curly-haired neighbour in the white athletic top", "Nuri, the woman in the cobalt-blue dress", "the muscular older man with the shaved head, grey moustache and canvas overalls". The model cannot resolve a name it has never seen; it CAN resolve hair, garment and build against the start frame. A bare "the woman" / "the man" is a FAIL whenever two of that gender share the frame.
+2. **The descriptor leads the turn, immediately before the quote.** The GlobalGPT fix is positional — attribution trailing the quote binds weakly.
+3. **Timestamps bracket every turn** (`[00:00-00:04]`), plus an explicit mouth-close beat at the boundary ("Her mouth closes at 00:04 and stays closed" / "Her mouth stays closed until 00:04"). Without them the model infers turn length from the text and routinely starts speaker 2 over speaker 1's tail. Timestamps are the difference between "no overlap" as a wish and as a spec.
+4. **Silent-cast lock, always.** Name every non-speaking adult in frame and state they never speak and keep their lips closed for the whole clip. Non-speakers left unmentioned drift into mouthing along.
+5. **`Voice:` mirrors the turn list** — one voice spec per speaker, plus "Never blend the two voices into one narrator" on a multi-speaker clip.
+6. **`Performance / Action:` mirrors it too** — the turn split is restated in staging terms ("the two women take strict turns and never overlap… the muscular climber and the heavy man keep their lips closed").
+
+Single-speaker clips take the same shape with one turn (`Dialogue: One speaker, one turn.` / `TURN 1 — SPEAKER: …`); timestamps optional there, silent-cast lock still mandatory whenever anyone else is in frame.
+
+**THE QUOTE-CHARACTER CONSTRAINT (interacts with §v865/§v821 — read before authoring).** §v865 hard-fails an Omni prompt carrying `saying exactly:` with anything other than EXACTLY ONE ASCII double-quoted span, because §v821 reads the LAST quoted span as the dialogue line. So a two-turn block CANNOT put both lines in `"…"`. Resolution:
+
+- **TURN 1 (and any turn that is not last) uses typographic quotes `“…”`** — invisible to the `r'"([^"]+)"'` scan in `verify_video_format.py:363`, fully legible as speech to Omni.
+- **The LAST turn uses ASCII `"…"`** — it becomes the v821 line, so Prompt B rewords ONLY the last speaker's line and every earlier turn stays byte-identical between A and B.
+- Consequence, unchanged from `feedback_merge-qa-into-one-clip`: a policy trip caused by the FIRST speaker's line cannot be rescued by Prompt B. Fallback is the single-speaker split for that one clip.
+- `saying exactly:` stays on EVERY turn and each turn carries its own "American accent" token — `audit_build.py:614` hard-fails a dialogue prompt missing `saying exactly:`, and `audit_build.py:643` hard-fails when the `American accent` count and the `saying exactly:` count diverge.
+
+**Escalation ladder when a merged render puts the words in the wrong mouth** (cheapest first): plain descriptor-first prose → TURN labels → TURN labels + timestamps → **split the clip so each speaker gets its own clip**. Operator evidence 2026-07-28: the first three rungs all failed on the same 8s two-speaker hook, so do not spend more than two re-rolls on the merged form — go to the split. The split IS the reliable form (§v643.4), and splitting is a §7 STRUCTURAL change (clip / scene / line counts move) → it needs a `## PROPOSAL: STRUCTURAL` block and operator ack, and produces a new `vN+1` file per §7.2.
+
+**Worked example** — `videos/nuri-korella-cortisol-chest-scaffold-climb-father-misattribution-wife-reveal-korella-saffron-selling-v6.md` Clip 1.1 (8s, two speakers) and its Clips 2-7 (one speaker each, four adults in frame throughout).
+
+**Scope:** GENERATE-side authoring, every Omni dialogue clip. Forward-only — shipped builds keep their old blocks. Auditor gate: `dialogue_turn_grammar` (see `audit_build.py`).
+
+**Touched**: this deep-dive (canonical), `code/template_new_format.md` (skeleton — Dialogue block shape), `~/.claude/skills/build-video/audit_build.py` (`dialogue_turn_grammar` check), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (workflow note), root `CLAUDE.md` (§9 tripwire row), `wiki/log.md`, memory `feedback_multi-speaker-turn-grammar`. Operator 2026-07-28.
+
+## v871 — Render-selectable prompt variant (Omni default + inert Anchor-Format reference section)
+
+Every build emits BOTH prompt sections: `## Google Omni Final Prompts` (rendered by DEFAULT — v865 twelve-block bodies, parse path unchanged) AND a `## Anchor-Format Prompts` reference section (bold `**Clip N.M**` labels, INERT — invisible to the clip-count parser and the render path). The operator picks per video which set renders via the Batch-overview selector: batch column `prompt_variant` (`omni` default / `anchor`); job-prep swaps the prompt text onto the clips when `anchor` is selected. Default `omni` = render path byte-identical to pre-v871 behavior. Forward-only; authored 2026-07-25 as "v868" and RENUMBERED to v871 after colliding with the Variable-ledger v868 (v-number space lives in commit history — both repos). Platform side: batch `prompt_variant` column + Batch-overview selector + job-prep swap (`image_platform.py` / `main.py`, commits `926ec6f`-era + `7de03d4`/`6d0aa95` UI). Index rows: `wiki/patterns/conventions.md` + `wiki/meta/build-rule-index.md`. Docs plan: `docs/superpowers/plans/2026-07-25-render-selectable-prompt-variant.md`.
+
+## v873 — HOOK CONTRACT: it shows what it says, it carries a contradiction, it names who it is for
+
+Source: the Hooks Masterclass card behind Selling Course Part 9 (`raw/course/hooks-masterclass-tension-2026-07-29.txt`) + its public Loom transcript (`raw/course/hooks-masterclass-loom-2026-07-29.json`) + the course's own "hook coherence" entry in the marketing dictionary. Together they turn "make it strong" into three checkable clauses.
+
+**Clause 1 — COHERENCE. The visual must show what the line says.** *"If the hook says 'increase your size,' the visual shows the size visibly increasing; if it says 'rotten banana,' the shot is an actual rotten banana."* Audio and visual are ONE message, not two competing signals. In build terms: the noun and the verb of Scene 1's `line:` must both be present in image_1's prompt — the object named, and the change or action named. A line about a failing part over a frame that only shows a face talking is a FAIL, not a stylistic choice. This is the same demand as §v539 (a concrete physical action on a prop) and Rule 21 (a working visual per claim), stated at the hook.
+
+**Clause 2 — TENSION. The hook carries a contradiction.** *"Your hook needs to create a contradiction, or a situation that doesn't make sense."* The doc's own example: **"He was 60, BUT his soldier never stood down."** Two facts that should not co-exist. The test is mechanical: can the hook be written as `<fact A> BUT <fact B>` where A and B fight? If the hook reduces to one uncontested statement ("saffron helps with drive"), there is no tension and nothing pulls the next second. Corpus shapes that already pass: the age-gap misattribution, the hanged-man-for-a-body, the fit-man-doing-the-chore, the jealous-wife dry answer.
+
+**Clause 3 — FILTER. The hook names who it is for.** The hook's first job per the same doc is *"filter people — call out who we sell to (50-year-old, 70-year-old men)"*. An age, a stage of life, or a symptom the target owns must be recoverable from the first line or the first frame. This is the callout-hook mechanic, and it is what makes the right viewer self-select in second one.
+
+**Clause 3 is often ALREADY SATISFIED by the US callout — never trade it away (operator 2026-07-30).** *"We mention American men to target Americans; without it the video could be shown to other countries on Instagram."* An opening like *"American men, pour baking soda on your soldier"* is doing two jobs at once: it filters the buyer (men, this symptom) AND it routes the distribution (the algorithm reads the demonym — the same lever [[us-audience-priming-strategy]] counts as a SCRIPT signal, and the reason `wiki/concepts/script-adaptation/forbidden-words.md` bans NON-US demonyms in spoken lines). So when a hook is missing tension, the fix is to **ADD the contradiction to the existing callout**, not to replace the callout with it. Wrong: dropping "American men" to make room for "he's 64, but…". Right: *"American men — he's 64, but his soldier still stands every morning."* The audit rule that follows: a hook rewrite that removes a US routing signal is a regression even when it improves the tension score.
+
+**What a build declares (§0), one line:**
+
+```
+HOOK CONTRACT: coherence — <the object + change shown in image_1> | tension — <fact A> BUT <fact B> | filter — <who self-selects, and from what cue>
+```
+
+**Interaction with existing rules.** §v791 governs the CAMERA (ultra-wide, close, foreshortened) and §v870 the FRAME (upper two thirds); v873 governs the MESSAGE. A §v791 carve-out does not carve out v873, and vice versa — a carve-out lifts only its own named clause (root `CLAUDE.md` §9). Where a hook has no spoken line (silent b-roll opener), clause 1 reads against the on-screen text overlay and clause 3 against the visible avatar/symptom.
+
+**Scope:** GENERATE side, every build, forward-only. Auditor gate: `hook_contract` (WARN when the §0 line is absent, so no shipped build is retro-failed; the three clauses stay operator-judged).
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/concepts/script-adaptation/hook-leverage-rule.md`, `wiki/sources/course/hooks-masterclass-tension.md`, `~/.claude/skills/build-video/audit_build.py`, root `CLAUDE.md` (§12 + §9 tripwire), `wiki/log.md`.
+
+## v874 — ONE MECHANISM PER VIDEO (effects are never promoted to the cause)
+
+Source: the Korella brand-DNA doc, all three angle contracts (`raw/marketing/korella-brand-dna-three-angles-2026-07-29.txt`): *"Cortisol is the only named root cause — never name anything else as the mechanism. One reveal per ad."*
+
+**The rule.** A video names exactly ONE root cause. Every other physiological noun in the script is an **effect** and must sit downstream of it, in a one-direction chain: `cortisol → <effects> → the visible symptom`. Effects may be described in as much detail as the beat wants. They may never appear in the sentence that answers "why is this happening".
+
+Per-angle effect sets that are NOT mechanisms: testosterone suppression / blood flow / nitric oxide (ED) · inflammation / trapped fluid / lost jawline (puffy face) · prostate inflammation / pelvic-floor breakdown / kidney load (prostate).
+
+**Surface causes stay legal on the surface** — modern living, work stress, processed food, poor sleep, salt, alcohol, "just aging", "just genetics". The script may blame them out loud, then reveal the real origin underneath. That is the reveal working, not a second mechanism.
+
+**Cortisol is the DEFAULT cause; which cause a video names is a declared choice (LOOSENED 2026-07-30, operator: "loosen it").** The two clauses of this rule are separate and are enforced differently:
+
+- **ONE cause per video — HARD.** Two nouns in cause position FAIL, whichever nouns they are. This is the clause that protects the belief chain and keeps a mechanism A/B readable.
+- **WHICH cause — a choice, not a permission.** Cortisol stays the default: the Brand DNA repeats "always cortisol" in all three angle tabs and the Part 9 Loom says *"you'll see the root cause, for example, it's always cortisol"*. But the mentor's own script library ships a complete cortisol→inflammation rewrite of the saggy-arms winner as an A/B, and ~6 of our ED builds already name blood flow in cause position. So an alternate cause no longer needs an operator-approval ceremony. It needs a REASON on the same line — `MECHANISM: inflammation | why: A/B against the cortisol cut` — and the build still names exactly one cause. The older `MECHANISM OVERRIDE: operator-approved | evidence: …` form stays valid and is treated as a reason.
+
+An alternate cause with no reason is a WARN, not a FAIL: the choice is legal, but an unexplained mechanism swap is how a video quietly drifts off the brand's positioning.
+
+**Why it is a hard rule and not taste.** The whole persuasion chain is "your symptom has ONE hidden origin, and this product addresses it". A second origin splits the argument in half inside a 40-second video and the viewer buys neither half. It also breaks the mechanism A/B: if every script names three causes, no test can tell which one sold.
+
+**What a build declares (§0):**
+
+```
+MECHANISM: cortisol | effects named: <list — all downstream> | surface causes: <list or none>
+MECHANISM: <alternate cause> | why: <one line> | effects named: … | surface causes: …   # non-default cause
+```
+
+**Scope:** GENERATE side, every build with a mechanism beat, forward-only. Auditor gate: `mechanism_lock` — **FAILs** more than one noun in cause position; **WARNs** when the §0 `MECHANISM:` line is missing, and when a non-default cause carries no `why:` (or legacy override); **PASSes** a single declared cause, default or not.
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/brand-dna-angle-contracts.md`, `wiki/concepts/script-adaptation/forbidden-words.md`, `~/.claude/skills/build-video/audit_build.py`, root `CLAUDE.md` (§12 + §9 tripwire), `wiki/log.md`.
+
+## v875 — THE SECONDARY VILLAIN IS AN ANGLE PROPERTY, AND §v796 STILL WORDS IT
+
+Source: the same brand-DNA doc, plus an operator correction on 2026-07-30.
+
+**CORRECTED 2026-07-30 — a villain is legal on ANY angle.** Operator: *"that's not true, we can use that also with ED or any other pain point."* The first draft of this rule read the brand DNA's SILENCE on the ED angle as a prohibition ("ED = none by design"). That was wrong twice over: the DNA documents the antagonist that fits each angle best, it does not hand out permissions, and the corpus already ships a pharmacy/pill-company villain in **12+ ED builds** — e.g. *"the pill companies make billions keeping his soldier down"* (`nuri-korella-ed-bigpharma-pour-pills-limp-balloon-pelvis-saffron-v1`, `…-locked-board-pill-dismissal-…`, `…-interview-couple-pills-shelf-…`). The auditor's whitelist would have hard-failed every one of them. Fixed: the angle supplies a **default**, never a whitelist.
+
+| Angle | Documented default | What it licenses |
+|---|---|---|
+| Puffy face | the doctor who knows and stays quiet | he is not missing it, he is choosing not to say it — a patient is worth more puffy than fixed |
+| Prostate | Big Pharma | "they ain't in the business of fixing you, they in the business of keeping you coming back" |
+| Johnson / ED | the pill companies / the pharmacy (corpus-attested, not in the DNA) | "stop buying these — the pill companies make billions keeping your soldier down"; the blue-pill pour is the visual form |
+| anything else | operator's pick | declare it and check it fits the angle's logic |
+
+**Two clauses.**
+
+1. **Any angle may carry a villain; pick one whose logic fits the pain.** The angle's default is the strongest-fitting antagonist on the evidence we have, not a gate. Porting one across angles is allowed when the story still makes sense (a pill company that profits from a symptom staying broken transfers to almost any angle; a doctor who keeps a patient coming back needs a symptom he is actually seen for). Villain-free stays a valid state — never add one at the cost of a symptom beat. The auditor WARNs on an off-default choice so the decision is visible; it does not block it.
+2. **The DNA decides WHO; §v796 decides HOW it is worded.** "doctors don't want you to know" / "big pharma" / "the truth about" are hard-failed in spoken lines and Veo prompts by §v796 (Google health classifier). The safe forms already in the corpus: *"most american men over 40 don't know this"*, *"they can't patent a spice, so nobody talks about it"*. Also note root `CLAUDE.md` §8 — the villain may be a doctor as an ABSENT third party in the script; it never licenses a doctor persona, coat, or clinic on screen.
+
+Optional layer, used *"when the format has room"* — never a mandatory beat, and never at the cost of a symptom beat.
+
+**What a build declares (§0):**
+
+```
+VILLAIN: <none | doctor-quiet | big-pharma | pill-companies | other:<name>> → worded as: "<the v796-safe line actually spoken>"
+```
+
+**Scope:** GENERATE side, forward-only. Auditor gate: `villain_contract` — requires the §0 declaration, validates `none | doctor-quiet | big-pharma`, checks the angle mapping when the angle is recoverable, and requires a quoted v796-safe line for a non-none villain. `v796_deceptive` still checks the spoken/prompt wording independently.
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/brand-dna-angle-contracts.md`, root `CLAUDE.md` (§12), `wiki/log.md`.
+
+## v876 — WINNER-DERIVED SELLING CONVERSION must name its parent, its proof, and what improved
+
+Source: content plan 28.07.26 (`raw/docs/content-plan-2026-07-28.txt`) — *"Don't repost them… ask: how can I make the hook stronger / improve the visuals / change the symptom / target a different age group / make it more emotional / more direct and sales-focused."*
+
+**The rule.** Every SELLING build explicitly says whether it is in this lane. A build derived from a video that already SOLD declares the parent and concrete proof or it is a repost:
+
+```
+CONVERSION LANE: yes
+WINNER POOL AUDIT: <path to completed June/July/viewed+sold table> | account: <name> | captured: <date>
+CONVERSION PARENT: <path/URL> | bucket: sold-this-month | sold-last-month | viewed+sold
+PARENT PROOF: sales=<number> | views=<number or n/a> | evidence=<dashboard/report/operator record>
+WINNER AUDIT: hook=<keep/change + reason> | visuals=<keep/change + reason> | symptom=<keep/change + reason> | age=<keep/change + reason> | emotion=<keep/change + reason> | sales-focus=<keep/change + reason>
+IMPROVED: <which of the six questions, with the concrete change per one>
+KEPT: <what is held constant — style / shape / beats>
+```
+
+Not derived from a seller: `CONVERSION LANE: no`.
+
+**Five constraints on the lane.**
+
+1. **The lane cannot be silently skipped.** Every SELLING build says `yes` or `no`; omitting `CONVERSION PARENT:` is no longer treated as proof that the rule does not apply.
+2. **The parent comes from the full three-bucket audit, not memory.** `WINNER POOL AUDIT:` points to a completed table covering July best sellers, June best sellers, and highest-viewed videos that also sold. The table records the account, capture date, views, sales/orders, revenue when available, and evidence. Template: `docs/winner-to-selling-audit-template.md`.
+3. **The parent must have SOLD, with concrete evidence.** A high-view, no-sale video is a growth asset; its hook may be borrowed, but it is not a conversion parent. Record a numeric sales/orders/revenue result and where it came from. The `viewed+sold` bucket records both views and sales. "It did well" or views alone does not qualify. The Part 9 Loom confirms the source must be known to generate views **and sales** (00:26:23-00:26:47).
+4. **All six questions are answered before changes are selected.** `WINNER AUDIT:` records `hook`, `visuals`, `symptom`, `age`, `emotion`, and `sales-focus` as `keep` or `change`, each with an exact reason. Then `IMPROVED:` names the chosen change. v877 decides which candidate wins and limits the test to one primary delta plus only the repairs needed to keep it coherent. "Stronger hook", "better visuals", or "more emotional" without the named weakness and change is not a delta.
+5. **Routing is unchanged by this lane.** If any §7 invariant moves (scene / image / clip / line counts, duration sum, scene→image map, operator-literal strings) the build routes as a BUILD or as §7.2.1 LOCKED PRODUCTION — v876 adds a declaration, it does not create a shortcut. And a conversion inherits NO rule pass: the full auditor runs to 0 FAIL every delivery (root `CLAUDE.md` §9).
+
+**The three named conversion moves** (plan verbatim): a symptom video that worked → a version with a DIFFERENT symptom · a transformation that worked → recreate with a DIFFERENT visual · a consistently-performing style → keep the style, change only angle / pain point / desire / wording. The third is the one that gets violated: the style is the account's asset, freshness comes from the words.
+
+**Scope:** GENERATE side, all SELLING builds, forward-only. Auditor gate: `conversion_declare` — WARN when `CONVERSION LANE:` is absent so older builds are not retro-failed, accepts an explicit `no`, and HARD-FAILS an explicit `yes` that lacks the pool-audit path, parent, bucket, numeric sales proof + evidence, any of the six `WINNER AUDIT:` answers, concrete `IMPROVED:`, or `KEPT:`.
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/winner-to-selling-conversion.md`, `wiki/concepts/script-adaptation/winning-content-system.md`, `~/.claude/skills/build-video/audit_build.py`, root `CLAUDE.md` (§12), `wiki/log.md`.
+
+## v877 — WINNER DELTA ROUTER: diagnose the gap, pick one primary change, use the smallest route that can fix it
+
+Sources: content plan 28.07.26 (`raw/docs/content-plan-2026-07-28.txt:12-43`) · Selling Course Part 5 and Part 9 (`raw/course/selling-course-korella-export-2026-07-29.txt:167-178,824-903`) · Script Training (`raw/course/Scripts Training - Google Docs - 10 February 2026.md:80-102,282-350`) · July 21 mentor review (`raw/calls/kaveno-meeting-2026-07-21-transcript.md:215-304`).
+
+**Why this rule exists.** v876 makes the six content-plan questions visible, but six `CHANGE` answers do not tell production which change should win, which method owns it, or when a small improvement has turned into a new concept. The course says to preserve the proven machine and test one element; the content plan says a small improvement usually beats a completely new idea; the July 21 review warns that this account tends to go too far.
+
+**The rule.** Every winner-derived build — both `CONVERSION LANE: yes` and an operator-approved view-proxy test — adds this block in §0 before `METHOD:`:
+
+```text
+WINNER DECISION:
+GOAL: attention | retention-proof | conversion | audience-transfer | concept-freshness
+EVIDENCE SIGNAL: <metric or exact operator observation; use unknown when unavailable>
+PRIMARY GAP: hook | visuals | symptom | age | emotion | sales-focus
+PRIMARY DELTA: <one exact from→to change>
+SUPPORTING REPAIRS: <only changes forced by coherence, or none>
+SMALLEST ROUTE: ADAPT-NEW-STRUCTURE | HOOK-ITERATION | STEP-UP-SAME-SOURCE | INNOVATION-MIX-AND-MATCH | SELLING-SCRIPT-TEST | FULL-BUILD
+WHY NOT SMALLER: <why a narrower route cannot fix the gap, or n/a>
+INNOVATION NEED: none | <second proven source + function + why the parent alone cannot supply it>
+```
+
+**Priority order.**
+
+1. **Use evidence, not taste.** Low opening hold or an operator-named opening weakness points to `hook`. A strong opening followed by a retention/proof drop points to `visuals` or proof. Strong views with weak clicks/sales points to `sales-focus`. A new group owning the same problem points to `age` or `symptom`. If the metric is missing, write `unknown`; do not invent a conversion diagnosis.
+2. **Fix quality before spending a creative delta.** Framing, centering, realism, captions, line/visual mismatch, and product readability are required repairs. They do not count as step-up or innovation by themselves.
+3. **Pick ONE primary delta.** The other five questions remain answered, but they are candidates, not equal votes. A second change is allowed only when the primary change forces it to keep the script and visuals coherent. Example: changing the symptom also forces its spoken noun, proxy, proof, and payoff to change; those are one dependency bundle. Two independent hypotheses require two builds.
+4. **Choose the smallest route that can express that delta.** Do not start with the most creative route and search for a reason afterward.
+5. **Default to same-source improvement in a winner lane.** `STEP-UP-SAME-SOURCE` is preferred over innovation when the same parent can supply more intensity, activity, belief, emotion, or freshness. Innovation is justified only when the selected gap cannot be solved inside the parent and a second proven atom is required.
+
+**Primary-gap → method map.**
+
+| Selected need | Route |
+|---|---|
+| New opening only; body and CTA still pay the promise | `HOOK-ITERATION` |
+| Same symptom/promise made stronger through intensity, motion, proof, emotion, angle, or light wording | `STEP-UP-SAME-SOURCE` |
+| Different symptom, age group, pain, or desire that requires the proven script to be re-instantiated for a new owner | `ADAPT-NEW-STRUCTURE` |
+| Winning hook/visual style stays fixed while body, proof order, offer bridge, and CTA are tested as one named selling package | `SELLING-SCRIPT-TEST` |
+| Different visual that stays in the parent's action family and preserves its concept identity | `STEP-UP-SAME-SOURCE` |
+| Different visual that imports a second proven device and needs both sources in one weld | `INNOVATION-MIX-AND-MATCH` |
+| No reliable parent, an unproven new device, nearly total change, or a new policy area | `FULL-BUILD` |
+
+**Do not confuse raw mentor labels with the current route names.** Older calls use “step up,” “differentiate,” and “innovation” loosely. Translate the example by source logic: same parent and recognizable concept = step-up; second proven source plus a dependent weld = innovation; a new audience/pain inside a preserved script = adapt; a locked visual with a new selling package = selling-script test.
+
+**Scope:** GENERATE side, forward-only, winner-derived builds and view-proxy winner tests. v876 continues to govern parent/proof/audit completeness.
+
+**Where it is enforced (two places, in this order — added 2026-07-30):**
+1. **BUILD TIME, the real gate.** The `/build` loader (`~/.claude/skills/build-video/SKILL.md` Step 5, "WINNER DECISION GATE") requires this block BEFORE the coverage table and before any draft — the delta is CHOSEN, never labelled after the writing. Operator 2026-07-30: *"make sure that it's considered while building the video, not while linting."*
+2. **LINT TIME, the catch-net.** Auditor check `winner_decision` — in lane when §0 carries `CONVERSION PARENT:` / `VIEW-PROXY TEST:` / `CONVERSION LANE: yes`, otherwise SKIP. **WARN-only, never FAIL** (Codex ack rev 185: a WARN catch for legacy and half-filled blocks that must not replace the pre-draft gate). It warns on: the block missing · any of the eight fields empty or left as a `<placeholder>`/tbd · an out-of-vocabulary `GOAL` / `PRIMARY GAP` / `SMALLEST ROUTE` · and **`SMALLEST ROUTE:` ≠ `METHOD:`**, which is the tell that the route was picked after the fact.
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/winner-to-selling-conversion.md`, `wiki/concepts/script-adaptation/script-adaptation-workflow.md`, `wiki/concepts/script-adaptation/step-up-vs-innovation.md`, `wiki/synthesis/innovation-operating-system.md`, `docs/winner-to-selling-audit-template.md`, root `CLAUDE.md`, `wiki/meta/generate-video-checklist.md`, `wiki/index.md`, `wiki/log.md`.
