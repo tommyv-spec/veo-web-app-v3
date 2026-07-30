@@ -827,6 +827,8 @@ Support-image stills usually differ from the 9:16 talking head — set their rea
      - **TEST AXES:** shell=talking-head | chore=none | observer=none | hero_age=64 | proxy=banana | destruction=none | recipe_stack=none | voiced=vo | setting_anchor=attic-studio | caption_style=yellow-highlight
      Decode side: same 11 fields (plus `watermark: present|absent`) as YAML frontmatter keys. -->
 
+<!-- v877: every winner-derived build and approved view-proxy test adds a WINNER DECISION block in §0 before METHOD: GOAL, EVIDENCE SIGNAL, one PRIMARY GAP, one exact PRIMARY DELTA, coherence-only SUPPORTING REPAIRS, SMALLEST ROUTE, WHY NOT SMALLER, and INNOVATION NEED. METHOD must match SMALLEST ROUTE. -->
+
 
 ---
 

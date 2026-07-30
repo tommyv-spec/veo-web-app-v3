@@ -16065,3 +16065,169 @@ Single-speaker clips take the same shape with one turn (`Dialogue: One speaker, 
 ## v871 — Render-selectable prompt variant (Omni default + inert Anchor-Format reference section)
 
 Every build emits BOTH prompt sections: `## Google Omni Final Prompts` (rendered by DEFAULT — v865 twelve-block bodies, parse path unchanged) AND a `## Anchor-Format Prompts` reference section (bold `**Clip N.M**` labels, INERT — invisible to the clip-count parser and the render path). The operator picks per video which set renders via the Batch-overview selector: batch column `prompt_variant` (`omni` default / `anchor`); job-prep swaps the prompt text onto the clips when `anchor` is selected. Default `omni` = render path byte-identical to pre-v871 behavior. Forward-only; authored 2026-07-25 as "v868" and RENUMBERED to v871 after colliding with the Variable-ledger v868 (v-number space lives in commit history — both repos). Platform side: batch `prompt_variant` column + Batch-overview selector + job-prep swap (`image_platform.py` / `main.py`, commits `926ec6f`-era + `7de03d4`/`6d0aa95` UI). Index rows: `wiki/patterns/conventions.md` + `wiki/meta/build-rule-index.md`. Docs plan: `docs/superpowers/plans/2026-07-25-render-selectable-prompt-variant.md`.
+
+## v873 — HOOK CONTRACT: it shows what it says, it carries a contradiction, it names who it is for
+
+Source: the Hooks Masterclass card behind Selling Course Part 9 (`raw/course/hooks-masterclass-tension-2026-07-29.txt`) + its public Loom transcript (`raw/course/hooks-masterclass-loom-2026-07-29.json`) + the course's own "hook coherence" entry in the marketing dictionary. Together they turn "make it strong" into three checkable clauses.
+
+**Clause 1 — COHERENCE. The visual must show what the line says.** *"If the hook says 'increase your size,' the visual shows the size visibly increasing; if it says 'rotten banana,' the shot is an actual rotten banana."* Audio and visual are ONE message, not two competing signals. In build terms: the noun and the verb of Scene 1's `line:` must both be present in image_1's prompt — the object named, and the change or action named. A line about a failing part over a frame that only shows a face talking is a FAIL, not a stylistic choice. This is the same demand as §v539 (a concrete physical action on a prop) and Rule 21 (a working visual per claim), stated at the hook.
+
+**Clause 2 — TENSION. The hook carries a contradiction.** *"Your hook needs to create a contradiction, or a situation that doesn't make sense."* The doc's own example: **"He was 60, BUT his soldier never stood down."** Two facts that should not co-exist. The test is mechanical: can the hook be written as `<fact A> BUT <fact B>` where A and B fight? If the hook reduces to one uncontested statement ("saffron helps with drive"), there is no tension and nothing pulls the next second. Corpus shapes that already pass: the age-gap misattribution, the hanged-man-for-a-body, the fit-man-doing-the-chore, the jealous-wife dry answer.
+
+**Clause 3 — FILTER. The hook names who it is for.** The hook's first job per the same doc is *"filter people — call out who we sell to (50-year-old, 70-year-old men)"*. An age, a stage of life, or a symptom the target owns must be recoverable from the first line or the first frame. This is the callout-hook mechanic, and it is what makes the right viewer self-select in second one.
+
+**Clause 3 is often ALREADY SATISFIED by the US callout — never trade it away (operator 2026-07-30).** *"We mention American men to target Americans; without it the video could be shown to other countries on Instagram."* An opening like *"American men, pour baking soda on your soldier"* is doing two jobs at once: it filters the buyer (men, this symptom) AND it routes the distribution (the algorithm reads the demonym — the same lever [[us-audience-priming-strategy]] counts as a SCRIPT signal, and the reason `wiki/concepts/script-adaptation/forbidden-words.md` bans NON-US demonyms in spoken lines). So when a hook is missing tension, the fix is to **ADD the contradiction to the existing callout**, not to replace the callout with it. Wrong: dropping "American men" to make room for "he's 64, but…". Right: *"American men — he's 64, but his soldier still stands every morning."* The audit rule that follows: a hook rewrite that removes a US routing signal is a regression even when it improves the tension score.
+
+**What a build declares (§0), one line:**
+
+```
+HOOK CONTRACT: coherence — <the object + change shown in image_1> | tension — <fact A> BUT <fact B> | filter — <who self-selects, and from what cue>
+```
+
+**Interaction with existing rules.** §v791 governs the CAMERA (ultra-wide, close, foreshortened) and §v870 the FRAME (upper two thirds); v873 governs the MESSAGE. A §v791 carve-out does not carve out v873, and vice versa — a carve-out lifts only its own named clause (root `CLAUDE.md` §9). Where a hook has no spoken line (silent b-roll opener), clause 1 reads against the on-screen text overlay and clause 3 against the visible avatar/symptom.
+
+**Scope:** GENERATE side, every build, forward-only. Auditor gate: `hook_contract` (WARN when the §0 line is absent, so no shipped build is retro-failed; the three clauses stay operator-judged).
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/concepts/script-adaptation/hook-leverage-rule.md`, `wiki/sources/course/hooks-masterclass-tension.md`, `~/.claude/skills/build-video/audit_build.py`, root `CLAUDE.md` (§12 + §9 tripwire), `wiki/log.md`.
+
+## v874 — ONE MECHANISM PER VIDEO (effects are never promoted to the cause)
+
+Source: the Korella brand-DNA doc, all three angle contracts (`raw/marketing/korella-brand-dna-three-angles-2026-07-29.txt`): *"Cortisol is the only named root cause — never name anything else as the mechanism. One reveal per ad."*
+
+**The rule.** A video names exactly ONE root cause. Every other physiological noun in the script is an **effect** and must sit downstream of it, in a one-direction chain: `cortisol → <effects> → the visible symptom`. Effects may be described in as much detail as the beat wants. They may never appear in the sentence that answers "why is this happening".
+
+Per-angle effect sets that are NOT mechanisms: testosterone suppression / blood flow / nitric oxide (ED) · inflammation / trapped fluid / lost jawline (puffy face) · prostate inflammation / pelvic-floor breakdown / kidney load (prostate).
+
+**Surface causes stay legal on the surface** — modern living, work stress, processed food, poor sleep, salt, alcohol, "just aging", "just genetics". The script may blame them out loud, then reveal the real origin underneath. That is the reveal working, not a second mechanism.
+
+**Cortisol is the DEFAULT cause; which cause a video names is a declared choice (LOOSENED 2026-07-30, operator: "loosen it").** The two clauses of this rule are separate and are enforced differently:
+
+- **ONE cause per video — HARD.** Two nouns in cause position FAIL, whichever nouns they are. This is the clause that protects the belief chain and keeps a mechanism A/B readable.
+- **WHICH cause — a choice, not a permission.** Cortisol stays the default: the Brand DNA repeats "always cortisol" in all three angle tabs and the Part 9 Loom says *"you'll see the root cause, for example, it's always cortisol"*. But the mentor's own script library ships a complete cortisol→inflammation rewrite of the saggy-arms winner as an A/B, and ~6 of our ED builds already name blood flow in cause position. So an alternate cause no longer needs an operator-approval ceremony. It needs a REASON on the same line — `MECHANISM: inflammation | why: A/B against the cortisol cut` — and the build still names exactly one cause. The older `MECHANISM OVERRIDE: operator-approved | evidence: …` form stays valid and is treated as a reason.
+
+An alternate cause with no reason is a WARN, not a FAIL: the choice is legal, but an unexplained mechanism swap is how a video quietly drifts off the brand's positioning.
+
+**Why it is a hard rule and not taste.** The whole persuasion chain is "your symptom has ONE hidden origin, and this product addresses it". A second origin splits the argument in half inside a 40-second video and the viewer buys neither half. It also breaks the mechanism A/B: if every script names three causes, no test can tell which one sold.
+
+**What a build declares (§0):**
+
+```
+MECHANISM: cortisol | effects named: <list — all downstream> | surface causes: <list or none>
+MECHANISM: <alternate cause> | why: <one line> | effects named: … | surface causes: …   # non-default cause
+```
+
+**Scope:** GENERATE side, every build with a mechanism beat, forward-only. Auditor gate: `mechanism_lock` — **FAILs** more than one noun in cause position; **WARNs** when the §0 `MECHANISM:` line is missing, and when a non-default cause carries no `why:` (or legacy override); **PASSes** a single declared cause, default or not.
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/brand-dna-angle-contracts.md`, `wiki/concepts/script-adaptation/forbidden-words.md`, `~/.claude/skills/build-video/audit_build.py`, root `CLAUDE.md` (§12 + §9 tripwire), `wiki/log.md`.
+
+## v875 — THE SECONDARY VILLAIN IS AN ANGLE PROPERTY, AND §v796 STILL WORDS IT
+
+Source: the same brand-DNA doc, plus an operator correction on 2026-07-30.
+
+**CORRECTED 2026-07-30 — a villain is legal on ANY angle.** Operator: *"that's not true, we can use that also with ED or any other pain point."* The first draft of this rule read the brand DNA's SILENCE on the ED angle as a prohibition ("ED = none by design"). That was wrong twice over: the DNA documents the antagonist that fits each angle best, it does not hand out permissions, and the corpus already ships a pharmacy/pill-company villain in **12+ ED builds** — e.g. *"the pill companies make billions keeping his soldier down"* (`nuri-korella-ed-bigpharma-pour-pills-limp-balloon-pelvis-saffron-v1`, `…-locked-board-pill-dismissal-…`, `…-interview-couple-pills-shelf-…`). The auditor's whitelist would have hard-failed every one of them. Fixed: the angle supplies a **default**, never a whitelist.
+
+| Angle | Documented default | What it licenses |
+|---|---|---|
+| Puffy face | the doctor who knows and stays quiet | he is not missing it, he is choosing not to say it — a patient is worth more puffy than fixed |
+| Prostate | Big Pharma | "they ain't in the business of fixing you, they in the business of keeping you coming back" |
+| Johnson / ED | the pill companies / the pharmacy (corpus-attested, not in the DNA) | "stop buying these — the pill companies make billions keeping your soldier down"; the blue-pill pour is the visual form |
+| anything else | operator's pick | declare it and check it fits the angle's logic |
+
+**Two clauses.**
+
+1. **Any angle may carry a villain; pick one whose logic fits the pain.** The angle's default is the strongest-fitting antagonist on the evidence we have, not a gate. Porting one across angles is allowed when the story still makes sense (a pill company that profits from a symptom staying broken transfers to almost any angle; a doctor who keeps a patient coming back needs a symptom he is actually seen for). Villain-free stays a valid state — never add one at the cost of a symptom beat. The auditor WARNs on an off-default choice so the decision is visible; it does not block it.
+2. **The DNA decides WHO; §v796 decides HOW it is worded.** "doctors don't want you to know" / "big pharma" / "the truth about" are hard-failed in spoken lines and Veo prompts by §v796 (Google health classifier). The safe forms already in the corpus: *"most american men over 40 don't know this"*, *"they can't patent a spice, so nobody talks about it"*. Also note root `CLAUDE.md` §8 — the villain may be a doctor as an ABSENT third party in the script; it never licenses a doctor persona, coat, or clinic on screen.
+
+Optional layer, used *"when the format has room"* — never a mandatory beat, and never at the cost of a symptom beat.
+
+**What a build declares (§0):**
+
+```
+VILLAIN: <none | doctor-quiet | big-pharma | pill-companies | other:<name>> → worded as: "<the v796-safe line actually spoken>"
+```
+
+**Scope:** GENERATE side, forward-only. Auditor gate: `villain_contract` — requires the §0 declaration, validates `none | doctor-quiet | big-pharma`, checks the angle mapping when the angle is recoverable, and requires a quoted v796-safe line for a non-none villain. `v796_deceptive` still checks the spoken/prompt wording independently.
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/brand-dna-angle-contracts.md`, root `CLAUDE.md` (§12), `wiki/log.md`.
+
+## v876 — WINNER-DERIVED SELLING CONVERSION must name its parent, its proof, and what improved
+
+Source: content plan 28.07.26 (`raw/docs/content-plan-2026-07-28.txt`) — *"Don't repost them… ask: how can I make the hook stronger / improve the visuals / change the symptom / target a different age group / make it more emotional / more direct and sales-focused."*
+
+**The rule.** Every SELLING build explicitly says whether it is in this lane. A build derived from a video that already SOLD declares the parent and concrete proof or it is a repost:
+
+```
+CONVERSION LANE: yes
+WINNER POOL AUDIT: <path to completed June/July/viewed+sold table> | account: <name> | captured: <date>
+CONVERSION PARENT: <path/URL> | bucket: sold-this-month | sold-last-month | viewed+sold
+PARENT PROOF: sales=<number> | views=<number or n/a> | evidence=<dashboard/report/operator record>
+WINNER AUDIT: hook=<keep/change + reason> | visuals=<keep/change + reason> | symptom=<keep/change + reason> | age=<keep/change + reason> | emotion=<keep/change + reason> | sales-focus=<keep/change + reason>
+IMPROVED: <which of the six questions, with the concrete change per one>
+KEPT: <what is held constant — style / shape / beats>
+```
+
+Not derived from a seller: `CONVERSION LANE: no`.
+
+**Five constraints on the lane.**
+
+1. **The lane cannot be silently skipped.** Every SELLING build says `yes` or `no`; omitting `CONVERSION PARENT:` is no longer treated as proof that the rule does not apply.
+2. **The parent comes from the full three-bucket audit, not memory.** `WINNER POOL AUDIT:` points to a completed table covering July best sellers, June best sellers, and highest-viewed videos that also sold. The table records the account, capture date, views, sales/orders, revenue when available, and evidence. Template: `docs/winner-to-selling-audit-template.md`.
+3. **The parent must have SOLD, with concrete evidence.** A high-view, no-sale video is a growth asset; its hook may be borrowed, but it is not a conversion parent. Record a numeric sales/orders/revenue result and where it came from. The `viewed+sold` bucket records both views and sales. "It did well" or views alone does not qualify. The Part 9 Loom confirms the source must be known to generate views **and sales** (00:26:23-00:26:47).
+4. **All six questions are answered before changes are selected.** `WINNER AUDIT:` records `hook`, `visuals`, `symptom`, `age`, `emotion`, and `sales-focus` as `keep` or `change`, each with an exact reason. Then `IMPROVED:` names the chosen change. v877 decides which candidate wins and limits the test to one primary delta plus only the repairs needed to keep it coherent. "Stronger hook", "better visuals", or "more emotional" without the named weakness and change is not a delta.
+5. **Routing is unchanged by this lane.** If any §7 invariant moves (scene / image / clip / line counts, duration sum, scene→image map, operator-literal strings) the build routes as a BUILD or as §7.2.1 LOCKED PRODUCTION — v876 adds a declaration, it does not create a shortcut. And a conversion inherits NO rule pass: the full auditor runs to 0 FAIL every delivery (root `CLAUDE.md` §9).
+
+**The three named conversion moves** (plan verbatim): a symptom video that worked → a version with a DIFFERENT symptom · a transformation that worked → recreate with a DIFFERENT visual · a consistently-performing style → keep the style, change only angle / pain point / desire / wording. The third is the one that gets violated: the style is the account's asset, freshness comes from the words.
+
+**Scope:** GENERATE side, all SELLING builds, forward-only. Auditor gate: `conversion_declare` — WARN when `CONVERSION LANE:` is absent so older builds are not retro-failed, accepts an explicit `no`, and HARD-FAILS an explicit `yes` that lacks the pool-audit path, parent, bucket, numeric sales proof + evidence, any of the six `WINNER AUDIT:` answers, concrete `IMPROVED:`, or `KEPT:`.
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/winner-to-selling-conversion.md`, `wiki/concepts/script-adaptation/winning-content-system.md`, `~/.claude/skills/build-video/audit_build.py`, root `CLAUDE.md` (§12), `wiki/log.md`.
+
+## v877 — WINNER DELTA ROUTER: diagnose the gap, pick one primary change, use the smallest route that can fix it
+
+Sources: content plan 28.07.26 (`raw/docs/content-plan-2026-07-28.txt:12-43`) · Selling Course Part 5 and Part 9 (`raw/course/selling-course-korella-export-2026-07-29.txt:167-178,824-903`) · Script Training (`raw/course/Scripts Training - Google Docs - 10 February 2026.md:80-102,282-350`) · July 21 mentor review (`raw/calls/kaveno-meeting-2026-07-21-transcript.md:215-304`).
+
+**Why this rule exists.** v876 makes the six content-plan questions visible, but six `CHANGE` answers do not tell production which change should win, which method owns it, or when a small improvement has turned into a new concept. The course says to preserve the proven machine and test one element; the content plan says a small improvement usually beats a completely new idea; the July 21 review warns that this account tends to go too far.
+
+**The rule.** Every winner-derived build — both `CONVERSION LANE: yes` and an operator-approved view-proxy test — adds this block in §0 before `METHOD:`:
+
+```text
+WINNER DECISION:
+GOAL: attention | retention-proof | conversion | audience-transfer | concept-freshness
+EVIDENCE SIGNAL: <metric or exact operator observation; use unknown when unavailable>
+PRIMARY GAP: hook | visuals | symptom | age | emotion | sales-focus
+PRIMARY DELTA: <one exact from→to change>
+SUPPORTING REPAIRS: <only changes forced by coherence, or none>
+SMALLEST ROUTE: ADAPT-NEW-STRUCTURE | HOOK-ITERATION | STEP-UP-SAME-SOURCE | INNOVATION-MIX-AND-MATCH | SELLING-SCRIPT-TEST | FULL-BUILD
+WHY NOT SMALLER: <why a narrower route cannot fix the gap, or n/a>
+INNOVATION NEED: none | <second proven source + function + why the parent alone cannot supply it>
+```
+
+**Priority order.**
+
+1. **Use evidence, not taste.** Low opening hold or an operator-named opening weakness points to `hook`. A strong opening followed by a retention/proof drop points to `visuals` or proof. Strong views with weak clicks/sales points to `sales-focus`. A new group owning the same problem points to `age` or `symptom`. If the metric is missing, write `unknown`; do not invent a conversion diagnosis.
+2. **Fix quality before spending a creative delta.** Framing, centering, realism, captions, line/visual mismatch, and product readability are required repairs. They do not count as step-up or innovation by themselves.
+3. **Pick ONE primary delta.** The other five questions remain answered, but they are candidates, not equal votes. A second change is allowed only when the primary change forces it to keep the script and visuals coherent. Example: changing the symptom also forces its spoken noun, proxy, proof, and payoff to change; those are one dependency bundle. Two independent hypotheses require two builds.
+4. **Choose the smallest route that can express that delta.** Do not start with the most creative route and search for a reason afterward.
+5. **Default to same-source improvement in a winner lane.** `STEP-UP-SAME-SOURCE` is preferred over innovation when the same parent can supply more intensity, activity, belief, emotion, or freshness. Innovation is justified only when the selected gap cannot be solved inside the parent and a second proven atom is required.
+
+**Primary-gap → method map.**
+
+| Selected need | Route |
+|---|---|
+| New opening only; body and CTA still pay the promise | `HOOK-ITERATION` |
+| Same symptom/promise made stronger through intensity, motion, proof, emotion, angle, or light wording | `STEP-UP-SAME-SOURCE` |
+| Different symptom, age group, pain, or desire that requires the proven script to be re-instantiated for a new owner | `ADAPT-NEW-STRUCTURE` |
+| Winning hook/visual style stays fixed while body, proof order, offer bridge, and CTA are tested as one named selling package | `SELLING-SCRIPT-TEST` |
+| Different visual that stays in the parent's action family and preserves its concept identity | `STEP-UP-SAME-SOURCE` |
+| Different visual that imports a second proven device and needs both sources in one weld | `INNOVATION-MIX-AND-MATCH` |
+| No reliable parent, an unproven new device, nearly total change, or a new policy area | `FULL-BUILD` |
+
+**Do not confuse raw mentor labels with the current route names.** Older calls use “step up,” “differentiate,” and “innovation” loosely. Translate the example by source logic: same parent and recognizable concept = step-up; second proven source plus a dependent weld = innovation; a new audience/pain inside a preserved script = adapt; a locked visual with a new selling package = selling-script test.
+
+**Scope:** GENERATE side, forward-only, winner-derived builds and view-proxy winner tests. v876 continues to govern parent/proof/audit completeness.
+
+**Where it is enforced (two places, in this order — added 2026-07-30):**
+1. **BUILD TIME, the real gate.** The `/build` loader (`~/.claude/skills/build-video/SKILL.md` Step 5, "WINNER DECISION GATE") requires this block BEFORE the coverage table and before any draft — the delta is CHOSEN, never labelled after the writing. Operator 2026-07-30: *"make sure that it's considered while building the video, not while linting."*
+2. **LINT TIME, the catch-net.** Auditor check `winner_decision` — in lane when §0 carries `CONVERSION PARENT:` / `VIEW-PROXY TEST:` / `CONVERSION LANE: yes`, otherwise SKIP. **WARN-only, never FAIL** (Codex ack rev 185: a WARN catch for legacy and half-filled blocks that must not replace the pre-draft gate). It warns on: the block missing · any of the eight fields empty or left as a `<placeholder>`/tbd · an out-of-vocabulary `GOAL` / `PRIMARY GAP` / `SMALLEST ROUTE` · and **`SMALLEST ROUTE:` ≠ `METHOD:`**, which is the tell that the route was picked after the fact.
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/winner-to-selling-conversion.md`, `wiki/concepts/script-adaptation/script-adaptation-workflow.md`, `wiki/concepts/script-adaptation/step-up-vs-innovation.md`, `wiki/synthesis/innovation-operating-system.md`, `docs/winner-to-selling-audit-template.md`, root `CLAUDE.md`, `wiki/meta/generate-video-checklist.md`, `wiki/index.md`, `wiki/log.md`.
