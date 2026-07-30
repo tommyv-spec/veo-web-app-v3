@@ -4273,10 +4273,17 @@ def _ig_export_window(range_: str, month: Optional[str] = None):
 def _ig_export_rows(db, account_id: int, start, end):
     """Reels of one account posted in [start, end), newest first, as CSV rows.
 
-    Name resolution, in order: the matched job's FIRST clip line (that is what
-    the Jobs board titles a job with, see _build_job_response first_dialogue) →
-    first line of the caption → the shortcode. A reel with no posted_at cannot
-    be placed in a window, so it is dropped and counted.
+    video_title (v878.1) = the BUILD title of the matched job: the name of the
+    image batch this video job was promoted from, which is what v780.1 already
+    shows in the video-job header. That is the only human-authored title in the
+    system — export_basename is a minted machine name (final_export_<id>_<ts>)
+    and no Job column holds a title. Empty when the reel has no match, or when
+    the job was not promoted from a batch.
+
+    video_name resolution, in order: the matched job's FIRST clip line (that is
+    what the Jobs board titles a job with, see _build_job_response
+    first_dialogue) → first line of the caption → the shortcode. A reel with no
+    posted_at cannot be placed in a window, so it is dropped and counted.
     """
     from models import InstagramVideo, Clip
     videos = (
@@ -4303,12 +4310,31 @@ def _ig_export_rows(db, account_id: int, start, end):
             # setdefault → the LOWEST clip_index wins (rows come in asc order).
             job_name.setdefault(c.job_id, (c.dialogue_text or "").strip()[:80])
 
+    # v878.1 — build title per matched job. Same lookup as v780.1 in get_job,
+    # batched here so a 30-day export is one query, not one per reel. Wrapped:
+    # a missing image_job_batches table (old DB / partial migration) must cost
+    # the operator a blank column, not the whole export.
+    job_title = {}
+    if job_ids:
+        try:
+            from image_platform import ImageJobBatch
+            for jid, bname in (
+                db.query(ImageJobBatch.promoted_video_job_id, ImageJobBatch.name)
+                .filter(ImageJobBatch.promoted_video_job_id.in_(job_ids))
+                .all()
+            ):
+                if jid and bname:
+                    job_title.setdefault(jid, str(bname).strip()[:200])
+        except Exception as e:
+            print(f"[ig-export] build-title lookup skipped (non-fatal): {e}", flush=True)
+
     rows = []
     for v in videos:
         name = job_name.get(v.matched_job_id) or ""
         if not name and v.caption:
             name = v.caption.strip().splitlines()[0][:80] if v.caption.strip() else ""
         rows.append([
+            job_title.get(v.matched_job_id, ""),
             name or v.shortcode or "",
             v.url or "",
             v.id,
@@ -4331,7 +4357,7 @@ def export_instagram_videos(
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Download name / URL / id / posting date / views as CSV for one account."""
+    """Download build title / name / URL / id / posting date / views as CSV."""
     import csv as _csv
     import io as _io
 
@@ -4341,7 +4367,7 @@ def export_instagram_videos(
 
     buf = _io.StringIO()
     w = _csv.writer(buf, lineterminator="\n")
-    w.writerow(["video_name", "video_url", "video_id", "posted_at", "views"])
+    w.writerow(["video_title", "video_name", "video_url", "video_id", "posted_at", "views"])
     w.writerows(rows)
     print(
         f"[ig-export] account={acc.id} @{acc.handle} range={range} month={month} "
