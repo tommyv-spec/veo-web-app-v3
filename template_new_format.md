@@ -376,21 +376,6 @@
     `none observed | n/a | n/a | n/a`. A 5/5 viral-max symptom MUST
     have headroom NO. The ledger records the SOURCE ceiling so a later
     step-up does not invent intensity that was already present.
-    v790 shown-beats amendment (2026-07-22): every new decode MUST also
-    emit this table under `## Adaptation-extraction`:
-
-      ### Shown beats ledger
-      | Source beat ID | Frame / clip evidence | Shown action / process step | Meaningful objects visibly present |
-      |---|---|---|---|
-      | SB1 | <clip/frame> | <one visible action or process step> | <every meaningful object in that beat, or none> |
-
-    List the source in viewing order as SB1, SB2, SB3... Separate make,
-    mix, pour, press, hold/display, and apply steps instead of replacing
-    them with one gist verb. A named bottle, box, tool, product, or proxy
-    held or standing on screen is part of the row even when no line names
-    it. Every row cites a clip or frame. If the video truly shows no
-    demonstrated process and no meaningful object, emit one row:
-    `none observed | n/a | n/a | n/a`. Never omit the ledger.
   • GENERATE-SIDE CHAIN OPTIONALITY (v590, parallel-generation
     enablement, GENERATE-SIDE ONLY):
     ASYMMETRIC RULE — applies to generate side ONLY (videos/*.md
@@ -822,14 +807,6 @@ Support-image stills usually differ from the 9:16 talking head — set their rea
 **Video mode:** storyboard
 **Auto-split:** off
 
-<!-- v867: every NEW build declares its test axes in §0 (one line, 10 keys, kebab-case values,
-     `none` when absent — never omit a key). Value bank: wiki/synthesis/video-variable-taxonomy.md.
-     - **TEST AXES:** shell=talking-head | chore=none | observer=none | hero_age=64 | proxy=banana | destruction=none | recipe_stack=none | voiced=vo | setting_anchor=attic-studio | caption_style=yellow-highlight
-     Decode side: same 11 fields (plus `watermark: present|absent`) as YAML frontmatter keys. -->
-
-<!-- v877: every winner-derived build and approved view-proxy test adds a WINNER DECISION block in §0 before METHOD: GOAL, EVIDENCE SIGNAL, one PRIMARY GAP, one exact PRIMARY DELTA, coherence-only SUPPORTING REPAIRS, SMALLEST ROUTE, WHY NOT SMALLER, and INNOVATION NEED. METHOD must match SMALLEST ROUTE. -->
-
-
 ---
 
 ## Ingredients
@@ -1048,8 +1025,7 @@ Performance / Action: Nuri pours the thin dark oil stream from the amber bottle 
 
 Voice: A warm, confident, playful woman's voice, lived-in and natural. Delivery is warm and playful, unpolished, not acted or announcer-like.
 
-Dialogue: One speaker, one turn.
-TURN 1 — SPEAKER: the main AI generated character. She speaks clearly in a warm playful American accent, saying exactly: "this is what black seed oil does to your soldier" then stops speaking and stays silent for the rest of the clip, holding the final expression.
+Dialogue: The main AI generated character speaks clearly in a warm playful American accent, saying exactly: "this is what black seed oil does to your soldier" then stops speaking and stays silent for the rest of the clip, holding the final expression.
 
 Audio: no music, no background noise (clean isolated voice). The voice sounds close and real to the phone microphone, not studio-polished.
 
@@ -1062,32 +1038,21 @@ Negative Constraints: No text overlays. No captions. No subtitles. No logos. No 
 [Prompt A written out in FULL, byte-identical, EXCEPT the Dialogue line, which reads: The main AI generated character speaks clearly in a warm playful American accent, saying exactly: "watch what black seed oil can do for your soldier" then stops speaking and stays silent for the rest of the clip, holding the final expression.]
 ```
 
-**Two people talking — split the SCENE, then use the short body (v872, confirmed by two first-try renders 2026-07-29).**
-
-**Scene level first.** A beat where two people speak is **TWO scenes**, never one scene with a merged `- **line:**`. One `### Scene N` = one `- **line:**` = one mouth. The answer scene needs its OWN start frame favouring that speaker (a reverse angle) — an image that favours the other speaker cannot be reused. Budget +1 scene, +1 clip, +1 line, +1 image, and recompute the duration sum (v861 buckets). The auditor HARD-FAILS a clip prompt carrying two speech spans, because that is a merged scene reaching the artifact.
-
-**Prompt level.** The spoken part is ONE sentence — Google's documented grammar, descriptor first:
-
-```
-The <visual descriptor> says, "<line>"
-```
-
-Descriptor = what the frame shows, garment colour first ("the woman in the blue dress", "the muscular man in the canvas overalls"). NEVER a name — the model has never seen "Nuri". NEVER a bare "the woman"/"the man" when two of that gender are in frame. NO `TURN` labels, NO timestamps, NO `saying exactly:`, NO turn-order plumbing, and **NEVER name a non-speaker** ("X and Y keep their lips closed" seeds those mouths — the §v808 negative-mention trap).
-
-The whole short body that shipped:
-
-```
-Animate the attached start-frame image into a <N>-second vertical 9:16 realistic UGC video. Handheld iPhone at chest height with slight natural drift. One continuous take, no cuts, no zooms.
-
-Keep the exact lighting, texture and imperfect iPhone quality of the attached image. No sharpening, no skin smoothing, no beauty filter, no HDR, no cinematic polish, no colour grade. Keep every face, outfit and object as in the image.
-
-<ONE sentence of motion — only what changes over the clip.>
-
-The <visual descriptor> says, "<line>"
-
-<Ambient audio in one line>. No music. No subtitles, no captions.
-```
-
-CUT because the start frame already carries them: the `Reference:` identity paragraph, the `Scene:` environment paragraph, the t=0 camera layout, `Ending Camera Beat`, `Style:`, the long negative list. Accent, when it must be locked, goes in its OWN sentence before the speech line — never between `says,` and the quote. Legacy twelve-block bodies still parse and still need their `saying exactly:` + silence clause; forward-only. Deep-dive: template_reference.md §v872.
-
 *(One Clip block per `- **line:**` in the Storyboard. Multi-line scenes get one Clip block per line, sharing the same Start frame. EVERY shot scene with a spoken line carries a `**Prompt B ...:**` label + its own fence directly under the Text-prompt fence — Prompt B is the FULL Prompt A copied byte-identical EXCEPT the quoted line, which is REWORDED (different words, same meaning + same selling power). `verify_video_format.py` hard-FAILs if B is missing, if B's body differs from A's body, or if B's line equals A's line. When a source has a known failure mode, bake the guard into the positive Text prompt as an affirmative sentence — e.g. "he is alone in frame for the full clip" for solo videos. Deep-dive: template_reference.md §v865 + §v821, prior Prompt-B shape §v805.)*
+
+---
+
+## Anchor-Format Prompts (IMMEDIATE ACTION / TERMINAL STATE — reference, selectable)
+
+> **v871 — every build emits this second section too; bold labels keep it inert to the render parser + clip-count; the operator selects which set renders per video in the Batch overview.** The same clips as the Omni section, written in the prior anchor format. Bold `**Clip N.M**` labels (NOT `### Clip`) + a header carrying no "Final Prompts" token, so the render parser and clip-counter ignore it. Both Prompt A and Prompt B are fenced. Deep-dive: `code/template_reference.md` §v871.
+
+**Clip 1.1 — Scene 1, Line 1 (HOOK)**
+**Start frame:** Image 1
+**Text prompt:**
+```
+IMMEDIATE ACTION: Nuri pours the thin dark oil stream from the amber bottle onto the short cucumber in the man's fist as she starts the line. TERMINAL STATE: the cucumber now runs several times longer and thicker, held steady as she finishes. The main AI generated character speaks clearly in a warm playful American accent, saying exactly: "this is what black seed oil does to your soldier" then stops speaking and stays silent for the rest of the clip, holding the final expression.
+```
+**Prompt B (policy fallback — Prompt A with the spoken line reworded, v821):**
+```
+IMMEDIATE ACTION: Nuri pours the thin dark oil stream from the amber bottle onto the short cucumber in the man's fist as she starts the line. TERMINAL STATE: the cucumber now runs several times longer and thicker, held steady as she finishes. The main AI generated character speaks clearly in a warm playful American accent, saying exactly: "watch what black seed oil can do for your soldier" then stops speaking and stays silent for the rest of the clip, holding the final expression.
+```
