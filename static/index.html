@@ -4885,6 +4885,11 @@ Ambient: same kitchen room tone, soft pour sound.
         // ====================================================================
         const LOCAL_VIDEO_EXTS = [".mp4", ".mov", ".webm"];
         const LOCAL_POLL_INTERVAL_MS = 30000;
+        // v877: the v822 stability gate + the delete debounce both need a
+        // SECOND observation separated by real time. Force rescan therefore
+        // runs TWO passes with this gap; one pass can never add or drop.
+        const LOCAL_STABILITY_MIN_MS = 2000;
+        const LOCAL_FORCE_PASS_GAP_MS = 2600;
         const LOCAL_IDB_DB = "kavenoLocalWatcher";
         const LOCAL_IDB_STORE = "handles";
         const LOCAL_IDB_KEY = "watched";
@@ -4895,7 +4900,7 @@ Ambient: same kitchen room tone, soft pour sound.
         let _localPollInFlight = false;
         // v822 never-miss state
         let _localStatCache = new Map();        // "name|size|mtime" -> sha256 (skip re-reads)
-        let _localPendingStability = new Map(); // name -> "size|mtime" from last scan (settling files)
+        let _localPendingStability = new Map(); // name -> {sig:"size|mtime", at:ms} first seen (settling files)
         let _localMissingStreak = new Map();    // hash -> consecutive scans missing
         let _localDeleteEligible = new Set();   // hashes OBSERVED in this folder this session
         let _localLastSkipped = [];             // [{name, reason}] from last scan
@@ -5118,10 +5123,18 @@ Ambient: same kitchen room tone, soft pour sound.
               // v822 stability gate: a file must show the SAME size+mtime on
               // two consecutive scans before we read it. Kills the
               // partial-file-upload -> wrong-match -> full-file-orphaned chain.
+              // v877: the gate is a TIME property, not a scan-count property.
+              // Scan count alone made a single Force-rescan pass structurally
+              // unable to upload anything new.
               const sig = `${file.size}|${file.lastModified}`;
-              if (_localPendingStability.get(entry.name) !== sig) {
-                _localPendingStability.set(entry.name, sig);
+              const pend = _localPendingStability.get(entry.name);
+              if (!pend || pend.sig !== sig) {
+                _localPendingStability.set(entry.name, { sig, at: Date.now() });
                 skipped.push({ name: entry.name, reason: "settling (new/changed - next scan)" });
+                continue;
+              }
+              if (Date.now() - pend.at < LOCAL_STABILITY_MIN_MS) {
+                skipped.push({ name: entry.name, reason: "settling (held <2s - next scan)" });
                 continue;
               }
               _localPendingStability.delete(entry.name);
@@ -5394,6 +5407,10 @@ Ambient: same kitchen room tone, soft pour sound.
         });
 
         // Force-rescan button (manual trigger for `_scanAndUpload`).
+        // v877: runs TWO passes. Pass 1 OBSERVES (settles new files, bumps the
+        // missing-streak of deleted ones); pass 2 ACTS (uploads, deletes). A
+        // single pass could never do either — the reason the button "did
+        // nothing" until the 30s poll caught up.
         document.getElementById("localForceRescanBtn")?.addEventListener("click", async () => {
           const btn = document.getElementById("localForceRescanBtn");
           if (!_localDirHandle) {
@@ -5401,7 +5418,7 @@ Ambient: same kitchen room tone, soft pour sound.
             return;
           }
           btn.disabled = true;
-          btn.textContent = "Scanning…";
+          btn.textContent = "Scanning… 1/2";
           try {
             // Ensure permission + scan now. If not granted, will prompt.
             const ok = await _verifyDirPermission(_localDirHandle);
@@ -5409,9 +5426,23 @@ Ambient: same kitchen room tone, soft pour sound.
               alert("Folder permission denied.");
               return;
             }
+            // A poll scan already running makes BOTH passes no-op silently
+            // (_localPollInFlight early-return). Wait for it to drain.
+            const _waitUntil = Date.now() + 20000;
+            while (_localPollInFlight && Date.now() < _waitUntil) {
+              await new Promise(r => setTimeout(r, 500));
+            }
+            if (_localPollInFlight) {
+              alert("A scan is already running (large upload?). Try again in a moment.");
+              return;
+            }
             // Ensure seen-set is fresh before diffing.
             await _refreshSeenHashesFromServer();
-            await _scanAndUpload();
+            await _scanAndUpload();                    // pass 1 — observe
+            btn.textContent = "Scanning… 2/2";
+            await new Promise(r => setTimeout(r, LOCAL_FORCE_PASS_GAP_MS));
+            console.log("[local] v877 force rescan: pass 2 (act)");
+            await _scanAndUpload();                    // pass 2 — act
             // Restart timer if not running.
             if (!_localPollTimer) {
               _localPollTimer = setInterval(_scanAndUpload, LOCAL_POLL_INTERVAL_MS);

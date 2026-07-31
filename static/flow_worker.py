@@ -7070,6 +7070,55 @@ def ensure_batch_view_mode(page, context=""):
         return False
 
 
+def _click_input_mode_tab(page, prefix=""):
+    """v881: click the Frames OR Ingredients tab for the CURRENT clip's mode.
+
+    Assumes the settings dropdown is already open. Returns
+    (mode_key, ok) where mode_key is 'Ingredients' or 'Frames' so the caller can
+    record it under the same key the settings verification checks. On success it
+    stamps page._input_mode_applied so set_clip_input_mode() only re-opens the
+    dropdown when the mode really changes between clips."""
+    if _omni_ingredients_mode(page):
+        try:
+            ing = page.locator(
+                "button.flow_tab_slider_trigger:has-text('Ingredients'), "
+                "button.flow_tab_slider_trigger:has(i:text-is('experiment')), "
+                "button.flow_tab_slider_trigger:has(i:text-is('cards'))"
+            ).first
+            ing.wait_for(state="visible", timeout=5000)
+            if ing.get_attribute("aria-selected") != "true":
+                human_click_element(page, ing, f"{prefix}Ingredients tab")
+                time.sleep(0.5)
+            page._input_mode_applied = 'Ingredients'
+            print(f"{prefix}✓ Ingredients tab OK (Omni + start&end frame)", flush=True)
+            return ('Ingredients', True)
+        except Exception:
+            # DIAG (remove after the live Omni-ingredients run lands): dump every
+            # slider-tab label so the real Ingredients selector can be confirmed.
+            try:
+                labels = page.locator("button.flow_tab_slider_trigger").all_inner_texts()
+                print(f"{prefix}⚠ [Omni/Ingredients] tab not found. slider tabs = {labels}", flush=True)
+            except Exception:
+                print(f"{prefix}⚠ [Omni/Ingredients] tab not found and could not enumerate tabs", flush=True)
+            return ('Ingredients', False)
+    # Frames tab — text-fallback added per v620 (defensive).
+    try:
+        tab = page.locator(
+            "button.flow_tab_slider_trigger:has(i:text-is('crop_free')), "
+            "button.flow_tab_slider_trigger:has-text('Frames')"
+        ).first
+        tab.wait_for(state="visible", timeout=5000)
+        if tab.get_attribute("aria-selected") != "true":
+            human_click_element(page, tab, f"{prefix}Frames tab")
+            time.sleep(0.5)
+        page._input_mode_applied = 'Frames'
+        print(f"{prefix}✓ Frames tab OK", flush=True)
+        return ('Frames', True)
+    except Exception:
+        print(f"{prefix}⚠ Frames tab missed", flush=True)
+        return ('Frames', False)
+
+
 def select_frames_to_video_mode(page, context="", **kwargs):
     """
     Ensure all project settings are correct. Bulletproof version:
@@ -7086,6 +7135,10 @@ def select_frames_to_video_mode(page, context="", **kwargs):
     # can change between consecutive clips but re-running the full settings pass
     # is wasteful (and the reuse path was built to skip it).
     _duration_only = kwargs.get('duration_only', False)
+    # v881 — input_mode_only: same open→click→close sequence, but touches ONLY
+    # the Frames/Ingredients tab. Used by set_clip_input_mode() when the current
+    # clip's shape (start-only vs start+end on Omni) needs the other tab.
+    _input_mode_only = kwargs.get('input_mode_only', False)
     _agent_off_tried = False  # only force Agent OFF once (it reloads the page)
     _marketing_recovered = False  # v836 — click through the marketing landing once
 
@@ -7334,6 +7387,17 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                     pass
                 return _dur_ok
 
+            # v881 — input-mode-only fast path: dropdown is open, click just the
+            # Frames/Ingredients tab, close, done.
+            if _input_mode_only:
+                _mode_key, _mode_ok = _click_input_mode_tab(page, prefix)
+                try:
+                    page.keyboard.press("Escape")
+                    time.sleep(0.3)
+                except Exception:
+                    pass
+                return _mode_ok
+
             # ---- Configure each setting ----
             settings_applied = {}
 
@@ -7374,49 +7438,12 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                 settings_applied['Video'] = False
                 print(f"{prefix}⚠ Video tab missed", flush=True)
 
-            # Frames vs Ingredients tab. v784: Omni Flash now accepts Frames,
-            # so every model (Omni included) selects the Frames tab via the
-            # else-branch. The Ingredients branch is kept (dead while
-            # _omni_ingredients_mode()==False) for a one-line revert if Flow
-            # drops Omni-on-Frames again.
-            if _omni_ingredients_mode(page):
-                try:
-                    ing = page.locator(
-                        "button.flow_tab_slider_trigger:has-text('Ingredients'), "
-                        "button.flow_tab_slider_trigger:has(i:text-is('experiment')), "
-                        "button.flow_tab_slider_trigger:has(i:text-is('cards'))"
-                    ).first
-                    ing.wait_for(state="visible", timeout=5000)
-                    if ing.get_attribute("aria-selected") != "true":
-                        human_click_element(page, ing, f"{prefix}Ingredients tab")
-                        time.sleep(0.5)
-                    settings_applied['Ingredients'] = True
-                    print(f"{prefix}✓ Ingredients tab OK (Omni)", flush=True)
-                except Exception:
-                    # DIAG (remove after live Omni run): dump every slider-tab
-                    # label so the real Ingredients selector can be confirmed.
-                    try:
-                        labels = page.locator("button.flow_tab_slider_trigger").all_inner_texts()
-                        print(f"{prefix}⚠ [Omni/Ingredients] tab not found. slider tabs = {labels}", flush=True)
-                    except Exception:
-                        print(f"{prefix}⚠ [Omni/Ingredients] tab not found and could not enumerate tabs", flush=True)
-                    settings_applied['Ingredients'] = False
-            else:
-                # Frames tab — text-fallback added per v620 (defensive).
-                try:
-                    tab = page.locator(
-                        "button.flow_tab_slider_trigger:has(i:text-is('crop_free')), "
-                        "button.flow_tab_slider_trigger:has-text('Frames')"
-                    ).first
-                    tab.wait_for(state="visible", timeout=5000)
-                    if tab.get_attribute("aria-selected") != "true":
-                        human_click_element(page, tab, f"{prefix}Frames tab")
-                        time.sleep(0.5)
-                    settings_applied['Frames'] = True
-                    print(f"{prefix}✓ Frames tab OK", flush=True)
-                except:
-                    settings_applied['Frames'] = False
-                    print(f"{prefix}⚠ Frames tab missed", flush=True)
+            # Frames vs Ingredients tab. v881: the mode is per clip — Omni with
+            # BOTH a start and an end frame takes Ingredients, everything else
+            # takes Frames. _click_input_mode_tab holds both branches so the
+            # full pass and the input_mode_only fast path can never drift.
+            _mode_key, _mode_ok = _click_input_mode_tab(page, prefix)
+            settings_applied[_mode_key] = _mode_ok
 
             # Portrait tab — text-fallback added per v620 (defensive).
             try:
@@ -9560,6 +9587,12 @@ def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retrie
             # Step 2.5: Check if frames were included in reuse
             # Frame upload buttons (div.sc-8f31d1ba-1) are PRESENT when frames are NOT loaded
             # They DISAPPEAR when frames ARE loaded
+            # v881 — set THIS clip's mode first: the two checks below branch on
+            # _omni_ingredients_mode(), which reads page._clip_has_end_frame. On
+            # the reuse path the upload function (which normally sets it) only
+            # runs later as a fallback, so without this the flag is the PREVIOUS
+            # clip's shape and the wrong signal gets read.
+            set_clip_input_mode(page, start_frame, end_frame, context=f"{prefix}Clip {clip_num}")
             frame_check_selector = 'div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]'
             time.sleep(2)  # Wait for UI to settle after reuse
             
@@ -9567,10 +9600,10 @@ def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retrie
             if frame_btns_count == 0:
                 # Also check without aria-haspopup
                 frame_btns_count = page.locator('div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]').count()
-            # v758.5 / v784: in Ingredients mode the add_2 button always matches
-            # the frame selector so the chip count was the real signal. With
-            # Omni now on Frames (_omni_ingredients_mode()==False) this override
-            # is skipped and the real frame-button count is used like Veo.
+            # v758.5 / v881: in Ingredients mode the add_2 button always matches
+            # the frame selector, so the CHIP count is the real signal. Live
+            # again for an Omni clip carrying both frames; every other clip
+            # falls through to the real frame-button count, like Veo.
             if _omni_ingredients_mode(page):
                 frame_btns_count = 0 if _omni_chip_count(page) > 0 else 1
 
@@ -13918,13 +13951,48 @@ def is_omni(model) -> bool:
 
 
 def _omni_ingredients_mode(page) -> bool:
-    """v784: Omni Flash now accepts Frames (start/end frame), so it runs the
-    SAME Frames path as Veo — NO model uses Ingredients mode anymore. This is
-    the single switch that gates every Ingredients-vs-Frames branch (tab
-    select + success-signal + prompt-anchor). Returns False so all of them take
-    the Frames branch. If Flow ever reverts Omni to ingredients-only, flip the
-    body back to `return is_omni(getattr(page, "_veo_model", ""))`."""
-    return False
+    """v881 (supersedes the flat v784 False): PER-CLIP switch.
+
+    Omni Flash takes a START frame on the Frames tab, but a clip that carries
+    BOTH a start AND an end frame must go through INGREDIENTS instead —
+    operator 2026-07-31. So the mode is decided per clip, not per job:
+
+        Omni + start&end  -> True  (Ingredients tab, 2 chips, attach order =
+                                    start first, end second)
+        Omni + start only -> False (Frames tab, same as v784)
+        any Veo model     -> False (Frames tab, unchanged)
+
+    `page._clip_has_end_frame` is set by set_clip_input_mode() before the tab is
+    chosen and before any upload runs. Unset (older call paths / first settings
+    pass) reads as False = Frames, i.e. exactly the v784 behavior."""
+    return bool(is_omni(getattr(page, "_veo_model", ""))
+                and getattr(page, "_clip_has_end_frame", False))
+
+
+def set_clip_input_mode(page, start_image, end_image, context=""):
+    """v881: set THIS clip's input shape + flip the Frames/Ingredients tab when
+    the shape changed since the last clip.
+
+    The full settings pass runs once per project, so a mixed job (some clips
+    start-only, some start+end) needs a per-clip tab toggle. This does the
+    minimum: record the shape, compute the mode, and only re-open the settings
+    dropdown when the mode actually differs from the one currently applied.
+
+    Returns the mode string ('Ingredients' or 'Frames')."""
+    prefix = f"{context} " if context else ""
+    page._clip_has_end_frame = bool(start_image and end_image)
+    mode = 'Ingredients' if _omni_ingredients_mode(page) else 'Frames'
+    applied = getattr(page, "_input_mode_applied", None)
+    if applied == mode:
+        return mode
+    print(f"{prefix}[v881] input mode {applied or '-'} → {mode} "
+          f"(model={getattr(page, '_veo_model', '-')}, "
+          f"end_frame={'yes' if page._clip_has_end_frame else 'no'})", flush=True)
+    try:
+        select_frames_to_video_mode(page, context=context, input_mode_only=True)
+    except Exception as e:
+        print(f"{prefix}[v881] ⚠ input-mode tab switch failed: {e}", flush=True)
+    return mode
 
 
 def _omni_chip_count(page):
@@ -14029,12 +14097,19 @@ def click_frame_and_upload(page, image_path, is_end_frame=False, context=""):
     upload_frame(page, image_path, frame_name)
 
 
-def attach_ingredient_image_with_check(page, image_path, context="", extra_images=None, gallery_cache=None):
+def attach_ingredient_image_with_check(page, image_path, context="", extra_images=None,
+                                       gallery_cache=None, clear_existing=True):
     """Attach one image as an Ingredient (Omni Flash mode).
 
     extra_images / gallery_cache are accepted for parity with the frames
     upload path (reserved for batch pre-loading all images together — a
     follow-up once the single-image path is confirmed live).
+
+    v881 — clear_existing: True wipes leftover chips from the previous clip
+    first (correct for the FIRST image of a clip). The SECOND image of a
+    start+end pair MUST pass False, or it would delete the start chip it is
+    supposed to sit beside. Success is a chip-count INCREASE, not "any chip
+    present", for the same reason.
 
     Returns:
         (True, None)          chip attached
@@ -14054,15 +14129,18 @@ def attach_ingredient_image_with_check(page, image_path, context="", extra_image
 
     # Clear any ingredient chip left over from the previous clip (its 'cancel'
     # icon, per the operator's DOM) so each clip attaches exactly its own image.
-    try:
-        for _ in range(4):
-            cancel = page.locator("button[data-card-open] i:text-is('cancel')").first
-            if cancel.count() == 0:
-                break
-            cancel.click(timeout=2000)
-            time.sleep(0.4)
-    except Exception:
-        pass
+    if clear_existing:
+        try:
+            for _ in range(4):
+                cancel = page.locator("button[data-card-open] i:text-is('cancel')").first
+                if cancel.count() == 0:
+                    break
+                cancel.click(timeout=2000)
+                time.sleep(0.4)
+        except Exception:
+            pass
+
+    chips_before = _omni_chip_count(page)
 
     # Open the add-ingredient dialog. The control is the 'add_2' Create button
     # (operator DOM: button[aria-haspopup=dialog] containing i 'add_2').
@@ -14129,8 +14207,11 @@ def attach_ingredient_image_with_check(page, image_path, context="", extra_image
     clicked_add = False
     for _ in range(30):
         try:
-            if page.locator(chip_sel).count() > 0:
-                print(f"{prefix}✓ [Omni/Ingredients] chip attached", flush=True)
+            # v881 — count INCREASE, so the second image of a start+end pair is
+            # not "confirmed" by the start chip that is already sitting there.
+            if page.locator(chip_sel).count() > chips_before:
+                print(f"{prefix}✓ [Omni/Ingredients] chip attached "
+                      f"({chips_before} → {page.locator(chip_sel).count()})", flush=True)
                 return (True, None)
         except Exception:
             pass
@@ -14977,6 +15058,12 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
     frame_selector = 'div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]'
     monitor = FramePolicyMonitor(page)
 
+    # v881 — decide THIS clip's input shape BEFORE anything is uploaded, and
+    # flip the Frames/Ingredients tab if it differs from the last clip. Every
+    # upload path in the worker funnels through this function, so this is the
+    # one place the per-clip mode has to be set.
+    set_clip_input_mode(page, start_image, end_image, context=context)
+
     # ── Always clear previous prompt/frames before uploading ──
     # After generating, Flow keeps the old prompt + frames in the slots.
     # The empty frame upload buttons (aria-haspopup="dialog") only appear
@@ -14990,9 +15077,9 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
     except Exception:
         pass  # No clear button = input already empty, proceed normally
 
-    # v758.3 / v784: Ingredients-mode pre-clear of leftover chips. Skipped now
-    # that Omni runs on Frames (_omni_ingredients_mode()==False) — the frames
-    # flow confirms via frame-button-gone, no chip bookkeeping needed.
+    # v758.3 / v881: Ingredients-mode pre-clear of leftover chips, then attach
+    # this clip's pair. Live again for Omni clips that carry BOTH frames — a
+    # Frames-tab upload cannot run there (Omni has no END slot).
     if _omni_ingredients_mode(page):
         try:
             for _ in range(4):
@@ -15003,6 +15090,24 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
                 time.sleep(0.3)
         except Exception:
             pass
+        # ATTACH ORDER IS THE CONTRACT: start first, end second. Nothing in the
+        # prompt names them (operator 2026-07-31) — Flow reads the chip order.
+        for _which, _img in (('start', start_image), ('end', end_image)):
+            if not _img:
+                continue
+            ok, why = attach_ingredient_image_with_check(
+                page, _img, context=f"{prefix}[{_which}]",
+                gallery_cache=gallery_cache, clear_existing=False)
+            if not ok:
+                # 'policy' → content reject (replace-image card, no reason text:
+                # the attach path does not surface FramePolicyMonitor.error_reason
+                # yet). 'no_buttons' → attach glitch, retried like a frame glitch.
+                if why == 'policy':
+                    return (False, _which, None)
+                return (False, f'{_which}_glitch', None)
+        print(f"{prefix}✓ [Omni/Ingredients] {'both images' if (start_image and end_image) else 'image'} attached "
+              f"({_omni_chip_count(page)} chips)", flush=True)
+        return (True, None, None)
 
     def _upload_one_frame(frame_name, image_path, image_hash, image_basename,
                           btn_getter, max_attempts=3):
@@ -15865,10 +15970,12 @@ def fill_prompt_textarea(page, prompt):
     Slate editor doesn't respond to textContent/innerText changes.
     Must use keyboard-level input or execCommand to update Slate's internal state.
     """
-    # v758 / v784: Ingredients-mode prompt anchor ("use the photo I added").
-    # Skipped now that Omni runs on Frames — the start frame already pins the
-    # framing, so the extra sentence is unneeded (and would pollute the prompt).
-    if _omni_ingredients_mode(page):
+    # v758 / v784 / v881: Ingredients-mode prompt anchor ("use the photo I
+    # added") stays OFF even now that Omni-with-both-frames uses Ingredients
+    # again. Operator 2026-07-31: attach ORDER carries start-vs-end; the prompt
+    # says nothing about the chips. Flip this flag to restore the sentence.
+    _OMNI_INGREDIENT_PROMPT_ANCHOR = False
+    if _OMNI_INGREDIENT_PROMPT_ANCHOR and _omni_ingredients_mode(page):
         anchor = "Important: use the photo I added, do not change the framing/camera angle."
         if anchor not in (prompt or ""):
             prompt = (prompt or "").rstrip() + "\n\n" + anchor

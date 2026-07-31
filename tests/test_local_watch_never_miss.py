@@ -322,3 +322,38 @@ def test_suggest_endpoint_uses_tfidf_not_char_v822_6():
     src = open(_MAIN, encoding="utf-8").read()
     assert "rank_tfidf(v.transcription" in src
     assert "_ig_match.score(_t, _dlg)" not in src
+
+
+# ---- v877: Force rescan must actually act ---------------------------------
+def _force_rescan_block():
+    src = open(_INDEX, encoding="utf-8").read()
+    start = src.index('getElementById("localForceRescanBtn")?.addEventListener')
+    end = src.index('addEventListener("visibilitychange"', start)
+    return src[start:end]
+
+
+def test_force_rescan_runs_two_passes_v877():
+    """The v822 stability gate and the delete debounce each need a SECOND
+    observation, so a one-pass Force rescan could never upload a new file or
+    drop a deleted one — it only looked broken until the 30s poll caught up."""
+    block = _force_rescan_block()
+    assert block.count("await _scanAndUpload();") == 2
+    assert "LOCAL_FORCE_PASS_GAP_MS" in block
+
+
+def test_force_rescan_waits_out_an_in_flight_scan_v877():
+    """_scanAndUpload early-returns while _localPollInFlight is set, so a
+    Force rescan landing on a running poll used to no-op silently."""
+    block = _force_rescan_block()
+    assert "_localPollInFlight" in block
+    assert "A scan is already running" in block
+
+
+def test_stability_gate_is_time_based_v877():
+    """Scan count is not elapsed time; the gate now stores {sig, at}."""
+    src = open(_INDEX, encoding="utf-8").read()
+    assert "LOCAL_STABILITY_MIN_MS" in src
+    assert "_localPendingStability.set(entry.name, { sig, at: Date.now() })" in src
+    assert "Date.now() - pend.at < LOCAL_STABILITY_MIN_MS" in src
+    # the old scan-count-only comparison must be gone
+    assert "_localPendingStability.get(entry.name) !== sig" not in src

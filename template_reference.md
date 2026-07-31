@@ -16231,3 +16231,141 @@ INNOVATION NEED: none | <second proven source + function + why the parent alone 
 2. **LINT TIME, the catch-net.** Auditor check `winner_decision` — in lane when §0 carries `CONVERSION PARENT:` / `VIEW-PROXY TEST:` / `CONVERSION LANE: yes`, otherwise SKIP. **WARN-only, never FAIL** (Codex ack rev 185: a WARN catch for legacy and half-filled blocks that must not replace the pre-draft gate). It warns on: the block missing · any of the eight fields empty or left as a `<placeholder>`/tbd · an out-of-vocabulary `GOAL` / `PRIMARY GAP` / `SMALLEST ROUTE` · and **`SMALLEST ROUTE:` ≠ `METHOD:`**, which is the tell that the route was picked after the fact.
 
 **Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/winner-to-selling-conversion.md`, `wiki/concepts/script-adaptation/script-adaptation-workflow.md`, `wiki/concepts/script-adaptation/step-up-vs-innovation.md`, `wiki/synthesis/innovation-operating-system.md`, `docs/winner-to-selling-audit-template.md`, root `CLAUDE.md`, `wiki/meta/generate-video-checklist.md`, `wiki/index.md`, `wiki/log.md`.
+
+## v879 — START-FRAME-SAFE ACTIONS: animate from what is visibly true, never from an assumed grip or pose
+
+Sources: operator correction 2026-07-31 on the grandfather/banana build · v750 action-only prompt discipline · v751 Veo-to-image semantic consistency.
+
+**The rule.** Every image-to-video action must be possible from the attached start frame exactly as rendered. The prompt may direct the subject to **continue, move, display, manipulate, or react with** what is visible. It must not silently assume a precise starting grip, hand, pose, orientation, contact point, or object position that the start frame may not contain.
+
+This is a build-time judgment gate, not a cleanup after generation:
+
+1. Open the actual start frame or read its final approved image prompt.
+2. List only the visible facts needed by the motion: who has the object, roughly where it is, and its current state.
+3. Write the action from those facts. If the exact grip is not guaranteed, use a grip-neutral verb such as `raises`, `shows`, `moves`, `holds forward`, `lets it hang`, `rubs`, or `turns`.
+4. Name a precise grip or contact point only when the approved start frame visibly guarantees it.
+5. Keep the action specific about the visible result and loose only about the uncertain starting mechanics.
+
+**Failure:** `She lifts the banana by its stem` when the frame may show the banana held around its body. Veo must invent a re-grip before it can obey, which causes hand/object jumps or a stalled action.
+
+**Pass:** `She raises the failed banana and lets its soft body hang in front of the man.` The action preserves the intended display while working from any natural grip already present.
+
+This is not permission to make actions vague. The key action and terminal state stay concrete; only unverified start-pose assumptions are removed. A deliberately locked pose/action from the operator or a verified start frame stays literal under §5.5.
+
+**Scope:** GENERATE side, forward-only, every image-to-video clip. Applies to Omni Prompt A/B and Anchor Prompt A/B. Build-time enforcement: the v879 start-frame compatibility read in `wiki/meta/generate-video-checklist.md`; v751 remains the broader semantic-consistency gate.
+
+## v880 — TWO VOCABULARIES: production prompts name the carrier; dialogue names the customer’s problem
+
+Sources: operator correction 2026-07-31 on the baking-soda/Vicks build · Selling Course Part 9 specificity pass · Script Training real-customer-language examples · `line-level-substitution-rules.md` proxy-binding and image tests.
+
+**The rule.** Keep production vocabulary and customer vocabulary separate:
+
+- Image prompts, action notes, and motion instructions name the literal visible carrier when the model needs it: `banana`, `eggplant`, `geoduck`, `bottle`, `board`, `balloon`.
+- Spoken dialogue names the pain, body function, desire, or consequence in words the audience uses: `soldier`, `Johnson`, `blood flow`, `wife`, `bedtime`, or the niche’s proven equivalent.
+- Internal labels never enter speech: `proxy`, `carrier`, `stand-in`, `visual metaphor`, `before-state`, `after-state`, `failed object`, `hero prop`.
+
+The visual metaphor should translate silently. The line binds it to the customer’s owned problem; it does not explain the production device. Saying `rub that paste across the same proxy` exposes the script notes, breaks the metaphor, creates distance, and sounds unlike a customer or creator. In this ED case, `rub that paste over your soldier` or a corpus-proven `Johnson` line keeps the speech on the buyer’s problem while the prompt still tells the model which food object is touched.
+
+**Literal-object carve-out.** A spoken line may name the object when the object is truly the topic: a recipe ingredient, a named product, a literal comparison, or a deliberate joke whose wording is proven by the source. The default in a symptom-metaphor beat is still customer language, not prop language.
+
+**Three checks for every spoken line:**
+
+1. **No-visual test:** if the frame disappeared, would the target customer still understand what problem or result the line means?
+2. **Real-person test:** would the speaker plausibly say this to a friend, spouse, or viewer, or does it sound like a storyboard note?
+3. **Binding test:** when a visible metaphor is doing the work, does the line connect it to the owned symptom using corpus-proven customer words?
+
+**Scope:** GENERATE side, forward-only, every spoken `- **line:**` and every quoted Prompt A/B copy. The build-time line proofread owns the judgment. A mechanical scan may hard-fail the internal labels above inside spoken text, but it must not ban those terms from §0 maps, Ingredients, image prompts, action notes, or other production fields.
+
+---
+
+## v881 — Omni + START AND END frame = INGREDIENTS, per clip (narrows v784)
+
+**Operator, 2026-07-31**: *"when we use omni as model and we have start and end frame, we have to use ingredients instead of frames."* Runtime change (`code/static/flow_worker.py` — the Flow video worker). Auto-deploys to Render.
+
+### What v784 got right, and where it was too wide
+
+§v784 collapsed the Ingredients path entirely: Omni had gained a Frames tab, so `_omni_ingredients_mode()` was hardcoded `return False` and every model ran Frames. That still holds for a clip with a START frame only. It does NOT hold for a clip that carries BOTH frames — Omni has no END slot, so the pair has to go in as two Ingredient chips.
+
+### The switch is now per CLIP, not per job
+
+```python
+def _omni_ingredients_mode(page) -> bool:
+    return bool(is_omni(getattr(page, "_veo_model", ""))
+                and getattr(page, "_clip_has_end_frame", False))
+```
+
+| Model | Clip frames | Mode |
+|---|---|---|
+| Omni Flash | start + end | **Ingredients** (2 chips) |
+| Omni Flash | start only | Frames (unchanged from v784) |
+| any Veo | anything | Frames (unchanged) |
+| flag unset (older call paths) | — | Frames (v784 behavior is the fallback) |
+
+`page._clip_has_end_frame` is stamped by the new `set_clip_input_mode(page, start_image, end_image)`.
+
+### Per-clip tab toggling (why a job-level decision was not enough)
+
+The full settings pass runs ONCE per project, but a mixed job holds both clip shapes. So `set_clip_input_mode()` compares the clip's mode against `page._input_mode_applied` and, only on a change, re-opens the settings dropdown through a new `select_frames_to_video_mode(page, input_mode_only=True)` fast path — the same open→click→Escape sequence the v861 `duration_only` path uses. Both the full pass and the fast path click the tab through one shared `_click_input_mode_tab()`, so they cannot drift.
+
+`set_clip_input_mode()` is called from two places: the top of `upload_both_frames_with_policy_check()` (every upload path funnels there) and the reuse path's frame-presence check in `click_reuse_and_generate()` — the reuse check branches on the mode BEFORE any upload runs, so without its own call it would read the previous clip's shape.
+
+### Attach contract: ORDER, not prose
+
+START is attached first, END second. Nothing in the prompt names them (operator call — the chip order is the signal). The v758 Ingredients prompt anchor ("use the photo I added…") therefore stays OFF, now behind an explicit `_OMNI_INGREDIENT_PROMPT_ANCHOR = False` flag in `fill_prompt_textarea()` instead of being dead by side effect.
+
+### The dead Ingredients path had two real bugs before it could be used
+
+`attach_ingredient_image_with_check()` had never been called by anything (§v784 noted this). Wiring it up needed two fixes:
+
+1. **`clear_existing` parameter** — it wiped every existing chip on entry. The second image of a pair must pass `clear_existing=False`, or it deletes the START chip it is meant to sit beside.
+2. **Chip-count DELTA as the success signal** — it returned success on "any chip present", which is already true when the END image is being attached. Now it baselines the count on entry and confirms only on an increase.
+
+Failure mapping into the caller's 3-tuple: `policy` → `(False, 'start'|'end', None)` (replace-image card); `no_buttons` → `(False, 'start_glitch'|'end_glitch', None)` (retried like an attach glitch). The attach path does not surface `FramePolicyMonitor.error_reason` yet, so the reason stays `None` — a v815 follow-up if a prominent-people auto-retry is wanted on this path.
+
+### Revert
+
+Flip the helper body back to `return False` — that restores v784 exactly, at every gated site.
+
+**Tests**: `code/test_omni_ingredients_mode.py` (truth table + the mode-change/no-change toggle). **Touched**: `code/static/flow_worker.py`, `code/template_reference.md` (this deep-dive), `code/test_omni_ingredients_mode.py` (new), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline).
+
+---
+
+## v882 — OBJECT SWAP = SCENE REBUILD: physical truth, dialogue truth, and valence must move together
+
+Sources: operator correction 2026-07-31 on `nuri-korella-ed-parkinglot-pov-wife-records-grandfather-stops-pills-korella-saffron-selling-v1` · the audited bag parent `nuri-korella-ed-drivethru-pov-wife-records-grandfather-stops-bag-korella-saffron-selling-v1` · `nuri-korella-ed-pharmacy-smack-bluepills-couple-saffron-v1` · `raw/videos/decoded_axe-woodsplit-jealous-wife-cortisol-chest-salvora-rhodiola-podcast-splitscreen-fb.md` · `line-level-substitution-rules.md` §“The beat's FUNCTION survives a pain change; the thing it POINTS AT does not.”
+
+**The rule.** A visible object may be token-swapped only when the replacement has the same physical grammar: the same number of meaningful pieces, the same owner at the start, the same action, the same transfer/contact, the same owner and state at the end, and the same meaning in the dialogue. If any one changes, this is not a noun swap. Rebuild every affected image, scene, line, motion prompt, question/answer beat, and transition as one scene chain.
+
+The failure that created this rule was a bag→pills substitution. A bag is one object transferred from a cashier to a husband. “He took the bag out of my husband's hand” can match a frame where the fit man ends holding the bag. Pills are a system: bottle + cap + capsules + receiving palm + pour. Blocking the bottle before the capsules land is not “taking the pills out of his hand.” Keeping the bag dialogue while rendering the pill system made the line, image and action describe different events.
+
+The same incomplete swap reversed the failed-fix meaning. The fit man held the GNC bottle label-forward while saying “then he should probably start doing what i do,” so the frame visually endorsed the object the script meant to reject. The next question changed from gym/diet to prescription, but the answer still denied training. A grammatically clean line can still be causally wrong.
+
+### Mandatory pre-draft declaration
+
+Every build with a script-changing `METHOD:` declares `OBJECT SWAP: yes | no` in §0. Use `yes` when a hook prop, failed fix, task object, carrier, transfer, contact action, or shown process changes. For `yes`, add:
+
+```text
+### OBJECT-STATE MAP
+| Beat | Source start | Source action | Source end | Build start | Build action | Build end | Dialogue claim | Valence |
+|---|---|---|---|---|---|---|---|---|
+| S1 | cashier owns one bag | husband reaches; fit man blocks | fit man owns bag | husband owns bottle; capsules remain inside | fit man knocks bottle away | bottle leaves the choice; no capsules land | “he knocked the pills out of my husband's hand” | pills = rejected failed fix |
+
+STALE SOURCE TOKENS: taken bag | stopped bag | order speaker | menu canopy | banana impact
+DIALOGUE CAUSALITY: <for every changed question/claim, name the exact later answer and why it answers>
+FAILED-FIX VALENCE: <enemy / neutral / solution; who holds it and why the frame cannot imply the opposite>
+HOOK-TO-BODY SEAM: <the exact hook promise and the first body beat that answers it>
+```
+
+The example row shows the required level of physical detail, not a required creative direction.
+
+### Five hard checks
+
+1. **Object-state truth.** Inventory every meaningful piece. Do not collapse bottle + loose contents + receiving hand into one noun. The Scene line, image prompt, action note, Prompt A and Prompt B must agree on who owns what at start and end.
+2. **Dialogue truth.** Read the line against the silent frame. Every verb must describe the visible event exactly. “Took from his hand” fails when the object never reached that hand.
+3. **Question→answer truth.** When a wrong guess changes, rewrite the denial and press beats that answer it. A prescription question cannot be answered by “I stopped training.” Check the whole exchange, not one line at a time.
+4. **Valence truth.** A failed fix stays visibly rejected. An authority or proof carrier may point to it as the enemy, knock it away, set it aside, or compare against it. They may not present it label-forward while saying “do what I do” unless the script truly endorses it.
+5. **Clean-swap truth.** List the old render-facing phrases in `STALE SOURCE TOKENS:` and require zero hits in Ingredients descriptions, image prompts, lines, action notes/action arcs, and both prompt sets. Source words may remain in §0 analysis only.
+
+Then run the v879 start-frame check separately: every animation starts before the requested motion, not already in its terminal pose. Finally read the hook→body seam aloud. If the hook promises pill rejection and the body opens on an unrelated physique or proxy claim, add the missing causal bridge or choose a different hook.
+
+**Scope:** GENERATE side, forward-only. Applies to every script-changing method; the full map is mandatory when `OBJECT SWAP: yes`. Build-time enforcement lives in the `/build` loader. Auditor `object_swap_logic` hard-fails a changed-object/action declaration with no map, incomplete required fields, or a declared stale token that survives in the render zone. It warns on legacy method builds with no `OBJECT SWAP:` declaration.

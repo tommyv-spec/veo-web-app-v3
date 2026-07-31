@@ -26,12 +26,13 @@ import shutil
 import asyncio
 import logging
 import secrets
+import html
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header, Request, Body, Query
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float, or_
@@ -41,12 +42,20 @@ from sqlalchemy.orm import Session, relationship, joinedload, selectinload
 # Reuse the existing SQLAlchemy Base so init_db() picks up these models
 from models import Base, get_db_session, get_db, User, read_query_with_retry, UserWorkerToken
 from config import app_config
-from auth import get_current_user
+from auth import get_current_user, SESSION_SECRET
 from clip_duration import (
     ALLOWED_CLIP_DURATIONS_S,
     pick_clip_duration_s,
     resolve_clip_duration_s,
 )
+from chatgpt_extension_pairing import (
+    ExpiredPairingTicket,
+    InvalidPairingTicket,
+    load_ticket as load_chatgpt_extension_pairing_ticket,
+    make_ticket as make_chatgpt_extension_pairing_ticket,
+    normalize_email as normalize_chatgpt_extension_email,
+)
+from chatgpt_extension_bundle import build_extension_zip
 
 
 log = logging.getLogger("image_platform")
@@ -10175,7 +10184,208 @@ Set-Location $WorkDir
     return FAResponse(content=script, media_type="text/plain")
 
 
-# ---- ChatGPT image worker distribution (additive) ------------------------
+# ---- ChatGPT existing-profile extension worker ----------------------------
+# The extension runs inside the Chrome profile the user is already using.
+# ChatGPT cookies never leave Chrome: install -> authenticated onboarding ->
+# short-lived signed ticket -> existing UserWorkerToken. The old Python worker
+# stays available as an advanced fallback until a live extension job is proven.
+
+_CHATGPT_EXTENSION_DIR = Path(__file__).parent / "static" / "chatgpt_extension"
+_CHATGPT_EXTENSION_PAIR_COOKIE = "kaveno_chatgpt_extension_pair"
+_CHATGPT_EXTENSION_PAIR_SALT = "chatgpt-extension-pair-v1"
+_CHATGPT_EXTENSION_PAIR_MAX_AGE_S = 600
+
+
+def _validate_chatgpt_extension_email(value: str) -> str:
+    """Return a normalized account email or raise a plain 400."""
+    try:
+        return normalize_chatgpt_extension_email(value)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def _make_chatgpt_extension_ticket(user_id: str, email: str, api_url: str) -> str:
+    return make_chatgpt_extension_pairing_ticket(
+        f"{SESSION_SECRET}:{_CHATGPT_EXTENSION_PAIR_SALT}",
+        user_id,
+        _validate_chatgpt_extension_email(email),
+        api_url,
+    )
+
+
+def _load_chatgpt_extension_ticket(ticket: str) -> Dict[str, str]:
+    try:
+        return load_chatgpt_extension_pairing_ticket(
+            f"{SESSION_SECRET}:{_CHATGPT_EXTENSION_PAIR_SALT}",
+            ticket,
+            _CHATGPT_EXTENSION_PAIR_MAX_AGE_S,
+        )
+    except ExpiredPairingTicket:
+        raise HTTPException(410, "ChatGPT extension setup expired. Start it again from KavenoBuilder.")
+    except InvalidPairingTicket:
+        raise HTTPException(400, "Invalid ChatGPT extension setup ticket")
+
+
+class ChatgptExtensionRedeemRequest(BaseModel):
+    ticket: str = Field(..., min_length=20, max_length=4096)
+
+
+@router.get("/worker/extension/install")
+def install_chatgpt_extension(
+    request: Request,
+    chatgpt_email: str = Query(""),
+    user: User = Depends(get_current_user),
+):
+    """Start setup from the Chrome profile that should run ChatGPT.
+
+    A signed HttpOnly cookie carries the expected account through Chrome's
+    required Web Store confirmation. The extension opens onboarding after install.
+    """
+    email = _validate_chatgpt_extension_email(chatgpt_email)
+    hostname = (request.url.hostname or "").lower()
+    if hostname in {"localhost", "127.0.0.1"}:
+        api_url = str(request.base_url).rstrip("/")
+    else:
+        # Never sign a worker-token handoff for a caller-controlled Host header.
+        api_url = "https://kavenobuilder.com"
+    ticket = _make_chatgpt_extension_ticket(user.id, email, api_url)
+    store_url = os.environ.get("CHATGPT_EXTENSION_STORE_URL", "").strip()
+    if store_url and not store_url.startswith("https://chromewebstore.google.com/"):
+        log.warning("Ignoring invalid CHATGPT_EXTENSION_STORE_URL")
+        store_url = ""
+
+    safe_ticket = html.escape(ticket, quote=True)
+    safe_email = html.escape(email, quote=True)
+    safe_api = html.escape(api_url, quote=True)
+    if store_url:
+        store_step = (
+            f'<a href="{html.escape(store_url, quote=True)}" '
+            'style="display:inline-block;background:#1769e0;color:white;text-decoration:none;'
+            'padding:11px 16px;border-radius:7px;font-weight:700">Add extension in Chrome</a>'
+        )
+    else:
+        store_step = (
+            '<a href="/api/images/worker/download/chatgpt-extension.zip">Download the test extension ZIP</a>, '
+            'unzip it, then open <code>chrome://extensions</code>, turn on Developer mode, '
+            'choose <strong>Load unpacked</strong>, and select the unzipped folder.'
+        )
+    body = f"""<!doctype html>
+<html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
+<meta name=\"kaveno-chatgpt-ticket\" content=\"{safe_ticket}\">
+<meta name=\"kaveno-chatgpt-email\" content=\"{safe_email}\">
+<meta name=\"kaveno-chatgpt-api\" content=\"{safe_api}\">
+<title>Kaveno ChatGPT worker setup</title></head>
+<body style=\"font-family:Arial,sans-serif;max-width:680px;margin:48px auto;padding:0 20px;line-height:1.5;color:#172033\">
+<h1>Connect ChatGPT</h1>
+<p>This connects <strong>{safe_email}</strong> in the Chrome profile that opened this page.</p>
+<p id=\"kaveno-pair-status\">If the extension is already installed, it will connect now.</p>
+<p>{store_step}</p>
+<p>Chrome asks for approval once. After approval, the worker opens automatically.</p>
+<p>No Chrome profile or window will be closed.</p></body></html>"""
+    response = HTMLResponse(body, status_code=200)
+
+    response.set_cookie(
+        _CHATGPT_EXTENSION_PAIR_COOKIE,
+        ticket,
+        max_age=_CHATGPT_EXTENSION_PAIR_MAX_AGE_S,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+        path="/api/images/worker/extension",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
+    return response
+
+
+@router.get("/worker/extension/onboarding")
+def onboard_chatgpt_extension(
+    request: Request,
+    user: User = Depends(get_current_user),
+):
+    """Page opened by runtime.onInstalled; its content script reads the ticket."""
+    ticket = request.cookies.get(_CHATGPT_EXTENSION_PAIR_COOKIE, "")
+    try:
+        payload = _load_chatgpt_extension_ticket(ticket)
+        if str(payload["user_id"]) != str(user.id):
+            raise HTTPException(403, "This setup belongs to a different KavenoBuilder account")
+        safe_ticket = html.escape(ticket, quote=True)
+        safe_email = html.escape(payload["email"], quote=True)
+        safe_api = html.escape(payload["api_url"], quote=True)
+        body = f"""<!doctype html>
+<html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
+<meta name=\"kaveno-chatgpt-ticket\" content=\"{safe_ticket}\">
+<meta name=\"kaveno-chatgpt-email\" content=\"{safe_email}\">
+<meta name=\"kaveno-chatgpt-api\" content=\"{safe_api}\">
+<title>Connecting ChatGPT</title></head>
+<body style=\"font-family:Arial,sans-serif;max-width:640px;margin:60px auto;padding:0 20px;color:#172033\">
+<h1>Connecting ChatGPT…</h1><p>The extension is pairing with <strong>{safe_email}</strong>.</p>
+<p id=\"kaveno-pair-status\">Keep this tab open for a moment.</p></body></html>"""
+        response = HTMLResponse(body)
+    except HTTPException as exc:
+        body = f"""<!doctype html><html><head><meta charset=\"utf-8\"><title>Restart setup</title></head>
+<body style=\"font-family:Arial,sans-serif;max-width:640px;margin:60px auto;padding:0 20px;color:#172033\">
+<h1>Restart setup</h1><p>{html.escape(str(exc.detail))}</p>
+<p>Return to KavenoBuilder and choose <strong>Connect existing Chrome</strong> again.</p></body></html>"""
+        response = HTMLResponse(body, status_code=exc.status_code)
+    response.delete_cookie(_CHATGPT_EXTENSION_PAIR_COOKIE, path="/api/images/worker/extension")
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
+    return response
+
+
+@router.post("/worker/extension/redeem")
+def redeem_chatgpt_extension(
+    payload: ChatgptExtensionRedeemRequest,
+    db: Session = Depends(get_db_session),
+):
+    """Exchange a ten-minute signed ticket for this user's image-worker token."""
+    setup = _load_chatgpt_extension_ticket(payload.ticket)
+    token = db.query(UserWorkerToken).filter(
+        UserWorkerToken.user_id == setup["user_id"],
+        UserWorkerToken.is_active == True,
+    ).first()
+    if not token:
+        token = UserWorkerToken(
+            id=secrets.token_urlsafe(48),
+            user_id=setup["user_id"],
+            name=f"ChatGPTBrowserWorker-{datetime.utcnow().strftime('%Y%m%d-%H%M')}",
+        )
+        db.add(token)
+        db.commit()
+    # Temporary production diagnostic required for a runtime path. Remove only
+    # after one operator-side extension job reaches ready.
+    log.info(
+        "[chatgpt-extension][diag] paired user=%s email=%s",
+        setup["user_id"], setup["email"],
+    )
+    return {
+        "api_url": setup["api_url"],
+        "api_key": token.id,
+        "chatgpt_email": setup["email"],
+    }
+
+
+@router.get("/worker/download/chatgpt-extension.zip")
+def download_chatgpt_extension_zip(
+    user: User = Depends(get_current_user),
+):
+    """Serve the unpacked-test extension bundle until the Web Store is live."""
+    if not _CHATGPT_EXTENSION_DIR.is_dir():
+        raise HTTPException(404, "ChatGPT extension bundle is not present")
+    return Response(
+        content=build_extension_zip(_CHATGPT_EXTENSION_DIR),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": "attachment; filename=KavenoChatGPTExtension.zip",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+# ---- ChatGPT Python worker distribution (advanced fallback) --------------
 # The ChatGPT worker is a multi-file bundle living under code/static/. The
 # operator sets it up from the UI: names the ChatGPT account, downloads +
 # runs the worker, which pulls that account's session and connects. Reuses
