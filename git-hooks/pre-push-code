@@ -1,0 +1,63 @@
+#!/bin/sh
+# DEPLOY GATE for the code submodule (tracked copy).
+#
+# A push to main IS a production deploy. This is the last moment anything can be
+# checked, and it is the moment two near-misses happened in two days:
+#   * a sync from a stale branch dropped 21 lines of main-only content
+#   * the fix for it dropped one more
+# Commit hooks did not catch either, because both were pushed from worktrees.
+#
+# WHAT IT DOES when (and only when) the push target is main:
+#   * runs check_deploy_safety.py — blocks if the pushed tree loses any line that
+#     origin/main has, deletes a text file, or ships a .py that does not parse
+#   * prints the exact verify command to run afterwards
+#
+# Deliberate removals: `git push --no-verify`, or run the check yourself with
+# --allow-loss first to see it acknowledged.
+#
+# INSTALL (from the wiki repo root):
+#   cp code/git-hooks/pre-push-code .git/modules/code/hooks/pre-push
+#   chmod +x .git/modules/code/hooks/pre-push
+#
+# Skips silently with no python or no reachable origin/main.
+
+remote="$1"
+
+targets_main=""
+while read local_ref local_sha remote_ref remote_sha; do
+  [ -z "$remote_ref" ] && continue
+  case "$remote_ref" in
+    refs/heads/main) targets_main="$local_sha" ;;
+  esac
+done
+
+[ -z "$targets_main" ] && exit 0
+command -v python >/dev/null 2>&1 || exit 0
+
+git fetch -q "$remote" main 2>/dev/null
+
+if [ -f check_deploy_safety.py ]; then
+  out=$(python check_deploy_safety.py --ref "$targets_main" 2>/dev/null)
+  status=$?
+else
+  script=$(git show origin/main:check_deploy_safety.py 2>/dev/null)
+  [ -z "$script" ] && exit 0
+  out=$(printf '%s' "$script" | python - --ref "$targets_main" 2>/dev/null)
+  status=$?
+fi
+
+echo "$out" | grep -q "DEPLOY SAFETY" || exit 0
+echo "$out"
+
+if [ $status -ne 0 ]; then
+  echo ""
+  echo "PUSH BLOCKED — this deploy would lose content or ship a broken module."
+  echo "Deliberate? re-run: python code/check_deploy_safety.py --allow-loss"
+  echo "then push with --no-verify."
+  exit 1
+fi
+
+echo ""
+echo "After the push, CONFIRM it (never assume):"
+echo "    python code/verify_deploy.py ${targets_main}"
+exit 0
