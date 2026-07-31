@@ -14618,7 +14618,9 @@ Give every visible process step and every meaningful on-screen object its own or
 
 **The meta-rule (the "completely unrelated cases" half):** before authoring artifact B from artifact A, ask what A actually IS. If A is an observation/summary/derived text, it is NOT ground truth for B — go one level down to the source A describes (frames, parser code, raw transcript, live platform behavior) and verify there. Same family as root `CLAUDE.md` §2 read-current-state; this rule pins it to the decode→build authoring path specifically.
 
-**Touched**: original 2026-06-12 work — this deep-dive, `code/verify_video_format.py` (c5463a0, the two mirrored gates), `wiki/patterns/conventions.md`, `wiki/meta/generate-video-checklist.md`, `wiki/concepts/prompting/realistic-ugc-prompt-templates.md`, root `CLAUDE.md`, `wiki/log.md`. 2026-07-22 shown-beats amendment — `code/verify_decode_format.py`, `code/template_new_format.md`, `code/decode_bundle.sh`, `wiki/meta/decode-grammar-checklist.md`, `wiki/concepts/script-adaptation/script-adaptation-workflow.md`, both decode/build skills, both authoring auditors, and the v790 index/checklist rows. Root `CLAUDE.md` was not changed for the amendment.
+**Touched**: this deep-dive, `code/verify_video_format.py` (c5463a0, the two mirrored gates), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (authoring-step note), `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` (§conversation staging + §recreate-from-frames), root `CLAUDE.md` (gotcha row), `wiki/log.md`.
+
+**Touched by the 2026-07-22 shown-beats amendment (Half C)**: `code/verify_decode_format.py`, `code/template_new_format.md`, `code/decode_bundle.sh`, `wiki/meta/decode-grammar-checklist.md`, `wiki/concepts/script-adaptation/script-adaptation-workflow.md`, both decode/build skills, both authoring auditors, and the v790 index/checklist rows. Root `CLAUDE.md` was NOT changed for the amendment.
 
 ## v791 — HOOK safe-area composition grammar (camera-first + layered foreground + scale cheat)
 
