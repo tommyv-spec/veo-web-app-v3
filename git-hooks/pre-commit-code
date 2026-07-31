@@ -1,0 +1,77 @@
+#!/bin/sh
+# Canon-drift gate for the CODE submodule (tracked copy).
+#
+# WHY: `code/template_reference.md` is THE rule canon and it lives inside the
+# submodule that deploys. On 2026-07-30 the shared checkout was found parked on
+# a feature branch 78 commits behind main, and TWELVE rule deep-dives had never
+# reached main (v867, v833.1, v868-v870, v872, v873-v877). The very next day it
+# recurred: v881's code shipped to main while its deep-dive sat on the branch.
+# Nothing warned anyone, because nothing was looking.
+#
+# WHAT IT DOES on every commit that touches a rule master:
+#   * BLOCKS when this checkout is missing lines that origin/main has
+#     (a wholesale sync would destroy them — the exact 21-line loss of 2026-07-30)
+#   * WARNS (never blocks) when rules are defined here but absent from main,
+#     because that is normal mid-work — it just must not stay invisible.
+#
+# Offline / no remote / no python: silently skips. It never blocks on infrastructure.
+#
+# INSTALL (from the wiki repo root):
+#   cp code/git-hooks/pre-commit-code .git/modules/code/hooks/pre-commit
+#   chmod +x .git/modules/code/hooks/pre-commit
+#
+# Bypass (rare, deliberate): git commit --no-verify
+
+MASTERS="template_reference.md template_new_format.md template_omni_master.md"
+
+# only act when a master is actually part of this commit
+touched=""
+for f in $MASTERS; do
+  if git diff --cached --name-only | grep -qx "$f"; then touched="yes"; fi
+done
+[ -z "$touched" ] && exit 0
+
+command -v python >/dev/null 2>&1 || exit 0
+
+# best-effort refresh; offline is fine, we just compare against what we have
+git fetch -q origin main 2>/dev/null
+
+# The guard lives on main. A feature branch checkout usually does NOT have it —
+# which is exactly the situation this hook exists for — so fall back to running
+# main's copy from the object store instead of giving up.
+if [ -f check_masters_vs_main.py ]; then
+  out=$(python check_masters_vs_main.py 2>/dev/null)
+  status=$?
+else
+  script=$(git show origin/main:check_masters_vs_main.py 2>/dev/null)
+  [ -z "$script" ] && exit 0
+  out=$(printf '%s' "$script" | python - 2>/dev/null)
+  status=$?
+fi
+
+# no usable comparison (no remote ref yet) -> do not stand in the way
+echo "$out" | grep -q "MASTERS vs" || exit 0
+
+echo "$out" | sed -n '1,6p'
+
+if [ $status -ne 0 ]; then
+  echo ""
+  echo "commit BLOCKED: this checkout is missing lines that origin/main has."
+  echo "$out" | sed -n '/^B\./,$p'
+  echo ""
+  echo "Fix: do NOT 'git checkout <branch> -- <master>'. Append the missing"
+  echo "sections onto main's copy instead, then re-run:"
+  echo "    python code/check_masters_vs_main.py --fetch"
+  echo "(Deliberate bypass: git commit --no-verify)"
+  exit 1
+fi
+
+if echo "$out" | grep -q "^A\."; then
+  echo ""
+  echo "WARNING: rules are defined here that main does not have — they have not shipped."
+  echo "$out" | sed -n '/^A\./,/^$/p'
+  echo "Ship them by appending those sections to main when the work is ready."
+  echo ""
+fi
+
+exit 0
