@@ -1,28 +1,63 @@
 $ErrorActionPreference = "Stop"
-$VpsIp = "185.254.206.22"
-$Message = Split-Path -Leaf (Get-Location)
 
-Write-Host "`n=== Deploying $Message ===" -ForegroundColor Cyan
+# Safe Render deploy entry point. This script never creates a commit, renames a
+# branch, force-pushes, or uploads local-worker files. Prepare and review the
+# commit first; this command only proves and publishes that exact commit.
+$Repo = Split-Path -Parent $MyInvocation.MyCommand.Path
+Push-Location $Repo
 
-# Push to Render FIRST
-Write-Host "Pushing to Render..." -ForegroundColor Yellow
-git init
-git add -A
-git commit -m $Message
-git branch -M main
-git remote add origin https://github.com/tommyv-spec/veo-web-app-v3.git 2>$null
-git push -u origin main --force
-Write-Host "Render updated" -ForegroundColor Green
+try {
+    $Inside = git rev-parse --is-inside-work-tree 2>$null
+    if ($LASTEXITCODE -ne 0 -or $Inside -ne "true") {
+        throw "deploy.ps1 must run from the code repository."
+    }
 
-# Upload to VPS LAST (overwrites whatever Render served)
-Write-Host "Uploading to VPS (force overwrite)..." -ForegroundColor Yellow
-scp -o StrictHostKeyChecking=no "static/flow_worker.py" "root@${VpsIp}:/root/veo-worker/flow_worker.py"
-scp -o StrictHostKeyChecking=no "static/setup_worker.py" "root@${VpsIp}:/root/veo-worker/setup_worker.py"
+    $Branch = git branch --show-current
+    if ($LASTEXITCODE -ne 0 -or $Branch -ne "main") {
+        throw "Deploy blocked: use a clean main checkout. Current branch: $Branch"
+    }
 
-# Stamp version on VPS so we can always verify
-$hash = (git rev-parse --short HEAD 2>$null) ?? "unknown"
-ssh -o StrictHostKeyChecking=no "root@${VpsIp}" "echo '$Message ($hash) deployed at $(Get-Date -Format 'yyyy-MM-dd HH:mm')' > /root/veo-worker/.deploy_version"
-Write-Host "VPS updated and stamped: $hash" -ForegroundColor Green
+    $Dirty = git status --porcelain
+    if ($LASTEXITCODE -ne 0 -or $Dirty) {
+        throw "Deploy blocked: the main checkout has uncommitted or untracked files."
+    }
 
-Write-Host "`n=== Done! ===" -ForegroundColor Cyan
-Write-Host "Verify on VPS: cat /root/veo-worker/.deploy_version"
+    Write-Host "Refreshing protected main..." -ForegroundColor Yellow
+    git fetch origin main
+    if ($LASTEXITCODE -ne 0) {
+        throw "Deploy blocked: origin/main could not be refreshed."
+    }
+
+    git merge-base --is-ancestor origin/main HEAD
+    if ($LASTEXITCODE -ne 0) {
+        throw "Deploy blocked: HEAD does not contain the current origin/main. Rebuild the change on fresh main."
+    }
+
+    $HeadSha = git rev-parse HEAD
+    if ($LASTEXITCODE -ne 0 -or -not $HeadSha) {
+        throw "Deploy blocked: HEAD is unreadable."
+    }
+
+    Write-Host "Running deploy safety gate for $($HeadSha.Substring(0, 7))..." -ForegroundColor Yellow
+    python check_deploy_safety.py --ref $HeadSha --main origin/main
+    if ($LASTEXITCODE -ne 0) {
+        throw "Deploy blocked by check_deploy_safety.py."
+    }
+
+    Write-Host "Pushing the reviewed commit to Render..." -ForegroundColor Yellow
+    git push origin HEAD:main
+    if ($LASTEXITCODE -ne 0) {
+        throw "Push failed. Production was not updated."
+    }
+
+    python verify_deploy.py $HeadSha
+    if ($LASTEXITCODE -ne 0) {
+        throw "Push completed, but the live deploy was not confirmed healthy. Check Render."
+    }
+
+    Write-Host "Render deploy confirmed live and healthy: $($HeadSha.Substring(0, 7))" -ForegroundColor Green
+    Write-Host "Local and VPS workers were not changed; deploy them through their separate runbook."
+}
+finally {
+    Pop-Location
+}

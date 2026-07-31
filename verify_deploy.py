@@ -50,8 +50,8 @@ def main(argv):
     args = ap.parse_args(argv[1:])
 
     want = (args.sha or head_sha()).strip()
-    if not want:
-        sys.stderr.write("no commit given and HEAD is unreadable\n")
+    if len(want) < 7 or len(want) > 40 or any(ch not in "0123456789abcdefABCDEF" for ch in want):
+        sys.stderr.write("expected a 7-40 character commit SHA\n")
         return 2
     short = want[:7]
 
@@ -68,10 +68,12 @@ def main(argv):
             if live[:7] != seen:
                 seen = live[:7]
                 print("  live=%s status=%s" % (seen or "?", status))
-            if live.startswith(want) or want.startswith(live[:7]) and live:
-                if live[:7] == short:
-                    print("\nDEPLOY CONFIRMED: %s is live (status=%s)" % (short, status))
+            commit_matches = live.startswith(want) or (len(live) >= 7 and want.startswith(live))
+            if commit_matches and live[:7] == short:
+                if str(status).lower() == "healthy":
+                    print("\nDEPLOY CONFIRMED: %s is live and healthy" % short)
                     return 0
+                print("  commit matches, but service is not healthy yet (status=%s)" % status)
         time.sleep(args.interval)
 
     print("\nNOT CONFIRMED: %s never appeared as render_commit (last seen %s)." % (short, seen or "none"))

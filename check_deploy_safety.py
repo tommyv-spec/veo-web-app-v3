@@ -33,16 +33,24 @@ USAGE
     python check_deploy_safety.py --allow-loss    # report loss but exit 0
                                                   # (deliberate deletions)
 
-Exit 0 = safe to deploy. Exit 1 = a push would lose content or ship a broken module.
+Exit 0 = safe to deploy. Exit 1 = content or syntax failure. Exit 2 = the
+comparison itself could not be proved; deploy remains blocked.
 """
 
 import argparse
 import ast
+from collections import Counter
 import subprocess
 import sys
 
-TEXT_SUFFIXES = (".py", ".md", ".sh", ".html", ".css", ".js", ".json", ".yaml", ".yml", ".txt", ".cfg", ".toml")
-MAX_BYTES = 4_000_000
+TEXT_SUFFIXES = (
+    ".bat", ".cfg", ".css", ".flow", ".gitignore", ".html", ".ini",
+    ".js", ".json", ".jsx", ".md", ".ps1", ".py", ".sh", ".sql",
+    ".toml", ".ts", ".tsx", ".txt", ".webmanifest", ".xml", ".yaml", ".yml",
+)
+TEXT_BASENAMES = {"Dockerfile", "Makefile", "Procfile"}
+INDENT_SENSITIVE_SUFFIXES = (".py", ".yaml", ".yml")
+MAX_BYTES = 32_000_000
 # lines that carry no information — ignoring them keeps reformatting quiet
 TRIVIAL = {"", "```", "---", "'''", '"""', "}", "{", ")", "(", "]", "[", "*", "-", "#", "|", "//", "pass"}
 
@@ -55,28 +63,40 @@ def git(*args, binary=False):
 
 def ls_files(ref):
     r = git("ls-tree", "-r", "--name-only", ref)
-    return [p for p in r.stdout.split("\n") if p.strip()] if r.returncode == 0 else []
+    if r.returncode != 0:
+        raise RuntimeError("cannot list %s: %s" % (ref, r.stderr.strip()[:200]))
+    return [p for p in r.stdout.split("\n") if p.strip()]
 
 
 def blob(ref, path):
     r = git("show", "%s:%s" % (ref, path), binary=True)
     if r.returncode != 0:
-        return None
+        return None, "cannot read blob"
     raw = r.stdout
     if len(raw) > MAX_BYTES:
-        return None
+        return None, "larger than %d bytes" % MAX_BYTES
     try:
-        return raw.decode("utf-8")
+        return raw.decode("utf-8"), None
     except (UnicodeDecodeError, AttributeError):
-        return None
+        return None, "not UTF-8 text"
 
 
-def significant(text):
+def is_text_path(path):
+    name = path.rsplit("/", 1)[-1]
+    return (
+        path.lower().endswith(TEXT_SUFFIXES)
+        or name in TEXT_BASENAMES
+        or path.startswith("git-hooks/")
+    )
+
+
+def significant(text, path):
     out = []
+    preserve_indent = path.lower().endswith(INDENT_SENSITIVE_SUFFIXES)
     for ln in text.split("\n"):
         s = ln.strip()
         if s and s not in TRIVIAL:
-            out.append(s)
+            out.append(ln.rstrip() if preserve_indent else s)
     return out
 
 
@@ -91,11 +111,27 @@ def main(argv):
 
     if args.fetch:
         remote, _, branch = args.main.partition("/")
-        git("fetch", "-q", remote, branch or "main")
+        fetched = git("fetch", "-q", remote, branch or "main")
+        if fetched.returncode != 0:
+            print("cannot refresh %s: %s" % (args.main, fetched.stderr.strip()[:200]))
+            return 2
 
-    if not ls_files(args.main):
-        print("cannot read %s — nothing to compare, skipping" % args.main)
-        return 0
+    for label, ref in (("candidate", args.ref), ("protected main", args.main)):
+        exists = git("rev-parse", "--verify", "%s^{commit}" % ref)
+        if exists.returncode != 0:
+            print("cannot read %s ref %s — deploy blocked" % (label, ref))
+            return 2
+
+    try:
+        main_files = ls_files(args.main)
+        ours_files = set(ls_files(args.ref))
+    except RuntimeError as exc:
+        print("%s — deploy blocked" % exc)
+        return 2
+
+    if not main_files:
+        print("protected main %s has no files — deploy blocked" % args.main)
+        return 2
 
     ours = git("rev-parse", args.ref).stdout.strip()[:7]
     theirs = git("rev-parse", args.main).stdout.strip()[:7]
@@ -106,30 +142,43 @@ def main(argv):
     # ---- 1. content loss -------------------------------------------------
     losses = {}
     gone = []
-    ours_files = set(ls_files(args.ref))
-    for path in ls_files(args.main):
-        if not path.endswith(TEXT_SUFFIXES):
+    unverified = []
+    for path in main_files:
+        if not is_text_path(path):
             continue
-        theirs_txt = blob(args.main, path)
-        if theirs_txt is None:
+        theirs_txt, reason = blob(args.main, path)
+        if reason:
+            unverified.append("%s on protected main: %s" % (path, reason))
             continue
         if path not in ours_files:
             gone.append(path)
             continue
-        ours_txt = blob(args.ref, path)
-        if ours_txt is None:
+        ours_txt, reason = blob(args.ref, path)
+        if reason:
+            unverified.append("%s in candidate: %s" % (path, reason))
             continue
-        ours_set = set(significant(ours_txt))
-        missing = [ln for ln in significant(theirs_txt) if ln not in ours_set]
+        theirs_counts = Counter(significant(theirs_txt, path))
+        ours_counts = Counter(significant(ours_txt, path))
+        missing = []
+        for line, count in theirs_counts.items():
+            missing.extend([line] * max(0, count - ours_counts[line]))
         if missing:
             losses[path] = missing
 
     # ---- 2. syntax of changed python -------------------------------------
-    changed = git("diff", "--name-only", "%s...%s" % (args.main, args.ref)).stdout.split("\n")
+    diff = git("diff", "--name-only", args.main, args.ref, "--")
+    if diff.returncode != 0:
+        unverified.append("cannot diff protected main against candidate: %s" % diff.stderr.strip()[:200])
+        changed = []
+    else:
+        changed = diff.stdout.split("\n")
     broken = []
     for path in [p for p in changed if p.strip().endswith(".py")]:
-        txt = blob(args.ref, path)
-        if txt is None:
+        if path not in ours_files:
+            continue
+        txt, reason = blob(args.ref, path)
+        if reason:
+            unverified.append("%s syntax: %s" % (path, reason))
             continue
         try:
             ast.parse(txt)
@@ -140,6 +189,7 @@ def main(argv):
     print("files deleted vs %s : %d" % (args.main, len(gone)))
     print("files losing lines   : %d  (%d line(s) total)" % (len(losses), n_lost))
     print("changed .py broken   : %d" % len(broken))
+    print("files/checks unread  : %d" % len(unverified))
 
     if gone:
         print("\nDELETED FILES:")
@@ -160,7 +210,12 @@ def main(argv):
         for b in broken:
             print("   %s" % b)
 
-    fail = bool(broken) or ((losses or gone) and not args.allow_loss)
+    if unverified:
+        print("\nUNVERIFIED — safety check could not prove these inputs:")
+        for item in unverified:
+            print("   %s" % item)
+
+    fail = bool(broken or unverified) or ((losses or gone) and not args.allow_loss)
     if fail:
         print("\nRESULT: FAIL — do not deploy this.")
         if losses or gone:

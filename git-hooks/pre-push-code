@@ -19,40 +19,63 @@
 #   cp code/git-hooks/pre-push-code .git/modules/code/hooks/pre-push
 #   chmod +x .git/modules/code/hooks/pre-push
 #
-# Skips silently with no python or no reachable origin/main.
+# A main push fails closed if Python, the protected checker, or the remote base
+# cannot be read. A broken guard must never become permission to deploy.
 
 remote="$1"
 
 targets_main=""
+base_main=""
+cr=$(printf '\r')
 while read local_ref local_sha remote_ref remote_sha; do
+  local_sha=${local_sha%"$cr"}
+  remote_sha=${remote_sha%"$cr"}
+  remote_ref=${remote_ref%"$cr"}
   [ -z "$remote_ref" ] && continue
   case "$remote_ref" in
-    refs/heads/main) targets_main="$local_sha" ;;
+    refs/heads/main)
+      targets_main="$local_sha"
+      base_main="$remote_sha"
+      ;;
   esac
 done
 
 [ -z "$targets_main" ] && exit 0
-command -v python >/dev/null 2>&1 || exit 0
+zero=0000000000000000000000000000000000000000
 
-git fetch -q "$remote" main 2>/dev/null
+block() {
+  echo ""
+  echo "PUSH BLOCKED — deploy safety could not be proved: $1"
+  echo "Do not bypass this for an infrastructure error. Fix the guard and retry."
+  exit 1
+}
 
-if [ -f check_deploy_safety.py ]; then
-  out=$(python check_deploy_safety.py --ref "$targets_main" 2>/dev/null)
-  status=$?
-else
-  script=$(git show origin/main:check_deploy_safety.py 2>/dev/null)
-  [ -z "$script" ] && exit 0
-  out=$(printf '%s' "$script" | python - --ref "$targets_main" 2>/dev/null)
-  status=$?
-fi
+[ "$targets_main" = "$zero" ] && block "deleting production main is not allowed"
+[ -z "$base_main" ] && block "the remote main SHA was not provided"
+[ "$base_main" = "$zero" ] && block "creating production main without a protected base is not allowed"
+command -v python >/dev/null 2>&1 || block "python is unavailable"
 
-echo "$out" | grep -q "DEPLOY SAFETY" || exit 0
+git fetch -q "$remote" main 2>/dev/null || block "remote main could not be refreshed"
+git cat-file -e "${base_main}^{commit}" 2>/dev/null || block "remote main ${base_main} is unreadable"
+
+# Always run the checker from the protected remote-main commit. A stale branch
+# may contain an older or weakened checker; candidate code is not the authority
+# that decides whether the candidate itself may deploy.
+script=$(git show "${base_main}:check_deploy_safety.py" 2>/dev/null)
+[ -z "$script" ] && block "protected main has no deploy checker"
+out=$(printf '%s' "$script" | python - --ref "$targets_main" --main "$base_main" 2>&1)
+status=$?
+
+case "$out" in
+  *"DEPLOY SAFETY"*) ;;
+  *) block "the deploy checker did not complete" ;;
+esac
 echo "$out"
 
 if [ $status -ne 0 ]; then
   echo ""
   echo "PUSH BLOCKED — this deploy would lose content or ship a broken module."
-  echo "Deliberate? re-run: python code/check_deploy_safety.py --allow-loss"
+  echo "Deliberate? first run the protected checker yourself with --allow-loss"
   echo "then push with --no-verify."
   exit 1
 fi

@@ -101,6 +101,8 @@ python -c "import re; t=open('videos/<file>.md',encoding='utf-8').read(); print(
 `code/` submodule auto-deploys to Render on every push to `main`. Every commit live in 2-3 min. Production = only environment.
 
 **Hard rules:**
+- Deploy only from a clean `main` checkout with `powershell -File deploy.ps1`. The script refuses branch drift, dirty files, force pushes, and unverified health.
+- The installed `pre-push` hook is the last gate for every direct push to main. It fails closed if Python, the remote base, or the protected checker cannot be read.
 - NEVER claim "should work" without evidence — see root `CLAUDE.md` §"Verification before should work claims"
 - Add temporary diagnostic log lines on runtime-affecting changes (`main.py` / `video_processor.py` / `image_platform.py` / `static/flow_worker.py`). Remove only after operator-side evidence lands.
 - After every push to `code/` main → spawn `caveman:cavecrew-reviewer` on commit set; cheap insurance
