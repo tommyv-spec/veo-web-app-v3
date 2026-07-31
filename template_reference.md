@@ -16241,3 +16241,55 @@ INNOVATION NEED: none | <second proven source + function + why the parent alone 
 2. **LINT TIME, the catch-net.** Auditor check `winner_decision` — in lane when §0 carries `CONVERSION PARENT:` / `VIEW-PROXY TEST:` / `CONVERSION LANE: yes`, otherwise SKIP. **WARN-only, never FAIL** (Codex ack rev 185: a WARN catch for legacy and half-filled blocks that must not replace the pre-draft gate). It warns on: the block missing · any of the eight fields empty or left as a `<placeholder>`/tbd · an out-of-vocabulary `GOAL` / `PRIMARY GAP` / `SMALLEST ROUTE` · and **`SMALLEST ROUTE:` ≠ `METHOD:`**, which is the tell that the route was picked after the fact.
 
 **Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/winner-to-selling-conversion.md`, `wiki/concepts/script-adaptation/script-adaptation-workflow.md`, `wiki/concepts/script-adaptation/step-up-vs-innovation.md`, `wiki/synthesis/innovation-operating-system.md`, `docs/winner-to-selling-audit-template.md`, root `CLAUDE.md`, `wiki/meta/generate-video-checklist.md`, `wiki/index.md`, `wiki/log.md`.
+
+## v881 — Omni + START AND END frame = INGREDIENTS, per clip (narrows v784)
+
+**Operator, 2026-07-31**: *"when we use omni as model and we have start and end frame, we have to use ingredients instead of frames."* Runtime change (`code/static/flow_worker.py` — the Flow video worker). Auto-deploys to Render.
+
+### What v784 got right, and where it was too wide
+
+§v784 collapsed the Ingredients path entirely: Omni had gained a Frames tab, so `_omni_ingredients_mode()` was hardcoded `return False` and every model ran Frames. That still holds for a clip with a START frame only. It does NOT hold for a clip that carries BOTH frames — Omni has no END slot, so the pair has to go in as two Ingredient chips.
+
+### The switch is now per CLIP, not per job
+
+```python
+def _omni_ingredients_mode(page) -> bool:
+    return bool(is_omni(getattr(page, "_veo_model", ""))
+                and getattr(page, "_clip_has_end_frame", False))
+```
+
+| Model | Clip frames | Mode |
+|---|---|---|
+| Omni Flash | start + end | **Ingredients** (2 chips) |
+| Omni Flash | start only | Frames (unchanged from v784) |
+| any Veo | anything | Frames (unchanged) |
+| flag unset (older call paths) | — | Frames (v784 behavior is the fallback) |
+
+`page._clip_has_end_frame` is stamped by the new `set_clip_input_mode(page, start_image, end_image)`.
+
+### Per-clip tab toggling (why a job-level decision was not enough)
+
+The full settings pass runs ONCE per project, but a mixed job holds both clip shapes. So `set_clip_input_mode()` compares the clip's mode against `page._input_mode_applied` and, only on a change, re-opens the settings dropdown through a new `select_frames_to_video_mode(page, input_mode_only=True)` fast path — the same open→click→Escape sequence the v861 `duration_only` path uses. Both the full pass and the fast path click the tab through one shared `_click_input_mode_tab()`, so they cannot drift.
+
+`set_clip_input_mode()` is called from two places: the top of `upload_both_frames_with_policy_check()` (every upload path funnels there) and the reuse path's frame-presence check in `click_reuse_and_generate()` — the reuse check branches on the mode BEFORE any upload runs, so without its own call it would read the previous clip's shape.
+
+### Attach contract: ORDER, not prose
+
+START is attached first, END second. Nothing in the prompt names them (operator call — the chip order is the signal). The v758 Ingredients prompt anchor ("use the photo I added…") therefore stays OFF, now behind an explicit `_OMNI_INGREDIENT_PROMPT_ANCHOR = False` flag in `fill_prompt_textarea()` instead of being dead by side effect.
+
+### The dead Ingredients path had two real bugs before it could be used
+
+`attach_ingredient_image_with_check()` had never been called by anything (§v784 noted this). Wiring it up needed two fixes:
+
+1. **`clear_existing` parameter** — it wiped every existing chip on entry. The second image of a pair must pass `clear_existing=False`, or it deletes the START chip it is meant to sit beside.
+2. **Chip-count DELTA as the success signal** — it returned success on "any chip present", which is already true when the END image is being attached. Now it baselines the count on entry and confirms only on an increase.
+
+Failure mapping into the caller's 3-tuple: `policy` → `(False, 'start'|'end', None)` (replace-image card); `no_buttons` → `(False, 'start_glitch'|'end_glitch', None)` (retried like an attach glitch). The attach path does not surface `FramePolicyMonitor.error_reason` yet, so the reason stays `None` — a v815 follow-up if a prominent-people auto-retry is wanted on this path.
+
+### Revert
+
+Flip the helper body back to `return False` — that restores v784 exactly, at every gated site.
+
+**Tests**: `code/test_omni_ingredients_mode.py` (truth table + the mode-change/no-change toggle). **Touched**: `code/static/flow_worker.py`, `code/template_reference.md` (this deep-dive), `code/test_omni_ingredients_mode.py` (new), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline).
+
+---
