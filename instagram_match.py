@@ -762,6 +762,54 @@ def export_ts_prefix_from_filename(file_name):
 
 
 # ============================================================================
+# v885 — MATCH BY THE NAME THE OPERATOR TYPED, NOT ONLY OUR OWN STAMP.
+#
+# The operator renames folder files with the VIDEO NAME — the import batch
+# title, e.g. "nuri-korella-ed-carshow-armgrab-...-v1" — instead of keeping
+# the minted final_export_* token. That title is unique per user (import
+# rejects a duplicate batch name), so a filename that CONTAINS it identifies
+# the job as surely as our own stamp: still a lookup, never a guess.
+#
+# Containment is TOKEN-BOUNDED, never substring: "...-v1" must not fire on a
+# file named "...-v10", and "carshow" must not fire inside "carshowcase".
+# Hyphens / spaces / underscores / case all normalize away, so the operator
+# may write the name with spaces where the batch title has hyphens.
+# ============================================================================
+
+_NAME_TOKEN = re.compile(r'[a-z0-9]+')
+
+
+def name_tokens(s):
+    """Lowercase alphanumeric runs of a name/filename; [] on junk input."""
+    if not isinstance(s, str) or not s:
+        return []
+    return _NAME_TOKEN.findall(s.lower())
+
+
+def name_is_lookup_worthy(tokens):
+    """A name too short/generic to be an identifier must never claim a file.
+
+    One lone word, or under 8 chars of signal, would let a batch named
+    "final" claim every "...final.mp4" in the folder.
+    """
+    return len(tokens) >= 2 and sum(len(t) for t in tokens) >= 8
+
+
+def filename_contains_name(file_name, batch_name):
+    """True iff batch_name's tokens appear contiguously, in order, in file_name."""
+    needle = name_tokens(batch_name)
+    if not name_is_lookup_worthy(needle):
+        return False
+    hay = name_tokens(file_name)
+    if len(needle) > len(hay):
+        return False
+    return any(
+        hay[i:i + len(needle)] == needle
+        for i in range(len(hay) - len(needle) + 1)
+    )
+
+
+# ============================================================================
 # v857 — ONE JOB, ONE VIDEO. Ranking the claims on a job.
 #
 # evidence_pick answers "which job produced THIS video". It is asked once per

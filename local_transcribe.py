@@ -199,7 +199,7 @@ def resolve_job_by_filename(db, file_name, user_id):
     two copies of "how do we read our own filename" drift the day the export
     naming changes.
 
-    Two lookup keys are tried, in this order (both are the platform's own words
+    The lookup keys are tried in this order (each is somebody's own words
     written into the name — a LOOKUP, never a guess):
 
       1. v856 job-id stamp — `final_export_<job8>_...`. The 8-char id resolves
@@ -208,13 +208,23 @@ def resolve_job_by_filename(db, file_name, user_id):
          fills the operator's real folder, no job id in it). We STORE that
          basename on Job.export_basename at mint + backfill, so it resolves by a
          plain equality lookup.
+      3. v860 truncated basename — same, matched as a prefix when a folder tool
+         cut the trailing hash.
+      4. v885 the VIDEO NAME — the import batch title the OPERATOR typed
+         (unique per user), token-bounded inside the filename, resolved via
+         ImageJobBatch.promoted_video_job_id. The operator renames exports to
+         the video name; that name identifies the job as surely as our stamp.
 
-    None means "no answer", NEVER "best answer". Specifically, for EITHER key:
-      * no stamp / basename in the name (renamed file) -> None
+    None means "no answer", NEVER "best answer". Specifically, for EVERY key:
+      * no stamp / basename / known name in the name (renamed file) -> None
       * it resolves to ZERO jobs for this user -> None
       * it resolves to MORE THAN ONE job -> None
     In every one of those cases the caller falls back to the evidence path.
     An ambiguous lookup is not a lookup; we do not break the tie by guessing.
+    (Key 4's one refinement: when one contained name is STRICTLY longer than
+    every other contained name, it wins — the longer title is the more specific
+    claim ("...-v1" inside a file actually named for "...-v1-final-cut"), not a
+    coin flip. An exact length tie is still ambiguity -> None.)
     """
     from models import Job
     import instagram_match as _ig_match
@@ -265,6 +275,40 @@ def resolve_job_by_filename(db, file_name, user_id):
             return hits[0]
         print(f"[filename-match] ts_prefix={tsp} resolved to {len(hits)} jobs "
               f"-> falling back to evidence", flush=True)
+
+    # 4. v885 — the video name. The operator names folder files after the BUILD
+    #    (the import batch title) instead of keeping the minted token. Batch
+    #    names are unique per user (import rejects duplicates), so a filename
+    #    that token-contains one names its job. Longest contained name wins
+    #    (more specific claim, see docstring); an exact-length tie is ambiguity.
+    from image_platform import ImageJobBatch
+    rows = (
+        db.query(ImageJobBatch.name, ImageJobBatch.promoted_video_job_id)
+        .filter(ImageJobBatch.user_id == user_id,
+                ImageJobBatch.promoted_video_job_id.isnot(None))
+        .all()
+    )
+    contained = [
+        (name, jid) for (name, jid) in rows
+        if _ig_match.filename_contains_name(file_name, name)
+    ]
+    if contained:
+        def _signal(name):
+            return sum(len(t) for t in _ig_match.name_tokens(name))
+        longest = max(_signal(n) for n, _ in contained)
+        top = [(n, jid) for (n, jid) in contained if _signal(n) == longest]
+        if len(top) == 1:
+            hits = (
+                db.query(Job)
+                .filter(Job.id == top[0][1], Job.user_id == user_id)
+                .all()
+            )
+            if len(hits) == 1:
+                print(f"[filename-match] v885 name={top[0][0]!r} -> "
+                      f"job={str(hits[0].id)[:8]} (file={file_name!r})", flush=True)  # TEMP DIAG
+                return hits[0]
+        print(f"[filename-match] batch-name matches={len(contained)} top={len(top)} "
+              f"-> falling back to evidence (file={file_name!r})", flush=True)
     return None
 
 
