@@ -199,7 +199,7 @@ def resolve_job_by_filename(db, file_name, user_id):
     two copies of "how do we read our own filename" drift the day the export
     naming changes.
 
-    The lookup keys are tried in this order (each is somebody's own words
+    Two lookup keys are tried, in this order (both are the platform's own words
     written into the name — a LOOKUP, never a guess):
 
       1. v856 job-id stamp — `final_export_<job8>_...`. The 8-char id resolves
@@ -208,23 +208,25 @@ def resolve_job_by_filename(db, file_name, user_id):
          fills the operator's real folder, no job id in it). We STORE that
          basename on Job.export_basename at mint + backfill, so it resolves by a
          plain equality lookup.
-      3. v860 truncated basename — same, matched as a prefix when a folder tool
-         cut the trailing hash.
-      4. v885 the VIDEO NAME — the import batch title the OPERATOR typed
-         (unique per user), token-bounded inside the filename, resolved via
-         ImageJobBatch.promoted_video_job_id. The operator renames exports to
-         the video name; that name identifies the job as surely as our stamp.
 
-    None means "no answer", NEVER "best answer". Specifically, for EVERY key:
-      * no stamp / basename / known name in the name (renamed file) -> None
+    None means "no answer", NEVER "best answer". Specifically, for EITHER key:
+      * no stamp / basename in the name (renamed file) -> None
       * it resolves to ZERO jobs for this user -> None
       * it resolves to MORE THAN ONE job -> None
     In every one of those cases the caller falls back to the evidence path.
     An ambiguous lookup is not a lookup; we do not break the tie by guessing.
-    (Key 4's one refinement: when one contained name is STRICTLY longer than
-    every other contained name, it wins — the longer title is the more specific
-    claim ("...-v1" inside a file actually named for "...-v1-final-cut"), not a
-    coin flip. An exact length tie is still ambiguity -> None.)
+
+    Two later keys extend the same contract: v860 (comment below) prefix-matches
+    a basename whose trailing hash a folder tool cut off, and v885 matches the
+    VIDEO NAME — the import batch title the OPERATOR typed (unique per user),
+    token-bounded inside the filename, resolved via
+    ImageJobBatch.promoted_video_job_id. The operator renames exports to the
+    video name; that name identifies the job as surely as our own stamp. The
+    no-guess rules above apply to both, with one refinement on v885: when one
+    contained name is STRICTLY longer than every other contained name it wins —
+    the longer title is the more specific claim ("...-v1" inside a file actually
+    named for "...-v1-final-cut"), not a coin flip. An exact length tie is
+    still ambiguity -> None.
     """
     from models import Job
     import instagram_match as _ig_match
