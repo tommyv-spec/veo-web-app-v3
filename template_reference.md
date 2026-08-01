@@ -16293,3 +16293,56 @@ Flip the helper body back to `return False` — that restores v784 exactly, at e
 **Tests**: `code/test_omni_ingredients_mode.py` (truth table + the mode-change/no-change toggle). **Touched**: `code/static/flow_worker.py`, `code/template_reference.md` (this deep-dive), `code/test_omni_ingredients_mode.py` (new), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline).
 
 ---
+
+## v884 — A LINE'S LENGTH IS NOT ITS WORD COUNT: the char table sizes the clip too
+
+**Where it came from**: operator 2026-08-01, on the axe/neighbor selling build — *"both scene 5 and 6 have 10 words, but scene 6 doesn't fit in the 4 seconds, because the words are longer."*
+
+The two lines:
+
+| line | words | chars | v861 said | reality |
+|---|---|---|---|---|
+| `neither. i stopped wasting money on quick fixes years ago.` | 10 | 58 | 4s | fits |
+| `then explain my forty-five-year-old husband. his soldier already gave up.` | 10 | 73 | 4s | **cut off** |
+
+**What it fixes**: v861 sized every clip off a whitespace word count alone. Measured over the 2708 spoken lines in `videos/*.md`, one word bucket spans an enormous character range — the 4s bucket holds lines from **11 to 78 chars**, and the 8s bucket **starts at 71**. The buckets overlap, so a word count cannot separate a fast 10-word line from a slow one. Word count is a proxy for duration; it is not duration.
+
+**The rule**: a clip renders at the LONGER of two picks — the v861 word bucket and a new char bucket.
+
+```
+duration = max( word_bucket(W), char_bucket(C) )
+```
+
+| chars `C` | duration |
+|---|---|
+| `C <= 59` | 4s |
+| `60 <= C <= 86` | 6s |
+| `87 <= C <= 129` | 8s |
+| `130 <= C <= 151` | 10s |
+| `C > 151` | a cap violation — split the line into two clips, exactly like `W > 28` |
+
+`C` is `len(line)` — spaces and punctuation included, because a comma or a full stop is a real pause the render has to fit.
+
+**Where the numbers come from** (not invented): corpus median is **5.38 chars per word including its space**, so v861's word boundaries 11/16/24/28 map to 59/86/129/151 chars. That is a consistent **~15 chars/sec** at every boundary (59/4, 86/6, 129/8, 151/10) — the same ballpark as v577's 158 wpm.
+
+**Why `max()` and not the char table alone.** Blast radius measured over all 2708 lines before choosing:
+
+| rule | lines changed | longer | shorter | newly over cap |
+|---|---|---|---|---|
+| pure chars | 483 (17.8%) | 337 | **146** | 15 |
+| pure syllables | 621 (22.9%) | 328 | **293** | 26 |
+| **max(words, chars)** | **337 (12.4%)** | 337 | **0** | 15 |
+
+A line of many SHORT words has few chars but still takes time to say, so a pure char rule would have SHORTENED 146 lines — speech cut off mid-sentence, the bad failure. `max()` only ever lengthens (336 of the 337 by exactly one bucket). Extra dead air is harmless; v810 already wants post-speech silence.
+
+**Syllables were measured and rejected.** They need a heuristic counter that breaks on names (`korella`, `ceo`), the operator cannot verify the count by eye, and the heuristic flags the FIRST line as 6s too — over-correcting the very case that prompted the rule. Chars are deterministic and countable.
+
+**Second half of the rule — the word count splits on hyphens.** `forty-five-year-old` is four spoken words; `.split()` called it one. `count_line_words()` splits on whitespace AND the hyphen/dash block. This alone moves 22 corpus lines (0.8%), and it alone fixes the operator's line (10w → 13w → 6s) before the char table is consulted.
+
+**The companion cap.** v831's 28-word cap gains a 151-char twin. Both mark the same thing: past them no bucket is big enough and the render cuts the line off. The auditor's `line_word_cap` FAILs on either.
+
+**Touched**: `code/clip_duration.py` (`CLIP_CHAR_BUCKETS`, `count_line_words`, `count_line_chars`, `pick_clip_duration_s(word_count, char_count=None)`, `pick_clip_duration_for_line`, `resolve_clip_duration_s`), `code/image_platform.py` (the bad-value hint now prints `Nw / Mc`), `code/main.py` (`/api/clip-duration-buckets` serves `char_buckets` + `char_cap`), `code/static/index.html` (validator shows `10w / 73c → 6s clip`, char-cap fault), `code/fix_clip_durations.py` (NEW — rewrites a build's duration bullets to the right buckets), `code/tests/test_v884_char_duration.py` (NEW), `~/.claude/skills/build-video/audit_build.py` (`v861_clip_duration`, `line_word_cap`).
+
+An older cached frontend that never learns `char_buckets` keeps the pure-word answer, which is only ever the SHORTER one — it under-reports rather than promising a length the backend will not render.
+
+**Scope / gates**: GENERATE-side authoring (every spoken line on every new build) + the import resolver. Forward-only per `feedback_rule-changes-forward-only` — shipped builds are not swept. A build you are already working on gets re-sized with `python code/fix_clip_durations.py videos/<build>.md --write`, which prints the total render-time delta before it writes.

@@ -149,6 +149,7 @@ from models import (
 )
 from clip_duration import (
     ALLOWED_CLIP_DURATIONS_S,
+    CLIP_CHAR_BUCKETS,
     CLIP_DURATION_BUCKETS,
     VEO_API_DURATIONS_S,
 )
@@ -998,7 +999,7 @@ def get_version():
 
 @app.get("/api/clip-duration-buckets")
 def get_clip_duration_buckets():
-    """v861 — serve the duration bucket table to the frontend.
+    """v861 + v884 — serve the duration bucket tables to the frontend.
 
     The new-job dialogue validator has to show each line's render length while
     the operator types, which is too hot for a per-keystroke round trip. It
@@ -1009,12 +1010,19 @@ def get_clip_duration_buckets():
     would be a third site — after the module and the build auditor — free to
     drift out of step silently. Serving it keeps the JS a renderer of server
     data rather than a second implementation.
+
+    v884 adds `char_buckets`; the frontend takes the longer of the two picks.
+    An older cached page ignores the new key and keeps the pure-word answer —
+    which is only ever the SHORTER one, so it under-reports rather than lies
+    about a length the backend will not render.
     """
     return {
         "buckets": [list(b) for b in CLIP_DURATION_BUCKETS],   # [[max_words, seconds], ...]
+        "char_buckets": [list(b) for b in CLIP_CHAR_BUCKETS],  # [[max_chars, seconds], ...] (v884)
         "allowed": list(ALLOWED_CLIP_DURATIONS_S),     # 4/6/8/10 — Flow can do all
         "veo_api": list(VEO_API_DURATIONS_S),          # 4/6/8 — the API folds 10→8
         "word_cap": CLIP_DURATION_BUCKETS[-1][0],              # v831 cap, amended to 28
+        "char_cap": CLIP_CHAR_BUCKETS[-1][0],                  # v884 companion cap
     }
 
 

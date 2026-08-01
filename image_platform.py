@@ -44,6 +44,9 @@ from config import app_config
 from auth import get_current_user
 from clip_duration import (
     ALLOWED_CLIP_DURATIONS_S,
+    count_line_chars,
+    count_line_words,
+    pick_clip_duration_for_line,
     pick_clip_duration_s,
     resolve_clip_duration_s,
 )
@@ -4611,10 +4614,12 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     # copy here would drift silently the day CLIP_DURATION_BUCKETS changes.
                     _hint = ""
                     if lines_list:
-                        _wc = len(lines_list[-1].split())
+                        _txt = lines_list[-1]
+                        _wc = count_line_words(_txt)
+                        _cc = count_line_chars(_txt)
                         _hint = (
-                            f" The line above it is {_wc} words → use "
-                            f"{pick_clip_duration_s(_wc)}."
+                            f" The line above it is {_wc} words / {_cc} chars → "
+                            f"use {pick_clip_duration_for_line(_txt)}."
                         )
                     raise ValueError(
                         f"Scene {scene_index}: clip_duration_s {dur_val} not in "

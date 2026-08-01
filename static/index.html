@@ -9866,15 +9866,32 @@ Ambient: same kitchen room tone, soft pour sound.
                 .then(d => { if(d && d.buckets){ window._v861Buckets = d; try{ validateDialogueLines(); }catch(e){} } })
                 .catch(() => {});   // offline / old backend → word count only
         }
-        function v861PickDuration(wordCount){
+        function v861Bucket(count, table){
+            if(!table || !table.length) return null;
+            for(const [maxCount, secs] of table){ if(count <= maxCount) return secs; }
+            return table[table.length-1][1];   // over cap → biggest bucket
+        }
+        // v884 — a word ends at whitespace OR a hyphen (`forty-five-year-old`
+        // is four spoken words). Same split as clip_duration.count_line_words.
+        function v884CountWords(text){
+            return (text||'').split(/[\s\-‐-―]+/).filter(w=>w).length;
+        }
+        // v884 — the longer of the word pick and the char pick. An older
+        // backend serves no char_buckets; then this is the pure v861 answer.
+        function v861PickDuration(wordCount, charCount){
             const t = window._v861Buckets;
             if(!t || !t.buckets || !t.buckets.length) return null;
-            for(const [maxWords, secs] of t.buckets){ if(wordCount <= maxWords) return secs; }
-            return t.buckets[t.buckets.length-1][1];   // over cap → biggest bucket
+            const byWords = v861Bucket(wordCount, t.buckets);
+            if(charCount === undefined || !t.char_buckets) return byWords;
+            return Math.max(byWords, v861Bucket(charCount, t.char_buckets) || 0);
         }
         function v861WordCap(){
             const t = window._v861Buckets;
             return (t && t.word_cap) ? t.word_cap : 28;
+        }
+        function v884CharCap(){
+            const t = window._v861Buckets;
+            return (t && t.char_cap) ? t.char_cap : 151;
         }
         function syncAdaptiveDurationLabel(){
             const on = (document.getElementById('adaptiveDuration')?.value||'true')==='true';
@@ -9921,7 +9938,7 @@ Ambient: same kitchen room tone, soft pour sound.
             let html='',issues=0,okCount=0;
             formattedLines.forEach((line,idx)=>{
                 const parts=line.split('|');if(parts.length<2)return;
-                const lineNum=parts[0].trim(),text=parts.slice(1).join('|').trim(),wordCount=text.split(/\s+/).filter(w=>w).length,duration=(wordCount/wps).toFixed(1);
+                const lineNum=parts[0].trim(),text=parts.slice(1).join('|').trim(),wordCount=v884CountWords(text),charCount=text.length,duration=(wordCount/wps).toFixed(1);
                 const isLastLine = idx === totalLines - 1;
                 let sc,st,si;
                 
@@ -9944,9 +9961,14 @@ Ambient: same kitchen room tone, soft pour sound.
                     // v861 — the clip is sized to this line. Only the v831 cap
                     // is a real fault: past it there is no bucket big enough
                     // and the renderer would cut the line off mid-sentence.
+                    // v884 — the char cap fails for the same reason: a line
+                    // under 28 words can still be too long to say in 10s.
                     if(wordCount > v861WordCap()){
                         sc='line-long';st='⚠️ Over cap';
                         si=`${wordCount-v861WordCap()} over the ${v861WordCap()}-word cap — split into 2 lines`;issues++;
+                    } else if(charCount > v884CharCap()){
+                        sc='line-long';st='⚠️ Over cap';
+                        si=`${charCount-v884CharCap()} over the ${v884CharCap()}-char cap — split into 2 lines`;issues++;
                     } else {
                         sc='line-ok';st='✓ OK';si='';okCount++;
                     }
@@ -9983,8 +10005,11 @@ Ambient: same kitchen room tone, soft pour sound.
                 if(isTextCard || isSilent){
                     renderInfo = `${wordCount} words`;
                 } else if(adaptiveOn){
-                    const b = v861PickDuration(wordCount);
-                    renderInfo = b ? `${wordCount} words → ${b}s clip` : `${wordCount} words`;
+                    // v884 — show BOTH counts, because the char count is often
+                    // the one that decided the bucket and "10 words → 6s clip"
+                    // alone reads like a bug.
+                    const b = v861PickDuration(wordCount, charCount);
+                    renderInfo = b ? `${wordCount}w / ${charCount}c → ${b}s clip` : `${wordCount} words`;
                 } else {
                     renderInfo = `${wordCount} words → ${fixedDuration}s clip (fixed)`;
                 }
@@ -9992,8 +10017,8 @@ Ambient: same kitchen room tone, soft pour sound.
             });
             const totalSecs = formattedLines.reduce((acc,line)=>{
                 const p=line.split('|'); if(p.length<2) return acc;
-                const wc=p.slice(1).join('|').trim().split(/\s+/).filter(w=>w).length;
-                return acc + (adaptiveOn ? (v861PickDuration(wc)||0) : fixedDuration);
+                const txt=p.slice(1).join('|').trim();
+                return acc + (adaptiveOn ? (v861PickDuration(v884CountWords(txt), txt.length)||0) : fixedDuration);
             },0);
             const modeNote = adaptiveOn
                 ? `adaptive — each clip sized to its line · ~${totalSecs}s total`
