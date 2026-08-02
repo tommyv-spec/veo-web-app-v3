@@ -115,6 +115,31 @@ def cleanup_expired_sessions(db: Session):
     db.commit()
 
 
+def validate_bearer_token(request: Request, db: Session):
+    """v886: personal API token path — accepts an active UserWorkerToken as
+    'Authorization: Bearer <token>' on ANY session-protected endpoint, so CLI
+    clients (send_to_platform.py) can call import/promote/jobs without a
+    browser cookie. Returns the token's User, None when no bearer header is
+    present, and raises 401/403 when a bearer header is present but invalid
+    (explicit failure beats silently falling back to the cookie path).
+    """
+    header = request.headers.get("authorization", "")
+    if not header.startswith("Bearer "):
+        return None
+    token_value = header[7:].strip()
+    from models import UserWorkerToken
+    token = db.query(UserWorkerToken).filter(
+        UserWorkerToken.id == token_value,
+        UserWorkerToken.is_active == True
+    ).first()
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid or revoked API token")
+    user = token.user
+    if not user or not user.is_active:
+        raise HTTPException(status_code=403, detail="Account disabled")
+    return user
+
+
 # =============================================================================
 # User Management
 # =============================================================================
@@ -171,7 +196,13 @@ async def get_current_user(
     if not GOOGLE_AUTH_ENABLED:
         # If auth is disabled, return a default user
         return _get_or_create_default_user(db)
-    
+
+    # v886: CLI bearer-token path (send_to_platform.py) — checked before the
+    # cookie so API clients never need a browser session.
+    token_user = validate_bearer_token(request, db)
+    if token_user:
+        return token_user
+
     session_token = request.cookies.get("session")
     if not session_token:
         raise HTTPException(status_code=401, detail="Not authenticated")
