@@ -35,6 +35,16 @@ The {{VISUAL_DESCRIPTOR}} says, "{{LINE}}"
 
 ## Legacy twelve-block master (v865) — pre-2026-07-29 builds
 
+> Pre-v872 wording of this master's header + hard-check note, kept verbatim (old builds cite it):
+
+```text
+# Google Omni master prompt (v865)
+
+Canonical per-clip render-prompt body for Google Omni Flash. Fill the slot markers from the build's own fields. Deep-dive: code/template_reference.md §v865.
+
+**Two literal strings the auditor hard-checks in the `Dialogue:` block — do not reword them away** (`audit_build.py` `c_v810_form`): every dialogue clip body must contain `saying exactly:` AND `stays silent for the rest of the clip`. The block below carries both; keep them verbatim when you fill the slot.
+```
+
 ## Locked master (verbatim)
 
 ```
@@ -108,3 +118,14 @@ Negative Constraints: No text overlays. No captions. No subtitles. No logos. No 
 Every future operator intel drop appends a dated row here.
 
 - 2026-07-24 — v865 established from operator master prompt. Anchors dropped, negatives kept as prose, both section headers accepted.
+
+## Both sections are standard (v871)
+
+Every build emits BOTH prompt sections: the Omni section (`## Google Omni Final Prompts (per clip)` — RENDERED by default) AND an anchor-format reference section (inert; the operator can select it to render per video via the Batch overview — batch `prompt_variant`). Deep-dive: code/template_reference.md §v871. Template for the anchor section:
+
+```
+## Anchor-Format Prompts (IMMEDIATE ACTION / TERMINAL STATE — reference, selectable)
+
+The same clips in the prior anchor format. Bold `**Clip N.M**` labels (NOT `### Clip`) + a header with no "Final Prompts" token, so the render parser and clip-counter ignore it. The operator can select this set to render per video (batch prompt_variant, v871). Each clip: `**Clip N.M — …**` / `**Start frame:** Image K` / `**Text prompt:**` fenced (IMMEDIATE ACTION: … TERMINAL STATE: … + the v810 dialogue sentence) / `**Prompt B (…):**` fenced.
+```
+
