@@ -14619,7 +14619,6 @@ Give every visible process step and every meaningful on-screen object its own or
 **The meta-rule (the "completely unrelated cases" half):** before authoring artifact B from artifact A, ask what A actually IS. If A is an observation/summary/derived text, it is NOT ground truth for B — go one level down to the source A describes (frames, parser code, raw transcript, live platform behavior) and verify there. Same family as root `CLAUDE.md` §2 read-current-state; this rule pins it to the decode→build authoring path specifically.
 
 **Touched**: this deep-dive, `code/verify_video_format.py` (c5463a0, the two mirrored gates), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (authoring-step note), `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` (§conversation staging + §recreate-from-frames), root `CLAUDE.md` (gotcha row), `wiki/log.md`.
-
 **Touched by the 2026-07-22 shown-beats amendment (Half C)**: `code/verify_decode_format.py`, `code/template_new_format.md`, `code/decode_bundle.sh`, `wiki/meta/decode-grammar-checklist.md`, `wiki/concepts/script-adaptation/script-adaptation-workflow.md`, both decode/build skills, both authoring auditors, and the v790 index/checklist rows. Root `CLAUDE.md` was NOT changed for the amendment.
 
 ## v791 — HOOK safe-area composition grammar (camera-first + layered foreground + scale cheat)
@@ -15857,18 +15856,6 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 
 **Touched**: this deep-dive (canonical), `code/clip_duration.py` (NEW — the only home of the bucket math), `code/tests/test_v861_clip_duration.py`, `code/image_platform.py` (per-line bullet parse + prepare-time resolve onto `clips.veo_render_duration_s`), `code/main.py` (PATCH validator accepts 10; all four worker payload builders ship the field — local + user worker × pending-jobs + redo-pending-clips), `code/worker.py` (Veo API path, per-clip duration + the 10→8 fold), `code/static/flow_worker.py` (Flow path, per-clip duration tab + prompt timing window), `code/template_new_format.md` (skeleton field), `~/.claude/skills/build-video/audit_build.py` (`v861_clip_duration` check + v831 cap 25→28), `wiki/patterns/conventions.md` (index row), `wiki/log.md`. Operator 2026-07-16.
 
-## v871 — Render-selectable prompt variant: every build carries BOTH prompt sections; the operator picks which renders (per video)
-
-**What / why**: v865 made the Google Omni block the per-clip render body. Operators want the prior anchor-format (IMMEDIATE ACTION / TERMINAL STATE) prompts KEPT and, per video, selectable as the actual render input. v871 makes every build emit BOTH sections and adds a platform selector. Operator directive 2026-07-25.
-
-**Authoring standard (forward-only)**: every build emits:
-- `## Google Omni Final Prompts (per clip)` — the v865 twelve-block set, RENDERED BY DEFAULT (`### Clip N.M` headers; parsed for render + clip count).
-- `## Anchor-Format Prompts (… reference …)` — the same clips in anchor format, INERT to the render parser + clip-counter (bold `**Clip N.M**` labels; the header carries NO "Final Prompts" token; placed after `## Comprehension` / at EOF). Both Prompt A and Prompt B are fenced.
-
-**Platform**: `ImageJobBatch.prompt_variant` (`omni` default | `anchor`), auto-migrated. Batch overview shows a per-video selector ("Render with: Google Omni | Anchor-format") that POSTs to `/api/images/batches/{id}/prompt-variant`. At job-prep (`main.py` `_setup_job_background`), when variant=='anchor', each clip's `veo_prompt_override` + Prompt B are swapped from the anchor section parsed off the stored `source_markdown` (`_parse_anchor_reference_prompts`, keyed `(scene_index, per-scene 1-based line ordinal)` — the same key the Omni attach uses). Default `omni` leaves the render path byte-for-byte unchanged (regression-critical).
-
-**Touched**: `image_platform.py` (column + auto-migrate + anchor parser returns Prompt B + `POST /prompt-variant` endpoint + overview payload), `main.py` (job-prep swap + `[v871]` diagnostic log), `static/index.html` (selector), `template_omni_master.md` + `template_new_format.md` (both-sections standard), `template_reference.md` §v871 (this), `~/.claude/skills/build-video/SKILL.md` (gate line), `wiki/patterns/conventions.md` + `wiki/meta/build-rule-index.md` + `wiki/log.md` (index/timeline). Forward-only.
-
 ## v867 — Test-axis fields: 11 controlled variables on every new decode + build §0
 
 **Problem this solves**: 11 axes PROVEN to vary between real videos lived only in filenames + free-text prose — never a structured field. Strongest evidence: the SAME cortisol/chest/Salvora concept exists as 4 decoded shell variants (podcast-splitscreen / gym-seminar-PiP / cowboy-seminar-PiP / gym-seminar-plain) plus chore variants (axe-woodsplit / cement-bag / lawnmower) plus observer variants (wife / new-neighbor / jogger) plus hero-age variants (48 / 63 / 64) — a live A/B family nobody could query or attribute. Single-variable testing needs the axis DECLARED, or the measurement can't say what changed.
@@ -16076,6 +16063,18 @@ Single-speaker clips take the same shape with one turn (`Dialogue: One speaker, 
 
 **Touched**: this deep-dive (canonical), `code/template_new_format.md` (skeleton — Dialogue block shape), `~/.claude/skills/build-video/audit_build.py` (`dialogue_turn_grammar` check), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (workflow note), root `CLAUDE.md` (§9 tripwire row), `wiki/log.md`, memory `feedback_multi-speaker-turn-grammar`. Operator 2026-07-28.
 
+## v871 — Render-selectable prompt variant: every build carries BOTH prompt sections; the operator picks which renders (per video)
+
+**What / why**: v865 made the Google Omni block the per-clip render body. Operators want the prior anchor-format (IMMEDIATE ACTION / TERMINAL STATE) prompts KEPT and, per video, selectable as the actual render input. v871 makes every build emit BOTH sections and adds a platform selector. Operator directive 2026-07-25.
+
+**Authoring standard (forward-only)**: every build emits:
+- `## Google Omni Final Prompts (per clip)` — the v865 twelve-block set, RENDERED BY DEFAULT (`### Clip N.M` headers; parsed for render + clip count).
+- `## Anchor-Format Prompts (… reference …)` — the same clips in anchor format, INERT to the render parser + clip-counter (bold `**Clip N.M**` labels; the header carries NO "Final Prompts" token; placed after `## Comprehension` / at EOF). Both Prompt A and Prompt B are fenced.
+
+**Platform**: `ImageJobBatch.prompt_variant` (`omni` default | `anchor`), auto-migrated. Batch overview shows a per-video selector ("Render with: Google Omni | Anchor-format") that POSTs to `/api/images/batches/{id}/prompt-variant`. At job-prep (`main.py` `_setup_job_background`), when variant=='anchor', each clip's `veo_prompt_override` + Prompt B are swapped from the anchor section parsed off the stored `source_markdown` (`_parse_anchor_reference_prompts`, keyed `(scene_index, per-scene 1-based line ordinal)` — the same key the Omni attach uses). Default `omni` leaves the render path byte-for-byte unchanged (regression-critical).
+
+**Touched**: `image_platform.py` (column + auto-migrate + anchor parser returns Prompt B + `POST /prompt-variant` endpoint + overview payload), `main.py` (job-prep swap + `[v871]` diagnostic log), `static/index.html` (selector), `template_omni_master.md` + `template_new_format.md` (both-sections standard), `template_reference.md` §v871 (this), `~/.claude/skills/build-video/SKILL.md` (gate line), `wiki/patterns/conventions.md` + `wiki/meta/build-rule-index.md` + `wiki/log.md` (index/timeline). Forward-only.
+
 ## v873 — HOOK CONTRACT: it shows what it says, it carries a contradiction, it names who it is for
 
 Source: the Hooks Masterclass card behind Selling Course Part 9 (`raw/course/hooks-masterclass-tension-2026-07-29.txt`) + its public Loom transcript (`raw/course/hooks-masterclass-loom-2026-07-29.json`) + the course's own "hook coherence" entry in the marketing dictionary. Together they turn "make it strong" into three checkable clauses.
@@ -16242,6 +16241,52 @@ INNOVATION NEED: none | <second proven source + function + why the parent alone 
 
 **Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/winner-to-selling-conversion.md`, `wiki/concepts/script-adaptation/script-adaptation-workflow.md`, `wiki/concepts/script-adaptation/step-up-vs-innovation.md`, `wiki/synthesis/innovation-operating-system.md`, `docs/winner-to-selling-audit-template.md`, root `CLAUDE.md`, `wiki/meta/generate-video-checklist.md`, `wiki/index.md`, `wiki/log.md`.
 
+## v879 — START-FRAME-SAFE ACTIONS: animate from what is visibly true, never from an assumed grip or pose
+
+Sources: operator correction 2026-07-31 on the grandfather/banana build · v750 action-only prompt discipline · v751 Veo-to-image semantic consistency.
+
+**The rule.** Every image-to-video action must be possible from the attached start frame exactly as rendered. The prompt may direct the subject to **continue, move, display, manipulate, or react with** what is visible. It must not silently assume a precise starting grip, hand, pose, orientation, contact point, or object position that the start frame may not contain.
+
+This is a build-time judgment gate, not a cleanup after generation:
+
+1. Open the actual start frame or read its final approved image prompt.
+2. List only the visible facts needed by the motion: who has the object, roughly where it is, and its current state.
+3. Write the action from those facts. If the exact grip is not guaranteed, use a grip-neutral verb such as `raises`, `shows`, `moves`, `holds forward`, `lets it hang`, `rubs`, or `turns`.
+4. Name a precise grip or contact point only when the approved start frame visibly guarantees it.
+5. Keep the action specific about the visible result and loose only about the uncertain starting mechanics.
+
+**Failure:** `She lifts the banana by its stem` when the frame may show the banana held around its body. Veo must invent a re-grip before it can obey, which causes hand/object jumps or a stalled action.
+
+**Pass:** `She raises the failed banana and lets its soft body hang in front of the man.` The action preserves the intended display while working from any natural grip already present.
+
+This is not permission to make actions vague. The key action and terminal state stay concrete; only unverified start-pose assumptions are removed. A deliberately locked pose/action from the operator or a verified start frame stays literal under §5.5.
+
+**Scope:** GENERATE side, forward-only, every image-to-video clip. Applies to Omni Prompt A/B and Anchor Prompt A/B. Build-time enforcement: the v879 start-frame compatibility read in `wiki/meta/generate-video-checklist.md`; v751 remains the broader semantic-consistency gate.
+
+## v880 — TWO VOCABULARIES: production prompts name the carrier; dialogue names the customer’s problem
+
+Sources: operator correction 2026-07-31 on the baking-soda/Vicks build · Selling Course Part 9 specificity pass · Script Training real-customer-language examples · `line-level-substitution-rules.md` proxy-binding and image tests.
+
+**The rule.** Keep production vocabulary and customer vocabulary separate:
+
+- Image prompts, action notes, and motion instructions name the literal visible carrier when the model needs it: `banana`, `eggplant`, `geoduck`, `bottle`, `board`, `balloon`.
+- Spoken dialogue names the pain, body function, desire, or consequence in words the audience uses: `soldier`, `Johnson`, `blood flow`, `wife`, `bedtime`, or the niche’s proven equivalent.
+- Internal labels never enter speech: `proxy`, `carrier`, `stand-in`, `visual metaphor`, `before-state`, `after-state`, `failed object`, `hero prop`.
+
+The visual metaphor should translate silently. The line binds it to the customer’s owned problem; it does not explain the production device. Saying `rub that paste across the same proxy` exposes the script notes, breaks the metaphor, creates distance, and sounds unlike a customer or creator. In this ED case, `rub that paste over your soldier` or a corpus-proven `Johnson` line keeps the speech on the buyer’s problem while the prompt still tells the model which food object is touched.
+
+**Literal-object carve-out.** A spoken line may name the object when the object is truly the topic: a recipe ingredient, a named product, a literal comparison, or a deliberate joke whose wording is proven by the source. The default in a symptom-metaphor beat is still customer language, not prop language.
+
+**Three checks for every spoken line:**
+
+1. **No-visual test:** if the frame disappeared, would the target customer still understand what problem or result the line means?
+2. **Real-person test:** would the speaker plausibly say this to a friend, spouse, or viewer, or does it sound like a storyboard note?
+3. **Binding test:** when a visible metaphor is doing the work, does the line connect it to the owned symptom using corpus-proven customer words?
+
+**Scope:** GENERATE side, forward-only, every spoken `- **line:**` and every quoted Prompt A/B copy. The build-time line proofread owns the judgment. A mechanical scan may hard-fail the internal labels above inside spoken text, but it must not ban those terms from §0 maps, Ingredients, image prompts, action notes, or other production fields.
+
+---
+
 ## v881 — Omni + START AND END frame = INGREDIENTS, per clip (narrows v784)
 
 **Operator, 2026-07-31**: *"when we use omni as model and we have start and end frame, we have to use ingredients instead of frames."* Runtime change (`code/static/flow_worker.py` — the Flow video worker). Auto-deploys to Render.
@@ -16291,6 +16336,98 @@ Failure mapping into the caller's 3-tuple: `policy` → `(False, 'start'|'end', 
 Flip the helper body back to `return False` — that restores v784 exactly, at every gated site.
 
 **Tests**: `code/test_omni_ingredients_mode.py` (truth table + the mode-change/no-change toggle). **Touched**: `code/static/flow_worker.py`, `code/template_reference.md` (this deep-dive), `code/test_omni_ingredients_mode.py` (new), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline).
+
+---
+
+## v882 — OBJECT SWAP = SCENE REBUILD: physical truth, dialogue truth, and valence must move together
+
+Sources: operator correction 2026-07-31 on `nuri-korella-ed-parkinglot-pov-wife-records-grandfather-stops-pills-korella-saffron-selling-v1` · the audited bag parent `nuri-korella-ed-drivethru-pov-wife-records-grandfather-stops-bag-korella-saffron-selling-v1` · `nuri-korella-ed-pharmacy-smack-bluepills-couple-saffron-v1` · `raw/videos/decoded_axe-woodsplit-jealous-wife-cortisol-chest-salvora-rhodiola-podcast-splitscreen-fb.md` · `line-level-substitution-rules.md` §“The beat's FUNCTION survives a pain change; the thing it POINTS AT does not.”
+
+**The rule.** A visible object may be token-swapped only when the replacement has the same physical grammar: the same number of meaningful pieces, the same owner at the start, the same action, the same transfer/contact, the same owner and state at the end, and the same meaning in the dialogue. If any one changes, this is not a noun swap. Rebuild every affected image, scene, line, motion prompt, question/answer beat, and transition as one scene chain.
+
+The failure that created this rule was a bag→pills substitution. A bag is one object transferred from a cashier to a husband. “He took the bag out of my husband's hand” can match a frame where the fit man ends holding the bag. Pills are a system: bottle + cap + capsules + receiving palm + pour. Blocking the bottle before the capsules land is not “taking the pills out of his hand.” Keeping the bag dialogue while rendering the pill system made the line, image and action describe different events.
+
+The same incomplete swap reversed the failed-fix meaning. The fit man held the GNC bottle label-forward while saying “then he should probably start doing what i do,” so the frame visually endorsed the object the script meant to reject. The next question changed from gym/diet to prescription, but the answer still denied training. A grammatically clean line can still be causally wrong.
+
+### Mandatory pre-draft declaration
+
+Every build with a script-changing `METHOD:` declares `OBJECT SWAP: yes | no` in §0. Use `yes` when a hook prop, failed fix, task object, carrier, transfer, contact action, or shown process changes. For `yes`, add:
+
+```text
+### OBJECT-STATE MAP
+| Beat | Source start | Source action | Source end | Build start | Build action | Build end | Dialogue claim | Valence |
+|---|---|---|---|---|---|---|---|---|
+| S1 | cashier owns one bag | husband reaches; fit man blocks | fit man owns bag | husband owns bottle; capsules remain inside | fit man knocks bottle away | bottle leaves the choice; no capsules land | “he knocked the pills out of my husband's hand” | pills = rejected failed fix |
+
+STALE SOURCE TOKENS: taken bag | stopped bag | order speaker | menu canopy | banana impact
+DIALOGUE CAUSALITY: <for every changed question/claim, name the exact later answer and why it answers>
+FAILED-FIX VALENCE: <enemy / neutral / solution; who holds it and why the frame cannot imply the opposite>
+HOOK-TO-BODY SEAM: <the exact hook promise and the first body beat that answers it>
+```
+
+The example row shows the required level of physical detail, not a required creative direction.
+
+### Five hard checks
+
+1. **Object-state truth.** Inventory every meaningful piece. Do not collapse bottle + loose contents + receiving hand into one noun. The Scene line, image prompt, action note, Prompt A and Prompt B must agree on who owns what at start and end.
+2. **Dialogue truth.** Read the line against the silent frame. Every verb must describe the visible event exactly. “Took from his hand” fails when the object never reached that hand.
+3. **Question→answer truth.** When a wrong guess changes, rewrite the denial and press beats that answer it. A prescription question cannot be answered by “I stopped training.” Check the whole exchange, not one line at a time.
+4. **Valence truth.** A failed fix stays visibly rejected. An authority or proof carrier may point to it as the enemy, knock it away, set it aside, or compare against it. They may not present it label-forward while saying “do what I do” unless the script truly endorses it.
+5. **Clean-swap truth.** List the old render-facing phrases in `STALE SOURCE TOKENS:` and require zero hits in Ingredients descriptions, image prompts, lines, action notes/action arcs, and both prompt sets. Source words may remain in §0 analysis only.
+
+Then run the v879 start-frame check separately: every animation starts before the requested motion, not already in its terminal pose. Finally read the hook→body seam aloud. If the hook promises pill rejection and the body opens on an unrelated physique or proxy claim, add the missing causal bridge or choose a different hook.
+
+**Scope:** GENERATE side, forward-only. Applies to every script-changing method; the full map is mandatory when `OBJECT SWAP: yes`. Build-time enforcement lives in the `/build` loader. Auditor `object_swap_logic` hard-fails a changed-object/action declaration with no map, incomplete required fields, or a declared stale token that survives in the render zone. It warns on legacy method builds with no `OBJECT SWAP:` declaration.
+
+## v883 — MOVIE STYLE CONTRACT: keep the emotion engine, age payload, named pain, and body handoff in one ordered chain
+
+Sources: `raw/docs/salvora-movie-style-playbook-2026-07-31.txt` · `raw/videos/decoded_airplane-aisle-overheadbin-50-cheating-wife-cortisol-chest-salvora-rhodiola-ted-seminar-pip-fb.md` · `raw/videos/decoded_rodeodrive-gucci-two-women-63-jealousy-cortisol-belly-salvora-rhodiola-amish-market-pip-ig.md` · `raw/videos/decoded_homedepot-truckbed-shirtless-wife-cheating-cortisol-chest-salvora-rhodiola-asian-coach-boxinggym-pip-fb.md` · `raw/videos/decoded_boardwalk-betrayal-napkin-throw-comforter-48-cortisol-belly-salvora-rhodiola-amish-barn-lecture-ig.md` · `wiki/patterns/interaction-hook-engine.md`.
+
+**The rule.** Movie Style is an ordered cause-and-effect scene, not a bag of dialogue lines. Pick one emotion, show the desired after-state, hit the emotion immediately, then preserve the route's line jobs and hand the exact named pain into the body.
+
+The standard admiration / jealousy / cheating lane is:
+
+`trigger → answer → one wrong guess → denial with age → press naming one body part → authority reveal → body opens on that same body part`
+
+The order is load-bearing. The age number must sit inside the denial that answers the wrong guess. Moving it after the press turns the number into late explanation. Combining two guesses weakens the denial. A press about “a body like that” is too broad; it must name one visible problem or result, and the first body beat must attack that same part. Five of six decoded interaction hooks state an age. The one bare “no” is the negative control and never explains why the result is reproducible.
+
+**Betrayal is the attested exception, not permission to scramble the standard lane.** Its order is:
+
+`emotional event → aftermath → comfort → age volunteered → need question → authority reveal → body opens on the declared pain`
+
+It may drop the wrong-guess and press beats because the comfort exchange does those jobs differently. The exception is valid only when `MOVIE STYLE VARIANT: betrayal` is declared; admiration, jealousy, and cheating use the standard chain.
+
+### Mandatory pre-draft declaration
+
+Every Movie Style / interaction-scene build adds this block in §0 before any Image or Scene:
+
+```text
+MOVIE STYLE: yes
+MOVIE STYLE VARIANT: standard
+MOVIE STYLE EMOTION: admiration
+VISIBLE AFTER-STATE: <the desired result already visible in the hook>
+MOVIE STYLE SEQUENCE: trigger=Scene 2 | answer=Scene 3 | wrong guess=Scene 4 | age=Scene 5 | press=Scene 6 | reveal=Scene 7 | body open=Scene 8
+AGE PAYLOAD: sixty four | scene=5
+PAIN HANDOFF: soldier | press scene=6 | body open scene=8
+```
+
+For betrayal, use `MOVIE STYLE VARIANT: betrayal` and this sequence shape:
+
+```text
+MOVIE STYLE SEQUENCE: event=Scene 1 | aftermath=Scene 2 | comfort=Scene 3 | age=Scene 4 | need question=Scene 5 | reveal=Scene 6 | body open=Scene 7
+AGE PAYLOAD: forty eight | scene=4
+PAIN HANDOFF: belly | press scene=n/a | body open scene=7
+```
+
+The scene numbers are examples. The order and truth checks are mandatory:
+
+1. `AGE PAYLOAD` names the literal spoken age words and the scene that says them. Those words must occur in that scene.
+2. In the standard lane, the age scene comes after the wrong guess and before the press.
+3. `PAIN HANDOFF` names one exact body part or audience-owned euphemism. In the standard lane it must occur in both the press scene and the first body scene. In betrayal it must occur in the first body scene.
+4. `VISIBLE AFTER-STATE` names what is already aspirational on screen. Dialogue does not substitute for showing it.
+5. Production terms remain banned from speech under v880. The Movie Style map belongs in §0; the characters still talk like people.
+
+**Scope:** GENERATE side, forward-only. Applies to every Movie Style / interaction-scene build, both genders and all four emotions. The `/build` loader is the hard pre-draft gate. Auditor `movie_style_contract` warns when a likely legacy interaction build has no declaration, then hard-fails an explicit `MOVIE STYLE: yes` block with a missing field, wrong sequence, displaced age, or broken pain handoff. Auditor `spoken_production_terms` separately hard-fails v880 internal labels inside spoken lines and quoted prompt dialogue only.
 
 ---
 

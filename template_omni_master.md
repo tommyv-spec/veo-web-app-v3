@@ -1,15 +1,48 @@
+# Google Omni master prompt (v865 → SHORT BODY per v872)
+
+Canonical per-clip render-prompt body for Google Omni Flash. Fill the slot markers from the build's own fields. Deep-dive: code/template_reference.md §v865 + **§v872 (supersedes the twelve-block body for new builds)**.
+
+---
+
+## Short body (v872) — USE THIS ON NEW BUILDS
+
+Confirmed by two first-try renders 2026-07-29, after the twelve-block body with TURN labels, timestamps and a silent-cast lock kept putting the words in the wrong mouth. Five blocks:
+
+```
+Animate the attached start-frame image into a {{DURATION}}-second vertical 9:16 realistic UGC video. Handheld iPhone at chest height with slight natural drift. One continuous take, no cuts, no zooms.
+
+Keep the exact lighting, texture and imperfect iPhone quality of the attached image. No sharpening, no skin smoothing, no beauty filter, no HDR, no cinematic polish, no colour grade. Keep every face, outfit and object as in the image.
+
+{{ONE_MOTION_SENTENCE — only what CHANGES over the clip}}
+
+The {{VISUAL_DESCRIPTOR}} says, "{{LINE}}"
+
+{{AMBIENT_AUDIO_ONE_LINE}}. No music. No subtitles, no captions.
+```
+
+**Rules that make it work:**
+
+- `Animate the attached start-frame image into a…` — NOT `Create a … video`. "Create" reads as generate-from-scratch; this names the job as continuation of the frame. Pairs with the v784 Frames submit shape (`shape=startImage` in the `[flow-api-capture]` log).
+- `{{VISUAL_DESCRIPTOR}}` = what the frame shows, garment colour first — "the woman in the blue dress", "the muscular man in the canvas overalls". NEVER a name. NEVER a bare "the woman"/"the man" when two of that gender are in frame.
+- ONE speech sentence per clip. Two speakers = two SCENES with two start frames (§v872 Layer 1), never one clip with two lines.
+- **Never name a non-speaker.** "the others keep their lips closed" seeds those mouths — the §v808 negative-mention trap.
+- Accent, when it must be locked, is its own sentence BEFORE the speech line ("Her voice is casual American, not acted.") — never inserted between `says,` and the quote.
+- CUT because the start frame carries them: the `Reference:` identity paragraph, `Scene:` environment, the t=0 camera layout, `Ending Camera Beat:`, `Style:`, the long negative list.
+- Prompt A and Prompt B both stay FENCED; the spoken line stays the ONLY double-quoted span per prompt (v821 + v865 gates unchanged). Prompt B rewords only the quoted line.
+- Keep the twelve-block form below for legacy builds and for a clip that genuinely needs an `Ending Camera Beat` (a real camera move that invents off-frame content).
+
+---
+
+## Legacy twelve-block master (v865) — pre-2026-07-29 builds
+
+> Pre-v872 wording of this master's header + hard-check note, kept verbatim (old builds cite it):
+
+```text
 # Google Omni master prompt (v865)
 
 Canonical per-clip render-prompt body for Google Omni Flash. Fill the slot markers from the build's own fields. Deep-dive: code/template_reference.md §v865.
 
-## Both sections are standard (v871)
-
-Every build emits BOTH prompt sections: the Omni section (`## Google Omni Final Prompts (per clip)` — RENDERED by default) AND an anchor-format reference section (inert; the operator can select it to render per video via the Batch overview — batch `prompt_variant`). Deep-dive: code/template_reference.md §v871. Template for the anchor section:
-
-```
-## Anchor-Format Prompts (IMMEDIATE ACTION / TERMINAL STATE — reference, selectable)
-
-The same clips in the prior anchor format. Bold `**Clip N.M**` labels (NOT `### Clip`) + a header with no "Final Prompts" token, so the render parser and clip-counter ignore it. The operator can select this set to render per video (batch prompt_variant, v871). Each clip: `**Clip N.M — …**` / `**Start frame:** Image K` / `**Text prompt:**` fenced (IMMEDIATE ACTION: … TERMINAL STATE: … + the v810 dialogue sentence) / `**Prompt B (…):**` fenced.
+**Two literal strings the auditor hard-checks in the `Dialogue:` block — do not reword them away** (`audit_build.py` `c_v810_form`): every dialogue clip body must contain `saying exactly:` AND `stays silent for the rest of the clip`. The block below carries both; keep them verbatim when you fill the slot.
 ```
 
 ## Locked master (verbatim)
@@ -22,7 +55,7 @@ Create an 8-second vertical 9:16 realistic UGC video. Quality / Fidelity Lock: U
 
 **Fencing is mandatory.** Both the Prompt A body and the Prompt B body sit inside a triple-backtick fence, exactly like every shipped build. The parser extracts Prompt B with `_extract_fenced_content` only — it has NO unfenced fallback (`code/veo_prompt_overrides.py:396`), so an unfenced Prompt B parses to `None`, the v821 gate hard-fails, and the worker never gets the fallback line. The `**Start frame:**` / `**End frame:**` / `**Text prompt:**` / `**Prompt B …:**` labels stay OUTSIDE the fence; the prose body goes INSIDE it.
 
-**Two literal strings the auditor hard-checks in the `Dialogue:` block — do not reword them away** (`audit_build.py` `c_v810_form`): every dialogue clip body must contain `saying exactly:` AND `stays silent for the rest of the clip`. The block below carries both; keep them verbatim when you fill the slot.
+**Speech-marker check (`audit_build.py` `c_v810_form`, updated 2026-07-29):** every dialogue clip body must carry a speech marker — either the v872 short form `The <descriptor> says, "<line>"` OR the legacy `saying exactly:`. The post-speech-silence clause (`stays silent for the rest of the clip`) is REQUIRED only alongside the legacy `saying exactly:` form; the short body needs neither it nor an `American accent` token. A clip carrying TWO speech spans HARD-FAILS (`dialogue_turn_grammar`) — that is a merged scene, split it per §v872.
 
 (The example below is wrapped in a 4-backtick outer fence only so the inner 3-backtick fences render literally. In a real build you write plain 3-backtick fences.)
 
@@ -85,3 +118,14 @@ Negative Constraints: No text overlays. No captions. No subtitles. No logos. No 
 Every future operator intel drop appends a dated row here.
 
 - 2026-07-24 — v865 established from operator master prompt. Anchors dropped, negatives kept as prose, both section headers accepted.
+
+## Both sections are standard (v871)
+
+Every build emits BOTH prompt sections: the Omni section (`## Google Omni Final Prompts (per clip)` — RENDERED by default) AND an anchor-format reference section (inert; the operator can select it to render per video via the Batch overview — batch `prompt_variant`). Deep-dive: code/template_reference.md §v871. Template for the anchor section:
+
+```
+## Anchor-Format Prompts (IMMEDIATE ACTION / TERMINAL STATE — reference, selectable)
+
+The same clips in the prior anchor format. Bold `**Clip N.M**` labels (NOT `### Clip`) + a header with no "Final Prompts" token, so the render parser and clip-counter ignore it. The operator can select this set to render per video (batch prompt_variant, v871). Each clip: `**Clip N.M — …**` / `**Start frame:** Image K` / `**Text prompt:**` fenced (IMMEDIATE ACTION: … TERMINAL STATE: … + the v810 dialogue sentence) / `**Prompt B (…):**` fenced.
+```
+
