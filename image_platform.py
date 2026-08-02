@@ -32,7 +32,8 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header, Request, Body, Query
-from fastapi.responses import FileResponse, Response, StreamingResponse, HTMLResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float, or_, func
@@ -42,7 +43,8 @@ from sqlalchemy.orm import Session, relationship, joinedload, selectinload, alia
 # Reuse the existing SQLAlchemy Base so init_db() picks up these models
 from models import Base, get_db_session, get_db, User, read_query_with_retry, UserWorkerToken
 from config import app_config
-from auth import get_current_user, SESSION_SECRET
+from auth import get_current_user
+from auth import SESSION_SECRET
 from clip_duration import (
     ALLOWED_CLIP_DURATIONS_S,
     count_line_chars,
@@ -10632,6 +10634,7 @@ def download_chatgpt_extension_zip(
     )
 
 
+# ---- ChatGPT image worker distribution (additive) ------------------------
 # ---- ChatGPT Python worker distribution (advanced fallback) --------------
 # The ChatGPT worker is a multi-file bundle living under code/static/. The
 # operator sets it up from the UI: names the ChatGPT account, downloads +
