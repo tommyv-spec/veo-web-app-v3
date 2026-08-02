@@ -87,10 +87,24 @@ def classify_http_error(resp):
     return PlatformError(EXIT_UNKNOWN, f"HTTP {code}: {msg}", det)
 
 
+def _as_list(data, key):
+    """Endpoint may return a bare list or {key: [...]} — anything else is a
+    contract break we want to fail loudly on, not iterate dict keys."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        val = data.get(key)
+        if isinstance(val, list):
+            return val
+    raise PlatformError(EXIT_UNKNOWN, f"unexpected response shape for '{key}': {str(data)[:200]}")
+
+
 def preflight_text(md_text):
     """Run the platform's OWN parser on the markdown, offline.
     Returns (ok, error_string). Catches every 'Parse error:' before any HTTP."""
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
     import image_platform as ip
     try:
         ip.parse_scene_table(md_text)
@@ -106,7 +120,13 @@ def preflight_text(md_text):
 class Client:
     def __init__(self, base_url, token):
         import requests  # deferred so tests of pure helpers don't need it
-        self.base = base_url.rstrip("/")
+        self._rq = requests
+        base = base_url.rstrip("/")
+        # never send the bearer token over plaintext, except local dev
+        if base.startswith("http://") and not any(
+                h in base for h in ("localhost", "127.0.0.1")):
+            raise PlatformError(EXIT_AUTH, f"AUTH: refusing to send token over http:// ({base}) — use https")
+        self.base = base
         self.s = requests.Session()
         self.s.headers["Authorization"] = f"Bearer {token}"
 
@@ -116,10 +136,16 @@ class Client:
         return resp.json() if resp.content else {}
 
     def get(self, path, **kw):
-        return self._check(self.s.get(self.base + path, timeout=60, **kw))
+        try:
+            return self._check(self.s.get(self.base + path, timeout=60, **kw))
+        except self._rq.exceptions.Timeout:
+            raise PlatformError(EXIT_WORKER, f"STALL: request timed out: GET {path}")
 
     def post(self, path, payload=None, **kw):
-        return self._check(self.s.post(self.base + path, json=payload, timeout=120, **kw))
+        try:
+            return self._check(self.s.post(self.base + path, json=payload, timeout=120, **kw))
+        except self._rq.exceptions.Timeout:
+            raise PlatformError(EXIT_WORKER, f"STALL: request timed out: POST {path}")
 
 
 def check_health(client, report):
@@ -163,7 +189,7 @@ def do_import(client, md_text, args, report):
 
 def cmd_list_uploads(client, as_json):
     data = client.get("/api/images/nodes", params={"since_days": 3650})
-    nodes = data.get("nodes", data) if isinstance(data, dict) else data
+    nodes = _as_list(data, "nodes")
     uploads = [n for n in nodes if n.get("kind") == "upload"]
     if as_json:
         print(json.dumps([{k: n.get(k) for k in ("id", "name", "status")} for n in uploads], indent=2))
@@ -184,8 +210,12 @@ def poll_images(client, batch_id, args, report):
     last_sig = None
     while True:
         data = client.get("/api/images/nodes", params={"batch_id": batch_id, "since_days": 30})
-        nodes = data.get("nodes", data) if isinstance(data, dict) else data
+        nodes = _as_list(data, "nodes")
         gen = [n for n in nodes if n.get("kind") == "generated"]
+        if not gen:
+            raise PlatformError(EXIT_IMAGE_FAIL,
+                                f"IMAGE_GEN_FAIL: batch {batch_id} has no generated nodes "
+                                f"(wrong --resume-batch id?)")
         failed = [n for n in gen if n.get("status") == "failed"]
         ready_unchosen = [n for n in gen if n.get("status") == "ready" and not n.get("chosen_variant_id")]
         done = [n for n in gen if n.get("status") == "ready" and n.get("chosen_variant_id")]
@@ -214,11 +244,12 @@ def poll_images(client, batch_id, args, report):
                 return False
             for n in ready_unchosen:
                 variants = n.get("variants") or []
-                if not variants:
+                first_variant_id = variants[0].get("id") if variants else None
+                if not first_variant_id:
                     raise PlatformError(EXIT_IMAGE_FAIL,
-                                        f"IMAGE_GEN_FAIL: node {n['id']} ready but has no variants")
+                                        f"IMAGE_GEN_FAIL: node {n['id']} ready but has no usable variants")
                 client.post(f"/api/images/nodes/{n['id']}/choose",
-                            {"variant_id": variants[0]["id"]})
+                            {"variant_id": first_variant_id})
             continue  # re-poll immediately: choosing may queue draft children
 
         if gen and len(done) == len(gen):
@@ -237,7 +268,10 @@ def poll_images(client, batch_id, args, report):
 def promote(client, batch_id, report):
     res = client.post(f"/api/images/batches/{batch_id}/promote-to-video")
     report["promote"] = res
-    return res["video_job_id"]
+    job_id = res.get("video_job_id")
+    if not job_id:
+        raise PlatformError(EXIT_UNKNOWN, f"promote response missing video_job_id: {str(res)[:200]}")
+    return job_id
 
 
 def classify_clip_failures(clips):
@@ -267,7 +301,7 @@ def poll_render(client, job_id, args, report):
 
         if status in ("completed", "failed", "cancelled"):
             data = client.get(f"/api/jobs/{job_id}/clips")
-            clips = data.get("clips", data) if isinstance(data, dict) else data
+            clips = _as_list(data, "clips")
             policy, other = classify_clip_failures(clips)
             report["render"] = {
                 "job_status": status,
