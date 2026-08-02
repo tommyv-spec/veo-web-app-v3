@@ -899,9 +899,48 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if path.startswith(prefix):
                 return await call_next(request)
         
+        # v886: personal API token (Authorization: Bearer <UserWorkerToken>).
+        # The middleware only needs to let the request reach its endpoint —
+        # get_current_user re-validates the token there. Cached like sessions
+        # to avoid a DB hit per poll.
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            import time as _time
+            token_value = auth_header[7:].strip()
+            if not hasattr(AuthMiddleware, '_session_cache'):
+                AuthMiddleware._session_cache = {}
+            bearer_cache_key = "bearer:" + token_value
+            bearer_cached = AuthMiddleware._session_cache.get(bearer_cache_key)
+            if bearer_cached and (_time.time() - bearer_cached['ts']) < 60:
+                if bearer_cached['valid']:
+                    return await call_next(request)
+            else:
+                from models import get_db, UserWorkerToken
+                with get_db() as db:
+                    tok = db.query(UserWorkerToken).filter(
+                        UserWorkerToken.id == token_value,
+                        UserWorkerToken.is_active == True
+                    ).first()
+                    valid = bool(tok and tok.user and tok.user.is_active)
+                    AuthMiddleware._session_cache[bearer_cache_key] = {'valid': valid, 'ts': _time.time()}
+                    # bearer-only traffic never reaches the cookie path's cap-eviction
+                    # below, so cap here too (same 500-entry policy)
+                    if len(AuthMiddleware._session_cache) > 500:
+                        _now = _time.time()
+                        AuthMiddleware._session_cache = {
+                            k: v for k, v in AuthMiddleware._session_cache.items()
+                            if _now - v['ts'] < 60
+                        }
+                    if valid:
+                        # TEMP DIAG v886 — remove after operator-side evidence lands
+                        print(f"[AuthMiddleware] v886 bearer accepted: {token_value[:8]}...", flush=True)
+                        return await call_next(request)
+                    print(f"[AuthMiddleware] v886 bearer REJECTED: {token_value[:8]}...", flush=True)
+            # fall through: invalid bearer → 401 below
+
         # Check session cookie
         session_token = request.cookies.get("session")
-        
+
         # (Debug cookie-check log removed — was firing on every root page hit)
         
         if session_token:
