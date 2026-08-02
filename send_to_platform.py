@@ -16,6 +16,8 @@ Usage:
   python send_to_platform.py videos/build.md --subject 42 --review
   python send_to_platform.py list-uploads
   python send_to_platform.py set-token <token>   # save once, forget forever
+  python send_to_platform.py set-alias nuri 1313 # name an upload once...
+  python send_to_platform.py videos/build.md --avatar nuri --product korella
 
 Exit codes:
   0 OK | 1 unknown/server | 2 parse | 3 auth | 4 worker-offline/stall
@@ -248,6 +250,77 @@ def do_import(client, md_text, args, report):
     return res["batch_id"]
 
 
+def _upload_image_url(base, node):
+    """Browser-viewable URL of an upload node's image (open while logged in)."""
+    variants = node.get("variants") or []
+    chosen = node.get("chosen_variant")
+    v = chosen or (variants[0] if variants else None)
+    if v and v.get("image_url"):
+        return base + v["image_url"]
+    return None
+
+
+def _fetch_uploads(client):
+    data = client.get("/api/images/nodes", params={"since_days": 3650})
+    nodes = _as_list(data, "nodes")
+    return [n for n in nodes if n.get("kind") == "upload"]
+
+
+ALIASES_PATH = os.path.join(os.path.expanduser("~"), ".kaveno", "aliases.json")
+
+
+def _load_aliases():
+    try:
+        with open(ALIASES_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def cmd_set_alias(name, node_id):
+    if not name or not node_id or not str(node_id).isdigit():
+        print("usage: send_to_platform.py set-alias <name> <node_id>", file=sys.stderr)
+        return EXIT_UNKNOWN
+    aliases = _load_aliases()
+    aliases[name.lower()] = int(node_id)
+    os.makedirs(os.path.dirname(ALIASES_PATH), exist_ok=True)
+    with open(ALIASES_PATH, "w", encoding="utf-8") as f:
+        json.dump(aliases, f, indent=2)
+    print(f"alias '{name}' -> node {node_id} saved ({ALIASES_PATH})")
+    return EXIT_OK
+
+
+def resolve_upload_ref(client, ref, uploads=None):
+    """Turn a human ref (alias, name fragment, or numeric id) into a node id.
+    Saved alias wins; then exact name match; then substring. Several uploads
+    with the SAME name -> newest (highest id), with a note. Different names
+    matching -> error listing candidates with viewable URLs."""
+    ref = str(ref).strip()
+    if ref.isdigit():
+        return int(ref)
+    alias = _load_aliases().get(ref.lower())
+    if alias:
+        return alias
+    if uploads is None:
+        uploads = _fetch_uploads(client)
+    low = ref.lower()
+    exact = [n for n in uploads if (n.get("name") or "").lower() == low]
+    hits = exact or [n for n in uploads if low in (n.get("name") or "").lower()]
+    if not hits:
+        raise PlatformError(EXIT_UNKNOWN,
+                            f"no upload matches '{ref}' — run list-uploads to see names, "
+                            f"or save one: send_to_platform.py set-alias {ref} <node_id>")
+    names = {(n.get("name") or "") for n in hits}
+    if len(names) > 1:
+        lines = "\n".join(f"    node {n['id']}: {n.get('name')}" for n in hits[:8])
+        raise PlatformError(EXIT_UNKNOWN,
+                            f"'{ref}' matches several different uploads — pick one:\n{lines}")
+    best = max(hits, key=lambda n: n["id"])
+    if len(hits) > 1:
+        print(f"  '{ref}': {len(hits)} uploads share this name — using newest (node {best['id']})", flush=True)
+    return best["id"]
+
+
 def cmd_list_uploads(client, as_json):
     data = client.get("/api/images/nodes", params={"since_days": 3650})
     nodes = _as_list(data, "nodes")
@@ -257,8 +330,14 @@ def cmd_list_uploads(client, as_json):
     else:
         if not uploads:
             print("no upload nodes found")
+        aliases = _load_aliases()
+        by_id = {v: k for k, v in aliases.items()}
         for n in uploads:
             print(f"  node {n['id']:>5}  {n.get('status', '?'):<8} {n.get('name', '')}")
+            tag = f"  alias: {by_id[n['id']]}" if n["id"] in by_id else ""
+            url = _upload_image_url(client.base, n)
+            if url or tag:
+                print(f"        {'view: ' + url if url else ''}{tag}")
     return EXIT_OK
 
 
@@ -402,6 +481,9 @@ def main(argv=None):
     p = argparse.ArgumentParser(description="Send a videos/*.md build to the platform and render it.")
     p.add_argument("md_file", help="path to videos/<build>.md, or the literal 'list-uploads'")
     p.add_argument("token_value", nargs="?", help="the token (only with set-token)")
+    p.add_argument("extra_value", nargs="?", help="node id (only with set-alias)")
+    p.add_argument("--avatar", help="persona upload by NAME or alias (instead of --subject id)")
+    p.add_argument("--product", help="product upload by NAME or alias (instead of --product-node id)")
     p.add_argument("--subject", type=int, help="upload node id of the persona (see list-uploads)")
     p.add_argument("--name", help="name_prefix for the batch (short label)")
     p.add_argument("--ingredient", action="append", default=[], metavar="NAME=NODEID")
@@ -422,6 +504,8 @@ def main(argv=None):
 
     if args.md_file == "set-token":
         return cmd_set_token(args.token_value)
+    if args.md_file == "set-alias":
+        return cmd_set_alias(args.token_value, args.extra_value)
 
     report = {"stages": []}
     try:
@@ -453,10 +537,33 @@ def main(argv=None):
         check_health(client, report)
         report["stages"].append("health:ok")
 
+        # names/aliases -> node ids (so the operator never needs the numbers)
+        uploads_cache = None
+        if args.avatar and not args.subject:
+            uploads_cache = uploads_cache or _fetch_uploads(client)
+            args.subject = resolve_upload_ref(client, args.avatar, uploads_cache)
+            print(f"avatar '{args.avatar}' -> node {args.subject}", flush=True)
+        if args.product and not args.product_node:
+            uploads_cache = uploads_cache or _fetch_uploads(client)
+            args.product_node = resolve_upload_ref(client, args.product, uploads_cache)
+            print(f"product '{args.product}' -> node {args.product_node}", flush=True)
+        if args.ingredient:
+            resolved = []
+            for item in args.ingredient:
+                name, sep, val = item.partition("=")
+                if sep and val and not val.strip().isdigit():
+                    uploads_cache = uploads_cache or _fetch_uploads(client)
+                    nid = resolve_upload_ref(client, val, uploads_cache)
+                    print(f"ingredient '{name}' = '{val}' -> node {nid}", flush=True)
+                    item = f"{name}={nid}"
+                resolved.append(item)
+            args.ingredient = resolved
+
         if args.resume_batch:
             batch_id = args.resume_batch
         else:
             if not args.subject:
+                print("tip: --avatar <name-or-alias> works too (see list-uploads)", file=sys.stderr, flush=True)
                 raise PlatformError(EXIT_UNKNOWN, "--subject <upload node id> is required for import")
             batch_id = do_import(client, md_text, args, report)
             print(f"import: batch {batch_id}", flush=True)
