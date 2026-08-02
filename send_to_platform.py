@@ -7,11 +7,15 @@ variants) -> promote to video job -> poll clips -> classified report.
 
 Auth: Authorization: Bearer <UserWorkerToken>  (env KAVENO_API_TOKEN or --token).
 Mint a token in the UI or POST /api/user-worker/tokens/generate.
+No token set? The CLI finds one by itself, in order: --token > KAVENO_API_TOKEN
+> VEO_TOKEN > USER_WORKER_TOKEN (env or ~/veo-worker/.env, the flow worker's
+own token) > ~/.kaveno/token (saved via `set-token <token>`).
 
 Usage:
   python send_to_platform.py videos/build.md --subject 42 --name "8-2.1 Test"
   python send_to_platform.py videos/build.md --subject 42 --review
   python send_to_platform.py list-uploads
+  python send_to_platform.py set-token <token>   # save once, forget forever
 
 Exit codes:
   0 OK | 1 unknown/server | 2 parse | 3 auth | 4 worker-offline/stall
@@ -85,6 +89,63 @@ def classify_http_error(resp):
             return PlatformError(EXIT_INGREDIENT, f"INGREDIENT_BINDING: {msg}", det)
         return PlatformError(EXIT_UNKNOWN, f"HTTP 400: {msg}", det)
     return PlatformError(EXIT_UNKNOWN, f"HTTP {code}: {msg}", det)
+
+
+_SAVED_TOKEN_PATH = os.path.join(os.path.expanduser("~"), ".kaveno", "token")
+
+
+_TOKEN_KEYS = ("KAVENO_API_TOKEN", "VEO_TOKEN", "USER_WORKER_TOKEN")
+
+
+def _read_env_file_token(path):
+    """Pull a worker token out of a worker .env file (KEY=value lines)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                key, sep, val = line.strip().partition("=")
+                if sep and key.strip() in _TOKEN_KEYS:
+                    val = val.strip().strip("\"'")
+                    if val:
+                        return val
+    except OSError:
+        pass
+    return None
+
+
+def resolve_token(cli_token):
+    """Find a worker token without making the operator think about it.
+    Order: --token > KAVENO_API_TOKEN > VEO_TOKEN > the flow worker's own
+    ~/veo-worker/.env > the token saved by `set-token`."""
+    if cli_token:
+        return cli_token, "--token"
+    for env_key in _TOKEN_KEYS:
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            return val, f"env {env_key}"
+    val = _read_env_file_token(os.path.join(os.path.expanduser("~"), "veo-worker", ".env"))
+    if val:
+        return val, "~/veo-worker/.env (flow worker token)"
+    try:
+        with open(_SAVED_TOKEN_PATH, encoding="utf-8") as f:
+            val = f.read().strip()
+        if val:
+            return val, "~/.kaveno/token"
+    except OSError:
+        pass
+    return None, None
+
+
+def cmd_set_token(token):
+    token = (token or "").strip()
+    if len(token) < 20:
+        print("that does not look like a token (too short) — copy the full one "
+              "from https://kavenobuilder.com/static/my-worker.html", file=sys.stderr)
+        return EXIT_AUTH
+    os.makedirs(os.path.dirname(_SAVED_TOKEN_PATH), exist_ok=True)
+    with open(_SAVED_TOKEN_PATH, "w", encoding="utf-8") as f:
+        f.write(token + "\n")
+    print(f"saved to {_SAVED_TOKEN_PATH} — every send_to_platform.py call finds it now")
+    return EXIT_OK
 
 
 def _as_list(data, key):
@@ -340,6 +401,7 @@ def poll_render(client, job_id, args, report):
 def main(argv=None):
     p = argparse.ArgumentParser(description="Send a videos/*.md build to the platform and render it.")
     p.add_argument("md_file", help="path to videos/<build>.md, or the literal 'list-uploads'")
+    p.add_argument("token_value", nargs="?", help="the token (only with set-token)")
     p.add_argument("--subject", type=int, help="upload node id of the persona (see list-uploads)")
     p.add_argument("--name", help="name_prefix for the batch (short label)")
     p.add_argument("--ingredient", action="append", default=[], metavar="NAME=NODEID")
@@ -358,10 +420,22 @@ def main(argv=None):
     p.add_argument("--stall-min", type=int, default=10)
     args = p.parse_args(argv)
 
+    if args.md_file == "set-token":
+        return cmd_set_token(args.token_value)
+
     report = {"stages": []}
     try:
         if not args.token:
+            token, source = resolve_token(args.token)
+        else:
+            token, source = args.token, "--token / KAVENO_API_TOKEN"
+        if not token:
+            print("hint: mint one at https://kavenobuilder.com/static/my-worker.html "
+                  "(New token), then run: python send_to_platform.py set-token <token>",
+                  file=sys.stderr, flush=True)
             raise PlatformError(EXIT_AUTH, "AUTH: no token — set KAVENO_API_TOKEN or pass --token")
+        print(f"token: {source}", flush=True)
+        args.token = token
         client = Client(args.url, args.token)
 
         if args.md_file == "list-uploads":
