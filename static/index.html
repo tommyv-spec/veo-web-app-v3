@@ -19636,6 +19636,7 @@ Ambient: same kitchen room tone, soft pour sound.
             trigger.innerHTML = `
                 ${thumb ? `<img src="${thumb}" alt="">` : '<div style="width:28px;height:28px;border-radius:4px;background:var(--bg-elevated);display:flex;align-items:center;justify-content:center;font-size:14px;">🖼</div>'}
                 <span class="subject-trigger-name">${nameSafe}</span>
+                <span class="option-kind" style="opacity:.8" title="node id — send_to_platform.py --subject">#${node.id}</span>
             `;
         }
 
@@ -19743,6 +19744,7 @@ Ambient: same kitchen room tone, soft pour sound.
             trigger.innerHTML = `
                 ${thumb ? `<img src="${thumb}" alt="">` : '<div style="width:28px;height:28px;border-radius:4px;background:var(--bg-elevated);display:flex;align-items:center;justify-content:center;font-size:14px;">📦</div>'}
                 <span class="subject-trigger-name">${nameSafe}</span>
+                <span class="option-kind" style="opacity:.8" title="node id — send_to_platform.py --product-node">#${node.id}</span>
                 <button type="button" onclick="event.stopPropagation(); imgClearProduct();" title="Clear product selection" style="margin-left:auto;background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;padding:0 6px;">×</button>
             `;
         }
