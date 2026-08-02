@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Kaveno ChatGPT worker</title>
+  <link rel="stylesheet" href="worker.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="eyebrow">KavenoBuilder</p>
+        <h1>ChatGPT image worker</h1>
+      </div>
+      <span id="statusDot" class="dot offline" aria-hidden="true"></span>
+    </header>
+
+    <section class="card">
+      <p id="statusText" class="status">Loading…</p>
+      <dl>
+        <div><dt>Expected account</dt><dd id="expectedEmail">—</dd></div>
+        <div><dt>ChatGPT account</dt><dd id="currentEmail">—</dd></div>
+        <div><dt>Last job</dt><dd id="lastJob">None</dd></div>
+      </dl>
+      <div class="actions">
+        <button id="startButton" class="primary">Start</button>
+        <button id="stopButton">Stop</button>
+        <button id="chatgptButton">Open ChatGPT tab</button>
+      </div>
+    </section>
+
+    <section class="card log-card">
+      <div class="log-title"><h2>Activity</h2><button id="clearButton" class="quiet">Clear</button></div>
+      <pre id="log"></pre>
+    </section>
+
+    <p class="footnote">Keep this small window open while generating. Your other Chrome windows stay untouched.</p>
+  </main>
+  <script src="worker.js"></script>
+</body>
+</html>
+

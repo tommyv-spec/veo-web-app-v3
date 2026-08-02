@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Kaveno ChatGPT Image Worker",
+  "version": "0.1.0",
+  "description": "Runs KavenoBuilder image jobs in the ChatGPT account already open in this Chrome profile.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://kavenobuilder.com/*",
+    "https://chatgpt.com/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Open Kaveno ChatGPT worker",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://kavenobuilder.com/api/images/worker/extension/install*",
+        "https://kavenobuilder.com/api/images/worker/extension/onboarding*"
+      ],
+      "js": ["pairing.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["chatgpt_page.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
