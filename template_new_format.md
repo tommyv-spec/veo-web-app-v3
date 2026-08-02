@@ -829,6 +829,18 @@ Support-image stills usually differ from the 9:16 talking head — set their rea
 
 <!-- v877: every winner-derived build and approved view-proxy test adds a WINNER DECISION block in §0 before METHOD: GOAL, EVIDENCE SIGNAL, one PRIMARY GAP, one exact PRIMARY DELTA, coherence-only SUPPORTING REPAIRS, SMALLEST ROUTE, WHY NOT SMALLER, and INNOVATION NEED. METHOD must match SMALLEST ROUTE. -->
 
+<!-- v883: every Movie Style / interaction-scene build adds this §0 contract before Images/Scenes.
+     Standard lane:
+     MOVIE STYLE: yes
+     MOVIE STYLE VARIANT: standard
+     MOVIE STYLE EMOTION: admiration | jealousy | cheating
+     VISIBLE AFTER-STATE: <what the hook already shows>
+     MOVIE STYLE SEQUENCE: trigger=Scene N | answer=Scene N | wrong guess=Scene N | age=Scene N | press=Scene N | reveal=Scene N | body open=Scene N
+     AGE PAYLOAD: <literal spoken age words> | scene=N
+     PAIN HANDOFF: <one exact body part/euphemism> | press scene=N | body open scene=N
+     Betrayal uses: event | aftermath | comfort | age | need question | reveal | body open,
+     plus `press scene=n/a`. Canonical: template_reference.md §v883. -->
+
 
 ---
 

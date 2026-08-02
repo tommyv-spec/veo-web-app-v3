@@ -16369,3 +16369,108 @@ The example row shows the required level of physical detail, not a required crea
 Then run the v879 start-frame check separately: every animation starts before the requested motion, not already in its terminal pose. Finally read the hook→body seam aloud. If the hook promises pill rejection and the body opens on an unrelated physique or proxy claim, add the missing causal bridge or choose a different hook.
 
 **Scope:** GENERATE side, forward-only. Applies to every script-changing method; the full map is mandatory when `OBJECT SWAP: yes`. Build-time enforcement lives in the `/build` loader. Auditor `object_swap_logic` hard-fails a changed-object/action declaration with no map, incomplete required fields, or a declared stale token that survives in the render zone. It warns on legacy method builds with no `OBJECT SWAP:` declaration.
+
+## v883 — MOVIE STYLE CONTRACT: keep the emotion engine, age payload, named pain, and body handoff in one ordered chain
+
+Sources: `raw/docs/salvora-movie-style-playbook-2026-07-31.txt` · `raw/videos/decoded_airplane-aisle-overheadbin-50-cheating-wife-cortisol-chest-salvora-rhodiola-ted-seminar-pip-fb.md` · `raw/videos/decoded_rodeodrive-gucci-two-women-63-jealousy-cortisol-belly-salvora-rhodiola-amish-market-pip-ig.md` · `raw/videos/decoded_homedepot-truckbed-shirtless-wife-cheating-cortisol-chest-salvora-rhodiola-asian-coach-boxinggym-pip-fb.md` · `raw/videos/decoded_boardwalk-betrayal-napkin-throw-comforter-48-cortisol-belly-salvora-rhodiola-amish-barn-lecture-ig.md` · `wiki/patterns/interaction-hook-engine.md`.
+
+**The rule.** Movie Style is an ordered cause-and-effect scene, not a bag of dialogue lines. Pick one emotion, show the desired after-state, hit the emotion immediately, then preserve the route's line jobs and hand the exact named pain into the body.
+
+The standard admiration / jealousy / cheating lane is:
+
+`trigger → answer → one wrong guess → denial with age → press naming one body part → authority reveal → body opens on that same body part`
+
+The order is load-bearing. The age number must sit inside the denial that answers the wrong guess. Moving it after the press turns the number into late explanation. Combining two guesses weakens the denial. A press about “a body like that” is too broad; it must name one visible problem or result, and the first body beat must attack that same part. Five of six decoded interaction hooks state an age. The one bare “no” is the negative control and never explains why the result is reproducible.
+
+**Betrayal is the attested exception, not permission to scramble the standard lane.** Its order is:
+
+`emotional event → aftermath → comfort → age volunteered → need question → authority reveal → body opens on the declared pain`
+
+It may drop the wrong-guess and press beats because the comfort exchange does those jobs differently. The exception is valid only when `MOVIE STYLE VARIANT: betrayal` is declared; admiration, jealousy, and cheating use the standard chain.
+
+### Mandatory pre-draft declaration
+
+Every Movie Style / interaction-scene build adds this block in §0 before any Image or Scene:
+
+```text
+MOVIE STYLE: yes
+MOVIE STYLE VARIANT: standard
+MOVIE STYLE EMOTION: admiration
+VISIBLE AFTER-STATE: <the desired result already visible in the hook>
+MOVIE STYLE SEQUENCE: trigger=Scene 2 | answer=Scene 3 | wrong guess=Scene 4 | age=Scene 5 | press=Scene 6 | reveal=Scene 7 | body open=Scene 8
+AGE PAYLOAD: sixty four | scene=5
+PAIN HANDOFF: soldier | press scene=6 | body open scene=8
+```
+
+For betrayal, use `MOVIE STYLE VARIANT: betrayal` and this sequence shape:
+
+```text
+MOVIE STYLE SEQUENCE: event=Scene 1 | aftermath=Scene 2 | comfort=Scene 3 | age=Scene 4 | need question=Scene 5 | reveal=Scene 6 | body open=Scene 7
+AGE PAYLOAD: forty eight | scene=4
+PAIN HANDOFF: belly | press scene=n/a | body open scene=7
+```
+
+The scene numbers are examples. The order and truth checks are mandatory:
+
+1. `AGE PAYLOAD` names the literal spoken age words and the scene that says them. Those words must occur in that scene.
+2. In the standard lane, the age scene comes after the wrong guess and before the press.
+3. `PAIN HANDOFF` names one exact body part or audience-owned euphemism. In the standard lane it must occur in both the press scene and the first body scene. In betrayal it must occur in the first body scene.
+4. `VISIBLE AFTER-STATE` names what is already aspirational on screen. Dialogue does not substitute for showing it.
+5. Production terms remain banned from speech under v880. The Movie Style map belongs in §0; the characters still talk like people.
+
+**Scope:** GENERATE side, forward-only. Applies to every Movie Style / interaction-scene build, both genders and all four emotions. The `/build` loader is the hard pre-draft gate. Auditor `movie_style_contract` warns when a likely legacy interaction build has no declaration, then hard-fails an explicit `MOVIE STYLE: yes` block with a missing field, wrong sequence, displaced age, or broken pain handoff. Auditor `spoken_production_terms` separately hard-fails v880 internal labels inside spoken lines and quoted prompt dialogue only.
+
+---
+
+## v884 — A LINE'S LENGTH IS NOT ITS WORD COUNT: the char table sizes the clip too
+
+**Where it came from**: operator 2026-08-01, on the axe/neighbor selling build — *"both scene 5 and 6 have 10 words, but scene 6 doesn't fit in the 4 seconds, because the words are longer."*
+
+The two lines:
+
+| line | words | chars | v861 said | reality |
+|---|---|---|---|---|
+| `neither. i stopped wasting money on quick fixes years ago.` | 10 | 58 | 4s | fits |
+| `then explain my forty-five-year-old husband. his soldier already gave up.` | 10 | 73 | 4s | **cut off** |
+
+**What it fixes**: v861 sized every clip off a whitespace word count alone. Measured over the 2708 spoken lines in `videos/*.md`, one word bucket spans an enormous character range — the 4s bucket holds lines from **11 to 78 chars**, and the 8s bucket **starts at 71**. The buckets overlap, so a word count cannot separate a fast 10-word line from a slow one. Word count is a proxy for duration; it is not duration.
+
+**The rule**: a clip renders at the LONGER of two picks — the v861 word bucket and a new char bucket.
+
+```
+duration = max( word_bucket(W), char_bucket(C) )
+```
+
+| chars `C` | duration |
+|---|---|
+| `C <= 59` | 4s |
+| `60 <= C <= 86` | 6s |
+| `87 <= C <= 129` | 8s |
+| `130 <= C <= 151` | 10s |
+| `C > 151` | a cap violation — split the line into two clips, exactly like `W > 28` |
+
+`C` is `len(line)` — spaces and punctuation included, because a comma or a full stop is a real pause the render has to fit.
+
+**Where the numbers come from** (not invented): corpus median is **5.38 chars per word including its space**, so v861's word boundaries 11/16/24/28 map to 59/86/129/151 chars. That is a consistent **~15 chars/sec** at every boundary (59/4, 86/6, 129/8, 151/10) — the same ballpark as v577's 158 wpm.
+
+**Why `max()` and not the char table alone.** Blast radius measured over all 2708 lines before choosing:
+
+| rule | lines changed | longer | shorter | newly over cap |
+|---|---|---|---|---|
+| pure chars | 483 (17.8%) | 337 | **146** | 15 |
+| pure syllables | 621 (22.9%) | 328 | **293** | 26 |
+| **max(words, chars)** | **337 (12.4%)** | 337 | **0** | 15 |
+
+A line of many SHORT words has few chars but still takes time to say, so a pure char rule would have SHORTENED 146 lines — speech cut off mid-sentence, the bad failure. `max()` only ever lengthens (336 of the 337 by exactly one bucket). Extra dead air is harmless; v810 already wants post-speech silence.
+
+**Syllables were measured and rejected.** They need a heuristic counter that breaks on names (`korella`, `ceo`), the operator cannot verify the count by eye, and the heuristic flags the FIRST line as 6s too — over-correcting the very case that prompted the rule. Chars are deterministic and countable.
+
+**Second half of the rule — the word count splits on hyphens.** `forty-five-year-old` is four spoken words; `.split()` called it one. `count_line_words()` splits on whitespace AND the hyphen/dash block. This alone moves 22 corpus lines (0.8%), and it alone fixes the operator's line (10w → 13w → 6s) before the char table is consulted.
+
+**The companion cap.** v831's 28-word cap gains a 151-char twin. Both mark the same thing: past them no bucket is big enough and the render cuts the line off. The auditor's `line_word_cap` FAILs on either.
+
+**Touched**: `code/clip_duration.py` (`CLIP_CHAR_BUCKETS`, `count_line_words`, `count_line_chars`, `pick_clip_duration_s(word_count, char_count=None)`, `pick_clip_duration_for_line`, `resolve_clip_duration_s`), `code/image_platform.py` (the bad-value hint now prints `Nw / Mc`), `code/main.py` (`/api/clip-duration-buckets` serves `char_buckets` + `char_cap`), `code/static/index.html` (validator shows `10w / 73c → 6s clip`, char-cap fault), `code/fix_clip_durations.py` (NEW — rewrites a build's duration bullets to the right buckets), `code/tests/test_v884_char_duration.py` (NEW), `~/.claude/skills/build-video/audit_build.py` (`v861_clip_duration`, `line_word_cap`).
+
+An older cached frontend that never learns `char_buckets` keeps the pure-word answer, which is only ever the SHORTER one — it under-reports rather than promising a length the backend will not render.
+
+**Scope / gates**: GENERATE-side authoring (every spoken line on every new build) + the import resolver. Forward-only per `feedback_rule-changes-forward-only` — shipped builds are not swept. A build you are already working on gets re-sized with `python code/fix_clip_durations.py videos/<build>.md --write`, which prints the total render-time delta before it writes.
