@@ -46,3 +46,8 @@ to_revert.json
 # discipline requires one before every push) and never wanted in the repo.
 __pycache__/
 *.pyc
+
+# Scoped deploy acknowledgment written by `check_deploy_safety.py --ack`.
+# Valid only for one exact tree + loss set (self-stales on any new commit).
+# Must be ignored so deploy.ps1's clean-checkout gate does not see it.
+.deploy_ack.json

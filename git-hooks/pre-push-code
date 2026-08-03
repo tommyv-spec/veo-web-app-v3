@@ -15,6 +15,11 @@
 # Deliberate removals: `git push --no-verify`, or run the check yourself with
 # --allow-loss first to see it acknowledged.
 #
+# PREFERRED since 2026-08-03: `python check_deploy_safety.py --ack` — writes a
+# scoped .deploy_ack.json bound to that exact tree + exact loss set. The
+# checker this hook runs honors it, so the hooked push passes with every other
+# check still enforced. It self-stales on any new commit; no --no-verify.
+#
 # INSTALL (from the wiki repo root):
 #   cp code/git-hooks/pre-push-code .git/modules/code/hooks/pre-push
 #   chmod +x .git/modules/code/hooks/pre-push
@@ -77,6 +82,8 @@ if [ $status -ne 0 ]; then
   echo "PUSH BLOCKED — this deploy would lose content or ship a broken module."
   echo "Deliberate? first run the protected checker yourself with --allow-loss"
   echo "then push with --no-verify."
+  echo "PREFERRED: python check_deploy_safety.py --ack   (scoped acknowledgment,"
+  echo "self-stales on any new commit) — then push normally; this hook honors it."
   exit 1
 fi
 
