@@ -16483,3 +16483,65 @@ A line of many SHORT words has few chars but still takes time to say, so a pure 
 An older cached frontend that never learns `char_buckets` keeps the pure-word answer, which is only ever the SHORTER one — it under-reports rather than promising a length the backend will not render.
 
 **Scope / gates**: GENERATE-side authoring (every spoken line on every new build) + the import resolver. Forward-only per `feedback_rule-changes-forward-only` — shipped builds are not swept. A build you are already working on gets re-sized with `python code/fix_clip_durations.py videos/<build>.md --write`, which prints the total render-time delta before it writes.
+
+## v887 — UNIVERSAL-SOURCE DECODE OBSERVATION: audio bed, timing effects, style register, fast-cut + long-form protocols
+
+**The problem.** The rev-231 logic-first pass (2026-08-02) made the decode's STRUCTURE side universal — open-ended section maps, `UNLISTED` labels, `none present` fields, no invented sales bodies. But the OBSERVATION side still assumed a voiced 9:16 UGC health ad: whisper captures speech only (a music-driven montage decodes with its engine missing), no field records a dissolve or a speed-ramp, the image-prompt opener hardcodes "vertical smartphone frame … realistic smartphone look" onto every source, hardcut + fps=2 under-sample sub-second montages, and >120s sources have no walk protocol. v887 closes those five gaps so ANY style / ANY timing decodes into recreate-ready grammar. Decode-side only; no platform parser change (decode artifacts are never imported).
+
+### v887a — AUDIO DESIGN read (required block on every NEW decode)
+
+Every new `raw/videos/decoded_*.md` emits `### Audio design read` under `## Adaptation-extraction`:
+
+```
+### Audio design read
+
+- **audio bed:** none | diegetic-only | trending-track | unknown-track | original-vo-only | vo+music | asmr | UNLISTED — <name>
+- **track character:** <genre / tempo / mood, e.g. "lo-fi hip-hop, ~80bpm, nostalgic"> or n/a — no track
+- **beat-sync:** yes — <which cuts land on beats + evidence, e.g. "clips 2-7 cut on the downbeat, clips.tsv durations ≈ bar length"> | no | n/a — no track
+- **sfx map:** <clip N: observed sound> per clip with meaningful sound, or none observed
+- **voice register:** whisper | conversational | narrator | shout | none | <observed>
+- **recreation contract:** omni-generates: <diegetic speech/sfx, per clip> · post-overlay: <track + span> — music stays a POST step (v852/v853)
+```
+
+Rules: values are OPEN enums — record what is observed, `UNLISTED — <name>` is legal. Never invent a track that is not audible. The **recreation contract** line is the point: it splits what Omni renders natively (dialogue, diegetic sfx — the v865 master's Voice/Dialogue/Audio blocks) from what the operator overlays at edit (music is a post step, attested twice by the operator in v852/v853). A beat-synced source additionally warns the build to pick clip durations near the bar length so the post-overlay lands (cut ON the beat is achievable only if clip lengths cooperate).
+
+### v887b — Timing-effects vocabulary (decode-side OPEN enums + recreation map)
+
+Two fields, decode side only:
+
+- Per-scene optional `- **speed:**` — omit for normal 1x; else `slow-mo-<n>x | timelapse | speed-ramp <from>→<to> | freeze-frame <at Ns> | reverse`. Record only what the frames prove (a slow-mo shows as smeared motion + long duration for a short action; a timelapse as jumping light/shadows).
+- Decode-side `- **transition:**` OPENS to the observed vocabulary: `hard-cut | dissolve | whip-pan | match-cut | jump-cut | fade-black | wipe | UNLISTED — <name>`. **DECODE ONLY.** The build/platform side stays the closed enum `cut | blend` (+ `end_frame_image` morph) per v782/v830 — the platform parser never sees a decode file, so the open vocabulary is safe there and ILLEGAL in a `videos/*.md`.
+
+**Recreation map (source transition → platform mechanism), consulted at build time:**
+
+| Observed in source | Recreate in omni via |
+|---|---|
+| hard-cut | `transition: cut` (default) |
+| dissolve / fade-black | `transition: blend`, or post edit |
+| whip-pan | `cut` + in-clip camera whip written into the Veo prompt of the OUTGOING clip |
+| match-cut | paired images (v718j START/END) or same-composition consecutive start frames |
+| jump-cut | `cut` between same-composition images (same image, evolved state) |
+| speed-ramp / slow-mo / timelapse / reverse / freeze | post speed pass (Tier-6 "Footage speed-up" axis) or slow-motion wording inside the clip prompt; freeze = still extension in post |
+
+v807 still governs: no transition language inside any clip prompt — the mapping lives in the storyboard field + post plan, never in Veo prompt text.
+
+**Detector caveat:** `hardcut_frames.py` uses PySceneDetect ContentDetector = HARD cuts only. Dissolves/fades/soft wipes do not register. When the `clips.tsv` count looks low against the visible motion, dense-walk the span, record the soft boundary manually, and tag its timing `INFERRED`.
+
+### v887c — Style register + source aspect (2 new frontmatter keys on every NEW decode)
+
+```
+style_register: ugc-smartphone | ugc-polished | cinematic | animation-2d | animation-3d | screen-record | slideshow | meme-collage | mixed — <combo> | UNLISTED — <name>
+aspect_source: 9:16 | 16:9 | 1:1 | 4:5 | other — <ratio>
+```
+
+**The conditional realism bank.** The decode image-prompt opener "A vertical smartphone frame … realistic smartphone look. Aspect ratio 9:16." and the UGC realism bank (no bokeh, natural light, smartphone-not-pro) apply ONLY when `style_register` is `ugc-*`. Any other register describes the source's ACTUAL look — for a cinematic source the decode prompt SAYS cinematic (shallow focus, graded, anamorphic…); for a 2D animation it names the animation style; for a screen-record it describes the UI. Recreate-ready means the prompt reproduces the SOURCE frame, not our house UGC look. The build-side ban-list for OUR UGC ads is unchanged — a build that adapts a cinematic source into a Nuri UGC ad re-enters the UGC bank by its own rules; the decode preserves the evidence either way. `aspect_source` records the source's real ratio; per-image ratios keep v826.
+
+### v887d — Fast-cut escalation (sampling floor)
+
+`fps=2` dense-walk = one frame per 0.5s; `--min-scene-len 0.3` drops faster cuts. A sub-second montage under-samples on BOTH. Rule: when the median clip duration in `clips.tsv` is **< 1.5s**, re-extract the dense walk at `fps=4` (native resolution stays mandatory, v790) and rerun hardcut with `--min-scene-len 0.15 --threshold 22`; read the new clip list against the frames. The coverage gate is unchanged — enumerate exactly what you read (`check_coverage.py` still hard-fails inflated claims).
+
+### v887e — Long-form tier protocol (>120s sources)
+
+A 10-minute source at fps=2 native = ~1200 frames; the old habit under scale pressure was sampling + a false "all frames" claim (the exact 2026-07-16 failure). Protocol: decode in LABELED SEGMENTS (e.g. `S-intro 0:00-1:30`, `S-demo 1:30-4:00`), each with its own clip list + dense walk. The floors do not relax: HOOK clip = every frame; every other clip ≥ start/mid/end + more whenever anything moves; per-clip action sequences stay mandatory. The `decoded_by:` coverage enumeration may be per segment; an honest partial (`read 300 of 1440 — S-intro + S-demo full, S-qa start/mid/end only`) stays legal and usable; `scale=540` never becomes the evidence base. A false complete claim is still the cardinal decode sin.
+
+**Gates**: `verify_decode_format.py` WARNs (never FAILs — forward-only per `feedback_rule-changes-forward-only`, 148 shipped decodes untouched) when a decode lacks `### Audio design read` or `style_register:`. New decodes treat both as required; the human gate is `wiki/meta/decode-grammar-checklist.md` §"Universal-source observation (v887)". Taxonomy axes (render style register, source transition vocabulary, audio bed, beat-sync) live in `wiki/synthesis/video-variable-taxonomy.md` as open enums — new value appends there same commit (v867 discipline).
