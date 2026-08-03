@@ -552,6 +552,38 @@
         .img-storyboard-tile:hover {
             border-color: var(--accent); transform: translateY(-2px);
         }
+        /* Add-a-reference tile on the Subjects & Uploads page. Dashed so it
+           reads as an action slot, not another stored reference. Matches the
+           height of a real tile (9/16 thumb + body) so the grid stays even. */
+        .img-storyboard-tile.img-ref-upload-tile {
+            border-style: dashed;
+            background: var(--bg-elevated);
+            color: var(--text-muted);
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            gap: 10px;
+            min-height: 220px;
+        }
+        .img-storyboard-tile.img-ref-upload-tile:hover {
+            border-color: var(--accent); color: var(--accent);
+            background: rgba(99, 102, 241, 0.06);
+        }
+        .img-storyboard-tile.img-ref-upload-tile .upload-icon { font-size: 32px; line-height: 1; }
+        .img-storyboard-tile.img-ref-upload-tile .upload-label {
+            font-size: 12px; text-align: center; line-height: 1.35;
+        }
+        .img-storyboard-tile.img-ref-upload-tile.uploading {
+            pointer-events: none; opacity: 0.75;
+            border-style: solid; border-color: var(--accent); color: var(--accent);
+        }
+        /* Drop-anywhere highlight for the same page. */
+        .img-storyboard-grid.drag-over {
+            outline: 3px dashed var(--accent);
+            outline-offset: 6px;
+            background: rgba(99, 102, 241, 0.05);
+            border-radius: var(--radius-md);
+            min-height: 160px;
+        }
         .img-storyboard-tile .tile-thumb {
             width: 100%; aspect-ratio: 9/16;
             background: var(--bg-elevated);
@@ -19679,6 +19711,120 @@ Ambient: same kitchen room tone, soft pour sound.
             imgCloseSubjectPicker();
         }
 
+        // ---------------------------------------------------------------
+        // Add references straight from the Subjects & Uploads page.
+        //
+        // Until now the only way to create an upload node was the "Upload new"
+        // button buried inside the Import modal's subject/product pickers — so
+        // stocking references meant opening an import you did not intend to
+        // run. This uploads to the same POST /api/images/uploads endpoint and
+        // takes several files at once (that modal path is one-at-a-time).
+        // ---------------------------------------------------------------
+        const IMG_UPLOAD_EXTS = ['.png', '.jpg', '.jpeg', '.webp'];
+
+        function imgRefUploadClick() {
+            const input = document.getElementById('imgRefUploadInput');
+            if (input) input.click();
+        }
+
+        async function imgHandleReferenceUpload(event) {
+            const files = event.target.files;
+            await imgUploadReferenceFiles(files);
+            // Clear so re-picking the SAME file fires change again.
+            event.target.value = '';
+        }
+
+        async function imgUploadReferenceFiles(fileList) {
+            const files = Array.from(fileList || []);
+            if (!files.length) return;
+            // Match the server's allow-list (image_platform.upload_reference)
+            // here rather than letting it 400 halfway through a batch.
+            const ok = [], bad = [];
+            for (const f of files) {
+                const dot = f.name.lastIndexOf('.');
+                const ext = dot >= 0 ? f.name.slice(dot).toLowerCase() : '';
+                (IMG_UPLOAD_EXTS.includes(ext) ? ok : bad).push(f);
+            }
+            if (bad.length) {
+                alert('Skipped ' + bad.length + ' file' + (bad.length === 1 ? '' : 's') +
+                      ' — only png, jpg and webp are accepted:\n\n' +
+                      bad.map(f => '• ' + f.name).join('\n'));
+            }
+            if (!ok.length) return;
+
+            const tile = document.getElementById('imgRefUploadTile');
+            const label = tile ? tile.querySelector('.upload-label') : null;
+            if (tile) tile.classList.add('uploading');
+
+            let done = 0;
+            const failed = [];
+            // Sequential on purpose: each upload writes a file, mirrors it to
+            // R2 and commits a node. Firing a dozen at once just contends for
+            // the same worker and makes a partial failure harder to report.
+            for (const f of ok) {
+                if (label) label.textContent = 'Uploading ' + (done + 1) + '/' + ok.length + '…';
+                try {
+                    const form = new FormData();
+                    form.append('file', f);
+                    form.append('name', f.name);
+                    const res = await fetch('/api/images/uploads', { method: 'POST', body: form });
+                    if (!res.ok) {
+                        const err = await res.json().catch(() => ({}));
+                        throw new Error(err.detail || ('HTTP ' + res.status));
+                    }
+                    done++;
+                } catch (e) {
+                    failed.push(f.name + ' — ' + (e.message || 'upload failed'));
+                }
+            }
+
+            if (tile) tile.classList.remove('uploading');
+            if (label) label.innerHTML = 'Upload<br>reference';
+
+            await imgRefreshNodes();
+            if (failed.length) {
+                alert('Uploaded ' + done + ' of ' + ok.length + '.\n\nFailed:\n' + failed.join('\n'));
+            } else if (typeof imgShowToast === 'function') {
+                imgShowToast(done + ' reference' + (done === 1 ? '' : 's') + ' uploaded');
+            }
+        }
+
+        // Drop files anywhere on the Subjects & Uploads grid. Distinct from
+        // imgWireDragDrop, which adds a manual VARIANT to one existing node —
+        // this creates new upload nodes and so takes every dropped file.
+        function imgWireReferenceDrop(grid) {
+            if (!grid || grid._refDropWired) return;
+            grid._refDropWired = true;
+            let dragCounter = 0;
+            const carriesFiles = e => {
+                const dt = e.dataTransfer;
+                return !!(dt && dt.types &&
+                    Array.from(dt.types).some(t => t === 'Files' || t === 'application/x-moz-file'));
+            };
+            grid.addEventListener('dragenter', e => {
+                if (!carriesFiles(e)) return;
+                e.preventDefault();
+                dragCounter++;
+                grid.classList.add('drag-over');
+            });
+            grid.addEventListener('dragover', e => {
+                if (!carriesFiles(e)) return;
+                e.preventDefault();                       // required or drop never fires
+                e.dataTransfer.dropEffect = 'copy';
+            });
+            grid.addEventListener('dragleave', () => {
+                if (dragCounter > 0) dragCounter--;
+                if (dragCounter <= 0) { dragCounter = 0; grid.classList.remove('drag-over'); }
+            });
+            grid.addEventListener('drop', e => {
+                e.preventDefault();
+                dragCounter = 0;
+                grid.classList.remove('drag-over');
+                const files = e.dataTransfer && e.dataTransfer.files;
+                if (files && files.length) imgUploadReferenceFiles(files);
+            });
+        }
+
         async function imgHandleSubjectUpload(event) {
             const file = event.target.files[0];
             if (!file) return;
@@ -21421,6 +21567,24 @@ Ambient: same kitchen room tone, soft pour sound.
                 bulkActions.push(`<button class="btn btn-secondary" style="color:var(--error);" onclick="imgBulkDeleteJob('${keyAttr}')" title="Delete every node in this job">🗑 Delete job</button>`);
             }
 
+            // Subjects & Uploads is where references live, so it is where you
+            // should be able to add them — no detour through the Import modal.
+            const isSubjectsView = (groupKey === '__subjects__');
+            if (isSubjectsView) {
+                bulkActions.unshift(`<button class="btn btn-primary" onclick="imgRefUploadClick()" title="Upload one or more reference images (png, jpg, webp). You can also drop files anywhere on this page.">📤 Upload reference</button>`);
+            }
+            // Click-to-browse tile, appended after the existing references so
+            // the affordance sits where the eye already is. Doubles as the
+            // progress readout during a batch upload. Declared before
+            // tilesHtml because that concatenation consumes it.
+            const uploadTileHtml = isSubjectsView ? `
+                <div class="img-storyboard-tile img-ref-upload-tile" id="imgRefUploadTile"
+                     onclick="imgRefUploadClick()"
+                     title="Click to browse, or drop image files anywhere on this page">
+                    <div class="upload-icon">📤</div>
+                    <div class="upload-label">Upload<br>reference</div>
+                </div>` : '';
+
             const tilesHtml = nodes.map((n, idx) => {
                 const fullUrl = n.chosen_variant ? n.chosen_variant.image_url
                                : (n.variants && n.variants.length ? n.variants[0].image_url : null);
@@ -21469,7 +21633,11 @@ Ambient: same kitchen room tone, soft pour sound.
                             </div>
                         </div>
                     </div>`;
-            }).join('');
+            }).join('') + uploadTileHtml;
+
+            const uploadInputHtml = isSubjectsView
+                ? `<input type="file" id="imgRefUploadInput" multiple accept=".png,.jpg,.jpeg,.webp" style="display:none;" onchange="imgHandleReferenceUpload(event)">`
+                : '';
 
             area.innerHTML = `
                 <div class="img-job-overview-header">
@@ -21479,11 +21647,21 @@ Ambient: same kitchen room tone, soft pour sound.
                     </div>
                     <div class="img-job-overview-actions">${bulkActions.join('')}</div>
                 </div>
-                ${nodes.length === 0
+                ${uploadInputHtml}
+                ${(nodes.length === 0 && !isSubjectsView)
                     ? `<div class="img-detail-empty"><div class="icon">📭</div><h3>No nodes in this group</h3></div>`
                     : `<div class="img-storyboard-grid">${tilesHtml}</div>`
                 }
             `;
+
+            // Whole grid is the drop zone — including when it is empty, which
+            // is exactly when a first-time user needs somewhere to drop.
+            if (isSubjectsView) {
+                try {
+                    const grid = area.querySelector('.img-storyboard-grid');
+                    if (grid) imgWireReferenceDrop(grid);
+                } catch (_e) {}
+            }
         }
 
         // v794 — lazy-load JSZip from cdnjs (same pattern as cytoscape above).
