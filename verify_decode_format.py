@@ -193,9 +193,12 @@ def lint(path):
             warns.append("v887a: no `### Audio design read` block "
                          "(required on NEW decodes; pre-v887 decodes exempt)")
 
-    # v887c — style register frontmatter (WARN-only, forward-only 2026-08-03)
+    # v887c — style register + source aspect frontmatter (WARN-only, forward-only 2026-08-03)
     if not re.search(r'^style_register:', t, re.M):
         warns.append("v887c: no `style_register:` frontmatter key "
+                     "(required on NEW decodes; pre-v887 decodes exempt)")
+    if not re.search(r'^aspect_source:', t, re.M):
+        warns.append("v887c: no `aspect_source:` frontmatter key "
                      "(required on NEW decodes; pre-v887 decodes exempt)")
 
     # 3. NO negative-prompt block (2026-06-04 no-negatives standing rule)
