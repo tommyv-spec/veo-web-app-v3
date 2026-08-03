@@ -21465,6 +21465,7 @@ Ambient: same kitchen room tone, soft pour sound.
                             <div class="tile-meta">
                                 <span class="node-status-badge status-${statusLabel}">${statusLabel}</span>
                                 ${n.chosen_variant_id ? '<span style="color:var(--success);font-size:11px;">✓ chosen</span>' : ''}
+                                <span style="margin-left:auto;font-size:11px;opacity:.8;" title="node id — use with send_to_platform.py (--subject / --product-node)">id ${n.id}</span>
                             </div>
                         </div>
                     </div>`;
@@ -22632,6 +22633,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 </div>
                 <div style="font-size:11px;color:var(--text-muted);display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
                     <span>Status: <span class="node-status-badge status-${node.kind==='upload'?'upload':node.status}">${node.kind==='upload'?'upload':node.status}</span></span>
+                    <span title="node id — use with send_to_platform.py (--subject / --product-node)">node id: <strong>${node.id}</strong></span>
                     ${node.kind !== 'upload' ? `<span>${imgEscape(node.model||'')}</span><span>${node.aspect_ratio||''} · ${node.resolution||''}</span><span>x${node.n_variants||1}</span>` : ''}
                 </div>
                 ${parentsHtml}
