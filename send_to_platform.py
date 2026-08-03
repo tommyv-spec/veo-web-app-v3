@@ -24,6 +24,10 @@ stops when images are ready and prints the resume command; continue with
 --resume-batch <id> after choosing. Pass --auto-choose to let the CLI take
 variant 1 of every image unattended.
 
+Promotion: also operator-triggered. Even with all variants chosen the run
+STOPS before creating the video job; promote in the UI or rerun with
+--resume-batch <id> --promote. Nothing renders until the operator says so.
+
 Exit codes:
   0 OK | 1 unknown/server | 2 parse | 3 auth | 4 worker-offline/stall
   5 ingredient-binding | 6 duplicate-name | 7 not-ready | 8 image-gen-fail
@@ -499,6 +503,8 @@ def main(argv=None):
     p.add_argument("--review", action="store_true", help="stop before variant auto-choice")
     p.add_argument("--auto-choose", action="store_true", dest="auto_choose",
                    help="pick variant 1 automatically (default is STOP and let the operator choose in the UI)")
+    p.add_argument("--promote", action="store_true",
+                   help="promote the batch to a video job once all variants are chosen (default is STOP — the operator triggers promotion)")
     p.add_argument("--resume-batch", help="skip import, resume from an existing batch id")
     p.add_argument("--no-render", action="store_true", help="stop after promote (don't poll clips)")
     p.add_argument("--skip-preflight", action="store_true")
@@ -585,6 +591,13 @@ def main(argv=None):
             report["stages"].append("images:awaiting_review")
             return EXIT_OK
         report["stages"].append("images:ok")
+
+        # promotion is OPERATOR-TRIGGERED (2026-08-03) — never automatic
+        if not args.promote:
+            report["stages"].append("promote:awaiting_operator")
+            print(f"batch ready — all variants chosen. Promote it yourself in the UI, or run:\n"
+                  f"  python send_to_platform.py x --resume-batch {batch_id} --promote", flush=True)
+            return EXIT_OK
 
         job_id = promote(client, batch_id, report)
         report["job_id"] = job_id
