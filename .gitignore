@@ -1,7 +1,46 @@
 # ChatGPT image worker — operator session material. NEVER commit (contains
 # logged-in ChatGPT cookies / profile). Local-only, per-machine.
-static/.chatgpt_profile/
+#
+# The pattern is a PREFIX match on purpose: the worker creates one profile
+# directory per account, suffixed with the email
+# (static/.chatgpt_profile_<account>/). The bare `static/.chatgpt_profile/`
+# below matched none of them, so ~513 MB of live cookies sat untracked-but-
+# not-ignored — one `git add -A` away from being committed, and enough to
+# block deploy.ps1's clean-checkout gate.
+static/.chatgpt_profile*/
 static/.chatgpt_cookies.json
+static/.submit_storage_state.json
+# Written at runtime by image_worker.py (see _worker_chrome_channel) — records
+# which Chrome channel this machine's worker uses. Per-machine, not shared.
+static/.worker_chrome_channel
+# Local scratch job list; carries absolute operator paths, not a repo template.
+static/chatgpt_jobs.example.json
+
+# Local runtime store — sqlite db, uploads, generated images, exports. Created
+# on first run; never shared (production keeps its own on Render + R2).
+data/
+
+# Local scratch produced while debugging jobs/exports. One-off operator
+# artifacts, none of them inputs to the app.
+cut5.mp4
+graphify-out/
+assignment.json
+file_to_job.json
+file_to_job2.json
+folder_index.json
+job_fps.json
+local_fp.b64
+local_fp2.b64
+local_fps.json
+proven_links.json
+proven_links_all.json
+proven_links_final.json
+recon_data.json
+recon_min.json
+reconcile.json
+revert_mine.json
+stranded.json
+to_revert.json
 
 # Byte-compiled files. Produced by any local `import main` check (the deploy
 # discipline requires one before every push) and never wanted in the repo.
