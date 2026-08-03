@@ -1466,6 +1466,14 @@ class ParentRef(BaseModel):
     parent_node_id: int
     role: Optional[str] = None
     slot_order: int = 0
+    # v888: the edge KIND, same vocabulary the importer stamps in v573
+    # ('character' | 'product' | None for a chain/anchor edge). Without it
+    # an edge added or repaired through the node API lands with kind=NULL,
+    # which _classify_edge_for_manifest reads as 'other' (no persona /
+    # product role line) and _node_has_chain_dependency reads as a chain
+    # dependency. Both are wrong for an upload reference. Optional, so
+    # every existing caller keeps its current behavior.
+    kind: Optional[str] = None
 
 
 class CreateNodeRequest(BaseModel):
@@ -2250,6 +2258,7 @@ def _replace_parents(db: Session, child: ImageNode, parents: List[ParentRef]):
             child_node_id=child.id,
             role=p.role,
             slot_order=p.slot_order,
+            kind=p.kind,  # v888 — carry the upload kind through a repair
         ))
 
 
@@ -2635,6 +2644,7 @@ def create_node(
             child_node_id=node.id,
             role=p.role,
             slot_order=p.slot_order,
+            kind=p.kind,  # v888 — carry the upload kind through node create
         ))
     db.commit()
     db.refresh(node)

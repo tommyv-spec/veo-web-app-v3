@@ -185,6 +185,48 @@ def preflight_text(md_text):
         return False, str(e)
 
 
+def missing_reference_bindings(md_text, has_subject, product_bound, ingredient_names):
+    """v888 — every Ingredients row typed character/product with a non-empty
+    Source declares an UPLOAD reference. Return the rows this invocation does
+    not bind, so the run stops BEFORE import instead of shipping a build whose
+    product renders as a generic bottle.
+
+    Concrete failure this prevents: the boardwalk-betrayal v5 batch
+    (d8697c58, 2026-08-02) went out without `--product`, so images 10-14 —
+    every product, testimonial, purity and CTA frame — carried no Korella
+    reference at all.
+
+    Binding paths: persona alias rows <- --avatar/--subject; the single
+    product row <- --product/--product-node; anything else <- --ingredient.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import image_platform as ip
+    parsed = ip.parse_scene_table(md_text)
+    rows = parsed.get("ingredients") or []
+    bound_names = {str(n).strip().lower() for n in (ingredient_names or [])}
+    missing = []
+    for row in rows:
+        name = (row.get("name") or "").strip()
+        rtype = (row.get("type") or "").strip().lower()
+        source = (row.get("source") or "").strip()
+        if rtype not in ("character", "product") or not source:
+            continue
+        if name.lower() in bound_names:
+            continue
+        if ip._is_persona_alias(name):
+            if not has_subject:
+                missing.append((name, rtype, source, "--avatar <name> (or --subject <id>)"))
+            continue
+        if rtype == "product":
+            if not product_bound:
+                missing.append((name, rtype, source, "--product <name> (or --product-node <id>)"))
+            continue
+        missing.append((name, rtype, source, f'--ingredient "{name}=<name-or-id>"'))
+    return missing
+
+
 # ---------------------------------------------------------------------------
 # HTTP client + pipeline stages
 # ---------------------------------------------------------------------------
@@ -578,6 +620,26 @@ def main(argv=None):
             if not args.subject:
                 print("tip: --avatar <name-or-alias> works too (see list-uploads)", file=sys.stderr, flush=True)
                 raise PlatformError(EXIT_UNKNOWN, "--subject <upload node id> is required for import")
+            # v888 — refuse to import a build whose declared upload references
+            # are not all bound by this invocation (see missing_reference_bindings).
+            gaps = missing_reference_bindings(
+                md_text,
+                has_subject=bool(args.subject),
+                product_bound=bool(args.product_node),
+                ingredient_names=[i.partition("=")[0] for i in (args.ingredient or [])],
+            )
+            if gaps:
+                lines = [f"  - {n!r} (type={t}, Source: {s}) -> pass {flag}"
+                         for n, t, s, flag in gaps]
+                raise PlatformError(
+                    EXIT_INGREDIENT,
+                    "REFERENCE BINDING: the Ingredients table declares uploaded "
+                    "references this command does not bind. Nothing was sent.\n"
+                    + "\n".join(lines))
+            report["stages"].append("refbind:ok")
+            print(f"reference bindings: OK (subject={args.subject}"
+                  + (f", product={args.product_node}" if args.product_node else "")
+                  + ")", flush=True)
             batch_id = do_import(client, md_text, args, report)
             print(f"import: batch {batch_id}", flush=True)
         report["batch_id"] = batch_id
