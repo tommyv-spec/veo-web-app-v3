@@ -109,6 +109,16 @@ def lint(path: str) -> int:
     fails: list[str] = []
     warns: list[str] = []
 
+    # RENDER ZONE = everything a generator can actually see. The §0 Citations
+    # Check block and HTML comments are authoring metadata: they are never sent
+    # to Banana or Omni, so a token there cannot seed a render. Token scans that
+    # exist to stop render-seeding (v808) must run on THIS, not on the raw file
+    # — on 2026-08-03 a build's own "no minors anywhere" compliance note
+    # hard-failed the v808 check it was asserting compliance with.
+    _t_render = re.sub(r"<!--.*?-->", " ", t, flags=re.S)
+    _t_render = re.sub(
+        r"^##\s+§0 Citations Check.*?(?=^##\s(?!#)|\Z)", " ", _t_render, flags=re.S | re.M)
+
     # --- structure / parser (v696 + v594) ---
     images = re.findall(r"^###\s+Image\s+(\d+)", t, re.M)
     scenes = re.findall(r"^###\s+Scene\s+(\d+)\s*$", t, re.M)
@@ -259,12 +269,22 @@ def lint(path: str) -> int:
     # WARN (can mean adults — "keep up with these girls"); explicit minor
     # tokens are FAIL. Negative mentions ("no children") also fail — they can
     # seed the render; describe the couple + "no one else in the frame".
-    _minor_fail = re.findall(
+    _minor_re = (
         r"\b(?:teen(?:ager)?s?|child(?:ren)?|kids?|toddlers?|bab(?:y|ies)|minors?|"
-        r"sons?|daughters?|(?:[1-9]|1[0-7])-year-old)\b", t, re.I)
+        r"sons?|daughters?|(?:[1-9]|1[0-7])-year-old)\b")
+    # FAIL only on the render zone — a token in §0 or an HTML comment cannot
+    # reach a generator. Meta-zone-only hits still WARN so intent stays visible.
+    _minor_fail = re.findall(_minor_re, _t_render, re.I)
     if _minor_fail:
         _uniq = sorted({m.lower() for m in _minor_fail})
         fails.append(f"v808: minor-reference token(s) in build: {_uniq} — NO kids/teens anywhere (CLAUDE.md §8); family payoff = the COUPLE only")
+    else:
+        _minor_meta = re.findall(_minor_re, t, re.I)
+        if _minor_meta:
+            _uniqm = sorted({m.lower() for m in _minor_meta})
+            warns.append(
+                f"v808: minor-reference token(s) {_uniqm} appear only in §0 / comments, not in any "
+                "rendered field — not a render risk, but confirm the build does not intend a minor")
     _minor_warn = re.findall(r"\b(?:boys?|girls?)\b", t, re.I)
     if _minor_warn:
         warns.append(f"v808: {len(_minor_warn)} 'boy/girl' token(s) — verify they mean ADULTS (e.g. 'these girls' = adult women is fine)")
