@@ -338,16 +338,27 @@ def _reply_is_gen_error(page):
 
 
 def _gen_failed(page):
-    """True only when a real generation-ERROR indicator is visible in the recent
-    turn ("Image generation failed", "Something went wrong", "si è verificato un
-    errore"…). Used to gate the Retry-button click so we never click a normal
-    regenerate/"Try again" affordance on a healthy turn (that false-click wasted a
-    generation). Scans the tail of the page text, not just the button."""
+    """The MATCHED error text when a real generation-ERROR indicator is visible in
+    the recent turn ("Image generation failed", "Something went wrong", "si è
+    verificato un errore"…), else "". Truthy/falsy, so every existing gate still
+    reads as a boolean — but the caller can now LOG what matched.
+
+    Used to gate the Retry-button click so we never click a normal regenerate/
+    "Try again" affordance on a healthy turn (that false-click wasted a
+    generation). Scans the tail of the page text, not just the button.
+
+    DIAGNOSTIC (node 4495, 2026-08-03): this fired TWICE on a chat that went on to
+    produce a good image, so the scan is suspected of matching page text that is
+    not this turn's error. The returned snippet is the evidence needed to tighten
+    it — do not narrow the regex until a real match string has been logged."""
     try:
         tail = page.evaluate("() => (document.body.innerText || '').slice(-1500)")
     except Exception:
         tail = ""
-    return bool(_GEN_ERROR_RE.search(tail or ""))
+    m = _GEN_ERROR_RE.search(tail or "")
+    if not m:
+        return ""
+    return " ".join(tail[max(0, m.start() - 60):m.end() + 60].split())
 
 
 def _resubmit(page, prompt):
@@ -385,6 +396,49 @@ def _conversation_id(page):
         return cid or None
     except Exception:
         return None
+
+
+def _conv_url(cid):
+    """Full chat URL for a conversation id. Logged on every node so the operator
+    can open the EXACT chat the worker is watching and see it for themselves."""
+    return f"{CHATGPT_URL.rstrip('/')}/c/{cid}" if cid else ""
+
+
+def _goto_conv(page, cid, timeout_ms=45000):
+    """Navigate to the PINNED conversation — used instead of page.reload() so the
+    tab can never come back on a different (or brand-new) chat."""
+    if not cid:
+        return False
+    try:
+        page.goto(_conv_url(cid), wait_until="domcontentloaded", timeout=timeout_ms)
+        return True
+    except Exception as e:
+        log(f"goto chat {_conv_url(cid)} failed: {e}")
+        return False
+
+
+def _ensure_on_conv(page, cid, why=""):
+    """True if the tab is on the pinned conversation, navigating back if it drifted.
+
+    ROOT-CAUSE FIX (node 4495, 2026-08-03): recovery used to act on whatever tab
+    was on screen. After a reload + Retry the tab was no longer on the node's
+    chat, so `_resubmit` typed into an EMPTY composer and opened a SECOND
+    conversation (6a70e062, born 18:39:30Z). The real generation finished in the
+    ORIGINAL chat (6a70df41, born 18:34:41Z — 289s earlier, the one the operator
+    could still see), which the worker had stopped watching. It then polled the
+    wrong chat, found nothing, and failed the node. Every recovery action now runs
+    INSIDE the pinned chat, or does not run at all."""
+    if not cid:
+        return True                       # nothing pinned yet — this tab is it
+    cur = _conversation_id(page)
+    if cur == cid:
+        return True
+    log(f"tab drifted off the pinned chat (now {_conv_url(cur) or 'a new/empty chat'})"
+        f"{' before ' + why if why else ''} — returning to {_conv_url(cid)}")
+    if not _goto_conv(page, cid):
+        return False
+    time.sleep(3)
+    return _conversation_id(page) == cid
 
 
 def _stream_status(page, cid):
@@ -505,7 +559,15 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
     retries_left = ERROR_RETRIES
     reloads_left = STUCK_RELOADS
     attempt_start = time.time()  # reset on submit / retry / reload
+    pinned_cid = None            # the chat this node lives in — never leave it
     while time.time() < deadline:
+        # Pin the conversation the moment the URL gains /c/<id> (the turn has
+        # started server-side) and LOG it, so the operator can open the exact chat
+        # the worker is watching instead of hunting for it.
+        cid_now = _conversation_id(page)
+        if pinned_cid is None and cid_now:
+            pinned_cid = cid_now
+            log(f"chat: {_conv_url(pinned_cid)}")
         # Stale-tab recovery: the worker's live stream can hang — the turn finishes
         # server-side (a fresh browser shows the image/error) but this tab stays
         # "Thinking" / stream_status stuck non-COMPLETE. Reload the conversation
@@ -514,11 +576,15 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
                 and (time.time() - attempt_start) >= STUCK_RELOAD_S):
             reloads_left -= 1
             log(f"tab stuck {STUCK_RELOAD_S}s (status={last_status}, no image) — "
-                f"reloading conversation ({STUCK_RELOADS - reloads_left}/{STUCK_RELOADS})")
-            try:
-                page.reload(wait_until="domcontentloaded", timeout=45000)
-            except Exception as _re:
-                log(f"reload failed: {_re}")
+                f"reloading {_conv_url(pinned_cid) or 'the current chat'} "
+                f"({STUCK_RELOADS - reloads_left}/{STUCK_RELOADS})")
+            # goto the PINNED chat, not reload() — a reload that lands on a
+            # redirect is how the tab drifted off the node's conversation.
+            if not (pinned_cid and _goto_conv(page, pinned_cid)):
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=45000)
+                except Exception as _re:
+                    log(f"reload failed: {_re}")
             last_cand = cand_since = last_status = complete_since = None
             ever_cand = False
             attempt_start = time.time()
@@ -529,18 +595,34 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
         # GATED on a real error indicator in the DOM — never click a healthy
         # turn's regenerate/"Try again" affordance (that false-click wasted a
         # generation). Click the button if present, else resubmit the prompt.
-        if gen_src is None and retries_left > 0 and _gen_failed(page):
+        err_txt = _gen_failed(page) if (gen_src is None and retries_left > 0) else ""
+        if err_txt:
             try:
                 retries_left -= 1
+                # Recovery runs INSIDE the pinned chat or not at all (node 4495).
+                on_conv = _ensure_on_conv(page, pinned_cid, "retry/resubmit")
+                log(f"generation error ({ERROR_RETRIES - retries_left}/{ERROR_RETRIES}) "
+                    f"in {_conv_url(pinned_cid) or 'the current chat'} "
+                    f"— matched: {err_txt!r}")
                 rb = page.locator(SEL["retry_btn"]).first
                 if rb.count() > 0 and rb.is_visible():
-                    log(f"generation error — clicking Retry/Try-again "
-                        f"({ERROR_RETRIES - retries_left}/{ERROR_RETRIES})")
+                    log("  clicking Retry/Try-again")
                     rb.click()
-                else:
-                    log(f"generation error (no button) — resubmitting "
-                        f"({ERROR_RETRIES - retries_left}/{ERROR_RETRIES})")
+                elif on_conv:
+                    log("  no button — resubmitting in the same chat")
                     _resubmit(page, prompt)
+                    after = _conversation_id(page)
+                    if pinned_cid and after and after != pinned_cid:
+                        # Canary: a resubmit inside an existing chat must not mint
+                        # a new one. If it ever does, say so instead of silently
+                        # watching the wrong conversation.
+                        log(f"  WARNING: resubmit opened a NEW chat {_conv_url(after)} "
+                            f"— watching it instead of {_conv_url(pinned_cid)}")
+                        pinned_cid = after
+                else:
+                    log(f"  cannot reach the pinned chat {_conv_url(pinned_cid)} — "
+                        f"NOT resubmitting (that would open a second chat and "
+                        f"abandon the one that is generating)")
                 deadline = time.time() + gen_timeout_s
                 last_cand = cand_since = last_status = complete_since = None
                 ever_cand = False
@@ -560,7 +642,9 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
         # ChatGPT's own turn status — read every iteration, not just when a
         # candidate is present (node 3613: COMPLETE + a big image on screen but
         # the strict detector never matched, so the loop must still act on it).
-        status = _stream_status(page, _conversation_id(page))
+        # Ask for the PINNED chat's status — if the tab drifted, the current URL's
+        # id belongs to some other conversation and its status means nothing here.
+        status = _stream_status(page, pinned_cid or cid_now)
         if status:
             last_status = status
         complete = status is not None and status.upper() == "COMPLETE"
@@ -611,19 +695,33 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
                 if reloads_left > 0:
                     reloads_left -= 1
                     log(f"turn COMPLETE {POST_COMPLETE_GRACE_S}s, no image in this tab "
-                        f"— reloading to pull server state "
+                        f"— reloading {_conv_url(pinned_cid) or 'the current chat'} "
+                        f"to pull server state "
                         f"({STUCK_RELOADS - reloads_left}/{STUCK_RELOADS})")
-                    try:
-                        page.reload(wait_until="domcontentloaded", timeout=45000)
-                    except Exception as _re:
-                        log(f"reload failed: {_re}")
+                    if not (pinned_cid and _goto_conv(page, pinned_cid)):
+                        try:
+                            page.reload(wait_until="domcontentloaded", timeout=45000)
+                        except Exception as _re:
+                            log(f"reload failed: {_re}")
                     last_cand = cand_since = last_status = complete_since = None
                     ever_cand = False
                     attempt_start = time.time()
                     time.sleep(3)
                     continue
+                # Final look INSIDE the pinned chat. Node 4495 gave up while the
+                # tab sat on a DIFFERENT conversation than the one generating.
+                if pinned_cid and _ensure_on_conv(page, pinned_cid, "the final check"):
+                    final = (_find_gen_src(page, pre_srcs)
+                             or _find_gen_src_loose(page, pre_srcs))
+                    if final:
+                        log(f"image WAS in the pinned chat on the final check "
+                            f"({_conv_url(pinned_cid)}) — using it")
+                        gen_src = final
+                        break
                 log(f"turn COMPLETE for {POST_COMPLETE_GRACE_S}s with no image "
-                    f"(reloads exhausted) — giving up (likely content refusal / usage cap)")
+                    f"(reloads exhausted) — giving up "
+                    f"[chat: {_conv_url(pinned_cid) or page.url}] "
+                    f"(likely content refusal / usage cap)")
                 break
         time.sleep(1.5)
     if not gen_src:
@@ -659,8 +757,11 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
         raise TimeoutError(
             f"no generated image after {gen_timeout_s}s — ChatGPT produced no "
             f"output (refusal / usage cap / slow render); refusing to upload the reference "
-            f"[diag: stream_status={_stream_status(page, _cid)} last_seen={last_status} "
-            f"conv={_cid} stop_btn={stop_n} ever_candidate={ever_cand} imgs={inv} "
+            f"[chat: {_conv_url(pinned_cid) or page.url}] "
+            f"[diag: stream_status={_stream_status(page, pinned_cid or _cid)} "
+            f"last_seen={last_status} "
+            f"conv={_cid} pinned={pinned_cid} stop_btn={stop_n} "
+            f"ever_candidate={ever_cand} imgs={inv} "
             f"retries_used={ERROR_RETRIES - retries_left} "
             f"reloads_used={STUCK_RELOADS - reloads_left} error_bubble={err_bubble} "
             f"reply={reply!r}]")
