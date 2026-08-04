@@ -1448,6 +1448,13 @@ class Api:
             seen.append(job["id"])
         return None
 
+    def redo_clips(self):
+        """Clips queued for regeneration — the retry/redo lane flow_worker.py
+        claims. Same endpoint, same claim semantics (claiming is done server
+        side when worker_id is supplied)."""
+        res, _ = self.get(f"/clips/redo-pending?worker_id={WORKER_ID}")
+        return (res or {}).get("clips") or []
+
     def job_status(self, job_id, status, error=None):
         return self.post(f"/jobs/{job_id}/status",
                          {"status": status, "error_message": error})
@@ -1539,8 +1546,13 @@ def _with_duration(prompt, seconds):
     return f"generate a video of {seconds} seconds\n\n{prompt}"
 
 
-def process_clip(page, api, job, clip, work_dir):
-    """One clip: pull frames -> generate -> upload -> report. Raises on failure."""
+def process_clip(page, api, job, clip, work_dir, attempt=1):
+    """One clip: pull frames -> generate -> upload -> report. Raises on failure.
+
+    `attempt` lands in the uploaded filename (clip_{i}_{attempt}.{variant}.mp4).
+    A redo MUST carry its real generation_attempt or it overwrites the previous
+    attempt's file instead of sitting beside it.
+    """
     idx = clip["clip_index"]
     clip_id = clip["id"]
     prompt = _clip_prompt(clip)
@@ -1564,23 +1576,77 @@ def process_clip(page, api, job, clip, work_dir):
     out = os.path.join(work_dir, f"clip_{idx}.mp4")
     # "I'm getting a lot of requests right now" is load, not rejection — wait it
     # out rather than failing the clip and marching on into the same wall.
-    for attempt in range(1, BUSY_RETRIES + 2):
+    # NOTE: this counter must NOT be called `attempt` — that is the caller's
+    # generation_attempt, and shadowing it made every redo upload as attempt 1,
+    # overwriting the previous attempt's file instead of sitting beside it.
+    for try_n in range(1, BUSY_RETRIES + 2):
         try:
             generate(page, prompt=prompt, ref_path=start_path, out_path=out,
                      end_frame_path=end_path)
             break
         except GeminiBusy as e:
-            if attempt > BUSY_RETRIES:
+            if try_n > BUSY_RETRIES:
                 raise
-            wait = BUSY_BACKOFF_S * attempt
-            log(f"  Gemini busy ({e}) — waiting {wait}s, retry {attempt}/{BUSY_RETRIES}")
+            wait = BUSY_BACKOFF_S * try_n
+            log(f"  Gemini busy ({e}) — waiting {wait}s, retry {try_n}/{BUSY_RETRIES}")
             time.sleep(wait)
     _check_duration(out, want)   # refuse to upload a clip of the wrong length
 
-    url = api.upload_video(out, job["id"], idx)
+    url = api.upload_video(out, job["id"], idx, attempt=attempt)
     api.clip_status(clip_id, "completed", output_url=url)
-    log(f"clip {idx + 1}: completed -> {url}")
+    log(f"clip {idx + 1}: completed (attempt {attempt}) -> {url}")
     return url
+
+
+def process_redo_clips(page, api, max_clips=None):
+    """Drain the retry/redo lane. Returns how many clips were attempted.
+
+    Redo clips carry their own job_id and duration, so each one is processed
+    against a minimal job dict rather than a claimed job.
+    """
+    try:
+        clips = api.redo_clips()
+    except Exception as e:
+        log(f"redo poll error: {e}")
+        return 0
+    if not clips:
+        return 0
+
+    log(f"redo queue: {len(clips)} clip(s) waiting")
+    done = 0
+    for clip in clips:
+        if max_clips is not None and done >= max_clips:
+            log(f"  reached --max-clips {max_clips}; leaving {len(clips) - done} redo(s) queued")
+            break
+        job_id = clip.get("job_id")
+        if not job_id:
+            log(f"  ! redo clip {clip.get('id')} has no job_id — skipping")
+            continue
+        job = {"id": job_id, "duration": clip.get("duration"),
+               "aspect_ratio": clip.get("aspect_ratio", "9:16")}
+        work_dir = os.path.join(BASE_DIR, ".gemini_work", job_id)
+        os.makedirs(work_dir, exist_ok=True)
+        attempt = int(clip.get("generation_attempt") or 1)
+        reason = clip.get("redo_reason") or "requeued"
+        log(f"redo clip {clip['clip_index'] + 1} of job {job_id[:8]}… "
+            f"(attempt {attempt}, reason: {reason})")
+        done += 1
+        try:
+            process_clip(page, api, job, clip, work_dir, attempt=attempt)
+        except GeminiRefused as e:
+            log(f"  x redo FAILED (Gemini refused): {e}")
+            try:
+                api.clip_status(clip["id"], "failed", error=f"Gemini refused: {e}")
+            except Exception:
+                pass
+        except Exception as e:
+            log(f"  x redo FAILED: {e}")
+            try:
+                api.clip_status(clip["id"], "failed", error=str(e))
+            except Exception:
+                pass
+        jitter(3, 7)
+    return done
 
 
 def process_job(page, api, job, max_clips=None):
@@ -1639,6 +1705,19 @@ def http_pull_loop(page, api, poll_s=10, once=False, max_clips=None, job_id=None
         except Exception as e:
             log(f"poll error: {e}")
             job = None
+        # Retries/redos first — they are work the operator already asked to be
+        # re-done, and a failed clip sitting in the redo lane blocks its job from
+        # ever completing.
+        if not job_id:
+            try:
+                if process_redo_clips(page, api, max_clips=max_clips):
+                    idle = 0
+                    if once:
+                        return
+                    continue
+            except Exception as e:
+                log(f"redo lane error: {e}")
+
         if job:
             idle = 0
             try:
