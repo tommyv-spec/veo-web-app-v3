@@ -214,6 +214,14 @@ def launch(p, headless=False):
         viewport={"width": 1280, "height": 900},
         args=list(CHROME_ARGS),
     )
+    # navigator.clipboard.writeText needs this; without it _enter_prompt falls
+    # back to character typing (correct, just slow).
+    try:
+        ctx.grant_permissions(["clipboard-read", "clipboard-write"],
+                              origin="https://gemini.google.com")
+    except Exception as e:
+        log(f"clipboard permission not granted ({e.__class__.__name__}); "
+            f"prompts will be typed instead of pasted")
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     return ctx, page
 
@@ -421,6 +429,43 @@ def parse_download_url(text):
         return None
     return ("https://contribution.usercontent.google.com/download"
             f"?c={m.group(1)}&filename=video.mp4")
+
+
+# Gemini answers a video request with PROSE when it will not or cannot make the
+# video. Observed live: "I couldn't do that because I'm getting a lot of requests
+# right now. Please try again later." — the worker saw no download URL and kept
+# polling the finished conversation for the full 900s timeout.
+_REFUSAL_PATTERNS = [
+    r"I couldn't do that[^\"\\]{0,160}",
+    r"I can't (?:create|generate|make)[^\"\\]{0,160}",
+    r"I'm unable to[^\"\\]{0,160}",
+    r"getting a lot of requests[^\"\\]{0,120}",
+    r"[Pp]lease try again later[^\"\\]{0,60}",
+    r"something went wrong[^\"\\]{0,120}",
+]
+# Transient ones are worth waiting out; the rest are not.
+_RATE_LIMIT_HINTS = ("lot of requests", "try again later", "something went wrong")
+
+
+class GeminiBusy(RuntimeError):
+    """Gemini refused for a transient reason (load). Worth retrying."""
+
+
+def conversation_refusal(text):
+    """The refusal sentence Gemini replied with, or None.
+
+    Unescape FIRST: apostrophes arrive as \\' inside the nested JSON, so a
+    pattern for "I can't create" never matched the literal "I can\\'t create"
+    and a hard refusal read as no-refusal-at-all.
+    """
+    flat = (text.replace("\\\\n", " ").replace("\\n", " ")
+                .replace("\\\\'", "'").replace("\\'", "'")
+                .replace('\\\\"', '"').replace('\\"', '"'))
+    for pat in _REFUSAL_PATTERNS:
+        m = re.search(pat, flat)
+        if m:
+            return re.sub(r"\s+", " ", m.group(0)).strip()
+    return None
 
 
 def poll_done(text):
@@ -756,6 +801,14 @@ def wait_for_video(page, conv, job, timeout_s=GEN_TIMEOUT_S, known_before=None,
                 if url:
                     log(f"  video ready after {int(time.time() - t0)}s")
                     return url
+                # No video AND a prose reply = it already answered and said no.
+                # Stop instead of polling a finished conversation to timeout.
+                refusal = conversation_refusal(conv_txt)
+                if refusal:
+                    log(f"  ! Gemini replied instead of rendering: {refusal!r}")
+                    if any(h in refusal.lower() for h in _RATE_LIMIT_HINTS):
+                        raise GeminiBusy(refusal)
+                    raise RuntimeError(f"Gemini refused: {refusal}")
                 # A finished render has been observed sitting in the conversation
                 # while the watched id yielded nothing. If the target keeps coming
                 # back empty, sweep the newest conversations for the asset rather
@@ -865,13 +918,50 @@ def _human_click(page, locator, label="", settle=(0.4, 0.9)):
 
 def _human_type(page, text):
     """Type with per-character variance and the odd longer pause, instead of a
-    metronome-perfect delay."""
+    metronome-perfect delay. Kept as the fallback for _enter_prompt."""
     for ch in text:
         page.keyboard.type(ch)
         d = random.uniform(0.03, 0.13)
         if random.random() < 0.06:
             d += random.uniform(0.15, 0.45)
         time.sleep(d)
+
+
+def _editor_text(page):
+    try:
+        return (page.evaluate("() => { const e = document.querySelector("
+                              "'div.ql-editor[contenteditable=true]'); "
+                              "return e ? e.innerText.trim() : ''; }") or "")
+    except Exception:
+        return ""
+
+
+def _enter_prompt(page, text):
+    """PASTE the prompt rather than typing it character by character.
+
+    Job prompts run 500-900 chars; typing them with human variance cost 30-90s
+    per clip. Pasting is what a person actually does with a prompt that long,
+    and it is a real Ctrl+V with real key events — the mouse behaviour is what
+    defeated the silent server-side drop, not the typing cadence.
+
+    Falls back to character typing if the paste does not land, because Quill has
+    already shown it can ignore synthetic input (locator.type() left text in the
+    DOM while Angular's model stayed empty and Send rendered disabled).
+    """
+    try:
+        page.evaluate("async (t) => { await navigator.clipboard.writeText(t); }", text)
+        page.wait_for_timeout(int(random.uniform(180, 420)))
+        page.keyboard.press("Control+V")
+        page.wait_for_timeout(int(random.uniform(700, 1200)))
+        got = _editor_text(page)
+        if len(got) >= min(10, len(text)):
+            log(f"  pasted {len(text)} chars")
+            return True
+        log(f"  paste did not land (editor has {len(got)} chars) — typing instead")
+    except Exception as e:
+        log(f"  clipboard paste unavailable ({e.__class__.__name__}) — typing instead")
+    _human_type(page, text)
+    return False
 
 
 def _dismiss_overlay(page):
@@ -1072,22 +1162,18 @@ def submit_ui(page, prompt, ref_paths, portrait=None, timeout_s=180):
         # page.keyboard.type dispatches real key events; locator.type() left the
         # text in the DOM while Angular's model stayed empty, so Send rendered
         # disabled and the prompt was never sent.
-        _human_type(page, flat)
+        _enter_prompt(page, flat)
         page.wait_for_timeout(int(random.uniform(900, 1800)))
-        # VERIFY the text actually landed. Quill can swallow synthetic keys, and
+        # VERIFY the text actually landed. Quill can swallow synthetic input, and
         # then Send is a no-op and the page never navigates — which is exactly the
         # failure that kept showing up as "submit produced no conversation".
-        got = (page.evaluate("() => { const e = document.querySelector("
-                             "'div.ql-editor[contenteditable=true]'); "
-                             "return e ? e.innerText.trim() : ''; }") or "")
+        got = _editor_text(page)
         if len(got) < min(10, len(flat)):
             log(f"  ! editor text did not land (saw {got!r}) — retrying via insert_text")
             ed.click()
             page.keyboard.insert_text(flat)
             page.wait_for_timeout(800)
-            got = (page.evaluate("() => { const e = document.querySelector("
-                                 "'div.ql-editor[contenteditable=true]'); "
-                                 "return e ? e.innerText.trim() : ''; }") or "")
+            got = _editor_text(page)
         log(f"  editor holds {len(got)} chars: {got[:70]!r}")
         if not got:
             raise RuntimeError("could not type the prompt into the composer")
@@ -1329,6 +1415,8 @@ class Api:
 
 
 DURATION_TOLERANCE_S = float(os.environ.get("GEMINI_DURATION_TOLERANCE_S", "0.5"))
+BUSY_RETRIES = int(os.environ.get("GEMINI_BUSY_RETRIES", "3"))
+BUSY_BACKOFF_S = int(os.environ.get("GEMINI_BUSY_BACKOFF_S", "90"))
 
 
 def _probe_duration(path):
@@ -1411,8 +1499,19 @@ def process_clip(page, api, job, clip, work_dir):
 
     api.clip_status(clip_id, "generating")
     out = os.path.join(work_dir, f"clip_{idx}.mp4")
-    generate(page, prompt=prompt, ref_path=start_path, out_path=out,
-             end_frame_path=end_path)
+    # "I'm getting a lot of requests right now" is load, not rejection — wait it
+    # out rather than failing the clip and marching on into the same wall.
+    for attempt in range(1, BUSY_RETRIES + 2):
+        try:
+            generate(page, prompt=prompt, ref_path=start_path, out_path=out,
+                     end_frame_path=end_path)
+            break
+        except GeminiBusy as e:
+            if attempt > BUSY_RETRIES:
+                raise
+            wait = BUSY_BACKOFF_S * attempt
+            log(f"  Gemini busy ({e}) — waiting {wait}s, retry {attempt}/{BUSY_RETRIES}")
+            time.sleep(wait)
     _check_duration(out, want)   # refuse to upload a clip of the wrong length
 
     url = api.upload_video(out, job["id"], idx)
@@ -1490,6 +1589,13 @@ def http_pull_loop(page, api, poll_s=10, once=False, max_clips=None, job_id=None
             if once:
                 return
         else:
+            if job_id and once:
+                # Targeted single run and the job is not claimable — usually
+                # another worker holds it. Say so and exit instead of spinning
+                # (this logged "was not among them" 105 times and never quit).
+                log(f"job {job_id} is not claimable — another worker may hold it. "
+                    f"Stop the other worker, or drop --once to keep waiting.")
+                return
             idle += 1
             if idle % 6 == 1:
                 log("no pending jobs — waiting")
