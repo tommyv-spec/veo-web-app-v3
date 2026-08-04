@@ -14295,6 +14295,42 @@ Ambient: same kitchen room tone, soft pour sound.
                                         </div>
                                     </div>
 
+                                    <!-- v890.4 MUSIC BED + BEAT ALIGN -->
+                                    <div style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;" id="modalMusicCard">
+                                        <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">🎵 Music</div>
+                                        <input type="file" id="modalMusicFile" accept="audio/*" style="display:none;">
+                                        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+                                            <button type="button" id="modalMusicPick"
+                                                style="padding:7px 12px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:11px;cursor:pointer;">Choose song…</button>
+                                            <span id="modalMusicName" style="font-size:10px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">No song — video keeps its own audio</span>
+                                        </div>
+                                        <div id="modalMusicOpts" style="display:none;">
+                                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+                                                <div>
+                                                    <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Start at (s)</label>
+                                                    <input type="number" id="modalMusicStart" value="0" min="0" step="0.01"
+                                                        style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+                                                </div>
+                                                <div>
+                                                    <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Volume (dB)</label>
+                                                    <input type="number" id="modalMusicGain" value="0" min="-40" max="10" step="1"
+                                                        style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+                                                </div>
+                                            </div>
+                                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                                                <span style="font-size:11px;">Replace clip audio<span style="font-size:9px;color:var(--text-muted);display:block;">Off = mix music under the voices</span></span>
+                                                <div class="toggle active" id="modalMusicReplace"></div>
+                                            </div>
+                                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                                <span style="font-size:11px;">🥁 Align cuts to the beat<span style="font-size:9px;color:var(--text-muted);display:block;">Nudges each cut to the nearest beat. Your clip lengths stay as authored.</span></span>
+                                                <div class="toggle" id="modalBeatAlign"></div>
+                                            </div>
+                                            <div id="modalBeatWarn" style="display:none;margin-top:8px;padding:8px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);border-radius:var(--radius-sm);font-size:10px;color:var(--text-secondary);line-height:1.45;">
+                                                Speed Up, Trim Frames and Remove Silence are switched off while beat align is on — each of them re-times the finished cut and would pull it off the beat.
+                                            </div>
+                                        </div>
+                                    </div>
+
                                     <!-- Speed -->
                                     <div style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
                                         <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -14588,6 +14624,56 @@ Ambient: same kitchen room tone, soft pour sound.
 
             // Setup toggle click handlers (use ?. to prevent chain breakage)
             document.getElementById('modalSmartTrim')?.addEventListener('click', function() { this.classList.toggle('active'); });
+
+            // v890.4 — music bed + beat align.
+            document.getElementById('modalMusicPick')?.addEventListener('click', () =>
+                document.getElementById('modalMusicFile').click());
+            document.getElementById('modalMusicFile')?.addEventListener('change', function () {
+                const f = this.files && this.files[0];
+                document.getElementById('modalMusicName').textContent =
+                    f ? f.name : 'No song — video keeps its own audio';
+                document.getElementById('modalMusicOpts').style.display = f ? 'block' : 'none';
+                if (!f) {
+                    document.getElementById('modalBeatAlign')?.classList.remove('active');
+                    _applyBeatAlignLock();
+                }
+            });
+            document.getElementById('modalMusicReplace')?.addEventListener('click', function () {
+                this.classList.toggle('active');
+            });
+
+            // Beat align and the three re-timing controls are MUTUALLY EXCLUSIVE.
+            // Speed Up applies setpts across the whole concat, Trim Frames shortens
+            // every clip, Remove Silence deletes spans mid-clip — each one moves
+            // cuts that were just placed on the beat. Rather than let them fight
+            // silently (the old behaviour, which nobody could see), beat align
+            // switches them off and says so.
+            function _applyBeatAlignLock() {
+                const on = document.getElementById('modalBeatAlign')?.classList.contains('active');
+                const warn = document.getElementById('modalBeatWarn');
+                if (warn) warn.style.display = on ? 'block' : 'none';
+                if (on) {
+                    document.getElementById('modalSpeedToggle')?.classList.remove('active');
+                    document.getElementById('modalRemoveSilence')?.classList.remove('active');
+                    const fs = document.getElementById('modalFramesStart');
+                    const fe = document.getElementById('modalFramesEnd');
+                    if (fs) fs.value = 0;
+                    if (fe) fe.value = 0;
+                }
+                ['modalSpeedToggle', 'modalRemoveSilence', 'modalFramesStart', 'modalFramesEnd']
+                    .forEach(id => {
+                        const el = document.getElementById(id);
+                        if (!el) return;
+                        el.style.opacity = on ? 0.4 : '';
+                        el.style.pointerEvents = on ? 'none' : '';
+                        if ('disabled' in el) el.disabled = !!on;
+                    });
+            }
+            window._applyBeatAlignLock = _applyBeatAlignLock;
+            document.getElementById('modalBeatAlign')?.addEventListener('click', function () {
+                this.classList.toggle('active');
+                _applyBeatAlignLock();
+            });
             document.getElementById('modalRemoveLaughter')?.addEventListener('click', function() { 
                 this.classList.toggle('active');
                 const strengthSection = document.getElementById('laughterStrengthSection');
@@ -14885,6 +14971,13 @@ Ambient: same kitchen room tone, soft pour sound.
                         frames_to_cut_start: isNaN(startVal) ? 0 : startVal,
                         frames_to_cut_end: isNaN(endVal) ? 7 : endVal,
                         smart_trim: document.getElementById('modalSmartTrim').classList.contains('active'),
+                        // v890.4 — music bed. music_filename is filled in at export
+                        // time, after the file is uploaded to the job.
+                        _music_file: (document.getElementById('modalMusicFile')?.files || [])[0] || null,
+                        music_start_s: parseFloat(document.getElementById('modalMusicStart')?.value || 0) || 0,
+                        music_gain_db: parseFloat(document.getElementById('modalMusicGain')?.value || 0) || 0,
+                        music_mode: document.getElementById('modalMusicReplace')?.classList.contains('active') ? 'replace' : 'mix',
+                        beat_align: document.getElementById('modalBeatAlign')?.classList.contains('active') || false,
                         // Silence removal
                         remove_silence: document.getElementById('modalRemoveSilence').classList.contains('active'),
                         silence_mode: document.getElementById('silModeWhisper')?.classList.contains('active') ? 'whisper' : 'energy',
@@ -14921,8 +15014,15 @@ Ambient: same kitchen room tone, soft pour sound.
                     
                     console.log('[Export] Modal settings:', modalSettings);
                     
-                    // Persist settings for next time modal opens
-                    try { localStorage.setItem('exportSettings', JSON.stringify(modalSettings)); } catch(e) {}
+                    // Persist settings for next time modal opens.
+                    // v890.4 — NEVER persist _music_file. It is a File object, which
+                    // JSON.stringify turns into {} — and {} is TRUTHY, so a reload
+                    // would take the upload path with an empty object and fail the
+                    // export. The song is a per-export choice anyway.
+                    try {
+                        const { _music_file, ...toPersist } = modalSettings;
+                        localStorage.setItem('exportSettings', JSON.stringify(toPersist));
+                    } catch(e) {}
                     
                     // Persist voice clone settings separately
                     if (modalSettings.voice_clone_enabled) {
@@ -15394,6 +15494,13 @@ Ambient: same kitchen room tone, soft pour sound.
                     enhance_audio: exportSettings.enhance_audio ?? false,
                     // Master audio alignment (assemble jobs only)
                     master_audio_filename: exportSettings.master_audio_filename || null,
+                    // v890.4 — music bed. music_filename is set just below, after
+                    // the chosen file is uploaded to this job.
+                    music_filename: null,
+                    music_start_s: exportSettings.music_start_s ?? 0,
+                    music_gain_db: exportSettings.music_gain_db ?? 0,
+                    music_mode: exportSettings.music_mode || 'replace',
+                    beat_align: exportSettings.beat_align ?? false,
                     // Transitions
                     transition: exportSettings.transition || 'none',
                     transition_duration: exportSettings.transition_duration || 0.5,
@@ -15430,6 +15537,29 @@ Ambient: same kitchen room tone, soft pour sound.
                     // v701v R2-file poll is gone: it could not tell "still working"
                     // apart from "the container died", so a deploy always ended in
                     // "Export polling exceeded the time cap".
+                    // v890.4 — upload the chosen song FIRST, then name it in the
+                    // settings. The export resolves it from the job's output dir
+                    // (falling back to R2, since the export runs in a different
+                    // container than this upload), and hard-fails if it is missing
+                    // rather than quietly shipping a silent cut.
+                    const _musicFile = exportSettings._music_file;
+                    if (_musicFile) {
+                        try {
+                            const _fd = new FormData();
+                            _fd.append('audio', _musicFile);
+                            const _mr = await fetch(`${API}/jobs/${jobId}/upload-music`,
+                                                    { method: 'POST', body: _fd });
+                            if (!_mr.ok) throw new Error(`HTTP ${_mr.status}`);
+                            settings.music_filename = (await _mr.json()).filename;
+                            console.log(`[Export/v890.4] music uploaded: ${settings.music_filename}`);
+                        } catch (e) {
+                            showToast(`Could not upload the song: ${e.message}`, '#ef4444');
+                            throw new Error(`Music upload failed: ${e.message}`);
+                        }
+                    } else {
+                        settings.beat_align = false;   // nothing to align to
+                    }
+
                     const _queueRes = await fetch(`${API}/jobs/${jobId}/export-final`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
