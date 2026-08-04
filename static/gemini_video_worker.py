@@ -451,6 +451,10 @@ class GeminiBusy(RuntimeError):
     """Gemini refused for a transient reason (load). Worth retrying."""
 
 
+class GeminiRefused(RuntimeError):
+    """Gemini answered with prose and will not make this video. Permanent."""
+
+
 def conversation_refusal(text):
     """The refusal sentence Gemini replied with, or None.
 
@@ -808,7 +812,7 @@ def wait_for_video(page, conv, job, timeout_s=GEN_TIMEOUT_S, known_before=None,
                     log(f"  ! Gemini replied instead of rendering: {refusal!r}")
                     if any(h in refusal.lower() for h in _RATE_LIMIT_HINTS):
                         raise GeminiBusy(refusal)
-                    raise RuntimeError(f"Gemini refused: {refusal}")
+                    raise GeminiRefused(refusal)
                 # A finished render has been observed sitting in the conversation
                 # while the watched id yielded nothing. If the target keeps coming
                 # back empty, sweep the newest conversations for the asset rather
@@ -823,6 +827,13 @@ def wait_for_video(page, conv, job, timeout_s=GEN_TIMEOUT_S, known_before=None,
                     if alt:
                         log(f"  found the render in {alt[0]} instead of {conv}")
                         return alt[1]
+            except (GeminiBusy, GeminiRefused):
+                # MUST escape this handler. These were raised inside the try, so
+                # the generic `except Exception` below swallowed them and logged
+                # "conversation fetch error (continuing)" — the detector fired
+                # correctly 14 times on one clip and the loop ignored itself
+                # every time, polling a refused conversation to the timeout.
+                raise
             except Exception as e:
                 log(f"  conversation fetch error (continuing): {e}")
         log(f"  … generating ({int(time.time() - t0)}s){' [job reports done]' if done else ''}")
@@ -964,6 +975,60 @@ def _enter_prompt(page, text):
     return False
 
 
+def _ensure_chat_mode(page):
+    """Force the CHAT surface, never Spark.
+
+    Gemini has a Chat|Spark toggle and a "Switch to Spark (Ctrl+Shift+S)"
+    shortcut. Once Spark is active there is no "Upload & tools" button, so every
+    later step dies — observed as two filechooser timeouts followed by
+    Locator.bounding_box timing out on a button that does not exist in Spark.
+    Cheap to check, fatal to miss.
+    """
+    try:
+        if page.locator(SEL["tools"]).count():
+            return True                      # composer is present -> chat surface
+        chat = page.locator(
+            "button:has-text('Chat'), [role=tab]:has-text('Chat')").first
+        if chat.count() and chat.is_visible():
+            log("  ! Spark surface detected — switching back to Chat")
+            _human_click(page, chat, "Chat tab")
+            page.wait_for_timeout(2500)
+            return bool(page.locator(SEL["tools"]).count())
+    except Exception as e:
+        log(f"  (chat-mode check failed: {e.__class__.__name__})")
+    return False
+
+
+def _focus_editor(page):
+    """Click the composer and PROVE it took focus.
+
+    Keystrokes that land on the document instead of the editor are how a stray
+    app shortcut gets triggered (Spark is Ctrl+Shift+S, and typed capitals send
+    Shift). Never type until the editor is really focused.
+    """
+    ed = page.locator(SEL["editor"]).first
+    for attempt in range(3):
+        try:
+            _human_click(page, ed, "prompt box" if attempt == 0 else "prompt box (refocus)")
+        except Exception:
+            _dismiss_overlay(page)
+            try:
+                ed.click(force=True)
+            except Exception:
+                pass
+        page.wait_for_timeout(int(random.uniform(350, 700)))
+        try:
+            if page.evaluate("() => { const a = document.activeElement; "
+                             "return !!(a && a.classList && "
+                             "a.classList.contains('ql-editor')); }"):
+                return ed
+        except Exception:
+            pass
+        log(f"  editor not focused (try {attempt + 1}/3)")
+        _dismiss_overlay(page)
+    return ed
+
+
 def _dismiss_overlay(page):
     """Angular Material leaves a `cdk-overlay-backdrop` behind after a menu
     selection; it swallows pointer events and makes the composer unclickable
@@ -1061,6 +1126,8 @@ def submit_ui(page, prompt, ref_paths, portrait=None, timeout_s=180):
         except Exception as e:
             log(f"  (New chat not clickable: {e})")
 
+        _ensure_chat_mode(page)
+
         for _ in range(5):
             leftover = page.locator("button[aria-label='close attachment']")
             if not leftover.count():
@@ -1071,14 +1138,11 @@ def submit_ui(page, prompt, ref_paths, portrait=None, timeout_s=180):
                 page.wait_for_timeout(1200)
             except Exception:
                 break
-        stale = (page.evaluate("() => { const e = document.querySelector("
-                               "'div.ql-editor[contenteditable=true]'); "
-                               "return e ? e.innerText.trim() : ''; }") or "")
+        stale = _editor_text(page)
         if stale:
             log(f"  clearing {len(stale)} stale chars from the composer")
             try:
-                ed0 = page.locator(SEL["editor"]).first
-                ed0.click()
+                _focus_editor(page)          # never send keys at the document
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
                 page.wait_for_timeout(600)
@@ -1113,6 +1177,11 @@ def submit_ui(page, prompt, ref_paths, portrait=None, timeout_s=180):
                 break
             log(f"  Videos tool not offered yet (try {tool_try}/3) — settling")
             _dismiss_overlay(page)
+            # A missing tools menu usually means the surface flipped to Spark.
+            if not _ensure_chat_mode(page):
+                page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(5000)
+                _ensure_chat_mode(page)
             page.wait_for_timeout(4000)
         else:
             raise RuntimeError("could not select the Videos tool after 3 tries")
@@ -1150,13 +1219,7 @@ def submit_ui(page, prompt, ref_paths, portrait=None, timeout_s=180):
 
         _dismiss_overlay(page)
 
-        ed = page.locator(SEL["editor"]).first
-        try:
-            _human_click(page, ed, "prompt box")
-        except Exception:
-            _dismiss_overlay(page)
-            ed.click(force=True)
-        page.wait_for_timeout(int(random.uniform(400, 900)))
+        ed = _focus_editor(page)
         # The composer treats Enter as send, so a multi-line prompt is flattened.
         flat = prompt.replace("\n\n", " ").replace("\n", " ")
         # page.keyboard.type dispatches real key events; locator.type() left the
