@@ -80,14 +80,14 @@ def read_build(md_path: Path):
     # Split on scene headers so each scene's own bullets stay with it.
     parts = SCENE_RE.split(text)
     if len(parts) < 3:
-        raise SystemExit("no `### Scene N` headers found in %s" % md_path)
+        raise ValueError("no `### Scene N` headers found in %s" % md_path)
     scenes = []
     for i in range(1, len(parts), 2):
         num = int(parts[i])
         body = parts[i + 1]
         m = DUR_RE.search(body)
         if not m:
-            raise SystemExit("Scene %d has no `- **target_duration_s:**` bullet" % num)
+            raise ValueError("Scene %d has no `- **target_duration_s:**` bullet" % num)
         r = RENDER_RE.search(body)
         scenes.append((num, float(m.group(1)), int(r.group(1)) if r else None))
     return text, scenes
@@ -180,9 +180,16 @@ def analyze_song(song: Path, beats_per_bar: int = 4, sr_target: int = 22050,
         from scipy.ndimage import gaussian_filter1d
         from scipy.signal import find_peaks
     except ImportError as exc:
-        raise SystemExit(
-            "beat_align needs librosa + scipy on the AUTHOR machine "
-            "(never on Render): pip install librosa scipy\n  %s" % exc)
+        # ImportError, NOT SystemExit. SystemExit inherits from BaseException,
+        # so a caller's `except Exception` does NOT catch it — on 2026-08-04
+        # this escaped the export worker's handler, killed the run, and the
+        # queue retried it into a crash loop that SIGABRT'd gunicorn three
+        # times. A library raises exceptions; only a CLI calls sys.exit.
+        raise ImportError(
+            "beat_align.analyze_song needs librosa + scipy. These are "
+            "AUTHOR-side only and are deliberately absent from the server "
+            "(requirements.txt) — the platform consumes a precomputed grid "
+            "instead. pip install librosa scipy\n  %s" % exc) from exc
 
     _load_kw = {"sr": sr_target, "mono": True}
     if duration is not None:
@@ -297,7 +304,7 @@ def snap_boundaries(scenes, beat_times, salience, start_time=0.0, tol_beats=0.6)
     beat_times = np.asarray(beat_times, dtype=float)
     salience = np.asarray(salience, dtype=float)
     if len(beat_times) == 0:
-        raise SystemExit("no beats detected")
+        raise ValueError("no beats detected in the analysed window")
     period = float(np.median(np.diff(beat_times))) if len(beat_times) > 1 else 0.5
     tol = tol_beats * period
 
@@ -380,9 +387,9 @@ def solve_boundaries(beat_times, salience, anchor_idx, count, lo, hi, before):
 
     score, idxs = solve(0, anchor_idx)
     if not math.isfinite(score):
-        raise SystemExit(
-            "could not place %d clips between %.2fs and %.2fs per clip — "
-            "widen --min/--max" % (count, lo, hi))
+        raise ValueError(
+            "could not place %d clips between %.2fs and %.2fs per clip - "
+            "widen the min/max range" % (count, lo, hi))
     seq = list(idxs)
     return sorted(seq + [anchor_idx]) if before else [anchor_idx] + seq
 

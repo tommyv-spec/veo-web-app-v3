@@ -10303,7 +10303,13 @@ async def _do_export_final(
     # it the tempo comes out 3:2 wrong.
     _beat_report = {"beat_align": False}
     if settings.beat_align and _music_path:
+        # BaseException, not Exception. The first version caught Exception and
+        # analyze_song raised SystemExit (BaseException) when librosa was
+        # missing — it escaped, killed the export, and the queue retried it into
+        # a crash loop that SIGABRT'd gunicorn three times (2026-08-04).
+        # Alignment is an enhancement; it must never be able to lose an export.
         try:
+            import json as _json
             import beat_align as _ba
             _ordered = sorted(clip_info, key=lambda c: c.get("_order", 0))
             _targets = [c.get("target_duration_s") for c in _ordered]
@@ -10314,11 +10320,23 @@ async def _do_export_final(
                     f"beat_align needs an authored target_duration_s on every clip; "
                     f"clip(s) {_missing} have none")
             _total = float(sum(_targets))
-            _an = _ba.analyze_song(
-                Path(_music_path),
-                offset=max(0.0, settings.music_start_s - 2.0),
-                duration=_total + 8.0,   # margin absorbs window-edge beat wobble
-            )
+            # THE SERVER NEVER ANALYSES. librosa is deliberately absent from
+            # requirements.txt (a full-song analysis peaks 678MB on a 2GB box),
+            # so the grid is computed AUTHOR-side and uploaded beside the song:
+            #   python code/beat_align.py <build>.md --song s.mp3 --emit-grid
+            #   POST /api/jobs/{id}/upload-music-grid
+            # Reading a few hundred floats costs nothing and cannot OOM.
+            _grid_path = Path(_music_path).with_suffix(".beatgrid.json")
+            if not _grid_path.exists():
+                raise FileNotFoundError(
+                    f"no beat grid for this song ({_grid_path.name}). The server does "
+                    f"not analyse audio — generate the grid author-side with "
+                    f"`python code/beat_align.py <build>.md --song <song> --emit-grid` "
+                    f"and upload it via POST /api/jobs/{job_id}/upload-music-grid.")
+            _an = _json.loads(_grid_path.read_text(encoding="utf-8"))
+            print(f"[Export/v890] beat grid loaded: {len(_an.get('beat_times') or [])} "
+                  f"beats, {_an.get('bpm')} BPM (precomputed, no analysis on-box)",
+                  flush=True)
             _scenes = [(i + 1, t) for i, t in enumerate(_targets)]
             _edges = _ba.snap_boundaries(
                 _scenes, _an["beat_times"], _an["beat_salience"],
@@ -10346,12 +10364,14 @@ async def _do_export_final(
             for _i, (_t, _n) in enumerate(zip(_targets, _new), 1):
                 print(f"[Export/v890]   clip {_i}: {_t:.3f}s -> {_n:.3f}s "
                       f"({_n - _t:+.3f})", flush=True)
-        except Exception as _be:
+        except BaseException as _be:
             # Beat alignment is an ENHANCEMENT. Never lose an export over it —
             # fall back to the authored timings, which are always valid.
-            print(f"[Export/v890] beat align FAILED ({_be}) - falling back to the "
-                  f"authored md timings", flush=True)
-            _beat_report = {"beat_align": False, "beat_align_error": str(_be)[:300]}
+            # BaseException on purpose: see the note above the try.
+            print(f"[Export/v890] beat align FAILED ({type(_be).__name__}: {_be}) - "
+                  f"falling back to the authored md timings", flush=True)
+            _beat_report = {"beat_align": False,
+                            "beat_align_error": f"{type(_be).__name__}: {_be}"[:300]}
     
     # Create output filename with unique suffix to prevent collisions
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
