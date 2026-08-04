@@ -14259,7 +14259,7 @@ Ambient: same kitchen room tone, soft pour sound.
             // Show settings confirmation modal
             const modalHtml = `
                 <div id="exportSettingsModal" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.75);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:10000;padding:16px;">
-                    <div style="background:var(--bg-card);border-radius:var(--radius-lg);width:100%;max-width:680px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 24px 48px rgba(0,0,0,0.7);overflow:hidden;">
+                    <div style="background:var(--bg-card);border-radius:var(--radius-lg);width:100%;max-width:560px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 24px 48px rgba(0,0,0,0.7);overflow:hidden;">
                         
                         <!-- Header -->
                         <div style="padding:16px 20px;border-bottom:1px solid var(--border-color);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
@@ -14269,13 +14269,13 @@ Ambient: same kitchen room tone, soft pour sound.
 
                         <!-- Body — scrollable two-column layout -->
                         <div style="overflow-y:auto;flex:1;padding:16px 20px;">
-                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+                            <div style="display:grid;grid-template-columns:1fr;gap:14px;">
 
                                 <!-- LEFT COLUMN: Trim + Speed + Silence -->
                                 <div style="display:flex;flex-direction:column;gap:12px;">
 
                                     <!-- Trim frames -->
-                                    <div style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
+                                    <div class="videoOnlySetting" style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
                                         <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">✂️ Trim Frames</div>
                                         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
                                             <div>
@@ -14299,10 +14299,15 @@ Ambient: same kitchen room tone, soft pour sound.
                                     <div style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;" id="modalMusicCard">
                                         <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">🎵 Music</div>
                                         <input type="file" id="modalMusicFile" accept="audio/*" style="display:none;">
-                                        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+                                        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
                                             <button type="button" id="modalMusicPick"
-                                                style="padding:7px 12px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:11px;cursor:pointer;">Choose song…</button>
-                                            <span id="modalMusicName" style="font-size:10px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">No song — video keeps its own audio</span>
+                                                style="padding:7px 12px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:11px;cursor:pointer;white-space:nowrap;">Choose song…</button>
+                                            <span id="modalMusicName" style="font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">No song — video keeps its own audio</span>
+                                            <button type="button" id="modalMusicClear" title="Remove song"
+                                                style="display:none;background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;line-height:1;padding:2px 4px;">✕</button>
+                                        </div>
+                                        <div id="modalMusicOnlyNote" style="display:none;margin-bottom:10px;padding:9px 11px;background:var(--bg-elevated);border-radius:4px;font-size:10px;color:var(--text-muted);line-height:1.5;">
+                                            Music edit — the video keeps the timings from its own file. Trim, speed and silence controls do not apply.
                                         </div>
                                         <div id="modalMusicOpts" style="display:none;">
                                             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
@@ -14325,14 +14330,14 @@ Ambient: same kitchen room tone, soft pour sound.
                                                 <span style="font-size:11px;">🥁 Align cuts to the beat<span style="font-size:9px;color:var(--text-muted);display:block;">Nudges each cut to the nearest beat. Your clip lengths stay as authored.</span></span>
                                                 <div class="toggle" id="modalBeatAlign"></div>
                                             </div>
-                                            <div id="modalBeatWarn" style="display:none;margin-top:8px;padding:8px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);border-radius:var(--radius-sm);font-size:10px;color:var(--text-secondary);line-height:1.45;">
-                                                Speed Up, Trim Frames and Remove Silence are switched off while beat align is on — each of them re-times the finished cut and would pull it off the beat.
+                                            <div id="modalBeatWarn" style="display:none;margin-top:10px;padding:9px 11px;background:rgba(99,102,241,.10);border-left:2px solid var(--primary, #6366f1);border-radius:4px;font-size:10px;color:var(--text-secondary);line-height:1.5;">
+                                                Cuts land on the nearest beat. Clip lengths stay as written in the video's own file.
                                             </div>
                                         </div>
                                     </div>
 
                                     <!-- Speed -->
-                                    <div style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
+                                    <div class="videoOnlySetting" style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
                                         <div style="display:flex;justify-content:space-between;align-items:center;">
                                             <span style="font-size:11px;">⚡ Speed Up Video<span style="font-size:9px;color:var(--text-muted);display:block;">Make final video slightly faster</span></span>
                                             <div class="toggle" id="modalSpeedToggle" onclick="
@@ -14358,7 +14363,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                     </div>
 
                                     <!-- Remove Silence -->
-                                    <div style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
+                                    <div class="videoOnlySetting" style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
                                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0;">
                                             <span style="font-size:11px;font-weight:600;">🔇 Remove Silence</span>
                                             <div class="toggle" id="modalRemoveSilence"></div>
@@ -14630,13 +14635,18 @@ Ambient: same kitchen room tone, soft pour sound.
                 document.getElementById('modalMusicFile').click());
             document.getElementById('modalMusicFile')?.addEventListener('change', function () {
                 const f = this.files && this.files[0];
-                document.getElementById('modalMusicName').textContent =
-                    f ? f.name : 'No song — video keeps its own audio';
+                const nameEl = document.getElementById('modalMusicName');
+                nameEl.textContent = f ? f.name : 'No song — video keeps its own audio';
+                nameEl.style.color = f ? 'var(--text-primary)' : 'var(--text-muted)';
                 document.getElementById('modalMusicOpts').style.display = f ? 'block' : 'none';
-                if (!f) {
-                    document.getElementById('modalBeatAlign')?.classList.remove('active');
-                    _applyBeatAlignLock();
-                }
+                document.getElementById('modalMusicClear').style.display = f ? 'inline-block' : 'none';
+                if (!f) document.getElementById('modalBeatAlign')?.classList.remove('active');
+                _applyBeatAlignLock();
+            });
+            document.getElementById('modalMusicClear')?.addEventListener('click', () => {
+                const inp = document.getElementById('modalMusicFile');
+                inp.value = '';
+                inp.dispatchEvent(new Event('change'));
             });
             document.getElementById('modalMusicReplace')?.addEventListener('click', function () {
                 this.classList.toggle('active');
@@ -14648,11 +14658,18 @@ Ambient: same kitchen room tone, soft pour sound.
             // cuts that were just placed on the beat. Rather than let them fight
             // silently (the old behaviour, which nobody could see), beat align
             // switches them off and says so.
+            // With a song loaded the export is a music edit: the video keeps the
+            // timings written in its own file and the music is laid over them.
+            // Trim Frames, Speed Up and Remove Silence all RE-TIME that finished
+            // cut, so they are not merely disabled — they are hidden, because a
+            // greyed-out control still reads as "something I should think about".
             function _applyBeatAlignLock() {
+                const hasSong = !!(document.getElementById('modalMusicFile')?.files || [])[0];
                 const on = document.getElementById('modalBeatAlign')?.classList.contains('active');
                 const warn = document.getElementById('modalBeatWarn');
                 if (warn) warn.style.display = on ? 'block' : 'none';
-                if (on) {
+                if (hasSong) {
+                    // Neutralise them so the export cannot re-time the cut.
                     document.getElementById('modalSpeedToggle')?.classList.remove('active');
                     document.getElementById('modalRemoveSilence')?.classList.remove('active');
                     const fs = document.getElementById('modalFramesStart');
@@ -14660,14 +14677,11 @@ Ambient: same kitchen room tone, soft pour sound.
                     if (fs) fs.value = 0;
                     if (fe) fe.value = 0;
                 }
-                ['modalSpeedToggle', 'modalRemoveSilence', 'modalFramesStart', 'modalFramesEnd']
-                    .forEach(id => {
-                        const el = document.getElementById(id);
-                        if (!el) return;
-                        el.style.opacity = on ? 0.4 : '';
-                        el.style.pointerEvents = on ? 'none' : '';
-                        if ('disabled' in el) el.disabled = !!on;
-                    });
+                document.querySelectorAll('.videoOnlySetting').forEach(el => {
+                    el.style.display = hasSong ? 'none' : '';
+                });
+                const note = document.getElementById('modalMusicOnlyNote');
+                if (note) note.style.display = hasSong ? 'block' : 'none';
             }
             window._applyBeatAlignLock = _applyBeatAlignLock;
             document.getElementById('modalBeatAlign')?.addEventListener('click', function () {
