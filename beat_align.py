@@ -150,13 +150,30 @@ def write_durations(text: str, new_durs: list[float]) -> str:
 
 # ------------------------------------------------------- analysis (librosa)
 
-def analyze_song(song: Path, beats_per_bar: int = 4, sr_target: int = 22050) -> dict:
+def analyze_song(song: Path, beats_per_bar: int = 4, sr_target: int = 22050,
+                 offset: float = 0.0, duration: float = None) -> dict:
     """Beat grid + per-beat salience + ranked drops.
 
     librosa is imported HERE, not at module scope, so this file stays importable
-    on a box that does not have it. `sr_target` downsamples on load (v5 uses
-    sr=None); at 22.05 kHz the STFTs are half the size and beat/drop detection
-    is unaffected, which is the cheapest of the memory mitigations.
+    on a box that does not have it.
+
+    MEMORY (measured 2026-08-04 on a 200s track, and the reason the server can
+    run this at all):
+
+        full song + HPSS        678-759 MB   16-31s
+        full song, no HPSS      130 MB       0.8s   <- WRONG, see below
+        45s window + HPSS       121 MB       1.9s
+        60s window + HPSS       168 MB       2.6s
+
+    HPSS is 83% of the memory and 95% of the time, so dropping it is the
+    obvious saving — and it is WRONG. Without the percussive separation this
+    track beat-tracks at 143.56 BPM instead of 95.70, a 3:2 tempo error with
+    essentially zero beat agreement. Keep HPSS; WINDOW instead. Windowing does
+    not move the tempo at all (95.70 at full, 60s and 45s alike).
+
+    So pass `offset`/`duration` covering only the span the video needs. The
+    caller knows the video length; analysing 200s to cut 40s is pure waste.
+    `sr_target` halves the arrays again (v5 loads at native rate).
     """
     try:
         import librosa
@@ -167,7 +184,14 @@ def analyze_song(song: Path, beats_per_bar: int = 4, sr_target: int = 22050) -> 
             "beat_align needs librosa + scipy on the AUTHOR machine "
             "(never on Render): pip install librosa scipy\n  %s" % exc)
 
-    y, sr = librosa.load(str(song), sr=sr_target, mono=True)
+    _load_kw = {"sr": sr_target, "mono": True}
+    if duration is not None:
+        _load_kw.update(offset=max(0.0, offset), duration=duration)
+    y, sr = librosa.load(str(song), **_load_kw)
+    # Every time below is relative to the WINDOW; shift back to song time so a
+    # cached grid is always absolute and a caller never has to remember the
+    # offset it asked for.
+    _t0 = max(0.0, offset) if duration is not None else 0.0
     y_h, y_p = librosa.effects.hpss(y)
     onset_env = librosa.onset.onset_strength(y=y_p, sr=sr, hop_length=HOP,
                                              aggregate=np.median)
@@ -243,10 +267,14 @@ def analyze_song(song: Path, beats_per_bar: int = 4, sr_target: int = 22050) -> 
               "score": float(combined[peaks[i]])}
              for r, i in enumerate(order)]
 
+    for _d in drops:
+        _d["time_seconds"] += _t0
     return {"bpm": tempo, "beats_per_bar": beats_per_bar,
-            "beat_times": beat_times.tolist(), "beat_salience": salience.tolist(),
+            "beat_times": (beat_times + _t0).tolist(),
+            "beat_salience": salience.tolist(),
             "is_downbeat": is_downbeat.tolist(), "drops": drops,
-            "duration_s": float(len(y) / sr), "sample_rate": int(sr)}
+            "duration_s": float(len(y) / sr), "window_offset_s": _t0,
+            "sample_rate": int(sr)}
 
 
 # ------------------------------------------------------------- mode: snap
