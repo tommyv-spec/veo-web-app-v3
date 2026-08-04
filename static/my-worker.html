@@ -330,7 +330,7 @@
             </div>
             <input id="laptopEmail" type="email" placeholder="you@gmail.com" autocomplete="off" spellcheck="false"
                 style="width:100%;padding:9px 12px;background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:8px;color:var(--text-primary);font-size:13px;font-family:inherit;outline:none;"
-                oninput="laptopEmail=this.value.trim()">
+                oninput="laptopEmail=this.value.trim(); syncEmergencyEmail()">
         </div>
     </div>
 
@@ -480,30 +480,32 @@
                 Use it only when the main worker will not run. It claims the
                 <strong>same jobs</strong> — so stop the main worker first, never run both.
             </div>
-            <button class="action-btn" id="emergencyBtn" onclick="toggleEmergency(event)">
-                Show emergency command
+            <div class="os-pills">
+                <span class="os-pill active" onclick="selectEmergencyOS('windows',this)">Windows</span>
+                <span class="os-pill" onclick="selectEmergencyOS('mac',this)">Mac / Linux</span>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin:8px 0 4px;">
+                Google account to render with (must be signed into <strong>Chrome Beta</strong>):
+            </div>
+            <input id="emergencyEmail" type="email" placeholder="you@gmail.com"
+                   autocomplete="off" spellcheck="false" oninput="updateEmergencyCmd()"
+                   style="width:100%;padding:7px 9px;border-radius:6px;border:1px solid rgba(51,65,85,0.6);background:rgba(15,23,42,0.6);color:var(--text-secondary);font-size:12px;margin-bottom:10px;">
+            <button class="action-btn" id="emergencyBtn" onclick="downloadEmergencyInstaller()">
+                Download Emergency Worker
             </button>
-            <div id="emergencyPanel" style="display:none;margin-top:10px;">
-                <div class="os-pills">
-                    <span class="os-pill active" onclick="selectEmergencyOS('windows',this)">Windows</span>
-                    <span class="os-pill" onclick="selectEmergencyOS('mac',this)">Mac / Linux</span>
-                </div>
-                <div style="font-size:11px;color:var(--text-muted);margin:6px 0 4px;">
-                    Google account to render with:
-                </div>
-                <input id="emergencyEmail" type="email" placeholder="you@gmail.com"
-                       autocomplete="off" spellcheck="false" oninput="updateEmergencyCmd()"
-                       style="width:100%;padding:7px 9px;border-radius:6px;border:1px solid rgba(51,65,85,0.6);background:rgba(15,23,42,0.6);color:var(--text-secondary);font-size:12px;margin-bottom:8px;">
+            <div id="emergencyHint" style="font-size:11px;color:var(--text-muted);margin-top:8px;line-height:1.5;">
+                Downloads a setup file with your token and account baked in — run it and
+                the worker installs itself and starts. Its session is copied from Chrome
+                Beta, so there is no login step; your daily Chrome is never touched.<br>
+                <strong style="color:#fb923c;">Basic renderer:</strong> no variants, no
+                auto-redo, no policy retries.
+            </div>
+            <button class="toggle-advanced" style="margin-top:10px;padding:0;font-size:11px;"
+                    onclick="toggleEmergency(event)">Terminal command instead</button>
+            <div id="emergencyPanel" style="display:none;margin-top:8px;">
                 <div class="cmd-block">
                     <code id="emergencyCmd">—</code>
                     <button class="cmd-copy" onclick="copyEmergencyCmd(event)">Copy</button>
-                </div>
-                <div style="font-size:11px;color:var(--text-muted);margin-top:10px;line-height:1.5;">
-                    Needs Python + <code>patchright</code>, and that Google account signed
-                    into <strong>Chrome Beta</strong> (its session is copied; your daily
-                    Chrome is never touched).<br>
-                    <strong style="color:#fb923c;">Basic renderer:</strong> no variants, no
-                    auto-redo, no policy retries. Duration is whatever Gemini returns.
                 </div>
             </div>
         </div>
@@ -791,12 +793,39 @@ function toggleEmergency(e) {
     const p = document.getElementById('emergencyPanel');
     const open = p.style.display === 'none';
     p.style.display = open ? 'block' : 'none';
-    e.target.textContent = open ? 'Hide emergency command' : 'Show emergency command';
-    if (open) {
-        const el = document.getElementById('emergencyEmail');
-        if (!el.value && laptopEmail) el.value = laptopEmail;
-        updateEmergencyCmd();
+    e.target.textContent = open ? 'Hide terminal command' : 'Terminal command instead';
+    if (open) updateEmergencyCmd();
+}
+
+function syncEmergencyEmail() {
+    // Reuse the account already typed for the normal worker — same Gmail in
+    // practice, and one less field to fill during an actual emergency.
+    const el = document.getElementById('emergencyEmail');
+    if (el && !el.value && laptopEmail) el.value = laptopEmail;
+}
+
+function downloadEmergencyInstaller() {
+    // Same delivery as the normal worker: a setup file with the token and the
+    // startup account baked in, fetched through a hidden iframe.
+    const el = document.getElementById('emergencyEmail');
+    const email = (el.value || '').trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+        el.style.borderColor = '#ef4444';
+        el.focus();
+        document.getElementById('emergencyHint').innerHTML =
+            '<span style="color:#ef4444;">Enter the Google account the worker should render with '
+            + '— it is baked into the setup file as the startup setting.</span>';
+        return;
     }
+    el.style.borderColor = '';
+    const url = API + '/api/user-worker/download/emergency-installer?os=' + emergencyOS
+        + '&laptop_email=' + encodeURIComponent(email);
+    let iframe = document.getElementById('dlFrame');
+    if (!iframe) { iframe = document.createElement('iframe'); iframe.id = 'dlFrame'; iframe.style.display = 'none'; document.body.appendChild(iframe); }
+    iframe.src = url;
+    const btn = document.getElementById('emergencyBtn');
+    btn.textContent = 'Downloading...';
+    setTimeout(() => { btn.textContent = 'Download Emergency Worker'; }, 2500);
 }
 
 function selectEmergencyOS(os, el) {
