@@ -12519,6 +12519,18 @@ async def get_error_codes():
 
 # ============ Health Check ============
 
+def _mem_probe():
+    """v890.3 — cgroup memory for the health probe. Never raises."""
+    try:
+        import mem_guard as _mg
+        s = _mg.snapshot()
+        return {"source": s.get("source"), "limit_mb": s.get("limit_mb"),
+                "used_mb": s.get("used_mb"), "avail_mb": s.get("avail_mb"),
+                "rss_mb": s.get("rss_mb")}
+    except Exception as e:
+        return {"error": str(e)[:120]}
+
+
 @app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health_check():
     """Health check endpoint (supports GET and HEAD for monitoring services)"""
@@ -12551,7 +12563,14 @@ async def health_check():
             "google_genai": sdk_status,
             "message": "Video generation available" if sdk_status == "installed" else "Install google-genai for video generation"
         },
-        "storage": storage_status
+        "storage": storage_status,
+        # v890.3 — container memory on the unauthenticated health probe, so a
+        # memory problem can be WATCHED from outside without dashboard access,
+        # the same reason render_commit is here. Beat analysis adds a ~150MB
+        # windowed spike and the box is 2GB with an OOM history; "it seemed
+        # fine" is not evidence. Never raises: a health probe that dies on its
+        # own diagnostics is worse than one without them.
+        "memory": _mem_probe(),
     }
 
 
