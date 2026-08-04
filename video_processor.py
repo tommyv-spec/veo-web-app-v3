@@ -5199,6 +5199,10 @@ def export_final_video(
     language: str = "English",
     cut_prefix_audio: bool = False,  # v542
     prefix_word: str = "only",  # v542
+    music_path: str = None,          # v888 — audio bed laid under the finished cut
+    music_start_s: float = 0.0,      # v888 — offset INTO the track (beatplan music_source_start)
+    music_gain_db: float = 0.0,      # v888 — bed level
+    music_mode: str = "replace",     # v888 — "replace" (silent build) | "mix" (keep dialogue)
 ) -> dict:
     """
     Main export function: trim, concat, and optionally apply VAD.
@@ -5373,6 +5377,54 @@ def export_final_video(
                         f"Clip {info.get('clip_index', idx)}: cut_mode=timeline "
                         f"target_duration_s={td:.3f}s (ffmpeg-trim, frame-trim ignored)"
                     )
+                    # v888 — FILL THE SLOT. `-t` alone can only trim DOWN: asking
+                    # for 5.9s from a 4.0s clip returns 4.0s with NO error, which
+                    # silently drifts a concat and destroys any beat alignment
+                    # downstream. When the source is shorter than the slot (or a
+                    # `clip_speed` is declared), retime with setpts so the output
+                    # is EXACTLY target_duration_s.
+                    #
+                    #   source_used  = min(src_dur, td * requested_speed)
+                    #   actual_speed = source_used / td        (<1 = slow-mo)
+                    #
+                    # Mirrors beat_drop_aligner_v5's graceful degradation: a clip
+                    # too short for its slot slows down rather than truncating.
+                    _req = float(info.get("clip_speed") or 1.0)
+                    _src = 0.0
+                    try:
+                        _src = float(get_duration(ffprobe_json(clip_path)))
+                    except Exception as _e:
+                        print(f"[VideoProcessor/v888] clip {idx} probe failed "
+                              f"({_e}); falling back to plain trim", flush=True)
+                    _retime = _src > 0 and (abs(_req - 1.0) > 1e-6 or _src < td - 0.001)
+                    if _retime:
+                        _used = min(_src, td * _req)
+                        _speed = _used / td
+                        print(
+                            f"[VideoProcessor/v888] clip {info.get('clip_index', idx)} "
+                            f"-> slot {td:.3f}s from {_src:.3f}s source: use {_used:.3f}s "
+                            f"@ {_speed:.3f}x ({'slow-mo' if _speed < 1 else 'speed-up'})",
+                            flush=True,
+                        )
+                        cmd = [
+                            FFMPEG_BIN, "-y",
+                            "-i", str(clip_path),
+                            "-filter_complex",
+                            f"[0:v]trim=start=0:duration={_used:.6f},"
+                            f"setpts=(PTS-STARTPTS)/{_speed:.6f}[v]",
+                            "-map", "[v]", "-an",
+                            "-t", f"{td:.6f}",
+                            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                            "-movflags", "+faststart",
+                            str(trimmed_file),
+                        ]
+                        code, _, err = run(cmd)
+                        if code != 0:
+                            logger.warning(
+                                f"Clip {info.get('clip_index', idx)}: v888 retime failed "
+                                f"({err[:200]}); falling back to plain trim")
+                        else:
+                            return idx - 1, trimmed_file
                     print(
                         f"[VideoProcessor/timeline] clip {info.get('clip_index', idx)} "
                         f"→ trim to {td:.3f}s",
@@ -5711,6 +5763,57 @@ def export_final_video(
             )
         else:
             concat_videos(files_to_concat, concat_output)
+
+        # v888 — MUSIC BED. The export had no audio-bed handling at all; a
+        # music-led build was finished by hand in post. Lay the track here so a
+        # beat-aligned cut arrives already scored.
+        #
+        # `music_start_s` is the beatplan's `music_source_start` — the point in
+        # the TRACK that lines up with the first cut. Without that offset the
+        # bar phase is wrong and every cut sits off the grid even when the clip
+        # lengths are perfect.
+        #
+        # replace: drop clip audio entirely (silent builds — the normal case).
+        # mix:     duck the bed under the existing dialogue.
+        if music_path:
+            import shutil  # module-local, matching the rest of this file
+            _mp = Path(music_path)
+            if not _mp.exists():
+                print(f"[VideoProcessor/v888] music not found: {_mp} — skipping bed",
+                      flush=True)
+            else:
+                try:
+                    _vid_dur = float(get_duration(ffprobe_json(concat_output)))
+                except Exception:
+                    _vid_dur = 0.0
+                _scored = concat_output.with_name(concat_output.stem + "_scored.mp4")
+                _gain = f",volume={music_gain_db:.2f}dB" if abs(music_gain_db) > 1e-6 else ""
+                print(
+                    f"[VideoProcessor/v888] music bed: {_mp.name} from {music_start_s:.3f}s "
+                    f"for {_vid_dur:.3f}s, mode={music_mode}, gain={music_gain_db:+.1f}dB",
+                    flush=True,
+                )
+                if music_mode == "mix":
+                    _fc = (f"[1:a]atrim=start={music_start_s:.6f},asetpts=PTS-STARTPTS"
+                           f"{_gain}[bed];[0:a][bed]amix=inputs=2:duration=first:"
+                           f"dropout_transition=0[a]")
+                    _maps = ["-map", "0:v", "-map", "[a]"]
+                else:
+                    _fc = (f"[1:a]atrim=start={music_start_s:.6f},asetpts=PTS-STARTPTS"
+                           f"{_gain}[a]")
+                    _maps = ["-map", "0:v", "-map", "[a]"]
+                _cmd = ([FFMPEG_BIN, "-y", "-i", str(concat_output), "-i", str(_mp),
+                         "-filter_complex", _fc] + _maps +
+                        ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                         "-t", f"{_vid_dur:.6f}", "-shortest",
+                         "-movflags", "+faststart", str(_scored)])
+                _c, _, _e = run(_cmd)
+                if _c != 0 or not _scored.exists():
+                    print(f"[VideoProcessor/v888] music mux FAILED ({(_e or '')[-300:]}) "
+                          f"— keeping the unscored cut", flush=True)
+                else:
+                    shutil.move(str(_scored), str(concat_output))
+                    print(f"[VideoProcessor/v888] music bed applied", flush=True)
 
         # v692b — ffprobe AFTER concat to confirm whether re-encode
         # itself stretched duration. If pre-sum ≈ 32 but post = 233,
