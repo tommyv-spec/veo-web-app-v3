@@ -8995,6 +8995,11 @@ class ExportSettings(BaseModel):
     music_start_s: float = Field(default=0.0, ge=0.0)
     music_gain_db: float = Field(default=0.0, ge=-40.0, le=10.0)
     music_mode: str = "replace"  # "replace" (silent builds) | "mix" (duck under dialogue)
+    # v890 beat alignment. OFF => the md's authored target_duration_s drives the
+    # cut, untouched (operator 2026-08-04: "default is keep my timings if any in
+    # the md"). ON => each authored cut NUDGES to the nearest strong beat.
+    beat_align: bool = False
+    beat_tol_beats: float = Field(default=0.6, ge=0.1, le=2.0)  # max nudge, in beats
     # Transitions (assemble jobs only)
     transition: str = "none"  # xfade transition type: none, fade, fadeblack, fadewhite, slideleft, slideright, slideup, slidedown, dissolve, circlecrop, wipeleft, wiperight, smoothleft, smoothright, radial, zoomin, pixelize
     transition_duration: float = Field(default=0.5, ge=0.2, le=1.5)
@@ -10284,6 +10289,69 @@ async def _do_export_final(
         print(f"[Export/v888.1] music bed resolved: {_mp} "
               f"({_mp.stat().st_size / 1e6:.1f}MB) start={settings.music_start_s}s "
               f"mode={settings.music_mode} gain={settings.music_gain_db:+.1f}dB", flush=True)
+
+    # v890 — BEAT ALIGNMENT. Runs HERE, before any clip work, so its ~120MB
+    # analysis peak never stacks with ffmpeg or the Whisper model.
+    #
+    # Default OFF: with no song, or with a song but beat_align off, the authored
+    # target_duration_s from the md drives the cut exactly as written (v889).
+    # ON: each authored cut NUDGES to the nearest strong beat, bounded by
+    # beat_tol_beats, so shot lengths and caption timing survive.
+    #
+    # The analysis is WINDOWED to the span this video needs (measured: 121MB /
+    # 1.9s for 45s, vs 678MB / 31s for a full 200s track). HPSS is kept — without
+    # it the tempo comes out 3:2 wrong.
+    _beat_report = {"beat_align": False}
+    if settings.beat_align and _music_path:
+        try:
+            import beat_align as _ba
+            _ordered = sorted(clip_info, key=lambda c: c.get("_order", 0))
+            _targets = [c.get("target_duration_s") for c in _ordered]
+            if not all(isinstance(t, (int, float)) and t and t > 0 for t in _targets):
+                _missing = [i + 1 for i, t in enumerate(_targets)
+                            if not (isinstance(t, (int, float)) and t and t > 0)]
+                raise ValueError(
+                    f"beat_align needs an authored target_duration_s on every clip; "
+                    f"clip(s) {_missing} have none")
+            _total = float(sum(_targets))
+            _an = _ba.analyze_song(
+                Path(_music_path),
+                offset=max(0.0, settings.music_start_s - 2.0),
+                duration=_total + 8.0,   # margin absorbs window-edge beat wobble
+            )
+            _scenes = [(i + 1, t) for i, t in enumerate(_targets)]
+            _edges = _ba.snap_boundaries(
+                _scenes, _an["beat_times"], _an["beat_salience"],
+                start_time=float(settings.music_start_s),
+                tol_beats=settings.beat_tol_beats,
+            )
+            _new = [round(_edges[i + 1] - _edges[i], 3) for i in range(len(_scenes))]
+            for _c, _nd in zip(_ordered, _new):
+                _c["target_duration_s"] = _nd
+                if not (_c.get("cut_mode") or "").lower() == "timeline":
+                    _c["cut_mode"] = "timeline"   # snapped targets must be applied
+            _beat_report = {
+                "beat_align": True, "bpm": round(_an["bpm"], 2),
+                "bar_seconds": round(4 * 60.0 / _an["bpm"], 3),
+                "tol_beats": settings.beat_tol_beats,
+                "authored_total_s": round(_total, 3),
+                "aligned_total_s": round(sum(_new), 3),
+                "per_clip": [{"clip": i + 1, "authored": _targets[i], "aligned": _new[i],
+                              "delta": round(_new[i] - _targets[i], 3)}
+                             for i in range(len(_new))],
+            }
+            print(f"[Export/v890] beat align: {_an['bpm']:.2f} BPM, "
+                  f"{_total:.2f}s -> {sum(_new):.2f}s, max nudge "
+                  f"{max(abs(n - t) for n, t in zip(_new, _targets)):.3f}s", flush=True)
+            for _i, (_t, _n) in enumerate(zip(_targets, _new), 1):
+                print(f"[Export/v890]   clip {_i}: {_t:.3f}s -> {_n:.3f}s "
+                      f"({_n - _t:+.3f})", flush=True)
+        except Exception as _be:
+            # Beat alignment is an ENHANCEMENT. Never lose an export over it —
+            # fall back to the authored timings, which are always valid.
+            print(f"[Export/v890] beat align FAILED ({_be}) - falling back to the "
+                  f"authored md timings", flush=True)
+            _beat_report = {"beat_align": False, "beat_align_error": str(_be)[:300]}
     
     # Create output filename with unique suffix to prevent collisions
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -11274,6 +11342,16 @@ async def _do_export_final(
             import mem_guard as _mg866c
             _mg866c._sample_once(force=True, tag="export-done")
             _mg866c.set_phase("idle")
+        except Exception:
+            pass
+
+        # v890 — surface what beat alignment actually did (or why it did not).
+        # Same lesson as v888.2's music_applied: an export that silently fell
+        # back to the authored timings must be distinguishable from one that
+        # aligned, without anyone having to watch the video.
+        try:
+            if isinstance(stats, dict):
+                stats.update(_beat_report)
         except Exception:
             pass
 
