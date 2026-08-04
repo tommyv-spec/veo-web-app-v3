@@ -8986,6 +8986,15 @@ class ExportSettings(BaseModel):
     master_audio_filename: Optional[str] = None  # If set, align clips to this master audio
     max_clip_speed: float = Field(default=1.5, ge=0.9, le=5.0)  # Max speed multiplier for clip alignment (0.9=slight slowdown, 5.0=very fast)
     min_gap_for_black: float = Field(default=2.0, ge=0.0, le=10.0)  # Gaps shorter than this (seconds) are filled by extending the previous clip instead of black
+    # v888 music bed — lay a track under the finished cut. Distinct from
+    # master_audio_filename above, which ALIGNS clips to a spoken master and
+    # routes to a different export path entirely. This is a score, not a guide.
+    # music_start_s must be the beatplan's `music_source_start`, or the bar
+    # phase is wrong and every cut sits off the grid even with perfect lengths.
+    music_filename: Optional[str] = None
+    music_start_s: float = Field(default=0.0, ge=0.0)
+    music_gain_db: float = Field(default=0.0, ge=-40.0, le=10.0)
+    music_mode: str = "replace"  # "replace" (silent builds) | "mix" (duck under dialogue)
     # Transitions (assemble jobs only)
     transition: str = "none"  # xfade transition type: none, fade, fadeblack, fadewhite, slideleft, slideright, slideup, slidedown, dissolve, circlecrop, wipeleft, wiperight, smoothleft, smoothright, radial, zoomin, pixelize
     transition_duration: float = Field(default=0.5, ge=0.2, le=1.5)
@@ -9044,6 +9053,53 @@ async def upload_master_audio(
     print(f"[MasterAudio] Saved {master_filename} ({size_mb:.1f}MB) for job {job_id[:8]}", flush=True)
     
     return {"filename": master_filename, "size_bytes": len(content)}
+
+
+@app.post("/api/jobs/{job_id}/upload-music")
+async def upload_music(
+    job_id: str,
+    audio: UploadFile = File(...),
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v888 — upload a MUSIC BED for the export to lay under the finished cut.
+
+    Deliberately separate from upload-master-audio: that one aligns clips to a
+    spoken master and routes to export_with_master_audio. This is a score, and
+    it works on ANY job type, not just assemble jobs.
+    """
+    job = get_user_job(db, job_id, current_user)
+
+    allowed_ext = {'.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac'}
+    suffix = Path(audio.filename).suffix.lower() if audio.filename else ''
+    if suffix not in allowed_ext:
+        raise HTTPException(status_code=400,
+                            detail=f"Unsupported audio format. Allowed: {', '.join(allowed_ext)}")
+
+    output_dir = Path(job.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    music_filename = f"music_bed{suffix}"
+    music_path = output_dir / music_filename
+
+    content = await audio.read()
+    with open(music_path, "wb") as f:
+        f.write(content)
+
+    try:
+        from backends.storage import is_storage_configured, get_storage
+        if is_storage_configured():
+            storage = get_storage()
+            r2_key = f"jobs/{job_id}/outputs/{music_filename}"
+            await asyncio.to_thread(storage.upload_file, str(music_path), r2_key,
+                                    audio.content_type or 'audio/mpeg')
+            print(f"[v888/Music] Uploaded to R2: {r2_key}", flush=True)
+    except Exception as e:
+        print(f"[v888/Music] R2 upload failed (non-fatal): {e}", flush=True)
+
+    size_mb = len(content) / (1024 * 1024)
+    print(f"[v888/Music] Saved {music_filename} ({size_mb:.1f}MB) for job {job_id[:8]}",
+          flush=True)
+    return {"filename": music_filename, "size_bytes": len(content)}
 
 
 async def _extract_and_upload_audio(video_path: Path, job_id: str, video_filename: str) -> dict:
@@ -10397,6 +10453,11 @@ async def _do_export_final(
                     vad_threshold=settings.silence_threshold,
                     silence_trigger=settings.silence_trigger,
                     silence_keep=settings.silence_keep,
+                    music_path=(str(Path(job.output_dir) / settings.music_filename)
+                                if settings.music_filename else None),
+                    music_start_s=settings.music_start_s,
+                    music_gain_db=settings.music_gain_db,
+                    music_mode=settings.music_mode,
                     transition=settings.transition,
                     transition_duration=settings.transition_duration,
                     dialogue_texts=[
@@ -10725,6 +10786,11 @@ async def _do_export_final(
                     vad_threshold=settings.silence_threshold,
                     silence_trigger=settings.silence_trigger,
                     silence_keep=settings.silence_keep,
+                    music_path=(str(Path(job.output_dir) / settings.music_filename)
+                                if settings.music_filename else None),
+                    music_start_s=settings.music_start_s,
+                    music_gain_db=settings.music_gain_db,
+                    music_mode=settings.music_mode,
                     transition=settings.transition,
                     transition_duration=settings.transition_duration,
                     dialogue_texts=[active_dialogue_line(c) or "" for c in clip_info],
@@ -16029,6 +16095,72 @@ async def clear_worker_error(
     return {"ok": True}
 
 
+@app.get("/api/user-worker/download/emergency-installer")
+async def download_emergency_installer(
+    request: Request,
+    os: str = Query("windows", regex="^(windows|mac|linux)$"),
+    laptop_email: str = Query(""),
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db_session)
+):
+    """Installer for the EMERGENCY (Gemini) worker — same download-and-run shape
+    as the Flow installer, with the token and the operator's Gmail baked in.
+
+    laptop_email is the startup setting that matters here: the worker copies that
+    account's live session out of a non-stable Chrome channel, so there is no
+    manual login.
+    """
+    _email = (laptop_email or "").strip()
+    if len(_email) > 254 or not _re.match(
+            r'^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', _email):
+        raise HTTPException(400, "A valid Google account email is required")
+
+    token = db.query(UserWorkerToken).filter(
+        UserWorkerToken.user_id == user.id,
+        UserWorkerToken.is_active == True  # noqa: E712
+    ).first()
+    if not token:
+        token = UserWorkerToken(
+            id=secrets.token_urlsafe(48),
+            user_id=user.id,
+            name=f"Worker-{datetime.utcnow().strftime('%Y%m%d-%H%M')}",
+        )
+        db.add(token)
+        db.commit()
+
+    app_url = str(request.base_url).rstrip('/')
+    if 'kavenobuilder.com' not in app_url:
+        app_url = "https://kavenobuilder.com"
+
+    if os == "windows":
+        return Response(
+            content=_generate_emergency_installer_windows(token.id, app_url, _email),
+            media_type="application/x-bat",
+            headers={
+                "Content-Disposition": "attachment; filename=KavenoBuilder-Emergency-Worker.bat",
+                "Cache-Control": "no-store",
+            },
+        )
+    # Mac/Linux: zip the .command so the execute bit survives the download
+    import zipfile, io, time as _t
+    content = _generate_emergency_installer_unix(token.id, app_url, _email)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        info = zipfile.ZipInfo("KavenoBuilder-Emergency-Worker.command",
+                               date_time=_t.localtime()[:6])
+        info.external_attr = 0o755 << 16
+        info.create_system = 3
+        zf.writestr(info, content)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": "attachment; filename=KavenoBuilder-Emergency-Worker.zip",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @app.get("/api/user-worker/download/installer")
 async def download_installer(
     request: Request,
@@ -16109,6 +16241,133 @@ async def download_installer(
                 "Cache-Control": "no-store",
             }
         )
+
+
+def _generate_emergency_installer_windows(token: str, app_url: str, email: str) -> str:
+    """Windows .bat for the EMERGENCY (Gemini) worker.
+
+    Same shape as the Flow installer: token baked in, the operator's Gmail baked
+    in as the startup setting, its own folder, and a start script it can re-run.
+    ASCII ONLY — a non-ASCII char in a .bat/.ps1 breaks parsing on PS 5.1.
+    """
+    return f'''@echo off
+setlocal enabledelayedexpansion
+title KavenoBuilder Emergency Worker
+mode con: cols=64 lines=26
+color 6F
+
+echo.
+echo   KavenoBuilder - EMERGENCY Worker (Gemini)
+echo.
+echo   Use this only when the normal worker cannot run.
+echo   It claims the SAME jobs, so STOP the normal worker first.
+echo.
+
+set "WORKER_DIR=%USERPROFILE%\\kaveno-gemini-worker"
+mkdir "%WORKER_DIR%" 2>nul
+
+where python >nul 2>nul
+if errorlevel 1 (
+  echo   [X] Python not found. Install Python 3 first, then re-run this file.
+  pause
+  exit /b 1
+)
+
+echo   Installing browser automation (one time, may take a minute)...
+python -m pip install --quiet --upgrade patchright >nul 2>nul
+python -m patchright install chromium >nul 2>nul
+echo   [OK] Ready
+
+echo   Downloading the emergency worker...
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{app_url}/api/user-worker/download/gemini_video_worker.py' -OutFile '%WORKER_DIR%\\gemini_video_worker.py' -UseBasicParsing" >nul 2>nul
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{app_url}/api/user-worker/download/worker_profile_pull.py' -OutFile '%WORKER_DIR%\\worker_profile_pull.py' -UseBasicParsing" >nul 2>nul
+echo   [OK] Downloaded
+
+> "%WORKER_DIR%\\.env" (
+echo USER_WORKER_TOKEN={token}
+echo WEB_APP_URL={app_url}
+echo GEMINI_EMAIL={email}
+)
+
+> "%WORKER_DIR%\\start-emergency-worker.bat" (
+echo @echo off
+echo title KavenoBuilder Emergency Worker
+echo cd /d "%%~dp0"
+echo python gemini_video_worker.py --email {email} --serve --token {token}
+echo pause
+)
+
+echo.
+echo   Account: {email}
+echo   Folder : %WORKER_DIR%
+echo.
+echo   NOTE: that Google account must be signed into CHROME BETA.
+echo   The worker copies that session; your daily Chrome is never touched.
+echo.
+echo   Starting the emergency worker now...
+echo   (re-run start-emergency-worker.bat in the folder above any time)
+echo.
+cd /d "%WORKER_DIR%"
+python gemini_video_worker.py --email {email} --serve --token {token}
+pause
+'''
+
+
+def _generate_emergency_installer_unix(token: str, app_url: str, email: str) -> str:
+    """Mac/Linux .command counterpart of the emergency installer."""
+    return f'''#!/bin/bash
+set -e
+echo ""
+echo "  KavenoBuilder - EMERGENCY Worker (Gemini)"
+echo ""
+echo "  Use this only when the normal worker cannot run."
+echo "  It claims the SAME jobs, so STOP the normal worker first."
+echo ""
+
+WORKER_DIR="$HOME/kaveno-gemini-worker"
+mkdir -p "$WORKER_DIR"
+cd "$WORKER_DIR"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "  [X] python3 not found. Install Python 3 first, then re-run."
+  read -n 1 -s -r -p "  Press any key to close"
+  exit 1
+fi
+
+echo "  Installing browser automation (one time)..."
+python3 -m pip install --quiet --upgrade patchright >/dev/null 2>&1 || true
+python3 -m patchright install chromium >/dev/null 2>&1 || true
+echo "  [OK] Ready"
+
+echo "  Downloading the emergency worker..."
+curl -sL "{app_url}/api/user-worker/download/gemini_video_worker.py" -o gemini_video_worker.py
+curl -sL "{app_url}/api/user-worker/download/worker_profile_pull.py" -o worker_profile_pull.py
+echo "  [OK] Downloaded"
+
+cat > .env <<EOF
+USER_WORKER_TOKEN={token}
+WEB_APP_URL={app_url}
+GEMINI_EMAIL={email}
+EOF
+
+cat > start-emergency-worker.command <<EOF
+#!/bin/bash
+cd "\\$(dirname "\\$0")"
+python3 gemini_video_worker.py --email {email} --serve --token {token}
+EOF
+chmod +x start-emergency-worker.command
+
+echo ""
+echo "  Account: {email}"
+echo "  Folder : $WORKER_DIR"
+echo ""
+echo "  NOTE: that Google account must be signed into a NON-STABLE Chrome"
+echo "  channel (Beta/Dev/Canary). Your daily Chrome is never touched."
+echo ""
+echo "  Starting the emergency worker now..."
+echo ""
+python3 gemini_video_worker.py --email {email} --serve --token {token}
+'''
 
 
 def _generate_windows_installer(token: str, app_url: str, accounts: int = 1, reset: bool = False, update_only: bool = False, laptop_email: str = "") -> str:
