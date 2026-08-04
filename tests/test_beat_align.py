@@ -113,7 +113,10 @@ def test_write_durations_roundtrip_preserves_everything_else(tmp_path):
 def test_read_build_rejects_scene_without_duration(tmp_path):
     p = tmp_path / "b.md"
     p.write_text("### Scene 1\n- **image:** image_1\n", encoding="utf-8")
-    with pytest.raises(SystemExit):
+    # ValueError, not SystemExit: library code must raise something a caller's
+    # `except Exception` can catch. SystemExit inherits from BaseException and
+    # escaped the export worker's handler into a crash loop (v890.1).
+    with pytest.raises(ValueError):
         ba.read_build(p)
 
 
@@ -227,7 +230,7 @@ def test_solve_respects_min_and_max():
 def test_solve_raises_when_the_window_cannot_fit_the_clips():
     bt = grid(bpm=120.0, n=6)      # only ~2.5s of grid
     sal = np.ones(len(bt))
-    with pytest.raises(SystemExit):
+    with pytest.raises(ValueError):
         ba.solve_boundaries(bt, sal, 5, count=10, lo=1.9, hi=2.0, before=True)
 
 
@@ -277,3 +280,35 @@ def test_seg_score_rewards_salience_over_duration_fit():
     strong_wrong = ba._seg_score(1.0, dur=2.0, target=1.0, lo=0.5, hi=2.0)
     weak_right = ba._seg_score(0.0, dur=1.0, target=1.0, lo=0.5, hi=2.0)
     assert strong_wrong > weak_right
+
+
+# ---------------------------------------------------------------- pins (v5 --pin-clip)
+
+def test_pin_forces_a_clip_to_its_wanted_length():
+    bt = grid(bpm=120.0, n=400)      # period 0.5s
+    sal = np.ones(len(bt))
+    # position 0 of the after-block pinned to 2.5s; caps would cap it at 1.0
+    idxs = ba.solve_boundaries(bt, sal, 100, count=4, lo=0.5, hi=1.0,
+                               before=False, pins={0: 2.5})
+    durs = np.diff([bt[i] for i in idxs])
+    assert durs[0] == pytest.approx(2.5, abs=0.26)   # pin wins over the cap
+    for d in durs[1:]:
+        assert 0.5 - 1e-6 <= d <= 1.0 + 1e-6         # the rest still respect it
+
+
+def test_pin_in_the_before_block_maps_to_the_right_position():
+    bt = grid(bpm=120.0, n=400)
+    sal = np.ones(len(bt))
+    idxs = ba.solve_boundaries(bt, sal, 200, count=3, lo=0.5, hi=1.0,
+                               before=True, pins={0: 2.0})
+    durs = np.diff([bt[i] for i in idxs])
+    assert durs[0] == pytest.approx(2.0, abs=0.26)   # first clip of the block
+    assert idxs[-1] == 200                            # anchor still hit exactly
+
+
+def test_no_pins_is_unchanged_behaviour():
+    bt = grid(bpm=120.0, n=400)
+    sal = np.random.default_rng(3).random(len(bt))
+    a = ba.solve_boundaries(bt, sal, 150, 5, 0.5, 2.0, before=True)
+    b = ba.solve_boundaries(bt, sal, 150, 5, 0.5, 2.0, before=True, pins={})
+    assert a == b

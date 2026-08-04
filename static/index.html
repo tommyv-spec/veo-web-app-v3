@@ -14330,8 +14330,92 @@ Ambient: same kitchen room tone, soft pour sound.
                                                 <span style="font-size:11px;">🥁 Align cuts to the beat<span style="font-size:9px;color:var(--text-muted);display:block;">Nudges each cut to the nearest beat. Your clip lengths stay as authored.</span></span>
                                                 <div class="toggle" id="modalBeatAlign"></div>
                                             </div>
-                                            <div id="modalBeatWarn" style="display:none;margin-top:10px;padding:9px 11px;background:rgba(99,102,241,.10);border-left:2px solid var(--primary, #6366f1);border-radius:4px;font-size:10px;color:var(--text-secondary);line-height:1.5;">
-                                                Cuts land on the nearest beat. Clip lengths stay as written in the video's own file.
+                                            <div id="modalBeatOpts" style="display:none;margin-top:10px;">
+                                                <div style="display:flex;gap:6px;margin-bottom:10px;">
+                                                    <button type="button" class="beatModeBtn" data-mode="snap"
+                                                        style="flex:1;padding:8px 6px;border-radius:var(--radius-sm);border:1px solid var(--border-color);background:var(--primary,#6366f1);color:#fff;font-size:10px;cursor:pointer;line-height:1.35;">
+                                                        Keep my timings<span style="display:block;font-size:9px;opacity:.75;">nudge cuts to the beat</span></button>
+                                                    <button type="button" class="beatModeBtn" data-mode="solve"
+                                                        style="flex:1;padding:8px 6px;border-radius:var(--radius-sm);border:1px solid var(--border-color);background:var(--bg-elevated);color:var(--text-primary);font-size:10px;cursor:pointer;line-height:1.35;">
+                                                        Let the music lead<span style="display:block;font-size:9px;opacity:.75;">music picks the lengths</span></button>
+                                                </div>
+
+                                                <div id="modalBeatSnapOpts">
+                                                    <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--text-muted);">
+                                                        <span>Max nudge</span><span id="modalBeatTolVal" style="color:var(--text-primary);">0.6 beats</span>
+                                                    </div>
+                                                    <input type="range" id="modalBeatTol" min="10" max="150" value="60" style="width:100%;margin-top:4px;">
+                                                </div>
+
+                                                <div id="modalBeatSolveOpts" style="display:none;">
+                                                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+                                                        <div>
+                                                            <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Shortest clip (s)</label>
+                                                            <input type="number" id="modalBeatMin" value="0.5" min="0.1" max="10" step="0.05"
+                                                                style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+                                                        </div>
+                                                        <div>
+                                                            <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Longest clip (s)</label>
+                                                            <input type="number" id="modalBeatMax" value="2.0" min="0.2" max="20" step="0.05"
+                                                                style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+                                                        </div>
+                                                    </div>
+                                                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+                                                        <div>
+                                                            <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Clip on the drop</label>
+                                                            <input type="number" id="modalBeatDropClip" value="1" min="1" max="99" step="1"
+                                                                style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+                                                        </div>
+                                                        <div>
+                                                            <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Which drop</label>
+                                                            <select id="modalBeatDropRank"
+                                                                style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+                                                                <option value="1">Strongest</option>
+                                                                <option value="2">2nd</option>
+                                                                <option value="3">3rd</option>
+                                                                <option value="4">4th</option>
+                                                            </select>
+                                                        </div>
+                                                    </div>
+                                                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+                                                        <div>
+                                                            <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Exact drop (s, optional)</label>
+                                                            <input type="number" id="modalBeatDropTime" placeholder="auto" min="0" step="0.01"
+                                                                style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+                                                        </div>
+                                                        <div>
+                                                            <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Beats per bar</label>
+                                                            <input type="number" id="modalBeatsPerBar" value="4" min="2" max="12" step="1"
+                                                                style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+                                                        </div>
+                                                    </div>
+                                                    <div style="margin-bottom:8px;">
+                                                        <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Pin clips (e.g. <code>1:2.47, 4:1.2</code>)</label>
+                                                        <input type="text" id="modalBeatPins" placeholder="clip:seconds, …"
+                                                            style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;">
+                                                    </div>
+                                                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+                                                        <div>
+                                                            <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Speed before</label>
+                                                            <input type="number" id="modalBeatPreSpeed" value="1.0" min="0.5" max="3" step="0.05"
+                                                                style="width:100%;padding:7px 8px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;">
+                                                        </div>
+                                                        <div>
+                                                            <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Speed after</label>
+                                                            <input type="number" id="modalBeatPostSpeed" value="1.0" min="0.5" max="3" step="0.05"
+                                                                style="width:100%;padding:7px 8px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;">
+                                                        </div>
+                                                        <div>
+                                                            <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">All clips ×</label>
+                                                            <input type="number" id="modalBeatClipSpeed" value="1.0" min="0.5" max="3" step="0.05"
+                                                                style="width:100%;padding:7px 8px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;">
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div id="modalBeatWarn" style="margin-top:10px;padding:9px 11px;background:rgba(99,102,241,.10);border-left:2px solid var(--primary, #6366f1);border-radius:4px;font-size:10px;color:var(--text-secondary);line-height:1.5;">
+                                                    Cuts land on the nearest beat. Clip lengths stay as written in the video's own file.
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
@@ -14684,8 +14768,37 @@ Ambient: same kitchen room tone, soft pour sound.
                 if (note) note.style.display = hasSong ? 'block' : 'none';
             }
             window._applyBeatAlignLock = _applyBeatAlignLock;
+
+            // Mode switch: snap keeps the authored lengths, solve lets the music
+            // choose them and lands a chosen clip on the drop.
+            window._beatMode = 'snap';
+            function _applyBeatMode() {
+                const solve = window._beatMode === 'solve';
+                document.querySelectorAll('.beatModeBtn').forEach(b => {
+                    const on = b.dataset.mode === window._beatMode;
+                    b.style.background = on ? 'var(--primary,#6366f1)' : 'var(--bg-elevated)';
+                    b.style.color = on ? '#fff' : 'var(--text-primary)';
+                });
+                const s = document.getElementById('modalBeatSnapOpts');
+                const v = document.getElementById('modalBeatSolveOpts');
+                const w = document.getElementById('modalBeatWarn');
+                if (s) s.style.display = solve ? 'none' : 'block';
+                if (v) v.style.display = solve ? 'block' : 'none';
+                if (w) w.innerHTML = solve
+                    ? 'The music picks every clip length inside your range, and the clip you nominate starts exactly on the drop. Your authored lengths are <strong>not</strong> kept in this mode.'
+                    : "Cuts land on the nearest beat. Clip lengths stay as written in the video's own file.";
+            }
+            document.querySelectorAll('.beatModeBtn').forEach(b =>
+                b.addEventListener('click', () => { window._beatMode = b.dataset.mode; _applyBeatMode(); }));
+            document.getElementById('modalBeatTol')?.addEventListener('input', function () {
+                document.getElementById('modalBeatTolVal').textContent =
+                    (this.value / 100).toFixed(2) + ' beats';
+            });
             document.getElementById('modalBeatAlign')?.addEventListener('click', function () {
                 this.classList.toggle('active');
+                const opts = document.getElementById('modalBeatOpts');
+                if (opts) opts.style.display = this.classList.contains('active') ? 'block' : 'none';
+                _applyBeatMode();
                 _applyBeatAlignLock();
             });
             document.getElementById('modalRemoveLaughter')?.addEventListener('click', function() { 
@@ -14992,6 +15105,29 @@ Ambient: same kitchen room tone, soft pour sound.
                         music_gain_db: parseFloat(document.getElementById('modalMusicGain')?.value || 0) || 0,
                         music_mode: document.getElementById('modalMusicReplace')?.classList.contains('active') ? 'replace' : 'mix',
                         beat_align: document.getElementById('modalBeatAlign')?.classList.contains('active') || false,
+                        beat_mode: window._beatMode || 'snap',
+                        beat_tol_beats: parseFloat((document.getElementById('modalBeatTol')?.value || 60) / 100) || 0.6,
+                        beat_min_s: parseFloat(document.getElementById('modalBeatMin')?.value || 0.5) || 0.5,
+                        beat_max_s: parseFloat(document.getElementById('modalBeatMax')?.value || 2.0) || 2.0,
+                        beat_drop_clip: parseInt(document.getElementById('modalBeatDropClip')?.value || 0) || null,
+                        beat_drop_rank: parseInt(document.getElementById('modalBeatDropRank')?.value || 1) || 1,
+                        beat_drop_time: (document.getElementById('modalBeatDropTime')?.value || '') === ''
+                            ? null : parseFloat(document.getElementById('modalBeatDropTime').value),
+                        beat_beats_per_bar: parseInt(document.getElementById('modalBeatsPerBar')?.value || 4) || 4,
+                        beat_pre_drop_speed: parseFloat(document.getElementById('modalBeatPreSpeed')?.value || 1) || 1,
+                        beat_post_drop_speed: parseFloat(document.getElementById('modalBeatPostSpeed')?.value || 1) || 1,
+                        beat_clip_speed: parseFloat(document.getElementById('modalBeatClipSpeed')?.value || 1) || 1,
+                        // "1:2.47, 4:1.2" -> {"1":2.47,"4":1.2}
+                        beat_pins: (function () {
+                            const raw = (document.getElementById('modalBeatPins')?.value || '').trim();
+                            if (!raw) return null;
+                            const out = {};
+                            raw.split(',').forEach(part => {
+                                const m = part.trim().match(/^(\d+)\s*:\s*([\d.]+)$/);
+                                if (m) out[m[1]] = parseFloat(m[2]);
+                            });
+                            return Object.keys(out).length ? out : null;
+                        })(),
                         // Silence removal
                         remove_silence: document.getElementById('modalRemoveSilence').classList.contains('active'),
                         silence_mode: document.getElementById('silModeWhisper')?.classList.contains('active') ? 'whisper' : 'energy',
@@ -15515,6 +15651,18 @@ Ambient: same kitchen room tone, soft pour sound.
                     music_gain_db: exportSettings.music_gain_db ?? 0,
                     music_mode: exportSettings.music_mode || 'replace',
                     beat_align: exportSettings.beat_align ?? false,
+                    beat_mode: exportSettings.beat_mode || 'snap',
+                    beat_tol_beats: exportSettings.beat_tol_beats ?? 0.6,
+                    beat_min_s: exportSettings.beat_min_s ?? 0.5,
+                    beat_max_s: exportSettings.beat_max_s ?? 2.0,
+                    beat_drop_clip: exportSettings.beat_drop_clip ?? null,
+                    beat_drop_rank: exportSettings.beat_drop_rank ?? 1,
+                    beat_drop_time: exportSettings.beat_drop_time ?? null,
+                    beat_beats_per_bar: exportSettings.beat_beats_per_bar ?? 4,
+                    beat_pre_drop_speed: exportSettings.beat_pre_drop_speed ?? 1.0,
+                    beat_post_drop_speed: exportSettings.beat_post_drop_speed ?? 1.0,
+                    beat_clip_speed: exportSettings.beat_clip_speed ?? 1.0,
+                    beat_pins: exportSettings.beat_pins ?? null,
                     // Transitions
                     transition: exportSettings.transition || 'none',
                     transition_duration: exportSettings.transition_duration || 0.5,

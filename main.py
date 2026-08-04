@@ -9000,6 +9000,24 @@ class ExportSettings(BaseModel):
     # the md"). ON => each authored cut NUDGES to the nearest strong beat.
     beat_align: bool = False
     beat_tol_beats: float = Field(default=0.6, ge=0.1, le=2.0)  # max nudge, in beats
+    # v890.6 — the beat_drop_aligner_v5 controls.
+    #   snap  = keep the authored clip lengths, nudge each cut to a beat.
+    #   solve = the MUSIC picks every length inside [min,max], clips accelerate
+    #           into the drop, and beat_drop_clip lands ON it. Authored lengths
+    #           are discarded, so this is for montages, not narrative builds.
+    beat_mode: str = "snap"
+    beat_min_s: float = Field(default=0.5, ge=0.1, le=10.0)
+    beat_max_s: float = Field(default=2.0, ge=0.2, le=20.0)
+    beat_drop_clip: Optional[int] = None     # 1-based clip that starts on the drop
+    beat_drop_rank: int = Field(default=1, ge=1, le=8)
+    beat_drop_time: Optional[float] = None   # exact seconds, bypasses detection
+    beat_pre_drop_speed: float = Field(default=1.0, ge=0.5, le=3.0)
+    beat_post_drop_speed: float = Field(default=1.0, ge=0.5, le=3.0)
+    beat_clip_speed: float = Field(default=1.0, ge=0.5, le=3.0)   # global multiplier
+    beat_beats_per_bar: int = Field(default=4, ge=2, le=12)
+    # v5 --pin-clip: {"3": 2.47} forces clip 3 to ~2.47s, beat-snapped, ignoring
+    # min/max for that clip only. Does not backtrack (same limit as v5).
+    beat_pins: Optional[dict] = None
     # Transitions (assemble jobs only)
     transition: str = "none"  # xfade transition type: none, fade, fadeblack, fadewhite, slideleft, slideright, slideup, slidedown, dissolve, circlecrop, wipeleft, wiperight, smoothleft, smoothright, radial, zoomin, pixelize
     transition_duration: float = Field(default=0.5, ge=0.2, le=1.5)
@@ -10301,6 +10319,7 @@ async def _do_export_final(
     # The analysis is WINDOWED to the span this video needs (measured: 121MB /
     # 1.9s for 45s, vs 678MB / 31s for a full 200s track). HPSS is kept — without
     # it the tempo comes out 3:2 wrong.
+    _music_start_eff = float(settings.music_start_s)
     _beat_report = {"beat_align": False}
     if settings.beat_align and _music_path:
         # BaseException, not Exception. The first version caught Exception and
@@ -10340,7 +10359,7 @@ async def _do_export_final(
             with open(_music_path, "rb") as _f:
                 for _chunk in iter(lambda: _f.read(1 << 20), b""):
                     _sig.update(_chunk)
-            _sig.update(f"|{_win_off:.3f}|{_win_dur:.3f}|v890.2".encode())
+            _sig.update(f"|{_win_off:.3f}|{_win_dur:.3f}|{settings.beat_beats_per_bar}|v890.6".encode())
             _grid_path = output_dir / f"beatgrid_{_sig.hexdigest()[:16]}.json"
 
             if _grid_path.exists():
@@ -10368,6 +10387,7 @@ async def _do_export_final(
                       f"(avail={_snap.get('avail_mb')}MB)", flush=True)
                 _an = await asyncio.to_thread(
                     _ba.analyze_song, Path(_music_path),
+                    beats_per_bar=settings.beat_beats_per_bar,
                     offset=_win_off, duration=_win_dur)
                 try:
                     _grid_path.write_text(_json.dumps(_an), encoding="utf-8")
@@ -10375,18 +10395,84 @@ async def _do_export_final(
                     print(f"[Export/v890] grid cache write failed (non-fatal): {_ce}",
                           flush=True)
             _scenes = [(i + 1, t) for i, t in enumerate(_targets)]
-            _edges = _ba.snap_boundaries(
-                _scenes, _an["beat_times"], _an["beat_salience"],
-                start_time=float(settings.music_start_s),
-                tol_beats=settings.beat_tol_beats,
-            )
+            _mode = (settings.beat_mode or "snap").lower()
+            _bt = _an["beat_times"]
+            _sal = _an["beat_salience"]
+            _music_start = float(settings.music_start_s)
+            _drop_used = None
+
+            if _mode == "solve":
+                # v890.6 — the full v5 solve. The music picks every length inside
+                # [min,max]; clips before the drop are laid out BACKWARDS from it
+                # so beat_drop_clip lands on the drop exactly, and pacing curves
+                # accelerate into it. Authored lengths are discarded by design.
+                import numpy as _np
+                _n = len(_scenes)
+                _dc = settings.beat_drop_clip or max(1, _n // 2)
+                _dc = max(1, min(_n, int(_dc)))
+                if settings.beat_drop_time is not None:
+                    _drop_used = float(settings.beat_drop_time)
+                else:
+                    _drops = _an.get("drops") or []
+                    if not _drops:
+                        raise ValueError("no drop detected in this window; set an exact "
+                                         "drop time or use snap mode")
+                    _drop_used = float(_drops[min(settings.beat_drop_rank,
+                                                  len(_drops)) - 1]["time_seconds"])
+                _anchor = int(_np.abs(_np.array(_bt) - _drop_used).argmin())
+                # v5 split_pins_by_drop: clip K < drop -> before-block position
+                # K-1; clip K >= drop -> after-block position K - drop.
+                _pins_raw = {int(k): float(v) for k, v in (settings.beat_pins or {}).items()}
+                _pins_pre = {k - 1: v for k, v in _pins_raw.items() if k < _dc}
+                _pins_post = {k - _dc: v for k, v in _pins_raw.items() if k >= _dc}
+                _pre = _ba.solve_boundaries(_bt, _sal, _anchor, _dc - 1,
+                                            settings.beat_min_s, settings.beat_max_s,
+                                            before=True, pins=_pins_pre)
+                _post = _ba.solve_boundaries(_bt, _sal, _anchor, _n - _dc + 1,
+                                             settings.beat_min_s, settings.beat_max_s,
+                                             before=False, pins=_pins_post)
+                _edges = ([float(_bt[i]) for i in _pre[:-1]] if _pre else []) + \
+                         [float(_bt[i]) for i in _post]
+                if len(_edges) != _n + 1:
+                    raise ValueError("solver built %d edges for %d clips"
+                                     % (len(_edges), _n))
+                _music_start = _edges[0]   # the song is trimmed to the edit window
+                print(f"[Export/v890] SOLVE: drop {_drop_used:.2f}s -> beat {_anchor} "
+                      f"@ {_bt[_anchor]:.2f}s, clip {_dc} lands on it, "
+                      f"range {settings.beat_min_s}-{settings.beat_max_s}s", flush=True)
+            else:
+                _edges = _ba.snap_boundaries(
+                    _scenes, _bt, _sal,
+                    start_time=_music_start,
+                    tol_beats=settings.beat_tol_beats,
+                )
+
             _new = [round(_edges[i + 1] - _edges[i], 3) for i in range(len(_scenes))]
-            for _c, _nd in zip(_ordered, _new):
+            # v890.6 — per-clip speed. v888's retime fills a slot exactly:
+            # source_used = min(src, target*speed), actual = source_used/target.
+            # Before the drop clip we use pre_drop_speed, from it onward
+            # post_drop_speed, both times the global clip_speed.
+            _dropclip = (settings.beat_drop_clip or 0) if _mode == "solve" else 0
+            for _i, (_c, _nd) in enumerate(zip(_ordered, _new), 1):
                 _c["target_duration_s"] = _nd
+                _base = (settings.beat_post_drop_speed if (_dropclip and _i >= _dropclip)
+                         else settings.beat_pre_drop_speed)
+                _sp = round(_base * settings.beat_clip_speed, 4)
+                if abs(_sp - 1.0) > 1e-6:
+                    _c["clip_speed"] = _sp
                 if not (_c.get("cut_mode") or "").lower() == "timeline":
-                    _c["cut_mode"] = "timeline"   # snapped targets must be applied
+                    _c["cut_mode"] = "timeline"   # aligned targets must be applied
+            # solve trims the song to the edit window, so the bed must start there
+            if _mode == "solve":
+                _music_start_eff = _music_start
             _beat_report = {
-                "beat_align": True, "bpm": round(_an["bpm"], 2),
+                "beat_align": True, "mode": _mode,
+                "drop_used_s": round(_drop_used, 3) if _drop_used is not None else None,
+                "drops_detected": [round(float(d["time_seconds"]), 2)
+                                   for d in (_an.get("drops") or [])[:5]],
+                "music_start_s": round(_music_start_eff, 3),
+                "clip_speed_applied": round(settings.beat_clip_speed, 3),
+                "bpm": round(_an["bpm"], 2),
                 "bar_seconds": round(4 * 60.0 / _an["bpm"], 3),
                 "tol_beats": settings.beat_tol_beats,
                 "authored_total_s": round(_total, 3),
@@ -10613,7 +10699,7 @@ async def _do_export_final(
                     silence_trigger=settings.silence_trigger,
                     silence_keep=settings.silence_keep,
                     music_path=_music_path,
-                    music_start_s=settings.music_start_s,
+                    music_start_s=_music_start_eff,
                     music_gain_db=settings.music_gain_db,
                     music_mode=settings.music_mode,
                     transition=settings.transition,
@@ -10945,7 +11031,7 @@ async def _do_export_final(
                     silence_trigger=settings.silence_trigger,
                     silence_keep=settings.silence_keep,
                     music_path=_music_path,
-                    music_start_s=settings.music_start_s,
+                    music_start_s=_music_start_eff,
                     music_gain_db=settings.music_gain_db,
                     music_mode=settings.music_mode,
                     transition=settings.transition,

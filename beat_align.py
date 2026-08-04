@@ -347,13 +347,24 @@ def _seg_score(sal, dur, target, lo, hi):
     return 2.8 * sal + 1.6 * (-abs(dur - target) / rng)
 
 
-def solve_boundaries(beat_times, salience, anchor_idx, count, lo, hi, before):
+def solve_boundaries(beat_times, salience, anchor_idx, count, lo, hi, before,
+                     pins=None):
     """v5.py:630 / :739 — memoized DP over (position, beat index), globally optimal.
 
     Returns beat INDICES, ordered. `before=True` walks right-to-left ending at
     the anchor so the nominated clip lands exactly on the drop; `before=False`
     walks forward from it.
+
+    `pins` maps a 0-based POSITION within this block to a wanted duration in
+    seconds. A pinned position ignores [lo, hi] and takes the boundary whose
+    duration is nearest the pin — that is how v5 lets one clip hold for an exact
+    beat-snapped length (an intro hold, say) while the rest stay inside the caps.
+
+    Known limit, same as v5 (`docs/.../pin-clip-duration.md`): a pin does not
+    backtrack. It commits to the single nearest boundary, so an unsatisfiable
+    pin fails the whole solve rather than trying the second-nearest.
     """
+    pins = pins or {}
     bt = np.asarray(beat_times, dtype=float)
     sal = np.asarray(salience, dtype=float)
     targets = _pacing_targets(count, lo, hi, before)
@@ -369,6 +380,17 @@ def solve_boundaries(beat_times, salience, anchor_idx, count, lo, hi, before):
             rng = range(idx - 1, -1, -1)
         else:
             rng = range(idx + 1, len(bt))
+        # A pinned position ignores the caps and takes the nearest duration.
+        _pin = pins.get(count - 1 - pos if before else pos)
+        if _pin:
+            cands = [j for j in rng]
+            if not cands:
+                return (float("-inf"), ())
+            j = min(cands, key=lambda k: abs(abs(bt[idx] - bt[k]) - _pin))
+            sub = solve(pos + 1, j)
+            if sub is None or not math.isfinite(sub[0]):
+                return (float("-inf"), ())
+            return (2.8 * float(sal[j]) + sub[0], (j,) + sub[1])
         for j in rng:
             dur = abs(bt[idx] - bt[j])
             if dur < lo:
