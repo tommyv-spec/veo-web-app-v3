@@ -967,10 +967,32 @@ def submit_ui(page, prompt, ref_paths, portrait=None, timeout_s=180):
         # attach through the composer's own "File upload" button. Attaching first
         # via the generic "Upload files" (documents/data/code) entry and selecting
         # Videos afterwards never submitted.
-        _human_click(page, page.locator(SEL["tools"]).first, "Upload & tools")
-        page.wait_for_timeout(int(random.uniform(1200, 2200)))
-        if not _click_text(page, ["Create video"], "videos-tool"):
-            raise RuntimeError("could not select the Videos tool")
+        # Videos mode PERSISTS across New chat. When it is already on, the menu
+        # item reads "Deselect Videos" and there is no "Create video" to click —
+        # blindly selecting it failed 5 clips in a row with "could not select the
+        # Videos tool". The aspect control only exists in Videos mode, so its
+        # presence is the reliable probe.
+        # Retry the whole probe: on a page that has not finished settling none of
+        # the three signals exist yet, and a single-shot check raised
+        # "could not select the Videos tool" on an otherwise healthy clip.
+        for tool_try in range(1, 4):
+            if page.locator(SEL["aspect"]).count():
+                log("  Videos mode already active (aspect control present)")
+                break
+            _human_click(page, page.locator(SEL["tools"]).first, "Upload & tools")
+            page.wait_for_timeout(int(random.uniform(1400, 2400)))
+            if page.locator("button:has-text('Deselect Videos'), "
+                            "[role=menuitem]:has-text('Deselect Videos')").count():
+                log("  Videos mode already active (Deselect Videos offered)")
+                _dismiss_overlay(page)
+                break
+            if _click_text(page, ["Create video"], "videos-tool"):
+                break
+            log(f"  Videos tool not offered yet (try {tool_try}/3) — settling")
+            _dismiss_overlay(page)
+            page.wait_for_timeout(4000)
+        else:
+            raise RuntimeError("could not select the Videos tool after 3 tries")
         page.wait_for_timeout(int(random.uniform(1600, 2600)))
 
         if portrait is not None:
@@ -978,15 +1000,19 @@ def submit_ui(page, prompt, ref_paths, portrait=None, timeout_s=180):
             _dismiss_overlay(page)
 
         for path in (ref_paths or []):
-            with page.expect_file_chooser(timeout=20000) as fc:
-                btn = page.locator("button[aria-label='File upload']").first
+            _dismiss_overlay(page)
+            btn = page.locator("button[aria-label='File upload']").first
+            if not btn.count():
+                # Fall back to the tools menu, but only when the composer's own
+                # upload button really is absent. Opening the menu first when the
+                # button existed cost two clips to filechooser timeouts.
+                _human_click(page, page.locator(SEL["tools"]).first, "Upload & tools")
+                page.wait_for_timeout(int(random.uniform(1000, 1800)))
+            with page.expect_file_chooser(timeout=25000) as fc:
                 if btn.count():
                     _human_click(page, btn, "File upload")
-                else:
-                    page.locator(SEL["tools"]).first.click()
-                    page.wait_for_timeout(1000)
-                    if not _click_text(page, ["Upload files", "Upload"], "upload"):
-                        raise RuntimeError("no file-upload control found")
+                elif not _click_text(page, ["Upload files", "Upload"], "upload"):
+                    raise RuntimeError("no file-upload control found")
             fc.value.set_files(path)
             # Wait for the attachment to finish, not a fixed sleep: the composer
             # grows a "close attachment" control once the file is really staged.
@@ -1269,6 +1295,43 @@ class Api:
         return (r.json() or {}).get("url")
 
 
+DURATION_TOLERANCE_S = float(os.environ.get("GEMINI_DURATION_TOLERANCE_S", "0.5"))
+
+
+def _probe_duration(path):
+    """Seconds of `path` per ffprobe, or None when ffprobe is unavailable."""
+    import subprocess
+    exe = os.environ.get("FFPROBE_BIN", "ffprobe")
+    try:
+        out = subprocess.run(
+            [exe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", path],
+            capture_output=True, text=True, timeout=60).stdout.strip()
+        return float(out.splitlines()[0]) if out else None
+    except Exception:
+        return None
+
+
+def _check_duration(path, want):
+    """Duration is asked for in PROMPT WORDING, which Gemini honours but does not
+    guarantee. Measured on job d8f1b043: 8 of 9 clips landed within 16ms of the
+    request and one came back 3.008s against an 8s ask — and it uploaded and was
+    marked completed anyway, so a 5-second-short clip shipped looking fine.
+    Raise instead, so the clip re-queues rather than silently passing.
+    """
+    if not want:
+        return
+    got = _probe_duration(path)
+    if got is None:
+        log("  ! ffprobe unavailable — duration NOT verified for this clip")
+        return
+    if abs(got - float(want)) > DURATION_TOLERANCE_S:
+        raise RuntimeError(
+            f"duration mismatch: asked {want}s, got {got:.3f}s "
+            f"(tolerance {DURATION_TOLERANCE_S}s) — not uploading")
+    log(f"  duration verified: {got:.3f}s vs {want}s asked")
+
+
 def _clip_prompt(clip):
     return (clip.get("prompt") or clip.get("dialogue_text") or "").strip()
 
@@ -1317,6 +1380,7 @@ def process_clip(page, api, job, clip, work_dir):
     out = os.path.join(work_dir, f"clip_{idx}.mp4")
     generate(page, prompt=prompt, ref_path=start_path, out_path=out,
              end_frame_path=end_path)
+    _check_duration(out, want)   # refuse to upload a clip of the wrong length
 
     url = api.upload_video(out, job["id"], idx)
     api.clip_status(clip_id, "completed", output_url=url)
