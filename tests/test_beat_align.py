@@ -36,11 +36,63 @@ MD = """## §0
 """
 
 
-def test_read_build_returns_scenes_in_order(tmp_path):
+def test_read_build_returns_scene_target_and_render_bucket(tmp_path):
     p = tmp_path / "b.md"
     p.write_text(MD, encoding="utf-8")
     _, scenes = ba.read_build(p)
-    assert scenes == [(1, 3.43), (2, 2.0)]
+    # (scene_no, target_duration_s, clip_duration_s or None)
+    assert scenes == [(1, 3.43, None), (2, 2.0, None)]
+
+
+def test_read_build_picks_up_clip_duration_s(tmp_path):
+    p = tmp_path / "b.md"
+    p.write_text(MD.replace("- **target_duration_s:** 3.430",
+                            "- **clip_duration_s:** 8\n- **target_duration_s:** 3.430"),
+                 encoding="utf-8")
+    _, scenes = ba.read_build(p)
+    assert scenes[0] == (1, 3.43, 8)
+    assert scenes[1] == (2, 2.0, None)
+
+
+# --------------------------------------------------------- headroom guard
+
+def test_required_bucket_picks_the_smallest_that_fits():
+    assert ba.required_bucket(3.4) == 4
+    assert ba.required_bucket(4.0) == 4
+    assert ba.required_bucket(4.01) == 6
+    assert ba.required_bucket(9.9) == 10
+    assert ba.required_bucket(10.5) is None
+
+
+def test_headroom_flags_a_target_longer_than_its_render_bucket():
+    """The silent-drift case: ffmpeg -t 5.9 on a 4s clip returns 4s."""
+    scenes = [(1, 3.4, 4)]
+    problems, needed = ba.check_headroom(scenes, [5.9])
+    assert problems and needed == {1: 6}
+    assert "drift" in problems[0]
+
+
+def test_headroom_passes_when_every_target_fits():
+    scenes = [(1, 3.4, 4), (2, 5.0, 6)]
+    problems, needed = ba.check_headroom(scenes, [3.9, 5.8])
+    assert problems == [] and needed == {}
+
+
+def test_headroom_uses_the_job_default_when_no_bullet():
+    scenes = [(1, 3.4, None)]
+    assert ba.check_headroom(scenes, [3.9], job_default=4)[0] == []
+    problems, needed = ba.check_headroom(scenes, [5.9], job_default=4)
+    assert problems and needed == {1: 6}
+
+
+def test_headroom_complains_when_neither_bullet_nor_default_is_known():
+    problems, needed = ba.check_headroom([(1, 3.4, None)], [3.9])
+    assert problems and needed == {1: 4}
+
+
+def test_headroom_flags_a_target_no_bucket_can_hold():
+    problems, needed = ba.check_headroom([(1, 3.4, 10)], [12.0])
+    assert problems and needed == {}      # nothing to suggest; 12s is unrenderable
 
 
 def test_write_durations_roundtrip_preserves_everything_else(tmp_path):
@@ -55,7 +107,7 @@ def test_write_durations_roundtrip_preserves_everything_else(tmp_path):
     assert out.count("### Scene") == 2
     p.write_text(out, encoding="utf-8")
     _, scenes = ba.read_build(p)
-    assert scenes == [(1, 1.111), (2, 2.222)]
+    assert scenes == [(1, 1.111, None), (2, 2.222, None)]
 
 
 def test_read_build_rejects_scene_without_duration(tmp_path):

@@ -275,8 +275,10 @@ def snap_boundaries(scenes, beat_times, salience, start_time=0.0, tol_beats=0.6)
 
     edges = [start_time]
     ideal = start_time
-    for _, dur, _bucket in scenes:
-        ideal += dur
+    # Index rather than unpack: callers pass (scene, dur) or (scene, dur, bucket)
+    # and this function only ever needs the duration.
+    for s in scenes:
+        ideal += s[1]
         floor_ = edges[-1] + 0.20  # never produce a zero/negative-length clip
         window = np.where((np.abs(beat_times - ideal) <= tol) & (beat_times > floor_))[0]
         if len(window):
