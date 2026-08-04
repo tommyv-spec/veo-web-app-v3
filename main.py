@@ -10250,6 +10250,40 @@ async def _do_export_final(
         raise HTTPException(status_code=400, detail="No valid clip files found")
     
     print(f"[Export] Smart trim: {settings.smart_trim}, Start frames: {settings.frames_to_cut_start}, End frames: {settings.frames_to_cut_end}, Remove silence: {settings.remove_silence} ({settings.silence_mode}), Remove laughter: {settings.remove_laughter}, DeepFilter: {settings.apply_deepfilter}, Loudnorm: {settings.apply_loudnorm}, Speed: {settings.playback_speed}, Master audio: {settings.master_audio_filename}")
+
+    # v888.1 — RESOLVE THE MUSIC BED BEFORE THE EXPORT STARTS.
+    #
+    # The first v888 export shipped an unscored video: upload-music wrote the
+    # file to the request container's local disk, the export ran detached in a
+    # DIFFERENT container, `Path(output_dir)/music_bed.mp3` did not exist there,
+    # and video_processor logged "music not found" and carried on. Render's disk
+    # is ephemeral; R2 is the only thing shared between the two. master_audio
+    # already had exactly this recovery (see its block below) — the music path
+    # did not.
+    #
+    # Two changes: recover from R2, and make a missing file a HARD 400. Silently
+    # delivering a silent cut when the operator explicitly asked for a score is
+    # the worst possible outcome — it looks like success.
+    _music_path = None
+    if settings.music_filename:
+        _mp = output_dir / settings.music_filename
+        if not _mp.exists() and storage:
+            try:
+                _r2 = f"jobs/{job_id}/outputs/{settings.music_filename}"
+                if storage.exists(_r2):
+                    print(f"[Export/v888.1] recovering music bed from R2: {_r2}", flush=True)
+                    await asyncio.to_thread(storage.download_file, _r2, str(_mp))
+            except Exception as _e:
+                print(f"[Export/v888.1] music R2 recovery failed: {_e}", flush=True)
+        if not _mp.exists():
+            raise HTTPException(
+                status_code=400,
+                detail=(f"Music bed '{settings.music_filename}' not found on disk or in R2 "
+                        f"for this job. Re-upload it via POST /api/jobs/{job_id}/upload-music."))
+        _music_path = str(_mp)
+        print(f"[Export/v888.1] music bed resolved: {_mp} "
+              f"({_mp.stat().st_size / 1e6:.1f}MB) start={settings.music_start_s}s "
+              f"mode={settings.music_mode} gain={settings.music_gain_db:+.1f}dB", flush=True)
     
     # Create output filename with unique suffix to prevent collisions
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -10453,8 +10487,7 @@ async def _do_export_final(
                     vad_threshold=settings.silence_threshold,
                     silence_trigger=settings.silence_trigger,
                     silence_keep=settings.silence_keep,
-                    music_path=(str(Path(job.output_dir) / settings.music_filename)
-                                if settings.music_filename else None),
+                    music_path=_music_path,
                     music_start_s=settings.music_start_s,
                     music_gain_db=settings.music_gain_db,
                     music_mode=settings.music_mode,
@@ -10786,8 +10819,7 @@ async def _do_export_final(
                     vad_threshold=settings.silence_threshold,
                     silence_trigger=settings.silence_trigger,
                     silence_keep=settings.silence_keep,
-                    music_path=(str(Path(job.output_dir) / settings.music_filename)
-                                if settings.music_filename else None),
+                    music_path=_music_path,
                     music_start_s=settings.music_start_s,
                     music_gain_db=settings.music_gain_db,
                     music_mode=settings.music_mode,
