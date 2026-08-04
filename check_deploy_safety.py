@@ -179,6 +179,15 @@ def write_ack(tree, digest, n_lost, n_gone):
         f.write("\n")
 
 
+def _safe(s):
+    """Console-safe text. Never let a non-ASCII source line kill the gate."""
+    try:
+        enc = (getattr(sys.stdout, "encoding", None) or "utf-8")
+        return s.encode(enc, "replace").decode(enc, "replace")
+    except Exception:
+        return s.encode("ascii", "replace").decode("ascii")
+
+
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("--ref", default="HEAD")
@@ -284,7 +293,12 @@ def main(argv):
         for path, lines in sorted(losses.items()):
             print("   %s (%d):" % (path, len(lines)))
             for ln in lines[:5]:
-                print("      %s" % ln[:140])
+                # The gate must never die on its own output. A lost line can
+                # contain anything the source does — an emoji in a UI label was
+                # enough to raise UnicodeEncodeError on a cp1252 console and
+                # block every push touching that line (2026-08-05, the 🥁 in the
+                # export modal). Degrade the character, never the check.
+                print("      %s" % _safe(ln[:140]))
             if len(lines) > 5:
                 print("      … and %d more" % (len(lines) - 5))
 
