@@ -14315,11 +14315,13 @@ Ambient: same kitchen room tone, soft pour sound.
                                                     <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Start at (s)</label>
                                                     <input type="number" id="modalMusicStart" value="0" min="0" step="0.01"
                                                         style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">Where in the song the video starts. 0 plays it from the top.</span>
                                                 </div>
                                                 <div>
                                                     <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Volume (dB)</label>
                                                     <input type="number" id="modalMusicGain" value="0" min="-40" max="10" step="1"
                                                         style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">0 is the song's own level. Negative makes it quieter.</span>
                                                 </div>
                                             </div>
                                             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
@@ -14327,7 +14329,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                                 <div class="toggle active" id="modalMusicReplace"></div>
                                             </div>
                                             <div style="display:flex;justify-content:space-between;align-items:center;">
-                                                <span style="font-size:11px;">🥁 Align cuts to the beat<span style="font-size:9px;color:var(--text-muted);display:block;">Nudges each cut to the nearest beat. Your clip lengths stay as authored.</span></span>
+                                                <span style="font-size:11px;">🥁 Align cuts to the beat<span style="font-size:9px;color:var(--text-muted);display:block;">Cuts land on the beat instead of where they fall now.</span></span>
                                                 <div class="toggle" id="modalBeatAlign"></div>
                                             </div>
                                             <div id="modalBeatOpts" style="display:none;margin-top:10px;">
@@ -14342,9 +14344,10 @@ Ambient: same kitchen room tone, soft pour sound.
 
                                                 <div id="modalBeatSnapOpts">
                                                     <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--text-muted);">
-                                                        <span>Max nudge</span><span id="modalBeatTolVal" style="color:var(--text-primary);">0.6 beats</span>
+                                                        <span>How far a cut may move</span><span id="modalBeatTolVal" style="color:var(--text-primary);">0.6 beats</span>
                                                     </div>
                                                     <input type="range" id="modalBeatTol" min="10" max="150" value="60" style="width:100%;margin-top:4px;">
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">The furthest a cut may shift to reach a beat. 0.6 beats is about a quarter second at 120 BPM. Smaller keeps your timing; larger lands harder on the beat.</span>
                                                 </div>
 
                                                 <div id="modalBeatSolveOpts" style="display:none;">
@@ -14353,11 +14356,13 @@ Ambient: same kitchen room tone, soft pour sound.
                                                             <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Shortest clip (s)</label>
                                                             <input type="number" id="modalBeatMin" value="0.5" min="0.1" max="10" step="0.05"
                                                                 style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">No clip will be shorter than this.</span>
                                                         </div>
                                                         <div>
                                                             <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Longest clip (s)</label>
                                                             <input type="number" id="modalBeatMax" value="2.0" min="0.2" max="20" step="0.05"
                                                                 style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">No clip will be longer than this. A tight range gives a fast, even cut.</span>
                                                         </div>
                                                     </div>
                                                     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
@@ -14365,6 +14370,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                                             <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Clip on the drop</label>
                                                             <input type="number" id="modalBeatDropClip" value="1" min="1" max="99" step="1"
                                                                 style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">This clip starts exactly on the drop. Clips before it are timed backwards from there.</span>
                                                         </div>
                                                         <div>
                                                             <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Which drop</label>
@@ -14375,6 +14381,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                                                 <option value="3">3rd</option>
                                                                 <option value="4">4th</option>
                                                             </select>
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">Which detected drop to hit. Strongest is usually right; try the next if it picks the wrong moment.</span>
                                                         </div>
                                                     </div>
                                                     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
@@ -14382,33 +14389,39 @@ Ambient: same kitchen room tone, soft pour sound.
                                                             <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Exact drop (s, optional)</label>
                                                             <input type="number" id="modalBeatDropTime" placeholder="auto" min="0" step="0.01"
                                                                 style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">Leave blank to detect it. Type a time if you know where the drop is.</span>
                                                         </div>
                                                         <div>
                                                             <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Beats per bar</label>
                                                             <input type="number" id="modalBeatsPerBar" value="4" min="2" max="12" step="1"
                                                                 style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;">
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">4 for almost all music, 3 for a waltz. Sets which beats count as strong.</span>
                                                         </div>
                                                     </div>
                                                     <div style="margin-bottom:8px;">
                                                         <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Pin clips (e.g. <code>1:2.47, 4:1.2</code>)</label>
                                                         <input type="text" id="modalBeatPins" placeholder="clip:seconds, …"
                                                             style="width:100%;padding:7px 10px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;">
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">Hold one clip for a set length, ignoring the range above. Good for an opening shot.</span>
                                                     </div>
                                                     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
                                                         <div>
                                                             <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Speed before</label>
                                                             <input type="number" id="modalBeatPreSpeed" value="1.0" min="0.5" max="3" step="0.05"
                                                                 style="width:100%;padding:7px 8px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;">
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">Playback speed of clips before the drop. 1 is normal.</span>
                                                         </div>
                                                         <div>
                                                             <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">Speed after</label>
                                                             <input type="number" id="modalBeatPostSpeed" value="1.0" min="0.5" max="3" step="0.05"
                                                                 style="width:100%;padding:7px 8px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;">
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">Speed from the drop clip onward.</span>
                                                         </div>
                                                         <div>
                                                             <label style="font-size:10px;color:var(--text-muted);margin-bottom:3px;display:block;">All clips ×</label>
                                                             <input type="number" id="modalBeatClipSpeed" value="1.0" min="0.5" max="3" step="0.05"
                                                                 style="width:100%;padding:7px 8px;background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;">
+<span style="font-size:9px;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4;">Multiplies both speeds. A clip too short for its slot slows down rather than cutting off.</span>
                                                         </div>
                                                     </div>
                                                 </div>
