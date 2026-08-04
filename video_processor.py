@@ -5308,7 +5308,17 @@ def export_final_video(
         "vad_silence_trigger": silence_trigger if remove_silence else None,
         "vad_silence_keep": silence_keep if remove_silence else None,
         "clips_with_start_trim_skipped": sum(1 for c in clip_info if c.get("skip_start_trim", False)),
-        "pre_trimmed": not needs_trimming
+        "pre_trimmed": not needs_trimming,
+        # v888.2 — report the bed. The first two v888 exports could not be
+        # verified without listening to the file: an audio stream exists either
+        # way because the clips carry their own audio, so "audio present" proved
+        # nothing. `music_applied` is set True ONLY after the mux actually
+        # succeeds, so a caller can tell a scored export from a silent one.
+        "music_requested": bool(music_path),
+        "music_filename": Path(music_path).name if music_path else None,
+        "music_start_s": music_start_s if music_path else None,
+        "music_mode": music_mode if music_path else None,
+        "music_applied": False,
     }
     
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -5813,6 +5823,7 @@ def export_final_video(
                           f"— keeping the unscored cut", flush=True)
                 else:
                     shutil.move(str(_scored), str(concat_output))
+                    stats["music_applied"] = True
                     print(f"[VideoProcessor/v888] music bed applied", flush=True)
 
         # v692b — ffprobe AFTER concat to confirm whether re-encode
