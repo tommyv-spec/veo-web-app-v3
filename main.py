@@ -10320,23 +10320,60 @@ async def _do_export_final(
                     f"beat_align needs an authored target_duration_s on every clip; "
                     f"clip(s) {_missing} have none")
             _total = float(sum(_targets))
-            # THE SERVER NEVER ANALYSES. librosa is deliberately absent from
-            # requirements.txt (a full-song analysis peaks 678MB on a 2GB box),
-            # so the grid is computed AUTHOR-side and uploaded beside the song:
-            #   python code/beat_align.py <build>.md --song s.mp3 --emit-grid
-            #   POST /api/jobs/{id}/upload-music-grid
-            # Reading a few hundred floats costs nothing and cannot OOM.
-            _grid_path = Path(_music_path).with_suffix(".beatgrid.json")
-            if not _grid_path.exists():
-                raise FileNotFoundError(
-                    f"no beat grid for this song ({_grid_path.name}). The server does "
-                    f"not analyse audio — generate the grid author-side with "
-                    f"`python code/beat_align.py <build>.md --song <song> --emit-grid` "
-                    f"and upload it via POST /api/jobs/{job_id}/upload-music-grid.")
-            _an = _json.loads(_grid_path.read_text(encoding="utf-8"))
-            print(f"[Export/v890] beat grid loaded: {len(_an.get('beat_times') or [])} "
-                  f"beats, {_an.get('bpm')} BPM (precomputed, no analysis on-box)",
-                  flush=True)
+            # v890.2 — analyse ON-BOX, but only ever a WINDOW, and cache it.
+            # This has to work for a user who just drags in a song, so a CLI
+            # step or a local worker is not an option.
+            #
+            # THREE SAFEGUARDS, because the box is 2GB with an OOM history:
+            #  (1) WINDOW — [music_start-2s, +authored_total+8s] only. Measured
+            #      121MB/1.9s for 45s vs 755MB/18.9s for a full 200s track.
+            #      Downsampling instead is not viable (11kHz gives 99.38 BPM
+            #      against a true 95.70) and neither is extrapolating from one
+            #      window (0.30s error late in a track, ~half a beat).
+            #  (2) CACHE — keyed by song content hash + the exact window, so a
+            #      re-export or a reused track never re-analyses.
+            #  (3) GATE — skip if free memory is low. Falling back to the
+            #      authored timings is always correct; an OOM is not.
+            _win_off = max(0.0, float(settings.music_start_s) - 2.0)
+            _win_dur = _total + 8.0
+            _sig = hashlib.sha256()
+            with open(_music_path, "rb") as _f:
+                for _chunk in iter(lambda: _f.read(1 << 20), b""):
+                    _sig.update(_chunk)
+            _sig.update(f"|{_win_off:.3f}|{_win_dur:.3f}|v890.2".encode())
+            _grid_path = output_dir / f"beatgrid_{_sig.hexdigest()[:16]}.json"
+
+            if _grid_path.exists():
+                _an = _json.loads(_grid_path.read_text(encoding="utf-8"))
+                print(f"[Export/v890] beat grid CACHE HIT {_grid_path.name} "
+                      f"({_an.get('bpm')} BPM) - no analysis", flush=True)
+            else:
+                # mem_guard.headroom_ok trims the heap first, then compares the
+                # cgroup figure; it returns True on local dev where the host
+                # number is not a container headroom number.
+                _ok, _snap = True, {}
+                try:
+                    import mem_guard as _mg
+                    _ok, _snap = _mg.headroom_ok(500)
+                except Exception as _mge:
+                    print(f"[Export/v890] mem gate unavailable ({_mge}); proceeding",
+                          flush=True)
+                if not _ok:
+                    raise MemoryError(
+                        f"insufficient headroom for beat analysis "
+                        f"(avail={_snap.get('avail_mb')}MB, need 500MB free for a "
+                        f"~150MB window). The authored timings still apply.")
+                print(f"[Export/v890] analysing {Path(_music_path).name} "
+                      f"window [{_win_off:.1f}s +{_win_dur:.1f}s] "
+                      f"(avail={_snap.get('avail_mb')}MB)", flush=True)
+                _an = await asyncio.to_thread(
+                    _ba.analyze_song, Path(_music_path),
+                    offset=_win_off, duration=_win_dur)
+                try:
+                    _grid_path.write_text(_json.dumps(_an), encoding="utf-8")
+                except Exception as _ce:
+                    print(f"[Export/v890] grid cache write failed (non-fatal): {_ce}",
+                          flush=True)
             _scenes = [(i + 1, t) for i, t in enumerate(_targets)]
             _edges = _ba.snap_boundaries(
                 _scenes, _an["beat_times"], _an["beat_salience"],

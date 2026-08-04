@@ -46,6 +46,22 @@ aiofiles>=23.0.0
 # Audio Enhancement (lightweight, works on free tier)
 numpy>=1.24.0
 soundfile>=0.12.0
+
+# v890.2 — beat analysis for music-bed alignment (beat_align.py).
+# Pulls numba + llvmlite (~90MB image). Deliberate: the alternative was making
+# every user run a CLI or a local worker, and this has to work for someone who
+# just drags in a song.
+#
+# MEMORY DISCIPLINE (measured 2026-08-04, 200s track) — the analysis is ALWAYS
+# windowed to the span a given video needs, never run over a whole track:
+#     full song @22.05kHz   755MB  18.9s   BPM 95.70
+#     45s window @22.05kHz  121MB   1.9s   BPM 95.70   <- what we run
+# Downsampling is NOT an alternative: 11kHz reports 99.38 BPM and 8kHz 93.75
+# against a true 95.70, and a 4% tempo error is ~1.2s of drift over a 30s reel.
+# Extrapolating a grid from one window is not either: 0.30s max error late in
+# the track, about half a beat.
+librosa>=0.10,<1.0
+scipy>=1.10
 noisereduce>=3.0.0
 
 # Voice Cloning uses httpx (already included above)
