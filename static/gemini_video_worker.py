@@ -434,19 +434,52 @@ def poll_done(text):
 # ---------------------------------------------------------------------------
 
 def is_logged_in(page):
+    """Signed in? Check SEVERAL signals, not just the token.
+
+    WIZ_global_data.SNlM0e is populated by app JS that has not necessarily run
+    yet right after domcontentloaded, so a single check on a freshly launched
+    golden reported "logged out" for a session that was perfectly valid and sent
+    the operator to a manual-login prompt they did not need.
+    """
     try:
-        return bool(page.evaluate("() => { try { return !!(window.WIZ_global_data && "
-                                  "window.WIZ_global_data.SNlM0e); } catch(e){ return false; } }"))
+        return bool(page.evaluate("""() => {
+            try {
+                if (window.WIZ_global_data && window.WIZ_global_data.SNlM0e) return true;
+            } catch (e) {}
+            if (document.querySelector('div.ql-editor[contenteditable=true]')) return true;
+            if (document.querySelector("a[aria-label*='Google Account']")) return true;
+            if (document.querySelector("[data-test-id='side-nav-sparkle-button']")) return true;
+            if (/"SNlM0e":"[^"]+"/.test(document.documentElement.innerHTML)) return true;
+            return false;
+        }"""))
     except Exception:
         return False
 
 
-def ensure_logged_in(page, timeout_s=600):
+def ensure_logged_in(page, timeout_s=600, session_copied=False):
+    """Settle first, prompt only as a last resort.
+
+    When a golden was just copied the session IS signed in; it only needs the
+    app to finish booting. Give it real time (and a couple of reloads) before
+    telling the operator to do anything — the previous version prompted for a
+    manual login immediately after a successful copy.
+    """
     page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=60000)
-    jitter(2, 4)
-    if is_logged_in(page):
-        log("already logged into Gemini.")
-        return True
+    for attempt in range(1, 7):
+        jitter(2.5, 4.0)
+        if is_logged_in(page):
+            log("already logged into Gemini (copied session)." if session_copied
+                else "already logged into Gemini.")
+            return True
+        if attempt in (3, 5):
+            log(f"  page not ready yet (try {attempt}/6) — reloading")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                pass
+    if session_copied:
+        log("copied session did not come up signed in — the account may need a")
+        log("one-time Gemini visit in Chrome Beta first. Waiting in the window...")
     log("=" * 60)
     log("  ACTION NEEDED: log into gemini.google.com in the window that opened.")
     log("  ONE-TIME — the session is saved in the worker's own profile.")
@@ -1513,8 +1546,9 @@ def main():
         login_flow(args.email)
         return
 
+    session_copied = False
     if args.email:
-        use_account(args.email)
+        session_copied = use_account(args.email)
 
     if args.serve and not args.token:
         log("ERROR: --serve needs a worker token (--token or USER_WORKER_TOKEN). "
@@ -1535,7 +1569,7 @@ def main():
     with _import_playwright()() as p:
         ctx, page = launch(p)
         try:
-            if not ensure_logged_in(page):
+            if not ensure_logged_in(page, session_copied=session_copied):
                 return
             _install(page)
             q = quota(page)
