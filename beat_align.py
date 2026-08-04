@@ -67,12 +67,17 @@ HOP = 512
 
 SCENE_RE = re.compile(r"^###\s+Scene\s+(\d+)\s*$", re.M)
 DUR_RE = re.compile(r"^-\s+\*\*target_duration_s:\*\*\s*([\d.]+)", re.M)
+RENDER_RE = re.compile(r"^-\s+\*\*clip_duration_s:\*\*\s*(\d+)", re.M)
+
+# v861 render buckets. A clip is RENDERED at one of these and then trimmed DOWN
+# to target_duration_s. There is no trim-up: see check_headroom.
+ALLOWED_RENDER_S = (4, 6, 8, 10)
 
 
 def read_build(md_path: Path):
-    """Ordered scenes with their authored durations. Returns (text, [ (scene_no, dur), ... ])."""
+    """Ordered scenes. Returns (text, [(scene_no, target_dur, render_bucket|None), ...])."""
     text = md_path.read_text(encoding="utf-8")
-    # Split on scene headers so each scene's own duration bullet stays with it.
+    # Split on scene headers so each scene's own bullets stay with it.
     parts = SCENE_RE.split(text)
     if len(parts) < 3:
         raise SystemExit("no `### Scene N` headers found in %s" % md_path)
@@ -83,8 +88,49 @@ def read_build(md_path: Path):
         m = DUR_RE.search(body)
         if not m:
             raise SystemExit("Scene %d has no `- **target_duration_s:**` bullet" % num)
-        scenes.append((num, float(m.group(1))))
+        r = RENDER_RE.search(body)
+        scenes.append((num, float(m.group(1)), int(r.group(1)) if r else None))
     return text, scenes
+
+
+def required_bucket(target_s: float):
+    """Smallest v861 bucket that can hold `target_s`, or None if none can."""
+    for b in ALLOWED_RENDER_S:
+        if b >= target_s - 1e-6:
+            return b
+    return None
+
+
+def check_headroom(scenes, targets, job_default=None):
+    """THE guard. A clip is rendered at a fixed bucket and trimmed DOWN only.
+
+    ffmpeg `-t 5.9` against a 4.0s file returns 4.0s with no error and no
+    warning (verified empirically 2026-08-04). The concat then drifts and every
+    later cut is off the beat, silently. So any aligned target longer than the
+    clip's render bucket is a HARD failure here, at plan time, where it is still
+    cheap to fix.
+
+    Returns (problems, needed) — `needed` maps scene -> the bucket it must be
+    rendered at for the plan to survive.
+    """
+    problems, needed = [], {}
+    for (num, _authored, bucket), tgt in zip(scenes, targets):
+        have = bucket if bucket is not None else job_default
+        want = required_bucket(tgt)
+        if want is None:
+            problems.append("Scene %d needs %.2fs but the longest render bucket is %ds"
+                            % (num, tgt, ALLOWED_RENDER_S[-1]))
+            continue
+        if have is None:
+            needed[num] = want
+            problems.append("Scene %d declares no `clip_duration_s` and no --job-duration "
+                            "was given; it needs >= %ds to hold %.2fs" % (num, want, tgt))
+        elif tgt > have + 1e-6:
+            needed[num] = want
+            problems.append("Scene %d renders at %ds but the plan wants %.2fs — ffmpeg "
+                            "would silently return %ds and drift the whole reel; set "
+                            "`clip_duration_s: %d`" % (num, have, tgt, have, want))
+    return problems, needed
 
 
 def write_durations(text: str, new_durs: list[float]) -> str:
@@ -229,7 +275,7 @@ def snap_boundaries(scenes, beat_times, salience, start_time=0.0, tol_beats=0.6)
 
     edges = [start_time]
     ideal = start_time
-    for _, dur in scenes:
+    for _, dur, _bucket in scenes:
         ideal += dur
         floor_ = edges[-1] + 0.20  # never produce a zero/negative-length clip
         window = np.where((np.abs(beat_times - ideal) <= tol) & (beat_times > floor_))[0]
@@ -328,15 +374,20 @@ def main():
     ap.add_argument("--min", dest="lo", type=float, default=0.5)
     ap.add_argument("--max", dest="hi", type=float, default=2.0)
     ap.add_argument("--beats-per-bar", type=int, default=4)
+    ap.add_argument("--job-duration", type=int, default=None, choices=ALLOWED_RENDER_S,
+                    help="render bucket for scenes with no `clip_duration_s` bullet")
     ap.add_argument("--write", action="store_true",
                     help="patch target_duration_s in the md (default: report only)")
+    ap.add_argument("--allow-drift", action="store_true",
+                    help="DANGEROUS: write a plan whose targets exceed the render "
+                         "buckets. ffmpeg cannot trim UP, so the reel will drift.")
     ap.add_argument("--plan-out", type=Path, default=None)
     a = ap.parse_args()
 
     text, scenes = read_build(a.build_md)
     n = len(scenes)
     print("build   : %s" % a.build_md.name)
-    print("scenes  : %d   authored total %.2fs" % (n, sum(d for _, d in scenes)))
+    print("scenes  : %d   authored total %.2fs" % (n, sum(d for _, d, _ in scenes)))
 
     an = analyze_song(a.song, beats_per_bar=a.beats_per_bar)
     bt, sal = np.array(an["beat_times"]), np.array(an["beat_salience"])
@@ -389,15 +440,15 @@ def main():
     loose = []
     print("\n%-6s %9s %9s %9s   %6s  %s" % ("scene", "authored", "aligned", "delta",
                                             "bars", "note"))
-    for i, ((num, old), new) in enumerate(zip(scenes, durs), 1):
+    for i, ((num, old, _bk), new) in enumerate(zip(scenes, durs), 1):
         note = ""
         if a.mode == "snap" and abs(new - old) > dur_bound + 1e-6:
             note = "OUT OF SNAP WINDOW (no beat in reach)"
             loose.append(num)
         print("%-6d %9.2f %9.2f %+9.2f   %6.2f  %s" % (num, old, new, new - old,
                                                        new / bar, note))
-    print("%-6s %9.2f %9.2f %+9.2f" % ("TOTAL", sum(d for _, d in scenes),
-                                       sum(durs), sum(durs) - sum(d for _, d in scenes)))
+    print("%-6s %9.2f %9.2f %+9.2f" % ("TOTAL", sum(d for _, d, _ in scenes),
+                                       sum(durs), sum(durs) - sum(d for _, d, _ in scenes)))
     if loose:
         print("\nWARNING scene(s) %s could not snap inside +/-%.2fs — usually the track "
               "ends before the reel does (song %.1fs, last beat %.1fs). Use a longer "
@@ -414,8 +465,31 @@ def main():
                        "timeline_start": round(edges[i], 3),
                        "timeline_end": round(edges[i + 1], 3),
                        "output_start": round(edges[i] - start, 3)}
-                      for i, ((num, old), new) in enumerate(zip(scenes, durs))]}
+                      for i, ((num, old, _bk), new) in enumerate(zip(scenes, durs))]}
+    # --- HEADROOM GUARD. Must run before anything is written.
+    problems, needed = check_headroom(scenes, durs, job_default=a.job_duration)
+    if problems:
+        print("\n" + "=" * 70)
+        print("HEADROOM FAIL — %d scene(s) want more than they render" % len(problems))
+        print("=" * 70)
+        for p in problems:
+            print("  " + p)
+        if needed:
+            print("\nSet these before rendering, then re-run:")
+            for scene, bucket in sorted(needed.items()):
+                print("  Scene %-3d  - **clip_duration_s:** %d" % (scene, bucket))
+        print("\nWhy this is fatal: ffmpeg trims DOWN only. `-t 5.9` on a 4.0s clip\n"
+              "returns 4.0s with no error, the concat drifts, and every later cut\n"
+              "falls off the beat with nothing in the logs.")
+        if not a.allow_drift:
+            raise SystemExit(1)
+        print("\n--allow-drift set — writing anyway. The reel WILL drift.")
+    else:
+        print("\nheadroom : OK — every target fits inside its render bucket")
+
     out = a.plan_out or a.build_md.with_suffix(".beatplan.json")
+    plan["headroom_ok"] = not problems
+    plan["required_clip_duration_s"] = {str(k): v for k, v in needed.items()}
     out.write_text(json.dumps(plan, indent=2), encoding="utf-8")
     print("plan    : %s" % out)
 
