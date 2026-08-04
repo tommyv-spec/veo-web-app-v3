@@ -471,6 +471,42 @@
                 </div>
             </div>
         </div>
+
+        <!-- Emergency worker — last resort when the main worker cannot run -->
+        <div class="card" id="emergencyCard" style="margin-top:14px;border-color:rgba(234,88,12,0.35);">
+            <h3 style="color:#fb923c;">Emergency Worker</h3>
+            <div style="font-size:12px;color:var(--text-muted);line-height:1.5;margin-bottom:10px;">
+                Renders your clips through the <strong>Gemini</strong> web app instead of Flow.
+                Use it only when the main worker will not run. It claims the
+                <strong>same jobs</strong> — so stop the main worker first, never run both.
+            </div>
+            <button class="action-btn" id="emergencyBtn" onclick="toggleEmergency(event)">
+                Show emergency command
+            </button>
+            <div id="emergencyPanel" style="display:none;margin-top:10px;">
+                <div class="os-pills">
+                    <span class="os-pill active" onclick="selectEmergencyOS('windows',this)">Windows</span>
+                    <span class="os-pill" onclick="selectEmergencyOS('mac',this)">Mac / Linux</span>
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);margin:6px 0 4px;">
+                    Google account to render with:
+                </div>
+                <input id="emergencyEmail" type="email" placeholder="you@gmail.com"
+                       autocomplete="off" spellcheck="false" oninput="updateEmergencyCmd()"
+                       style="width:100%;padding:7px 9px;border-radius:6px;border:1px solid rgba(51,65,85,0.6);background:rgba(15,23,42,0.6);color:var(--text-secondary);font-size:12px;margin-bottom:8px;">
+                <div class="cmd-block">
+                    <code id="emergencyCmd">—</code>
+                    <button class="cmd-copy" onclick="copyEmergencyCmd(event)">Copy</button>
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:10px;line-height:1.5;">
+                    Needs Python + <code>patchright</code>, and that Google account signed
+                    into <strong>Chrome Beta</strong> (its session is copied; your daily
+                    Chrome is never touched).<br>
+                    <strong style="color:#fb923c;">Basic renderer:</strong> no variants, no
+                    auto-redo, no policy retries. Duration is whatever Gemini returns.
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -747,6 +783,53 @@ function updateManualCmd() {
 }
 function copyManualCmd(e) { navigator.clipboard.writeText(document.getElementById('manualCmd').textContent).then(() => { e.target.textContent = 'Copied!'; setTimeout(() => e.target.textContent = 'Copy', 1500); }); }
 function toggleAdvanced(e) { const p = document.getElementById('advancedPanel'), v = p.classList.toggle('visible'); e.target.textContent = v ? 'Advanced ▴' : 'Advanced ▾'; }
+
+// ── Emergency worker (Gemini stand-in for Flow) ──────────────────
+let emergencyOS = (userOS === 'windows') ? 'windows' : 'mac';
+
+function toggleEmergency(e) {
+    const p = document.getElementById('emergencyPanel');
+    const open = p.style.display === 'none';
+    p.style.display = open ? 'block' : 'none';
+    e.target.textContent = open ? 'Hide emergency command' : 'Show emergency command';
+    if (open) {
+        const el = document.getElementById('emergencyEmail');
+        if (!el.value && laptopEmail) el.value = laptopEmail;
+        updateEmergencyCmd();
+    }
+}
+
+function selectEmergencyOS(os, el) {
+    emergencyOS = os;
+    el.parentElement.querySelectorAll('.os-pill').forEach(p => p.classList.remove('active'));
+    el.classList.add('active');
+    updateEmergencyCmd();
+}
+
+function updateEmergencyCmd() {
+    const base = location.origin || 'https://kavenobuilder.com';
+    const url = base + '/api/user-worker/download/gemini_video_worker.py';
+    const email = (document.getElementById('emergencyEmail').value || 'you@gmail.com').trim();
+    const tok = activeToken || '<worker-token>';
+    const el = document.getElementById('emergencyCmd');
+    // Fetch the worker + its profile-pull companion, then serve the same queue.
+    el.textContent = emergencyOS === 'windows'
+        ? "pip install patchright; patchright install chromium; "
+          + "irm " + url + " -OutFile gemini_video_worker.py; "
+          + "irm " + base + "/api/user-worker/download/worker_profile_pull.py -OutFile worker_profile_pull.py; "
+          + "python gemini_video_worker.py --email " + email + " --serve --token " + tok
+        : "pip install patchright && patchright install chromium && "
+          + "curl -sL " + url + " -o gemini_video_worker.py && "
+          + "curl -sL " + base + "/api/user-worker/download/worker_profile_pull.py -o worker_profile_pull.py && "
+          + "python3 gemini_video_worker.py --email " + email + " --serve --token " + tok;
+}
+
+function copyEmergencyCmd(e) {
+    navigator.clipboard.writeText(document.getElementById('emergencyCmd').textContent).then(() => {
+        e.target.textContent = 'Copied!';
+        setTimeout(() => e.target.textContent = 'Copy', 1500);
+    });
+}
 
 init();
 </script>

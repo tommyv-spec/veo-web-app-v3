@@ -9,6 +9,13 @@
 # block deploy.ps1's clean-checkout gate.
 static/.chatgpt_profile*/
 static/.chatgpt_cookies.json
+# Same deal for the Gemini video worker's own Chrome profile (live Google
+# session cookies). Prefix match so any per-account suffix is covered too.
+static/.gemini_profile*/
+# Per-job scratch (downloaded frames + rendered mp4s) from --serve mode.
+static/.gemini_work/
+# Dumped StreamGenerate responses from failed submits (diagnostics only).
+static/.gemini_debug/
 static/.submit_storage_state.json
 # Written at runtime by image_worker.py (see _worker_chrome_channel) — records
 # which Chrome channel this machine's worker uses. Per-machine, not shared.

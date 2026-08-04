@@ -14771,13 +14771,27 @@ async def user_worker_get_pending_job(
                 job.status = 'queued_for_flow'
             db.commit()
     else:
-        job = db.query(Job).filter(
+        # No worker_id -> LOOK WITHOUT CLAIMING. exclude must still apply here:
+        # it used to be honoured only in the worker_id branch above, so a caller
+        # paging the queue read-only got handed the same head job forever (a
+        # 40-step walk returned one job 40 times). Without this, the only way to
+        # see past the head is to claim, which mutates live queue state just to
+        # browse it.
+        query = db.query(Job).filter(
             Job.user_id == user_id,
             Job.backend == 'flow',
             Job.status.in_(['pending', 'queued_for_flow']),
             Job.claimed_by_worker.is_(None)
-        ).order_by(Job.created_at.asc()).first()
-    
+        )
+        if exclude_ids:
+            query = query.filter(Job.id.notin_(exclude_ids))
+            # TEMP DIAG (remove once operator-side evidence lands): proves the
+            # read-only branch now honours exclude. Before this fix a caller
+            # paging without worker_id got the same head job forever.
+            print(f"[UserWorker] read-only pending poll excluding {len(exclude_ids)} job(s)",
+                  flush=True)
+        job = query.order_by(Job.created_at.asc()).first()
+
     # v455: piggyback abort signals (same as local-worker endpoint)
     aborted_jobs = []
     if worker_id:
@@ -15814,6 +15828,18 @@ async def serve_flow_worker():
     if not worker_path.exists():
         raise HTTPException(404, "Worker script not found")
     return Response(content=worker_path.read_text(), media_type="text/x-python")
+
+
+@app.get("/api/user-worker/download/gemini_video_worker.py")
+async def serve_gemini_video_worker():
+    """Serve the EMERGENCY worker — renders clips through the Gemini web app when
+    flow_worker.py cannot run. Claims the same /api/user-worker job queue.
+    Imports worker_profile_pull.py, which is served by the endpoint below."""
+    worker_path = Path(__file__).parent / "static" / "gemini_video_worker.py"
+    if not worker_path.exists():
+        raise HTTPException(404, "Emergency worker script not found")
+    return Response(content=worker_path.read_text(encoding="utf-8"),
+                    media_type="text/x-python")
 
 
 @app.get("/api/user-worker/download/worker_profile_pull.py")
