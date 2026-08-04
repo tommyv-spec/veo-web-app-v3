@@ -4443,6 +4443,41 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         if cut_mode:
             print(f"[v668/parse] scene_{scene_index} cut_mode={cut_mode}", flush=True)
 
+        # v889 — EXPLICIT per-scene `- **target_duration_s:**`.
+        #
+        # Until now this bullet was parsed on the DECODE side and ignored on the
+        # build side: the importer derived every duration as
+        # next_image_anchor - this_image_anchor (v667). That model assumes
+        # anchors rise monotonically with scene order, which IMAGE REUSE breaks —
+        # and reuse is something we actively encourage (v594: 3-6 images for
+        # 8-12 scenes).
+        #
+        # Live failure, job d8f1b043: scene 6 reused image_3 (anchor 7.60s) for
+        # the wide-angle repeat of a pulse. Its anchor jumped BACKWARDS, the next
+        # anchor forward was 19.23s, so the derived duration was 11.63s for a
+        # beat authored at 1.83s. The clip held on screen six times too long and
+        # read as slow motion. Scenes 5 and 9 were collaterally wrong too.
+        #
+        # The authored bullet is what the decode actually measured, so it wins.
+        # The anchor diff stays as the fallback for builds that do not declare it.
+        explicit_target_s: Optional[float] = None
+        _ets_raw = _parse_bullet_field(block, "target_duration_s")
+        if _ets_raw:
+            try:
+                _v = float(str(_ets_raw).split()[0].strip())
+                if _v > 0:
+                    explicit_target_s = round(_v, 3)
+                else:
+                    print(f"[v889/parse] scene_{scene_index} target_duration_s "
+                          f"{_ets_raw!r} is not > 0 - ignoring", flush=True)
+            except (TypeError, ValueError):
+                print(f"[v889/parse] scene_{scene_index} target_duration_s "
+                      f"{_ets_raw!r} is not a number - ignoring", flush=True)
+        if explicit_target_s is not None:
+            print(f"[v889/parse] scene_{scene_index} "
+                  f"target_duration_s={explicit_target_s} (explicit, authoritative)",
+                  flush=True)
+
         # v681 — per-scene cast presence (overrides per-image cast).
         # Comma-separated list of Ingredients-table Name values present
         # in this scene. When non-empty, image worker binds ONLY these
@@ -4713,6 +4748,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "clip_durations": clip_durations,  # v861 — parallel to lines; int (4|6|8|10) or None
             "speaker_mode": speaker_mode,  # v537
             "cut_mode": cut_mode,  # v668 — None | 'whisper' | 'timeline' | 'auto'
+            "explicit_target_s": explicit_target_s,  # v889 — authored, outranks the v667 anchor diff
             "cast": scene_cast,           # v681 — None | list[str]
             "scene_type": scene_type,     # v681 — None | 'shot' | 'text_card'
             "caption": caption,           # v681 — source caption (decode) OR text_card text
@@ -8315,6 +8351,18 @@ def prepare_batch_for_video(
             if nxt is not None and nxt > this_anchor:
                 target_duration_s = round(nxt - this_anchor, 3)
                 anchor_bucket = _ceil_to_veo_bucket(target_duration_s)
+
+        # v889 — the authored bullet OUTRANKS the anchor diff. See the parse
+        # site for why: image reuse makes the anchor jump backwards and the
+        # diff balloons (job d8f1b043 scene 6: 11.63s derived for a 1.83s beat).
+        _explicit = scene.get("explicit_target_s")
+        if _explicit:
+            if target_duration_s is not None and abs(_explicit - target_duration_s) > 0.05:
+                print(f"[v889] scene_{scene['scene_index']} target_duration_s "
+                      f"{_explicit}s (authored) overrides {target_duration_s}s "
+                      f"(anchor-derived)", flush=True)
+            target_duration_s = _explicit
+            anchor_bucket = _ceil_to_veo_bucket(target_duration_s)
 
         # v861 — per-line explicit durations parsed off the scene block.
         # Parallel to `lines`; entries are int (4|6|8|10) or None. A no-lines
