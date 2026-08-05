@@ -892,7 +892,8 @@ def _click_text(page, needles, tag, timeout_ms=6000):
         try:
             loc = page.locator(sel.format(n=n)).last   # innermost match
             if loc.count() and loc.is_visible():
-                _human_click(page, loc, f"{tag}:{n}")
+                # Menu options live inside the overlay — never dismiss it here.
+                _human_click(page, loc, f"{tag}:{n}", clear_overlay=False)
                 page.wait_for_timeout(int(random.uniform(700, 1400)))
                 return n
         except Exception:
@@ -900,7 +901,7 @@ def _click_text(page, needles, tag, timeout_ms=6000):
     return None
 
 
-def _human_click(page, locator, label="", settle=(0.4, 0.9)):
+def _human_click(page, locator, label="", settle=(0.4, 0.9), clear_overlay=True):
     """Click the way a person does: travel the cursor there, pause, press.
 
     Playwright's locator.click() teleports the pointer and fires instantly, with
@@ -912,7 +913,13 @@ def _human_click(page, locator, label="", settle=(0.4, 0.9)):
     # A leftover Material backdrop swallows pointer events; clicking through it
     # burns Playwright's full 30s actionability timeout ("subtree intercepts
     # pointer events") and then cascades into a filechooser timeout.
-    _dismiss_overlay(page)
+    #
+    # clear_overlay=False when the TARGET LIVES INSIDE an overlay (a menu
+    # option): dismissing then would Escape the very menu we just opened. That
+    # regression silently rendered a 9:16 job in landscape — the aspect menu was
+    # closed before "Portrait (9:16)" could be clicked.
+    if clear_overlay:
+        _dismiss_overlay(page)
     box = locator.bounding_box()
     if not box:
         locator.click(timeout=15000)
@@ -1657,6 +1664,44 @@ def _check_duration(path, want):
     log(f"  duration verified: {got:.3f}s vs {want}s asked")
 
 
+def _probe_size(path):
+    """(width, height) per ffprobe, or (None, None)."""
+    import subprocess
+    exe = os.environ.get("FFPROBE_BIN", "ffprobe")
+    try:
+        out = subprocess.run(
+            [exe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=width,height", "-of", "csv=p=0:s=x", path],
+            capture_output=True, text=True, timeout=60).stdout.strip()
+        w, h = out.split("x")[:2]
+        return int(w), int(h)
+    except Exception:
+        return None, None
+
+
+def _check_aspect(path, portrait=True):
+    """Refuse to upload a render in the wrong orientation.
+
+    The aspect control is a UI click that can silently fail; when it did, an
+    8s 1280x720 LANDSCAPE clip was uploaded into a 9:16 job and marked
+    completed, because the only gate checked duration. Orientation is just as
+    load-bearing as length — verify it the same way.
+    """
+    w, h = _probe_size(path)
+    if not w or not h:
+        log("  ! ffprobe gave no dimensions — aspect NOT verified")
+        return
+    is_portrait = h > w
+    if portrait and not is_portrait:
+        raise RuntimeError(
+            f"aspect mismatch: job wants 9:16 but the render is {w}x{h} "
+            f"(landscape) — not uploading")
+    if not portrait and is_portrait:
+        raise RuntimeError(
+            f"aspect mismatch: job wants 16:9 but the render is {w}x{h}")
+    log(f"  aspect verified: {w}x{h}")
+
+
 def _clip_prompt(clip):
     return (clip.get("prompt") or clip.get("dialogue_text") or "").strip()
 
@@ -1748,6 +1793,7 @@ def process_clip(page, api, job, clip, work_dir, attempt=1):
                 f"hard reset, retry {try_n}/{UI_RETRIES}")
             _hard_reset(page)
     _check_duration(out, want)   # refuse to upload a clip of the wrong length
+    _check_aspect(out, portrait=str(job.get("aspect_ratio", "9:16")) != "16:9")
 
     url = api.upload_video(out, job["id"], idx, attempt=attempt)
     api.clip_status(clip_id, "completed", output_url=url)
