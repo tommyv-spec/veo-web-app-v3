@@ -36,6 +36,7 @@ Exit codes:
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -223,8 +224,187 @@ def missing_reference_bindings(md_text, has_subject, product_bound, ingredient_n
             if not product_bound:
                 missing.append((name, rtype, source, "--product <name> (or --product-node <id>)"))
             continue
+        if re.match(r"^\(?\s*no\s+upload\s*\)?$", source, re.I):
+            # v618b discipline: a character/product row with no real upload is
+            # mis-typed — steer to the fix, not to a binding flag.
+            missing.append((name, rtype, source,
+                            "no upload exists: change the row to type=extra + Source inline (v618b)"))
+            continue
         missing.append((name, rtype, source, f'--ingredient "{name}=<name-or-id>"'))
     return missing
+
+
+# ---------------------------------------------------------------------------
+# v888.1 — generic reference resolver
+#
+# Three name spaces rot at different speeds: row names live forever in the
+# build, aliases (~/.kaveno/aliases.json) are re-pointable, node ids die when
+# uploads are deleted. The old flow hard-wired across them (a 5-string
+# persona-alias set decided which row --avatar credits), so a build whose
+# persona row is named "the woman" needed the SAME node bound twice under two
+# flags. This resolver bridges the layers per row, most explicit wins:
+#
+#   1. --ingredient "name=ref"          (explicit, always wins)
+#   2. the row's own Source cell        ("upload node 4481" / "upload elder71")
+#   3. a saved alias matching the row name
+#   4. base-name retry                  ("the man (day 30)" -> "the man")
+#   5. slot inference, only when unambiguous (--avatar -> the sole unbound
+#      character row; --product -> the sole unbound product row)
+#   6. nothing guessed -> the v888 guard still refuses with exact flags
+#
+# Every resolved node is liveness-checked against the live uploads list, so a
+# deleted upload fails with the row + stale id named instead of a server 400.
+# ---------------------------------------------------------------------------
+
+_SOURCE_NODE_RE = re.compile(r"^\s*upload(?:ed)?\s*(?:node\s*)?#?(\d+)\s*$", re.I)
+_SOURCE_ALIAS_RE = re.compile(r"^\s*upload(?:ed)?[:\s]\s*([A-Za-z][\w][\w .-]*?)\s*$", re.I)
+_SOURCE_BARE_NODE_RE = re.compile(r"^\s*node\s*#?(\d+)\s*$", re.I)
+_STATE_SUFFIX_RE = re.compile(r"^(.+?)\s*\([^)]+\)\s*$")
+
+
+def parse_source_ref(source):
+    """Parse an Ingredients Source cell into ('node', id) / ('alias', name) / None.
+
+    Canonical forms (documented in the build checklist): `upload <alias>` is
+    preferred (aliases survive re-uploads), `upload node <id>` accepted.
+    Anything else (inline, (no upload), free prose) returns None and the
+    cascade continues.
+    """
+    s = (source or "").strip().strip("`")
+    m = _SOURCE_NODE_RE.match(s) or _SOURCE_BARE_NODE_RE.match(s)
+    if m:
+        return ("node", int(m.group(1)))
+    m = _SOURCE_ALIAS_RE.match(s)
+    if m and not m.group(1).strip().isdigit():
+        return ("alias", m.group(1).strip())
+    return None
+
+
+def _strip_state_suffix(name):
+    """'the man (day 30)' -> 'the man'; None when there is no (state) suffix."""
+    m = _STATE_SUFFIX_RE.match(name)
+    return m.group(1).strip() if m else None
+
+
+def _declared_upload_rows(md_text):
+    """The Ingredients rows that declare an upload (v618b: character/product
+    with a non-empty Source cell)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import image_platform as ip
+    parsed = ip.parse_scene_table(md_text)
+    rows = []
+    for row in parsed.get("ingredients") or []:
+        name = (row.get("name") or "").strip()
+        rtype = (row.get("type") or "").strip().lower()
+        source = (row.get("source") or "").strip()
+        if name and rtype in ("character", "product") and source:
+            rows.append({"name": name, "type": rtype, "source": source})
+    return rows
+
+
+def plan_reference_bindings(rows, explicit, aliases, uploads_by_id,
+                            subject, product_node):
+    """Pure planner (no network, unit-testable). Returns
+    (bindings, new_subject, new_product, notes, errors):
+      bindings     {row_name: node_id} to add as --ingredient pairs
+      new_subject  subject id inferred from the sole character row, or None
+      new_product  product id inferred from the sole product row, or None
+      notes        human lines explaining every resolution
+      errors       hard problems (stale node, unknown alias) — abort, send nothing
+    """
+    bindings, notes, errors = {}, [], []
+    unbound_chars, unbound_products = [], []
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import image_platform as ip
+
+    def _alias_lookup(key):
+        return aliases.get(key.lower())
+
+    for row in rows:
+        name, rtype, source = row["name"], row["type"], row["source"]
+        low = name.lower()
+        if low in explicit:
+            continue  # --ingredient wins; guard already credits it
+        if rtype == "character" and ip._is_persona_alias(name) and subject:
+            continue  # legacy path: server binds this row from subject_node_id
+        if rtype == "product" and product_node:
+            continue  # server binds the product row from product_node_id
+
+        node, how = None, None
+        ref = parse_source_ref(source)
+        if ref:
+            kind, val = ref
+            if kind == "node":
+                node, how = val, f"Source cell 'upload node {val}'"
+            else:
+                nid = _alias_lookup(val)
+                if nid:
+                    node, how = nid, f"Source cell alias '{val}'"
+                else:
+                    errors.append(
+                        f"row '{name}': Source cell names alias '{val}' but no such alias "
+                        f"is saved — run: send_to_platform.py set-alias {val} <node_id>")
+                    continue
+        if node is None:
+            nid = _alias_lookup(low)
+            if nid:
+                node, how = nid, f"saved alias '{low}'"
+        if node is None:
+            base = _strip_state_suffix(name)
+            if base:
+                bl = base.lower()
+                if bl in explicit:
+                    node, how = explicit[bl], f"base name '{base}' bound via --ingredient"
+                else:
+                    nid = _alias_lookup(bl)
+                    if nid:
+                        node, how = nid, f"base-name alias '{bl}'"
+        if node is None:
+            (unbound_chars if rtype == "character" else unbound_products).append(name)
+            continue
+
+        if uploads_by_id is not None and node not in uploads_by_id:
+            errors.append(
+                f"row '{name}': {how} -> node {node}, but that upload no longer exists "
+                f"(deleted?) — run list-uploads, then fix the Source cell or re-point the alias")
+            continue
+        bindings[name] = node
+        notes.append(f"{name} -> node {node} ({how})")
+
+    # slot inference — only ever when there is exactly ONE candidate (v573:
+    # at most one character upload + one product upload exist per build, so
+    # a sole unbound row is unambiguous; two rows are never guessed).
+    if subject and len(unbound_chars) == 1:
+        bindings[unbound_chars[0]] = subject
+        notes.append(f"{unbound_chars[0]} -> node {subject} (--avatar/--subject, sole unbound character row)")
+        unbound_chars = []
+    if product_node and len(unbound_products) == 1:
+        bindings[unbound_products[0]] = product_node
+        notes.append(f"{unbound_products[0]} -> node {product_node} (--product, sole unbound product row)")
+        unbound_products = []
+
+    # reverse inference: a zero-flag send whose build self-describes its
+    # uploads still needs subject_node_id / product_node_id for the import.
+    new_subject = new_product = None
+    if not subject:
+        char_bound = [(r["name"], bindings[r["name"]]) for r in rows
+                      if r["type"] == "character" and r["name"] in bindings]
+        if len(char_bound) == 1:
+            new_subject = char_bound[0][1]
+            notes.append(f"subject <- node {new_subject} (sole character row '{char_bound[0][0]}')")
+    if not product_node:
+        prod_bound = [(r["name"], bindings[r["name"]]) for r in rows
+                      if r["type"] == "product" and r["name"] in bindings]
+        if len(prod_bound) == 1:
+            new_product = prod_bound[0][1]
+            notes.append(f"product <- node {new_product} (sole product row '{prod_bound[0][0]}')")
+
+    return bindings, new_subject, new_product, notes, errors
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +729,8 @@ def main(argv=None):
                    help="promote the batch to a video job once all variants are chosen (default is STOP — the operator triggers promotion)")
     p.add_argument("--resume-batch", help="skip import, resume from an existing batch id")
     p.add_argument("--no-render", action="store_true", help="stop after promote (don't poll clips)")
+    p.add_argument("--bindings", action="store_true", dest="bindings_only",
+                   help="resolve reference bindings, print the table, send NOTHING (dry run)")
     p.add_argument("--skip-preflight", action="store_true")
     p.add_argument("--json", action="store_true", dest="as_json")
     p.add_argument("--poll-interval", type=int, default=15)
@@ -613,6 +795,39 @@ def main(argv=None):
                     item = f"{name}={nid}"
                 resolved.append(item)
             args.ingredient = resolved
+
+        # v888.1 — generic reference resolver: bridge row names / aliases /
+        # live nodes per row BEFORE the v888 guard, so a self-describing build
+        # sends with zero flags and nothing is ever typed twice.
+        if not args.resume_batch:
+            rows = _declared_upload_rows(md_text)
+            if rows:
+                uploads_cache = uploads_cache or _fetch_uploads(client)
+                uploads_by_id = {n["id"]: n for n in uploads_cache}
+                explicit = {}
+                for item in args.ingredient:
+                    name, _, nid = item.partition("=")
+                    if nid.strip().isdigit():
+                        explicit[name.strip().lower()] = int(nid)
+                bindings, new_subject, new_product, notes, errors = plan_reference_bindings(
+                    rows, explicit, _load_aliases(), uploads_by_id,
+                    args.subject, args.product_node)
+                for msg in notes:
+                    print(f"  bind: {msg}", flush=True)
+                if errors:
+                    raise PlatformError(
+                        EXIT_INGREDIENT,
+                        "REFERENCE RESOLVE (nothing sent):\n"
+                        + "\n".join("  - " + e for e in errors))
+                for name, nid in bindings.items():
+                    args.ingredient.append(f"{name}={nid}")
+                if new_subject and not args.subject:
+                    args.subject = new_subject
+                if new_product and not args.product_node:
+                    args.product_node = new_product
+            if args.bindings_only:
+                print("bindings dry-run complete — nothing sent", flush=True)
+                return EXIT_OK
 
         if args.resume_batch:
             batch_id = args.resume_batch
