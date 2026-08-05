@@ -49,6 +49,13 @@ def test_captcha_mint_failure_is_unusual():
     assert _is_unusual(_reason("submit_image failed: captcha mint failed")) is True
 
 
+def test_grecaptcha_execute_rejected_is_unusual():
+    # v894 — the script LOADED and execute() was refused: still an account block.
+    assert _is_unusual(_reason(
+        "submit_image failed: captcha mint failed (grecaptcha execute rejected: "
+        "Invalid site key)")) is True
+
+
 def test_bare_permission_denied_403_is_unusual():
     # Vector 2 — 403 block without the literal RECAPTCHA word
     assert _is_unusual(_reason(
@@ -89,3 +96,18 @@ def test_plain_timeout_is_not_unusual():
 def test_empty_reason_is_not_unusual():
     assert _is_unusual("") is False
     assert _is_unusual(None) is False
+
+
+# --- v894: a mint that failed because the PAGE never loaded reCAPTCHA is a page
+# problem. Calling it an account block drove an endless golden-restore/relaunch
+# loop (operator 2026-08-05, node 4577: mint=10.0s(4x) = the wait timeout). ---
+
+def test_grecaptcha_absent_is_not_unusual():
+    assert _is_unusual(_reason(
+        "submit_image failed: captcha mint failed (grecaptcha not available)")) is False
+
+
+def test_mint_evaluate_failure_is_not_unusual():
+    assert _is_unusual(_reason(
+        "submit_image failed: captcha mint failed (mint evaluate failed: "
+        "Execution context was destroyed)")) is False

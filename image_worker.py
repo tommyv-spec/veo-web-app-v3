@@ -107,7 +107,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v582"  # v893 foreign-project error-page detection (flow_worker parity)
+WORKER_VERSION = "img-v583"  # v894 mint-failure cause + page reload recovery (no false account block)
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 
 # v891d — truthful heartbeat. The heartbeat threads beat every 5s no matter
@@ -3842,8 +3842,14 @@ def _fa_api_fetch(page, url, method, token, body_obj=None, extra_headers=None):
 
 def _fa_mint_or_empty(page, action):
     try:
-        return _fa_mint_captcha(page, action)
-    except Exception:
+        tok = _fa_mint_captcha(page, action)
+        if tok:
+            _FA_MINT_LAST_ERR["reason"] = ""
+        return tok
+    except Exception as _e:
+        # v894 — keep the cause; the single-token JS still throws on a page that
+        # never loaded reCAPTCHA ("grecaptcha not available").
+        _FA_MINT_LAST_ERR["reason"] = str(_e).strip().splitlines()[0][:200] if str(_e) else "mint evaluate failed"
         return ""
 
 
@@ -3857,24 +3863,33 @@ def _fa_mint_or_empty(page, action):
 # and fire N POSTs concurrently inside ONE page.evaluate, so a x4 node costs one
 # render's wall time instead of four.
 
+# v894 — returns {tokens, err} instead of throwing, so the caller learns WHY a
+# mint failed. Two very different causes used to collapse into the same empty
+# string: the reCAPTCHA script never loading in the PAGE (a page problem — the
+# Flow app hadn't hydrated) versus execute() being REJECTED (an account
+# problem). The first was being reported as an account block and drove an
+# endless golden-restore/relaunch loop (operator 2026-08-05, node 4577:
+# mint=10.0s(4x) — exactly the 10s wait timeout, so grecaptcha was absent).
 _FA_CAPTCHA_BATCH_JS = """
 async ([siteKey, action, n]) => {
-  function waitG(t) {
-    return new Promise((res, rej) => {
-      const s = Date.now();
-      const c = () => {
-        if (window.grecaptcha && window.grecaptcha.enterprise && window.grecaptcha.enterprise.execute) return res();
-        if (Date.now() - s > t) return rej(new Error('grecaptcha not available'));
-        setTimeout(c, 200);
-      };
-      c();
-    });
+  const s = Date.now();
+  while (Date.now() - s < 10000) {
+    if (window.grecaptcha && window.grecaptcha.enterprise && window.grecaptcha.enterprise.execute) break;
+    await new Promise(r => setTimeout(r, 200));
   }
-  await waitG(10000);
+  if (!(window.grecaptcha && window.grecaptcha.enterprise && window.grecaptcha.enterprise.execute)) {
+    return { tokens: [], err: 'grecaptcha not available' };
+  }
   const jobs = [];
   for (let i = 0; i < n; i++) jobs.push(window.grecaptcha.enterprise.execute(siteKey, { action }));
   const out = await Promise.allSettled(jobs);
-  return out.map(r => (r.status === 'fulfilled' && r.value) ? r.value : '');
+  const tokens = out.map(r => (r.status === 'fulfilled' && r.value) ? r.value : '');
+  let err = '';
+  if (!tokens.some(t => t)) {
+    const first = out.find(r => r.status === 'rejected');
+    err = 'grecaptcha execute rejected: ' + ((first && first.reason && first.reason.message) || 'unknown');
+  }
+  return { tokens, err };
 }
 """
 
@@ -3900,19 +3915,67 @@ async ([url, method, headers, bodyStrs]) => {
 """
 
 
-def _fa_mint_captcha_batch(page, action, n):
-    """Mint n reCAPTCHA tokens concurrently. Always returns a list of length n;
-    a slot that failed to mint is an empty string (caller fails that variant)."""
+def _fa_mint_batch_raw(page, action, n):
+    """One mint attempt. Returns (tokens, err) — tokens is always length n, err
+    is '' on success or a plain-language cause. Accepts the pre-v894 list shape
+    so an older page script can't break this."""
     n = int(n or 1)
     try:
-        toks = page.evaluate(_FA_CAPTCHA_BATCH_JS, [_FA_RECAPTCHA_SITE_KEY, action, n])
-    except Exception:
-        return [""] * n
-    if not isinstance(toks, list):
-        return [""] * n
+        res = page.evaluate(_FA_CAPTCHA_BATCH_JS, [_FA_RECAPTCHA_SITE_KEY, action, n])
+    except Exception as _e:
+        return [""] * n, f"mint evaluate failed: {_e}"
+    if isinstance(res, list):          # pre-v894 shape
+        toks, err = res, ""
+    elif isinstance(res, dict):
+        toks = res.get("tokens") or []
+        err = res.get("err") or ""
+    else:
+        return [""] * n, "mint returned an unreadable value"
     toks = [t if isinstance(t, str) else "" for t in toks]
     toks += [""] * (n - len(toks))
-    return toks[:n]
+    return toks[:n], err
+
+
+# v894 — page-level mint recovery. When grecaptcha is simply absent the Flow app
+# has not hydrated (foreign/broken project, slow load, navigation mid-flight).
+# Reloading the project page reloads Flow's reCAPTCHA script, which is a real
+# fix; a golden restore + browser relaunch is not (and loops forever).
+_FA_MINT_LAST_ERR = {"reason": ""}
+
+
+def _fa_mint_page_not_ready(reason: str) -> bool:
+    """The mint failed because of the PAGE, not the account."""
+    r = (reason or "").lower()
+    return "grecaptcha not available" in r or "mint evaluate failed" in r
+
+
+def _fa_mint_captcha_batch(page, action, n, pfx=""):
+    """Mint n reCAPTCHA tokens concurrently. Always returns a list of length n;
+    a slot that failed to mint is an empty string.
+
+    v894: when NOTHING minted because grecaptcha was absent, reload the project
+    page once and mint again before giving up — the pre-v894 code reported this
+    as an account block, which triggered a pointless golden restore + relaunch
+    on every job. The failure cause is recorded in _FA_MINT_LAST_ERR so the
+    caller can put it in the variant's reason string."""
+    n = int(n or 1)
+    toks, err = _fa_mint_batch_raw(page, action, n)
+    _FA_MINT_LAST_ERR["reason"] = err
+    if any(toks) or not _fa_mint_page_not_ready(err):
+        return toks
+    print(f"{pfx}[flow_api][v894] captcha mint failed ({err}) — reloading the project page and re-minting", flush=True)
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=30000)
+    except Exception as _re:
+        print(f"{pfx}[flow_api][v894] page reload failed: {_re}", flush=True)
+        return toks
+    toks2, err2 = _fa_mint_batch_raw(page, action, n)
+    _FA_MINT_LAST_ERR["reason"] = err2
+    if any(toks2):
+        print(f"{pfx}[flow_api][v894] ✓ mint recovered after page reload", flush=True)
+    else:
+        print(f"{pfx}[flow_api][v894] ✗ mint still failing after reload ({err2})", flush=True)
+    return toks2
 
 
 # ─── v856 — uploaded-reference media_id cache ────────────
@@ -4087,7 +4150,8 @@ class _FaClient:
             self._t["mint"] += time.monotonic() - _m0
             self._t["mint_n"] += 1
             if not token:
-                last = {"error": "captcha mint failed"}
+                _me = _FA_MINT_LAST_ERR.get("reason") or ""
+                last = {"error": f"captcha mint failed ({_me})" if _me else "captcha mint failed"}
                 self._bump_outcome("mint_fail")   # v833
                 continue
             _fa_inject_captcha_token(body, token)
@@ -4178,13 +4242,19 @@ class _FaClient:
         captchas = _fa_mint_captcha_batch(self.page, _FA_CAPTCHA_IMAGE, n)
         self._t["mint"] += time.monotonic() - _m0
         self._t["mint_n"] += n
+        # v894 — carry WHY the mint failed into the reason string. Without it the
+        # classifier can't tell a page that never loaded reCAPTCHA from a flagged
+        # account, and treats both as an account block.
+        _mint_err = _FA_MINT_LAST_ERR.get("reason") or ""
 
         out = [None] * n
         bodies, slots = [], []
         for i in range(n):
             if not captchas[i]:
                 self._bump_outcome("mint_fail")
-                out[i] = {"ok": False, "reason": "captcha mint failed"}
+                out[i] = {"ok": False,
+                          "reason": f"captcha mint failed ({_mint_err})" if _mint_err
+                                    else "captcha mint failed"}
                 continue
             body = _fa_build_generate_image(
                 prompt=prompt, project_id=self.project_id,
@@ -4979,6 +5049,15 @@ def _is_unusual(reason: str) -> bool:
     testable — see tests/test_image_worker_unusual_classifier.py.
     """
     r = (reason or "").upper()
+    # v894 — a mint that failed because the PAGE never loaded reCAPTCHA is not an
+    # account block. Restoring the golden + relaunching the browser cannot fix a
+    # page that hasn't hydrated, so v828's blanket "mint failed = blocked" put the
+    # worker in an endless restore loop (operator 2026-08-05, node 4577:
+    # mint=10.0s(4x) = exactly the grecaptcha wait timeout). Page-level causes get
+    # a page reload + normal retries instead (see _fa_mint_captcha_batch).
+    # Checked FIRST so it wins over the MINT-FAILED clause below.
+    if "GRECAPTCHA NOT AVAILABLE" in r or "MINT EVALUATE FAILED" in r:
+        return False
     if "UNUSUAL_ACTIVITY" in r:
         return True
     # 403 / permission block — Flow returns PERMISSION_DENIED code=403 on the
