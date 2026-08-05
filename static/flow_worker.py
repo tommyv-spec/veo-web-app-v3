@@ -1564,6 +1564,17 @@ def _scan_failure_reason(resp, url, buf_key=''):
         return
     if st != 200:
         print(f"[fail-reason-diag] {ep} HTTP {st} buf={buf_key}", flush=True)
+        # v898 TEMP DIAG (remove after the 403 cause is confirmed) — a 4xx on
+        # the generate call only ever logged its status; the BODY names the
+        # real cause (reCAPTCHA failure / abuse flag / quota). Read-only; body
+        # reads are already proven safe in this handler (resp.json() below).
+        if st in (400, 403, 429) and 'batchAsyncGenerateVideoStartImage' in ep:
+            try:
+                _body = resp.text()
+                if _body:
+                    print(f"[fail-reason-diag] v898 {ep} HTTP {st} body[:800]={_body[:800]}", flush=True)
+            except Exception as _be:
+                print(f"[fail-reason-diag] v898 body read failed: {_be}", flush=True)
         # v829 — the "unusual activity" card on the generate call is
         # locale-independent at the HTTP layer: it returns 403 (forbidden /
         # "Visita el Centro de ayuda") OR 429 (rate-limit / "Espera unos momentos
