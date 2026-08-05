@@ -19204,7 +19204,15 @@ Ambient: same kitchen room tone, soft pour sound.
                 }
                 const isOnline = window._imgWorkerDisplayedOnline;
 
-                const indicator = isOnline
+                // v891c — STALLED beats Online: the heartbeat only proves the
+                // worker process is alive; the server flags stalled when the
+                // lane's queue has sat undrained past the stall window with no
+                // fresh claim. Amber, not green — the operator must know the
+                // light no longer means "working".
+                const flowStalled = !!s.flow_stalled;
+                const indicator = flowStalled
+                    ? `<span style="color:var(--warning, #e8a13c);">Your image worker: ● Stalled — online but not picking up jobs (oldest queued ${Math.round((s.queued_oldest_age_seconds || 0) / 60)}m)</span>`
+                    : isOnline
                     ? '<span style="color:var(--success);">Your image worker: ● Online</span>'
                     : '<span style="color:var(--error);">Your image worker: ● Offline</span>';
                 // v758 — show the heartbeat age for HTTP-pull workers too (the
@@ -19229,15 +19237,23 @@ Ambient: same kitchen room tone, soft pour sound.
                 // Second light: the ChatGPT image worker, distinct from the
                 // flow worker above. Mirrors the primary indicator's markup.
                 const chatgptOnline = !!s.chatgpt_worker_online;
-                const chatgptIndicator = chatgptOnline
+                const chatgptStalled = !!s.chatgpt_stalled;
+                const chatgptIndicator = chatgptStalled
+                    ? `<span style="color:var(--warning, #e8a13c);">ChatGPT worker: ● Stalled — online but not picking up jobs (oldest queued ${Math.round((s.cg_queued_oldest_age_seconds || 0) / 60)}m)</span>`
+                    : chatgptOnline
                     ? '<span style="color:var(--success);">ChatGPT worker: ● Online</span>'
                     : '<span style="color:var(--error);">ChatGPT worker: ● Offline</span>';
                 const chatgptAgeStr = s.chatgpt_worker_heartbeat_age_seconds != null
                     ? ` <span style="color:var(--text-muted);">(last heartbeat ${s.chatgpt_worker_heartbeat_age_seconds}s ago${s.chatgpt_worker_id ? ' · ' + s.chatgpt_worker_id : ''})</span>`
                     : '';
 
-                const queueLine = (s.queued || s.generating)
-                    ? `<div style="margin-top:6px;">⏳ Queued: <strong>${s.queued}</strong> · Generating: <strong>${s.generating}</strong></div>`
+                // v891c — show the chatgpt lane's own queue too (cg_status lane
+                // is independent of the banana lane's counters).
+                const cgQueueBit = (s.cg_queued || s.cg_generating)
+                    ? ` · ChatGPT queued: <strong>${s.cg_queued}</strong> / generating: <strong>${s.cg_generating}</strong>`
+                    : '';
+                const queueLine = (s.queued || s.generating || s.cg_queued || s.cg_generating)
+                    ? `<div style="margin-top:6px;">⏳ Queued: <strong>${s.queued}</strong> · Generating: <strong>${s.generating}</strong>${cgQueueBit}</div>`
                     : '';
 
                 // v758 — the launch/setup UI used to render ONLY when offline,
@@ -19246,9 +19262,11 @@ Ambient: same kitchen room tone, soft pour sound.
                 // the operator "couldn't launch it". Always make setup reachable:
                 // show it when offline, OR when the operator force-reveals it via
                 // the relaunch link below.
-                const showSetup = !isOnline || window._imgForceShowSetup;
+                // v891c — a stalled worker needs the relaunch UI just as much
+                // as an offline one.
+                const showSetup = !isOnline || flowStalled || window._imgForceShowSetup;
                 let onlineControls = '';
-                if (isOnline && !window._imgForceShowSetup) {
+                if (isOnline && !flowStalled && !window._imgForceShowSetup) {
                     onlineControls = `<div style="margin-top:6px;font-size:11px;"><a href="#" onclick="imgForceWorkerSetup(event)" style="color:var(--text-muted);text-decoration:none;">Worker not responding? Set up / relaunch ▾</a></div>`;
                 }
                 let helpLine = '';

@@ -11453,6 +11453,58 @@ def _worker_kind(worker_id) -> str:
     return "chatgpt" if (worker_id or "").startswith("chatgpt-") else "flow"
 
 
+def _split_worker_lights(rows, now):
+    """v891a — one light per worker KIND, never cross-fed.
+
+    Before v891 the flow light ("Your image worker") took the freshest
+    heartbeat row of ANY kind. A beating chatgpt worker therefore kept the
+    flow light green while image_worker.py was not running at all — the
+    exact false-"Online" the operator hit 2026-08-05. Each kind now only
+    sees its own rows.
+
+    rows: heartbeat rows sorted freshest-first. Returns (flow, chatgpt)
+    dicts with online / worker_id / age (age reported even when stale, so
+    the UI can show a dying row instead of a bare light).
+    """
+    flow = {"online": False, "worker_id": None, "age": None}
+    cg = {"online": False, "worker_id": None, "age": None}
+    for row in rows:
+        if not row.last_heartbeat_at:
+            continue
+        slot = cg if _worker_kind(row.worker_id) == "chatgpt" else flow
+        if slot["worker_id"] is not None:
+            continue  # already have this kind's freshest row
+        age = round((now - row.last_heartbeat_at).total_seconds(), 1)
+        slot["worker_id"] = row.worker_id
+        slot["age"] = age
+        slot["online"] = age < WORKER_HEARTBEAT_STALE_SECONDS
+    return flow, cg
+
+
+# v891b — a lane is STALLED when its light is green but its queue is not
+# draining. Heartbeats only prove the worker PROCESS is alive (the flow
+# worker even beats from a daemon thread, so a wedged main loop keeps
+# beating forever). Queue movement is the truth: queued work older than
+# this with no fresh claim means nobody is actually working.
+IMAGE_QUEUE_STALL_SECONDS = 300
+
+
+def _lane_stalled(online, queued, oldest_queued_age_s, generating_fresh):
+    """True when the lane looks online but is not picking up its queue.
+
+    generating_fresh = count of this lane's nodes claimed within the last
+    10 minutes — a genuinely busy worker always has one; a wedged worker's
+    claims age past the 10-min sweep window and the count drops to 0.
+    """
+    return bool(
+        online
+        and queued > 0
+        and oldest_queued_age_s is not None
+        and oldest_queued_age_s >= IMAGE_QUEUE_STALL_SECONDS
+        and generating_fresh == 0
+    )
+
+
 @router.get("/worker/status")
 def worker_status(
     db: Session = Depends(get_db_session),
@@ -11503,27 +11555,24 @@ def worker_status(
         except Exception:
             pass
 
-    # v758 — HTTP-pull worker heartbeat: surface the freshest row's age +
-    # worker_id so the UI can show "online, last beat Ns ago (worker X)"
-    # instead of a bare "● Online" with no age. Without an age the operator
-    # can't tell a live worker from a stale/zombie row, and a false "online"
-    # hides the launch UI. Also GC rows well past the stale window so a dead
-    # worker doesn't linger in the table.
-    http_worker_id = None
-    http_heartbeat_age = None
+    # v891a — HTTP-pull worker heartbeats, split by worker KIND. The flow
+    # light only sees flow rows and the chatgpt light only chatgpt rows
+    # (pre-v891 the flow light took the freshest row of ANY kind — a beating
+    # chatgpt worker kept "Your image worker: ● Online" green while
+    # image_worker.py was dead). Ages surface even for stale rows so the UI
+    # can show a dying row. GC rows well past the stale window.
+    now = datetime.utcnow()
+    flow_light = {"online": False, "worker_id": None, "age": None}
+    cg_light = {"online": False, "worker_id": None, "age": None}
     try:
-        freshest = (
+        rows = (
             db.query(ImageWorkerHeartbeat)
             .filter(ImageWorkerHeartbeat.user_id == current_user.id)
             .order_by(ImageWorkerHeartbeat.last_heartbeat_at.desc())
-            .first()
+            .all()
         )
-        if freshest and freshest.last_heartbeat_at:
-            http_heartbeat_age = round(
-                (datetime.utcnow() - freshest.last_heartbeat_at).total_seconds(), 1
-            )
-            http_worker_id = freshest.worker_id
-        gc_cutoff = datetime.utcnow() - timedelta(seconds=120)
+        flow_light, cg_light = _split_worker_lights(rows, now)
+        gc_cutoff = now - timedelta(seconds=120)
         deleted = db.query(ImageWorkerHeartbeat).filter(
             ImageWorkerHeartbeat.last_heartbeat_at < gc_cutoff
         ).delete()
@@ -11532,36 +11581,68 @@ def worker_status(
     except Exception:
         db.rollback()
 
-    http_online = (
-        http_heartbeat_age is not None
-        and http_heartbeat_age < WORKER_HEARTBEAT_STALE_SECONDS
-    )
-
-    # ChatGPT worker: scan fresh heartbeat rows (within the stale window) and
-    # surface the freshest one whose worker_id classifies as a chatgpt worker,
-    # so the UI can show a SECOND online/offline light distinct from flow.
-    chatgpt_worker_online = False
-    chatgpt_worker_id = None
-    chatgpt_worker_heartbeat_age = None
+    # v891b — stalled detection: light green but queue not draining.
+    # cg lane has its own queue columns (cg_status/cg_claimed_at), banana
+    # lane uses status/claimed_at. "Fresh claim" = claimed within the
+    # 10-min stale-claim window; a wedged worker has none.
+    flow_stalled = False
+    chatgpt_stalled = False
+    cg_queued = 0
+    cg_generating = 0
+    queued_oldest_age = None
+    cg_queued_oldest_age = None
     try:
-        fresh_cutoff = datetime.utcnow() - timedelta(seconds=WORKER_HEARTBEAT_STALE_SECONDS)
-        fresh_rows = (
-            db.query(ImageWorkerHeartbeat)
-            .filter(ImageWorkerHeartbeat.user_id == current_user.id)
-            .filter(ImageWorkerHeartbeat.last_heartbeat_at >= fresh_cutoff)
-            .order_by(ImageWorkerHeartbeat.last_heartbeat_at.desc())
-            .all()
-        )
-        for row in fresh_rows:
-            if row.last_heartbeat_at and _worker_kind(row.worker_id) == "chatgpt":
-                chatgpt_worker_online = True
-                chatgpt_worker_id = row.worker_id
-                chatgpt_worker_heartbeat_age = round(
-                    (datetime.utcnow() - row.last_heartbeat_at).total_seconds(), 1
-                )
-                break
+        cg_queued = db.query(ImageNode).filter(
+            ImageNode.user_id == current_user.id,
+            ImageNode.cg_status == "queued",
+        ).count()
+        cg_generating = db.query(ImageNode).filter(
+            ImageNode.user_id == current_user.id,
+            ImageNode.cg_status == "generating",
+        ).count()
+        oldest_queued_at = db.query(func.min(ImageNode.updated_at)).filter(
+            ImageNode.user_id == current_user.id,
+            ImageNode.status == "queued",
+        ).scalar()
+        if oldest_queued_at:
+            queued_oldest_age = round((now - oldest_queued_at).total_seconds(), 1)
+        oldest_cg_queued_at = db.query(func.min(ImageNode.updated_at)).filter(
+            ImageNode.user_id == current_user.id,
+            ImageNode.cg_status == "queued",
+        ).scalar()
+        if oldest_cg_queued_at:
+            cg_queued_oldest_age = round((now - oldest_cg_queued_at).total_seconds(), 1)
+        claim_fresh_cutoff = now - timedelta(minutes=10)
+        generating_fresh = db.query(ImageNode).filter(
+            ImageNode.user_id == current_user.id,
+            ImageNode.status == "generating",
+            ImageNode.claimed_at.isnot(None),
+            ImageNode.claimed_at >= claim_fresh_cutoff,
+        ).count()
+        cg_generating_fresh = db.query(ImageNode).filter(
+            ImageNode.user_id == current_user.id,
+            ImageNode.cg_status == "generating",
+            ImageNode.cg_claimed_at.isnot(None),
+            ImageNode.cg_claimed_at >= claim_fresh_cutoff,
+        ).count()
+        flow_stalled = _lane_stalled(
+            flow_light["online"], n_queued, queued_oldest_age, generating_fresh)
+        chatgpt_stalled = _lane_stalled(
+            cg_light["online"], cg_queued, cg_queued_oldest_age, cg_generating_fresh)
     except Exception:
         db.rollback()
+
+    # v891 temporary diagnostics — remove after operator-side evidence lands.
+    if flow_stalled or chatgpt_stalled:
+        log.info(
+            f"[image_platform][v891-diag] STALLED flow={flow_stalled} cg={chatgpt_stalled} "
+            f"queued={n_queued}/{cg_queued} oldest_age={queued_oldest_age}/{cg_queued_oldest_age}"
+        )
+    if not flow_light["online"] and cg_light["online"]:
+        log.info(
+            "[image_platform][v891-diag] flow light OFF while chatgpt beats "
+            f"(cg={cg_light['worker_id']} age={cg_light['age']}s) — pre-v891 this read as a false flow 'Online'"
+        )
 
     return {
         "queued": n_queued,
@@ -11572,14 +11653,21 @@ def worker_status(
         "watch_folder": str(watch),
         "worker_online": worker_online,
         "worker_heartbeat_age_seconds": heartbeat_age,
-        # HTTP-pull mode heartbeat (separate from filesystem one)
-        "http_worker_online": http_online,
-        "http_worker_id": http_worker_id,
-        "http_worker_heartbeat_age_seconds": http_heartbeat_age,
+        # HTTP-pull mode heartbeat — flow-kind rows ONLY (v891a)
+        "http_worker_online": flow_light["online"],
+        "http_worker_id": flow_light["worker_id"],
+        "http_worker_heartbeat_age_seconds": flow_light["age"],
         # ChatGPT worker (second light, distinct from flow)
-        "chatgpt_worker_online": chatgpt_worker_online,
-        "chatgpt_worker_id": chatgpt_worker_id,
-        "chatgpt_worker_heartbeat_age_seconds": chatgpt_worker_heartbeat_age,
+        "chatgpt_worker_online": cg_light["online"],
+        "chatgpt_worker_id": cg_light["worker_id"],
+        "chatgpt_worker_heartbeat_age_seconds": cg_light["age"],
+        # v891b — queue-drain truth per lane
+        "flow_stalled": flow_stalled,
+        "chatgpt_stalled": chatgpt_stalled,
+        "cg_queued": cg_queued,
+        "cg_generating": cg_generating,
+        "queued_oldest_age_seconds": queued_oldest_age,
+        "cg_queued_oldest_age_seconds": cg_queued_oldest_age,
     }
 
 

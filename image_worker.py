@@ -107,8 +107,28 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v579"  # v856 ref media_id cache (content-hash) + upload timing in the [timing] line
+WORKER_VERSION = "img-v580"  # v891d truthful heartbeat (suppress beats when main loop wedged)
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
+
+# v891d — truthful heartbeat. The heartbeat threads beat every 5s no matter
+# what the main loop does, so a wedged/hung main loop kept the platform's
+# "● Online" light green forever while zero jobs moved. The main loops stamp
+# _LOOP_ALIVE every iteration; once the stamp goes older than WEDGE_AFTER_S
+# the heartbeat threads STOP beating, so the platform light goes red instead
+# of lying. 15 min is far above any legitimate single blocking call (jobs
+# block 30-60s; stuck-node handling has its own timeouts well under this).
+_LOOP_ALIVE = {"t": time.time()}
+WEDGE_AFTER_S = 15 * 60
+
+
+def _mark_loop_alive():
+    _LOOP_ALIVE["t"] = time.time()
+
+
+def _loop_wedged_secs():
+    """Seconds since the main loop last completed an iteration; 0 if fresh."""
+    age = time.time() - _LOOP_ALIVE["t"]
+    return age if age > WEDGE_AFTER_S else 0
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FOLDER = os.environ.get("IMAGE_SESSION_FOLDER",
     os.path.join(BASE_DIR, "image-chrome-session"))
@@ -7073,6 +7093,14 @@ def api_pull_mode(page, api_url, api_key, worker_id=None):
 
     def _heartbeat_loop():
         while not heartbeat_stop.is_set():
+            # v891d — don't vouch for a wedged main loop. If it hasn't
+            # completed an iteration in WEDGE_AFTER_S, suppress the beat so
+            # the platform light flips red instead of showing a false Online.
+            _wedge = _loop_wedged_secs()
+            if _wedge:
+                print(f"[API] ♥✖ main loop silent {int(_wedge)}s — heartbeat suppressed (platform will show Offline)", flush=True)
+                heartbeat_stop.wait(5.0)
+                continue
             try:
                 _api_request(api_url, api_key, "POST", "/heartbeat",
                              json={}, params={"worker_id": worker_id}, timeout=8)
@@ -7089,6 +7117,7 @@ def api_pull_mode(page, api_url, api_key, worker_id=None):
     try:
         consecutive_timeouts = 0
         while True:
+            _mark_loop_alive()  # v891d — heartbeat only vouches for a turning loop
             # Claim next job. Heartbeats are handled by the background
             # thread, so the main loop just focuses on claiming + processing.
             try:
@@ -8446,6 +8475,13 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     # --- Heartbeat thread ---
     def _heartbeat_loop():
         while not heartbeat_stop.is_set():
+            # v891d — suppress beats while the main loop is wedged (see
+            # _loop_wedged_secs). A beat here only proves THIS thread lives.
+            _wedge = _loop_wedged_secs()
+            if _wedge:
+                print(f"[API] ♥✖ main loop silent {int(_wedge)}s — heartbeat suppressed (platform will show Offline)", flush=True)
+                heartbeat_stop.wait(timeout=5)
+                continue
             try:
                 _api_request(api_url, api_key, "POST", "/heartbeat",
                              json={"worker_id": worker_id,
@@ -9959,6 +9995,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     _session_start = time.time()  # v818.2 — for the relaunch-budget reset in main()
     try:
         while not stop_flag.is_set():
+            _mark_loop_alive()  # v891d — heartbeat only vouches for a turning loop
             # 1. Harvest completions from the HTTP worker
             _drain_done_queue()
 
