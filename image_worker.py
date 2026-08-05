@@ -107,7 +107,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v584"  # v895 load reCAPTCHA enterprise.js ourselves when Flow hasn't
+WORKER_VERSION = "img-v585"  # v896 mint reCAPTCHA in the page's MAIN world (Patchright isolates evaluate)
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 
 # v891d — truthful heartbeat. The heartbeat threads beat every 5s no matter
@@ -3842,10 +3842,12 @@ def _fa_api_fetch(page, url, method, token, body_obj=None, extra_headers=None):
 
 def _fa_mint_or_empty(page, action):
     try:
-        tok = _fa_mint_captcha(page, action)
-        if tok:
-            _FA_MINT_LAST_ERR["reason"] = ""
-        return tok
+        # v896 — route the single-token path through the same main-world mint.
+        # The old single-token JS ran in Patchright's isolated world, where
+        # window.grecaptcha does not exist, so it could only ever fail.
+        toks, err = _fa_mint_batch_raw(page, action, 1)
+        _FA_MINT_LAST_ERR["reason"] = "" if (toks and toks[0]) else (err or "captcha mint failed")
+        return toks[0] if toks else ""
     except Exception as _e:
         # v894 — keep the cause; the single-token JS still throws on a page that
         # never loaded reCAPTCHA ("grecaptcha not available").
@@ -3870,73 +3872,115 @@ def _fa_mint_or_empty(page, action):
 # problem). The first was being reported as an account block and drove an
 # endless golden-restore/relaunch loop (operator 2026-08-05, node 4577:
 # mint=10.0s(4x) — exactly the 10s wait timeout, so grecaptcha was absent).
-# v895 — LOAD the reCAPTCHA Enterprise script when the page hasn't. Flow loads
-# it lazily (the app only pulls it when its own UI is about to generate), so a
-# page the worker drives purely through the JSON API can sit forever without it
-# — grecaptcha never appears, every mint fails, and no amount of reloading or
-# relaunching helps. Injecting the standard enterprise.js with Flow's own site
-# key gives us the same minting the app would do. Diagnostics come back with the
-# error so an unloaded script is distinguishable from one that loaded but stayed
-# invisible to this execution context.
+# v896 — MINT IN THE MAIN WORLD. Patchright runs page.evaluate inside an
+# ISOLATED execution context (that is how it hides automation), and
+# window.grecaptcha lives in the page's MAIN world, so the worker's JS could
+# never see it. Probed live 2026-08-05 on the operator's own session:
+#
+#   eval_typeof_grecaptcha = "undefined"   <- what page.evaluate sees
+#   main_world_typeof      = "object"      <- what the page actually has
+#   recaptcha_script_tags  = 2             <- Flow had ALREADY loaded it
+#
+# So this was never a missing script and never an account block: v895's
+# injection added two more script tags and changed nothing. A <script> tag runs
+# in the MAIN world, and the DOM is shared between worlds — so we run the mint
+# inside an injected script and hand the tokens back through a DOM attribute.
+# The enterprise.js load stays as a fallback for a page that genuinely has not
+# loaded it yet, and now runs in the main world too.
 _FA_CAPTCHA_BATCH_JS = """
 async ([siteKey, action, n]) => {
-  const ready = () => !!(window.grecaptcha && window.grecaptcha.enterprise
-                         && window.grecaptcha.enterprise.execute);
-  const waitFor = async (ms) => {
-    const s = Date.now();
-    while (Date.now() - s < ms) {
-      if (ready()) return true;
-      await new Promise(r => setTimeout(r, 200));
-    }
-    return ready();
-  };
-  const diag = () => {
+  const id = 'kv-mint-' + Math.random().toString(36).slice(2);
+  const holder = document.createElement('div');
+  holder.id = id;
+  holder.style.display = 'none';
+  (document.body || document.documentElement).appendChild(holder);
+
+  // Everything below the string boundary executes in the page's MAIN world,
+  // where window.grecaptcha lives. It reports back through DOM attributes,
+  // which both worlds can read.
+  const mainWorld = `
+    (async () => {
+      const el = document.getElementById(${JSON.stringify(id)});
+      if (!el) return;
+      const KEY = ${JSON.stringify(siteKey)};
+      const ACTION = ${JSON.stringify(action)};
+      const N = ${JSON.stringify(n)};
+      const fail = (m) => { el.setAttribute('data-err', m); el.setAttribute('data-done', '1'); };
+      const ready = () => !!(window.grecaptcha && window.grecaptcha.enterprise
+                             && window.grecaptcha.enterprise.execute);
+      const waitFor = async (ms) => {
+        const s = Date.now();
+        while (Date.now() - s < ms) {
+          if (ready()) return true;
+          await new Promise(r => setTimeout(r, 200));
+        }
+        return ready();
+      };
+      try {
+        if (!await waitFor(5000)) {
+          // The page really has not loaded it — load it ourselves, main world.
+          try {
+            await new Promise((res, rej) => {
+              const s = document.createElement('script');
+              s.src = 'https://www.google.com/recaptcha/enterprise.js?render=' + encodeURIComponent(KEY);
+              s.async = true;
+              s.onload = () => res();
+              s.onerror = () => rej(new Error('enterprise.js failed to load (blocked?)'));
+              (document.head || document.documentElement).appendChild(s);
+            });
+          } catch (e) {
+            return fail('grecaptcha not available in main world: ' + ((e && e.message) || 'load failed'));
+          }
+          if (!await waitFor(12000)) {
+            return fail('grecaptcha not available in main world after loading enterprise.js');
+          }
+        }
+        await new Promise(r => { try { window.grecaptcha.enterprise.ready(r); } catch (e) { r(); } });
+        const jobs = [];
+        for (let i = 0; i < N; i++) jobs.push(window.grecaptcha.enterprise.execute(KEY, { action: ACTION }));
+        const out = await Promise.allSettled(jobs);
+        const tokens = out.map(r => (r.status === 'fulfilled' && r.value) ? r.value : '');
+        el.setAttribute('data-tokens', JSON.stringify(tokens));
+        if (!tokens.some(t => t)) {
+          const f = out.find(r => r.status === 'rejected');
+          el.setAttribute('data-err', 'grecaptcha execute rejected: '
+                                      + ((f && f.reason && f.reason.message) || 'unknown'));
+        }
+        el.setAttribute('data-done', '1');
+      } catch (e) {
+        fail('main-world mint threw: ' + ((e && e.message) || 'unknown'));
+      }
+    })();
+  `;
+
+  try {
+    const s = document.createElement('script');
+    s.textContent = mainWorld;
+    (document.head || document.documentElement).appendChild(s);
+    s.remove();
+  } catch (e) {
+    holder.remove();
+    return { tokens: [], err: 'main-world script injection failed: ' + ((e && e.message) || 'unknown') };
+  }
+
+  const t0 = Date.now();
+  while (Date.now() - t0 < 35000) {
+    if (holder.getAttribute('data-done')) break;
+    await new Promise(r => setTimeout(r, 150));
+  }
+  const raw = holder.getAttribute('data-tokens');
+  let err = holder.getAttribute('data-err') || '';
+  if (!holder.getAttribute('data-done') && !err) {
     let tags = -1;
     try { tags = document.querySelectorAll('script[src*="recaptcha"]').length; } catch (e) {}
-    return 'recaptcha script tags=' + tags + ', typeof grecaptcha=' + (typeof window.grecaptcha);
-  };
-
-  let ok = await waitFor(6000);
-  let injected = false;
-  if (!ok) {
-    injected = true;
-    try {
-      await new Promise((res, rej) => {
-        const prior = document.querySelector('script[data-kaveno-recaptcha]');
-        if (prior) return res();
-        const s = document.createElement('script');
-        s.src = 'https://www.google.com/recaptcha/enterprise.js?render=' + encodeURIComponent(siteKey);
-        s.async = true;
-        s.setAttribute('data-kaveno-recaptcha', '1');
-        s.onload = () => res();
-        s.onerror = () => rej(new Error('enterprise.js failed to load (blocked?)'));
-        (document.head || document.documentElement).appendChild(s);
-      });
-    } catch (e) {
-      return { tokens: [], err: 'grecaptcha not available: ' + ((e && e.message) || 'inject failed')
-                                 + ' [' + diag() + ']' };
-    }
-    ok = await waitFor(12000);
-    if (!ok) {
-      return { tokens: [], err: 'grecaptcha not visible after loading enterprise.js '
-                                 + '(execution context may be isolated) [' + diag() + ']' };
-    }
+    err = 'main-world mint timed out (inline script may be blocked by CSP; '
+          + 'recaptcha script tags=' + tags + ')';
   }
-  try {
-    await new Promise(r => {
-      try { window.grecaptcha.enterprise.ready(r); } catch (e) { r(); }
-    });
-  } catch (e) {}
-  const jobs = [];
-  for (let i = 0; i < n; i++) jobs.push(window.grecaptcha.enterprise.execute(siteKey, { action }));
-  const out = await Promise.allSettled(jobs);
-  const tokens = out.map(r => (r.status === 'fulfilled' && r.value) ? r.value : '');
-  let err = '';
-  if (!tokens.some(t => t)) {
-    const first = out.find(r => r.status === 'rejected');
-    err = 'grecaptcha execute rejected: ' + ((first && first.reason && first.reason.message) || 'unknown');
-  }
-  return { tokens, err, injected };
+  holder.remove();
+  let tokens = [];
+  try { tokens = raw ? JSON.parse(raw) : []; } catch (e) { tokens = []; }
+  if (!Array.isArray(tokens)) tokens = [];
+  return { tokens, err };
 }
 """
 
@@ -5106,7 +5150,8 @@ def _is_unusual(reason: str) -> bool:
     # a page reload + normal retries instead (see _fa_mint_captcha_batch).
     # Checked FIRST so it wins over the MINT-FAILED clause below.
     if ("GRECAPTCHA NOT AVAILABLE" in r or "MINT EVALUATE FAILED" in r
-            or "GRECAPTCHA NOT VISIBLE" in r):
+            or "GRECAPTCHA NOT VISIBLE" in r or "MAIN-WORLD MINT" in r
+            or "MAIN-WORLD SCRIPT INJECTION FAILED" in r):
         return False
     if "UNUSUAL_ACTIVITY" in r:
         return True
