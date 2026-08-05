@@ -62,21 +62,92 @@ def wait_for_token(store: TokenStore, page=None, timeout: float = 30.0) -> str:
     return store.token  # may be '' — caller treats empty as failure
 
 
+# v896 — page.evaluate does NOT reach the main world under Patchright: it runs
+# in an ISOLATED execution context (that is how automation stays hidden), and
+# window.grecaptcha lives in the main world. Probed live 2026-08-05 on the
+# operator's Flow session: page.evaluate saw `typeof grecaptcha = undefined`
+# while a <script> tag saw `object`, with two recaptcha scripts already loaded
+# by Flow. The old code here could therefore only ever fail — it just threw
+# 'grecaptcha not available', which callers then misread as an account block.
+#
+# A <script> tag runs in the main world and the DOM is shared between worlds, so
+# the mint runs inside an injected script and returns its token through a DOM
+# attribute. Same fix that image_worker.py carries (verified there: 4/4 tokens
+# in 0.9s, then a full node rendered and uploaded).
 _CAPTCHA_JS = """
 async ([siteKey, action]) => {
-  function waitG(t) {
-    return new Promise((res, rej) => {
-      const s = Date.now();
-      const c = () => {
-        if (window.grecaptcha && window.grecaptcha.enterprise && window.grecaptcha.enterprise.execute) return res();
-        if (Date.now() - s > t) return rej(new Error('grecaptcha not available'));
-        setTimeout(c, 200);
+  const id = 'kv-mint-' + Math.random().toString(36).slice(2);
+  const holder = document.createElement('div');
+  holder.id = id;
+  holder.style.display = 'none';
+  (document.body || document.documentElement).appendChild(holder);
+
+  const mainWorld = `
+    (async () => {
+      const el = document.getElementById(${JSON.stringify(id)});
+      if (!el) return;
+      const KEY = ${JSON.stringify(siteKey)};
+      const ACTION = ${JSON.stringify(action)};
+      const done = (attr, val) => { el.setAttribute(attr, val); el.setAttribute('data-done', '1'); };
+      const ready = () => !!(window.grecaptcha && window.grecaptcha.enterprise
+                             && window.grecaptcha.enterprise.execute);
+      const waitFor = async (ms) => {
+        const s = Date.now();
+        while (Date.now() - s < ms) {
+          if (ready()) return true;
+          await new Promise(r => setTimeout(r, 200));
+        }
+        return ready();
       };
-      c();
-    });
+      try {
+        if (!await waitFor(5000)) {
+          try {
+            await new Promise((res, rej) => {
+              const s = document.createElement('script');
+              s.src = 'https://www.google.com/recaptcha/enterprise.js?render=' + encodeURIComponent(KEY);
+              s.async = true;
+              s.onload = () => res();
+              s.onerror = () => rej(new Error('enterprise.js failed to load (blocked?)'));
+              (document.head || document.documentElement).appendChild(s);
+            });
+          } catch (e) {
+            return done('data-err', 'grecaptcha not available in main world: '
+                                    + ((e && e.message) || 'load failed'));
+          }
+          if (!await waitFor(12000)) {
+            return done('data-err', 'grecaptcha not available in main world after loading enterprise.js');
+          }
+        }
+        await new Promise(r => { try { window.grecaptcha.enterprise.ready(r); } catch (e) { r(); } });
+        const tok = await window.grecaptcha.enterprise.execute(KEY, { action: ACTION });
+        done('data-token', tok || '');
+      } catch (e) {
+        done('data-err', 'grecaptcha execute rejected: ' + ((e && e.message) || 'unknown'));
+      }
+    })();
+  `;
+
+  try {
+    const s = document.createElement('script');
+    s.textContent = mainWorld;
+    (document.head || document.documentElement).appendChild(s);
+    s.remove();
+  } catch (e) {
+    holder.remove();
+    throw new Error('main-world script injection failed: ' + ((e && e.message) || 'unknown'));
   }
-  await waitG(10000);
-  return await window.grecaptcha.enterprise.execute(siteKey, { action });
+
+  const t0 = Date.now();
+  while (Date.now() - t0 < 35000) {
+    if (holder.getAttribute('data-done')) break;
+    await new Promise(r => setTimeout(r, 150));
+  }
+  const token = holder.getAttribute('data-token') || '';
+  const err = holder.getAttribute('data-err')
+              || (holder.getAttribute('data-done') ? '' : 'main-world mint timed out (CSP?)');
+  holder.remove();
+  if (!token) throw new Error(err || 'captcha mint failed');
+  return token;
 }
 """
 
