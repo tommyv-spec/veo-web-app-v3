@@ -199,6 +199,33 @@ def locate_profile(email):
     return None
 
 
+# Channels that are NOT the operator's daily stable Chrome. Same set the
+# chatgpt worker's session pull uses (chatgpt_session_pull._NON_STABLE).
+_NON_STABLE_TAGS = ("chrome beta", "chrome dev", "chrome sxs", "chrome canary",
+                    "chromium", "google-chrome-beta", "google-chrome-unstable")
+
+
+def locate_profile_beta_first(email):
+    """v892 — like locate_profile, but scan NON-STABLE channels (Beta/Dev/
+    Canary/Chromium) FIRST, exactly like the chatgpt worker's session pull.
+
+    Why prefer Beta: copying from a non-stable channel closes only THAT
+    channel's window — the operator's daily stable Chrome is never touched —
+    and non-stable channels run with App-Bound Encryption off (v10 cookies),
+    so the copied golden decrypts reliably. Falls back to the normal
+    stable-first scan when the account is not in any non-stable channel, so
+    existing stable-only setups keep working unchanged."""
+    for ud in resolve_laptop_user_data_dirs():
+        if not ud or not os.path.isdir(ud) or not os.path.isfile(os.path.join(ud, "Local State")):
+            continue
+        if not any(tag in ud.lower() for tag in _NON_STABLE_TAGS):
+            continue
+        pf = find_profile_dir_for_email(ud, email) if email else find_logged_in_profile(ud)
+        if pf:
+            return ud, pf, _channel_for_user_data_dir(ud)
+    return locate_profile(email)
+
+
 def _parse_user_data_dir_from_cmdline(cmdline):
     """Extract --user-data-dir value from a Chrome commandline, or None."""
     if not cmdline:

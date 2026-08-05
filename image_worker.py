@@ -107,7 +107,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v580"  # v891d truthful heartbeat (suppress beats when main loop wedged)
+WORKER_VERSION = "img-v581"  # v892 Beta-first laptop-profile pull (like the chatgpt worker)
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 
 # v891d — truthful heartbeat. The heartbeat threads beat every 5s no matter
@@ -210,6 +210,7 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label="IMAGE"):
             if os.path.isdir(_p) and _p not in sys.path:
                 sys.path.insert(0, _p)
         sys.modules.pop("worker_profile_pull", None)  # fresh-load after companion sync
+        import worker_profile_pull as _wpp
         from worker_profile_pull import (build_lean_golden_from_profile, locate_profile,
                                          close_laptop_chrome, load_laptop_email as _lle)
         # load_laptop_email reads ACCOUNT1_LAPTOP_EMAIL env first, then the file.
@@ -219,7 +220,13 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label="IMAGE"):
         if golden_folder in _LAPTOP_COPIED_GOLDENS:
             print(f"[{label}] laptop copy: golden already built this session — reusing", flush=True)
             return
-        loc = locate_profile(email)
+        # v892 — check the account in Chrome BETA (non-stable channels) FIRST,
+        # exactly like the chatgpt worker: a Beta copy never touches the
+        # operator's daily stable Chrome and decrypts reliably (ABE off).
+        # Falls back to the stable-first scan inside the helper. getattr guard:
+        # a not-yet-synced older companion module lacks the new function.
+        _locate = getattr(_wpp, "locate_profile_beta_first", locate_profile)
+        loc = _locate(email)
         if not loc:
             print(f"[{label}] laptop copy: {email!r} not logged into any Chrome channel", flush=True)
             return
