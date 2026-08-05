@@ -959,18 +959,56 @@ def _enter_prompt(page, text):
     already shown it can ignore synthetic input (locator.type() left text in the
     DOM while Angular's model stayed empty and Send rendered disabled).
     """
+    want = min(10, len(text))
+
+    def _landed():
+        return len(_editor_text(page)) >= want
+
+    def _clear():
+        """Drop any partial paste so a retry cannot double the prompt."""
+        try:
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(250)
+        except Exception:
+            pass
+
+    # 1) Real clipboard paste, RETRIED. A single miss used to drop straight to
+    #    character typing, which costs 30-90s on a 500-1800 char job prompt.
+    for attempt in range(1, PASTE_RETRIES + 1):
+        try:
+            _focus_editor(page)
+            page.evaluate("async (t) => { await navigator.clipboard.writeText(t); }", text)
+            page.wait_for_timeout(int(random.uniform(200, 450)))
+            page.keyboard.press("Control+V")
+            page.wait_for_timeout(int(random.uniform(700, 1200)))
+            if _landed():
+                log(f"  pasted {len(text)} chars"
+                    + (f" (attempt {attempt})" if attempt > 1 else ""))
+                return True
+            log(f"  paste attempt {attempt}/{PASTE_RETRIES} did not land "
+                f"(editor has {len(_editor_text(page))} chars)")
+        except Exception as e:
+            log(f"  paste attempt {attempt}/{PASTE_RETRIES} errored "
+                f"({e.__class__.__name__})")
+        _clear()
+        page.wait_for_timeout(int(random.uniform(400, 900)))
+
+    # 2) insert_text: one synthetic input event, still instant. Worth trying
+    #    before typing because it is ~1000x faster on a long prompt.
     try:
-        page.evaluate("async (t) => { await navigator.clipboard.writeText(t); }", text)
-        page.wait_for_timeout(int(random.uniform(180, 420)))
-        page.keyboard.press("Control+V")
-        page.wait_for_timeout(int(random.uniform(700, 1200)))
-        got = _editor_text(page)
-        if len(got) >= min(10, len(text)):
-            log(f"  pasted {len(text)} chars")
+        _focus_editor(page)
+        page.keyboard.insert_text(text)
+        page.wait_for_timeout(800)
+        if _landed():
+            log(f"  inserted {len(text)} chars (clipboard paste failed)")
             return True
-        log(f"  paste did not land (editor has {len(got)} chars) — typing instead")
+        _clear()
     except Exception as e:
-        log(f"  clipboard paste unavailable ({e.__class__.__name__}) — typing instead")
+        log(f"  insert_text failed ({e.__class__.__name__})")
+
+    # 3) Last resort. Slow, but Quill has shown it can ignore synthetic input.
+    log(f"  falling back to character typing ({len(text)} chars — this is slow)")
     _human_type(page, text)
     return False
 
@@ -1533,6 +1571,7 @@ class Api:
 DURATION_TOLERANCE_S = float(os.environ.get("GEMINI_DURATION_TOLERANCE_S", "0.5"))
 BUSY_RETRIES = int(os.environ.get("GEMINI_BUSY_RETRIES", "3"))
 UI_RETRIES = int(os.environ.get("GEMINI_UI_RETRIES", "2"))
+PASTE_RETRIES = int(os.environ.get("GEMINI_PASTE_RETRIES", "3"))
 BUSY_BACKOFF_S = int(os.environ.get("GEMINI_BUSY_BACKOFF_S", "90"))
 
 
