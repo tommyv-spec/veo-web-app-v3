@@ -107,7 +107,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v581"  # v892 Beta-first laptop-profile pull (like the chatgpt worker)
+WORKER_VERSION = "img-v582"  # v893 foreign-project error-page detection (flow_worker parity)
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 
 # v891d — truthful heartbeat. The heartbeat threads beat every 5s no matter
@@ -129,6 +129,56 @@ def _loop_wedged_secs():
     """Seconds since the main loop last completed an iteration; 0 if fresh."""
     age = time.time() - _LOOP_ALIVE["t"]
     return age if age > WEDGE_AFTER_S else 0
+
+
+# v893 — port of flow_worker's v660/v834/v741 access-denied detection. A stored
+# project created under ANOTHER account/session keeps its /project/<uuid> URL
+# but renders Flow's error overlay ("Something went wrong." + "Back to
+# projects") — the v836 URL-only check passes and the worker proceeded against
+# a broken page (operator 2026-08-05, node 4577). Body text is the reliable
+# signal; locale-robust like v834 (es-419 shows "Se produjo un error").
+_FLOW_ERR_COOLDOWN_S = 45  # v741 — error page doubles as Flow's throttle signal
+
+
+def _project_page_ok(page, context, deadline_s=10.0):
+    """True = the project page is healthy (or unclear — proceed optimistically,
+    downstream steps have their own retries, same as flow_worker). False = the
+    error overlay or a redirect off /project/ was detected; the caller must
+    discard the stored project and create a fresh one. On the error overlay we
+    cool down _FLOW_ERR_COOLDOWN_S BEFORE returning (v741: immediately spawning
+    a replacement project amplifies the throttle)."""
+    deadline = time.time() + deadline_s
+    while time.time() < deadline:
+        time.sleep(1.0)
+        try:
+            if "/project/" not in (page.url or ""):
+                print(f"[{context}] ⚠ URL left the project page ({(page.url or '')[:60]})", flush=True)
+                return False
+        except Exception:
+            pass
+        try:
+            state = page.evaluate("""() => {
+                const raw = (document.body && document.body.innerText) || '';
+                const txt = raw.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
+                const okMarkers = ['videos', 'scenes', 'escenas'];
+                const hasOk = okMarkers.some(s => txt.includes(s));
+                if (txt.includes('something went wrong') || txt.includes('se produjo un error')) return 'err';
+                if ((txt.includes('back to projects') || txt.includes('volver a los proyectos')) && !hasOk) return 'err';
+                if (hasOk) return 'ok';
+                return 'wait';
+            }""")
+        except Exception as _e:
+            print(f"[{context}] project-state eval error: {_e}", flush=True)
+            state = 'wait'
+        if state == 'err':
+            print(f"[{context}] ⚠ Flow error page detected (foreign project or throttle) — "
+                  f"cooling down {_FLOW_ERR_COOLDOWN_S}s before creating a fresh project", flush=True)
+            time.sleep(_FLOW_ERR_COOLDOWN_S)
+            return False
+        if state == 'ok':
+            return True
+    print(f"[{context}] ⚠ Project state unclear after {deadline_s:.0f}s — proceeding optimistically", flush=True)
+    return True
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FOLDER = os.environ.get("IMAGE_SESSION_FOLDER",
     os.path.join(BASE_DIR, "image-chrome-session"))
@@ -7348,8 +7398,20 @@ def api_pull_mode(page, api_url, api_key, worker_id=None):
                             create_btn.wait_for(state="visible", timeout=20000)
                             print(f"[node_{node_id}] ✓ Project UI hydrated", flush=True)
                         except Exception:
-                            print(f"[node_{node_id}] ⚠ UI didn't hydrate — falling back to 5s sleep", flush=True)
-                            time.sleep(5)
+                            # v893 — before the blind 5s sleep, check for Flow's
+                            # error overlay (foreign project keeps its URL). On a
+                            # broken page, drop the project + create a fresh one
+                            # instead of proceeding into "Settings button not found".
+                            if not _project_page_ok(page, f"node_{node_id}"):
+                                if current_job_key:
+                                    projects_dict.pop(current_job_key, None)
+                                need_new_project = True
+                                current_project_url = None
+                                uploaded_in_project = set()
+                                _save_state()
+                            else:
+                                print(f"[node_{node_id}] ⚠ UI didn't hydrate — falling back to 5s sleep", flush=True)
+                                time.sleep(5)
                     except Exception as nav_e:
                         print(f"[node_{node_id}] ⚠ Couldn't return to project ({nav_e}), will create new one", flush=True)
                         # The current project is unreachable; drop it from the
@@ -8768,16 +8830,13 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                     # mid-run ACCOUNT SWITCH (golden restore / relaunch) the stored
                     # project belongs to the OLD account, so goto() silently lands
                     # on home/login/404 with NO exception → later "Settings button
-                    # not found". Match the video worker (flow_worker): if we're
-                    # not on a /project/ page, drop the stale project + create a
-                    # fresh one on the current account.
-                    try:
-                        _landed = page.url or ""
-                    except Exception as _url_e:
-                        _landed = ""
-                        print(f"[{context}] ⚠ page.url unreadable after stored-project nav ({_url_e})", flush=True)
-                    if "/project/" not in _landed:
-                        print(f"[{context}] ⚠ Stored project didn't load (account may have switched; landed on {_landed[:60] or '<none>'}) — creating a new one", flush=True)
+                    # not found".
+                    # v893 — the URL-only check was not enough: a foreign project
+                    # KEEPS its /project/<uuid> URL and renders the "Something went
+                    # wrong." overlay instead (node 4577, 2026-08-05). Full
+                    # flow_worker-parity check: URL + locale-robust body text.
+                    if not _project_page_ok(page, context):
+                        print(f"[{context}] ⚠ Stored project is broken/foreign — creating a new one", flush=True)
                         projects.pop(project_state["current_job_key"], None)
                         need_new = True
                         project_state["current_project_url"] = None
