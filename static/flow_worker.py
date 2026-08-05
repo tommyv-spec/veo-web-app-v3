@@ -2986,6 +2986,71 @@ def dismiss_create_with_flow(page, label=""):
     return False
 
 
+def _flow_entry_login_click(page, label="Flow"):
+    """v896 — click the marketing page's REAL auth entry and VERIFY the labs
+    session minted, instead of trusting that a click landed. The 2026-08
+    marketing redesign (nav tabs Overview/Models/.../Pricing + autoplay hero +
+    carousels) let the coordinate click drift onto the '#models' nav anchor
+    while the log still said clicked — Account2 looped logged-out for hours
+    (2026-08-05). Success signal = the __Secure-next-auth.session-token
+    cookie: the lean goldens carry NO labs session, Google SSO silently
+    re-mints it during the entry click's OAuth round-trip (verified live:
+    golden-2 probe went marketing -> one hero click -> token minted -> app).
+    Exact-name hero button first, then broader selectors; human click first,
+    plain locator click as fallback. Returns True ONLY on a verified mint."""
+    def _minted():
+        try:
+            for _c in page.context.cookies("https://labs.google"):
+                if _c.get("name") == "__Secure-next-auth.session-token":
+                    return True
+        except Exception:
+            pass
+        return False
+
+    if _minted():
+        return True
+    # The consent banner ("OK, got it") overlays the hero and steals
+    # coordinate clicks — clear it before any entry attempt.
+    try:
+        _ok = page.locator("button:has-text('OK, got it')").first
+        if _ok.is_visible(timeout=800):
+            _ok.click(timeout=3000)
+            time.sleep(0.5)
+    except Exception:
+        pass
+
+    _candidates = [
+        lambda: page.get_by_role("button", name="Create with Google Flow").first,
+        lambda: page.get_by_role("link", name="Create with Google Flow").first,
+        lambda: page.locator("button:text-matches('Create with.*Flow', 'i')").first,
+        lambda: page.locator("a:text-matches('Create with.*Flow', 'i')").first,
+        lambda: page.locator("button:has-text('Sign in'), a:has-text('Sign in')").first,
+    ]
+    for _get in _candidates:
+        try:
+            _btn = _get()
+            if not _btn.is_visible(timeout=1200):
+                continue
+        except Exception:
+            continue
+        for _mode in ("human", "locator"):
+            try:
+                if _mode == "human":
+                    human_click_element(page, _btn, f"[{label}] flow entry (v896)")
+                else:
+                    _btn.click(timeout=8000)
+            except Exception:
+                continue
+            # OAuth round-trip needs a beat — poll for the minted token.
+            for _ in range(10):
+                time.sleep(1.5)
+                if _minted():
+                    print(f"[{label}] v896: ✓ labs session-token minted after entry click ({_mode})", flush=True)
+                    return True
+            print(f"[{label}] v896: entry click ({_mode}) did not mint a session — url={page.url}", flush=True)
+    return False
+
+
 def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
     """Ensure the page is on Flow and the user is logged in.
     
@@ -3295,8 +3360,12 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                 "a:has-text('Sign in')",
                 "button:has-text('Start creating')",
             ]
-            clicked = False
-            for sel in entry_selectors:
+            # v896 — VERIFIED entry first: exact hero button + session-token
+            # check. The blind selector list below stays as fallback for older
+            # page variants ('Get started' etc.), but it can no longer loop on
+            # a click that landed on the '#models' nav anchor.
+            clicked = _flow_entry_login_click(page, label)
+            for sel in ([] if clicked else entry_selectors):
                 try:
                     btn = page.locator(sel).first
                     if btn.is_visible(timeout=1000):
@@ -7224,7 +7293,11 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                             _proj_url = page.url
                             _marketing_recovered = True
                             print(f"{prefix}[v836] dropped to marketing landing on a project URL — clicking 'Create with Google Flow' + re-navigating to the project", flush=True)
-                            human_click_element(page, _cta, f"{prefix}Create with Google Flow (landing recovery)")
+                            # v896 — verified entry (hero button + session-token
+                            # check) instead of a blind coordinate click; the old
+                            # click stays as last resort for odd page variants.
+                            if not _flow_entry_login_click(page, label="v836-recovery"):
+                                human_click_element(page, _cta, f"{prefix}Create with Google Flow (landing recovery)")
                             human_delay(3, 5)
                             page.goto(_proj_url, wait_until="domcontentloaded", timeout=30000)
                             human_delay(3, 5)
