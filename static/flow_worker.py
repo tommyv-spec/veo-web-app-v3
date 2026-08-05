@@ -3026,7 +3026,16 @@ def _flow_entry_login_click(page, label="Flow"):
         lambda: page.locator("a:text-matches('Create with.*Flow', 'i')").first,
         lambda: page.locator("button:has-text('Sign in'), a:has-text('Sign in')").first,
     ]
+    # v896.1 — total time budget (reviewer): worst case was 5 candidates x 2
+    # modes x 15s poll ≈ 150s of blind waiting before the caller's fallback
+    # ran. The mint lands within a few seconds when a click was right, so a
+    # ~75s overall budget keeps every real success and cuts the pathological
+    # tail; on budget exhaustion return False and let the caller fall back.
+    _deadline = time.time() + 75
     for _get in _candidates:
+        if time.time() > _deadline:
+            print(f"[{label}] v896.1: entry-click budget exhausted — falling back", flush=True)
+            break
         try:
             _btn = _get()
             if not _btn.is_visible(timeout=1200):
@@ -3034,6 +3043,8 @@ def _flow_entry_login_click(page, label="Flow"):
         except Exception:
             continue
         for _mode in ("human", "locator"):
+            if time.time() > _deadline:
+                break
             try:
                 if _mode == "human":
                     human_click_element(page, _btn, f"[{label}] flow entry (v896)")

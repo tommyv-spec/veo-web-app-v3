@@ -32,7 +32,7 @@ def _load_helper():
     )
     assert m, "_flow_entry_login_click not found in flow_worker.py"
     ns = {
-        "time": types.SimpleNamespace(sleep=lambda *_: None),
+        "time": types.SimpleNamespace(sleep=lambda *_: None, time=lambda: 0.0),
         "human_click_element": lambda *a, **k: True,
         "print": lambda *a, **k: None,
     }
@@ -55,23 +55,28 @@ class _FakeLocator:
 class _FakePage:
     """Page whose context mints the session token after N cookie polls."""
 
-    def __init__(self, mint_after_polls):
+    def __init__(self, mint_after_polls, minted_name="__Secure-next-auth.session-token",
+                 hero_visible=True):
         self._polls = 0
         self._mint_after = mint_after_polls
+        self._minted_name = minted_name
+        self._hero_visible = hero_visible
         self.url = "https://labs.google/fx/tools/flow#models"
         self.context = self
 
     def cookies(self, _url):
         self._polls += 1
         if self._mint_after is not None and self._polls > self._mint_after:
-            return [{"name": "__Secure-next-auth.session-token"}]
+            return [{"name": self._minted_name}]
         return []
 
     def locator(self, _sel):
+        # consent banner + selector-list candidates stay visible; only the
+        # role-based hero honors hero_visible (see skip test)
         return _FakeLocator(visible=True)
 
     def get_by_role(self, _role, name=None):
-        return _FakeLocator(visible=True)
+        return _FakeLocator(visible=self._hero_visible)
 
 
 class TestV896EntryVerify(unittest.TestCase):
@@ -87,6 +92,22 @@ class TestV896EntryVerify(unittest.TestCase):
     def test_never_minted_returns_false(self):
         fn = _load_helper()
         self.assertFalse(fn(_FakePage(mint_after_polls=None)))
+
+    def test_wrong_cookie_name_is_not_a_mint(self):
+        # v896.1 (reviewer nit) — near-miss cookie names must NOT verify;
+        # proves the exact-name match is live code.
+        fn = _load_helper()
+        for bad in ("session-token", "__next-auth.session-token", "email"):
+            self.assertFalse(
+                fn(_FakePage(mint_after_polls=0, minted_name=bad)),
+                f"cookie name {bad!r} wrongly accepted as the labs session",
+            )
+
+    def test_invisible_hero_falls_through_to_selector_candidates(self):
+        # v896.1 (reviewer nit) — role-based hero not visible: the loop must
+        # skip it and still succeed via the selector-based candidates.
+        fn = _load_helper()
+        self.assertTrue(fn(_FakePage(mint_after_polls=3, hero_visible=False)))
 
     def test_wired_into_login_loop_and_v836_recovery(self):
         src = _source()
