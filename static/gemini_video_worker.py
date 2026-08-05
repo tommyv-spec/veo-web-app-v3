@@ -909,9 +909,13 @@ def _human_click(page, locator, label="", settle=(0.4, 0.9)):
     dropped automated request looks like. This moves in steps with jitter, waits
     a beat, and presses with a human-length hold.
     """
+    # A leftover Material backdrop swallows pointer events; clicking through it
+    # burns Playwright's full 30s actionability timeout ("subtree intercepts
+    # pointer events") and then cascades into a filechooser timeout.
+    _dismiss_overlay(page)
     box = locator.bounding_box()
     if not box:
-        locator.click()
+        locator.click(timeout=15000)
         return
     tx = box["x"] + box["width"] / 2 + random.uniform(-box["width"] / 5, box["width"] / 5)
     ty = box["y"] + box["height"] / 2 + random.uniform(-box["height"] / 5, box["height"] / 5)
@@ -1010,6 +1014,43 @@ def _enter_prompt(page, text):
     # 3) Last resort. Slow, but Quill has shown it can ignore synthetic input.
     log(f"  falling back to character typing ({len(text)} chars — this is slow)")
     _human_type(page, text)
+    return False
+
+
+_NET_ERRORS = ("ERR_NAME_NOT_RESOLVED", "ERR_NETWORK_CHANGED", "ERR_INTERNET_DISCONNECTED",
+               "ERR_CONNECTION", "ERR_TIMED_OUT", "ERR_PROXY", "ERR_ADDRESS_UNREACHABLE",
+               "net::")
+
+
+def _is_network_error(exc):
+    """Transient connectivity, not a UI bug. Seen mid-run as ERR_NAME_NOT_RESOLVED
+    and ERR_NETWORK_CHANGED — the machine's network flapped. These must NOT eat
+    the UI retry budget, or a 20-second blip fails a clip permanently."""
+    s = str(exc)
+    return any(tok in s for tok in _NET_ERRORS)
+
+
+def _hard_reset(page):
+    """Full reset of the tab. A plain goto('/app') leaves SPA state behind; when
+    the Videos tool stops activating, that leftover state is what is wrong.
+    Bounce through about:blank, come back, and wait for a real composer."""
+    for attempt in range(1, 4):
+        try:
+            page.goto("about:blank", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(800)
+            page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_selector(SEL["editor"], timeout=30000)
+            page.wait_for_timeout(int(random.uniform(2000, 3500)))
+            _ensure_chat_mode(page)
+            return True
+        except Exception as e:
+            if _is_network_error(e):
+                wait = 20 * attempt
+                log(f"  network down during reset ({str(e)[:60]}) — waiting {wait}s")
+                time.sleep(wait)
+                continue
+            log(f"  hard reset attempt {attempt}/3 failed: {e.__class__.__name__}")
+            time.sleep(3)
     return False
 
 
@@ -1129,7 +1170,10 @@ def _set_aspect(page, portrait=True):
             log(f"  aspect already {want}")
             return True
         log(f"  aspect control reads: {label!r}")
-        btn.click()
+        # _human_click (not locator.click) — it clears the backdrop first and
+        # uses raw mouse input, instead of waiting out a 30s actionability
+        # timeout against an overlay that will never go away on its own.
+        _human_click(page, btn, "aspect control")
         page.wait_for_timeout(1500)
         opts = page.evaluate("""() => {
             const r = [];
@@ -1257,14 +1301,17 @@ def submit_ui(page, prompt, ref_paths, portrait=None, timeout_s=180):
                     log(f"  clicked the Videos tool but it did not activate "
                         f"(try {tool_try}/3)")
                     _dismiss_overlay(page)
+                    # A plain retry here just repeats the same failure — the SPA
+                    # is in a state where the tool will not turn on. Bounce the
+                    # tab properly before the next try.
+                    if tool_try >= 2:
+                        _hard_reset(page)
                     continue
             log(f"  Videos tool not offered yet (try {tool_try}/3) — settling")
             _dismiss_overlay(page)
             # A missing tools menu usually means the surface flipped to Spark.
             if not _ensure_chat_mode(page):
-                page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(5000)
-                _ensure_chat_mode(page)
+                _hard_reset(page)
             page.wait_for_timeout(4000)
         else:
             raise RuntimeError("could not select the Videos tool after 3 tries")
@@ -1570,7 +1617,8 @@ class Api:
 
 DURATION_TOLERANCE_S = float(os.environ.get("GEMINI_DURATION_TOLERANCE_S", "0.5"))
 BUSY_RETRIES = int(os.environ.get("GEMINI_BUSY_RETRIES", "3"))
-UI_RETRIES = int(os.environ.get("GEMINI_UI_RETRIES", "2"))
+UI_RETRIES = int(os.environ.get("GEMINI_UI_RETRIES", "3"))
+NET_RETRIES = int(os.environ.get("GEMINI_NET_RETRIES", "5"))
 PASTE_RETRIES = int(os.environ.get("GEMINI_PASTE_RETRIES", "3"))
 BUSY_BACKOFF_S = int(os.environ.get("GEMINI_BUSY_BACKOFF_S", "90"))
 
@@ -1665,6 +1713,7 @@ def process_clip(page, api, job, clip, work_dir, attempt=1):
     # NOTE: this counter must NOT be called `attempt` — that is the caller's
     # generation_attempt, and shadowing it made every redo upload as attempt 1,
     # overwriting the previous attempt's file instead of sitting beside it.
+    net_fails = 0
     for try_n in range(1, BUSY_RETRIES + 2):
         try:
             generate(page, prompt=prompt, ref_path=start_path, out_path=out,
@@ -1679,18 +1728,25 @@ def process_clip(page, api, job, clip, work_dir, attempt=1):
         except GeminiRefused:
             raise                       # permanent: do not waste retries on it
         except Exception as e:
+            if _is_network_error(e):
+                # Connectivity, not the UI. Wait it out on its own budget —
+                # otherwise a brief network flap permanently fails a clip.
+                if net_fails >= NET_RETRIES:
+                    raise
+                net_fails += 1
+                wait = 30 * net_fails
+                log(f"  network error ({str(e)[:70]}) — waiting {wait}s, "
+                    f"attempt {net_fails}/{NET_RETRIES}")
+                time.sleep(wait)
+                _hard_reset(page)
+                continue
             # Composer/UI hiccups (tool did not activate, upload control missing,
             # submit did not navigate) are transient and cost a whole clip each.
-            # Reload and try again rather than failing the clip on first stumble.
             if try_n > UI_RETRIES:
                 raise
             log(f"  UI problem ({e.__class__.__name__}: {str(e)[:90]}) — "
-                f"reloading and retrying {try_n}/{UI_RETRIES}")
-            try:
-                page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(5000)
-            except Exception:
-                pass
+                f"hard reset, retry {try_n}/{UI_RETRIES}")
+            _hard_reset(page)
     _check_duration(out, want)   # refuse to upload a clip of the wrong length
 
     url = api.upload_video(out, job["id"], idx, attempt=attempt)
