@@ -25315,7 +25315,11 @@ if __name__ == "__main__":
     # flow_worker.py on PROCESS launch (the .bat Invoke-WebRequest); a golden
     # restore relaunches the browser, NOT the process, so it does NOT pick up a
     # new deploy. Bump this string on any behavior-affecting worker change.
-    print("[Init] ===== flow_worker build: v780 (dedicated 5s heartbeat + going_offline — My Worker online dot now responsive) =====", flush=True)
+    # v898.1 — the banner used to hardcode "v780" and misled everyone into
+    # thinking the worker was months stale (operator, 2026-08-05: "looks like
+    # a very old version"). Print the LIVE file hash — the same value the
+    # update check compares against the server — plus the newest rules baked in.
+    print(f"[Init] ===== flow_worker build {WORKER_BUILD} (v898 4xx-body diag · v896 verified entry click · v895 redo fresh-project) =====", flush=True)
     # Auto-drain the Kling-variant queue in the background (no-op if CLI absent).
     try:
         import threading as _kthread
