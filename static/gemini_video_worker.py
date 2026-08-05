@@ -975,6 +975,35 @@ def _enter_prompt(page, text):
     return False
 
 
+def _dump_composer_state(page, tag):
+    """Record what the composer actually offers. Called when an expected control
+    is missing, so the next failure is diagnosed from evidence."""
+    try:
+        info = page.evaluate("""() => {
+            const btns = [];
+            document.querySelectorAll('button,[role=menuitem],[role=option]').forEach(b => {
+                const t = (b.getAttribute('aria-label') || b.innerText || '').trim();
+                if (t) btns.push(t.slice(0, 60));
+            });
+            return {url: location.href, buttons: btns.slice(0, 60),
+                    hasEditor: !!document.querySelector('div.ql-editor[contenteditable=true]'),
+                    overlay: !!document.querySelector('.cdk-overlay-backdrop-showing')};
+        }""")
+        log(f"  [{tag}] url={info['url']}")
+        log(f"  [{tag}] editor={info['hasEditor']} overlay={info['overlay']}")
+        log(f"  [{tag}] controls: {info['buttons']}")
+        p = _dump_debug(repr(info), f"composer_{tag}")
+        try:
+            page.screenshot(path=os.path.join(BASE_DIR, ".gemini_debug",
+                                              f"composer_{tag}_{int(time.time())}.png"))
+        except Exception:
+            pass
+        return info
+    except Exception as e:
+        log(f"  [{tag}] state dump failed: {e}")
+        return {}
+
+
 def _ensure_chat_mode(page):
     """Force the CHAT surface, never Spark.
 
@@ -1051,7 +1080,10 @@ def _set_aspect(page, portrait=True):
     try:
         btn = page.locator(SEL["aspect"]).first
         if not btn.count():
-            log("  ! no aspect control found — leaving default")
+            # The aspect control is the proof Videos mode is really on. Missing
+            # means the tool did not activate, and every later step will fail.
+            log("  ! no aspect control found — Videos mode did NOT activate")
+            _dump_composer_state(page, "no_aspect_control")
             return False
         label = btn.get_attribute("aria-label") or ""
         want = "Portrait" if portrait else "Landscape"
@@ -1174,7 +1206,20 @@ def submit_ui(page, prompt, ref_paths, portrait=None, timeout_s=180):
                 _dismiss_overlay(page)
                 break
             if _click_text(page, ["Create video"], "videos-tool"):
-                break
+                # VERIFY BY OUTCOME, not by the click landing. The aspect control
+                # only exists in Videos mode, so wait for it to appear. Breaking
+                # on a successful click alone is why a whole redo batch died with
+                # "no aspect control" then "no file-upload control" — the click
+                # reported success while the tool had not actually activated.
+                try:
+                    page.wait_for_selector(SEL["aspect"], timeout=12000)
+                    log("  Videos mode confirmed (aspect control appeared)")
+                    break
+                except Exception:
+                    log(f"  clicked the Videos tool but it did not activate "
+                        f"(try {tool_try}/3)")
+                    _dismiss_overlay(page)
+                    continue
             log(f"  Videos tool not offered yet (try {tool_try}/3) — settling")
             _dismiss_overlay(page)
             # A missing tools menu usually means the surface flipped to Spark.
@@ -1204,6 +1249,7 @@ def submit_ui(page, prompt, ref_paths, portrait=None, timeout_s=180):
                 if btn.count():
                     _human_click(page, btn, "File upload")
                 elif not _click_text(page, ["Upload files", "Upload"], "upload"):
+                    _dump_composer_state(page, "no_upload_control")
                     raise RuntimeError("no file-upload control found")
             fc.value.set_files(path)
             # Wait for the attachment to finish, not a fixed sleep: the composer
@@ -1486,6 +1532,7 @@ class Api:
 
 DURATION_TOLERANCE_S = float(os.environ.get("GEMINI_DURATION_TOLERANCE_S", "0.5"))
 BUSY_RETRIES = int(os.environ.get("GEMINI_BUSY_RETRIES", "3"))
+UI_RETRIES = int(os.environ.get("GEMINI_UI_RETRIES", "2"))
 BUSY_BACKOFF_S = int(os.environ.get("GEMINI_BUSY_BACKOFF_S", "90"))
 
 
@@ -1590,6 +1637,21 @@ def process_clip(page, api, job, clip, work_dir, attempt=1):
             wait = BUSY_BACKOFF_S * try_n
             log(f"  Gemini busy ({e}) — waiting {wait}s, retry {try_n}/{BUSY_RETRIES}")
             time.sleep(wait)
+        except GeminiRefused:
+            raise                       # permanent: do not waste retries on it
+        except Exception as e:
+            # Composer/UI hiccups (tool did not activate, upload control missing,
+            # submit did not navigate) are transient and cost a whole clip each.
+            # Reload and try again rather than failing the clip on first stumble.
+            if try_n > UI_RETRIES:
+                raise
+            log(f"  UI problem ({e.__class__.__name__}: {str(e)[:90]}) — "
+                f"reloading and retrying {try_n}/{UI_RETRIES}")
+            try:
+                page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(5000)
+            except Exception:
+                pass
     _check_duration(out, want)   # refuse to upload a clip of the wrong length
 
     url = api.upload_video(out, job["id"], idx, attempt=attempt)
