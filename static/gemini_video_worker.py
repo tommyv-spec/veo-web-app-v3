@@ -91,6 +91,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sys
 import time
 import uuid
@@ -1702,6 +1703,74 @@ def _check_aspect(path, portrait=True):
     log(f"  aspect verified: {w}x{h}")
 
 
+def verify_render(path, job, clip, prev_paths=()):
+    """THE upload gate. Every property the job declares is checked HERE.
+
+    Why one function instead of scattered checks: three separate bad renders
+    shipped as "completed" because each gate validated a single property and
+    nothing owned the rest.
+      * a stale file from an earlier run was returned and reported as success
+      * a 3.008s render satisfied an 8s request (only duration was checked)
+      * a 1280x720 landscape render satisfied a 9:16 job (only duration again)
+    Each was patched after it had already corrupted a job. So: if the job
+    declares it, it is verified here, and a caller cannot forget a check
+    because there is exactly one call site.
+
+    Raises RuntimeError on any mismatch — the clip then re-queues instead of
+    uploading something wrong that looks right.
+    """
+    problems = []
+
+    # 1. a real, non-trivial mp4
+    if not os.path.exists(path):
+        raise RuntimeError("render missing: nothing was downloaded")
+    size = os.path.getsize(path)
+    if size < 10000:
+        problems.append(f"file is only {size} bytes")
+    with open(path, "rb") as f:
+        head = f.read(12)
+    if b"ftyp" not in head:
+        problems.append(f"not an mp4 (header {head[:12]!r})")
+
+    # 2. FRESHNESS — never accept a file identical to a previous attempt.
+    #    A recovery sweep once returned the previous run's byte-identical
+    #    render and the worker reported success.
+    if prev_paths:
+        import hashlib
+        h = hashlib.sha256(open(path, "rb").read()).hexdigest()
+        for prev in prev_paths:
+            try:
+                if os.path.exists(prev) and prev != path and \
+                        hashlib.sha256(open(prev, "rb").read()).hexdigest() == h:
+                    problems.append(f"identical to a previous render ({os.path.basename(prev)})")
+            except OSError:
+                pass
+
+    # 3. duration, if the job asked for one
+    want = clip.get("veo_render_duration_s") or job.get("duration")
+    got = _probe_duration(path)
+    if want and got is None:
+        log("  ! ffprobe unavailable — duration NOT verified")
+    elif want and abs(got - float(want)) > DURATION_TOLERANCE_S:
+        problems.append(f"duration {got:.3f}s but {want}s asked")
+
+    # 4. orientation
+    w, h = _probe_size(path)
+    if w and h:
+        want_portrait = str(job.get("aspect_ratio", "9:16")) != "16:9"
+        if want_portrait and h <= w:
+            problems.append(f"{w}x{h} is landscape but the job is 9:16")
+        elif not want_portrait and h > w:
+            problems.append(f"{w}x{h} is portrait but the job is 16:9")
+    else:
+        log("  ! ffprobe gave no dimensions — aspect NOT verified")
+
+    if problems:
+        raise RuntimeError("render rejected: " + "; ".join(problems))
+    log(f"  render verified: {w}x{h}, {got:.3f}s, {size} bytes"
+        if (w and got is not None) else f"  render verified: {size} bytes")
+
+
 def _clip_prompt(clip):
     return (clip.get("prompt") or clip.get("dialogue_text") or "").strip()
 
@@ -1753,6 +1822,15 @@ def process_clip(page, api, job, clip, work_dir, attempt=1):
 
     api.clip_status(clip_id, "generating")
     out = os.path.join(work_dir, f"clip_{idx}.mp4")
+    # Keep the previous attempt so verify_render can prove this one is new.
+    prev_attempts = []
+    if os.path.exists(out):
+        keep = os.path.join(work_dir, f"clip_{idx}.prev{attempt}.mp4")
+        try:
+            shutil.copy2(out, keep)
+            prev_attempts.append(keep)
+        except OSError:
+            pass
     # "I'm getting a lot of requests right now" is load, not rejection — wait it
     # out rather than failing the clip and marching on into the same wall.
     # NOTE: this counter must NOT be called `attempt` — that is the caller's
@@ -1792,8 +1870,9 @@ def process_clip(page, api, job, clip, work_dir, attempt=1):
             log(f"  UI problem ({e.__class__.__name__}: {str(e)[:90]}) — "
                 f"hard reset, retry {try_n}/{UI_RETRIES}")
             _hard_reset(page)
-    _check_duration(out, want)   # refuse to upload a clip of the wrong length
-    _check_aspect(out, portrait=str(job.get("aspect_ratio", "9:16")) != "16:9")
+    # ONE gate, every declared property. Do not add checks elsewhere — add them
+    # inside verify_render() so no call site can be missing one.
+    verify_render(out, job, clip, prev_paths=prev_attempts)
 
     url = api.upload_video(out, job["id"], idx, attempt=attempt)
     api.clip_status(clip_id, "completed", output_url=url)
