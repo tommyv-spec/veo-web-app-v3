@@ -629,9 +629,35 @@ def poll_images(client, batch_id, args, report):
         if time.time() > deadline:
             raise PlatformError(EXIT_WORKER, f"STALL: image gen not finished after {args.timeout_min} min")
         if time.time() - last_change > args.stall_min * 60:
+            # v897 — "no status change" is NOT the same as "nobody is working".
+            # A single Banana/ChatGPT generation routinely outlasts the 10-min
+            # stall window, and this exit used to be reported as the outcome:
+            # on 2026-08-05 two batches were called stalled and then turned out
+            # 3/3 ready. Ask the server whose lane is alive before deciding.
+            lane = {}
+            try:
+                lane = client.get("/api/images/worker/status") or {}
+            except Exception:
+                pass
+            alive = bool(lane.get("http_worker_online") or lane.get("chatgpt_worker_online")
+                         or lane.get("worker_online"))
+            busy = bool(lane.get("http_worker_busy") or lane.get("chatgpt_worker_busy"))
+            really_stalled = bool(lane.get("flow_stalled") or lane.get("chatgpt_stalled"))
+            working = [n for n in gen if n.get("status") in ("queued", "generating")]
+            if (alive or busy or working) and not really_stalled:
+                # Still being worked — say so and keep the batch, do not error.
+                print(f"  still generating after {args.stall_min} min "
+                      f"({len(working)} node(s) queued/generating; worker online={alive} busy={busy}). "
+                      f"Not an error — images land asynchronously.\n"
+                      f"  check later:  python send_to_platform.py x --resume-batch {batch_id} --review",
+                      flush=True)
+                report["stages"].append("images:still_generating")
+                report["awaiting_generation"] = [n["id"] for n in working]
+                return False
             raise PlatformError(
                 EXIT_WORKER,
-                f"STALL: no image progress for {args.stall_min} min — is the image worker running? "
+                f"STALL: no image progress for {args.stall_min} min and no lane is working "
+                f"(worker online={alive}, lane stalled={really_stalled}) — start the image worker. "
                 f"(GET /api/images/worker/status)")
         time.sleep(args.poll_interval)
 

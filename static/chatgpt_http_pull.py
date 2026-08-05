@@ -96,16 +96,34 @@ def run(api_url, api_key, page, host, poll_s=5, log=print):
                       headers=_auth(api_key), timeout=30)
     except Exception as e:
         log(f"release-claims failed (non-fatal): {e}")
-    last_hb = 0
-    while True:
-        now = time.time()
-        if now - last_hb > 4:
+
+    # v897 — heartbeat from a DAEMON THREAD, not from the poll loop.
+    #
+    # The beat used to be sent inline right before generate(), which blocks for
+    # minutes while the browser renders. No request goes out for that whole
+    # span, so the server's heartbeat row ages past its 20s window and the
+    # platform light flips to "offline" while the worker is demonstrably
+    # working (operator caught this 2026-08-05: "the chatgpt worker is live").
+    # flow_worker already beats from a thread; this brings parity.
+    #
+    # Server-side v897 also treats a fresh claim as liveness, so an OLD copy of
+    # this worker still reads correctly — but a real beat is the honest signal.
+    import threading
+    _hb_stop = threading.Event()
+
+    def _heartbeat_loop():
+        while not _hb_stop.is_set():
             try:
                 requests.post(f"{base}/heartbeat", params={"worker_id": wid},
                               headers=_auth(api_key), timeout=15)
-                last_hb = now
             except Exception as e:
                 log(f"heartbeat failed: {e}")
+            _hb_stop.wait(4.0)
+
+    _hb_thread = threading.Thread(target=_heartbeat_loop, name="chatgpt-heartbeat", daemon=True)
+    _hb_thread.start()
+
+    while True:
         try:
             r = requests.get(f"{base}/jobs/pending",
                              params={"worker_id": wid, "backend": WORKER_BACKEND},

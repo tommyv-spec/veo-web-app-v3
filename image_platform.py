@@ -11478,7 +11478,34 @@ def _split_worker_lights(rows, now):
         slot["worker_id"] = row.worker_id
         slot["age"] = age
         slot["online"] = age < WORKER_HEARTBEAT_STALE_SECONDS
+        slot["busy"] = False
     return flow, cg
+
+
+def _apply_busy_liveness(light, fresh_claims):
+    """v897 — a worker holding a FRESH CLAIM is alive, even with a stale beat.
+
+    Heartbeat rows are only written when the worker calls the server
+    (`POST /worker/heartbeat` or the pending-jobs poll). The ChatGPT worker
+    has no heartbeat thread, so while it is inside a multi-minute image
+    generation it makes no request at all, its row ages past the 20s window
+    and the light flips red. The operator watched it read "offline" while it
+    was demonstrably rendering (2026-08-05), and `_lane_stalled` compounded
+    it: that check only fires when the light is green, so a busy worker
+    showed as plain offline and never as working.
+
+    A claim taken inside the 10-minute stale-claim sweep window is proof the
+    process is alive right now, so it keeps the lane green and marks it BUSY.
+    `busy` is reported separately so the UI can say "working" instead of the
+    idle green. Applies to any lane, so a future worker that forgets to beat
+    is covered too.
+    """
+    if fresh_claims > 0 and not light["online"]:
+        light["online"] = True
+        light["busy"] = True
+    else:
+        light["busy"] = bool(fresh_claims) and light["online"]
+    return light
 
 
 # v891b — a lane is STALLED when its light is green but its queue is not
@@ -11625,6 +11652,11 @@ def worker_status(
             ImageNode.cg_claimed_at.isnot(None),
             ImageNode.cg_claimed_at >= claim_fresh_cutoff,
         ).count()
+        # v897 — a fresh claim keeps the lane green and flags it BUSY, so a
+        # worker inside a long generation stops reading as offline. Must run
+        # BEFORE _lane_stalled, which keys off the (now corrected) light.
+        _apply_busy_liveness(flow_light, generating_fresh)
+        _apply_busy_liveness(cg_light, cg_generating_fresh)
         flow_stalled = _lane_stalled(
             flow_light["online"], n_queued, queued_oldest_age, generating_fresh)
         chatgpt_stalled = _lane_stalled(
@@ -11657,10 +11689,13 @@ def worker_status(
         "http_worker_online": flow_light["online"],
         "http_worker_id": flow_light["worker_id"],
         "http_worker_heartbeat_age_seconds": flow_light["age"],
+        # v897 — green because it is mid-generation, not because it is idle
+        "http_worker_busy": flow_light.get("busy", False),
         # ChatGPT worker (second light, distinct from flow)
         "chatgpt_worker_online": cg_light["online"],
         "chatgpt_worker_id": cg_light["worker_id"],
         "chatgpt_worker_heartbeat_age_seconds": cg_light["age"],
+        "chatgpt_worker_busy": cg_light.get("busy", False),
         # v891b — queue-drain truth per lane
         "flow_stalled": flow_stalled,
         "chatgpt_stalled": chatgpt_stalled,
