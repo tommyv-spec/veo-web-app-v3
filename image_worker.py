@@ -107,7 +107,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v583"  # v894 mint-failure cause + page reload recovery (no false account block)
+WORKER_VERSION = "img-v584"  # v895 load reCAPTCHA enterprise.js ourselves when Flow hasn't
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 
 # v891d — truthful heartbeat. The heartbeat threads beat every 5s no matter
@@ -3870,16 +3870,63 @@ def _fa_mint_or_empty(page, action):
 # problem). The first was being reported as an account block and drove an
 # endless golden-restore/relaunch loop (operator 2026-08-05, node 4577:
 # mint=10.0s(4x) — exactly the 10s wait timeout, so grecaptcha was absent).
+# v895 — LOAD the reCAPTCHA Enterprise script when the page hasn't. Flow loads
+# it lazily (the app only pulls it when its own UI is about to generate), so a
+# page the worker drives purely through the JSON API can sit forever without it
+# — grecaptcha never appears, every mint fails, and no amount of reloading or
+# relaunching helps. Injecting the standard enterprise.js with Flow's own site
+# key gives us the same minting the app would do. Diagnostics come back with the
+# error so an unloaded script is distinguishable from one that loaded but stayed
+# invisible to this execution context.
 _FA_CAPTCHA_BATCH_JS = """
 async ([siteKey, action, n]) => {
-  const s = Date.now();
-  while (Date.now() - s < 10000) {
-    if (window.grecaptcha && window.grecaptcha.enterprise && window.grecaptcha.enterprise.execute) break;
-    await new Promise(r => setTimeout(r, 200));
+  const ready = () => !!(window.grecaptcha && window.grecaptcha.enterprise
+                         && window.grecaptcha.enterprise.execute);
+  const waitFor = async (ms) => {
+    const s = Date.now();
+    while (Date.now() - s < ms) {
+      if (ready()) return true;
+      await new Promise(r => setTimeout(r, 200));
+    }
+    return ready();
+  };
+  const diag = () => {
+    let tags = -1;
+    try { tags = document.querySelectorAll('script[src*="recaptcha"]').length; } catch (e) {}
+    return 'recaptcha script tags=' + tags + ', typeof grecaptcha=' + (typeof window.grecaptcha);
+  };
+
+  let ok = await waitFor(6000);
+  let injected = false;
+  if (!ok) {
+    injected = true;
+    try {
+      await new Promise((res, rej) => {
+        const prior = document.querySelector('script[data-kaveno-recaptcha]');
+        if (prior) return res();
+        const s = document.createElement('script');
+        s.src = 'https://www.google.com/recaptcha/enterprise.js?render=' + encodeURIComponent(siteKey);
+        s.async = true;
+        s.setAttribute('data-kaveno-recaptcha', '1');
+        s.onload = () => res();
+        s.onerror = () => rej(new Error('enterprise.js failed to load (blocked?)'));
+        (document.head || document.documentElement).appendChild(s);
+      });
+    } catch (e) {
+      return { tokens: [], err: 'grecaptcha not available: ' + ((e && e.message) || 'inject failed')
+                                 + ' [' + diag() + ']' };
+    }
+    ok = await waitFor(12000);
+    if (!ok) {
+      return { tokens: [], err: 'grecaptcha not visible after loading enterprise.js '
+                                 + '(execution context may be isolated) [' + diag() + ']' };
+    }
   }
-  if (!(window.grecaptcha && window.grecaptcha.enterprise && window.grecaptcha.enterprise.execute)) {
-    return { tokens: [], err: 'grecaptcha not available' };
-  }
+  try {
+    await new Promise(r => {
+      try { window.grecaptcha.enterprise.ready(r); } catch (e) { r(); }
+    });
+  } catch (e) {}
   const jobs = [];
   for (let i = 0; i < n; i++) jobs.push(window.grecaptcha.enterprise.execute(siteKey, { action }));
   const out = await Promise.allSettled(jobs);
@@ -3889,7 +3936,7 @@ async ([siteKey, action, n]) => {
     const first = out.find(r => r.status === 'rejected');
     err = 'grecaptcha execute rejected: ' + ((first && first.reason && first.reason.message) || 'unknown');
   }
-  return { tokens, err };
+  return { tokens, err, injected };
 }
 """
 
@@ -3944,7 +3991,9 @@ _FA_MINT_LAST_ERR = {"reason": ""}
 
 
 def _fa_mint_page_not_ready(reason: str) -> bool:
-    """The mint failed because of the PAGE, not the account."""
+    """The mint failed because of the PAGE, not the account — worth ONE reload.
+    'not visible after loading enterprise.js' is excluded on purpose: the script
+    did load, so reloading changes nothing (see v895)."""
     r = (reason or "").lower()
     return "grecaptcha not available" in r or "mint evaluate failed" in r
 
@@ -5056,7 +5105,8 @@ def _is_unusual(reason: str) -> bool:
     # mint=10.0s(4x) = exactly the grecaptcha wait timeout). Page-level causes get
     # a page reload + normal retries instead (see _fa_mint_captcha_batch).
     # Checked FIRST so it wins over the MINT-FAILED clause below.
-    if "GRECAPTCHA NOT AVAILABLE" in r or "MINT EVALUATE FAILED" in r:
+    if ("GRECAPTCHA NOT AVAILABLE" in r or "MINT EVALUATE FAILED" in r
+            or "GRECAPTCHA NOT VISIBLE" in r):
         return False
     if "UNUSUAL_ACTIVITY" in r:
         return True
