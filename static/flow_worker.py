@@ -16748,7 +16748,11 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
             print(f"[REDO] ⚠ Project state unclear after 10s — proceeding optimistically", flush=True)
 
     except Exception as e:
-        print(f"[REDO] ⚠ Could not navigate to project: {e} — creating new project", flush=True)
+        # v895.1 — the no-URL sentinel raise is the EXPECTED route here, not a
+        # navigation failure; its intent line already printed above, so don't
+        # log it as an error (reviewer: conflated log confused tracing).
+        if project_url:
+            print(f"[REDO] ⚠ Could not navigate to project: {e} — creating new project", flush=True)
         _need_new_project = True
     
     if _need_new_project:
@@ -16788,8 +16792,18 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                 except Exception as _ce:
                     print(f"[REDO] ⚠ v895: could not cache new project URL: {_ce}", flush=True)
         except Exception as e2:
-            print(f"[REDO] ❌ Failed to create new project: {e2}", flush=True)
-            update_clip_status(clip_id, 'flow_redo_queued')
+            # v895.1 — cap this re-queue exactly like the rebuild_clip path
+            # below: a persistently failing project creation would otherwise
+            # re-queue into the same redo-pending poll forever — the exact
+            # livelock v895 removed from the no-URL branch (reviewer catch).
+            _fp_cycles = register_auto_redo_cycle(clip_id)
+            if auto_redo_exhausted(_fp_cycles):
+                print(f"[REDO] ❌ Failed to create new project {_fp_cycles}× — giving up, marking failed: {e2}", flush=True)
+                update_clip_status(clip_id, 'failed', error_message="Could not create a Flow project for this redo after retries — click Retry to try again.")
+                clear_auto_redo_cycle(clip_id)
+            else:
+                print(f"[REDO] ❌ Failed to create new project: {e2} — requeuing [{_fp_cycles}/{MAX_AUTO_REDO_CYCLES}]", flush=True)
+                update_clip_status(clip_id, 'flow_redo_queued')
             shutil.rmtree(temp_dir, ignore_errors=True)
             return False
     

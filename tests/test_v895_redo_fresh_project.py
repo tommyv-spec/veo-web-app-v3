@@ -43,6 +43,22 @@ class TestV895RedoFreshProject(unittest.TestCase):
             "_need_new_project no longer accounts for a missing project URL",
         )
 
+    def test_fresh_project_failure_is_capped(self):
+        # v895.1 (reviewer catch) — a failing fresh-project creation must not
+        # re-queue uncapped: that is the same livelock through a different
+        # door. The except branch must run the auto-redo-cycle cap and mark
+        # the clip failed once exhausted.
+        src = _source()
+        self.assertRegex(
+            src,
+            re.compile(
+                r"except Exception as e2:.{0,600}?register_auto_redo_cycle\(clip_id\)"
+                r".{0,600}?auto_redo_exhausted",
+                re.S,
+            ),
+            "fresh-project-creation failure lost its auto-redo-cycle cap",
+        )
+
     def test_fresh_project_url_cached_for_sibling_clips(self):
         # The created project must be written back to the job cache (per
         # account) so the job's other queued redo clips reuse it instead of
