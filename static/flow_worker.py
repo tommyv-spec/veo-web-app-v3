@@ -16623,10 +16623,17 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
     print(f"{'='*60}", flush=True)
     
     if not project_url:
-        print(f"[REDO] ❌ No project URL for job {job_id[:8]} — cannot redo in same project", flush=True)
-        update_clip_status(clip_id, 'flow_redo_queued', error_message="No project URL available — click Retry")
-        return False
-    
+        # v895 — do NOT park the clip back to flow_redo_queued here: the
+        # redo-pending poll filters on exactly that status, so the same clip was
+        # re-claimed and re-parked forever (livelock — job 46dc610a, 2026-08-05,
+        # clips 12-15 cycling generating -> flow_redo_queued on both accounts).
+        # A job legitimately has no project URL when its clips were rendered by
+        # another worker (Gemini emergency worker has no Flow project) or when
+        # the v758.24 unusual-activity recovery dropped the URL on purpose.
+        # Fall through: the _need_new_project branch below creates a fresh
+        # project and submits there, exactly like a policy-swap redo.
+        print(f"[REDO] v895: no project URL for job {job_id[:8]} — will create a FRESH project for this redo", flush=True)
+
     temp_dir = tempfile.mkdtemp(prefix=f"flow_redo_{clip_id}_", dir=SHM_DIR)
     
     start_frame_local = None
@@ -16649,8 +16656,12 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
     # project and re-apply settings — reusing the old project would keep the
     # original model. (Both models now run Frames, so the tab is unchanged; the
     # fresh project is still required for the model swap itself.)
-    _need_new_project = bool(_policy_swap_model)
+    _need_new_project = bool(_policy_swap_model) or not project_url
     try:
+        if not project_url:
+            # v895 — nothing to navigate to; the except branch below routes
+            # straight to fresh-project creation.
+            raise RuntimeError("no project URL for this job (v895)")
         page.goto(project_url, timeout=60000)
         page.wait_for_load_state("domcontentloaded", timeout=30000)
 
@@ -16760,6 +16771,22 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
             time.sleep(2)
             project_url = page.url
             print(f"[REDO] ✓ Created new project: {project_url}", flush=True)
+            # v895 — remember this project so the job's OTHER queued redo clips
+            # reuse it instead of each creating another fresh project (a
+            # new-project burst per clip is exactly the automated signal that
+            # trips the unusual-activity block). Skipped for policy-swap
+            # projects: those are locked to the swapped model and must not be
+            # picked up by non-swap redos.
+            if cache is not None and not _policy_swap_model:
+                try:
+                    _j = cache.setdefault('jobs', {}).setdefault(job_id, {})
+                    if account_name:
+                        _j.setdefault('account_projects', {})[account_name] = project_url
+                    else:
+                        _j['project_url'] = project_url
+                    save_cache(cache)
+                except Exception as _ce:
+                    print(f"[REDO] ⚠ v895: could not cache new project URL: {_ce}", flush=True)
         except Exception as e2:
             print(f"[REDO] ❌ Failed to create new project: {e2}", flush=True)
             update_clip_status(clip_id, 'flow_redo_queued')
