@@ -857,62 +857,6 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
         prof["info_cache"] = {"Default": entry}
         prof["last_used"] = "Default"
         prof["last_active_profiles"] = ["Default"]
-        # v903 — carry a REAL Chrome variations seed into the golden.
-        #
-        # flow_worker's own chrome_warmup docstring states the rule: "reCAPTCHA
-        # Enterprise checks x-client-data — a short header = low trust score =
-        # 403". Chrome only sends x-client-data when it has an applied
-        # variations seed, which lives in Local State.variations_compressed_seed.
-        #
-        # Measured 2026-08-06: the golden had variations_seed_signature and
-        # _date but NO variations_compressed_seed, because the profile is pulled
-        # from Chrome BETA and that install has never synced one (stable's seed
-        # is 61292 chars, Beta's is absent). The copy faithfully preserved the
-        # absence. Result: worker Chrome sent NO x-client-data ("[Warmup] no
-        # x-client-data header captured"), reCAPTCHA scored the session
-        # untrusted, and EVERY generate returned 403 "reCAPTCHA evaluation
-        # failed" / PUBLIC_ERROR_UNUSUAL_ACTIVITY — which the worker then
-        # misread as an account block and golden-restored forever.
-        #
-        # The seed is per Chrome install, not per account, and the worker
-        # launches on stable `chrome`, so stable's seed is the correct one.
-        # Copy the whole variations_* set together: the signature signs the
-        # seed, so a mismatched pair is worse than none.
-        try:
-            _seed = (ls.get("variations_compressed_seed") or "")
-            if not _seed:
-                _VAR_KEYS = ("variations_compressed_seed", "variations_seed_signature",
-                             "variations_seed_date", "variations_last_fetch_time",
-                             "variations_country", "variations_permanent_consistency_country")
-                _donor = None
-                for _cand in resolve_laptop_user_data_dirs():
-                    if not _cand or _cand == user_data_dir:
-                        continue
-                    _cls = os.path.join(_cand, "Local State")
-                    if not os.path.isfile(_cls):
-                        continue
-                    try:
-                        with open(_cls, "r", encoding="utf-8", errors="ignore") as _f:
-                            _d = json.load(_f)
-                    except (OSError, ValueError):
-                        continue
-                    if _d.get("variations_compressed_seed"):
-                        _donor = (_cand, _d)
-                        break
-                if _donor:
-                    _dpath, _d = _donor
-                    for _k in _VAR_KEYS:
-                        ls.pop(_k, None)
-                        if _k in _d:
-                            ls[_k] = _d[_k]
-                    log(f"{tag}lean golden: v903 borrowed variations seed "
-                        f"({len(ls.get('variations_compressed_seed') or '')} chars) from {_dpath} "
-                        f"— without it Chrome sends no x-client-data and reCAPTCHA 403s every generate")
-                else:
-                    log(f"{tag}lean golden: v903 WARNING no Chrome install has a variations seed; "
-                        f"x-client-data will be empty and Flow may 403 every generate")
-        except Exception as _ve:
-            log(f"{tag}lean golden: v903 variations-seed copy skipped: {_ve}")
         with open(os.path.join(tmp, "Local State"), "w", encoding="utf-8") as f:
             json.dump(ls, f)
         # 3. Preferences: clean exit so Chrome does not reopen the operator's tabs
