@@ -16542,6 +16542,15 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
     inline on page1 via the HTTP worker — same path as the main process.
     Page2 stays idle.
     """
+    # v900 — same authoritative install as process_job_submission: the redo
+    # path submits too, so it needs the response listener for mediaId binding
+    # and fail-reason scanning. Idempotent.
+    try:
+        _lbl = os.path.basename((getattr(page, '_user_data_dir', '') or SESSION_FOLDER or '').rstrip('\\/'))
+        _install_submit_response_listener(page, account_label=_lbl)
+    except Exception as _le:
+        print(f"[v900] redo listener install skipped: {_le}", flush=True)
+
     clip_id = clip['id']
     job_id = clip['job_id']
     register_clip_prompt_b(clip)  # v805 — make Prompt B findable by clip_id
@@ -18919,7 +18928,22 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     """Submit all clips for a job"""
     global _policy_retried_tiles
     _policy_retried_tiles = set()  # Reset dedup for new job/project
-    
+
+    # v900 — AUTHORITATIVE listener install. This is the single place every
+    # submit path passes through, in EVERY mode, with the exact page the clips
+    # are submitted on — including a page rebuilt by a mid-loop golden restore
+    # (main() relaunches the browser at ~6 sites; patching each is one miss away
+    # from going blind again). Idempotent: no-ops when already installed.
+    # Deliberately NOT _stash_profile_on_page — that also rewrites
+    # page._user_data_dir, which in multi-account mode would stamp the wrong
+    # profile and break the HWND lookup. Label reuses the page's own profile dir
+    # when present so parallel account buffers stay separate.
+    try:
+        _lbl = os.path.basename((getattr(page, '_user_data_dir', '') or SESSION_FOLDER or '').rstrip('\\/'))
+        _install_submit_response_listener(page, account_label=_lbl)
+    except Exception as _le:
+        print(f"[v900] listener install skipped: {_le}", flush=True)
+
     job_id = job['id']
     clips = job['clips']
 
@@ -23742,9 +23766,20 @@ def main(account_session=None, account_download=None, account_label=None):
         
         # Match test_human_like.py: browser.pages[0] if browser.pages else browser.new_page()
         page = browser.pages[0] if browser.pages else browser.new_page()
-        
+        # v900 — install the submit-response listener. EVERY call site of
+        # _stash_profile_on_page lived inside AccountWorker, so single-account
+        # main() (what start_worker.bat --single runs) never installed it and
+        # ran BLIND: no v700 mediaId binding ("no submit response captured
+        # within 40s"), and _scan_failure_reason never ran, so no 403 / RAI /
+        # policy reason was ever detected. Every failure then degraded to a
+        # DOM-only "refresh button + no video" HARD FAILURE -> abort job ->
+        # golden restore -> reset clips -> repeat. Measured 2026-08-06 on job
+        # 2f72065d: 0 flow-api-capture and 0 fail-reason-diag lines in a whole
+        # single-mode run, vs dozens in a multi-account run.
+        _stash_profile_on_page(page, SESSION_FOLDER, account_label=label)
+
         # Note: Patchright handles stealth (webdriver, CDP, Runtime.enable) natively
-        
+
         print(f"✓ {browser_name} browser started")
         
         # Warm up Chrome — sync variations seed for valid x-client-data header
@@ -23761,6 +23796,7 @@ def main(account_session=None, account_download=None, account_label=None):
             time.sleep(2)
             browser = p.chromium.launch_persistent_context(**launch_kwargs) if BROWSER_MODE == "stealth" else p.firefox.launch_persistent_context(**launch_kwargs)
             page = browser.pages[0] if browser.pages else browser.new_page()
+            _stash_profile_on_page(page, SESSION_FOLDER, account_label=label)  # v900 — new page = new listener
             print("[Warmup] ✓ Browser relaunched — proceeding to Flow without warmup", flush=True)
         
         # === Match test_human_like.py startup exactly ===
@@ -23902,8 +23938,9 @@ def main(account_session=None, account_download=None, account_label=None):
                     browser = p.firefox.launch_persistent_context(**relaunch_kwargs)
                 
                 page = browser.pages[0] if browser.pages else browser.new_page()
+                _stash_profile_on_page(page, SESSION_FOLDER, account_label=label)  # v900 — new page = new listener
                 chrome_warmup(page)
-                
+
                 print("[Sync] Navigating to Flow...", flush=True)
                 page.goto(FLOW_HOME_URL)
                 human_delay(1, 2)
@@ -23939,6 +23976,7 @@ def main(account_session=None, account_download=None, account_label=None):
                             print(f"[Sync] ⚠ Could not copy session: {e}")
                     browser = p.chromium.launch_persistent_context(**relaunch_kwargs) if BROWSER_MODE == "stealth" else p.firefox.launch_persistent_context(**relaunch_kwargs)
                     page = browser.pages[0] if browser.pages else browser.new_page()
+                    _stash_profile_on_page(page, SESSION_FOLDER, account_label=label)  # v900 — new page = new listener
                     chrome_warmup(page)
                     page.goto(FLOW_HOME_URL)
                     human_delay(1, 2)
