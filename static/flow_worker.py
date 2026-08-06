@@ -20781,12 +20781,41 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             print("[Flow] [v902] ✓ page reloaded — Flow reCAPTCHA script re-fetched", flush=True)
                         except Exception as _v902e:
                             print(f"[Flow] [v902] ⚠ page reload failed: {_v902e}", flush=True)
+                        # v902.1 — CAP the reload+requeue. Live evidence
+                        # 2026-08-06: after the reload, clip 2 got the SAME
+                        # "reCAPTCHA evaluation failed" 403 on the freshly
+                        # reloaded page. So the cause is not a missing script (a
+                        # reload cures that — the image worker's v894 case); it
+                        # is reCAPTCHA SCORING this browser session as automated,
+                        # which no retry can fix. Without a cap the requeue is an
+                        # infinite redo loop. Reuse the existing auto-redo counter
+                        # so the clip fails with an actionable message instead.
+                        _rc_absorbed = []
                         for _dfc in _hard_fails:
                             _df_clip = next((c for c in clips if c.get('clip_index') == _dfc), None)
-                            if _df_clip:
-                                update_clip_status(_df_clip['id'], 'flow_redo_queued',
-                                                   error_message="Flow reCAPTCHA check failed on this page — retrying on a reloaded page.")
-                                clip_log(_df_clip['id'], _dfc, "REDO", "page reCAPTCHA 403 (v902) — reloaded + requeued")
+                            if not _df_clip:
+                                continue
+                            _rc_cycles = register_auto_redo_cycle(_df_clip['id'])
+                            if auto_redo_exhausted(_rc_cycles):
+                                print(f"[Flow] ⛔ [v902.1] clip {_dfc+1}: Flow's reCAPTCHA rejected "
+                                      f"{_rc_cycles} submits in a row even after page reloads — this "
+                                      f"browser session is being scored as automated. Failing the clip "
+                                      f"(cool the account down / rotate it, then Retry).", flush=True)
+                                update_clip_status(_df_clip['id'], 'failed',
+                                                   error_message=("Flow's reCAPTCHA kept rejecting this browser session "
+                                                                  "(reCAPTCHA evaluation failed). Let the account rest or "
+                                                                  "use another one, then click Retry."))
+                                clip_log(_df_clip['id'], _dfc, "FAILED", "page reCAPTCHA 403 persisted after reloads (v902.1)")
+                                clear_auto_redo_cycle(_df_clip['id'])
+                                continue
+                            update_clip_status(_df_clip['id'], 'flow_redo_queued',
+                                               error_message="Flow reCAPTCHA check failed on this page — retrying on a reloaded page.")
+                            clip_log(_df_clip['id'], _dfc, "REDO",
+                                     f"page reCAPTCHA 403 (v902) — reloaded + requeued [{_rc_cycles}/{MAX_AUTO_REDO_CYCLES}]")
+                            _rc_absorbed.append(_dfc)
+                        # Only clips still being retried are absorbed; a clip that
+                        # exhausted the cap is already terminally failed above, so
+                        # it must NOT fall through to the golden-restore abort.
                         _hard_fails = []
                 # Re-test: v902 may have absorbed every hard failure above.
                 if _hard_fails:

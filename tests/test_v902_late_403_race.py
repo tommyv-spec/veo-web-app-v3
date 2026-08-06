@@ -67,6 +67,18 @@ class TestV902Late403Race(unittest.TestCase):
         self.assertEqual([], escapes,
                          f"the delayed-failure raise escaped the _hard_fails guard at {escapes[:3]}")
 
+    def test_recaptcha_requeue_is_capped(self):
+        """v902.1 — live evidence 2026-08-06: after the reload, the next clip
+        got the SAME reCAPTCHA 403 on the freshly reloaded page, so the cause is
+        scoring, not a missing script, and an uncapped requeue is an infinite
+        redo loop. The clip must terminally fail with an actionable message."""
+        src = _source()
+        i = src.index("_recent_generate_recaptcha_fail(_rc_bk)")
+        branch = src[i:src.index("# Re-test: v902")]
+        self.assertIn("register_auto_redo_cycle(", branch, "requeue must count attempts")
+        self.assertIn("auto_redo_exhausted(", branch, "requeue must be capped")
+        self.assertIn("'failed'", branch, "an exhausted clip must terminally fail, not requeue forever")
+
     def test_real_hard_failure_still_aborts(self):
         """A hard failure with no reCAPTCHA marker must still reach the
         golden-restore abort - v902 narrows the classification, it does not
