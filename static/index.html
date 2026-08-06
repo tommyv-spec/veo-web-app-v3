@@ -3790,7 +3790,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                     <textarea class="img-prompt" id="imgNodePrompt" placeholder="Describe the image you want to generate..."></textarea>
 
                     <div style="margin-top:12px;">
-                        <label class="field-label">Parents <span style="color:var(--text-muted);font-weight:400;">(max 3)</span></label>
+                        <label class="field-label">Parents <span id="imgParentLimitLabel" style="color:var(--text-muted);font-weight:400;">(up to 14 for this model)</span></label>
                         <div id="imgParentSlots"></div>
                         <button class="add-parent-btn" id="imgAddParentBtn" onclick="imgAddParentSlot()">+ Add Parent</button>
                     </div>
@@ -3819,7 +3819,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                         </div>
                         <div>
                             <label class="field-label">Model</label>
-                            <select class="img-select" id="imgModel">
+                            <select class="img-select" id="imgModel" onchange="imgHandleModelReferenceLimit()">
                                 <option value="nano_banana_pro">Nano Banana Pro</option>
                                 <option value="nano_banana_2" selected>Nano Banana 2</option>
                                 <option value="imagen_4">Imagen 4</option>
@@ -18332,7 +18332,7 @@ Ambient: same kitchen room tone, soft pour sound.
             currentTab: 'videos',       // 'videos' | 'images'
             nodes: [],                  // cached list of nodes
             nodesById: {},              // id → node
-            parentSlots: [],            // [{parent_node_id, role, slot_order}]
+            parentSlots: [],            // [{parent_node_id, role, reference_instruction, slot_order}]
             view: 'list',               // 'list' | 'graph'
             pollTimer: null,
             graphInstance: null,
@@ -21333,14 +21333,27 @@ Ambient: same kitchen room tone, soft pour sound.
 
         // ---- Parent slot picker -----------------------------------------------
 
+        function imgMaxParents() {
+            const model = (document.getElementById('imgModel') || {}).value || 'nano_banana_2';
+            return (model === 'nano_banana_2' || model === 'nano_banana_pro') ? 14 : 3;
+        }
+
+        function imgHandleModelReferenceLimit() {
+            const maxParents = imgMaxParents();
+            const label = document.getElementById('imgParentLimitLabel');
+            if (label) label.textContent = `(up to ${maxParents} for this model)`;
+            imgRenderParentSlots();
+        }
+
         function imgAddParentSlot() {
-            if (imgState.parentSlots.length >= 3) return;
+            if (imgState.parentSlots.length >= imgMaxParents()) return;
             const usedSlots = new Set(imgState.parentSlots.map(s => s.slot_order));
             let newSlot = 0;
             while (usedSlots.has(newSlot)) newSlot++;
             imgState.parentSlots.push({
                 parent_node_id: null,
                 role: '',
+                reference_instruction: '',
                 slot_order: newSlot,
             });
             imgRenderParentSlots();
@@ -21370,8 +21383,9 @@ Ambient: same kitchen room tone, soft pour sound.
             } else {
                 container.innerHTML = imgState.parentSlots.map((slot, i) => imgParentSlotHtml(slot, i)).join('');
             }
-            addBtn.disabled = imgState.parentSlots.length >= 3;
-            addBtn.textContent = imgState.parentSlots.length >= 3 ? 'Max 3 parents' : '+ Add Parent';
+            const maxParents = imgMaxParents();
+            addBtn.disabled = imgState.parentSlots.length >= maxParents;
+            addBtn.textContent = imgState.parentSlots.length >= maxParents ? `Max ${maxParents} parents` : '+ Add Parent';
         }
 
         function imgParentSlotHtml(slot, idx) {
@@ -21387,6 +21401,7 @@ Ambient: same kitchen room tone, soft pour sound.
             const parent = slot.parent_node_id ? imgState.nodesById[slot.parent_node_id] : null;
             const thumbUrl = parent && parent.chosen_variant ? parent.chosen_variant.image_url : null;
             const roleSafe = imgEscape(slot.role || '');
+            const instructionSafe = imgEscape(slot.reference_instruction || '');
             // v509: warn if a role is set but its name doesn't appear in the prompt.
             // Substring match is intentionally loose — a real mismatch is the kind
             // of thing the user wants flagged, but we shouldn't false-positive on
@@ -21395,8 +21410,9 @@ Ambient: same kitchen room tone, soft pour sound.
             try {
                 const prompt = (document.getElementById('imgNodePrompt') || {}).value || '';
                 const role = (slot.role || '').trim();
-                if (role && prompt && !prompt.toLowerCase().includes(role.toLowerCase())) {
-                    mismatchHtml = `<div style="font-size:10px;color:#c89417;margin-top:2px;">⚠ "${imgEscape(role)}" doesn't appear in the prompt — Nano Banana 2 won't bind this ingredient unless its name is in the prompt text.</div>`;
+                const useInstruction = (slot.reference_instruction || '').trim();
+                if (role && prompt && !useInstruction && !prompt.toLowerCase().includes(role.toLowerCase())) {
+                    mismatchHtml = `<div style="font-size:10px;color:#c89417;margin-top:2px;">⚠ Add "${imgEscape(role)}" to the scene prompt, or write a clear use instruction below.</div>`;
                 }
             } catch (e) { /* prompt textarea not on screen yet */ }
             return `
@@ -21409,6 +21425,7 @@ Ambient: same kitchen room tone, soft pour sound.
                             ${options}
                         </select>
                         <input type="text" class="img-input" list="imgIngredientNameSuggestions" placeholder="ingredient name (e.g. the main character)" value="${roleSafe}" onchange="imgUpdateParentSlot(${idx}, 'role', this.value)" style="font-size:11px;padding:4px 8px;">
+                        <textarea class="img-input" placeholder="Take: porch geometry. Apply to: background. Preserve: main identity and product. Ignore: people, clothing, camera angle." onchange="imgUpdateParentSlot(${idx}, 'reference_instruction', this.value)" style="font-size:11px;padding:5px 8px;min-height:58px;resize:vertical;margin-top:4px;">${instructionSafe}</textarea>
                         ${mismatchHtml}
                     </div>
                     <button class="slot-remove" onclick="imgRemoveParentSlot(${idx})" title="Remove">✕</button>
@@ -21443,7 +21460,12 @@ Ambient: same kitchen room tone, soft pour sound.
                 n_variants: parseInt(document.getElementById('imgNVariants').value, 10),
                 parents: imgState.parentSlots
                     .filter(s => s.parent_node_id)
-                    .map(s => ({ parent_node_id: s.parent_node_id, role: s.role || null, slot_order: s.slot_order })),
+                    .map(s => ({
+                        parent_node_id: s.parent_node_id,
+                        role: s.role || null,
+                        reference_instruction: (s.reference_instruction || '').trim() || null,
+                        slot_order: s.slot_order,
+                    })),
             };
             // v773.11.2: PostHog event — image-job Create + Generate click.
             window.track && window.track('image_job_generated', {
@@ -23512,7 +23534,10 @@ Ambient: same kitchen room tone, soft pour sound.
         }
 
         async function imgRegenerate(nodeId) {
-            if (!confirm('Regenerate this node? The current variants will be deleted.')) return;
+            // v910 — banana-lane only. Any GPT (ChatGPT-backend) variant on this
+            // node is preserved server-side; say so, the old copy claimed all
+            // variants died.
+            if (!confirm('Regenerate this node? The Banana variants will be deleted. GPT variants are kept.')) return;
             // v773.11.2: PostHog event — node regenerate (destructive — current variants deleted).
             window.track && window.track('image_node_regenerated', { node_id: nodeId });
             // v858 — instant optimistic feedback: flag regenerating + repaint BEFORE
@@ -23535,6 +23560,9 @@ Ambient: same kitchen room tone, soft pour sound.
                 // Server now reflects queued/generating → the status-driven render
                 // owns the spinner from here; drop the optimistic flag.
                 imgState.regeneratingIds.delete(nodeId);
+                // v910 — repaint once the flag is gone so a surviving GPT variant
+                // comes back immediately instead of waiting for the next poll.
+                try { imgReflectRegenerating(); } catch (e) {}
             }
         }
 
@@ -23668,8 +23696,9 @@ Ambient: same kitchen room tone, soft pour sound.
             imgCloseNodeDetail();
             const alreadyThere = imgState.parentSlots.some(s => s.parent_node_id === nodeId);
             if (!alreadyThere) {
-                if (imgState.parentSlots.length >= 3) {
-                    alert('Already have 3 parents. Remove one first.');
+                const maxParents = imgMaxParents();
+                if (imgState.parentSlots.length >= maxParents) {
+                    alert(`Already have ${maxParents} parents for this model. Remove one first.`);
                     return;
                 }
                 const usedSlots = new Set(imgState.parentSlots.map(s => s.slot_order));
@@ -23678,6 +23707,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 imgState.parentSlots.push({
                     parent_node_id: nodeId,
                     role: '',
+                    reference_instruction: '',
                     slot_order: newSlot,
                 });
                 imgRenderParentSlots();

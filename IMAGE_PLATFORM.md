@@ -63,11 +63,63 @@ returns as `node_<id>.done.json` with the saved variant file paths.
   - `chosen_variant_id` — the variant the user picked
 - **ImageVariant** — one of the N variants produced by a generation.
 - **ImageEdge** — parent→child link. A child can have up to 3 parents
-  (slot 0/1/2), each with an optional `role` label.
+  (slot 0/1/2), each with an optional `role` label and an open
+  `reference_instruction`.
 
 Uploaded images are **seed nodes**: `kind=upload`, `status=ready`, one variant
 (the uploaded file). They can be used as parents for generated nodes the same
 way as other ready nodes.
+
+## Reference-image prompt contract
+
+Every new generation job carries two prompt fields:
+
+- `prompt` — the legacy scene body for older local workers.
+- `render_prompt` — the v2 prompt used by updated ChatGPT and Banana workers.
+
+`render_prompt` numbers references in the exact attachment order and gives each
+one a separate job before the scene brief:
+
+```text
+IMAGE REFERENCE CONTRACT v2
+
+REFERENCE IMAGES
+Image numbering below matches the attachment order.
+Image 1 - Role: main character.
+Use (fallback): identity reference ...
+Image 2 - Role: product bottle.
+Use (authoritative): Take: exact bottle. Apply to: her hand. Preserve: label.
+
+SCENE TO CREATE
+<the complete author-written image prompt>
+
+OUTPUT
+Aspect ratio: vertical 9:16.
+```
+
+The role text and the use instruction stay open-ended. In the parent picker,
+`Use this image for...` can say exactly what to take, where to apply it, what to
+preserve, and what to ignore. A useful open format is `Take: ...`,
+`Apply to: ...`, `Preserve: ...`, `Ignore: ...`. That instruction is
+authoritative. If it is left
+blank, the platform supplies a safe fallback for known jobs: persona identity,
+exact product appearance, prior-scene continuity, a second body/pose reference,
+or a generic stated role. Each input gets its own job, so a body reference cannot
+compete with the base scene. The scene body still decides the pose, action,
+composition, location, style, edit, and any deliberate transfer between inputs.
+This keeps one contract usable for identity locks, product placement, Pinterest
+location or styling references, scene edits, compositing, pose/style references,
+and continuity chains.
+
+Both workers sort attachments by `slot_order` before upload. The first uploaded
+file is `Image 1`, the second is `Image 2`, and so on. The Flow API upload also
+keeps each file's real PNG, JPEG, or WebP MIME type. ChatGPT waits for every
+attachment preview before sending the prompt and excludes user uploads when it
+looks for the generated result.
+
+The numbered role map follows the official multi-image guidance for
+[GPT Image 2](https://developers.openai.com/cookbook/examples/multimodal/image-gen-models-prompting-guide)
+and [Nano Banana](https://ai.google.dev/gemini-api/docs/image-generation).
 
 ## API (prefix `/api/images`)
 

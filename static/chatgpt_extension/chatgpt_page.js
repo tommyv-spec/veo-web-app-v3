@@ -2,7 +2,8 @@ const KAVENO_SELECTORS = {
   composer: "#prompt-textarea",
   fileInput: "input[type=file]",
   send: "button[data-testid=send-button], button[aria-label*='Send'], button[data-testid='composer-send-button']",
-  generatedImage: "img[src*='estuary/content'], img[src*='backend-api/files'], img[src*='oaiusercontent'], img[alt*='Generated']",
+  generatedImage: "[data-message-author-role='assistant'] img[src*='estuary/content'], [data-message-author-role='assistant'] img[src*='oaiusercontent'], [data-message-author-role='assistant'] img[alt*='Generated']",
+  uploadedReference: "img[src*='backend-api/files'], img[src*='estuary/content'], img[src^='blob:'], [data-testid*='attachment'] img, [data-testid*='file'] img",
   stop: "button[data-testid='stop-button'], button[aria-label*='Stop']"
 };
 
@@ -47,6 +48,11 @@ function dataUrlToFile(item) {
 
 async function attachReferences(refs) {
   if (!refs || !refs.length) return;
+  const before = new Set(
+    Array.from(document.querySelectorAll(KAVENO_SELECTORS.uploadedReference))
+      .map((node) => node.currentSrc || node.src || node.getAttribute("data-testid") || "")
+      .filter(Boolean)
+  );
   const input = await waitFor(
     () => document.querySelector(KAVENO_SELECTORS.fileInput),
     20000,
@@ -55,9 +61,21 @@ async function attachReferences(refs) {
   const transfer = new DataTransfer();
   refs.forEach((item) => transfer.items.add(dataUrlToFile(item)));
   input.files = transfer.files;
+  const attachedNames = Array.from(input.files || []).map((file) => file.name);
+  const expectedNames = refs.map((item) => item.filename || "reference.png");
+  if (attachedNames.length !== expectedNames.length ||
+      attachedNames.some((name, index) => name !== expectedNames[index])) {
+    throw new Error("ChatGPT reference attachment order could not be verified.");
+  }
   input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
   input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-  await sleep(Math.max(1800, refs.length * 900));
+  await waitFor(() => {
+    const current = Array.from(document.querySelectorAll(KAVENO_SELECTORS.uploadedReference))
+      .map((node) => node.currentSrc || node.src || node.getAttribute("data-testid") || "")
+      .filter(Boolean);
+    return current.filter((value) => !before.has(value)).length >= refs.length;
+  }, 60000, "ChatGPT reference upload previews");
+  await sleep(500);
 }
 
 async function fillComposer(prompt) {
@@ -102,8 +120,12 @@ async function generatedImageAsDataUrl(src) {
 async function generateImage(message) {
   const email = await currentAccountEmail();
   if (!email) throw new Error("ChatGPT is logged out. Sign in in this worker tab.");
-  const baseline = document.querySelectorAll(KAVENO_SELECTORS.generatedImage).length;
   await attachReferences(message.refs || []);
+  const baseline = new Set(
+    Array.from(document.querySelectorAll(KAVENO_SELECTORS.generatedImage))
+      .map((node) => node.currentSrc || node.src || "")
+      .filter(Boolean)
+  );
   await fillComposer(message.prompt || "");
   const send = await waitFor(() => {
     const button = document.querySelector(KAVENO_SELECTORS.send);
@@ -113,10 +135,15 @@ async function generateImage(message) {
 
   const image = await waitFor(() => {
     const images = Array.from(document.querySelectorAll(KAVENO_SELECTORS.generatedImage));
-    const stillGenerating = Boolean(document.querySelector(KAVENO_SELECTORS.stop));
-    if (images.length <= baseline || stillGenerating) return null;
-    const candidate = images[images.length - 1];
-    return candidate && candidate.src ? candidate : null;
+    const newImages = images.filter((node) => {
+      const src = node.currentSrc || node.src || "";
+      return src && !baseline.has(src);
+    });
+    if (!newImages.length) return null;
+    const candidate = newImages[newImages.length - 1];
+    if (!candidate || !candidate.src || !candidate.complete) return null;
+    if ((candidate.naturalWidth || 0) < 256 || (candidate.naturalHeight || 0) < 256) return null;
+    return candidate;
   }, 210000, "ChatGPT generated image");
   await sleep(1200);
   const result = await generatedImageAsDataUrl(image.src);

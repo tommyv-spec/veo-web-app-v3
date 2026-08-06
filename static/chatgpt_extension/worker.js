@@ -148,7 +148,11 @@ async function releaseClaims(goingOffline = false) {
 }
 
 function buildPrompt(job) {
-  const lines = [`Crea immagine: ${String(job.prompt || "").trim()}`];
+  const body = String(job.render_prompt || job.prompt || "").trim();
+  // v909: marked jobs already contain the numbered, backend-specific
+  // reference contract. Older jobs keep the local fallback below.
+  if (body.includes("IMAGE REFERENCE CONTRACT v2") || body.includes("IMAGE REFERENCE CONTRACT v1")) return body;
+  const lines = [`Crea immagine: ${body}`];
   const refs = [...(job.input_images || [])].sort((a, b) => (a.slot_order || 0) - (b.slot_order || 0));
   refs.forEach((ref) => {
     const role = String(ref.role || "").trim();
@@ -168,6 +172,15 @@ function blobToDataUrl(blob) {
   });
 }
 
+function referenceMime(filename, responseMime) {
+  const value = String(responseMime || "").toLowerCase();
+  if (["image/png", "image/jpeg", "image/webp"].includes(value)) return value;
+  const lower = String(filename || "").toLowerCase();
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".webp")) return "image/webp";
+  return "image/png";
+}
+
 async function downloadReferences(job) {
   const refs = [...(job.input_images || [])].sort((a, b) => (a.slot_order || 0) - (b.slot_order || 0));
   const result = [];
@@ -177,7 +190,7 @@ async function downloadReferences(job) {
     const blob = await response.blob();
     result.push({
       filename: ref.filename || "reference.png",
-      mime: blob.type || "image/png",
+      mime: referenceMime(ref.filename, blob.type),
       dataUrl: await blobToDataUrl(blob)
     });
   }

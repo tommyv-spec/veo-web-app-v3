@@ -11,7 +11,7 @@ A standalone module plugged into the main FastAPI app. Provides:
 Design principles:
   • Uploaded reference images are stored as "seed nodes" (status=ready,
     one variant = the uploaded file). Keeps the graph uniform.
-  • A node can have up to 3 parent nodes (subject / background / ref).
+  • A node can use the reference count supported by its selected model.
     Parent = "use the chosen variant of parent N as reference image N".
   • Regenerating a node trashes the old variants (files + DB rows) and
     kicks off a fresh generation. Chosen variant is reset.
@@ -27,6 +27,7 @@ import asyncio
 import logging
 import secrets
 import html
+import re
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set, Tuple
@@ -61,6 +62,7 @@ from chatgpt_extension_pairing import (
     normalize_email as normalize_chatgpt_extension_email,
 )
 from chatgpt_extension_bundle import build_extension_zip
+from image_prompt_contract import build_image_prompt_contract
 
 
 log = logging.getLogger("image_platform")
@@ -166,6 +168,9 @@ def run_image_platform_migrations():
         # role-pattern detection when NULL, so legacy edges still work.
         ("image_edges", "kind",
          "ALTER TABLE image_edges ADD COLUMN kind TEXT"),
+        # v905: open per-reference instruction. Presets remain fallbacks.
+        ("image_edges", "reference_instruction",
+         "ALTER TABLE image_edges ADD COLUMN reference_instruction TEXT"),
         # v644: per-line audio-padding suffixes on the assignment row.
         # Parallel to lines_json. NULL = no pads anywhere; populated =
         # JSON array of (str | null) per line. Veo prompt builder
@@ -389,6 +394,9 @@ def run_image_platform_migrations():
         # the SQLite migration above).
         ("image_edges", "kind",
          "ALTER TABLE image_edges ADD COLUMN IF NOT EXISTS kind VARCHAR(32)"),
+        # v905: open per-reference instruction. Presets remain fallbacks.
+        ("image_edges", "reference_instruction",
+         "ALTER TABLE image_edges ADD COLUMN IF NOT EXISTS reference_instruction TEXT"),
         # v681e.10: per-scene speaker_mode denormalized to ImageSceneAssignment
         # so prepare_batch_for_video can detect silent scenes when reading
         # assignments back from DB. See SQLite migration above for rationale.
@@ -1174,7 +1182,7 @@ class ImageVariant(Base):
 
 
 class ImageEdge(Base):
-    """Parent→child relationship. A child can have up to 3 parents (slot 0/1/2).
+    """Parent→child relationship. Parent slots are ordered and model-limited.
 
     role is a free-form label ("subject", "background", "ref_1", ...).
     When a child node is generated, the chosen variant of each parent is
@@ -1198,6 +1206,9 @@ class ImageEdge(Base):
     slot_order = Column(Integer, default=0)  # 0, 1, 2
     # v573: ingredient type discriminator — see class docstring.
     kind = Column(String(32), nullable=True)
+    # v905: exact operator instruction for how this image may affect the output.
+    # NULL keeps the class-based persona/product/chain fallback behavior.
+    reference_instruction = Column(Text, nullable=True)
 
     parent = relationship("ImageNode", back_populates="child_edges", foreign_keys=[parent_node_id])
     child = relationship("ImageNode", back_populates="parent_edges", foreign_keys=[child_node_id])
@@ -1210,6 +1221,7 @@ class ImageEdge(Base):
             "role": self.role,
             "slot_order": self.slot_order,
             "kind": self.kind,
+            "reference_instruction": self.reference_instruction,
         }
 
 
@@ -1474,6 +1486,20 @@ class ParentRef(BaseModel):
     # dependency. Both are wrong for an upload reference. Optional, so
     # every existing caller keeps its current behavior.
     kind: Optional[str] = None
+    # Open instruction, for example: take only the porch geometry for the
+    # background; ignore people, clothing, and camera angle.
+    reference_instruction: Optional[str] = Field(None, max_length=2000)
+
+
+class ExternalReferenceRef(BaseModel):
+    """One opt-in, upload-backed reference for one imported Image N.
+
+    The role vocabulary stays open on purpose. The instruction is required:
+    an outside image must say exactly what the model may take from it.
+    """
+    parent_node_id: int
+    role: str = Field(..., min_length=1, max_length=200)
+    reference_instruction: str = Field(..., min_length=1, max_length=2000)
 
 
 class CreateNodeRequest(BaseModel):
@@ -1504,6 +1530,27 @@ class ChooseVariantRequest(BaseModel):
 # Worker bridge (watch folder)
 # =============================================================================
 
+def _reference_intent_for_class(reference_class: str, chain_sequence: int = 0) -> str:
+    """Return the job an input image performs inside the final prompt.
+
+    The first generated-frame chain is the base/continuity image. The second
+    is the v859 body reference. Keeping this separate from the broad `chain`
+    class prevents two attached images from both claiming the full scene.
+    """
+    cls = (reference_class or "other").strip().lower()
+    if cls == "persona":
+        return "identity"
+    if cls == "product":
+        return "product"
+    if cls == "chain":
+        if chain_sequence == 0:
+            return "continuity"
+        if chain_sequence == 1:
+            return "body"
+        return "support"
+    return "role"
+
+
 def _resolve_parent_image_inputs(db: Session, node: ImageNode) -> List[Dict[str, Any]]:
     """For each parent edge (ordered by slot), return a dict
     {"path": ..., "role": ..., "slot_order": ...} for the parent's chosen
@@ -1525,6 +1572,7 @@ def _resolve_parent_image_inputs(db: Session, node: ImageNode) -> List[Dict[str,
     lazy-rehydration pattern used by serve_image_file at /files/{token}.
     """
     inputs: List[Dict[str, Any]] = []
+    chain_sequence = 0
     for edge in sorted(node.parent_edges, key=lambda e: e.slot_order or 0):
         parent: ImageNode = edge.parent
         if parent is None:
@@ -1561,10 +1609,17 @@ def _resolve_parent_image_inputs(db: Session, node: ImageNode) -> List[Dict[str,
                     500,
                     f"R2 reported success but file still missing at {abs_path}"
                 )
+        reference_class = _classify_edge_for_manifest(edge)
+        reference_intent = _reference_intent_for_class(reference_class, chain_sequence)
+        if reference_class == "chain":
+            chain_sequence += 1
         inputs.append({
             "path": str(abs_path),
             "role": edge.role or "",
             "slot_order": edge.slot_order or 0,
+            "reference_class": reference_class,
+            "reference_intent": reference_intent,
+            "reference_instruction": edge.reference_instruction or "",
         })
     return inputs
 
@@ -2031,12 +2086,24 @@ def write_generation_job(db: Session, node: ImageNode) -> Path:
         except Exception:
             pass
 
+    prompt_body = _resolve_flow_prompt_bindings(node)
+    compiled_prompt = build_image_prompt_contract(
+        prompt_body,
+        input_inputs,
+        node.aspect_ratio,
+        backend="banana",
+    )
     job = {
         "id": f"node_{node.id}",
         # v573: prepend the per-slot reference manifest so Flow knows
         # what each uploaded reference is for. Falls through unchanged
         # for nodes with no parent edges (establishing Image 1 cases).
-        "prompt": _resolve_flow_prompt_bindings(node),
+        # Keep the legacy body for workers that have not updated yet. v909+
+        # workers prefer render_prompt, so server and local worker may roll out
+        # in either order without duplicate manifests or ChatGPT triggers.
+        "prompt": prompt_body,
+        "render_prompt": compiled_prompt,
+        "prompt_contract_version": 2,
         "input_images": input_inputs,
         "output_dir": str(out_dir),
         "aspect_ratio": node.aspect_ratio,
@@ -2047,6 +2114,12 @@ def write_generation_job(db: Session, node: ImageNode) -> Path:
 
     job_path = jobs_watch_dir() / f"node_{node.id}.json"
     job_path.write_text(json.dumps(job, indent=2), encoding="utf-8")
+    # v909 temporary diagnostic: keep until one real Banana and ChatGPT job
+    # confirms the numbered reference contract survives worker submission.
+    log.info(
+        f"[v909/ref-contract] node={node.id} backend=banana "
+        f"refs={[(i.get('slot_order'), i.get('reference_class'), i.get('reference_intent'), i.get('role'), bool(i.get('reference_instruction'))) for i in input_inputs]}"
+    )
     log.info(f"[image_platform] Wrote job file: {job_path.name}  inputs={len(input_inputs)}  variants={job['variants']}")
     return job_path
 
@@ -2229,13 +2302,32 @@ def _cleanup_job_files(node_id: int):
 router = APIRouter(prefix="/api/images", tags=["images"])
 
 
-def _max_parents() -> int:
-    return 3
+REFERENCE_LIMITS_BY_MODEL = {
+    # Gemini 3 image models accept up to 14 mixed reference images.
+    "nano_banana_2": 14,
+    "nano_banana_pro": 14,
+    # Keep the proven legacy budget for older/other model routes.
+    "nano_banana": 3,
+    "imagen_4": 3,
+}
 
 
-def _validate_parents(db: Session, parents: List[ParentRef]):
-    if len(parents) > _max_parents():
-        raise HTTPException(400, f"Max {_max_parents()} parents allowed")
+def _max_parents(model: Optional[str] = None) -> int:
+    return REFERENCE_LIMITS_BY_MODEL.get((model or "nano_banana_2").strip(), 3)
+
+
+def _validate_parents(
+    db: Session,
+    parents: List[ParentRef],
+    model: Optional[str] = None,
+):
+    max_parents = _max_parents(model)
+    if len(parents) > max_parents:
+        raise HTTPException(
+            400,
+            f"Model {model or 'nano_banana_2'} accepts at most "
+            f"{max_parents} reference images; received {len(parents)}",
+        )
     seen_slots = set()
     for p in parents:
         if p.slot_order in seen_slots:
@@ -2244,6 +2336,8 @@ def _validate_parents(db: Session, parents: List[ParentRef]):
         node = db.query(ImageNode).filter(ImageNode.id == p.parent_node_id).first()
         if node is None:
             raise HTTPException(400, f"Parent node {p.parent_node_id} not found")
+        if p.reference_instruction is not None:
+            p.reference_instruction = p.reference_instruction.strip() or None
 
 
 def _replace_parents(db: Session, child: ImageNode, parents: List[ParentRef]):
@@ -2258,6 +2352,7 @@ def _replace_parents(db: Session, child: ImageNode, parents: List[ParentRef]):
             child_node_id=child.id,
             role=p.role,
             slot_order=p.slot_order,
+            reference_instruction=p.reference_instruction,
             kind=p.kind,  # v888 — carry the upload kind through a repair
         ))
 
@@ -2278,10 +2373,40 @@ def _thumb_rels_for(rel_path: str):
         yield f"{parent}/{name}" if parent not in ("", ".") else name
 
 
-def _delete_variant_files(node: ImageNode):
+def _file_belongs_to_backend(name: str, backend: Optional[str]) -> bool:
+    """v910 — does this on-disk variant filename belong to `backend`'s lane?
+
+    Naming (see the worker upload path): banana keeps the bare
+    `variant_{idx}.png`; every other backend is namespaced
+    `variant_{backend}_{idx}.png`. Thumbs reuse the same stem
+    (`variant_1.w256.webp` / `variant_chatgpt_1.w256.webp`).
+
+    backend=None -> True for everything (full node wipe on delete).
+    """
+    if not backend:
+        return True
+    head = name.split(".", 1)[0]           # variant_1 | variant_chatgpt_1
+    if not head.startswith("variant_"):
+        return False
+    tail = head[len("variant_"):]          # 1 | chatgpt_1
+    if (backend or "banana") == "banana":
+        return tail.isdigit()
+    return tail.startswith(f"{backend}_")
+
+
+def _delete_variant_files(node: ImageNode, backend: Optional[str] = None):
+    """Delete variant files (local + R2 + derived thumbs) for a node.
+
+    v910 — `backend` scopes the wipe to ONE lane. A base node holds BOTH
+    lanes' variants (banana + chatgpt); regenerating the banana lane must
+    not take the ChatGPT image with it. backend=None keeps the old
+    full-wipe behaviour, which node/batch delete still want.
+    """
     d = node_dir(node.id)
     thumbs_deleted = 0
     for v in node.variants:
+        if backend and (getattr(v, "backend", "banana") or "banana") != backend:
+            continue
         try:
             # Delete R2 backup too (ignores errors)
             _storage_delete(v.image_path)
@@ -2307,12 +2432,18 @@ def _delete_variant_files(node: ImageNode):
                 log.warning(f"Couldn't delete thumb {thumb_rel}: {e}")
     # Clean any stragglers — both full-res AND thumbnail webp files whose
     # variant rows may already be gone (partial/aborted states).
+    # v910: when scoped to one lane, skip the other lane's files — the bare
+    # `variant_*.png` glob also matches `variant_chatgpt_1.png`.
     for f in d.glob("variant_*.png"):
+        if not _file_belongs_to_backend(f.name, backend):
+            continue
         try:
             f.unlink()
         except Exception:
             pass
     for f in d.glob("variant_*.w*.webp"):
+        if not _file_belongs_to_backend(f.name, backend):
+            continue
         try:
             f.unlink()
             thumbs_deleted += 1
@@ -2619,7 +2750,7 @@ def create_node(
 ):
     # Validate parents exist AND belong to the current user — can't reference
     # another user's nodes as your parents.
-    _validate_parents(db, req.parents)
+    _validate_parents(db, req.parents, req.model)
     for p in req.parents:
         parent = db.query(ImageNode).filter(ImageNode.id == p.parent_node_id).first()
         if parent and parent.user_id and parent.user_id != current_user.id:
@@ -2644,6 +2775,7 @@ def create_node(
             child_node_id=node.id,
             role=p.role,
             slot_order=p.slot_order,
+            reference_instruction=p.reference_instruction,
             kind=p.kind,  # v888 — carry the upload kind through node create
         ))
     db.commit()
@@ -2675,8 +2807,16 @@ def update_node(
             setattr(node, field, v)
 
     if req.parents is not None:
-        _validate_parents(db, req.parents)
+        _validate_parents(db, req.parents, req.model or node.model)
         _replace_parents(db, node, req.parents)
+    elif req.model is not None:
+        max_parents = _max_parents(req.model)
+        if len(node.parent_edges or []) > max_parents:
+            raise HTTPException(
+                400,
+                f"Model {req.model} accepts at most {max_parents} reference "
+                f"images; this node already has {len(node.parent_edges or [])}",
+            )
 
     node.updated_at = datetime.utcnow()
     db.commit()
@@ -3013,8 +3153,11 @@ def generate_node(
     _resolve_parent_image_paths(db, node)
 
     # Clean any existing variants (shouldn't be any for a draft, but just in case)
-    _delete_variant_files(node)
+    # v910: BANANA lane only — a ChatGPT variant already on this node survives.
+    _delete_variant_files(node, backend="banana")
     for v in list(node.variants):
+        if (getattr(v, "backend", "banana") or "banana") != "banana":
+            continue
         db.delete(v)
     node.chosen_variant_id = None
     node.error_message = None
@@ -3055,14 +3198,31 @@ def regenerate_node(
 
     _resolve_parent_image_paths(db, node)
 
-    _delete_variant_files(node)
+    # v910 — regenerate is BANANA-lane scoped. Before this, the wipe took the
+    # whole node: a ChatGPT variant sitting next to the banana ones (and its
+    # file, which the bare `variant_*.png` straggler glob also matched) was
+    # destroyed by a banana re-render the operator never asked to touch.
+    # ChatGPT variants + their files now survive; re-render the GPT image
+    # explicitly via /chatgpt-generate.
+    kept_cg = sum(
+        1 for v in node.variants
+        if (getattr(v, "backend", "banana") or "banana") != "banana"
+    )
+    _delete_variant_files(node, backend="banana")
     for v in list(node.variants):
+        if (getattr(v, "backend", "banana") or "banana") != "banana":
+            continue
         db.delete(v)
     node.chosen_variant_id = None
     node.error_message = None
     node.status = "queued"
     _seed_chatgpt_lane(node)
     db.flush()
+    # v910 diagnostic — remove once operator evidence confirms GPT variants survive.
+    log.info(
+        f"[image_platform] v910 regenerate node {node_id}: banana variants cleared, "
+        f"{kept_cg} non-banana variant(s) kept (cg_status={node.cg_status})"
+    )
 
     try:
         write_generation_job(db, node)
@@ -5224,6 +5384,10 @@ class ImportSceneTableRequest(BaseModel):
     # binding — the user gets a non-fatal log entry rather than a
     # failed import.
     product_node_id: Optional[int] = None
+    # Opt-in only. Missing/empty keeps the existing import path byte-for-byte.
+    # Keys accept "image_N" (preferred) or "N". Each referenced node must be a
+    # ready upload owned by the caller, and every item must state what it controls.
+    external_references: Optional[Dict[str, List[ExternalReferenceRef]]] = None
 
 
 # v510: helpers for auto-bootstrapping ingredient nodes from the markdown
@@ -5536,7 +5700,7 @@ def import_scene_table(
         The role on each ImageEdge is the verbatim ingredient name.
       - If `reference_image: image_N` is also set, append the previous
         scene image as an additional parent (for setting/composition
-        chain inheritance), respecting the 3-parent cap.
+        chain inheritance), respecting the selected model's reference limit.
 
     **Legacy single-subject (fallback):**
       - Subject upload as parent (slot 0) — only for scenes with no `reference_image:`
@@ -5706,7 +5870,7 @@ def _v859_plan_chain_edges(
             break
         parent_id = parent_id_by_ref[this_ref]
         # v520/v522: Banana 2 down-weights a duplicate reference AND it burns
-        # one of only 3 slots. Skip without consuming a slot.
+        # a model input slot. Skip without consuming a slot.
         if parent_id in bound:
             duplicates.append(this_ref)
             continue
@@ -5801,6 +5965,83 @@ def _v859_refuse_multiref_without_ingredients(
         )
 
 
+def _normalize_external_reference_bindings(
+    req: "ImportSceneTableRequest",
+    images: List[Dict[str, Any]],
+    db: Session,
+    current_user: User,
+) -> Dict[int, List[ExternalReferenceRef]]:
+    """Validate the explicit external-ref choice before creating the batch.
+
+    No request field means no outside images. We never scan local Pinterest
+    folders here and never guess a binding from a filename.
+    """
+    raw = req.external_references or {}
+    if not raw:
+        return {}
+
+    valid_image_indices = {int(img["image_index"]) for img in images}
+    normalized: Dict[int, List[ExternalReferenceRef]] = {}
+    seen_node_ids: Dict[int, Set[int]] = {}
+
+    for raw_key, refs in raw.items():
+        key = str(raw_key).strip().lower()
+        match = re.fullmatch(r"(?:image_)?(\d+)", key)
+        if not match:
+            raise HTTPException(
+                400,
+                f"External reference key {raw_key!r} must be image_N or N",
+            )
+        image_index = int(match.group(1))
+        if image_index not in valid_image_indices:
+            raise HTTPException(
+                400,
+                f"External references target image_{image_index}, which is not in the build",
+            )
+
+        bucket = normalized.setdefault(image_index, [])
+        seen = seen_node_ids.setdefault(image_index, set())
+        for ref in refs:
+            ref.role = ref.role.strip()
+            ref.reference_instruction = ref.reference_instruction.strip()
+            if not ref.role or not ref.reference_instruction:
+                raise HTTPException(
+                    400,
+                    f"image_{image_index}: every external reference needs a role and use instruction",
+                )
+            if ref.parent_node_id in seen:
+                raise HTTPException(
+                    400,
+                    f"image_{image_index}: upload node {ref.parent_node_id} is selected twice",
+                )
+            parent = db.query(ImageNode).filter(
+                ImageNode.id == ref.parent_node_id,
+                ImageNode.user_id == current_user.id,
+            ).first()
+            if parent is None:
+                raise HTTPException(
+                    400,
+                    f"image_{image_index}: external upload node {ref.parent_node_id} not found",
+                )
+            if parent.kind != "upload" or parent.status != "ready" or parent.chosen_variant_id is None:
+                raise HTTPException(
+                    400,
+                    f"image_{image_index}: external node {ref.parent_node_id} must be a ready upload",
+                )
+            seen.add(ref.parent_node_id)
+            bucket.append(ref)
+
+        max_parents = _max_parents(req.model)
+        if len(bucket) > max_parents:
+            raise HTTPException(
+                400,
+                f"image_{image_index}: {len(bucket)} external references exceed "
+                f"the {max_parents}-reference limit for {req.model}",
+            )
+
+    return normalized
+
+
 def _import_scene_table_impl(
     req: "ImportSceneTableRequest",
     db: Session,
@@ -5819,6 +6060,13 @@ def _import_scene_table_impl(
     images = parsed["images"]
     storyboard_scenes = parsed["scenes"]
     md_format = parsed["format"]
+
+    # v909: outside images are an explicit request field. When absent, this is
+    # an empty map and the established import/generation path is unchanged.
+    external_refs_by_image = _normalize_external_reference_bindings(
+        req, images, db, current_user,
+    )
+    reference_limit = _max_parents(req.model)
 
     # Validate subject exists, belongs to current user, and is a ready upload
     subject = db.query(ImageNode).filter(
@@ -6530,7 +6778,7 @@ def _import_scene_table_impl(
         # Scan the prompt for ingredient names (longest-first) and attach
         # each matching ingredient as a parent edge with role = ingredient name.
         # If reference_image is also set, append the previous scene image as
-        # an additional parent for chain inheritance, respecting the 3-parent cap.
+        # an additional parent for chain inheritance, respecting the model limit.
         #
         # Legacy behavior (preserved when no ingredients block):
         # —————————————————————————————————————————————————————————————
@@ -6563,7 +6811,7 @@ def _import_scene_table_impl(
             #     itself defines the ingredient's appearance from this
             #     point on. Record the anchor for later scenes.
             #
-            # Slots are filled in match order (longest-first). The 3-parent
+            # Slots are filled in match order (longest-first). The model
             # cap still applies; if a scene mentions 4+ ingredients OR has
             # a ref_image plus 3 ingredients, the lowest-priority parent
             # is dropped with a warning.
@@ -6774,12 +7022,13 @@ def _import_scene_table_impl(
             mentioned = sorted(mentioned, key=_slot_priority)
 
             for ing_name in mentioned:
-                if attached_parents_count >= 3:
-                    log.warning(
-                        f"[import] Image {image_index}: 3-parent cap reached, "
-                        f"can't also bind '{ing_name}'. Lower-priority bindings dropped."
+                if attached_parents_count >= reference_limit:
+                    raise HTTPException(
+                        400,
+                        f"Image {image_index}: reference limit {reference_limit} "
+                        f"for {req.model} reached before binding '{ing_name}'. "
+                        f"Remove a reference; no binding was dropped.",
                     )
-                    break
 
                 if ing_name in ingredient_nodes:
                     # Upload-backed: persona or explicit upload.
@@ -6857,7 +7106,7 @@ def _import_scene_table_impl(
             ]
 
             # If the scene also has a ref_image and there's still room in
-            # the 3-parent cap, append it for setting/composition chain.
+            # the model's reference limit, append it for setting/composition chain.
             #
             # v520: skip if ref_image's parent_node is already bound to
             # this scene via an ingredient anchor. Previously, when a
@@ -6893,6 +7142,7 @@ def _import_scene_table_impl(
                     attached_parents_count,
                     bound_parent_ids,
                     slot,
+                    max_parents=reference_limit,
                 )
                 if _plan["missing"] is not None:
                     raise HTTPException(
@@ -6908,10 +7158,11 @@ def _import_scene_table_impl(
                         f"already bound via ingredient match — skipping duplicate chain edge"
                     )
                 if _plan["capped"] is not None:
-                    log.warning(
-                        f"[import] Image {image_index}: 3 parents already bound, "
-                        f"can't also chain to image_{_plan['capped']} (3-parent cap). "
-                        f"Setting/composition continuity may be reduced."
+                    raise HTTPException(
+                        400,
+                        f"Image {image_index}: reference limit {reference_limit} "
+                        f"for {req.model} reached before chain image_{_plan['capped']}. "
+                        f"Remove a reference; no chain binding was dropped.",
                     )
                 for _edge in _plan["edges"]:
                     db.add(ImageEdge(
@@ -7039,6 +7290,79 @@ def _import_scene_table_impl(
 
         db.flush()
 
+        # v909 â€” external role plates are opt-in and append AFTER the
+        # established character/product/chain slots. That keeps every existing
+        # slot number stable and makes the option safe to turn off. No local
+        # folder is scanned; only upload ids present in the request are bound.
+        external_refs = external_refs_by_image.get(image_index, [])
+        if external_refs:
+            existing_edges = db.query(ImageEdge).filter(
+                ImageEdge.child_node_id == node.id
+            ).order_by(ImageEdge.slot_order.asc()).all()
+            existing_parent_ids = {edge.parent_node_id for edge in existing_edges}
+            existing_slots = {
+                edge.slot_order for edge in existing_edges
+                if edge.slot_order is not None
+            }
+            # A forward variant chain is wired only after all scene nodes exist.
+            # Reserve its first free slot now so outside refs still sort after
+            # every established identity/continuity input once that edge lands.
+            reserved_slots: Set[int] = set()
+            if using_ingredients and will_receive_deferred_variant_chain:
+                if len(existing_slots) >= reference_limit:
+                    raise HTTPException(
+                        400,
+                        f"Image {image_index}: reference limit {reference_limit} "
+                        f"for {req.model} leaves no slot for its deferred identity chain",
+                    )
+                reserved_slot = next(
+                    slot_no for slot_no in range(reference_limit)
+                    if slot_no not in existing_slots
+                )
+                reserved_slots.add(reserved_slot)
+            if (
+                len(existing_edges)
+                + len(reserved_slots)
+                + len(external_refs)
+                > reference_limit
+            ):
+                raise HTTPException(
+                    400,
+                    f"Image {image_index}: {len(existing_edges)} existing + "
+                    f"{len(reserved_slots)} deferred + "
+                    f"{len(external_refs)} external references exceed the "
+                    f"{reference_limit}-reference limit for {req.model}. "
+                    f"Nothing was truncated.",
+                )
+            occupied_slots = existing_slots | reserved_slots
+            next_slot = 0
+            for external_ref in external_refs:
+                while next_slot in occupied_slots:
+                    next_slot += 1
+                if external_ref.parent_node_id in existing_parent_ids:
+                    raise HTTPException(
+                        400,
+                        f"Image {image_index}: external upload node "
+                        f"{external_ref.parent_node_id} is already bound by the build",
+                    )
+                db.add(ImageEdge(
+                    parent_node_id=external_ref.parent_node_id,
+                    child_node_id=node.id,
+                    role=f"external:{external_ref.role}",
+                    slot_order=next_slot,
+                    kind="other",
+                    reference_instruction=external_ref.reference_instruction,
+                ))
+                existing_parent_ids.add(external_ref.parent_node_id)
+                occupied_slots.add(next_slot)
+                log.info(
+                    f"[v909/external-ref] Image {image_index}: upload node "
+                    f"{external_ref.parent_node_id} role={external_ref.role!r} "
+                    f"slot={next_slot}"
+                )
+                next_slot += 1
+            db.flush()
+
         # v512: register this scene as the anchor for any ingredient
         # mentioned for the first time. Now that db.flush() has run,
         # node.id is available, so downstream scenes mentioning the
@@ -7142,18 +7466,18 @@ def _import_scene_table_impl(
             ).all()
             existing_slots = {e.slot_order for e in existing_edges}
             existing_count = len(existing_edges)
-            if existing_count >= 3:
-                log.warning(
-                    f"[import] Image {variant_anchor_idx}: 3-parent cap already "
-                    f"reached, can't add variant chain to image_{base_idx}. "
-                    f"Face identity may drift."
+            if existing_count >= reference_limit:
+                raise HTTPException(
+                    400,
+                    f"Image {variant_anchor_idx}: reference limit {reference_limit} "
+                    f"for {req.model} reached before variant chain image_{base_idx}. "
+                    f"Remove a reference; no identity binding was dropped.",
                 )
-                continue
 
             # If slot 0 is free, claim it (top priority for face identity).
-            # Otherwise use the next free slot (1 or 2).
+            # Otherwise use the next free slot supported by this model.
             target_slot = 0 if 0 not in existing_slots else (
-                next(s for s in (1, 2) if s not in existing_slots)
+                next(s for s in range(1, reference_limit) if s not in existing_slots)
             )
 
             # Find the variant ingredient name this scene is anchoring
@@ -12072,6 +12396,7 @@ def worker_get_pending_job(
 
     # Re-walk the parent edges (sorted by slot) so we have both the file path
     # and the variant metadata together
+    chain_sequence = 0
     for edge in sorted(node.parent_edges, key=lambda e: e.slot_order or 0):
         parent = edge.parent
         if parent is None or parent.chosen_variant_id is None:
@@ -12089,11 +12414,18 @@ def worker_get_pending_job(
             f"{abs_path}:{_get_worker_api_key()}".encode("utf-8")
         ).hexdigest()[:32]
         _worker_file_tokens[tok] = abs_path
+        reference_class = _classify_edge_for_manifest(edge)
+        reference_intent = _reference_intent_for_class(reference_class, chain_sequence)
+        if reference_class == "chain":
+            chain_sequence += 1
         input_images.append({
             "url": f"{base_url}/api/images/worker/files/{tok}",
             "filename": stable_name,
             "role": edge.role or "",
             "slot_order": edge.slot_order or 0,
+            "reference_class": reference_class,
+            "reference_intent": reference_intent,
+            "reference_instruction": edge.reference_instruction or "",
         })
 
     # Claim the job. chatgpt claims the cg lane (leaves node.status untouched so
@@ -12110,13 +12442,31 @@ def worker_get_pending_job(
 
     # Keep backwards-compat: still emit input_image_urls (flat list) for
     # older worker versions, and the new input_images structure for v364+
+    prompt_body = _resolve_flow_prompt_bindings(node)
+    compiled_prompt = build_image_prompt_contract(
+        prompt_body,
+        input_images,
+        node.aspect_ratio,
+        backend="chatgpt" if is_cg else "banana",
+    )
+    # v909 temporary diagnostic: backend + ordered role map are enough to
+    # prove the emitted contract matches the attachments without logging the
+    # full creative prompt.
+    log.info(
+        f"[v909/ref-contract] node={node.id} backend={'chatgpt' if is_cg else 'banana'} "
+        f"refs={[(i.get('slot_order'), i.get('reference_class'), i.get('reference_intent'), i.get('role'), bool(i.get('reference_instruction'))) for i in input_images]}"
+    )
     return {
         "job": {
             "id": node.id,
             "name": node.name or "",
             # v573: prepend per-slot reference manifest (see
             # _build_flow_prompt_with_manifest for rationale).
-            "prompt": _resolve_flow_prompt_bindings(node),
+            # Rolling-worker compatibility: old workers read prompt; v909+
+            # workers prefer render_prompt.
+            "prompt": prompt_body,
+            "render_prompt": compiled_prompt,
+            "prompt_contract_version": 2,
             "aspect_ratio": node.aspect_ratio,
             "resolution": node.resolution,
             "model": "chatgpt" if is_cg else node.model,

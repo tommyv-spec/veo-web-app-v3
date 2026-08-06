@@ -39,6 +39,7 @@ import os
 import re
 import sys
 import time
+from pathlib import Path
 
 DEFAULT_URL = "https://kavenobuilder.com"
 
@@ -441,6 +442,20 @@ class Client:
         except self._rq.exceptions.Timeout:
             raise PlatformError(EXIT_WORKER, f"STALL: request timed out: POST {path}")
 
+    def upload_image(self, path, display_name):
+        """Upload one local image as a ready platform reference node."""
+        try:
+            with open(path, "rb") as fh:
+                resp = self.s.post(
+                    self.base + "/api/images/uploads",
+                    files={"file": (Path(path).name, fh)},
+                    data={"name": display_name},
+                    timeout=120,
+                )
+            return self._check(resp)
+        except self._rq.exceptions.Timeout:
+            raise PlatformError(EXIT_WORKER, f"STALL: upload timed out: {path}")
+
 
 def check_health(client, report):
     """GET /api/health (public) + both worker liveness endpoints.
@@ -473,12 +488,117 @@ def do_import(client, md_text, args, report):
         payload["ingredient_node_ids"] = pairs
     if args.product_node:
         payload["product_node_id"] = args.product_node
+    if getattr(args, "external_reference_nodes", None):
+        payload["external_references"] = args.external_reference_nodes
     res = client.post("/api/images/import-scene-table", payload)
     report["import"] = {k: res.get(k) for k in
                         ("batch_id", "batch_name", "format", "created", "queued",
                          "waiting_on_parent", "scene_assignments_created")}
     report["scene_nodes"] = res.get("scene_nodes", {})
     return res["batch_id"]
+
+
+def load_external_reference_selection(md_file, plan_path=None):
+    """Read only the operator-selected external refs for this build.
+
+    The default path is raw/refs/<build-stem>/refs_plan.json. Merely having
+    fetched candidates does nothing: a file enters this list only through a
+    ``selected_refs`` item with an open role and a clear use instruction.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    plan = (
+        Path(plan_path).expanduser()
+        if plan_path
+        else repo_root / "raw" / "refs" / Path(md_file).stem / "refs_plan.json"
+    )
+    plan = plan.resolve()
+    if not plan.exists():
+        raise PlatformError(
+            EXIT_PARSE,
+            f"EXTERNAL REFS: plan not found: {plan}",
+        )
+    try:
+        data = json.loads(plan.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise PlatformError(EXIT_PARSE, f"EXTERNAL REFS: invalid plan {plan}: {exc}")
+
+    selected = {}
+    allowed_ext = {".png", ".jpg", ".jpeg", ".webp"}
+    for entry in data.get("images") or []:
+        image_key = str(entry.get("image") or "").strip().lower()
+        if not re.fullmatch(r"image_\d+", image_key):
+            raise PlatformError(
+                EXIT_PARSE,
+                f"EXTERNAL REFS: bad image key {image_key!r} in {plan}",
+            )
+        image_dir = (plan.parent / image_key).resolve()
+        bucket = []
+        for item in entry.get("selected_refs") or []:
+            if not isinstance(item, dict):
+                raise PlatformError(
+                    EXIT_PARSE,
+                    f"EXTERNAL REFS: {image_key} selected_refs entries must be objects",
+                )
+            filename = str(item.get("file") or "").strip()
+            role = str(item.get("role") or "").strip()
+            instruction = str(item.get("instruction") or "").strip()
+            if not filename or not role or not instruction:
+                raise PlatformError(
+                    EXIT_PARSE,
+                    f"EXTERNAL REFS: {image_key} needs file, role, and instruction",
+                )
+            file_path = (image_dir / filename).resolve()
+            if file_path.parent != image_dir:
+                raise PlatformError(
+                    EXIT_PARSE,
+                    f"EXTERNAL REFS: {image_key} file must stay inside {image_dir}",
+                )
+            if file_path.suffix.lower() not in allowed_ext or not file_path.is_file():
+                raise PlatformError(
+                    EXIT_PARSE,
+                    f"EXTERNAL REFS: missing or unsupported image: {file_path}",
+                )
+            bucket.append({
+                "path": file_path,
+                "file": filename,
+                "role": role,
+                "instruction": instruction,
+            })
+        if bucket:
+            selected[image_key] = bucket
+
+    if not selected:
+        raise PlatformError(
+            EXIT_PARSE,
+            f"EXTERNAL REFS: option is on, but {plan} has no selected_refs",
+        )
+    return plan, selected
+
+
+def upload_external_reference_selection(client, selected, report):
+    """Upload selected files and return the import API's per-image binding map."""
+    bindings = {}
+    uploaded = []
+    for image_key, refs in selected.items():
+        bucket = []
+        for ref in refs:
+            display_name = f"external {image_key} {ref['role']} - {ref['file']}"
+            node = client.upload_image(ref["path"], display_name)
+            node_id = node.get("id")
+            if not node_id:
+                raise PlatformError(
+                    EXIT_UNKNOWN,
+                    f"EXTERNAL REFS: upload returned no node id for {ref['path']}",
+                )
+            bucket.append({
+                "parent_node_id": int(node_id),
+                "role": ref["role"],
+                "reference_instruction": ref["instruction"],
+            })
+            uploaded.append({"image": image_key, "file": ref["file"], "node_id": int(node_id)})
+        bindings[image_key] = bucket
+    report["external_references"] = uploaded
+    return bindings
 
 
 def _upload_image_url(base, node):
@@ -745,6 +865,15 @@ def main(argv=None):
     p.add_argument("--name", help="name_prefix for the batch (short label)")
     p.add_argument("--ingredient", action="append", default=[], metavar="NAME=NODEID")
     p.add_argument("--product-node", type=int, help="upload node id of the product (v583 shortcut)")
+    p.add_argument(
+        "--external-refs",
+        action="store_true",
+        help="opt in to selected_refs from raw/refs/<build>/refs_plan.json (default: off)",
+    )
+    p.add_argument(
+        "--external-refs-plan",
+        help="alternate refs_plan.json path (requires --external-refs)",
+    )
     p.add_argument("--variants", type=int, default=4, choices=range(1, 5))
     p.add_argument("--url", default=os.environ.get("KAVENO_URL", DEFAULT_URL))
     p.add_argument("--token", default=os.environ.get("KAVENO_API_TOKEN", ""))
@@ -764,6 +893,9 @@ def main(argv=None):
     p.add_argument("--render-timeout-min", type=int, default=90)
     p.add_argument("--stall-min", type=int, default=10)
     args = p.parse_args(argv)
+
+    if args.external_refs_plan and not args.external_refs:
+        p.error("--external-refs-plan requires --external-refs")
 
     if args.md_file == "set-token":
         return cmd_set_token(args.token_value)
@@ -789,6 +921,28 @@ def main(argv=None):
             return cmd_list_uploads(client, args.as_json)
 
         md_text = open(args.md_file, encoding="utf-8").read()
+
+        external_selection = {}
+        args.external_reference_nodes = None
+        if args.external_refs:
+            if args.resume_batch:
+                raise PlatformError(
+                    EXIT_PARSE,
+                    "EXTERNAL REFS: choose them during import, not while resuming a batch",
+                )
+            plan_path, external_selection = load_external_reference_selection(
+                args.md_file, args.external_refs_plan,
+            )
+            selected_count = sum(len(v) for v in external_selection.values())
+            report["external_reference_plan"] = str(plan_path)
+            report["external_reference_selected_count"] = selected_count
+            print(
+                f"external references: ON — {selected_count} selected across "
+                f"{len(external_selection)} image(s)",
+                flush=True,
+            )
+        else:
+            print("external references: OFF — existing import path", flush=True)
 
         if not args.skip_preflight:
             ok, err = preflight_text(md_text)
@@ -880,7 +1034,16 @@ def main(argv=None):
             report["stages"].append("refbind:ok")
             print(f"reference bindings: OK (subject={args.subject}"
                   + (f", product={args.product_node}" if args.product_node else "")
-                  + ")", flush=True)
+                   + ")", flush=True)
+            if external_selection:
+                args.external_reference_nodes = upload_external_reference_selection(
+                    client, external_selection, report,
+                )
+                print(
+                    f"external references: uploaded "
+                    f"{sum(len(v) for v in args.external_reference_nodes.values())}",
+                    flush=True,
+                )
             batch_id = do_import(client, md_text, args, report)
             print(f"import: batch {batch_id}", flush=True)
         report["batch_id"] = batch_id

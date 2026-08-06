@@ -6,6 +6,10 @@ payload the platform polls for.
 """
 
 _ASPECT = {"9:16": "vertical 9:16", "16:9": "horizontal 16:9"}
+_PROMPT_CONTRACT_MARKERS = (
+    "IMAGE REFERENCE CONTRACT v2",
+    "IMAGE REFERENCE CONTRACT v1",
+)
 
 
 def aspect_phrase(aspect_ratio):
@@ -21,7 +25,12 @@ def ref_paths(job):
 
 def build_prompt(job):
     """Compose the ChatGPT prompt: image trigger + body + per-ref role lines + aspect."""
-    body = (job.get("prompt") or "").strip()
+    body = (job.get("render_prompt") or job.get("prompt") or "").strip()
+    # v909: the server already produced a numbered, backend-specific prompt.
+    # Returning it byte-for-byte avoids a second trigger, role map, or aspect.
+    # Unmarked queued/legacy jobs keep the fallback below.
+    if any(marker in body for marker in _PROMPT_CONTRACT_MARKERS):
+        return body
     lines = [f"Crea immagine: {body}"]
     for img in sorted(job.get("input_images") or [], key=lambda i: i.get("slot_order", 0)):
         role = (img.get("role") or "").strip()

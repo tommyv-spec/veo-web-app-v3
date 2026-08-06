@@ -4965,6 +4965,8 @@ Same person, same [persona-locking features], same [pose], — but [body transfo
 ### Isolated-reference rule (v573, supersedes v523.1) — persona AND product are the sanctioned uploads; everything else stays inline
 Nano Banana 2 documentation says it accepts up to 14 reference object images and 5 character sheets per generation. That's the model's capacity. Our practical constraint is different: **a reference image only works as an ingredient if it's a clean isolated photo of just that one object on a neutral background.** When the prop's only available image is its anchor scene (a busy composition with other objects, walls, floors, lighting), uploading that as the prop's "ingredient" would make Nano Banana 2 try to reproduce the entire busy composition every time the prop is referenced — including the wall, the floor, the neighboring jars, the lighting, and so on. The result is worse than describing the prop in prompt text from scratch.
 
+**v909 boundary.** This rule still owns the build's default `## Ingredients` table: persona plus one hero product. v909 adds a separate, explicit per-image path for outside role plates (background, pose, object, outfit, light, or an unlisted need). Those refs are not silently promoted into Ingredients; each requires an operator selection plus a narrow use instruction.
+
 **The isolated-reference test.** Before declaring anything in the `## Ingredients` table, ask: *"Do I have a clean isolated photo of just this one object on a neutral background, with no surrounding scene?"* If yes, it can be an ingredient. If no, describe it inline in the image prompt text instead.
 
 **Two things now pass the test in practice (v573 update):**
@@ -16545,3 +16547,42 @@ aspect_source: 9:16 | 16:9 | 1:1 | 4:5 | other — <ratio>
 A 10-minute source at fps=2 native = ~1200 frames; the old habit under scale pressure was sampling + a false "all frames" claim (the exact 2026-07-16 failure). Protocol: decode in LABELED SEGMENTS (e.g. `S-intro 0:00-1:30`, `S-demo 1:30-4:00`), each with its own clip list + dense walk. The floors do not relax: HOOK clip = every frame; every other clip ≥ start/mid/end + more whenever anything moves; per-clip action sequences stay mandatory. The `decoded_by:` coverage enumeration may be per segment; an honest partial (`read 300 of 1440 — S-intro + S-demo full, S-qa start/mid/end only`) stays legal and usable; `scale=540` never becomes the evidence base. A false complete claim is still the cardinal decode sin.
 
 **Gates**: `verify_decode_format.py` WARNs (never FAILs — forward-only per `feedback_rule-changes-forward-only`, 148 shipped decodes untouched) when a decode lacks `### Audio design read` or `style_register:`. New decodes treat both as required; the human gate is `wiki/meta/decode-grammar-checklist.md` §"Universal-source observation (v887)". Taxonomy axes (render style register, source transition vocabulary, audio bed, beat-sync) live in `wiki/synthesis/video-variable-taxonomy.md` as open enums — new value appends there same commit (v867 discipline).
+
+---
+
+## v909 — EXTERNAL IMAGE REFERENCES ARE OPTIONAL, ROLE-BOUND, AND NEVER TRUNCATED
+
+**Protected function.** Keep the proven image-generation path unchanged while allowing a scene to use any helpful outside image as a narrow role plate. A fetched Pinterest candidate never becomes an input merely because it exists on disk.
+
+**Evidence trigger.** Use this path only when an `### Image N` needs visual evidence that its normal character, product, or continuity references do not supply: a background, pose, object, outfit, lighting look, texture, camera relationship, or an unlisted scene-specific need.
+
+**Decision test.** Ask: “What exact visible fact should this image control?” If the answer cannot be written as a clear take/apply/preserve/ignore instruction, do not attach the image. The role list is OPEN. `UNLISTED — <plain role>` is valid.
+
+**Default and operator choice.** External references are OFF by default. The normal import request omits `external_references`, and the CLI prints `external references: OFF — existing import path`. To opt in:
+
+1. Fetch candidates with `tools/fetch_refs.py`.
+2. In `raw/refs/<build>/refs_plan.json`, add only the chosen files to that image's `selected_refs` list:
+
+```json
+"selected_refs": [
+  {
+    "file": "pin_123.jpg",
+    "role": "background geometry",
+    "instruction": "Take only the porch layout and railing. Apply it to the background. Preserve the main character and product. Ignore the people, clothing, and camera angle."
+  }
+]
+```
+
+3. Import with `python code/send_to_platform.py videos/<build>.md ... --external-refs`.
+
+No `--external-refs` flag means no external file is read, uploaded, or bound. Turning the option on with no `selected_refs` is an error, not an implicit “use all candidates.” `--external-refs-plan <path>` selects an alternate plan and still requires the opt-in flag.
+
+**Ordering and prompt contract.** Existing character, product, and prior-scene references keep their current slot order. External refs append after them so the existing numbered prompt stays stable. Each external edge carries its own authoritative `reference_instruction`; `image_prompt_contract.py` numbers the references in actual upload order and sends the same contract to the Banana and ChatGPT workers. A custom use line wins over conflicting scene prose. Workers must upload every listed input in that order and fail clearly when a file or attachment is missing.
+
+**How many.** Count is per image, not a fixed three-ref template: `0..model limit`. Current platform limits are 14 total for Nano Banana 2 / Nano Banana Pro and 3 for legacy/other routes. The 14 ceiling comes from Google's current Gemini 3 image documentation; Nano Banana 2 is Gemini 3.1 Flash Image and Nano Banana Pro is Gemini 3 Pro Image. GPT Image 2 documents high-fidelity image inputs but the ChatGPT browser surface does not publish a dependable attachment count, so the worker must not invent or silently apply a smaller cap. If the browser refuses an attachment, the job fails with evidence instead of dropping the image.
+
+**Hard boundaries.** Never auto-select all Pinterest hits. Never attach a reference without a role and use instruction. Never silently drop a character, product, chain, or external reference to fit a limit. Never let a path escape its `raw/refs/<build>/image_N/` folder. Every selected outside image keeps its source URL in the fetched index/plan and still passes §8/no-minors review before upload.
+
+**Composition with existing rules.** v573/v607 still own persona/product identity. v580.4/v682 still own scene continuity. v909 adds narrow outside role plates without replacing those inputs. The existing scene-index compatibility path is deliberately untouched: external refs append after current slots, so option-off output and existing chain slot numbers do not change.
+
+**Sources:** Google AI image-generation documentation (Gemini 3 models: up to 14 mixed reference images; model-specific character/object fidelity guidance) · OpenAI GPT Image 2 model documentation (high-fidelity image inputs) · live platform paths `image_platform.py`, `image_prompt_contract.py`, `image_worker.py`, `static/chatgpt_image_backend.py` · operator 2026-08-06 (“make it a choice to include external images or keep it as it is”).

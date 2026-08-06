@@ -285,6 +285,34 @@ def _all_img_srcs(page):
         return []
 
 
+def _attach_reference_files(page, ref_paths, timeout_s=60):
+    """Attach references in order and wait until ChatGPT shows every preview."""
+    if not ref_paths:
+        return
+    before = set(_all_img_srcs(page))
+    file_input = page.locator(SEL["file_input"]).first
+    file_input.set_input_files(ref_paths)
+    attached_names = file_input.evaluate(
+        "el => Array.from(el.files || []).map(file => file.name)"
+    )
+    expected_names = [os.path.basename(path) for path in ref_paths]
+    if attached_names != expected_names:
+        raise RuntimeError(
+            "ChatGPT reference attachment order could not be verified: "
+            f"expected {expected_names}, got {attached_names}"
+        )
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        current = _all_img_srcs(page)
+        if sum(1 for src in current if src not in before) >= len(ref_paths):
+            return
+        time.sleep(0.5)
+    raise RuntimeError(
+        f"ChatGPT showed fewer than {len(ref_paths)} uploaded reference previews"
+    )
+
+
 def _looks_like_reference(out_path, ref_paths):
     """True if the downloaded image is pixel-(near)-identical to an uploaded
     reference at the SAME dimensions — i.e. ChatGPT served the input back instead
@@ -521,8 +549,8 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
         if not os.path.exists(rp):
             raise FileNotFoundError(f"ref image not found: {rp}")
     if ref_paths:
-        page.locator(SEL["file_input"]).first.set_input_files(ref_paths)
-        jitter(2.0, 4.0)
+        _attach_reference_files(page, ref_paths)
+        jitter(0.5, 1.0)
     comp = page.locator(SEL["composer"]).first
     comp.click(); jitter(0.4, 0.9)
     # Insert the whole prompt in ONE op — char-by-char .type() times out on the

@@ -2824,6 +2824,35 @@ def _strip_stale_reference_lines(prompt):
     return cleaned.lstrip("\n")
 
 
+_PROMPT_CONTRACT_MARKERS = (
+    "IMAGE REFERENCE CONTRACT v2",
+    "IMAGE REFERENCE CONTRACT v1",
+)
+
+
+def _prepare_reference_prompt(prompt, input_paths, context=""):
+    """Return the prompt that should be submitted with attached references.
+
+    v909 jobs already carry the server-built, numbered reference contract.
+    Older queued/watch-folder jobs do not, so they keep the proven v703 worker
+    manifest.  The explicit marker is the compatibility boundary.
+    """
+    if not input_paths:
+        return prompt
+    prefix = f"[{context}] " if context else ""
+    if any(marker in (prompt or "") for marker in _PROMPT_CONTRACT_MARKERS):
+        # Temporary runtime diagnostic. Remove after operator-side evidence
+        # confirms both DOM and private-API submissions keep one contract.
+        print(
+            f"{prefix}[v909/ref-contract] using server contract "
+            f"({len(input_paths)} ref(s)); legacy v703 manifest skipped",
+            flush=True,
+        )
+        return prompt
+    manifest = _build_reference_manifest(input_paths)
+    return manifest + _strip_stale_reference_lines(prompt)
+
+
 def upload_reference_images_legacy(page, image_paths, context=""):
     """Original multi-select upload (kept for reference). Not used."""
     prefix = f"[{context}] " if context else ""
@@ -3350,7 +3379,7 @@ def process_image_job(page, input_paths, prompt, output_path,
             upload_reference_images(page, input_paths)
             human_delay(1, 2)
             # v703 — worker-injected reference manifest (see helper docstrings)
-            prompt = _build_reference_manifest(input_paths) + _strip_stale_reference_lines(prompt)
+            prompt = _prepare_reference_prompt(prompt, input_paths, context="dom-single")
 
         # --- Step 5: Enter prompt ---
         human_mouse_move(page)
@@ -4953,6 +4982,26 @@ def _fa_api_start_cooldown(page, reason, pfx=""):
     print(f"{pfx}[flow_api] attempt failed (API stays armed, no global pause): {reason}", flush=True)
 
 
+def _reference_upload_metadata(path, image_bytes, index):
+    """Return a filename and MIME type that match the actual reference bytes."""
+    data = image_bytes or b""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        ext, mime = ".png", "image/png"
+    elif data.startswith(b"\xff\xd8\xff"):
+        ext, mime = ".jpg", "image/jpeg"
+    elif len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        ext, mime = ".webp", "image/webp"
+    else:
+        suffix = os.path.splitext(str(path or ""))[1].lower()
+        ext, mime = {
+            ".png": (".png", "image/png"),
+            ".jpg": (".jpg", "image/jpeg"),
+            ".jpeg": (".jpg", "image/jpeg"),
+            ".webp": (".webp", "image/webp"),
+        }.get(suffix, (".png", "image/png"))
+    return f"ref_{int(index) + 1}{ext}", mime
+
+
 def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_path):
     """Try the flow_api (private-API) path for one image generation.
 
@@ -4996,12 +5045,18 @@ def _flow_api_image_try(page, input_paths, prompt, aspect_ratio, model, output_p
             return _latch_off(f"failed to read input {p}: {e}")
 
     try:
+        api_prompt = _prepare_reference_prompt(prompt, input_paths, context="flow-api-one")
+    except Exception:
+        api_prompt = prompt
+
+    try:
         cli = _FaClient(page, project_id=project_id)
         ref_ids = []
         for i, b in enumerate(ref_bytes_list):
-            ref_ids.append(cli.upload_image(b, file_name=f"ref_{i}.jpg"))
+            file_name, mime_type = _reference_upload_metadata(input_paths[i], b, i)
+            ref_ids.append(cli.upload_image(b, file_name=file_name, mime_type=mime_type))
         media_id, url = cli.submit_image(
-            prompt=prompt,
+            prompt=api_prompt,
             image_model_name=image_model,
             reference_media_ids=ref_ids or None,
             aspect=api_aspect,
@@ -5066,8 +5121,7 @@ def _flow_api_image_multi_try(page, input_paths, prompt, aspect_ratio, model,
     # uploads via uploadImage instead and skips that DOM step, so we still want
     # the manifest in the prompt for the model. Build it here.
     try:
-        v703_manifest = _build_reference_manifest(input_paths) if input_paths else ""
-        api_prompt = (v703_manifest + _strip_stale_reference_lines(prompt)) if input_paths else prompt
+        api_prompt = _prepare_reference_prompt(prompt, input_paths, context="flow-api-single")
     except Exception:
         api_prompt = prompt
 
@@ -5083,7 +5137,8 @@ def _flow_api_image_multi_try(page, input_paths, prompt, aspect_ratio, model,
         cli = _FaClient(page, project_id=project_id)
         ref_ids = []
         for i, b in enumerate(ref_bytes_list):
-            ref_ids.append(cli.upload_image(b, file_name=f"ref_{i}.jpg"))
+            file_name, mime_type = _reference_upload_metadata(input_paths[i], b, i)
+            ref_ids.append(cli.upload_image(b, file_name=file_name, mime_type=mime_type))
         results = []
         for v in range(int(variants or 1)):
             mid, mu = cli.submit_image(
@@ -5287,13 +5342,7 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
 
     # v703 manifest — same shape the DOM path applies after upload_reference_images.
     try:
-        if input_paths:
-            manifest = _build_reference_manifest(input_paths)
-            api_prompt = manifest + _strip_stale_reference_lines(prompt)
-            preview = manifest.replace("\n", " | ").strip(" |")
-            print(f"{pfx}[flow_api] v703 manifest ({len(input_paths)} ref(s)): {preview}", flush=True)
-        else:
-            api_prompt = prompt
+        api_prompt = _prepare_reference_prompt(prompt, input_paths, context="flow-api-multi")
     except Exception:
         api_prompt = prompt
 
@@ -5326,7 +5375,8 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
                 cli.note_cached_upload()
                 _reused += 1
                 continue
-            _mid = cli.upload_image(b, file_name=f"ref_{i}.jpg")
+            file_name, mime_type = _reference_upload_metadata(input_paths[i], b, i)
+            _mid = cli.upload_image(b, file_name=file_name, mime_type=mime_type)
             _fa_ref_cache_put(_ref_cache, _key, _mid)
             ref_ids.append(_mid)
             _uploaded += 1
@@ -6156,13 +6206,7 @@ def _process_image_job_multi_once(page, input_paths, prompt, output_dir,
                                            already_uploaded=already_uploaded):
                 return False, [], "Failed to upload reference images"
             # v703 — worker-injected reference manifest (see helper docstrings)
-            _v703_manifest = _build_reference_manifest(input_paths)
-            prompt = _v703_manifest + _strip_stale_reference_lines(prompt)
-            print(
-                f"[{context}] [v703] manifest prepended ({len(input_paths)} ref(s)): "
-                f"{_v703_manifest.replace(chr(10), ' | ').strip(' |')}",
-                flush=True,
-            )
+            prompt = _prepare_reference_prompt(prompt, input_paths, context=context)
 
         # 4) Fill prompt
         if not fill_prompt_textarea(page, prompt):
@@ -6476,7 +6520,7 @@ def _process_watch_job(page, job_path, job):
     if not _flow_handles_model(job):
         return  # chatgpt job -> owned by chatgpt_image_worker; do NOT render or write .done.json
     jid = job.get('id', 'unknown')
-    prompt = job.get('prompt', '')
+    prompt = job.get('render_prompt') or job.get('prompt', '')
     raw_input_images = job.get('input_images') or []
     output_dir = job.get('output_dir')
     if not output_dir:
@@ -6740,6 +6784,13 @@ def _download_reference_inputs(api_key, input_images, work_dir):
         input_images = [{"url": u, "filename": f"ref_{i+1}.png",
                          "role": "", "slot_order": i}
                         for i, u in enumerate(input_images)]
+
+    # The prompt calls the first attachment Image 1, the second Image 2, etc.
+    # Sort here as a worker-side guard even if the server already did so.
+    input_images = sorted(
+        input_images or [],
+        key=lambda item: int(item.get("slot_order", 0) or 0),
+    )
 
     for idx, item in enumerate(input_images, start=1):
         url = item["url"]
@@ -7404,7 +7455,7 @@ def api_pull_mode(page, api_url, api_key, worker_id=None):
 
             node_id = job.get("id")
             node_name = job.get("name", "")
-            prompt = job.get("prompt", "")
+            prompt = job.get("render_prompt") or job.get("prompt", "")
             variants = int(job.get("variants") or 1)
             aspect_ratio = job.get("aspect_ratio", "16:9")
             resolution = job.get("resolution", "1K")
@@ -7483,7 +7534,22 @@ def api_pull_mode(page, api_url, api_key, worker_id=None):
                     continue
 
                 if missing_refs:
-                    print(f"[API] ⚠ Node {node_id}: {len(missing_refs)} reference(s) missing, proceeding with {len(input_items)}", flush=True)
+                    # v909: fail hard just like the parallel path. If one file
+                    # drops out, every later attachment shifts its actual Image
+                    # N position while render_prompt keeps the original role map.
+                    # Continuing could swap a person, product, or base scene.
+                    lost = ", ".join(
+                        f"{m.get('filename', '?')} [{m.get('role', '') or '?'}]"
+                        for m in missing_refs
+                    )
+                    reasons = "; ".join({m.get("error", "unknown") for m in missing_refs})
+                    err = (
+                        f"{len(missing_refs)} of {len(input_images)} reference image(s) "
+                        f"could not be downloaded after retries: {lost} ({reasons})"
+                    )
+                    print(f"[API] ✗ Node {node_id}: {err}", flush=True)
+                    _post_status(api_url, api_key, node_id, "failed", error=err)
+                    continue
 
                 input_paths = [it["path"] for it in input_items]
 
@@ -9081,7 +9147,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
         """
         node_id = job.get("id")
         node_name = job.get("name", "")
-        prompt = job.get("prompt", "")
+        prompt = job.get("render_prompt") or job.get("prompt", "")
         variants = int(job.get("variants") or 1)
         aspect_ratio = job.get("aspect_ratio", "16:9")
         resolution = job.get("resolution", "1K")
@@ -9343,15 +9409,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             # manifest at top → trusts it → no more "bottle ended up at
             # Image 3 but prompt says Image 2" misbinds.
             if input_paths:
-                _v703_manifest = _build_reference_manifest(input_paths)
-                _v703_stripped = _strip_stale_reference_lines(prompt)
-                prompt = _v703_manifest + _v703_stripped
-                _v703_preview = _v703_manifest.replace("\n", " | ").strip(" |")
-                print(
-                    f"[{ctx}] [v703] manifest prepended ({len(input_paths)} ref(s)): "
-                    f"{_v703_preview}",
-                    flush=True,
-                )
+                prompt = _prepare_reference_prompt(prompt, input_paths, context=ctx)
 
             if not fill_prompt_textarea(page, prompt):
                 raise RuntimeError("Failed to fill prompt")

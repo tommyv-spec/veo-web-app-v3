@@ -27,6 +27,28 @@ def test_build_prompt_adds_one_line_per_ref_role():
     assert "use the uploaded reference for the main character" in p
     assert "use the uploaded reference for the salvora bottle" in p
 
+
+def test_build_prompt_returns_server_contract_unchanged():
+    compiled = """Crea immagine:
+IMAGE REFERENCE CONTRACT v2
+
+REFERENCE IMAGES
+Image 1 - Role: the main character.
+
+SCENE TO CREATE
+scene"""
+    job = {"prompt": "legacy body", "render_prompt": compiled,
+           "prompt_contract_version": 2, "aspect_ratio": "9:16", "input_images": [
+        {"path": "/a.png", "role": "the main character", "slot_order": 0},
+    ]}
+
+    assert m.build_prompt(job) == compiled
+
+
+def test_build_prompt_keeps_queued_v1_contract_unchanged():
+    compiled = "Crea immagine:\nIMAGE REFERENCE CONTRACT v1\n\nSCENE TO CREATE\nscene"
+    assert m.build_prompt({"render_prompt": compiled}) == compiled
+
 def test_ref_paths_sorted_by_slot_order():
     job = {"input_images": [{"path": "/b.png", "slot_order": 1},
                             {"path": "/a.png", "slot_order": 0}]}

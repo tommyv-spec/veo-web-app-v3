@@ -14,6 +14,7 @@ the fixture embeds triple-backtick fences, and keeping it a plain
 """
 
 import pytest
+from types import SimpleNamespace
 from fastapi import HTTPException
 
 from image_platform import (
@@ -24,7 +25,80 @@ from image_platform import (
     _v859_collect_gating_parents,
     _v859_plan_chain_edges,
     _v859_refuse_multiref_without_ingredients,
+    _max_parents,
+    _normalize_external_reference_bindings,
+    ExternalReferenceRef,
 )
+
+
+def test_reference_limit_is_model_aware():
+    assert _max_parents("nano_banana_2") == 14
+    assert _max_parents("nano_banana_pro") == 14
+    assert _max_parents("imagen_4") == 3
+    assert _max_parents("unknown-route") == 3
+
+
+def test_chain_planner_accepts_more_than_three_when_model_budget_allows_it():
+    refs = list(range(1, 11))
+    plan = _v859_plan_chain_edges(
+        refs,
+        {ref: 100 + ref for ref in refs},
+        attached_parents_count=0,
+        bound_parent_ids=set(),
+        slot=0,
+        max_parents=14,
+    )
+
+    assert len(plan["edges"]) == 10
+    assert plan["capped"] is None
+
+
+def test_external_reference_binding_is_absent_by_default():
+    req = SimpleNamespace(external_references=None, model="nano_banana_2")
+    assert _normalize_external_reference_bindings(
+        req,
+        [{"image_index": 1}],
+        db=SimpleNamespace(),
+        current_user=SimpleNamespace(id="u1"),
+    ) == {}
+
+
+def test_external_reference_binding_accepts_open_role_and_instruction():
+    parent = SimpleNamespace(
+        id=22,
+        user_id="u1",
+        kind="upload",
+        status="ready",
+        chosen_variant_id=5,
+    )
+
+    class FakeQuery:
+        def filter(self, *args):
+            return self
+
+        def first(self):
+            return parent
+
+    db = SimpleNamespace(query=lambda model: FakeQuery())
+    ref = ExternalReferenceRef(
+        parent_node_id=22,
+        role="  unusual texture role  ",
+        reference_instruction="  Take only the woven texture.  ",
+    )
+    req = SimpleNamespace(
+        external_references={"image_1": [ref]},
+        model="nano_banana_2",
+    )
+
+    result = _normalize_external_reference_bindings(
+        req,
+        [{"image_index": 1}],
+        db=db,
+        current_user=SimpleNamespace(id="u1"),
+    )
+
+    assert result[1][0].role == "unusual texture role"
+    assert result[1][0].reference_instruction == "Take only the woven texture."
 
 
 _MD_TEMPLATE = """## Images
