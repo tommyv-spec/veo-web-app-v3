@@ -7920,6 +7920,27 @@ class JobAbortedException(Exception):
         self.job_id = job_id
 
 
+class FlowAccountBlocked(Exception):
+    """v904.1 — Flow answered with the account block ('unusual activity' /
+    403 PUBLIC_ERROR_UNUSUAL_ACTIVITY). MUST reach the account thread so the
+    golden restore runs.
+
+    Why a dedicated type: v904 raised a plain Exception from inside the redo
+    scan loop, whose broad `except Exception` logged '[REDO] Scan error: ...'
+    and kept scanning. Measured 2026-08-06 (job d8051bf6, clip 20): the block
+    was detected and re-raised ELEVEN times in a row, requeuing the clip each
+    time, and the golden restore never happened — the loop just fell through to
+    'HTTP scan failed'. Every broad handler between the detection and the
+    account thread now re-raises this type instead of swallowing it.
+
+    Message text is kept identical to the v758.24 signal because the account
+    thread matches on it.
+    """
+    def __init__(self, job_id):
+        super().__init__(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
+        self.job_id = job_id
+
+
 def mark_job_aborted(job_id):
     """Mark a job as aborted. Called when:
     - /pending returns the job_id in aborted_jobs list
@@ -17070,7 +17091,7 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
         clip_log(clip_id, clip_index, "RESTORE", f"unusual-activity (account block), golden restore {_gr_count}/{MAX_UNUSUAL_GOLDEN_RESTORES}")
         update_clip_status(clip_id, 'flow_redo_queued', error_message=None)
         shutil.rmtree(temp_dir, ignore_errors=True)
-        raise Exception(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
+        raise FlowAccountBlocked(job_id)  # v904.1 — typed so scan loops re-raise
 
     # v826 — MATCH THE MAIN PROCESS. The main path gates terminal-record
     # consumption on `clip_failed` (check_recent_clip_failure): when the clip did
@@ -17413,7 +17434,7 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                             shutil.rmtree(temp_dir, ignore_errors=True)
                             # Same raise string the main path uses; the account
                             # thread catches it and runs the golden restore.
-                            raise Exception(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
+                            raise FlowAccountBlocked(job_id)  # v904.1 — typed so scan loops re-raise
                         _term_reason = tile_text_terminal_reason(page, 0)
                         if _term_reason:
                             route_terminal_content_reject(clip_id, _term_reason)
@@ -17456,6 +17477,11 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                         human_mouse_move(page)
                     except Exception:
                         pass
+            except FlowAccountBlocked:
+                # v904.1 — the account block must reach the account thread so the
+                # golden restore runs. Swallowing it here made v904 fire 11x in a
+                # row on one clip and never restore (job d8051bf6, 2026-08-06).
+                raise
             except Exception as e:
                 print(f"[REDO] Scan error: {e}", flush=True)
                 time.sleep(10)
@@ -19639,7 +19665,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         update_clip_status(_rc['id'], 'pending', error_message=None)
                     except Exception:
                         pass
-            raise Exception(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
+            raise FlowAccountBlocked(job_id)  # v904.1 — typed so scan loops re-raise
 
         clip_index = clip['clip_index']
 
@@ -20535,7 +20561,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 save_cache(cache)
             with _UNUSUAL_ACTIVITY_LOCK:
                 _UNUSUAL_ACTIVITY_HITS.pop(job_id, None)
-            raise Exception(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
+            raise FlowAccountBlocked(job_id)  # v904.1 — typed so scan loops re-raise
 
         if clip_failed:
             # Terminal video-gen content filter (e.g. PROMINENT_PEOPLE): the avatar

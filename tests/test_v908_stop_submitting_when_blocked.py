@@ -47,8 +47,10 @@ class TestV908StopSubmittingWhenBlocked(unittest.TestCase):
                       "clips never submitted must go back to pending, not be lost")
 
     def test_raises_the_golden_restore_signal(self):
-        self.assertIn("trigger golden restore (v758.24)", _guard(_source()),
-                      "the account thread keys off this string to restore")
+        # v904.1 — typed signal; its message still carries the string the
+        # account thread matches on.
+        self.assertIn("raise FlowAccountBlocked(job_id)", _guard(_source()),
+                      "the block must raise the typed signal that survives broad handlers")
 
     def test_peek_failure_cannot_break_the_submit_loop(self):
         """A DOM/page error during the peek must never abort a healthy job."""

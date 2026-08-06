@@ -40,7 +40,10 @@ class TestV904RedoUnusualNotPolicy(unittest.TestCase):
         src = _source()
         i = src.index("[v904] Clip")
         branch = src[i: src.index("_term_reason = tile_text_terminal_reason", i)]
-        self.assertIn("trigger golden restore (v758.24)", branch)
+        # v904.1 — the signal is now a typed FlowAccountBlocked whose message
+        # carries the same text; a plain Exception here got swallowed by the
+        # scan loop's broad handler (11x on job d8051bf6).
+        self.assertIn("raise FlowAccountBlocked(job_id)", branch)
         self.assertIn("flow_redo_queued", branch,
                       "the clip must be requeued so the restore can retry it")
 
