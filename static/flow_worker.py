@@ -5650,7 +5650,19 @@ class AccountHealthTracker:
     COOLDOWN_SECONDS = 300  # 5 minutes
     # Proactive restore: after this many successful clips (across jobs), restore golden
     # profile before the next job to keep reCAPTCHA scores clean.
-    PROACTIVE_RESTORE_THRESHOLD = 6
+    # v905 — 6 was far too late. Measured 2026-08-06, both accounts, same pattern:
+    # the FIRST submit after a golden restore renders; every later submit on that
+    # same session gets 403 PUBLIC_ERROR_UNUSUAL_ACTIVITY on BOTH variants.
+    #   Account1 17:03:48 (1st after restore) -> rendered
+    #   Account1 17:07:30 (2nd)               -> both variants 403
+    #   Account1 17:09:38 (3rd)               -> both variants 403
+    #   Account2 17:10:50 (1st after restore) -> rendered
+    # So a session is good for exactly ONE clip. At 6 the session was already
+    # burnt from clip 2 onward and the job limped on dead submits. At 1 every
+    # clip is submitted on a freshly restored session, which is the state that
+    # actually renders. Costs a profile copy + browser relaunch per clip; that
+    # trade is worth it because the alternative is clips that never finish.
+    PROACTIVE_RESTORE_THRESHOLD = 1
     
     def __init__(self):
         self._lock = threading.RLock()  # RLock: reentrant — same thread can acquire multiple times.
