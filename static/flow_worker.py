@@ -1586,21 +1586,6 @@ def _scan_failure_reason(resp, url, buf_key=''):
                 _body = resp.text()
                 if _body:
                     print(f"[fail-reason-diag] v898 {ep} HTTP {st} body[:800]={_body[:800]}", flush=True)
-                    # v901 — port of the image worker's v894 finding to the video
-                    # worker. Flow answers a generate whose reCAPTCHA token did not
-                    # evaluate with 403 PERMISSION_DENIED + PUBLIC_ERROR_UNUSUAL_ACTIVITY
-                    # and message "reCAPTCHA evaluation failed" — byte-identical to a
-                    # genuinely flagged account, so v829 classified it as an account
-                    # block and golden-restored + relaunched forever without ever
-                    # generating (measured 2026-08-06, job 2f72065d). v894 proved the
-                    # cause is PAGE-level: Flow's reCAPTCHA script is missing/stale in
-                    # that page, and only RELOADING the page reloads it — a browser
-                    # relaunch cannot. Stamp it separately so FailCheck reloads and
-                    # retries instead of restoring.
-                    if 'recaptcha' in _body.lower():
-                        _record_generate_recaptcha_fail(buf_key)
-                        print(f"[fail-reason-diag] v901 {ep} 403 is a PAGE reCAPTCHA failure "
-                              f"(buf={buf_key}) — page reload + retry, NOT an account block", flush=True)
             except Exception as _be:
                 print(f"[fail-reason-diag] v898 body read failed: {_be}", flush=True)
         # v829 — the "unusual activity" card on the generate call is
@@ -4961,33 +4946,6 @@ def _record_generate_400(buf_key):
         return
     with _GENERATE_403_LOCK:
         _GENERATE_400_TS[buf_key] = time.time()
-
-
-# v901 — a generate 403 whose body says the reCAPTCHA evaluation failed. Same
-# HTTP shape and same PUBLIC_ERROR_UNUSUAL_ACTIVITY reason as a real account
-# block, but the cause is the PAGE (Flow's reCAPTCHA script missing/stale), so
-# the cure is a page reload, not a golden restore. See the image worker's v894.
-_GENERATE_RECAPTCHA_TS = {}
-GENERATE_RECAPTCHA_WINDOW_S = 90
-
-
-def _record_generate_recaptcha_fail(buf_key):
-    if not buf_key:
-        return
-    with _GENERATE_403_LOCK:
-        _GENERATE_RECAPTCHA_TS[buf_key] = time.time()
-
-
-def _recent_generate_recaptcha_fail(buf_key, consume=True):
-    if not buf_key:
-        return False
-    now = time.time()
-    with _GENERATE_403_LOCK:
-        ts = _GENERATE_RECAPTCHA_TS.get(buf_key, 0)
-        hit = (now - ts) <= GENERATE_RECAPTCHA_WINDOW_S
-        if hit and consume:
-            _GENERATE_RECAPTCHA_TS.pop(buf_key, None)
-        return hit
 
 def _recent_generate_400(buf_key, consume=True):
     if not buf_key:
@@ -10729,24 +10687,6 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         # never a golden restore.
         if all_failed and not _failed_uuids and job_id:
             _bk = _page_buffer_key(page)
-            # v901 — check the PAGE-level reCAPTCHA cause FIRST. It presents
-            # exactly like an account block (403 + PUBLIC_ERROR_UNUSUAL_ACTIVITY)
-            # but a golden restore cannot fix it: only reloading the page reloads
-            # Flow's reCAPTCHA script (image worker's v894 proved this). Reload
-            # here and report a plain retry so the clip is re-submitted on a page
-            # that actually has reCAPTCHA, instead of entering the
-            # restore -> relaunch -> re-submit -> 403 loop that never generates.
-            if _recent_generate_recaptcha_fail(_bk):
-                print(f"[FailCheck] ⚠ [v901] generate 403 was a PAGE reCAPTCHA failure "
-                      f"(buf={_bk}) — reloading the page to reload Flow's reCAPTCHA "
-                      f"script, then retrying (NOT a golden restore)", flush=True)
-                try:
-                    page.reload(wait_until="domcontentloaded", timeout=45000)
-                    time.sleep(5)
-                    print("[FailCheck] [v901] ✓ page reloaded — reCAPTCHA script re-fetched", flush=True)
-                except Exception as _re:
-                    print(f"[FailCheck] [v901] ⚠ page reload failed: {_re}", flush=True)
-                return True  # generic retry path
             if _recent_generate_403(_bk):
                 print(f"[FailCheck] ⚠ [v829/v831] account block — ALL {tiles} variants submit-blocked "
                       f"(generate HTTP 403, buf={_bk}, no rendered media) — routing to account recovery, "
