@@ -13,6 +13,19 @@ Processes Flow jobs from the Veo web app with:
 """
 
 import os, re
+# v899 — line-buffer stdout/stderr. Almost every launcher redirects this worker
+# to a log file (start_worker.bat > worker.log, nohup, service wrappers); a pipe
+# makes Python switch from line to BLOCK buffering, so every print WITHOUT
+# flush=True sits in a 4-8KB buffer. Real cost, 2026-08-06: a healthy worker
+# looked hung for 4+ minutes because "WORKER READY - Polling for jobs..." and the
+# whole poll loop are unflushed prints that never reached the log. Reconfigure
+# once here instead of auditing ~2000 print() calls for flush=True.
+try:
+    import sys as _sys
+    _sys.stdout.reconfigure(line_buffering=True)
+    _sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 # Build version — auto-computed from file content hash (stable across downloads)
 import hashlib as _hashlib
 def _compute_build():
