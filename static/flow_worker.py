@@ -8165,6 +8165,18 @@ def clip_done_in_platform(clip_id, require_approved=False):
             return False
         if require_approved:
             return _f.get('approval_status') == 'approved'
+        # v913 — TRUST has_video. A clip whose render is already uploaded sits in
+        # approval_status 'pending_review' while its clip.status may be anything
+        # (the worker itself sets 'flow_redo_queued' on a false failure). Checking
+        # only status therefore returned False for clips the platform ALREADY had
+        # a video for, so the auto-redo fired and regenerated finished work —
+        # operator 2026-08-07, screenshot: clips #2 and #3 showing a playable
+        # video AND a "REDO QUEUED" badge, while later clips sat "Waiting..."
+        # behind them. The endpoint computes has_video as
+        # (status == completed) OR versions exist, which is the authoritative
+        # "a render exists" signal; status alone is not.
+        if _f.get('has_video'):
+            return True
         return _f.get('status') in ('completed', 'approved')
     except Exception:
         return False
