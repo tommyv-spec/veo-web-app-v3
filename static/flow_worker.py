@@ -14659,6 +14659,26 @@ _upload_hard_400_counts = {}
 # concurrently.
 _frame_rejection_tls = threading.local()
 
+# v906 — did the last redo actually DO anything? A redo that bails out without
+# generating (clip already completed/approved, status unreadable, preemptively
+# policy-flagged) must NOT count as a rendered clip. The caller used to call
+# record_success() unconditionally after process_redo_clip, so a stale redo for
+# an already-completed clip incremented clips_since_restore -> at
+# PROACTIVE_RESTORE_THRESHOLD=1 that fired a golden restore instantly, the same
+# dead redo was served again, and the account spun restore->skip->restore
+# forever: 19 restores, 3 submits, 1 upload (measured 2026-08-06, Account2).
+_redo_noop_tls = threading.local()
+
+
+def _redo_mark_noop():
+    """Flag the current redo as having done no generation work."""
+    _redo_noop_tls.noop = True
+
+
+def redo_was_noop():
+    """True if the redo that just ran on this thread generated nothing."""
+    return bool(getattr(_redo_noop_tls, 'noop', False))
+
 
 class FramePolicyMonitor:
     """Monitor uploadImage network responses for policy rejections.
@@ -16532,6 +16552,7 @@ def process_redo_clip(page, clip, download_queue, cache, http_dl_queue=None, htt
     threads never regenerate the same clip concurrently. Signature mirrors the
     impl so every call site (dispatcher, self-resume, coordinator, single-
     account) is guarded with no call-site change."""
+    _redo_noop_tls.noop = False  # v906 — assume real work until a bail-out says otherwise
     clip_id = clip.get('id')
     if not _redo_in_flight.try_claim(clip_id):
         print(f"[v862] Redo clip {clip.get('clip_index', '?')} "
@@ -16620,9 +16641,11 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
             # reachable — one poll cycle late instead of wrong.
             print(f"[v863] Redo clip {clip.get('clip_index', '?')} — status unreadable after "
                   f"3 tries (API timeout); deferring instead of regenerating", flush=True)
+            _redo_mark_noop()  # v906 — deferred, no generation happened
             return True
         if _fresh and _fresh.get('status') in ('completed', 'approved'):
             print(f"[REDO] Clip {clip.get('clip_index', '?')} already completed in DB — skipping", flush=True)
+            _redo_mark_noop()  # v906 — nothing generated; must not drive a proactive restore
             return True
         # v701i — also skip clips that were preemptively marked
         # CONTENT_POLICY_VIOLATION by a sibling's policy report (v701e
@@ -22250,7 +22273,14 @@ class AccountWorker(threading.Thread):
                             process_redo_clip(self.page, clip, _redo_acc, self.cache,
                                               http_dl_queue=self._http_dl_queue,
                                               http_session=self._http_session_ref[0])
-                            account_health.record_success(self.name)
+                            # v906 — a redo that generated nothing (already-completed
+                            # clip, deferred status read) must not count toward the
+                            # proactive-restore clip counter, or a stale redo spins
+                            # restore -> skip -> restore forever without rendering.
+                            if not redo_was_noop():
+                                account_health.record_success(self.name)
+                            else:
+                                print(f"[{self.name}] [v906] redo did no work — not counting it toward the restore threshold", flush=True)
                             account_health.set_idle(self.name)
                             if account_health.is_hot(self.name) or account_health.needs_proactive_restore(self.name):
                                 raise Exception(f"Account {self.name} restore triggered after redo (hot={account_health.is_hot(self.name)}, proactive={account_health.needs_proactive_restore(self.name)})")
