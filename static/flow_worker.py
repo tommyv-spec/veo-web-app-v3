@@ -19609,6 +19609,38 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             print(f"[Flow] 🛑 Job {job_id[:8]}... aborted — stopping clip submission loop at clip {i+1}/{len(clips)}", flush=True)
             raise
 
+        # v908 — STOP SUBMITTING ONCE THE ACCOUNT IS BLOCKED.
+        # Flow answers a blocked generate with 403 PUBLIC_ERROR_UNUSUAL_ACTIVITY
+        # about 40s after the click, but this loop submits a clip every few
+        # seconds — so by the time the FIRST block is visible, the whole rest of
+        # the job has already been fired into the same burnt session. Operator
+        # screenshot 2026-08-06 (project 95cef954): four tiles in ONE project,
+        # every one "We noticed some unusual activity". Those submits were
+        # guaranteed to fail and they deepen the block.
+        # Peek (consume=False) so the existing FailCheck/delayed-failure
+        # classifiers still see the marker and run the golden restore; this
+        # guard only stops feeding more clips into a dead session.
+        _v908_blocked = ""
+        if i > 0:
+            try:
+                _bk908 = _page_buffer_key(page)
+                if _bk908 and _recent_generate_403(_bk908, consume=False):
+                    _v908_blocked = _bk908
+            except Exception:
+                _v908_blocked = ""  # a peek must never break the submit loop
+        if _v908_blocked:
+            print(f"[Flow] ⛔ [v908] account block detected (generate 403, buf={_v908_blocked}) — "
+                  f"STOPPING submission at clip {i+1}/{len(clips)} instead of burning the "
+                  f"remaining {len(clips) - i} clip(s) into a blocked session; "
+                  f"job stops for a golden restore", flush=True)
+            for _rc in clips[i:]:
+                if (_rc.get('status') or '').lower() not in ('completed', 'approved'):
+                    try:
+                        update_clip_status(_rc['id'], 'pending', error_message=None)
+                    except Exception:
+                        pass
+            raise Exception(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
+
         clip_index = clip['clip_index']
 
         # v765 — never auto-resubmit a clip the DB already marks 'failed'. A
