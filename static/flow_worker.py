@@ -17344,6 +17344,45 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                         # are caught at uploadImage (→ "different image"). Fail with a
                         # try-a-different-PROMPT message; keep the image.
                         # REDO runs in a fresh project — the retried tile sits at data-index 0.
+                        # v904 — UNUSUAL ACTIVITY IS NOT A CONTENT-POLICY BLOCK.
+                        # This branch assumed any persistent redo failure is a
+                        # prompt/policy block (v758.16) and, when the tile text
+                        # matched neither terminal-reason nor prominent-people,
+                        # DEFAULTED to route_generation_policy. An account block
+                        # ("We noticed some unusual activity" / generate HTTP 403
+                        # PUBLIC_ERROR_UNUSUAL_ACTIVITY) matches neither, so it fell
+                        # into the policy lane -> Prompt B -> requeue -> block again,
+                        # forever, and NEVER reached the golden restore that actually
+                        # clears it. Measured 2026-08-06 on clip 13967: repeated
+                        # "[promptB] policy block" while every generate answered
+                        # PUBLIC_ERROR_UNUSUAL_ACTIVITY. The MAIN path has this check
+                        # (v829/v831); the REDO path never got it.
+                        # Locale-proof: the HTTP 403 marker is checked first (the
+                        # card renders in the account locale), DOM text second.
+                        _ua_403 = _recent_generate_403(_page_buffer_key(page))
+                        _ua_dom = False
+                        if not _ua_403:
+                            try:
+                                _ua_dom = bool(page.evaluate("""() => {
+                                    const c = document.querySelector("div[data-index='0']");
+                                    const t = ((c && c.textContent) || '').toLowerCase();
+                                    return t.includes('unusual activity') || t.includes('actividad inusual')
+                                        || t.includes('help center') || t.includes('centro de ayuda');
+                                }"""))
+                            except Exception:
+                                _ua_dom = False
+                        if _ua_403 or _ua_dom:
+                            print(f"[REDO] 🔥 [v904] Clip {clip_index+1} blocked by UNUSUAL ACTIVITY "
+                                  f"({'generate 403' if _ua_403 else 'tile text'}) — NOT a content-policy "
+                                  f"block; requeuing + stopping the job so the account golden-restores",
+                                  flush=True)
+                            clip_log(clip_id, clip_index, "REDO", "unusual activity -> golden restore (v904)")
+                            update_clip_status(clip_id, 'flow_redo_queued',
+                                               error_message="Flow reported unusual activity — restoring the account session and retrying.")
+                            shutil.rmtree(temp_dir, ignore_errors=True)
+                            # Same raise string the main path uses; the account
+                            # thread catches it and runs the golden restore.
+                            raise Exception(f"Job {job_id} unusual activity — stopping job to trigger golden restore (v758.24)")
                         _term_reason = tile_text_terminal_reason(page, 0)
                         if _term_reason:
                             route_terminal_content_reject(clip_id, _term_reason)
