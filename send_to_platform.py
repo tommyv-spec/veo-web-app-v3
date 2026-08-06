@@ -442,14 +442,19 @@ class Client:
         except self._rq.exceptions.Timeout:
             raise PlatformError(EXIT_WORKER, f"STALL: request timed out: POST {path}")
 
-    def upload_image(self, path, display_name):
-        """Upload one local image as a ready platform reference node."""
+    def upload_image(self, path, display_name, origin="manual"):
+        """Upload one local image as a ready platform reference node.
+
+        v912.1: `origin` says whether a scraper found this file ('auto') or the
+        operator did ('manual'). It rides to the node so the Subjects & Uploads
+        gallery can badge a scraped image the operator has not vetted.
+        """
         try:
             with open(path, "rb") as fh:
                 resp = self.s.post(
                     self.base + "/api/images/uploads",
                     files={"file": (Path(path).name, fh)},
-                    data={"name": display_name},
+                    data={"name": display_name, "origin": origin},
                     timeout=120,
                 )
             return self._check(resp)
@@ -583,7 +588,12 @@ def upload_external_reference_selection(client, selected, report):
         bucket = []
         for ref in refs:
             display_name = f"external {image_key} {ref['role']} - {ref['file']}"
-            node = client.upload_image(ref["path"], display_name)
+            ref_origin = (
+                "manual"
+                if str(ref.get("origin", "")).strip().lower() == "manual"
+                else "auto"
+            )
+            node = client.upload_image(ref["path"], display_name, origin=ref_origin)
             node_id = node.get("id")
             if not node_id:
                 raise PlatformError(
@@ -597,7 +607,7 @@ def upload_external_reference_selection(client, selected, report):
                 # v912: a scraped candidate is 'auto' and stays unverified until
                 # someone looks at it; a file the operator dropped in the build's
                 # manual/ folder is theirs. The plan entry says which.
-                "origin": "manual" if str(ref.get("origin", "")).strip().lower() == "manual" else "auto",
+                "origin": ref_origin,
             })
             uploaded.append({"image": image_key, "file": ref["file"], "node_id": int(node_id)})
         bindings[image_key] = bucket

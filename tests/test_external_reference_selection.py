@@ -56,8 +56,10 @@ def test_upload_builds_per_image_api_binding():
         def __init__(self):
             self.calls = []
 
-        def upload_image(self, path, display_name):
-            self.calls.append((path, display_name))
+        def upload_image(self, path, display_name, origin="manual"):
+            # v912.1: the origin rides to the node so the uploads gallery can
+            # badge a scraped file the operator has not vetted.
+            self.calls.append((path, display_name, origin))
             return {"id": 701 + len(self.calls)}
 
     client = FakeClient()

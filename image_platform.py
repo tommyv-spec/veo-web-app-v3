@@ -174,6 +174,9 @@ def run_image_platform_migrations():
         # v912 — auto (scraped) vs manual (operator's own). NULL reads as manual.
         ("image_edges", "origin",
          "ALTER TABLE image_edges ADD COLUMN origin VARCHAR(16)"),
+        # v912.1 — same split on the upload node, for the Subjects & Uploads gallery.
+        ("image_nodes", "origin",
+         "ALTER TABLE image_nodes ADD COLUMN origin VARCHAR(16)"),
         # v644: per-line audio-padding suffixes on the assignment row.
         # Parallel to lines_json. NULL = no pads anywhere; populated =
         # JSON array of (str | null) per line. Veo prompt builder
@@ -403,6 +406,9 @@ def run_image_platform_migrations():
         # v912 — auto (scraped) vs manual (operator's own). NULL reads as manual.
         ("image_edges", "origin",
          "ALTER TABLE image_edges ADD COLUMN IF NOT EXISTS origin VARCHAR(16)"),
+        # v912.1 — same split on the upload node, for the Subjects & Uploads gallery.
+        ("image_nodes", "origin",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS origin VARCHAR(16)"),
         # v681e.10: per-scene speaker_mode denormalized to ImageSceneAssignment
         # so prepare_batch_for_video can detect silent scenes when reading
         # assignments back from DB. See SQLite migration above for rationale.
@@ -927,6 +933,13 @@ class ImageNode(Base):
     user_id = Column(String(36), nullable=True, index=True)
     name = Column(Text, nullable=True)  # v489: widened from String(200) — grows with user's name_prefix
     kind = Column(String(20), default="generated", nullable=False)  # generated | upload
+    # v912.1: for kind='upload' — where the file came from. 'auto' = a scraper
+    # pulled it off the web (tools/fetch_refs.py) and nobody has vouched for it;
+    # 'manual' = the operator uploaded or chose it. NULL reads as manual, so
+    # every upload made before this and every hand-upload stays trusted.
+    # Lives on the NODE as well as the edge because the Subjects & Uploads
+    # gallery shows uploads with no edge context at all.
+    origin = Column(String(16), nullable=True)
     prompt = Column(Text, nullable=True)
     aspect_ratio = Column(String(20), default="9:16")
     resolution = Column(String(10), default="2K")
@@ -1091,6 +1104,9 @@ class ImageNode(Base):
             "id": self.id,
             "name": self.name or (f"Node {self.id}" if self.kind == "generated" else f"Upload {self.id}"),
             "kind": self.kind,
+            # v912.1: 'auto' = scraped off the web, 'manual' = the operator's own.
+            # NULL reads as manual (see the column comment).
+            "origin": self.origin or "manual",
             "prompt": self.prompt,
             "aspect_ratio": self.aspect_ratio,
             "resolution": self.resolution,
@@ -3386,6 +3402,9 @@ def choose_variant(
 async def upload_reference(
     file: UploadFile = File(...),
     name: Optional[str] = Form(None),
+    # v912.1: callers that scraped the file say so. Anything uploaded through
+    # the UI omits this and stays 'manual' — the operator picked it.
+    origin: Optional[str] = Form(None),
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -3417,6 +3436,9 @@ async def upload_reference(
         prompt=None,
         status="ready",
         n_variants=1,
+        # v912.1: only an explicit 'auto' marks it scraped; everything else is
+        # the operator's own file.
+        origin="auto" if (origin or "").strip().lower() == "auto" else "manual",
     )
     db.add(node)
     db.flush()
