@@ -7380,7 +7380,8 @@ def _import_scene_table_impl(
                 log.info(
                     f"[v909/external-ref] Image {image_index}: upload node "
                     f"{external_ref.parent_node_id} role={external_ref.role!r} "
-                    f"slot={next_slot} origin={external_ref.origin}"
+                    f"slot={next_slot}"
+                    f" origin={external_ref.origin}"
                 )
                 next_slot += 1
             db.flush()
