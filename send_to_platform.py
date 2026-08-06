@@ -594,7 +594,7 @@ def upload_external_reference_selection(client, selected, report):
                 "parent_node_id": int(node_id),
                 "role": ref["role"],
                 "reference_instruction": ref["instruction"],
-                # v911: a scraped candidate is 'auto' and stays unverified until
+                # v912: a scraped candidate is 'auto' and stays unverified until
                 # someone looks at it; a file the operator dropped in the build's
                 # manual/ folder is theirs. The plan entry says which.
                 "origin": "manual" if str(ref.get("origin", "")).strip().lower() == "manual" else "auto",

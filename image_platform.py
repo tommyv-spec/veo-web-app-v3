@@ -171,7 +171,7 @@ def run_image_platform_migrations():
         # v905: open per-reference instruction. Presets remain fallbacks.
         ("image_edges", "reference_instruction",
          "ALTER TABLE image_edges ADD COLUMN reference_instruction TEXT"),
-        # v911 — auto (scraped) vs manual (operator's own). NULL reads as manual.
+        # v912 — auto (scraped) vs manual (operator's own). NULL reads as manual.
         ("image_edges", "origin",
          "ALTER TABLE image_edges ADD COLUMN origin VARCHAR(16)"),
         # v644: per-line audio-padding suffixes on the assignment row.
@@ -400,7 +400,7 @@ def run_image_platform_migrations():
         # v905: open per-reference instruction. Presets remain fallbacks.
         ("image_edges", "reference_instruction",
          "ALTER TABLE image_edges ADD COLUMN IF NOT EXISTS reference_instruction TEXT"),
-        # v911 — auto (scraped) vs manual (operator's own). NULL reads as manual.
+        # v912 — auto (scraped) vs manual (operator's own). NULL reads as manual.
         ("image_edges", "origin",
          "ALTER TABLE image_edges ADD COLUMN IF NOT EXISTS origin VARCHAR(16)"),
         # v681e.10: per-scene speaker_mode denormalized to ImageSceneAssignment
@@ -1215,10 +1215,10 @@ class ImageEdge(Base):
     # v905: exact operator instruction for how this image may affect the output.
     # NULL keeps the class-based persona/product/chain fallback behavior.
     reference_instruction = Column(Text, nullable=True)
-    # v911: where this reference CAME FROM — 'auto' (scraped by tools/fetch_refs.py,
+    # v912: where this reference CAME FROM — 'auto' (scraped by tools/fetch_refs.py,
     # third-party, unverified) or 'manual' (the operator chose or uploaded it).
     # Mirrors the v530 ImageVariant.source split so the UI can badge it the same
-    # way. NULL = 'manual': every pre-v911 edge and every slot added by hand in
+    # way. NULL = 'manual': every pre-v912 edge and every slot added by hand in
     # the UI is the operator's own choice, so the safe default is the trusted one.
     origin = Column(String(16), nullable=True)
 
@@ -1234,7 +1234,7 @@ class ImageEdge(Base):
             "slot_order": self.slot_order,
             "kind": self.kind,
             "reference_instruction": self.reference_instruction,
-            # v911: 'auto' = scraped third-party image, 'manual' = the operator's
+            # v912: 'auto' = scraped third-party image, 'manual' = the operator's
             # own. NULL reads as manual (see the column comment).
             "origin": self.origin or "manual",
         }
@@ -1515,7 +1515,7 @@ class ExternalReferenceRef(BaseModel):
     parent_node_id: int
     role: str = Field(..., min_length=1, max_length=200)
     reference_instruction: str = Field(..., min_length=1, max_length=2000)
-    # v911: 'auto' = the tool scraped it (third-party, unverified), 'manual' =
+    # v912: 'auto' = the tool scraped it (third-party, unverified), 'manual' =
     # the operator's own file. Defaults to 'auto' because this whole path exists
     # for fetched candidates; a manual pick must say so explicitly.
     origin: str = Field("auto", pattern="^(auto|manual)$")
@@ -7371,7 +7371,7 @@ def _import_scene_table_impl(
                     slot_order=next_slot,
                     kind="other",
                     reference_instruction=external_ref.reference_instruction,
-                    # v911: carry where it came from so the UI can badge a
+                    # v912: carry where it came from so the UI can badge a
                     # scraped image differently from the operator's own file.
                     origin=external_ref.origin,
                 ))
