@@ -4795,6 +4795,13 @@ POSTER_RETRY_MAX = 6       # retries on the same stable URL while it's still a p
 POSTER_RETRY_DELAY = 20    # seconds between poster retries (6×20 = 120s ≈ an 8s clip's render time)
 
 
+# v912 — a stale-session 401 must not destroy a finished render. Re-queue the
+# DOWNLOAD this many times (growing delay) before falling back to a real
+# regeneration, so a fresher cookie snapshot gets a chance to land.
+HTTP_DL_401_REQUEUE_MAX = 3
+HTTP_DL_401_REQUEUE_DELAY = 60  # seconds, multiplied by the attempt number
+
+
 def _video_media_url(url):
     """Drop `mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL` from a getMediaUrlRedirect URL.
     HAR-proven 2026-06-27: the SAME mediaId returns the /image/ POSTER (jpeg ~60KB)
@@ -22891,6 +22898,8 @@ class AccountWorker(threading.Thread):
                     attempt = item.get('generation_attempt', 1)
                     all_ok = True
                     any_ok = False
+                    _last_err_401 = False           # v912 — was the failure a stale-session 401?
+                    _dl_retry = int(item.get('_dl_401_retry', 0) or 0)
                     for vi, url in enumerate(urls):
                         if not url or url.startswith('blob:'):
                             continue
@@ -22946,6 +22955,8 @@ class AccountWorker(threading.Thread):
                             any_ok = True
                         except Exception as ve:
                             print(f"[{account_name}-HTTP-DL] ✗ Clip {ci+1} variant {attempt}.{vi+1} failed: {ve}", flush=True)
+                            if "401" in str(ve):
+                                _last_err_401 = True  # v912 — render is fine, our session is not
                             all_ok = False
                     if not any_ok:
                         # One tile may have rendered under a mediaId that LATE-BOUND
@@ -23014,6 +23025,29 @@ class AccountWorker(threading.Thread):
                     if not all_ok and not any_ok:
                         if clip_done_in_platform(clip_id):
                             print(f"[{account_name}-HTTP-DL] ↩ Clip {ci+1} already completed/approved in platform — NOT redoing (download just missed the late-bound tile)", flush=True)
+                        elif _last_err_401 and _dl_retry < HTTP_DL_401_REQUEUE_MAX:
+                            # v912 — A 401 IS A DOWNLOAD PROBLEM, NOT A RENDER PROBLEM.
+                            # The video finished rendering; only our cookie snapshot went stale.
+                            # Requeueing the CLIP for redo threw that finished render away and paid
+                            # to generate it again (measured 2026-08-06, clip 20: rendered, then 6
+                            # stale-token retries, then "all variants failed — queuing for redo").
+                            # The mediaId URL is stable, so re-queue the DOWNLOAD and let a later
+                            # attempt use a fresher session. This worker cannot call
+                            # browser.cookies() itself without breaking its "zero browser
+                            # interaction" greenlet guarantee, so it waits instead of regenerating.
+                            _delay = HTTP_DL_401_REQUEUE_DELAY * (_dl_retry + 1)
+                            print(f"[{account_name}-HTTP-DL] ↻ [v912] Clip {ci+1} failed on stale-session 401 — "
+                                  f"the render EXISTS; re-queuing the DOWNLOAD in {_delay}s "
+                                  f"[{_dl_retry+1}/{HTTP_DL_401_REQUEUE_MAX}] instead of regenerating", flush=True)
+                            _rq = dict(item)
+                            _rq['_dl_401_retry'] = _dl_retry + 1
+                            def _later(q=http_queue, it=_rq, d=_delay):
+                                time.sleep(d)
+                                try:
+                                    q.put(it)
+                                except Exception:
+                                    pass
+                            threading.Thread(target=_later, daemon=True, name=f"dl401-rq-{ci}").start()
                         else:
                             print(f"[{account_name}-HTTP-DL] ✗ Clip {ci+1} all variants failed — queuing for redo", flush=True)
                             update_clip_status(clip_id, 'flow_redo_queued')
