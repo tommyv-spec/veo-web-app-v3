@@ -5650,19 +5650,15 @@ class AccountHealthTracker:
     COOLDOWN_SECONDS = 300  # 5 minutes
     # Proactive restore: after this many successful clips (across jobs), restore golden
     # profile before the next job to keep reCAPTCHA scores clean.
-    # v905 — 6 was far too late. Measured 2026-08-06, both accounts, same pattern:
-    # the FIRST submit after a golden restore renders; every later submit on that
-    # same session gets 403 PUBLIC_ERROR_UNUSUAL_ACTIVITY on BOTH variants.
-    #   Account1 17:03:48 (1st after restore) -> rendered
-    #   Account1 17:07:30 (2nd)               -> both variants 403
-    #   Account1 17:09:38 (3rd)               -> both variants 403
-    #   Account2 17:10:50 (1st after restore) -> rendered
-    # So a session is good for exactly ONE clip. At 6 the session was already
-    # burnt from clip 2 onward and the job limped on dead submits. At 1 every
-    # clip is submitted on a freshly restored session, which is the state that
-    # actually renders. Costs a profile copy + browser relaunch per clip; that
-    # trade is worth it because the alternative is clips that never finish.
-    PROACTIVE_RESTORE_THRESHOLD = 1
+    # v905 REVERTED 2026-08-06. Setting this to 1 restored after EVERY clip, but
+    # the counter increments when a clip is SUBMITTED, not when its video has
+    # downloaded — so the restore tore the browser down mid-render and destroyed
+    # the very clip it was protecting ("Proactive restore threshold reached after
+    # clip 0" seconds after the submit, 0 uploads for the whole run). At 6, clips
+    # actually completed (13965/13966/13967/13942). The reactive golden restore on
+    # unusual activity (v758.24) is the correct recovery: it fires AFTER a failure,
+    # not on top of a live render.
+    PROACTIVE_RESTORE_THRESHOLD = 6
     
     def __init__(self):
         self._lock = threading.RLock()  # RLock: reentrant — same thread can acquire multiple times.
