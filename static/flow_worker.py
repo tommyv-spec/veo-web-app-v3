@@ -20758,6 +20758,38 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     # job. Fall through and keep submitting the remaining clips.
                     print(f"[Flow] ✓ policy-only failure(s) {[c+1 for c in _policy_fails]} handled — continuing with the rest of the job (no abort, no golden restore)", flush=True)
                 else:
+                    # v902 — close the LATE-403 race. Flow's generate 403 lands
+                    # AFTER the 40s submit drain and after FailCheck has already
+                    # passed the clip to 'generating' (measured 2026-08-06: the
+                    # 403 arrives ~45s post-click), so v901's reload branch inside
+                    # FailCheck never sees the marker — it is stamped after that
+                    # branch has returned. By the time we get HERE the response HAS
+                    # arrived, so this is the first point that can classify it.
+                    # A page-level reCAPTCHA failure is NOT a broken Flow and NOT a
+                    # flagged account: reload the page (the only thing that
+                    # re-fetches Flow's reCAPTCHA script) and requeue the clips,
+                    # instead of the golden restore that can never fix it.
+                    _rc_bk = _page_buffer_key(page)
+                    if _recent_generate_recaptcha_fail(_rc_bk):
+                        print(f"[Flow] 🔁 [v902] delayed failure on clip(s) "
+                              f"{[c+1 for c in _hard_fails]} was a PAGE reCAPTCHA 403 "
+                              f"(buf={_rc_bk}) — reloading the page + requeuing, "
+                              f"NOT a golden restore", flush=True)
+                        try:
+                            page.reload(wait_until="domcontentloaded", timeout=45000)
+                            time.sleep(5)
+                            print("[Flow] [v902] ✓ page reloaded — Flow reCAPTCHA script re-fetched", flush=True)
+                        except Exception as _v902e:
+                            print(f"[Flow] [v902] ⚠ page reload failed: {_v902e}", flush=True)
+                        for _dfc in _hard_fails:
+                            _df_clip = next((c for c in clips if c.get('clip_index') == _dfc), None)
+                            if _df_clip:
+                                update_clip_status(_df_clip['id'], 'flow_redo_queued',
+                                                   error_message="Flow reCAPTCHA check failed on this page — retrying on a reloaded page.")
+                                clip_log(_df_clip['id'], _dfc, "REDO", "page reCAPTCHA 403 (v902) — reloaded + requeued")
+                        _hard_fails = []
+                # Re-test: v902 may have absorbed every hard failure above.
+                if _hard_fails:
                     # Genuine hard failure(s) → submitting more clips to a broken
                     # Flow is pointless → abort + golden restore (existing v758.19).
                     print(f"[Flow] ⛔ DELAYED HARD FAILURE: clip(s) {[c+1 for c in _hard_fails]} failed after generating — aborting job for golden restore", flush=True)
