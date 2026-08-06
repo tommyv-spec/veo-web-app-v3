@@ -4920,15 +4920,23 @@ def _record_generate_403(buf_key):
     with _GENERATE_403_LOCK:
         _GENERATE_403_TS[buf_key] = time.time()
 
-def _recent_generate_403(buf_key, consume=True):
+def _recent_generate_403(buf_key, consume=True, window_s=None):
     """True if a generate-call 403 landed for this account within the window.
-    Consumes the marker by default so a stale 403 can't re-trigger on a later clip."""
+    Consumes the marker by default so a stale 403 can't re-trigger on a later clip.
+
+    v911.1 — window_s lets a LATE classifier use a wider window. The default 90s
+    fits FailCheck, which runs seconds after the click. The delayed hard-failure
+    classifier runs MINUTES later (50s wait + up to 20 scans x 15s), so at 90s
+    the marker was always stale by then and the block looked like a plain render
+    failure — which is exactly why the golden restore never ran.
+    """
     if not buf_key:
         return False
+    _win = GENERATE_403_WINDOW_S if window_s is None else window_s
     now = time.time()
     with _GENERATE_403_LOCK:
         ts = _GENERATE_403_TS.get(buf_key, 0)
-        hit = (now - ts) <= GENERATE_403_WINDOW_S
+        hit = (now - ts) <= _win
         if hit and consume:
             _GENERATE_403_TS.pop(buf_key, None)
         return hit
@@ -20897,7 +20905,10 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     # unchanged generic behaviour.
                     try:
                         _v911_bk = _page_buffer_key(page)
-                        _v911_blocked = bool(_v911_bk) and _recent_generate_403(_v911_bk, consume=False)
+                        # v911.1 — 10-min window: this classifier runs minutes after
+                        # the 403, so the default 90s marker had already expired.
+                        _v911_blocked = bool(_v911_bk) and _recent_generate_403(
+                            _v911_bk, consume=False, window_s=600)
                     except Exception:
                         _v911_blocked = False
                     if _v911_blocked:
