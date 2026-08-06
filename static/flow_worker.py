@@ -20881,6 +20881,30 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         cache['jobs'][job_id]['project_url'] = None
                         cache['jobs'][job_id]['status'] = 'pending'
                         save_cache(cache)
+                    # v911 — IF THE BLOCK CAUSED THIS, RESTORE THE GOLDEN FOLDER.
+                    # This branch prints "aborting job for golden restore", but the
+                    # exception it raised said only "Flow delayed failure — ...",
+                    # and the account thread restores ONLY when the message contains
+                    # "stopping job to trigger golden restore". So the restore never
+                    # ran: the account self-resumed into the SAME blocked session and
+                    # every resubmit 403'd again. Measured 2026-08-07 on job 4f8687cf:
+                    # 7 delayed hard failures, ~2 generate-403s each, and just ONE
+                    # golden restore in the whole stretch — the only clip that landed
+                    # was the one submitted immediately after a real restore.
+                    # A fresh generate-403 for this account means unusual activity, so
+                    # raise the typed block signal (message carries the restore
+                    # trigger) instead. No 403 marker => genuine render failure =>
+                    # unchanged generic behaviour.
+                    try:
+                        _v911_bk = _page_buffer_key(page)
+                        _v911_blocked = bool(_v911_bk) and _recent_generate_403(_v911_bk, consume=False)
+                    except Exception:
+                        _v911_blocked = False
+                    if _v911_blocked:
+                        print(f"[Flow] 🔥 [v911] delayed failure on clip(s) {[c+1 for c in _hard_fails]} carries a "
+                              f"generate-403 (unusual activity) — restoring the golden folder instead of "
+                              f"resubmitting into the same blocked session", flush=True)
+                        raise FlowAccountBlocked(job_id)
                     raise Exception(f"Flow delayed failure — clip(s) {[c+1 for c in _hard_fails]} failed after generating")
             # After wait: check if any clips have hit 70s since submission
             if http_dl_queue is not None:

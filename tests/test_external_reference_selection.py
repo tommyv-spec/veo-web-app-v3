@@ -75,6 +75,8 @@ def test_upload_builds_per_image_api_binding():
         "parent_node_id": 702,
         "role": "body pose",
         "reference_instruction": "Take only the arm and torso pose.",
+        # v911: a fetched candidate is unverified until someone looks at it.
+        "origin": "auto",
     }]}
     assert report["external_references"][0]["node_id"] == 702
 

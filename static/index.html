@@ -21415,12 +21415,22 @@ Ambient: same kitchen room tone, soft pour sound.
                     mismatchHtml = `<div style="font-size:10px;color:#c89417;margin-top:2px;">⚠ Add "${imgEscape(role)}" to the scene prompt, or write a clear use instruction below.</div>`;
                 }
             } catch (e) { /* prompt textarea not on screen yet */ }
+            // v911: show where this reference came from. 'auto' means a scraper
+            // pulled it off the web and nobody has vouched for it — including
+            // whether it is itself AI-generated, which would teach the model the
+            // exact smooth look we use real references to escape. Anything the
+            // operator picked or uploaded reads as theirs. NULL = manual.
+            const originIsAuto = (slot.origin || 'manual') === 'auto';
+            const originHtml = originIsAuto
+                ? `<span title="Scraped from the web by the fetch tool. Check it before you trust it — it may itself be AI-generated." style="display:inline-block;font-size:9px;font-weight:700;letter-spacing:.04em;padding:1px 5px;border-radius:3px;background:#5a3d0a;color:#f0c674;margin-bottom:4px;">AUTO · UNVERIFIED</span>`
+                : `<span title="Your own file, or a slot you set by hand." style="display:inline-block;font-size:9px;font-weight:700;letter-spacing:.04em;padding:1px 5px;border-radius:3px;background:#123d1e;color:#7fd18e;margin-bottom:4px;">YOURS</span>`;
             return `
                 <div class="parent-slot">
                     <div class="slot-thumb">
                         ${thumbUrl ? `<img src="${thumbUrl}" alt="">` : '<span class="ph">+</span>'}
                     </div>
                     <div class="slot-body">
+                        <div>${originHtml}</div>
                         <select class="img-select" onchange="imgUpdateParentSlot(${idx}, 'parent_node_id', this.value)" style="margin-bottom:4px;">
                             ${options}
                         </select>

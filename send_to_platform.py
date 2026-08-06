@@ -594,6 +594,10 @@ def upload_external_reference_selection(client, selected, report):
                 "parent_node_id": int(node_id),
                 "role": ref["role"],
                 "reference_instruction": ref["instruction"],
+                # v911: a scraped candidate is 'auto' and stays unverified until
+                # someone looks at it; a file the operator dropped in the build's
+                # manual/ folder is theirs. The plan entry says which.
+                "origin": "manual" if str(ref.get("origin", "")).strip().lower() == "manual" else "auto",
             })
             uploaded.append({"image": image_key, "file": ref["file"], "node_id": int(node_id)})
         bindings[image_key] = bucket

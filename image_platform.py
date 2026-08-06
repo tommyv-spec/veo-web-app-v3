@@ -171,6 +171,9 @@ def run_image_platform_migrations():
         # v905: open per-reference instruction. Presets remain fallbacks.
         ("image_edges", "reference_instruction",
          "ALTER TABLE image_edges ADD COLUMN reference_instruction TEXT"),
+        # v911 — auto (scraped) vs manual (operator's own). NULL reads as manual.
+        ("image_edges", "origin",
+         "ALTER TABLE image_edges ADD COLUMN origin VARCHAR(16)"),
         # v644: per-line audio-padding suffixes on the assignment row.
         # Parallel to lines_json. NULL = no pads anywhere; populated =
         # JSON array of (str | null) per line. Veo prompt builder
@@ -397,6 +400,9 @@ def run_image_platform_migrations():
         # v905: open per-reference instruction. Presets remain fallbacks.
         ("image_edges", "reference_instruction",
          "ALTER TABLE image_edges ADD COLUMN IF NOT EXISTS reference_instruction TEXT"),
+        # v911 — auto (scraped) vs manual (operator's own). NULL reads as manual.
+        ("image_edges", "origin",
+         "ALTER TABLE image_edges ADD COLUMN IF NOT EXISTS origin VARCHAR(16)"),
         # v681e.10: per-scene speaker_mode denormalized to ImageSceneAssignment
         # so prepare_batch_for_video can detect silent scenes when reading
         # assignments back from DB. See SQLite migration above for rationale.
@@ -1209,6 +1215,12 @@ class ImageEdge(Base):
     # v905: exact operator instruction for how this image may affect the output.
     # NULL keeps the class-based persona/product/chain fallback behavior.
     reference_instruction = Column(Text, nullable=True)
+    # v911: where this reference CAME FROM — 'auto' (scraped by tools/fetch_refs.py,
+    # third-party, unverified) or 'manual' (the operator chose or uploaded it).
+    # Mirrors the v530 ImageVariant.source split so the UI can badge it the same
+    # way. NULL = 'manual': every pre-v911 edge and every slot added by hand in
+    # the UI is the operator's own choice, so the safe default is the trusted one.
+    origin = Column(String(16), nullable=True)
 
     parent = relationship("ImageNode", back_populates="child_edges", foreign_keys=[parent_node_id])
     child = relationship("ImageNode", back_populates="parent_edges", foreign_keys=[child_node_id])
@@ -1222,6 +1234,9 @@ class ImageEdge(Base):
             "slot_order": self.slot_order,
             "kind": self.kind,
             "reference_instruction": self.reference_instruction,
+            # v911: 'auto' = scraped third-party image, 'manual' = the operator's
+            # own. NULL reads as manual (see the column comment).
+            "origin": self.origin or "manual",
         }
 
 
@@ -1500,6 +1515,10 @@ class ExternalReferenceRef(BaseModel):
     parent_node_id: int
     role: str = Field(..., min_length=1, max_length=200)
     reference_instruction: str = Field(..., min_length=1, max_length=2000)
+    # v911: 'auto' = the tool scraped it (third-party, unverified), 'manual' =
+    # the operator's own file. Defaults to 'auto' because this whole path exists
+    # for fetched candidates; a manual pick must say so explicitly.
+    origin: str = Field("auto", pattern="^(auto|manual)$")
 
 
 class CreateNodeRequest(BaseModel):
@@ -7352,13 +7371,16 @@ def _import_scene_table_impl(
                     slot_order=next_slot,
                     kind="other",
                     reference_instruction=external_ref.reference_instruction,
+                    # v911: carry where it came from so the UI can badge a
+                    # scraped image differently from the operator's own file.
+                    origin=external_ref.origin,
                 ))
                 existing_parent_ids.add(external_ref.parent_node_id)
                 occupied_slots.add(next_slot)
                 log.info(
                     f"[v909/external-ref] Image {image_index}: upload node "
                     f"{external_ref.parent_node_id} role={external_ref.role!r} "
-                    f"slot={next_slot}"
+                    f"slot={next_slot} origin={external_ref.origin}"
                 )
                 next_slot += 1
             db.flush()
