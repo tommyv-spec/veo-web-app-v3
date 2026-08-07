@@ -3495,7 +3495,14 @@ async def upload_reference(
     )
     db.add(variant)
     db.flush()
-    node.chosen_variant_id = variant.id
+    # v912.6 — a SCRAPED upload ('auto') arrives with its variant UNCHOSEN, so it
+    # rides the exact approval flow produced images use: the operator clicks the
+    # variant to approve (POST /nodes/{id}/choose, which also promotes children
+    # held in draft), or deletes the node to reject. The v859 parent gate keeps
+    # every dependent scene in draft until then. Manual uploads stay auto-chosen
+    # — the operator picked those themselves, nothing changes for them.
+    if node.origin != "auto":
+        node.chosen_variant_id = variant.id
     db.commit()
     db.refresh(node)
     return node.to_dict()

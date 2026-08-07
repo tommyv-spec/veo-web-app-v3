@@ -1053,11 +1053,24 @@ def main(argv=None):
                 args.external_reference_nodes = upload_external_reference_selection(
                     client, external_selection, report,
                 )
+                n_auto = sum(
+                    1 for refs in external_selection.values() for r in refs
+                    if str(r.get("origin", "auto")).strip().lower() != "manual"
+                )
                 print(
                     f"external references: uploaded "
                     f"{sum(len(v) for v in args.external_reference_nodes.values())}",
                     flush=True,
                 )
+                if n_auto:
+                    # v912.6 — scraped refs arrive UNAPPROVED; scenes using them
+                    # hold in draft until the operator approves in the UI.
+                    print(
+                        f"external references: {n_auto} scraped ref(s) await YOUR "
+                        f"approval in the UI (open the upload, click its image — "
+                        f"same as choosing a variant); scenes hold in draft until then",
+                        flush=True,
+                    )
             batch_id = do_import(client, md_text, args, report)
             print(f"import: batch {batch_id}", flush=True)
         report["batch_id"] = batch_id
