@@ -22766,6 +22766,45 @@ Ambient: same kitchen room tone, soft pour sound.
         // Copy a node's FULL prompt (not the 8000-char truncated preview the
         // <details> body renders). Reads from imgState.nodesById so nothing has
         // to be escaped into an inline handler.
+        async function imgShowFinalPrompt(nodeId, btn) {
+            // v912.2 — fetch the dispatch-time prompt (slot translation + numbered
+            // reference contract) composed by the same server code the worker path
+            // runs, and show it in a modal so the operator can audit it.
+            const backend = 'banana';
+            let data;
+            try {
+                const res = await fetch(`/api/images/nodes/${nodeId}/final-prompt?backend=${backend}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                data = await res.json();
+            } catch (e) {
+                showToast(`Could not load final prompt: ${e.message}`, '#ef4444');
+                return;
+            }
+            const old = document.getElementById('imgFinalPromptModal');
+            if (old) old.remove();
+            const refRows = (data.references || []).map(r =>
+                `<div style="margin-bottom:4px;"><b>Image ${r.slot}</b> — ${imgEscape(r.role || '(no role)')}` +
+                `${r.reference_instruction ? `<div style="color:var(--text-muted);margin-left:14px;">${imgEscape(r.reference_instruction)}</div>` : ''}</div>`
+            ).join('');
+            const wrap = document.createElement('div');
+            wrap.id = 'imgFinalPromptModal';
+            wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;';
+            wrap.innerHTML = `
+                <div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:10px;max-width:900px;width:100%;max-height:85vh;display:flex;flex-direction:column;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border-color);">
+                        <b style="font-size:13px;">Final prompt — node ${data.node_id} (${imgEscape(data.backend)})</b>
+                        <span>
+                            <button class="btn btn-secondary btn-sm" style="font-size:11px;" onclick="navigator.clipboard.writeText(document.getElementById('imgFinalPromptText').textContent).then(()=>showToast('Final prompt copied'))">📋 Copy</button>
+                            <button class="btn btn-secondary btn-sm" style="font-size:11px;margin-left:6px;" onclick="document.getElementById('imgFinalPromptModal').remove()">✕ Close</button>
+                        </span>
+                    </div>
+                    ${refRows ? `<div style="padding:10px 16px;border-bottom:1px solid var(--border-color);font-size:11px;">${refRows}</div>` : ''}
+                    <pre id="imgFinalPromptText" style="margin:0;padding:14px 16px;font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-y:auto;">${imgEscape(data.final_prompt || '')}</pre>
+                </div>`;
+            wrap.addEventListener('click', (e) => { if (e.target === wrap) wrap.remove(); });
+            document.body.appendChild(wrap);
+        }
+
         function imgCopyNodePrompt(nodeId, btn) {
             const n = imgState.nodesById[nodeId];
             const text = n && n.prompt;
@@ -22900,7 +22939,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 const promptSizeNote = ` <span style="color:var(--text-muted);font-size:10px;">(${rawPrompt.length.toLocaleString()} chars)</span>`;
                 promptHtml = `
                     <details style="margin-bottom:16px;">
-                        <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary);margin-bottom:6px;font-weight:500;user-select:none;">Prompt (click to expand)${promptSizeNote}<button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;margin-left:8px;vertical-align:middle;" title="Copy the full prompt" onclick="event.stopPropagation();event.preventDefault();imgCopyNodePrompt(${node.id},this)">📋 Copy</button></summary>
+                        <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary);margin-bottom:6px;font-weight:500;user-select:none;">Prompt (click to expand)${promptSizeNote}<button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;margin-left:8px;vertical-align:middle;" title="Copy the full prompt" onclick="event.stopPropagation();event.preventDefault();imgCopyNodePrompt(${node.id},this)">📋 Copy</button><button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;margin-left:6px;vertical-align:middle;" title="The exact prompt the worker receives: slot-translated body wrapped in the numbered reference contract (v912.2)" onclick="event.stopPropagation();event.preventDefault();imgShowFinalPrompt(${node.id},this)">🧾 Final prompt</button></summary>
                         <div style="background:var(--bg-input);border:1px solid var(--border-color);border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.5;white-space:pre-wrap;margin-top:6px;max-height:600px;overflow-y:auto;">${imgEscape(previewPrompt)}</div>
                     </details>`;
             }

@@ -2724,6 +2724,52 @@ def approval_summary(
     }
 
 
+@router.get("/nodes/{node_id}/final-prompt")
+def get_node_final_prompt(
+    node_id: int,
+    backend: str = Query("banana", regex="^(banana|chatgpt)$"),
+    db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v912.2 — the EXACT prompt the worker will receive, composed on demand.
+
+    The stored node prompt is only the scene brief; at dispatch it gets slot
+    translation plus the numbered IMAGE REFERENCE CONTRACT v2 wrapper (one
+    Role/Use line per attached reference). That final text was never stored or
+    shown anywhere, so the operator could not audit what the model actually
+    reads. This runs the SAME functions the dispatch path runs, so the preview
+    is the truth, not a reconstruction.
+    """
+    node = db.query(ImageNode).filter(
+        ImageNode.id == node_id,
+        ImageNode.user_id == current_user.id,
+    ).first()
+    if not node:
+        raise HTTPException(404, "Node not found")
+    input_images = _resolve_parent_image_inputs(db, node)
+    prompt_body = _resolve_flow_prompt_bindings(node)
+    compiled = build_image_prompt_contract(
+        prompt_body,
+        input_images,
+        node.aspect_ratio,
+        backend=backend,
+    )
+    return {
+        "node_id": node.id,
+        "backend": backend,
+        "final_prompt": compiled,
+        "references": [
+            {
+                "slot": i + 1,
+                "role": item.get("role"),
+                "reference_class": item.get("reference_class"),
+                "reference_instruction": item.get("reference_instruction"),
+            }
+            for i, item in enumerate(input_images)
+        ],
+    }
+
+
 @router.get("/nodes/{node_id}")
 def get_node(
     node_id: int,
