@@ -426,6 +426,16 @@ def _conversation_id(page):
         return None
 
 
+def _is_provisional_cid(cid):
+    """ChatGPT's URL briefly carries a client-side placeholder id ('WEB:<uuid>')
+    before the server swaps in the real conversation id. The placeholder is NOT
+    navigable: /c/WEB:<uuid> lands on a brand-new empty chat. Node 4655
+    (2026-08-07) pinned one — every stale-tab reload then opened a fresh chat and
+    the detector stared at an empty conversation while the finished image sat in
+    the real one. A placeholder must never be pinned or navigated to."""
+    return bool(cid) and str(cid).upper().startswith("WEB:")
+
+
 def _conv_url(cid):
     """Full chat URL for a conversation id. Logged on every node so the operator
     can open the EXACT chat the worker is watching and see it for themselves."""
@@ -435,7 +445,9 @@ def _conv_url(cid):
 def _goto_conv(page, cid, timeout_ms=45000):
     """Navigate to the PINNED conversation — used instead of page.reload() so the
     tab can never come back on a different (or brand-new) chat."""
-    if not cid:
+    if not cid or _is_provisional_cid(cid):
+        # A placeholder URL opens a NEW chat instead of the pinned one — refuse,
+        # so the caller falls back to a plain reload of the current tab.
         return False
     try:
         page.goto(_conv_url(cid), wait_until="domcontentloaded", timeout=timeout_ms)
@@ -593,9 +605,16 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
         # started server-side) and LOG it, so the operator can open the exact chat
         # the worker is watching instead of hunting for it.
         cid_now = _conversation_id(page)
-        if pinned_cid is None and cid_now:
-            pinned_cid = cid_now
-            log(f"chat: {_conv_url(pinned_cid)}")
+        if cid_now and not _is_provisional_cid(cid_now):
+            if pinned_cid is None or _is_provisional_cid(pinned_cid):
+                # Pin only the REAL server-assigned id. The URL's early
+                # 'WEB:<uuid>' placeholder is not navigable (node 4655) — wait
+                # for the swap, then pin (or re-pin over a placeholder).
+                pinned_cid = cid_now
+                log(f"chat: {_conv_url(pinned_cid)}")
+        elif pinned_cid is None and cid_now:
+            pinned_cid = cid_now   # placeholder: keeps the log honest, replaced
+            log(f"chat: {_conv_url(pinned_cid)} (provisional id — waiting for the real one)")
         # Stale-tab recovery: the worker's live stream can hang — the turn finishes
         # server-side (a fresh browser shows the image/error) but this tab stays
         # "Thinking" / stream_status stuck non-COMPLETE. Reload the conversation
