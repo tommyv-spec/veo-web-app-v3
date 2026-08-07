@@ -9422,13 +9422,23 @@ def click_generate_button(page, context_name="", max_retries=3):
                     else:
                         raise Exception("Generate button is disabled after 60s - frames may not have loaded")
             
-            # Pre-generate look-around (matching test_human_like.py [9/10])
-            human_mouse_move(page)
-            human_delay(1, 2)
-            scroll_randomly(page)
-            human_delay(0.5, 1)
-
-            # v700h — snapshot the data-index=0 tile_ids RIGHT BEFORE the
+            # v918 — the tile snapshot moved ABOVE the human look-around.
+            # Measured 2026-08-07 (job 4f8687cf): on ONE golden, built the
+            # operator's way (0 labs.google cookies, site data purged), two
+            # browsers on the SAME account submitted a minute apart. The redo
+            # path SUCCEEDED (abra_i2v_8s -> SCHEDULED -> SUCCESSFUL, 2 variants
+            # uploaded); this main path 403'd both variants with
+            # "reCAPTCHA evaluation failed" / PUBLIC_ERROR_UNUSUAL_ACTIVITY.
+            # The golden was therefore NOT the variable. What differed was the
+            # last few seconds before the click: the redo path (16452-16476)
+            # runs human_pre_generate_wait + a human_delay and injects NO
+            # script, while this path fired page.evaluate immediately before
+            # the click and then clicked with no settle. Since the reCAPTCHA
+            # token is minted by the page at click time, the last thing to
+            # touch the page should be a human action, not injected JS.
+            # This block is unchanged in content — only its position moved.
+            #
+            # v700h — snapshot the data-index=0 tile_ids before the
             # Generate-click. After the click, ANY tile_id that appears
             # which wasn't in the snapshot = the tile this click created.
             # Used by ghost detection as a third confirmation signal
@@ -9438,6 +9448,8 @@ def click_generate_button(page, context_name="", max_retries=3):
             # into the tile, and it doesn't depend on the listener
             # capturing the submit response in time. Bulletproof DOM
             # signal at the cost of one quick page.evaluate.
+            # Still safe this early: tiles only appear on submit, and this
+            # thread is the only submitter for this account.
             try:
                 _v700h_pre_ids = page.evaluate("""() => {
                     const c = document.querySelector("div[data-index='0']");
@@ -9454,6 +9466,20 @@ def click_generate_button(page, context_name="", max_retries=3):
             except Exception:
                 page._v700h_pre_tile_ids = set()
                 page._v700h_snapshot_at = time.time()
+
+            # v918 — pre-generate beats, now byte-for-byte the redo path's
+            # sequence (16452-16476). human_pre_generate_wait was previously
+            # called ONLY by the redo path and by the rebuild-retry fallback
+            # (9568) — never by a normal submit, despite the redo comment
+            # claiming it "match[es] main flow exactly". It does not, and the
+            # redo path is the one that lands.
+            human_pre_generate_wait(page)
+
+            # Pre-generate look-around (matching test_human_like.py [9/10])
+            human_mouse_move(page)
+            human_delay(1, 2)
+            scroll_randomly(page)
+            human_delay(0.5, 1)
 
             # v700j — stamp the click time on the page so _bind_pending_submits
             # can REJECT any submit-response that was captured BEFORE this
@@ -9476,6 +9502,15 @@ def click_generate_button(page, context_name="", max_retries=3):
                     )
             except Exception:
                 page._v700j_last_click_at = time.time()
+
+            # v918 — settle before the click, exactly as the redo path does at
+            # 16473. Nothing may touch the page between the last human beat and
+            # the click; the v700j stamp + drain above are pure Python.
+            human_delay(0.5, 1.5)
+            # TEMP DIAG (v918) — proves the redo-parity sequence ran on a real
+            # submit. Remove once operator-side evidence shows whether the main
+            # path's 403 rate moved.
+            print(f"{prefix}[v918] pre-generate beats done (redo parity) — clicking Generate", flush=True)
 
             # Click Generate — use human_click for natural mouse movement + real click events
             # This is THE click that triggers the API call with reCAPTCHA token
