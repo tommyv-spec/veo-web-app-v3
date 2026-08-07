@@ -2411,17 +2411,22 @@ def _stash_profile_on_page(page, profile_dir, account_label=None):
 
 
 def _get_worker_chrome_pids(profile_dir):
-    """Return the set of Chrome process PIDs whose commandline contains
+    """Return the set of browser process PIDs whose commandline contains
     the given profile directory. Used by _find_chrome_hwnd to identify
-    the worker's Chrome window unambiguously by PID rather than by
+    the worker's browser window unambiguously by PID rather than by
     fragile title matching.
 
     v486: the previous title-based matching in _find_chrome_hwnd would
     hit the user's personal Chrome if it happened to have a tab titled
     "Flow" (any Google Flow page, or any site with Flow in its title).
-    Matching by owning process ID is 100% reliable — worker Chrome
+    Matching by owning process ID is 100% reliable — worker browser
     processes have the profile path in their commandline, user's
     personal Chrome processes don't.
+
+    Firefox fix: match the process name(s) for the CURRENT BROWSER_MODE
+    (via browser_driver.browser_process_names), not a hardcoded
+    "chrome.exe" — a Firefox worker's processes never matched before,
+    so this lookup silently returned nothing on Firefox runs.
     """
     import platform as _platform
     import subprocess as _sub
@@ -2432,11 +2437,14 @@ def _get_worker_chrome_pids(profile_dir):
     except Exception:
         return set()
     pids = set()
+    proc_names = _bd.browser_process_names(BROWSER_MODE)
+    name_clause_wmic = " or ".join(f'name="{n}"' for n in proc_names)
+    name_clause_ps = " or ".join(f"name='{n}'" for n in proc_names)
     # Method 1: WMIC (Windows 10 and earlier)
     try:
         r = _sub.run(
             ['wmic', 'process', 'where',
-             f'name="chrome.exe" and commandline like "%{abs_profile}%"',
+             f'({name_clause_wmic}) and commandline like "%{abs_profile}%"',
              'get', 'ProcessId', '/format:value'],
             capture_output=True, text=True, timeout=3
         )
@@ -2452,7 +2460,7 @@ def _get_worker_chrome_pids(profile_dir):
     try:
         escaped = abs_profile.replace("'", "''")
         ps_cmd = (
-            f"Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\""
+            f"Get-CimInstance Win32_Process -Filter \"({name_clause_ps})\""
             f" | Where-Object {{ $_.CommandLine -like '*{escaped}*' }}"
             f" | Select-Object -ExpandProperty ProcessId"
         )
@@ -4047,7 +4055,7 @@ def _parse_user_data_dir_from_cmdline(cmdline):
 
 
 def kill_chrome_using_profile(profile_dir, label=""):
-    """Force-kill any Chrome process holding a lock on the given profile directory.
+    """Force-kill any browser process holding a lock on the given profile directory.
     Also removes SingletonLock/Socket/Cookie files so the next launch starts clean.
     Works on both Linux (pgrep/kill) and Windows (WMIC/taskkill).
 
@@ -4058,25 +4066,38 @@ def kill_chrome_using_profile(profile_dir, label=""):
     matched BOTH accounts' Chrome processes (because "chrome-session" is
     a substring of "chrome-session-2"). Result: killing one account
     accidentally killed the other's browser window mid-session.
+
+    Firefox fix: match the process name(s) for the CURRENT BROWSER_MODE
+    (via browser_driver.browser_process_names) instead of a hardcoded
+    "chrome.exe". Before this fix, a Firefox worker's golden restore
+    called this function, matched nothing, and the subsequent
+    shutil.rmtree(..., ignore_errors=True) silently half-failed against
+    a still-live Firefox process, leaving the profile corrupt with no
+    error anywhere. Observed live 2026-08-07: "[STARTUP] No worker Chrome
+    process found for profile ...flow_session_firefox".
     """
     import subprocess as _sub
     import platform as _platform
     prefix = f"[{label}] " if label else ""
     abs_profile = os.path.abspath(profile_dir)
     killed = []
+    proc_names = _bd.browser_process_names(BROWSER_MODE)
 
     try:
         if _platform.system() == "Windows":
-            # v684 — fetch (PID, CommandLine) for every chrome.exe and filter
-            # in Python with EXACT match on the parsed --user-data-dir value.
-            # No substring LIKE in WMIC/PowerShell — too many false positives
-            # when account profile paths share a common prefix.
+            # v684 — fetch (PID, CommandLine) for every matching browser
+            # process and filter in Python with EXACT match on the parsed
+            # --user-data-dir value. No substring LIKE in WMIC/PowerShell —
+            # too many false positives when account profile paths share a
+            # common prefix.
             pid_to_cmdline = {}
+            name_clause_wmic = " or ".join(f'name="{n}"' for n in proc_names)
+            name_clause_ps = " or ".join(f"name='{n}'" for n in proc_names)
 
             # Method 1: WMIC (Windows 10 and earlier)
             try:
                 r = _sub.run(
-                    ['wmic', 'process', 'where', 'name="chrome.exe"',
+                    ['wmic', 'process', 'where', f'({name_clause_wmic})',
                      'get', 'ProcessId,CommandLine', '/format:list'],
                     capture_output=True, text=True, timeout=8
                 )
@@ -4105,7 +4126,7 @@ def kill_chrome_using_profile(profile_dir, label=""):
                 # WMIC not available (Windows 11+) — try PowerShell
                 try:
                     ps_cmd = (
-                        "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\""
+                        f"Get-CimInstance Win32_Process -Filter \"({name_clause_ps})\""
                         " | Select-Object ProcessId,CommandLine"
                         " | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
                     )
@@ -4139,7 +4160,7 @@ def kill_chrome_using_profile(profile_dir, label=""):
 
             for pid in pids_found:
                 _sub.run(['taskkill', '/F', '/PID', pid], capture_output=True, timeout=5)
-                print(f"{prefix}Killed worker Chrome pid {pid} (profile: {os.path.basename(abs_profile)})", flush=True)
+                print(f"{prefix}Killed worker browser pid {pid} (profile: {os.path.basename(abs_profile)})", flush=True)
                 killed.append(pid)
 
             # v701g — give Windows a moment to release the killed processes'
@@ -4154,15 +4175,16 @@ def kill_chrome_using_profile(profile_dir, label=""):
 
             # NOTE: We intentionally do NOT fall back to 'taskkill /IM chrome.exe'
             # OR to a basename search. Exact full-path match is the only safe way
-            # to distinguish this account's Chrome from (a) the user's personal
-            # Chrome, (b) OTHER accounts' Chrome (this video worker's accounts
-            # share parent paths), and (c) OTHER workers' Chrome (image worker).
+            # to distinguish this account's browser from (a) the user's personal
+            # Chrome, (b) OTHER accounts' browser (this video worker's accounts
+            # share parent paths), and (c) OTHER workers' browser (image worker).
             if not killed:
-                print(f"{prefix}No worker Chrome process found for profile {abs_profile}", flush=True)
+                print(f"{prefix}No worker browser process found for profile {abs_profile}", flush=True)
         else:
             # Linux/Mac: parse commandlines from /proc, do exact --user-data-dir
             # match. v684 — same fix as Windows side above. pre-v684 used
             # `pgrep -f abs_profile` which is substring match → cross-account kills.
+            proc_names_linux = [n[:-4] if n.lower().endswith('.exe') else n for n in proc_names]
             try:
                 # Iterate /proc/<pid>/cmdline files
                 for pid_dir in os.listdir('/proc'):
@@ -4177,7 +4199,7 @@ def kill_chrome_using_profile(profile_dir, label=""):
                     # /proc cmdline is NUL-separated; reassemble with spaces
                     # for the regex parser.
                     cmdline = raw.replace(b'\x00', b' ').decode('utf-8', errors='replace').strip()
-                    if 'chrome' not in cmdline.lower():
+                    if not any(pn.lower() in cmdline.lower() for pn in proc_names_linux):
                         continue
                     udd = _parse_user_data_dir_from_cmdline(cmdline)
                     if udd is None:
@@ -4185,7 +4207,7 @@ def kill_chrome_using_profile(profile_dir, label=""):
                     if udd.rstrip('/').lower() == abs_profile.rstrip('/').lower():
                         try:
                             _sub.run(['kill', '-9', pid_dir], capture_output=True, timeout=5)
-                            print(f"{prefix}Killed stale Chrome pid {pid_dir} (profile: {os.path.basename(abs_profile)})", flush=True)
+                            print(f"{prefix}Killed stale browser pid {pid_dir} (profile: {os.path.basename(abs_profile)})", flush=True)
                             killed.append(pid_dir)
                         except Exception:
                             pass
@@ -4193,9 +4215,9 @@ def kill_chrome_using_profile(profile_dir, label=""):
                 pass
 
         if not killed:
-            print(f"{prefix}No stale Chrome found for {os.path.basename(abs_profile)}", flush=True)
+            print(f"{prefix}No stale browser found for {os.path.basename(abs_profile)}", flush=True)
     except Exception as e:
-        print(f"{prefix}Could not kill Chrome: {e}", flush=True)
+        print(f"{prefix}Could not kill browser: {e}", flush=True)
 
     # Remove lock files so new instance doesn't attach to old session
     for lock_file in ['SingletonLock', 'SingletonSocket', 'SingletonCookie']:
