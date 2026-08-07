@@ -285,10 +285,48 @@ def _all_img_srcs(page):
         return []
 
 
+_MAX_REF_DIM = 2000  # px
+
+
+def _normalise_ref_for_upload(path):
+    """Downscale an oversized reference into a temp JPEG before attaching.
+
+    Node 4654 (2026-08-07): Scene 2 carried a 3996x6000 PNG reference and
+    ChatGPT answered 'Something went wrong' twice, then an empty reply — while
+    the sibling scene with a 1080px reference rendered fine. A grounding
+    reference loses nothing at 2000px, and a smaller attachment cannot wedge
+    the image tool the same way.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return path
+    try:
+        with Image.open(path) as im:
+            w, h = im.size
+            if max(w, h) <= _MAX_REF_DIM:
+                return path
+            scale = _MAX_REF_DIM / float(max(w, h))
+            resized = im.convert("RGB").resize(
+                (max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS
+            )
+        import tempfile
+        fd, out = tempfile.mkstemp(suffix=".jpg", prefix="ref_ds_")
+        os.close(fd)
+        resized.save(out, "JPEG", quality=92)
+        log(f"reference {os.path.basename(path)}: {w}x{h} -> "
+            f"{resized.size[0]}x{resized.size[1]} downscaled for upload")
+        return out
+    except Exception as e:
+        log(f"ref downscale failed for {path}: {e} — attaching the original")
+        return path
+
+
 def _attach_reference_files(page, ref_paths, timeout_s=60):
     """Attach references in order and wait until ChatGPT shows every preview."""
     if not ref_paths:
         return
+    ref_paths = [_normalise_ref_for_upload(p) for p in ref_paths]
     before = set(_all_img_srcs(page))
     file_input = page.locator(SEL["file_input"]).first
     file_input.set_input_files(ref_paths)
