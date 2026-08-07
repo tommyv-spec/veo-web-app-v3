@@ -1363,6 +1363,21 @@ def _install_flow_api_capture(page):
         "submitBatchLog",
     )
 
+    def _acct_tag():
+        """v920.1 — which browser this request came from.
+
+        The capture file is GLOBAL: every account's page writes into the same
+        jsonl. Without this tag a reCAPTCHA reload/clr cannot be attributed to a
+        submit, because two browsers interleave in one file. The v919 reading
+        that the main path issues an extra `clr` before its generates was built
+        on exactly that missing attribution and is NOT yet trustworthy.
+        """
+        try:
+            d = getattr(page, '_user_data_dir', '') or SESSION_FOLDER or ''
+            return os.path.basename(d.rstrip('\\/')) or '?'
+        except Exception:
+            return '?'
+
     def _on_request(req):
         try:
             url = getattr(req, 'url', '') or ''
@@ -1389,7 +1404,7 @@ def _install_flow_api_capture(page):
                 try:
                     _leaf = url.split('?', 1)[0].rsplit('/', 1)[-1] or 'recaptcha'
                     print(f"[flow-api-capture] recaptcha:{_leaf} "
-                          f"method={getattr(req, 'method', '')}", flush=True)
+                          f"method={getattr(req, 'method', '')} acct={_acct_tag()}", flush=True)
                 except Exception:
                     pass
                 try:
@@ -1399,6 +1414,7 @@ def _install_flow_api_capture(page):
                             'method': getattr(req, 'method', ''),
                             'url': url,
                             'kind': 'recaptcha',
+                            'acct': _acct_tag(),
                         }) + "\n")
                 except Exception:
                     pass
@@ -1447,6 +1463,7 @@ def _install_flow_api_capture(page):
                         'videoModelKey': model_key,
                         'shape': ingredient_shape,
                         'body_raw': body,
+                        'acct': _acct_tag(),  # v920.1 — see _acct_tag docstring
                     }) + "\n")
             except Exception:
                 pass
@@ -4821,34 +4838,29 @@ MAX_POLL_TIME = 120     # Max seconds to poll before giving up
 POLL_INTERVAL = 5       # Seconds between status polls (used in download phase)
 MAX_GENERATION_RETRIES = 2   # Max retries per clip
 CLIP_READY_WAIT = 50    # Seconds to wait after submission before clip is ready for download
-# v920 — was 1. The failure check polls the DOM with page.evaluate for up to 8s,
-# so starting it 1s after the Generate click put injected script straight through
-# the reCAPTCHA mint window, which is where the 403 is decided.
+# v920.1 — REVERTED to 1. v920 raised this to 8 on the theory that the failure
+# check's page.evaluate poll was running through the reCAPTCHA mint window and
+# spoiling the token. The v920 timestamps disproved it on the first run:
 #
-# Measured 2026-08-07, one worker run, both paths on the same session and the
-# same account. Every generate carries clientContext.recaptchaContext.token;
-# a real Enterprise token ("0cA...") runs, anything else ("HF...") comes back
-# 403 "reCAPTCHA evaluation failed" / PUBLIC_ERROR_UNUSUAL_ACTIVITY:
+#   click Generate         @04:36:04.350
+#   FailCheck poll starts  @04:36:56.417     <- 52s later, not 1s
+#   mints                   reload clr reload clr
+#   generates               HF + HF -> 403 both variants
 #
-#   04:00:26  HF+0cA   reload clr reload        REDO  -> SCHEDULED, uploaded
-#   04:04:18  HF+HF    reload clr reload clr    MAIN  -> 403 both variants
-#   04:06:58  HF+0cA   reload                   REDO  -> SCHEDULED, uploaded
-#   04:11:22  HF+HF    reload clr reload clr    MAIN  -> 403 both variants
+# The poll never went anywhere near the mint. With the delay at 8 the gap was
+# 52s, so at the old value of 1 it was still ~45s: FailCheck was ALWAYS clear of
+# the window, and raising the delay changed nothing except making a genuinely
+# failed submit take 7s longer to notice. The click+1s figure was inferred from
+# this constant rather than measured, which is precisely the assumption v920's
+# diagnostics were added to test.
 #
-# 4/4, split exactly by path. The redo path leaves the page alone for
-# CLIP_READY_WAIT (50s) after clicking Generate and its token survives; the main
-# path was the only one polling, and its tokens were always cleared first.
-#
-# The generate POSTs land ~4.5s after the click, so 8s keeps the whole poll
-# window clear of the mint. Cost is that a genuinely failed submit is noticed
-# ~7s later, which is cheap next to a 403 that burns a golden restore.
-#
-# NOT yet proven to be the cause: the click log lines carry no timestamp, so the
-# overlap is inferred from the poll's own schedule rather than measured. v920
-# also stamps the click and the check start, so the next run settles it. If the
-# main path still shows "reload clr reload clr" with the poll provably outside
-# the window, this is the wrong lever and should be reverted.
-FAILURE_CHECK_DELAY = 8
+# What this rules OUT, so it is not re-tried: the immediate failure check is not
+# what clears the widget. Still true and still unexplained - the main path shows
+# "reload clr reload clr" (clr BEFORE the generates, tokens HF, 403) while the
+# redo path shows "reload clr reload" (clr AFTER, one real 0cA token, clip
+# lands). 4/4 in the v919 run, split exactly by path. Whatever issues that early
+# clr, it is something else in the main path.
+FAILURE_CHECK_DELAY = 1 # Brief pause before failure check (check itself polls for up to 8s)
 GENERATION_WAIT = 90    # Seconds to wait for generation before download
 # v794c — the bound-mediaId getMediaUrlRedirect URL is STABLE but serves a POSTER
 # (image, ~70KB) while the clip is still rendering, then the real mp4 once done.
