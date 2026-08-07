@@ -4564,6 +4564,17 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
             pass
         if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
+        # This copies a real CHROME profile into the slot's golden. In Firefox
+        # mode that golden is firefox-golden, and the restore would drop Chrome
+        # files into a Firefox profile directory — unreadable by Firefox, so the
+        # login breaks on every restore. There is no Firefox equivalent of the
+        # laptop pull: a Firefox worker signs in once and its own golden is built
+        # from that session. Observed 2026-08-07 building 'Profile 61
+        # (chrome-beta)' into a firefox slot.
+        if _bd.is_firefox_mode(BROWSER_MODE):
+            print(f"[{label}] laptop pull skipped - Chrome profile cannot seed a Firefox golden",
+                  flush=True)
+            return
         # Fresh-load the synced companion (updater writes it after import).
         import sys as _sys
         _sys.modules.pop("worker_profile_pull", None)
