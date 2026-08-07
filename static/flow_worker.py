@@ -4445,33 +4445,48 @@ except Exception:
     def load_laptop_email(*_a, **_k):
         return ""
 
+# Profile directories are per-ENGINE. A Chrome profile is unreadable by Firefox
+# and vice-versa, and these names also drive get_golden_folder() (which maps
+# "<x>-session" -> "<x>-golden"). Sharing one name across engines is actively
+# destructive: with BROWSER_MODE=firefox and the existing chrome-golden on disk,
+# the startup restore rmtree's the session and copies the CHROME golden into it,
+# so Firefox silently loses its login on every single launch.
+# Chrome keeps its historic "chrome-*" names, so existing installs are untouched.
+_PROFILE_PREFIX = "firefox" if _bd.is_firefox_mode(_BROWSER_MODE_EARLY) else "chrome"
+
+
+def _profile_dir(suffix=""):
+    """<prefix>-session / <prefix>-session-2 / <prefix>-download ... per engine."""
+    return os.path.join(_BASE, f"{_PROFILE_PREFIX}-{suffix}")
+
+
 ACCOUNTS = [
     {
         "name": "Account1",
-        "session_folder": os.path.join(_BASE, "chrome-session"),
-        "download_folder": os.environ.get("ACCOUNT1_DOWNLOAD", os.path.join(_BASE, "chrome-download")),
+        "session_folder": _profile_dir("session"),
+        "download_folder": os.environ.get("ACCOUNT1_DOWNLOAD", _profile_dir("download")),
         "proxy": _get_proxy(1),
         "enabled": os.environ.get("ACCOUNT1_ENABLED", "true").lower() == "true",
         "laptop_email": load_laptop_email(os.path.join(_BASE, "worker_settings.json")),
     },
     {
         "name": "Account2",
-        "session_folder": os.path.join(_BASE, "chrome-session-2"),
-        "download_folder": os.environ.get("ACCOUNT2_DOWNLOAD", os.path.join(_BASE, "chrome-download-2")),
+        "session_folder": _profile_dir("session-2"),
+        "download_folder": os.environ.get("ACCOUNT2_DOWNLOAD", _profile_dir("download-2")),
         "proxy": _get_proxy(2),
         "enabled": os.environ.get("ACCOUNT2_ENABLED", "true").lower() == "true",
     },
     {
         "name": "Account3",
-        "session_folder": os.path.join(_BASE, "chrome-session-3"),
-        "download_folder": os.environ.get("ACCOUNT3_DOWNLOAD", os.path.join(_BASE, "chrome-download-3")),
+        "session_folder": _profile_dir("session-3"),
+        "download_folder": os.environ.get("ACCOUNT3_DOWNLOAD", _profile_dir("download-3")),
         "proxy": _get_proxy(3),
         "enabled": os.environ.get("ACCOUNT3_ENABLED", "false").lower() == "true",
     },
     {
         "name": "Account4",
-        "session_folder": os.path.join(_BASE, "chrome-session-4"),
-        "download_folder": os.environ.get("ACCOUNT4_DOWNLOAD", os.path.join(_BASE, "chrome-download-4")),
+        "session_folder": _profile_dir("session-4"),
+        "download_folder": os.environ.get("ACCOUNT4_DOWNLOAD", _profile_dir("download-4")),
         "proxy": _get_proxy(4),
         "enabled": os.environ.get("ACCOUNT4_ENABLED", "false").lower() == "true",
     },
