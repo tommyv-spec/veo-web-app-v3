@@ -6117,7 +6117,12 @@ def _normalize_external_reference_bindings(
                     400,
                     f"image_{image_index}: external upload node {ref.parent_node_id} not found",
                 )
-            if parent.kind != "upload" or parent.status != "ready" or parent.chosen_variant_id is None:
+            # v912.6: an auto-scraped upload arrives with its variant UNCHOSEN on
+            # purpose — the operator approves it in the UI (the choose click) and
+            # the v859 parent gate holds dependent scenes in draft until then. So
+            # import must ACCEPT an unchosen upload and let the gate do the
+            # waiting; only a missing/wrong-kind/unready node is an error.
+            if parent.kind != "upload" or parent.status != "ready":
                 raise HTTPException(
                     400,
                     f"image_{image_index}: external node {ref.parent_node_id} must be a ready upload",
