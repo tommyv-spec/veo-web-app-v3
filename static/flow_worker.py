@@ -4564,16 +4564,47 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
             pass
         if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
-        # This copies a real CHROME profile into the slot's golden. In Firefox
-        # mode that golden is firefox-golden, and the restore would drop Chrome
-        # files into a Firefox profile directory — unreadable by Firefox, so the
-        # login breaks on every restore. There is no Firefox equivalent of the
-        # laptop pull: a Firefox worker signs in once and its own golden is built
-        # from that session. Observed 2026-08-07 building 'Profile 61
-        # (chrome-beta)' into a firefox slot.
+        # Firefox mode uses its OWN pull. The Chrome path below copies a real
+        # CHROME profile, which is unreadable by Firefox — dropping it into
+        # firefox-golden breaks the login on every restore (observed 2026-08-07
+        # building 'Profile 61 (chrome-beta)' into a firefox slot).
+        #
+        # firefox_profile_pull finds the real Firefox profile signed into this
+        # email and copies its cookie store. Same account across all slots, same
+        # as Chrome. Falls through to a manual sign-in if nothing matches.
         if _bd.is_firefox_mode(BROWSER_MODE):
-            print(f"[{label}] laptop pull skipped - Chrome profile cannot seed a Firefox golden",
-                  flush=True)
+            try:
+                import sys as _sys
+                _sys.modules.pop("firefox_profile_pull", None)
+                from firefox_profile_pull import build_firefox_golden_from_profile
+                from worker_profile_pull import load_laptop_email as _lle_ff
+
+                _acct_num, _ff_acct = None, None
+                for _i, _a in enumerate(ACCOUNTS, start=1):
+                    if _a.get("session_folder") == session_folder:
+                        _acct_num, _ff_acct = _i, _a
+                        break
+                if _ff_acct is None:
+                    print(f"[{label}] firefox pull: session {session_folder} not in "
+                          f"ACCOUNTS - skip", flush=True)
+                    return
+                # Same rule as the Chrome path below: the slot's own laptop_email
+                # if set, else Account1's. The operator runs the SAME Google
+                # account across slots, so every slot seeds from one profile.
+                _ff_email = (_ff_acct.get("laptop_email", "")
+                             or ACCOUNTS[0].get("laptop_email", "")
+                             or _lle_ff(os.path.join(_BASE, "worker_settings.json")))
+                if not _ff_email:
+                    print(f"[{label}] firefox pull: no laptop_email configured - "
+                          f"manual sign-in", flush=True)
+                    return
+                if build_firefox_golden_from_profile(
+                        _ff_email, golden_folder, label=label,
+                        account_num=_acct_num, log=lambda m: print(m, flush=True)):
+                    _LAPTOP_COPIED_GOLDENS.add(golden_folder)
+            except Exception as _fe:
+                print(f"[{label}] firefox pull unavailable ({_fe}) - manual sign-in",
+                      flush=True)
             return
         # Fresh-load the synced companion (updater writes it after import).
         import sys as _sys
@@ -25969,7 +26000,8 @@ if __name__ == "__main__":
             # BEFORE the flow_worker hash/restart below so they are present even
             # when flow_worker.py itself restarts.
             for _comp in ("worker_profile_pull.py", "worker_cookie_extract.py",
-                          "flow_attribution.py", "browser_driver.py"):
+                          "flow_attribution.py", "browser_driver.py",
+                          "firefox_profile_pull.py"):
                 try:
                     _comp_url = f"{WEB_APP_URL}/api/user-worker/download/{_comp}"
                     _creq = _urllib.Request(_comp_url, headers={"User-Agent": f"flow-worker/{WORKER_BUILD}"})
