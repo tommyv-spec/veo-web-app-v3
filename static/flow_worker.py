@@ -144,6 +144,49 @@ def _ensure_patchright():
 
 _patchright_ok = _ensure_patchright()
 
+def _ensure_camoufox():
+    """Auto-install Camoufox - required for BROWSER_MODE=firefox.
+
+    Camoufox is the Firefox-side equivalent of Patchright. Plain Playwright
+    Firefox cannot log in: Google's OAuth refuses it with "This browser or app
+    may not be secure" because navigator.webdriver is true.
+
+    Requires >=0.5.4 (FF152). On 0.4.11 (FF135), Playwright's Node driver dies
+    on any page error (pageError.location.url undefined), which presents as a
+    dead browser and an expired session rather than a version problem.
+    """
+    try:
+        import camoufox  # noqa: F401
+        print("[Init] Camoufox already installed", flush=True)
+        return True
+    except ImportError:
+        pass
+
+    print("[Init] Camoufox not found - installing (required for firefox mode)...", flush=True)
+    for cmd, label in (
+        ([sys.executable, "-m", "pip", "install", "camoufox>=0.5.4"], "pip install"),
+        ([sys.executable, "-m", "pip", "install", "--user", "camoufox>=0.5.4"], "pip install --user"),
+    ):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if r.returncode == 0:
+                print(f"[Init] {label} succeeded", flush=True)
+                break
+            print(f"[Init] {label} failed (rc={r.returncode}): {r.stderr[:200]}", flush=True)
+        except Exception as e:
+            print(f"[Init] {label} exception: {e}", flush=True)
+    else:
+        print("[Init] ERROR: could not install camoufox - firefox mode will not start", flush=True)
+        return False
+
+    try:
+        subprocess.run([sys.executable, "-m", "camoufox", "fetch"],
+                       capture_output=True, text=True, timeout=600)
+        print("[Init] Camoufox browser fetched", flush=True)
+    except Exception as e:
+        print(f"[Init] WARNING: camoufox fetch failed ({e}) - launch may fail", flush=True)
+    return True
+
 # Firefox must NOT use Patchright — its chromium-only patches break Firefox's
 # page.evaluate ("Cannot read properties of undefined (reading '_client')").
 # Decided here because this import runs long before the module-level
@@ -152,6 +195,7 @@ import browser_driver as _bd
 _BROWSER_MODE_EARLY = _bd.resolve_browser_mode()
 
 if _bd.is_firefox_mode(_BROWSER_MODE_EARLY):
+    _ensure_camoufox()
     from playwright.sync_api import sync_playwright
     print("[Init] Firefox mode - using Playwright + Camoufox (Patchright is chromium-only)", flush=True)
 elif _patchright_ok:
