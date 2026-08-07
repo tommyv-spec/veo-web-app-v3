@@ -20875,6 +20875,22 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             print(f"[Flow] ⛔ clip {_dfc+1} terminal content filter ({_df_term}) — replace-image card, NOT requeueing (v823 hard-fail lane)", flush=True)
                             clip_log(_df_clip['id'], _dfc, "FAILED", f"terminal content filter {_df_term} (v823)")
                             continue
+                        # v915 — DO NOT REDO A CLIP THE PLATFORM ALREADY HAS.
+                        # v913 fixed clip_done_in_platform(), but this MAIN-path
+                        # requeue never consulted it — only the HTTP-DL give-up
+                        # path did. Measured 2026-08-07 on job 4f8687cf: clip
+                        # 13972 reached 'completed' TWICE, and was flipped to
+                        # flow_redo_queued 5x / generating 6x, burning a golden
+                        # restore cycle each time while other clips waited. The
+                        # DOM re-verify can read the wrong tile after a restore,
+                        # so 'hard failure' here is not proof the render is
+                        # missing — the platform is.
+                        if clip_done_in_platform(_df_clip['id']):
+                            print(f"[Flow] ↩ [v915] clip {_dfc+1} already has a render in the platform — "
+                                  f"NOT re-queuing (false hard-failure after restore)", flush=True)
+                            clip_log(_df_clip['id'], _dfc, "SKIP", "already in platform — no redo (v915)")
+                            clear_auto_redo_cycle(_df_clip['id'])
+                            continue
                         _df_cycles = register_auto_redo_cycle(_df_clip['id'])
                         if auto_redo_exhausted(_df_cycles):
                             update_clip_status(_df_clip['id'], 'failed',
