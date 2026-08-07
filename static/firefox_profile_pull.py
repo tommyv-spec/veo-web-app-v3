@@ -146,10 +146,42 @@ def google_cookie_count(profile_dir):
 def profile_google_emails(profile_dir, log=print):
     """Which Google addresses this profile's cookie jar is signed into.
 
-    Firefox keeps no offline record of it, so ask Google. Loads ONLY a copy of
-    the cookie store into a throwaway Camoufox profile — the real profile is
-    never launched.
+    Runs the browser probe in a SUBPROCESS. The worker calls this from inside a
+    running asyncio loop, where Playwright's sync API refuses to start
+    ("It looks like you are using Playwright Sync API inside the asyncio loop").
+    A child process has its own loop and is immune. Falls back to in-process
+    when the subprocess route is unavailable (e.g. running as a plain script).
     """
+    if profile_dir in _EMAIL_CACHE:
+        return _EMAIL_CACHE[profile_dir]
+
+    import subprocess
+    import sys as _sys
+    try:
+        proc = subprocess.run(
+            [_sys.executable, os.path.abspath(__file__), "--emails-for", profile_dir],
+            capture_output=True, text=True, timeout=180)
+        found = []
+        for line in (proc.stdout or "").splitlines():
+            if line.startswith("EMAIL="):
+                found.append(line.split("=", 1)[1].strip())
+        if found:
+            _EMAIL_CACHE[profile_dir] = found
+            return found
+        if proc.returncode != 0:
+            log(f"[ff-pull] email probe exited {proc.returncode}: "
+                f"{(proc.stderr or '')[-160:]}")
+    except Exception as e:
+        log(f"[ff-pull] email subprocess failed ({str(e)[:100]}) - trying in-process")
+    else:
+        _EMAIL_CACHE[profile_dir] = []
+        return []
+
+    return _probe_google_emails_inproc(profile_dir, log=log)
+
+
+def _probe_google_emails_inproc(profile_dir, log=print):
+    """The actual browser probe. Only safe outside an asyncio loop."""
     if profile_dir in _EMAIL_CACHE:
         return _EMAIL_CACHE[profile_dir]
 
@@ -304,7 +336,17 @@ if __name__ == "__main__":
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--email", default="", help="Google address to look for")
     ap.add_argument("--list", action="store_true", help="List profiles and exit")
+    ap.add_argument("--emails-for", default="", metavar="PROFILE_DIR",
+                    help="Internal: probe one profile, print EMAIL=<addr> lines")
     a = ap.parse_args()
+
+    if a.emails_for:
+        # Subprocess entry point used by profile_google_emails(): the worker
+        # runs inside an asyncio loop where the sync Playwright API refuses to
+        # start, so the probe is exiled to a child process.
+        for e in _probe_google_emails_inproc(a.emails_for, log=lambda m: None):
+            print(f"EMAIL={e}")
+        raise SystemExit(0)
 
     if a.list or not a.email:
         print(f"Firefox root: {firefox_profiles_root()}")
