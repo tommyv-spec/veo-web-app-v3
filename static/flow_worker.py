@@ -25820,7 +25820,8 @@ if __name__ == "__main__":
             # fetch the helper modules it imports next to it every launch. Done
             # BEFORE the flow_worker hash/restart below so they are present even
             # when flow_worker.py itself restarts.
-            for _comp in ("worker_profile_pull.py", "worker_cookie_extract.py", "flow_attribution.py"):
+            for _comp in ("worker_profile_pull.py", "worker_cookie_extract.py",
+                          "flow_attribution.py", "browser_driver.py"):
                 try:
                     _comp_url = f"{WEB_APP_URL}/api/user-worker/download/{_comp}"
                     _creq = _urllib.Request(_comp_url, headers={"User-Agent": f"flow-worker/{WORKER_BUILD}"})

@@ -16332,6 +16332,18 @@ async def serve_flow_attribution():
     return Response(content=mod_path.read_text(), media_type="text/x-python")
 
 
+@app.get("/api/user-worker/download/browser_driver.py")
+async def serve_browser_driver():
+    """Serve the browser-driver companion module. flow_worker.py imports it at
+    module load to pick Patchright (Chrome) vs Camoufox (Firefox), so a worker
+    that cannot fetch this file cannot start at all. The worker's auto-updater
+    fetches it next to flow_worker.py every launch."""
+    mod_path = Path(__file__).parent / "static" / "browser_driver.py"
+    if not mod_path.exists():
+        raise HTTPException(404, "Module not found")
+    return Response(content=mod_path.read_text(), media_type="text/x-python")
+
+
 @app.get("/api/user-worker/version")
 async def worker_version():
     """Return current worker version (content hash) for auto-update checks."""
