@@ -764,101 +764,6 @@ def _diag_cookie_readiness(cookies_db, log=print, tag=""):
         log(f"{tag}cookie-diag: read failed: {e}")
 
 
-def _purge_labs_site_data(profile_dir, log=print):
-    """v916 — remove labs.google site data BEYOND cookies from a copied golden.
-
-    Operator, 2026-08-07: "the copy of the golden folder you are doing is not
-    correct, because otherwise it would have worked." Correct. Their manual step
-    is chrome://settings -> labs.google -> **Delete data**, which clears cookies
-    AND localStorage AND IndexedDB AND service workers. v914 only cleaned the
-    Cookies DB, so the copy still inherited the Flow session identity and the
-    account still read as already-signed-in-and-flagged.
-
-    Measured in a v914-built golden: Local Storage/leveldb held 26 labs.google
-    matches and IndexedDB/https_labs.google_0.indexeddb.leveldb existed intact.
-
-    Local Storage / Session Storage share ONE leveldb across origins and cannot
-    be edited surgically without a leveldb library, so on a purpose-built worker
-    profile they are removed wholesale — Google SSO lives in cookies, not in
-    localStorage, so sign-in survives. IndexedDB is per-origin, so only the
-    labs.google database is touched. Service Worker caches/scripts regenerate on
-    demand.
-
-    Returns a list of what was removed. Never raises.
-    """
-    removed = []
-    try:
-        default = os.path.join(profile_dir, "Default")
-
-        # per-origin: only labs.google
-        idb = os.path.join(default, "IndexedDB")
-        if os.path.isdir(idb):
-            for entry in os.listdir(idb):
-                if "labs.google" in entry.lower():
-                    shutil.rmtree(os.path.join(idb, entry), ignore_errors=True)
-                    removed.append(f"IndexedDB/{entry}")
-
-        # shared leveldb stores — cannot be filtered per origin; SSO is cookie-based
-        for sub in ("Local Storage", "Session Storage", "Service Worker"):
-            d = os.path.join(default, sub)
-            if os.path.isdir(d):
-                shutil.rmtree(d, ignore_errors=True)
-                removed.append(sub)
-    except Exception as e:
-        try:
-            log(f"  purge labs site data failed: {e}")
-        except Exception:
-            pass
-    return removed
-
-
-def _prune_labs_session_cookies(cookies_db, log=print):
-    """v914 — strip EVERY labs.google cookie from a copied golden Cookies DB,
-    keeping Google SSO (google.com/accounts.google.com) untouched.
-
-    This is the operator's manual procedure, automated. Their working recipe:
-      1. chrome://settings -> labs.google -> Delete data (removes its cookies)
-      2. do NOT open Flow again
-      3. build the golden / start the worker
-    A golden built that way holds Google SSO but NO Flow session, so the first
-    entry into Flow makes SSO mint a FRESH labs session, which passes reCAPTCHA.
-
-    If the profile still carries a labs session (because Flow was opened), the
-    golden inherits that already-flagged session and EVERY generate comes back
-    403 'reCAPTCHA evaluation failed' / PUBLIC_ERROR_UNUSUAL_ACTIVITY - no
-    number of golden restores helps, because each restore faithfully restores
-    the flagged session (measured all night 2026-08-06/07).
-
-    _prune_handshake_cookies deliberately KEPT __Secure-next-auth.session-token;
-    that is exactly the cookie that must go. Probe evidence 2026-08-06: the
-    goldens that WORKED carried zero labs session cookies, and one click on
-    'Create with Google Flow' minted a fresh token on the spot.
-
-    Returns count deleted, -1 on error. Operates on the GOLDEN copy only.
-    """
-    if not cookies_db or not os.path.isfile(cookies_db):
-        return -1
-    try:
-        import sqlite3
-        con = sqlite3.connect(cookies_db, timeout=5)
-        try:
-            rows = con.execute("SELECT rowid, host_key, name FROM cookies").fetchall()
-            kill = [rid for (rid, host, name) in rows
-                    if "labs.google" in (host or "").lower()]
-            for rid in kill:
-                con.execute("DELETE FROM cookies WHERE rowid=?", (rid,))
-            con.commit()
-            return len(kill)
-        finally:
-            con.close()
-    except Exception as e:
-        try:
-            log(f"  prune labs cookies failed: {e}")
-        except Exception:
-            pass
-        return -1
-
-
 def _prune_handshake_cookies(cookies_db, log=print):
     """Delete stale next-auth handshake cookies from a copied golden Cookies DB
     (keeps the session token + Google SSO). Returns count deleted, -1 on error.
@@ -973,20 +878,6 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
         #    __Secure-next-auth.session-token + Google SSO so the golden stays
         #    logged in (reinstated from the reverted v819.4, isolated — cookie
         #    prune only, none of the v819 Restart-Manager copy rework).
-        # v914 — remove the whole labs.google session so Google SSO re-mints a
-        # fresh one on first entry (the operator's "delete cookies, don't open
-        # Flow, then build" recipe). Must run BEFORE the handshake prune's log
-        # so the counts read in order.
-        _labs_pruned = _prune_labs_session_cookies(
-            os.path.join(tmp, "Default", "Network", "Cookies"), log=log)
-        _site = _purge_labs_site_data(tmp, log=log)
-        if _site:
-            log(f"{tag}lean golden: v916 purged labs.google site data ({', '.join(_site)}) — "
-                f"cookies alone were not enough, the Flow session also lives in "
-                f"localStorage/IndexedDB/service-worker")
-        if _labs_pruned > 0:
-            log(f"{tag}lean golden: v914 stripped {_labs_pruned} labs.google cookie(s) — "
-                f"golden ships Google SSO only, Flow session is minted fresh on first entry")
         _pruned = _prune_handshake_cookies(
             os.path.join(tmp, "Default", "Network", "Cookies"), log=log)
         if _pruned > 0:
