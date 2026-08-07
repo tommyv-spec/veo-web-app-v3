@@ -764,6 +764,54 @@ def _diag_cookie_readiness(cookies_db, log=print, tag=""):
         log(f"{tag}cookie-diag: read failed: {e}")
 
 
+def _purge_labs_site_data(profile_dir, log=print):
+    """v916 — remove labs.google site data BEYOND cookies from a copied golden.
+
+    Operator, 2026-08-07: "the copy of the golden folder you are doing is not
+    correct, because otherwise it would have worked." Correct. Their manual step
+    is chrome://settings -> labs.google -> **Delete data**, which clears cookies
+    AND localStorage AND IndexedDB AND service workers. v914 only cleaned the
+    Cookies DB, so the copy still inherited the Flow session identity and the
+    account still read as already-signed-in-and-flagged.
+
+    Measured in a v914-built golden: Local Storage/leveldb held 26 labs.google
+    matches and IndexedDB/https_labs.google_0.indexeddb.leveldb existed intact.
+
+    Local Storage / Session Storage share ONE leveldb across origins and cannot
+    be edited surgically without a leveldb library, so on a purpose-built worker
+    profile they are removed wholesale — Google SSO lives in cookies, not in
+    localStorage, so sign-in survives. IndexedDB is per-origin, so only the
+    labs.google database is touched. Service Worker caches/scripts regenerate on
+    demand.
+
+    Returns a list of what was removed. Never raises.
+    """
+    removed = []
+    try:
+        default = os.path.join(profile_dir, "Default")
+
+        # per-origin: only labs.google
+        idb = os.path.join(default, "IndexedDB")
+        if os.path.isdir(idb):
+            for entry in os.listdir(idb):
+                if "labs.google" in entry.lower():
+                    shutil.rmtree(os.path.join(idb, entry), ignore_errors=True)
+                    removed.append(f"IndexedDB/{entry}")
+
+        # shared leveldb stores — cannot be filtered per origin; SSO is cookie-based
+        for sub in ("Local Storage", "Session Storage", "Service Worker"):
+            d = os.path.join(default, sub)
+            if os.path.isdir(d):
+                shutil.rmtree(d, ignore_errors=True)
+                removed.append(sub)
+    except Exception as e:
+        try:
+            log(f"  purge labs site data failed: {e}")
+        except Exception:
+            pass
+    return removed
+
+
 def _prune_labs_session_cookies(cookies_db, log=print):
     """v914 — strip EVERY labs.google cookie from a copied golden Cookies DB,
     keeping Google SSO (google.com/accounts.google.com) untouched.
@@ -931,6 +979,11 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
         # so the counts read in order.
         _labs_pruned = _prune_labs_session_cookies(
             os.path.join(tmp, "Default", "Network", "Cookies"), log=log)
+        _site = _purge_labs_site_data(tmp, log=log)
+        if _site:
+            log(f"{tag}lean golden: v916 purged labs.google site data ({', '.join(_site)}) — "
+                f"cookies alone were not enough, the Flow session also lives in "
+                f"localStorage/IndexedDB/service-worker")
         if _labs_pruned > 0:
             log(f"{tag}lean golden: v914 stripped {_labs_pruned} labs.google cookie(s) — "
                 f"golden ships Google SSO only, Flow session is minted fresh on first entry")
