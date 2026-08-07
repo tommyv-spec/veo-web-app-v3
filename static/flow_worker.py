@@ -22495,25 +22495,65 @@ class AccountWorker(threading.Thread):
                         # v174: self-resume after golden restore — re-process the same
                         # job/parallel assignment without going through the dispatcher.
                         # This prevents parallel re-splitting and cross-account duplication.
+                        # v922 — a redo assigned to this account while it was
+                        # restoring lands in self.job_queue, but the comment
+                        # above ("Check for redo clips first") did not match the
+                        # code: the self-resume branch below returned first and
+                        # the queue was only read when NO resume was pending.
+                        # Because a self-resume re-enters the same job that just
+                        # 403'd -> hard failure -> golden restore -> self-resume
+                        # again, the queue could go unread indefinitely.
+                        #
+                        # Measured 2026-08-07 on job 09083c15:
+                        #   [12:59:58] Found 1 NEW clip(s) needing redo
+                        #     -> Clip 2 (attempt 1) assigned to Account2
+                        #   [Account2] Self-resuming job 09083c15 after golden restore
+                        # and no "Processing redo" line ever followed. An earlier
+                        # run made 11 main-path submits and 0 redo submits with
+                        # redos queued the whole time. The only clips that landed
+                        # all night came from redos left over from a prior run.
+                        #
+                        # Take the queued redo FIRST and leave _retry_job pending
+                        # for the next loop, so the self-resume still happens (no
+                        # parallel re-splitting, v174) but cannot starve the path
+                        # that actually produces renders.
+                        job = None
+                        _from_queue = False
                         if _retry_job is not None:
-                            job = _retry_job
-                            _retry_job = None
-                            self._pending_resume_job = None  # v824 — job now in hand; clear mirror so a later unrelated restart won't re-resume it
-                            _from_queue = False  # Don't call task_done — already called when _retry_job was set
-                            _retry_job_id = None
-                            if isinstance(job, dict):
-                                if 'job' in job and isinstance(job['job'], dict):
-                                    _retry_job_id = job['job'].get('id')
-                                else:
-                                    _retry_job_id = job.get('id')
-                            print(f"[{self.name}] ↩ Self-resuming job {(_retry_job_id or '?')[:8]}... after golden restore", flush=True)
-                            # v198: Re-fetch clip statuses from DB before resuming.
-                            # The stale job object still shows all clips as 'pending'
-                            # even though HTTP-DL completed many during the previous run.
-                            refresh_clip_statuses(job)
-                        else:
-                            job = self.job_queue.get(timeout=1)
-                            _from_queue = True
+                            try:
+                                _peeked = self.job_queue.get_nowait()
+                            except Exception:
+                                _peeked = None
+                            if isinstance(_peeked, dict) and _peeked.get('type') == 'redo':
+                                print(f"[{self.name}] ↩ [v922] taking the queued redo before "
+                                      f"self-resuming — the resume stays pending", flush=True)
+                                job = _peeked
+                                _from_queue = True
+                            elif _peeked is not None:
+                                # Not a redo — hand it back untouched. A pending
+                                # self-resume still outranks a fresh job (v174).
+                                self.job_queue.put(_peeked)
+
+                        if job is None:
+                            if _retry_job is not None:
+                                job = _retry_job
+                                _retry_job = None
+                                self._pending_resume_job = None  # v824 — job now in hand; clear mirror so a later unrelated restart won't re-resume it
+                                _from_queue = False  # Don't call task_done — already called when _retry_job was set
+                                _retry_job_id = None
+                                if isinstance(job, dict):
+                                    if 'job' in job and isinstance(job['job'], dict):
+                                        _retry_job_id = job['job'].get('id')
+                                    else:
+                                        _retry_job_id = job.get('id')
+                                print(f"[{self.name}] ↩ Self-resuming job {(_retry_job_id or '?')[:8]}... after golden restore", flush=True)
+                                # v198: Re-fetch clip statuses from DB before resuming.
+                                # The stale job object still shows all clips as 'pending'
+                                # even though HTTP-DL completed many during the previous run.
+                                refresh_clip_statuses(job)
+                            else:
+                                job = self.job_queue.get(timeout=1)
+                                _from_queue = True
                         
                         if job.get('type') == 'redo':
                             clip = job['clip']
