@@ -15384,7 +15384,11 @@ async def user_worker_get_redo_clips(
         # v487: reverted Clip.updated_at reference — column doesn't
         # exist, see local-worker endpoint comment.
         redo_cutoff = datetime.utcnow() - timedelta(hours=24)
-        redo_clips = db.query(Clip).join(Job).filter(
+        # Job.created_at is immutable, unlike updated_at above which the redo path
+        # and the startup backfill both bump — that is why an ancient job could keep
+        # refreshing itself back into eligibility and get re-rendered at real cost.
+        _age_cutoff = job_age_cutoff()
+        _q = db.query(Clip).join(Job).filter(
             Job.user_id == user_id,
             Job.backend == 'flow',
             Job.updated_at >= redo_cutoff,
@@ -15399,10 +15403,17 @@ async def user_worker_get_redo_clips(
                     Clip.error_message.ilike('%file not found%')
                 )
             )
-        ).order_by(Clip.id.asc()).all()
+        )
+        if _age_cutoff is not None:
+            _q = _q.filter(Job.created_at >= _age_cutoff)
+        redo_clips = _q.order_by(Clip.id.asc()).all()
     else:
         redo_cutoff = datetime.utcnow() - timedelta(hours=24)
-        redo_clips = db.query(Clip).join(Job).filter(
+        # Job.created_at is immutable, unlike updated_at above which the redo path
+        # and the startup backfill both bump — that is why an ancient job could keep
+        # refreshing itself back into eligibility and get re-rendered at real cost.
+        _age_cutoff = job_age_cutoff()
+        _q = db.query(Clip).join(Job).filter(
             Job.user_id == user_id,
             Job.backend == 'flow',
             Job.updated_at >= redo_cutoff,
@@ -15410,7 +15421,10 @@ async def user_worker_get_redo_clips(
                 and_(Clip.status == ClipStatus.FLOW_REDO_QUEUED.value, Clip.claimed_by_worker.is_(None)),
                 and_(Clip.status == 'failed', Clip.generation_attempt > 1, Clip.error_message.ilike('%file not found%'))
             )
-        ).order_by(Clip.id.asc()).all()
+        )
+        if _age_cutoff is not None:
+            _q = _q.filter(Job.created_at >= _age_cutoff)
+        redo_clips = _q.order_by(Clip.id.asc()).all()
     
     if not redo_clips:
         return {"clips": []}
