@@ -13646,8 +13646,30 @@ async def local_worker_get_pending_job(
         print(f"[Worker] Releasing stale claim on job {stale_job.id[:8]} (was claimed by {stale_job.claimed_by_worker})", flush=True)
         stale_job.claimed_by_worker = None
         stale_job.claimed_at = None
-    
+
     if stale_jobs:
+        db.commit()
+
+    # v921 — recover jobs STRANDED at 'processing' by a worker that died.
+    # Mirror of the user-worker endpoint; see the full rationale there. Keyed on
+    # updated_at (touched by every clip report) rather than claimed_at, because
+    # a real multi-clip job outlives the 10-minute claim window and releasing on
+    # claim age would double-submit a live worker's clips.
+    stranded_cutoff = datetime.utcnow() - timedelta(minutes=30)
+    stranded_jobs = db.query(Job).filter(
+        Job.backend == 'flow',
+        Job.status == 'processing',
+        Job.updated_at < stranded_cutoff
+    ).all()
+
+    for sj in stranded_jobs:
+        print(f"[Worker] v921 releasing STRANDED job {sj.id[:8]} "
+              f"(processing, no clip activity since {sj.updated_at}, "
+              f"was claimed by {sj.claimed_by_worker})", flush=True)
+        sj.claimed_by_worker = None
+        sj.claimed_at = None
+        sj.status = 'pending'
+    if stranded_jobs:
         db.commit()
     
     # Find users who have an active personal worker (last_seen within 2 minutes)
@@ -14190,6 +14212,11 @@ async def local_worker_update_clip_status(
     # Clean up images_dir for Flow jobs (frames are in R2, not local disk)
     # This fixes existing Flow jobs that still have local paths set
     job = db.query(Job).filter(Job.id == clip.job_id).first()
+    # v921 — work heartbeat, same as the user-worker endpoint. See the comment
+    # there: Job.updated_at is the only per-job liveness signal we have, and
+    # without this it stays frozen at the moment the job went 'processing'.
+    if job:
+        job.updated_at = datetime.utcnow()
     if job and job.backend == 'flow' and job.images_dir:
         print(f"[LocalWorker] Cleaning up images_dir for Flow job {job.id[:8]}", flush=True)
         job.images_dir = ""  # Empty string instead of None (DB has NOT NULL constraint)
@@ -15079,13 +15106,45 @@ async def user_worker_get_pending_job(
         Job.claimed_by_worker.isnot(None),
         Job.claimed_at < claim_timeout
     ).all()
-    
+
     for stale_job in stale_jobs:
         stale_job.claimed_by_worker = None
         stale_job.claimed_at = None
     if stale_jobs:
         db.commit()
-    
+
+    # v921 — recover jobs STRANDED at 'processing' by a worker that died.
+    #
+    # The sweep above only covers 'pending' / 'queued_for_flow'. A worker that
+    # dies mid-job (crash, OOM, Render deploy, kill) leaves its job at
+    # 'processing' with the claim still set, and NOTHING released it — the job
+    # sat there forever while the worker polled "No pending jobs or redos".
+    # Measured 2026-08-07 on job 09083c15: stranded until reset by hand.
+    #
+    # The cutoff is deliberately generous and keyed on updated_at, NOT
+    # claimed_at. A legitimate 15-clip job runs far longer than the 10-minute
+    # claim window, so releasing on claim age would hand a live worker's job to
+    # a second worker and double-submit its clips. updated_at is now touched on
+    # every clip report (v921 work heartbeat in the clips/{id}/status
+    # endpoints), so 30 minutes of total silence means the worker is gone.
+    stranded_cutoff = datetime.utcnow() - timedelta(minutes=30)
+    stranded_jobs = db.query(Job).filter(
+        Job.user_id == user_id,
+        Job.backend == 'flow',
+        Job.status == 'processing',
+        Job.updated_at < stranded_cutoff
+    ).all()
+
+    for sj in stranded_jobs:
+        print(f"[Worker] v921 releasing STRANDED job {sj.id[:8]} "
+              f"(processing, no clip activity since {sj.updated_at}, "
+              f"was claimed by {sj.claimed_by_worker})", flush=True)
+        sj.claimed_by_worker = None
+        sj.claimed_at = None
+        sj.status = 'pending'
+    if stranded_jobs:
+        db.commit()
+
     # Query for available jobs - SCOPED TO USER
     if worker_id:
         query = db.query(Job).filter(
@@ -15766,11 +15825,21 @@ async def user_worker_update_clip_status(
     clip = db.query(Clip).join(Job).filter(Clip.id == clip_id, Job.user_id == user_id).with_for_update().first()
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found or not yours")
-    
+
     job = db.query(Job).filter(Job.id == clip.job_id).first()
     if job and job.backend == 'flow' and job.images_dir:
         job.images_dir = ""
-    
+
+    # v921 — work heartbeat. Clip has no updated_at column (only Job does,
+    # models.py:167), and the common path here writes ONLY clip fields, so a job
+    # could run for an hour with Job.updated_at frozen at the moment it went
+    # 'processing'. That left no way to tell a live job from one whose worker
+    # died. Touching updated_at on every clip report makes it a true
+    # "work is still happening" signal, which the stranded-job sweep in
+    # /jobs/pending relies on to avoid stealing a job from a live worker.
+    if job:
+        job.updated_at = datetime.utcnow()
+
     old_status = clip.status
     
     if update.status:
