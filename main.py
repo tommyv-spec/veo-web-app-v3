@@ -157,6 +157,7 @@ from lifecycle import apply_lifecycle_change, compute_stuck_days, apply_jobs_fil
 from auto_image_retry import parse_auto_image_retry_mode, VALID_RETRY_MODES, order_distinct_frames, pick_substitute
 from worker import worker, WORKER_VERSION
 from error_handler import ErrorCode
+from job_age import job_age_cutoff
 
 # Image Platform (node-graph image generation via Flow UI worker)
 from image_platform import (
@@ -13970,9 +13971,13 @@ async def local_worker_get_redo_clips(
     # by the startup backfill in lifespan that bumps Job.updated_at on
     # any job containing flow_redo_queued clips.
     redo_cutoff = datetime.utcnow() - timedelta(hours=24)
+    # Job.created_at is immutable, unlike updated_at above which the redo path
+    # and the startup backfill both bump — that is why an ancient job could keep
+    # refreshing itself back into eligibility and get re-rendered at real cost.
+    _age_cutoff = job_age_cutoff()
     if worker_id:
         # Either: unclaimed, OR claimed by this same worker
-        redo_clips = db.query(Clip).join(Job).filter(
+        _q = db.query(Clip).join(Job).filter(
             Job.backend == 'flow',
             Job.updated_at >= redo_cutoff,
             or_(
@@ -13991,10 +13996,13 @@ async def local_worker_get_redo_clips(
                     Clip.error_message.ilike('%file not found%')
                 )
             )
-        ).order_by(Clip.id.asc()).all()
+        )
+        if _age_cutoff is not None:
+            _q = _q.filter(Job.created_at >= _age_cutoff)
+        redo_clips = _q.order_by(Clip.id.asc()).all()
     else:
         # No worker_id - get unclaimed only (legacy behavior)
-        redo_clips = db.query(Clip).join(Job).filter(
+        _q = db.query(Clip).join(Job).filter(
             Job.backend == 'flow',
             Job.updated_at >= redo_cutoff,
             or_(
@@ -14008,8 +14016,21 @@ async def local_worker_get_redo_clips(
                     Clip.error_message.ilike('%file not found%')
                 )
             )
-        ).order_by(Clip.id.asc()).all()
-    
+        )
+        if _age_cutoff is not None:
+            _q = _q.filter(Job.created_at >= _age_cutoff)
+        redo_clips = _q.order_by(Clip.id.asc()).all()
+
+    if _age_cutoff is not None:
+        _skipped = db.query(Clip).join(Job).filter(
+            Job.backend == 'flow',
+            Clip.status == ClipStatus.FLOW_REDO_QUEUED.value,
+            Job.created_at < _age_cutoff,
+        ).count()
+        if _skipped:
+            print(f"[redo-pending] age cap: skipped {_skipped} clip(s) "
+                  f"on jobs older than {_age_cutoff.isoformat()}", flush=True)
+
     if not redo_clips:
         return {"clips": []}
     
