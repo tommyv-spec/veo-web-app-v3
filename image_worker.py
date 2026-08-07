@@ -107,7 +107,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v585"  # v896 mint reCAPTCHA in the page's MAIN world (Patchright isolates evaluate)
+WORKER_VERSION = "img-v586"  # v917 enter the Flow APP (home serves marketing after the v914/v916 session strip)
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 
 # v891d — truthful heartbeat. The heartbeat threads beat every 5s no matter
@@ -1370,6 +1370,100 @@ def ensure_logged_into_flow(page, label="IMAGE", timeout_minutes=10):
     
     check_and_dismiss_popup(page)
     return True
+
+
+# v917 — Flow home serves TWO different pages at the same URL: Google's public
+# MARKETING page, and the signed-in app. Which one you get depends on whether a
+# labs.google Flow session exists. Since v914/v916 the golden deliberately ships
+# Google SSO only and strips that session, so the FIRST visit after a golden
+# restore lands on marketing, whose "Create with Flow" is a plain <button> with
+# no href: clicking it leaves an empty app shell and the URL parked on a
+# marketing anchor. That is the operator's 2026-08-07 failure — three retries,
+# every one reporting "New project button not visible" at
+# labs.google/fx/tools/flow#capabilities.
+#
+# Loading an app route mints the session. Proven from a fresh golden copy:
+#   1. flow home                 -> marketing, CTA is <button href=(none)>
+#   2. CTA click                 -> empty app shell, still no New project
+#   3. flow/project              -> app chrome + ULTRA badge (session minted)
+#   4. flow home                 -> New project + 6 project tiles
+FLOW_APP_MINT_URL = FLOW_HOME_URL.rstrip("/") + "/project"
+
+
+def _flow_app_rendered(page):
+    """True when Flow home is showing the APP (a New-project control exists),
+    False when it is showing the marketing page or a bare shell."""
+    try:
+        return bool(page.evaluate("""() => {
+            const ctrls = Array.from(document.querySelectorAll('button,[role=button]'));
+            return ctrls.some(b => {
+              const t = (b.innerText || b.getAttribute('aria-label') || '');
+              return /new project|nuovo progetto|nuevo proyecto|nouveau projet|neues projekt/i.test(t)
+                     || /\\badd_2\\b/.test(t);
+            });
+        }"""))
+    except Exception:
+        return False
+
+
+def _dismiss_flow_banner(page):
+    """Close Flow's promo banner (e.g. the daily-credits ribbon). It sits over
+    the top of the app home where the New-project button lives."""
+    try:
+        btn = page.locator("button:has-text('Dismiss'), [role=button]:has-text('Dismiss')").first
+        if btn.count() and btn.is_visible(timeout=1500):
+            btn.click(force=True, timeout=3000)
+            time.sleep(1)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def ensure_flow_app_entered(page, label="IMAGE", attempts=2):
+    """Make Flow home render the APP, minting the session if it does not.
+
+    Returns True when a New-project control is present. Cheap no-op when the
+    app is already up — the evaluate costs milliseconds.
+    """
+    prefix = f"[{label}] " if label else ""
+    if _flow_app_rendered(page):
+        return True
+    for i in range(1, attempts + 1):
+        print(f"{prefix}Flow home is serving the marketing page — entering the app "
+              f"(attempt {i}/{attempts})", flush=True)
+        # Step 1 — the marketing CTA boots the app client-side. On its own it
+        # only leaves an empty shell (that is the trap: the worker used to stop
+        # here and call itself logged in), but the app it boots is what makes
+        # the session mint below work. Skipping this step was measured: the
+        # mint route alone left home on marketing through every retry.
+        try:
+            dismiss_create_with_flow(page, label)
+        except Exception as e:
+            print(f"{prefix}⚠ could not click the Flow CTA: {e}", flush=True)
+        time.sleep(8)
+        if _flow_app_rendered(page):
+            print(f"{prefix}✓ Flow app rendered — New project is available", flush=True)
+            return True
+        # Step 2 — load an app route so the Flow session is minted.
+        try:
+            page.goto(FLOW_APP_MINT_URL, wait_until="domcontentloaded", timeout=45000)
+        except Exception as e:
+            print(f"{prefix}⚠ mint route unreachable: {e}", flush=True)
+        time.sleep(8)
+        # Step 3 — home now serves the app.
+        try:
+            page.goto(FLOW_HOME_URL, wait_until="domcontentloaded", timeout=45000)
+        except Exception as e:
+            print(f"{prefix}⚠ could not return to Flow home: {e}", flush=True)
+            continue
+        time.sleep(6)
+        _dismiss_flow_banner(page)
+        if _flow_app_rendered(page):
+            print(f"{prefix}✓ Flow app rendered — New project is available", flush=True)
+            return True
+    print(f"{prefix}⚠ Flow app still not rendering after {attempts} attempt(s)", flush=True)
+    return False
 
 
 def spa_navigate_to_flow_home(page, label=""):
@@ -7183,6 +7277,11 @@ def create_new_flow_project(page, context=""):
             # labels as well as the '+' icon button variant
             dismiss_create_with_flow(page, context or "NEW_PROJECT")
 
+            # v917 — the button can be absent because Flow home is serving the
+            # MARKETING page, not the app (fresh golden = no Flow session). No
+            # amount of reloading fixes that; the session has to be minted.
+            ensure_flow_app_entered(page, context or "NEW_PROJECT")
+
             # v755 — confirm the New project button is present + visible before
             # clicking. A click against a not-yet-hydrated home page is the main
             # cause of "clicked but URL never changed to /project/".
@@ -10813,6 +10912,11 @@ Examples:
         human_delay(0.5, 1)
         
         ensure_logged_into_flow(page, "IMAGE")
+        # v917 — signed in is not the same as inside the app. After a golden
+        # restore the Flow session is stripped (v914/v916), so home serves the
+        # marketing page and the first job dies on "New project button not
+        # visible". Mint the session now, at startup, once.
+        ensure_flow_app_entered(page, "IMAGE")
         print("[IMAGE] ✓ Logged in and ready\n", flush=True)
         
         # Route to mode
