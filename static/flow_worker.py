@@ -4821,7 +4821,34 @@ MAX_POLL_TIME = 120     # Max seconds to poll before giving up
 POLL_INTERVAL = 5       # Seconds between status polls (used in download phase)
 MAX_GENERATION_RETRIES = 2   # Max retries per clip
 CLIP_READY_WAIT = 50    # Seconds to wait after submission before clip is ready for download
-FAILURE_CHECK_DELAY = 1 # Brief pause before failure check (check itself polls for up to 8s)
+# v920 — was 1. The failure check polls the DOM with page.evaluate for up to 8s,
+# so starting it 1s after the Generate click put injected script straight through
+# the reCAPTCHA mint window, which is where the 403 is decided.
+#
+# Measured 2026-08-07, one worker run, both paths on the same session and the
+# same account. Every generate carries clientContext.recaptchaContext.token;
+# a real Enterprise token ("0cA...") runs, anything else ("HF...") comes back
+# 403 "reCAPTCHA evaluation failed" / PUBLIC_ERROR_UNUSUAL_ACTIVITY:
+#
+#   04:00:26  HF+0cA   reload clr reload        REDO  -> SCHEDULED, uploaded
+#   04:04:18  HF+HF    reload clr reload clr    MAIN  -> 403 both variants
+#   04:06:58  HF+0cA   reload                   REDO  -> SCHEDULED, uploaded
+#   04:11:22  HF+HF    reload clr reload clr    MAIN  -> 403 both variants
+#
+# 4/4, split exactly by path. The redo path leaves the page alone for
+# CLIP_READY_WAIT (50s) after clicking Generate and its token survives; the main
+# path was the only one polling, and its tokens were always cleared first.
+#
+# The generate POSTs land ~4.5s after the click, so 8s keeps the whole poll
+# window clear of the mint. Cost is that a genuinely failed submit is noticed
+# ~7s later, which is cheap next to a 403 that burns a golden restore.
+#
+# NOT yet proven to be the cause: the click log lines carry no timestamp, so the
+# overlap is inferred from the poll's own schedule rather than measured. v920
+# also stamps the click and the check start, so the next run settles it. If the
+# main path still shows "reload clr reload clr" with the poll provably outside
+# the window, this is the wrong lever and should be reverted.
+FAILURE_CHECK_DELAY = 8
 GENERATION_WAIT = 90    # Seconds to wait for generation before download
 # v794c — the bound-mediaId getMediaUrlRedirect URL is STABLE but serves a POSTER
 # (image, ~70KB) while the clip is still rendering, then the real mp4 once done.
@@ -9529,7 +9556,12 @@ def click_generate_button(page, context_name="", max_retries=3):
             # TEMP DIAG (v918) — proves the redo-parity sequence ran on a real
             # submit. Remove once operator-side evidence shows whether the main
             # path's 403 rate moved.
-            print(f"{prefix}[v918] pre-generate beats done (redo parity) — clicking Generate", flush=True)
+            # v920 TEMP DIAG — millisecond stamp so the click can be lined up
+            # against the recaptcha reload/clr timestamps in the capture jsonl.
+            # Without it the overlap between this click and the mint window is
+            # inferred, not measured.
+            print(f"{prefix}[v918] pre-generate beats done (redo parity) — clicking Generate "
+                  f"@{datetime.now().strftime('%H:%M:%S.%f')[:-3]}", flush=True)
 
             # v700j — stamp the click time on the page so _bind_pending_submits
             # can REJECT any submit-response that was captured BEFORE this
@@ -10625,7 +10657,10 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
     - 'refresh' button = tile is TRULY failed (not just starting up)
     - 'undo' button WITHOUT videocam/% = tile starting up, not yet failed
     """
-    print(f"[FailCheck] Checking clip {clip_num} for immediate failure...", flush=True)
+    # v920 TEMP DIAG — stamp when the DOM poll actually starts. Paired with the
+    # click stamp, this shows whether the poll overlaps the reCAPTCHA mint.
+    print(f"[FailCheck] Checking clip {clip_num} for immediate failure... "
+          f"@{datetime.now().strftime('%H:%M:%S.%f')[:-3]}", flush=True)
     
     # Shared JS for tile analysis — used for both initial check and recheck
     # DATA_INDEX_PLACEHOLDER is replaced with actual data_index before evaluate
