@@ -24190,7 +24190,6 @@ def main(account_session=None, account_download=None, account_label=None):
             launch_kwargs = {
                 'user_data_dir': SESSION_FOLDER,
                 'headless': False,
-                'viewport': {"width": 1280, "height": 500},
             }
             if single_proxy_config:
                 launch_kwargs['proxy'] = single_proxy_config
