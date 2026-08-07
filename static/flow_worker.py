@@ -1366,6 +1366,43 @@ def _install_flow_api_capture(page):
     def _on_request(req):
         try:
             url = getattr(req, 'url', '') or ''
+            # v919 TEMP DIAG — also record the reCAPTCHA traffic.
+            #
+            # Every generate carries clientContext.recaptchaContext.token, and
+            # measured 2026-08-07 across 9995 captured generates, WHICH KIND of
+            # token decides the 403:
+            #   "0cA..."  real reCAPTCHA Enterprise token  -> generation runs
+            #   "HF..."   something else                   -> 403 "reCAPTCHA
+            #                                                evaluation failed"
+            # Until 08-02 the page emitted ~100% real tokens; from 08-05 it
+            # mostly emits the other kind. A real token costs a round-trip to
+            # google.com/recaptcha/enterprise/reload (~450-900ms); the fallback
+            # is instant, which is why failing submits fire both variants
+            # ~2ms apart and passing ones are ~500ms apart. The gap is the
+            # SYMPTOM of a successful mint, not its cause.
+            #
+            # This capture only ever logged aisandbox-pa, so the mint itself was
+            # invisible. Recording it answers the one open question: does the
+            # failing path skip the reload call, or make it and get refused?
+            # Remove once that is established.
+            if 'recaptcha' in url:
+                try:
+                    _leaf = url.split('?', 1)[0].rsplit('/', 1)[-1] or 'recaptcha'
+                    print(f"[flow-api-capture] recaptcha:{_leaf} "
+                          f"method={getattr(req, 'method', '')}", flush=True)
+                except Exception:
+                    pass
+                try:
+                    with open(out_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({
+                            'ts': time.time(),
+                            'method': getattr(req, 'method', ''),
+                            'url': url,
+                            'kind': 'recaptcha',
+                        }) + "\n")
+                except Exception:
+                    pass
+                return
             if 'aisandbox-pa.googleapis.com' not in url:
                 return
             if not any(w in url for w in _watch):
