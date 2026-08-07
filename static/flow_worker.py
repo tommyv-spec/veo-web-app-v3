@@ -24983,9 +24983,19 @@ def main_multi_coordinator(accounts):
     # This is identical to main()'s startup — same browser launch, same login flow
     initialized = []
     
-    from patchright.sync_api import sync_playwright
-    p = sync_playwright().start()
-    
+    # Must mirror the module-load driver choice (see the import block near the
+    # top). This function re-imports its own playwright, so without this branch
+    # multi-account mode always builds `p` from Patchright — whose chromium-only
+    # patches break Firefox's page.evaluate no matter which accessor is used on
+    # it afterwards. The module-level `sync_playwright` is already the correct
+    # driver for this BROWSER_MODE, so reuse it rather than re-importing.
+    if _bd.is_firefox_mode(BROWSER_MODE):
+        print("[Init] multi-account: Firefox mode - using module Playwright driver", flush=True)
+        p = sync_playwright().start()
+    else:
+        from patchright.sync_api import sync_playwright as _pr_sync_playwright
+        p = _pr_sync_playwright().start()
+
     for acc in accounts:
         acc_name = acc['name']
         session = acc['session_folder']
