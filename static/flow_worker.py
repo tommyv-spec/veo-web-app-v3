@@ -22188,7 +22188,7 @@ class AccountWorker(threading.Thread):
                 }
                 if proxy_config:
                     acct_launch_kwargs['proxy'] = proxy_config
-                self.browser = p.chromium.launch_persistent_context(**acct_launch_kwargs)
+                self.browser = _bd.launch_context(p, BROWSER_MODE, **acct_launch_kwargs)
             else:
                 acct_launch_kwargs = {
                     'user_data_dir': self.session_folder,
@@ -22197,8 +22197,8 @@ class AccountWorker(threading.Thread):
                 }
                 if proxy_config:
                     acct_launch_kwargs['proxy'] = proxy_config
-                self.browser = p.firefox.launch_persistent_context(**acct_launch_kwargs)
-            
+                self.browser = _bd.launch_context(p, BROWSER_MODE, **acct_launch_kwargs)
+
             # Match test_human_like.py
             self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
             # DIAG: which Chrome actually launched? Beta=~150, stable=~149. If
@@ -22317,7 +22317,7 @@ class AccountWorker(threading.Thread):
                 except Exception:
                     pass
                 time.sleep(2)
-                self.browser = p.chromium.launch_persistent_context(**acct_launch_kwargs)
+                self.browser = _bd.launch_context(p, BROWSER_MODE, **acct_launch_kwargs)
                 self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
                 # v486 + v700: stash profile + install submit-response listener
                 _stash_profile_on_page(
@@ -22449,7 +22449,7 @@ class AccountWorker(threading.Thread):
                     }
                     if proxy_config:
                         relaunch_kwargs['proxy'] = proxy_config
-                    self.browser = p.chromium.launch_persistent_context(**relaunch_kwargs)
+                    self.browser = _bd.launch_context(p, BROWSER_MODE, **relaunch_kwargs)
                 else:
                     relaunch_kwargs = {
                         'user_data_dir': self.session_folder,
@@ -22458,11 +22458,11 @@ class AccountWorker(threading.Thread):
                     }
                     if proxy_config:
                         relaunch_kwargs['proxy'] = proxy_config
-                    self.browser = p.firefox.launch_persistent_context(**relaunch_kwargs)
-                
+                    self.browser = _bd.launch_context(p, BROWSER_MODE, **relaunch_kwargs)
+
                 self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
                 _stash_profile_on_page(self.page, self.session_folder, account_label=getattr(self, 'account_name', None))  # v486 + v700
-                
+
                 # Warm up Chrome — sync variations seed
                 chrome_warmup(self.page)
                 
@@ -22888,9 +22888,10 @@ class AccountWorker(threading.Thread):
                                     }
                                     if self._proxy_config:
                                         acct_launch_kwargs['proxy'] = self._proxy_config
-                                    self.browser = self._playwright.chromium.launch_persistent_context(**acct_launch_kwargs)
+                                    self.browser = _bd.launch_context(self._playwright, BROWSER_MODE, **acct_launch_kwargs)
                                 else:
-                                    self.browser = self._playwright.chromium.launch_persistent_context(
+                                    self.browser = _bd.launch_context(
+                                        self._playwright, BROWSER_MODE,
                                         user_data_dir=self.session_folder, headless=False,
                                         viewport={"width": 1280, "height": 720}, args=self._launch_args)
                                 self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
@@ -23019,7 +23020,7 @@ class AccountWorker(threading.Thread):
         last_err = None
         for i in range(1, attempts + 1):
             try:
-                return self._playwright.chromium.launch_persistent_context(**kwargs)
+                return _bd.launch_context(self._playwright, BROWSER_MODE, **kwargs)
             except Exception as _le:
                 last_err = _le
                 print(f"[{self.name}] ⚠ submit-browser launch attempt {i}/{attempts} failed: {_le}", flush=True)
@@ -23494,7 +23495,7 @@ class AccountWorker(threading.Thread):
             }
             if proxy_config:
                 relaunch_kwargs['proxy'] = proxy_config
-            self.browser = p.chromium.launch_persistent_context(**relaunch_kwargs)
+            self.browser = _bd.launch_context(p, BROWSER_MODE, **relaunch_kwargs)
         else:
             relaunch_kwargs = {
                 'user_data_dir': self.session_folder,
@@ -23503,7 +23504,7 @@ class AccountWorker(threading.Thread):
             }
             if proxy_config:
                 relaunch_kwargs['proxy'] = proxy_config
-            self.browser = p.firefox.launch_persistent_context(**relaunch_kwargs)
+            self.browser = _bd.launch_context(p, BROWSER_MODE, **relaunch_kwargs)
 
         self.page = self.browser.pages[0] if self.browser.pages else self.browser.new_page()
         _stash_profile_on_page(self.page, self.session_folder, account_label=getattr(self, 'account_name', None))  # v486 + v700
@@ -24160,7 +24161,7 @@ def main(account_session=None, account_download=None, account_label=None):
             # Only pass proxy if actually configured (test_human_like.py doesn't pass proxy)
             if single_proxy_config:
                 launch_kwargs['proxy'] = single_proxy_config
-            browser = p.chromium.launch_persistent_context(**launch_kwargs)
+            browser = _bd.launch_context(p, BROWSER_MODE, **launch_kwargs)
             browser_name = "Chrome"
         else:
             print("[Browser] Launching Firefox (playwright mode)...")
@@ -24171,7 +24172,7 @@ def main(account_session=None, account_download=None, account_label=None):
             }
             if single_proxy_config:
                 launch_kwargs['proxy'] = single_proxy_config
-            browser = p.firefox.launch_persistent_context(**launch_kwargs)
+            browser = _bd.launch_context(p, BROWSER_MODE, **launch_kwargs)
             browser_name = "Firefox"
         
         # Match test_human_like.py: browser.pages[0] if browser.pages else browser.new_page()
@@ -24204,7 +24205,7 @@ def main(account_session=None, account_download=None, account_label=None):
             except Exception:
                 pass
             time.sleep(2)
-            browser = p.chromium.launch_persistent_context(**launch_kwargs) if BROWSER_MODE == "stealth" else p.firefox.launch_persistent_context(**launch_kwargs)
+            browser = _bd.launch_context(p, BROWSER_MODE, **launch_kwargs)
             page = browser.pages[0] if browser.pages else browser.new_page()
             _stash_profile_on_page(page, SESSION_FOLDER, account_label=label)  # v900 — new page = new listener
             print("[Warmup] ✓ Browser relaunched — proceeding to Flow without warmup", flush=True)
@@ -24336,7 +24337,7 @@ def main(account_session=None, account_download=None, account_label=None):
                     }
                     if single_proxy_config:
                         relaunch_kwargs['proxy'] = single_proxy_config
-                    browser = p.chromium.launch_persistent_context(**relaunch_kwargs)
+                    browser = _bd.launch_context(p, BROWSER_MODE, **relaunch_kwargs)
                 else:
                     relaunch_kwargs = {
                         'user_data_dir': SESSION_FOLDER,
@@ -24345,8 +24346,8 @@ def main(account_session=None, account_download=None, account_label=None):
                     }
                     if single_proxy_config:
                         relaunch_kwargs['proxy'] = single_proxy_config
-                    browser = p.firefox.launch_persistent_context(**relaunch_kwargs)
-                
+                    browser = _bd.launch_context(p, BROWSER_MODE, **relaunch_kwargs)
+
                 page = browser.pages[0] if browser.pages else browser.new_page()
                 _stash_profile_on_page(page, SESSION_FOLDER, account_label=label)  # v900 — new page = new listener
                 chrome_warmup(page)
@@ -24384,7 +24385,7 @@ def main(account_session=None, account_download=None, account_label=None):
                             print(f"[Sync] ✓ Session copied from golden")
                         except Exception as e:
                             print(f"[Sync] ⚠ Could not copy session: {e}")
-                    browser = p.chromium.launch_persistent_context(**relaunch_kwargs) if BROWSER_MODE == "stealth" else p.firefox.launch_persistent_context(**relaunch_kwargs)
+                    browser = _bd.launch_context(p, BROWSER_MODE, **relaunch_kwargs)
                     page = browser.pages[0] if browser.pages else browser.new_page()
                     _stash_profile_on_page(page, SESSION_FOLDER, account_label=label)  # v900 — new page = new listener
                     chrome_warmup(page)
@@ -24846,7 +24847,7 @@ def main(account_session=None, account_download=None, account_label=None):
                                     # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
                                     if BROWSER_MODE == "stealth":
                                         launch_kwargs['user_data_dir'] = SESSION_FOLDER
-                                    browser = p.chromium.launch_persistent_context(**launch_kwargs)
+                                    browser = _bd.launch_context(p, BROWSER_MODE, **launch_kwargs)
                                     page = browser.pages[0] if browser.pages else browser.new_page()
                                     # Match startup sequence exactly — warmup, human delays, full load
                                     chrome_warmup(page)
@@ -24919,7 +24920,7 @@ def main(account_session=None, account_download=None, account_label=None):
                                             time.sleep(2)
                                             if BROWSER_MODE == "stealth":
                                                 launch_kwargs['user_data_dir'] = SESSION_FOLDER
-                                            browser = p.chromium.launch_persistent_context(**launch_kwargs)
+                                            browser = _bd.launch_context(p, BROWSER_MODE, **launch_kwargs)
                                             page = browser.pages[0] if browser.pages else browser.new_page()
                                             page.goto(FLOW_HOME_URL, timeout=30000, wait_until="domcontentloaded")
                                             ensure_logged_into_flow(page, "RESTORE-RETRY", timeout_minutes=2)
@@ -24937,7 +24938,7 @@ def main(account_session=None, account_download=None, account_label=None):
                                 try:
                                     if BROWSER_MODE == "stealth":
                                         launch_kwargs['user_data_dir'] = SESSION_FOLDER
-                                    browser = p.chromium.launch_persistent_context(**launch_kwargs)
+                                    browser = _bd.launch_context(p, BROWSER_MODE, **launch_kwargs)
                                     page = browser.pages[0] if browser.pages else browser.new_page()
                                     page.goto(FLOW_HOME_URL, timeout=30000, wait_until="domcontentloaded")
                                     _dl_page = browser.new_page()
@@ -25036,7 +25037,7 @@ def main_multi_coordinator(accounts):
             }
             if single_proxy_config:
                 launch_kwargs['proxy'] = single_proxy_config
-            browser = p.chromium.launch_persistent_context(**launch_kwargs)
+            browser = _bd.launch_context(p, BROWSER_MODE, **launch_kwargs)
         else:
             launch_kwargs = {
                 'user_data_dir': session,
@@ -25045,8 +25046,8 @@ def main_multi_coordinator(accounts):
             }
             if single_proxy_config:
                 launch_kwargs['proxy'] = single_proxy_config
-            browser = p.firefox.launch_persistent_context(**launch_kwargs)
-        
+            browser = _bd.launch_context(p, BROWSER_MODE, **launch_kwargs)
+
         page = browser.pages[0] if browser.pages else browser.new_page()
         print(f"[{acc_name}] ✓ Browser started")
 
@@ -25127,11 +25128,8 @@ def main_multi_coordinator(accounts):
                 print(f"[{acc_name}] ⚠ Sync failed: {e}")
             
             # Relaunch
-            if BROWSER_MODE == "stealth":
-                # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
-                browser = p.chromium.launch_persistent_context(**launch_kwargs)
-            else:
-                browser = p.firefox.launch_persistent_context(**launch_kwargs)
+            # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
+            browser = _bd.launch_context(p, BROWSER_MODE, **launch_kwargs)
             
             page = browser.pages[0] if browser.pages else browser.new_page()
             chrome_warmup(page)
@@ -25236,7 +25234,7 @@ def main_multi_coordinator(accounts):
                     # suppress_chrome_signin_dialog — removed (reCAPTCHA fix v123.4)
                     lk = dict(acc_info['launch_kwargs'])
                     lk['user_data_dir'] = acc_info['session']
-                    new_browser = p.chromium.launch_persistent_context(**lk)
+                    new_browser = _bd.launch_context(p, BROWSER_MODE, **lk)
                     new_page = new_browser.pages[0] if new_browser.pages else new_browser.new_page()
                     chrome_warmup(new_page)
                     new_page.goto(FLOW_HOME_URL, timeout=30000, wait_until="domcontentloaded")
