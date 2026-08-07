@@ -191,7 +191,46 @@ def _ensure_camoufox():
 # page.evaluate ("Cannot read properties of undefined (reading '_client')").
 # Decided here because this import runs long before the module-level
 # BROWSER_MODE is defined, so read the env directly.
-import browser_driver as _bd
+def _bootstrap_browser_driver():
+    """Import browser_driver, self-healing if the worker does not have it yet.
+
+    ORDERING TRAP: the companion-module sync lives in check_for_updates(), which
+    only runs under `if __name__ == "__main__"` — i.e. AFTER this module has
+    finished importing. So the very first time a worker auto-updates to a
+    flow_worker.py that imports browser_driver, the file is not on disk yet and
+    the import dies with ModuleNotFoundError before the sync can ever fetch it.
+    That bricks EVERY updating worker, Chrome ones included (observed 2026-08-07).
+
+    Fetch it here instead, from the same endpoint the companion sync uses.
+    """
+    try:
+        import browser_driver as _m
+        return _m
+    except ImportError:
+        pass
+
+    import urllib.request
+    base = (os.environ.get("WEB_APP_URL") or "https://kavenobuilder.com").rstrip("/")
+    dest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser_driver.py")
+    url = f"{base}/api/user-worker/download/browser_driver.py"
+    print(f"[Init] browser_driver missing - fetching from {url}", flush=True)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "flow-worker"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = r.read()
+        with open(dest, "wb") as f:
+            f.write(data)
+        print(f"[Init] browser_driver fetched ({len(data)} bytes)", flush=True)
+    except Exception as e:
+        print(f"[Init] FATAL: could not fetch browser_driver ({e})", flush=True)
+        print("[Init] Worker cannot start. Re-run the installer or check WEB_APP_URL.", flush=True)
+        raise
+
+    import browser_driver as _m
+    return _m
+
+
+_bd = _bootstrap_browser_driver()
 _BROWSER_MODE_EARLY = _bd.resolve_browser_mode()
 
 if _bd.is_firefox_mode(_BROWSER_MODE_EARLY):
