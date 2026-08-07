@@ -9481,6 +9481,19 @@ def click_generate_button(page, context_name="", max_retries=3):
             scroll_randomly(page)
             human_delay(0.5, 1)
 
+            # v918 — settle before the click, exactly as the redo path does at
+            # 16473. This is the LAST human beat, so it belongs here, above the
+            # v700j bookkeeping. v918.1: it was briefly placed BELOW the v700j
+            # block, which pushed the click-time stamp 0.5-1.5s ahead of the
+            # real click and weakened the very filter v700j exists for — a
+            # response captured inside that gap would have passed the
+            # min_captured_at test and could bind to the wrong clip.
+            human_delay(0.5, 1.5)
+            # TEMP DIAG (v918) — proves the redo-parity sequence ran on a real
+            # submit. Remove once operator-side evidence shows whether the main
+            # path's 403 rate moved.
+            print(f"{prefix}[v918] pre-generate beats done (redo parity) — clicking Generate", flush=True)
+
             # v700j — stamp the click time on the page so _bind_pending_submits
             # can REJECT any submit-response that was captured BEFORE this
             # click. Without this filter, late-arriving responses from a
@@ -9491,6 +9504,11 @@ def click_generate_button(page, context_name="", max_retries=3):
             # "right slot, wrong content" misroute the user reported.
             # Also drain + discard any pre-existing buffer entries so the
             # window for this click starts clean.
+            # v918: this block stays IMMEDIATELY above the click. It touches no
+            # page (time.time() + an in-process buffer), so it does not break
+            # v918's rule that the last thing to touch the page is a human
+            # action — and keeping it here preserves the stamp's proximity to
+            # the real click exactly as it was before v918.
             try:
                 page._v700j_last_click_at = time.time()
                 _drained = _drain_submit_responses(getattr(page, '_v700_submit_buffer_key', '').replace('acct:', '') if getattr(page, '_v700_submit_buffer_key', None) else "")
@@ -9502,15 +9520,6 @@ def click_generate_button(page, context_name="", max_retries=3):
                     )
             except Exception:
                 page._v700j_last_click_at = time.time()
-
-            # v918 — settle before the click, exactly as the redo path does at
-            # 16473. Nothing may touch the page between the last human beat and
-            # the click; the v700j stamp + drain above are pure Python.
-            human_delay(0.5, 1.5)
-            # TEMP DIAG (v918) — proves the redo-parity sequence ran on a real
-            # submit. Remove once operator-side evidence shows whether the main
-            # path's 403 rate moved.
-            print(f"{prefix}[v918] pre-generate beats done (redo parity) — clicking Generate", flush=True)
 
             # Click Generate — use human_click for natural mouse movement + real click events
             # This is THE click that triggers the API call with reCAPTCHA token

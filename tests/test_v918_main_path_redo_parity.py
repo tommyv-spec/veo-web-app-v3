@@ -85,6 +85,30 @@ class TestV918MainPathRedoParity(unittest.TestCase):
         self.assertNotIn("page.evaluate", between,
                          "nothing may touch the page between the settle and the click")
 
+    def test_v700j_stamp_stays_immediately_before_the_click(self):
+        """v918.1 regression guard.
+
+        The first cut of v918 put the settle delay BELOW the v700j block, so
+        the click-time stamp fired 0.5-1.5s ahead of the real click. v700j
+        exists to reject submit-responses captured BEFORE the click
+        (min_captured_at, ~line 1960); widening that gap lets a response
+        captured inside it pass the filter and bind to the wrong clip.
+
+        The stamp must therefore be the LAST thing before the click, and the
+        settle must sit above it — which is safe because the v700j block
+        touches no page."""
+        i_delay = self.fn.index("human_delay(0.5, 1.5)")
+        i_stamp = self.fn.index("page._v700j_last_click_at = time.time()")
+        i_click = self.fn.index("human_click_element(page, arrow_btn")
+        self.assertLess(i_delay, i_stamp,
+                        "the settle must run BEFORE the click-time stamp")
+        self.assertLess(i_stamp, i_click)
+        tail = self.fn[i_stamp:i_click]
+        for blocking in ("human_delay(", "human_pre_generate_wait(",
+                         "human_mouse_move(", "scroll_randomly(", "time.sleep("):
+            self.assertNotIn(blocking, tail,
+                             f"{blocking} must not sit between the stamp and the click")
+
     def test_nothing_touches_the_page_after_the_last_human_beat(self):
         """The v700j stamp + drain may stay before the click because they are
         pure Python (time.time() and an in-process buffer), but no page call
