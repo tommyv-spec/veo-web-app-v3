@@ -179,10 +179,20 @@ def build_image_prompt_contract(
         }.get(aspect)
         label = f"{orientation} {aspect}" if orientation else aspect
         output_lines.append(f"Aspect ratio: {label}.")
+    # v912.3 — the full realism vocabulary, positively phrased (Google: semantic
+    # negatives; house rule: no negative prompts). Every clause targets a known
+    # AI tell: waxy skin, painted-on clothes, showroom-clean rooms, studio glow,
+    # cinematic gloss, perfectly level framing.
     output_lines.append(
-        "Render as a real photograph captured in the moment: natural skin texture "
-        "with visible pores and fine lines where faces appear, real fabric weave "
-        "and worn surfaces, everyday imperfection, honest unstaged framing."
+        "Render as a real photograph taken on an ordinary phone camera in the "
+        "available light of the scene: natural daylight falloff and slightly "
+        "imperfect white balance. Skin keeps its pores, fine lines, freckles and "
+        "uneven tone, and lips and hands look their real age. Cloth shows its "
+        "weave and the creases of a garment that has been worn. Surfaces carry "
+        "everyday wear — scuffs, smudges, dust and ordinary clutter where the "
+        "scene allows. The frame carries faint sensor noise, slightly soft "
+        "edges, flat everyday dynamic range, and a plain unposed snapshot "
+        "framing, as if someone simply raised a phone and shot."
     )
     output_lines.append(
         "The scene brief is the source of truth for the final scene except that it "
