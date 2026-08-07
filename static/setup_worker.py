@@ -101,13 +101,20 @@ def install_dependencies():
     if pip_python != sys.executable:
         print(f"  Using Python: {pip_python}")
 
-    # Check what's already installed
+    # Check what's already installed.
+    # camoufox is the Firefox (Camoufox) automation backend used by BROWSER_MODE=firefox,
+    # the new default (see write_config) — must be present on a clean machine.
+    packages = [
+        ("playwright", "playwright"),
+        ("requests", "requests"),
+        ("camoufox", "camoufox>=0.5.4"),
+    ]
     missing = []
-    for pkg in ["playwright", "requests"]:
+    for import_name, pip_spec in packages:
         try:
-            __import__(pkg)
+            __import__(import_name)
         except ImportError:
-            missing.append(pkg)
+            missing.append(pip_spec)
 
     if not missing:
         print("  ✓ Python packages already installed")
@@ -129,6 +136,18 @@ def install_dependencies():
             import subprocess as _sp
             result = _sp.run([pip_python] + sys.argv + ["--relaunched"])
             sys.exit(result.returncode)
+
+    # Fetch the Camoufox (Firefox) browser binary. This downloads from GitHub, which
+    # the operator's VPN can sometimes block -- a failed fetch must WARN, not abort
+    # setup, since flow_worker._ensure_camoufox() retries the fetch at launch anyway.
+    print("  Fetching Camoufox browser binary...")
+    try:
+        subprocess.check_call([pip_python, "-m", "camoufox", "fetch"])
+        print("  OK Camoufox browser ready")
+    except Exception as e:
+        print(f"  WARNING: Camoufox browser fetch failed ({e})")
+        print("  This can happen if GitHub is blocked (VPN/firewall).")
+        print(f"  Fix it later by running: {pip_python} -m camoufox fetch")
 
     # Verify Chrome is available (we use system Chrome, not Playwright's Chromium)
     chrome_paths = [
@@ -324,7 +343,10 @@ def write_config(token, accounts, admin_mode=False):
             f"WEB_APP_URL={WEB_APP_URL}\n"
             f"SESSION_FOLDER={acc['session_dir']}\n"
             f"DOWNLOAD_SESSION_FOLDER={acc['download_dir']}\n"
-            f"BROWSER_MODE=stealth\n"
+            # Firefox (Camoufox) is the default: Chrome 151+ mints reCAPTCHA tokens Flow
+            # refuses (~0% success as of 2026-08-07), while Firefox minted 10/10 accepted
+            # tokens. Set BROWSER_MODE=stealth here to fall back to Chrome.
+            f"BROWSER_MODE=firefox\n"
             f"MULTI_ACCOUNT=false\n"
             f"PROXY_TYPE=none\n"
         )
@@ -334,7 +356,10 @@ def write_config(token, accounts, admin_mode=False):
             f"WORKER_MODE={mode}",
             f"{token_key}={token}",
             f"WEB_APP_URL={WEB_APP_URL}",
-            f"BROWSER_MODE=stealth",
+            # Firefox (Camoufox) is the default: Chrome 151+ mints reCAPTCHA tokens Flow
+            # refuses (~0% success as of 2026-08-07), while Firefox minted 10/10 accepted
+            # tokens. Set BROWSER_MODE=stealth here to fall back to Chrome.
+            f"BROWSER_MODE=firefox",
             f"MULTI_ACCOUNT=true",
             f"MULTI_ACCOUNT_MODE=true",
             f"PROXY_TYPE=none",
