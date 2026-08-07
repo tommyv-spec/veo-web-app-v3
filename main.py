@@ -13754,6 +13754,7 @@ async def local_worker_get_pending_job(
     # Build query for available jobs
     # Either: unclaimed, OR claimed by this same worker
     # Exclude any jobs the worker is already processing
+    _age_cutoff = job_age_cutoff()
     if worker_id:
         query = db.query(Job).filter(
             Job.backend == 'flow',
@@ -13771,9 +13772,12 @@ async def local_worker_get_pending_job(
         # Exclude jobs already being processed
         if exclude_ids:
             query = query.filter(Job.id.notin_(exclude_ids))
-        
+
+        if _age_cutoff is not None:
+            query = query.filter(Job.created_at >= _age_cutoff)
+
         job = query.order_by(Job.created_at.asc()).first()
-        
+
         if job and job.claimed_by_worker != worker_id:
             # Claim it
             job.claimed_by_worker = worker_id
@@ -13794,7 +13798,10 @@ async def local_worker_get_pending_job(
 
         if exclude_ids:
             query = query.filter(Job.id.notin_(exclude_ids))
-        
+
+        if _age_cutoff is not None:
+            query = query.filter(Job.created_at >= _age_cutoff)
+
         job = query.order_by(Job.created_at.asc()).first()
     
     # v455: piggyback abort signals on this poll. The worker polls /pending
@@ -15167,6 +15174,7 @@ async def user_worker_get_pending_job(
         db.commit()
 
     # Query for available jobs - SCOPED TO USER
+    _age_cutoff = job_age_cutoff()
     if worker_id:
         query = db.query(Job).filter(
             Job.user_id == user_id,
@@ -15179,9 +15187,12 @@ async def user_worker_get_pending_job(
         )
         if exclude_ids:
             query = query.filter(Job.id.notin_(exclude_ids))
-        
+
+        if _age_cutoff is not None:
+            query = query.filter(Job.created_at >= _age_cutoff)
+
         job = query.order_by(Job.created_at.asc()).first()
-        
+
         if job:
             job.claimed_by_worker = worker_id
             job.claimed_at = datetime.utcnow()
@@ -15208,6 +15219,10 @@ async def user_worker_get_pending_job(
             # paging without worker_id got the same head job forever.
             print(f"[UserWorker] read-only pending poll excluding {len(exclude_ids)} job(s)",
                   flush=True)
+
+        if _age_cutoff is not None:
+            query = query.filter(Job.created_at >= _age_cutoff)
+
         job = query.order_by(Job.created_at.asc()).first()
 
     # v455: piggyback abort signals (same as local-worker endpoint)
