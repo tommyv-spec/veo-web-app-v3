@@ -63,7 +63,9 @@ def _reference_use(reference_class: str, role: str, reference_intent: str = "") 
     if cls == "persona":
         return (
             f"Identity reference for {role}. Keep the same face, defining facial "
-            "features, apparent age, skin tone, hair, body shape, and proportions. Follow "
+            "features, apparent age, skin tone, hair, body shape, and proportions "
+            "exactly as this reference shows them — rendered as they are, with "
+            "natural skin texture rather than smoothing or restyling. Follow "
             "the scene brief for pose, expression, wardrobe, action, framing, and setting."
         )
     if cls == "product":
@@ -129,6 +131,15 @@ def build_image_prompt_contract(
     scene = strip_legacy_manifest_lines(body)
 
     sections = [PROMPT_CONTRACT_MARKER]
+    # v912.3 — both vendors' official guides ask for the INTENT up front (Google:
+    # "provide context and intent"; OpenAI: "include the intended use to set the
+    # mode"), and for the word "photorealistic" stated plainly to engage the
+    # photorealistic mode. One line, before anything else.
+    sections.append(
+        "Goal: one photorealistic, unposed phone snapshot for a social video. "
+        "Combine the numbered reference images and the scene brief into a single "
+        "coherent photograph captured in the moment."
+    )
     if refs:
         lines = [
             "REFERENCE IMAGES",
@@ -146,11 +157,13 @@ def build_image_prompt_contract(
                     f"Use (fallback): {_reference_use(ref_class, role, item.get('reference_intent') or '')}"
                 )
         lines.append(
-            "Follow each image's Use line. An authoritative Use line wins over any "
+            "Read each Use line as four parts: what to take from that image, where "
+            "to apply it, what to preserve untouched, and what to ignore. Follow "
+            "each image's Use line. An authoritative Use line wins over any "
             "conflicting scene instruction. A fallback Use line defers to the scene "
-            "brief only where that fallback says it does. Do not blend identities, "
-            "products, styles, poses, or backgrounds across references unless these "
-            "rules allow that combination."
+            "brief only where that fallback says it does. Keep every identity, "
+            "product, style, pose, and background bound to its own reference; "
+            "combine them only as these rules direct."
         )
         sections.append("\n".join(lines))
 
@@ -167,9 +180,15 @@ def build_image_prompt_contract(
         label = f"{orientation} {aspect}" if orientation else aspect
         output_lines.append(f"Aspect ratio: {label}.")
     output_lines.append(
+        "Render as a real photograph captured in the moment: natural skin texture "
+        "with visible pores and fine lines where faces appear, real fabric weave "
+        "and worn surfaces, everyday imperfection, honest unstaged framing."
+    )
+    output_lines.append(
         "The scene brief is the source of truth for the final scene except that it "
         "cannot override an authoritative Use line. Preserve every reference detail "
-        "that the permitted changes do not need to alter."
+        "that the permitted changes do not need to alter, and keep those preserved "
+        "details identical in the output."
     )
     sections.append("\n".join(output_lines))
 
