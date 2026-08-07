@@ -144,9 +144,19 @@ def _ensure_patchright():
 
 _patchright_ok = _ensure_patchright()
 
-if _patchright_ok:
+# Firefox must NOT use Patchright — its chromium-only patches break Firefox's
+# page.evaluate ("Cannot read properties of undefined (reading '_client')").
+# Decided here because this import runs long before the module-level
+# BROWSER_MODE is defined, so read the env directly.
+import browser_driver as _bd
+_BROWSER_MODE_EARLY = _bd.resolve_browser_mode()
+
+if _bd.is_firefox_mode(_BROWSER_MODE_EARLY):
+    from playwright.sync_api import sync_playwright
+    print("[Init] Firefox mode - using Playwright + Camoufox (Patchright is chromium-only)", flush=True)
+elif _patchright_ok:
     from patchright.sync_api import sync_playwright
-    print("[Init] ✓ Using Patchright (undetected Playwright fork — CDP detection bypass active)")
+    print("[Init] Using Patchright (undetected Playwright fork - CDP detection bypass active)", flush=True)
 else:
     print("[Init] ╔══════════════════════════════════════════════════════════════╗", flush=True)
     print("[Init] ║  ⚠ WARNING: Running WITHOUT Patchright!                    ║", flush=True)
