@@ -17099,7 +17099,12 @@ echo USER_WORKER_TOKEN=%TOKEN%
 echo WEB_APP_URL=%APP_URL%
 echo SESSION_FOLDER=%WORKER_DIR%\\chrome-session
 echo DOWNLOAD_SESSION_FOLDER=%WORKER_DIR%\\chrome-download
-echo BROWSER_MODE=stealth
+REM Firefox (Camoufox) is the default: Chrome 151+ mints reCAPTCHA tokens Flow
+REM refuses (~0%% real as of 2026-08-07) while Firefox minted 10/10 accepted.
+REM Set BROWSER_MODE=stealth to fall back to Chrome. The SESSION_FOLDER above
+REM only applies in single-account mode; multi-account derives per-engine dirs
+REM (firefox-session / chrome-session) so the two browsers never share a profile.
+echo BROWSER_MODE=firefox
 echo MULTI_ACCOUNT={multi}
 echo MULTI_ACCOUNT_MODE={multi}
 echo PROXY_TYPE=none
@@ -17240,7 +17245,12 @@ USER_WORKER_TOKEN={token}
 WEB_APP_URL={app_url}
 SESSION_FOLDER=$HOME/veo-worker/chrome-session
 DOWNLOAD_SESSION_FOLDER=$HOME/veo-worker/chrome-download
-BROWSER_MODE=stealth
+# Firefox (Camoufox) is the default: Chrome 151+ mints reCAPTCHA tokens Flow
+# refuses (~0% real as of 2026-08-07) while Firefox minted 10/10 accepted.
+# Set BROWSER_MODE=stealth to fall back to Chrome. SESSION_FOLDER above only
+# applies in single-account mode; multi-account derives per-engine dirs
+# (firefox-session / chrome-session) so the two browsers never share a profile.
+BROWSER_MODE=firefox
 MULTI_ACCOUNT={multi}
 MULTI_ACCOUNT_MODE={multi}
 PROXY_TYPE=none
