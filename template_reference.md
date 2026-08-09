@@ -1269,6 +1269,8 @@ v598 elevates the hook-image-power decision from "implicit" (buried in hook-patt
 
 **Source: 2026-05-06 owner observation** *"and study also the backgrounds, especially because they have to resonate with the audience and have to give authority."* The HOOK frame is not just the foreground prop — the BACKGROUND signals what kind of authority the persona has. A clinical persona in a kitchen sounds like a stranger; a folk-wisdom elder in a sterile clinic sounds like a fraud. The setting MUST match the persona's authority type or the entire hook collapses.
 
+> **AMENDMENT (2026-08-09, forward-only — HANDOFF rev 277/278 Stage 0).** The PRINCIPLE above stands and is the rule: *the background must signal, and match, this persona's authority type.* The pairing matrix below is a dated observation of the May-2026 corpus and is **non-normative**. Its clinical rows are **RETIRED**: root `CLAUDE.md` §8 bans ALL medical-authority creatives (doctor personas, exam rooms, framed diplomas, clinical anchors — `feedback_compliance-no-medical-authority`). Do not stage any "required setting" or "required anchor" from a clinical row. Authority today is built §8-style: warm-knowing tone, sourced ingredients, ancestral/wellness lineage, distinctive premium setting (see §8 setting bank + `realistic-ugc-prompt-templates` §"Distinctive premium background"). **Q6 decision test:** does the setting confer THIS persona's authority type, within §8, with ≥2 visible anchors of that authority in the 0-2s frame? Any persona×setting pair passing that test is valid, listed below or not.
+
 **Corpus-grounded persona × setting authority pairings** (24-decode audit, 2026-05-06):
 
 | Persona archetype | Required setting | Required visible anchors (0-2s) | What BREAKS authority |
@@ -1311,6 +1313,8 @@ The setting carries TWO simultaneous signals: it must either look like *"the wor
 **Source: 2026-05-06 owner observation** *"there's no action, nothing happens. you have just a list of hooks, but you didn't understand the psychology behind it."* The first v598 ship gave Q1-Q7 (object + motion + pun + novelty + match + bg-authority + audience-resonance) but missed the **psychology** that makes the corpus videos actually viral. A hook can pass Q1-Q7 (lady at counter doing nice things with saffron, with proper background) and still be **psychologically dead** because no shame is being mediated, no taboo is being violated, no agent is acting, no curiosity loop is open.
 
 Every viral hook in the 24-decoded-video corpus stacks **four psychological mechanisms simultaneously**. Q8 forces the LLM to NAME each mechanism explicitly before locking the hook image; if any of the four is missing, the hook is psychologically dead even if Q1-Q7 pass.
+
+> **AMENDMENT (2026-08-09, forward-only — HANDOFF rev 277/278 Stage 0).** The four mechanisms below are the observed stack of the 24-video May-2026 corpus — an **example bank, not an exhaustive requirement**. Later doctrine supersedes the "all four or dead" claim as a universal gate: **v873 (HOOK CONTRACT: coherence + tension + filter) is the current universal hook decision test**, and live hook families go viral WITHOUT a shame-proxy or violent-act (v883 movie-style/dialogue scenes, the interaction-hook engine — dialogue tension and social stakes carry the psychology instead). **Q8 decision test today:** name the psychological mechanisms YOUR hook stacks and why each fires for this audience; an unlisted mechanism derived from the source is valid. The 4-row table remains the required checklist ONLY within the spectacle-prop hook family it was derived from (proxy + force-verb + agent-of-change hooks); outside that family it is a comparison lens.
 
 **The 4-mechanism stack (corpus-derived):**
 
@@ -1374,6 +1378,8 @@ If ANY no → reject hook. Q8 fails most often when Q1-Q7 pass with
 "gentle gesture + clean kitchen + soft saffron pinch" — that's the
 psychologically-dead trap.
 ```
+
+**Read Q6 and Q8 through their 2026-08-09 amendment blocks above**: Q6's clinical rows are retired (§8), its test is the authority-match principle; Q8's four-mechanism checklist is family-conditional (spectacle-prop hooks) — the universal hook gate is v873.
 
 ---
 
