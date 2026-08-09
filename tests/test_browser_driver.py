@@ -69,6 +69,23 @@ def test_camoufox_kwargs_bad_window_keeps_default():
     assert "window" not in out
 
 
+def test_firefox_defaults_to_headless():
+    # A minimized Firefox window cannot be clicked at all (measured: visible
+    # click 0.1s, same click minimized times out). Headless has no window to
+    # minimize. flow_worker hardcodes headless=False, so the override must win.
+    assert bd.firefox_headless_enabled({}) is True
+    out = bd.camoufox_launch_kwargs({"user_data_dir": "X", "headless": False}, env={})
+    assert out["headless"] is True
+
+
+def test_firefox_headless_opt_out():
+    for val in ("0", "false", "no", "off"):
+        assert bd.firefox_headless_enabled({"FIREFOX_HEADLESS": val}) is False
+    out = bd.camoufox_launch_kwargs({"user_data_dir": "X", "headless": False},
+                                    env={"FIREFOX_HEADLESS": "0"})
+    assert out["headless"] is False
+
+
 def test_firefox_mode_never_targets_chrome_processes():
     # The golden restore kills by process name then rmtree's the profile with
     # ignore_errors=True. Wrong names => live Firefox keeps its lock => the

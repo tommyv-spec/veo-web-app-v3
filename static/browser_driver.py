@@ -42,12 +42,42 @@ def browser_process_names(mode):
     return FIREFOX_PROCESS_NAMES if is_firefox_mode(mode) else CHROME_PROCESS_NAMES
 
 
-def camoufox_launch_kwargs(kwargs, window=None):
+def firefox_headless_enabled(env=None):
+    """Headless is the DEFAULT for Firefox mode. Set FIREFOX_HEADLESS=0 to show it.
+
+    A minimized Firefox window cannot be driven at all. Measured 2026-08-09 on
+    Camoufox: click on a visible window succeeds in 0.1s; minimize the same
+    window and the identical click times out. Firefox stops compositing when
+    minimized and Playwright's click does hit-testing that needs live layout.
+
+    That is not a corner case — it cost a live run ~19 minutes stuck retrying
+    one settings click ("performing click action" then timeout, 15 attempts),
+    which only recovered when the window came back to the foreground. Firefox
+    prefs do not help: window_occlusion_tracking.enabled=false,
+    dom.suspend_inactive.enabled=false and the timer-throttling prefs were all
+    tried and the minimized click still timed out.
+
+    Headless has no window to minimize, so the failure cannot happen, and the
+    operator gets their desktop back. navigator.webdriver stays False.
+    """
+    env = os.environ if env is None else env
+    raw = (env.get("FIREFOX_HEADLESS") or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
+def camoufox_launch_kwargs(kwargs, window=None, env=None):
     """Translate flow_worker's launch kwargs into Camoufox's dialect."""
     out = dict(kwargs)
 
     for k in _CHROME_ONLY_KWARGS:
         out.pop(k, None)
+
+    # flow_worker hardcodes headless=False (it was written for a Chrome window
+    # the operator watches). See firefox_headless_enabled for why that is the
+    # wrong default here.
+    out["headless"] = firefox_headless_enabled(env)
 
     # Pin the OS or Camoufox randomises it — it served a macOS user-agent on a
     # Windows host, a mismatch reCAPTCHA can score against.
