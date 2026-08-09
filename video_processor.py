@@ -3022,6 +3022,32 @@ def _match_whisper_to_dialogue(whisper_words: list, per_clip_words: list,
 # replacement; per-clip Whisper-tiny pass now feeds final stats directly.
 
 
+def map_time_through_keep_segments(t_pre: float, keep_segments) -> float:
+    """v926 — map a timestamp from PRE-VAD time onto the trimmed timeline.
+
+    `keep_segments` is what apply_vad returns: the (start, end) ranges it kept,
+    sorted, non-overlapping, in the source's own clock. A timestamp's new
+    position is simply how much kept time precedes it. A timestamp that falls
+    inside a REMOVED gap collapses onto that gap's cut point, which is exactly
+    where it ends up in the output.
+
+    Why this exists: the b-roll pipeline knows each clip's window on the
+    pre-VAD concat clock, and the final-pass VAD then removes silence from
+    wherever it happens to sit — 24.175s out of 121.47s on job d8051bf6.
+    Scaling by one global ratio keeps the total right and every interior
+    window wrong (measured: b-roll visual 3 landed 2.22s past the end of its
+    own line). This maps each boundary exactly instead.
+    """
+    acc = 0.0
+    for s, e in (keep_segments or []):
+        if t_pre <= s:
+            break
+        acc += min(t_pre, e) - s
+        if t_pre <= e:
+            break
+    return max(0.0, acc)
+
+
 def apply_vad(
     src: Path,
     out: Path,
@@ -3372,7 +3398,17 @@ def apply_vad(
         "original_duration": original_duration,
         "final_duration": final_duration,
         "segments_found": len(merged),
-        "silence_removed": original_duration - final_duration
+        "silence_removed": original_duration - final_duration,
+        # v926 — the keep-list, in ORIGINAL (pre-VAD) source time, exactly as
+        # extracted above. Anything that knows a timestamp on the pre-VAD
+        # timeline can map it onto the trimmed one with it. The b-roll pipeline
+        # needs precisely that: its per-clip windows are cumulative sums of the
+        # pre-VAD clip durations, and this pass then removed silence from
+        # WHEREVER it happened to be — measured 24.175s out of 121.47s on job
+        # d8051bf6, which left b-roll visual 3 sitting 2.22s past the end of
+        # its own line. A single global ratio cannot model a non-uniform cut;
+        # this list can, exactly.
+        "keep_segments": [(float(s), float(e)) for s, e in merged],
     }
 
 

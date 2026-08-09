@@ -166,6 +166,62 @@ def test_measured_scaling_keeps_broll_and_speaker_the_same_length(rendered):
     )
 
 
+def test_keep_segment_map_places_windows_exactly_under_a_non_uniform_cut():
+    """v926 — the final-pass VAD removes silence from wherever it sits, so a
+    single global ratio cannot place interior windows. Measured on job
+    d8051bf6 (2026-08-09): 24.175s cut out of a 121.47s concat, and the global
+    ratio left b-roll visual 3 at 39.35-45.00s while its line actually played
+    at 38.42-42.78s — 2.22s past its own end, over the persona's next line.
+
+    Here the cut is deliberately lopsided: all the silence sits early, so a
+    proportional model is wrong everywhere after it.
+    """
+    from video_processor import map_time_through_keep_segments as m
+
+    # 40s source; 10s of silence removed in one lump at 5-15s. Kept: 30s.
+    keep = [(0.0, 5.0), (15.0, 40.0)]
+    assert m(0.0, keep) == pytest.approx(0.0)
+    assert m(5.0, keep) == pytest.approx(5.0)
+    assert m(10.0, keep) == pytest.approx(5.0)     # inside the gap → the cut point
+    assert m(15.0, keep) == pytest.approx(5.0)
+    assert m(20.0, keep) == pytest.approx(10.0)    # 5 kept + 5 past the gap
+    assert m(40.0, keep) == pytest.approx(30.0)
+
+    # the global-ratio model would put t=20 at 20 * (30/40) = 15.0s — 5s wrong
+    assert abs(20.0 * (30.0 / 40.0) - m(20.0, keep)) == pytest.approx(5.0)
+
+
+def test_keep_segment_map_is_identity_without_a_vad_pass():
+    """No global VAD (per-clip Whisper path) → nothing to map."""
+    from video_processor import map_time_through_keep_segments as m
+
+    assert m(12.34, [(0.0, 60.0)]) == pytest.approx(12.34)
+    assert m(12.34, []) == pytest.approx(0.0)   # caller must skip the map when empty
+
+
+def test_apply_vad_returns_its_keep_list(rendered):
+    """The map is only usable if apply_vad actually hands the ranges back."""
+    from video_processor import apply_vad
+
+    out = rendered["work"] / "vadded.mp4"
+    st = apply_vad(
+        rendered["speaker"], out,
+        min_gap_duration=0.3, silence_keep_duration=0.2, silence_mode="energy",
+    )
+    assert "keep_segments" in st, "apply_vad must return keep_segments for v926"
+    segs = st["keep_segments"]
+    assert isinstance(segs, list) and segs, "keep_segments must be a non-empty list"
+    assert all(e > s for s, e in segs), "each kept range must be forward"
+    assert all(
+        segs[i][1] <= segs[i + 1][0] + 1e-6 for i in range(len(segs) - 1)
+    ), "kept ranges must be sorted and non-overlapping"
+    kept = sum(e - s for s, e in segs)
+    assert kept == pytest.approx(st["final_duration"], abs=0.5), (
+        f"kept time {kept:.3f}s should account for the trimmed duration "
+        f"{st['final_duration']:.3f}s"
+    )
+
+
 def test_measured_ratio_also_absorbs_concat_normalize_drift(rendered):
     """The per-clip durations are probed BEFORE concat_videos re-encodes each
     clip to fps=24 + 48k AAC, so their sum is not the real timeline. The

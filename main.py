@@ -11207,38 +11207,95 @@ async def _do_export_final(
                     if not _all_mapped:
                         _pre_targets = None
                     else:
-                        # v925 — ONE measured ratio maps the pre-normalize
-                        # per-clip timeline onto the delivered speaker file.
-                        # Covers the speed pass (k≈1/1.1 when it ran, ≈1.0 when
-                        # it did not) AND the concat's normalize drift. No
-                        # condition is re-derived here — the ratio is observed.
+                        # === v926 — map the windows through what actually
+                        # happened to the timeline, in two exact steps. ===
+                        #
+                        # The targets above live on the PRE-VAD concat clock
+                        # (cumulative sums of the per-clip durations). Two
+                        # things move them before delivery:
+                        #
+                        #   1. the final-pass silence VAD, which deletes
+                        #      silence from WHEREVER it sits — non-uniform, so
+                        #      no single ratio can express it. Measured on job
+                        #      d8051bf6: 24.175s cut out of 121.47s. v925
+                        #      rescaled by one global ratio, which fixed total
+                        #      length (delta 0.001s) but still left b-roll
+                        #      visual 3 sitting 2.22s past the end of its own
+                        #      line, on top of the persona's next line.
+                        #      apply_vad now returns `keep_segments` — the
+                        #      exact ranges it kept, in pre-VAD time — so a
+                        #      timestamp maps across by summing kept time
+                        #      before it. Exact, not approximated.
+                        #   2. the speed pass, a genuine uniform scale, taken
+                        #      as the MEASURED ratio of the delivered duration
+                        #      to the post-VAD one.
+                        #
+                        # No VAD keep-list (per-clip Whisper path, where the
+                        # concat is never globally re-trimmed) → step 1 is the
+                        # identity and step 2 falls back to the delivered
+                        # duration over the summed clip durations, which also
+                        # absorbs concat normalize drift.
                         _sum_durs = sum(float(_d or 0.0) for _d in _speaker_durs)
-                        _k = 1.0
-                        if _sum_durs > 0.1 and _speaker_final_dur > 0.1:
-                            _k = _speaker_final_dur / _sum_durs
-                        if _k <= 0.4 or _k >= 1.6:
-                            print(
-                                f"[Export/v698A/broll] ⚠ measured ratio {_k:.4f} "
-                                f"outside sane range (sum_clips={_sum_durs:.3f}s, "
-                                f"speaker={_speaker_final_dur:.3f}s) — using 1.0. "
-                                f"Something upstream changed the timeline length.",
-                                flush=True,
+                        _keep = stats.get("keep_segments") or []
+                        _post_vad_dur = float(
+                            stats.get("pre_speed_duration")
+                            or stats.get("vad_final_duration")
+                            or 0.0
+                        ) or _speaker_final_dur
+
+                        from video_processor import (
+                            map_time_through_keep_segments as _map_through_vad_impl,
+                        )
+
+                        def _map_through_vad(_t_pre, _segs=_keep):
+                            return _map_through_vad_impl(_t_pre, _segs)
+
+                        if _keep:
+                            _k = (
+                                _speaker_final_dur / _post_vad_dur
+                                if _post_vad_dur > 0.1 else 1.0
                             )
-                            _k = 1.0
-                        if abs(_k - 1.0) > 1e-4:
+                            _mode = f"vad_keep_map({len(_keep)} segs) × {_k:.4f}"
                             for _t in _pre_targets:
-                                _t["start"] = _t["start"] * _k
-                                _t["end"] = _t["end"] * _k
+                                _t["start"] = _map_through_vad(_t["start"]) * _k
+                                _t["end"] = _map_through_vad(_t["end"]) * _k
                                 _t["target_duration"] = _t["end"] - _t["start"]
+                        else:
+                            _k = 1.0
+                            if _sum_durs > 0.1 and _speaker_final_dur > 0.1:
+                                _k = _speaker_final_dur / _sum_durs
+                            if _k <= 0.4 or _k >= 1.6:
+                                print(
+                                    f"[Export/v698A/broll] ⚠ measured ratio {_k:.4f} "
+                                    f"outside sane range (sum_clips={_sum_durs:.3f}s, "
+                                    f"speaker={_speaker_final_dur:.3f}s) — using 1.0. "
+                                    f"Something upstream changed the timeline length.",
+                                    flush=True,
+                                )
+                                _k = 1.0
+                            _mode = f"global ratio {_k:.4f}"
+                            if abs(_k - 1.0) > 1e-4:
+                                for _t in _pre_targets:
+                                    _t["start"] = _t["start"] * _k
+                                    _t["end"] = _t["end"] * _k
+                                    _t["target_duration"] = _t["end"] - _t["start"]
                         stats["v698a_broll_time_scale"] = round(_k, 6)
+                        stats["v698a_broll_target_map"] = _mode
                         print(
                             f"[Export/v698A/broll] targets built from speaker "
-                            f"per-clip durations ({len(_pre_targets)} clips), "
-                            f"scaled by MEASURED ratio {_k:.4f} "
-                            f"(sum_clips={_sum_durs:.3f}s → speaker "
+                            f"per-clip durations ({len(_pre_targets)} clips) and "
+                            f"mapped by {_mode} "
+                            f"(pre-VAD sum={_sum_durs:.3f}s → post-VAD "
+                            f"{_post_vad_dur:.3f}s → delivered "
                             f"{_speaker_final_dur:.3f}s)",
                             flush=True,
                         )
+                        for _i, _t in enumerate(_pre_targets):
+                            print(
+                                f"[Export/v698A/broll]   window {_i}: "
+                                f"{_t['start']:.2f}s → {_t['end']:.2f}s",
+                                flush=True,
+                            )
 
                 print(
                     f"[Export/v698A/broll] master-audio alignment: "
