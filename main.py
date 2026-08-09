@@ -11302,6 +11302,47 @@ async def _do_export_final(
                         flush=True,
                     )
 
+                # v925 — PERSIST the verdict. Every [Export] line above is a
+                # print(): it reaches Render's stdout and nowhere else, so the
+                # only way anyone could check a shipped pair was to download
+                # both files and probe them by hand (job_logs held 0 rows for
+                # the export phase). Write the one line that matters into
+                # job_logs so `GET /api/jobs/{id}/logs` can answer "did this
+                # pair line up?" without shell access to the box. Note the
+                # 24h purge for completed jobs — this is a verification aid
+                # for the export you just ran, not an archive.
+                try:
+                    _verdict = (
+                        "❌ b-roll LENGTH MISMATCH"
+                        if stats.get("v698a_broll_length_mismatch")
+                        else "✓ b-roll length matches speaker"
+                    )
+                    add_job_log(
+                        db, job_id,
+                        f"{_verdict}: broll {_broll_dur:.3f}s vs speaker "
+                        f"{_speaker_final_dur:.3f}s (delta {_len_delta:+.3f}s, "
+                        f"speed={stats.get('playback_speed') or 'none'}, "
+                        f"time_scale={stats.get('v698a_broll_time_scale')}, "
+                        f"clips={len(broll_clip_info)})",
+                        "WARNING" if stats.get("v698a_broll_length_mismatch") else "INFO",
+                        "export",
+                        details={
+                            "broll_duration": stats.get("v698a_broll_duration"),
+                            "speaker_duration": stats.get("v698a_speaker_duration"),
+                            "length_delta": stats.get("v698a_broll_length_delta"),
+                            "time_scale": stats.get("v698a_broll_time_scale"),
+                            "playback_speed": stats.get("playback_speed"),
+                            "broll_filename": broll_filename,
+                            "targets": "pre_computed" if _pre_targets else "whisper_master",
+                        },
+                    )
+                except Exception as _jl_err:
+                    print(
+                        f"[Export/v698A/broll] job-log write failed (non-fatal): "
+                        f"{_jl_err}",
+                        flush=True,
+                    )
+
                 print(
                     f"[Export/v698A/broll] broll pipeline complete. "
                     f"final_broll → {broll_output_path}",
