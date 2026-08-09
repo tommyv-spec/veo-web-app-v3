@@ -3975,8 +3975,33 @@ WORKER_ID = os.environ.get("WORKER_ID", DEFAULT_WORKER_ID)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Single account config (legacy)
-SESSION_FOLDER = os.environ.get("SESSION_FOLDER", "./flow_session_chrome")
-DOWNLOAD_SESSION_FOLDER = os.environ.get("DOWNLOAD_SESSION_FOLDER", "./flow_session_chrome_download")
+def _engine_session_folder(env_key, default):
+    """Session dir for the CURRENT engine, remapping a chrome-named value.
+
+    The installer writes SESSION_FOLDER=...\\chrome-session unconditionally, and
+    single-account mode (`flow_worker.py --single`, which start_worker.bat uses)
+    treats that value as authoritative. In Firefox mode that points the worker at
+    a Chrome profile directory, so get_golden_folder() looks for chrome-golden,
+    finds none, skips the ff-pull entirely, and the worker lands on the Google
+    sign-in page with no way to log in (observed 2026-08-09).
+
+    A Chrome profile is unreadable by Firefox, so a chrome-named dir in Firefox
+    mode is ALWAYS wrong. Remap the prefix instead of trusting it. Chrome mode is
+    untouched.
+    """
+    val = os.environ.get(env_key, default)
+    if _bd.is_firefox_mode(_BROWSER_MODE_EARLY):
+        base, name = os.path.split(val.rstrip("\\/"))
+        if name.startswith("chrome-"):
+            return os.path.join(base, "firefox-" + name[len("chrome-"):])
+        if name.startswith("flow_session_chrome"):
+            return os.path.join(base, name.replace("chrome", "firefox", 1))
+    return val
+
+
+SESSION_FOLDER = _engine_session_folder("SESSION_FOLDER", "./flow_session_chrome")
+DOWNLOAD_SESSION_FOLDER = _engine_session_folder(
+    "DOWNLOAD_SESSION_FOLDER", "./flow_session_chrome_download")
 CACHE_FILE = "./worker_cache.json"
 
 
