@@ -10569,6 +10569,11 @@ async def _do_export_final(
             except Exception:
                 return line or ""
 
+        # v925 — declared at export scope: the v698A b-roll pipeline now runs
+        # at the END of this function (after enhancement + speed), so the flag
+        # has to survive past the branch that sets it.
+        _has_v698a_pairs = False
+
         # === Master Audio Alignment (assemble jobs only) ===
         if settings.master_audio_filename:
             from video_processor import export_with_master_audio
@@ -10726,297 +10731,10 @@ async def _do_export_final(
                     flush=True,
                 )
 
-                # === Phase 4b-ii — BROLL PIPELINE (v701z) ===
-                # Master-audio-alignment restored. Speaker's per-clip
-                # Whisper-tiny pass (v701y) disposes its model BEFORE
-                # process_export returns; we add an explicit malloc_trim
-                # here so RSS is back to baseline before loading the
-                # master-audio Whisper-tiny (v701z) for the alignment pass.
-                # That sequencing — not overlapping Whisper loads — was
-                # what triggered the v701r → OOM regression.
-                #
-                # Speaker output's audio IS the broll master timeline.
-                # Each broll visual is placed at the timestamp where ITS
-                # dialogue line plays in master audio:
-                #   - 'single'      → dialogue = clip.dialogue_text
-                #   - 'visual_pair' → dialogue = clip.voiceover_line
-                #   - 'audio_pair'  → SKIP (face-anchor visual, not in broll)
-                #   - 'text_card'   → SKIP (no dialogue to align; gap → black)
-                # Visuals get speed-adjusted (up to 2× cap) to fit each
-                # line's master span; gaps with no paired clip render as
-                # BLACK frames. Out-of-budget visuals get speed-cap +
-                # trim (process_clip_for_alignment).
-                try:
-                    # v701z — explicit malloc_trim between speaker and broll
-                    # pipelines. Speaker's Whisper-tiny (v701y) was disposed
-                    # at the end of its per-clip loop, but glibc may still
-                    # hold the freed pages. Trim now so the master-audio
-                    # Whisper load below starts from clean RSS.
-                    try:
-                        import ctypes as _ct
-                        _ct.CDLL("libc.so.6").malloc_trim(0)
-                        print(
-                            "[Export/v698A/broll] v701z malloc_trim applied "
-                            "before master-audio pipeline",
-                            flush=True,
-                        )
-                    except Exception:
-                        pass
-
-                    from video_processor import export_with_master_audio
-                    import tempfile as _tmp
-
-                    def _rehydrate_path(c):
-                        p = Path(c.get("path") or "")
-                        if not p or p.exists():
-                            return
-                        if (c.get("scene_type") or "").lower() == "text_card":
-                            return
-                        if storage is None:
-                            return
-                        try:
-                            r2_key = f"jobs/{job_id}/outputs/{p.name}"
-                            if storage.exists(r2_key):
-                                print(
-                                    f"[Export/v698A/broll] rehydrating from R2: {p.name}",
-                                    flush=True,
-                                )
-                                storage.download_file(r2_key, str(p))
-                        except Exception as _rh_err:
-                            print(
-                                f"[Export/v698A/broll] rehydrate failed for "
-                                f"{p.name}: {_rh_err}",
-                                flush=True,
-                            )
-
-                    # v701zf — broll includes ONLY visual_pair clips.
-                    # HOOK + CTA (singles) are persona on-camera → those
-                    # windows on the master timeline render as black in
-                    # broll (audio plays, no replacement visual). audio_pair
-                    # + text_card stay skipped. visual_pair without a
-                    # resolvable paired_clip_id (no audio_pair sibling in
-                    # speaker) is also skipped — "don't include the clip
-                    # if the clip is not paired".
-                    broll_clip_info: List[Dict[str, Any]] = []
-                    broll_dialogue_lines: List[str] = []
-                    for c in clip_info:
-                        role = (c.get("clip_role") or "single").lower()
-                        if role != "visual_pair":
-                            continue  # singles + audio_pair + everything else
-                        paired_id = c.get("paired_clip_id")
-                        if not paired_id:
-                            print(
-                                f"[Export/v698A/broll] visual_pair clip "
-                                f"{c.get('clip_index')} has no paired_clip_id; "
-                                f"skipping (master window stays black)",
-                                flush=True,
-                            )
-                            continue
-                        line = (c.get("voiceover_line") or "").strip()
-                        if not line:
-                            print(
-                                f"[Export/v698A/broll] visual_pair clip "
-                                f"{c.get('clip_index')} missing voiceover_line; "
-                                f"skipping",
-                                flush=True,
-                            )
-                            continue
-                        _rehydrate_path(c)
-                        broll_clip_info.append(dict(c))
-                        broll_dialogue_lines.append(line)
-
-                    # Extract master audio from the freshly-written speaker MP4.
-                    # v773.10.18 — when a global speed pass will be applied to
-                    # the speaker output later in this function, PRE-APPLY the
-                    # same atempo to the master audio we extract for the b-roll
-                    # pipeline. Otherwise the b-roll renders against a
-                    # 61.16 s audio while the final speaker file is 55.60 s,
-                    # leaving the b-roll the wrong length AND out of sync at
-                    # every clip boundary. atempo here matches the speed pass
-                    # below (line ~8121) exactly: same value, audio-only path.
-                    broll_temp_dir = Path(_tmp.mkdtemp(prefix="v698a_broll_"))
-                    speaker_master_audio = broll_temp_dir / "speaker_master.mp3"
-                    import subprocess as _sp
-                    _broll_speed = 1.0
-                    if (
-                        settings.playback_speed
-                        and settings.playback_speed > 1.01
-                        and not settings.master_audio_filename
-                    ):
-                        _broll_speed = round(float(settings.playback_speed), 3)
-                    if _broll_speed > 1.01:
-                        _audio_cmd = [
-                            "ffmpeg", "-y", "-i", str(output_path),
-                            "-vn",
-                            "-filter:a", f"atempo={_broll_speed:.6f}",
-                            "-acodec", "libmp3lame", "-q:a", "2",
-                            str(speaker_master_audio),
-                        ]
-                    else:
-                        _audio_cmd = [
-                            "ffmpeg", "-y", "-i", str(output_path),
-                            "-vn", "-acodec", "libmp3lame", "-q:a", "2",
-                            str(speaker_master_audio),
-                        ]
-                    _audio_res = await asyncio.to_thread(
-                        _sp.run, _audio_cmd, capture_output=True, text=True,
-                    )
-                    if _audio_res.returncode != 0 or not speaker_master_audio.exists():
-                        raise RuntimeError(
-                            f"speaker audio extraction failed: rc="
-                            f"{_audio_res.returncode} stderr={_audio_res.stderr[:300]}"
-                        )
-                    print(
-                        f"[Export/v698A/broll] extracted speaker master audio: "
-                        f"{speaker_master_audio.name} "
-                        f"({speaker_master_audio.stat().st_size // 1024}KB)",
-                        flush=True,
-                    )
-
-                    broll_filename = output_filename.replace(
-                        "final_export_", "final_broll_"
-                    )
-                    if broll_filename == output_filename:
-                        broll_filename = f"final_broll_{output_filename}"
-                    broll_output_path = output_dir / broll_filename
-
-                    # v701zd — build pre-computed targets from speaker's
-                    # per-clip post-VAD durations. Speaker pipeline already
-                    # trimmed each clip via Whisper-VAD; the resulting
-                    # files_to_concat durations ARE the master timeline
-                    # positions. No second Whisper master transcription
-                    # needed (the legacy path repeatedly under-transcribed
-                    # to ~half the script words and bricked alignment).
-                    _pre_targets = None
-                    _speaker_durs = stats.get("per_clip_post_vad_durations") or []
-                    _speaker_db_ids = stats.get("per_clip_post_vad_clip_db_ids") or []
-                    if _speaker_durs and _speaker_db_ids:
-                        # Build map: speaker clip's db_id → (master_start, master_end)
-                        _pos_by_db_id = {}
-                        _cursor = 0.0
-                        for _i, _d in enumerate(_speaker_durs):
-                            _start = _cursor
-                            _end = _cursor + _d
-                            _cursor = _end
-                            _db_id = _speaker_db_ids[_i] if _i < len(_speaker_db_ids) else None
-                            if _db_id is not None:
-                                _pos_by_db_id[_db_id] = (_start, _end)
-
-                        # For each broll clip, find its position:
-                        #   - single (HOOK/CTA): match by own clip_db_id
-                        #   - visual_pair: match by paired_clip_id (the audio_pair sibling
-                        #     was in speaker concat at that position)
-                        _pre_targets = []
-                        _all_mapped = True
-                        for _bc in broll_clip_info:
-                            _role = (_bc.get("clip_role") or "single").lower()
-                            if _role == "visual_pair":
-                                _lookup_id = _bc.get("paired_clip_id")
-                            else:
-                                _lookup_id = _bc.get("_clip_db_id")
-                            _pos = _pos_by_db_id.get(_lookup_id)
-                            if _pos is None:
-                                _all_mapped = False
-                                print(
-                                    f"[Export/v698A/broll] v701zd no speaker position "
-                                    f"for broll clip clip_index={_bc.get('clip_index')} "
-                                    f"role={_role} lookup_id={_lookup_id} — falling back "
-                                    f"to Whisper-master path",
-                                    flush=True,
-                                )
-                                break
-                            _start, _end = _pos
-                            _pre_targets.append({
-                                "start": _start,
-                                "end": _end,
-                                "target_duration": _end - _start,
-                                "confidence": 1.0,
-                            })
-                        if not _all_mapped:
-                            _pre_targets = None
-                        else:
-                            # v773.10.18 — scale targets to post-speed timeline
-                            # so each b-roll slot matches what the speaker will
-                            # be after its atempo pass. With _broll_speed=1.1,
-                            # a 7.73 s slot becomes 7.03 s and the b-roll clip
-                            # gets compressed correspondingly (~1.14× total).
-                            if _broll_speed > 1.01:
-                                _inv = 1.0 / _broll_speed
-                                for _t in _pre_targets:
-                                    _t["start"] = _t["start"] * _inv
-                                    _t["end"] = _t["end"] * _inv
-                                    _t["target_duration"] = _t["end"] - _t["start"]
-                            print(
-                                f"[Export/v698A/broll] v701zd pre-computed targets built "
-                                f"from speaker per-clip durations ({len(_pre_targets)} clips, "
-                                f"scaled by 1/{_broll_speed:.3f} for post-speed master)",
-                                flush=True,
-                            )
-
-                    print(
-                        f"[Export/v698A/broll] master-audio alignment: "
-                        f"{len(broll_clip_info)} visuals against speaker master → "
-                        f"{broll_filename}"
-                        + (" (pre-computed targets)" if _pre_targets else " (Whisper master)"),
-                        flush=True,
-                    )
-
-                    broll_stats = await asyncio.to_thread(
-                        export_with_master_audio,
-                        clip_info=broll_clip_info,
-                        dialogue_lines=broll_dialogue_lines,
-                        master_audio_path=speaker_master_audio,
-                        output_path=broll_output_path,
-                        frames_to_cut_start=0,
-                        frames_to_cut_end=0,
-                        transition=settings.transition,
-                        transition_duration=settings.transition_duration,
-                        max_clip_speed=2.0,         # visual_pair clips need ≤2x
-                        min_gap_for_black=1.0,      # gaps ≥1s → black; smaller → extend prev clip
-                        sequential_alignment=True,  # v701t — fallback path uses sequential matching
-                        pre_computed_targets=_pre_targets,  # v701zd
-                    )
-                    stats["v698a_broll_filename"] = broll_filename
-                    stats["v698a_broll_clips"] = len(broll_clip_info)
-                    stats["v698a_broll_mode"] = "master_audio_alignment_v701z"
-                    stats["v698a_broll_stats"] = broll_stats
-                    print(
-                        f"[Export/v698A/broll] broll pipeline complete. "
-                        f"final_broll → {broll_output_path}",
-                        flush=True,
-                    )
-
-                    # Upload broll to R2 (if configured)
-                    try:
-                        from backends.storage import is_storage_configured, get_storage as _gs2
-                        if is_storage_configured():
-                            _storage = _gs2()
-                            _r2_key = f"jobs/{job_id}/outputs/{broll_filename}"
-                            await asyncio.to_thread(
-                                _storage.upload_file,
-                                str(broll_output_path),
-                                _r2_key,
-                                'video/mp4',
-                            )
-                            print(
-                                f"[Export/v698A/broll] Uploaded to R2: {_r2_key}",
-                                flush=True,
-                            )
-                    except Exception as _r2_err:
-                        print(
-                            f"[Export/v698A/broll] R2 upload failed (non-fatal): "
-                            f"{_r2_err}",
-                            flush=True,
-                        )
-                except Exception as _broll_err:
-                    print(
-                        f"[Export/v698A/broll] broll pipeline FAILED (non-fatal): "
-                        f"{_broll_err}",
-                        flush=True,
-                    )
-                    import traceback as _tb_broll
-                    _tb_broll.print_exc()
-                    stats["v698a_broll_error"] = str(_broll_err)[:500]
+                # === v698A Phase 4b-ii — BROLL PIPELINE ===
+                # v925 (2026-08-08): MOVED to the end of this function, after
+                # audio enhancement + the speed pass. See the block tagged
+                # "v925 — B-ROLL PIPELINE" below for why.
             else:
                 # === Regular Export (no master audio, no v698A pairs) ===
                 # Process the export with per-clip trim settings (non-blocking)
@@ -11110,12 +10828,21 @@ async def _do_export_final(
         # container before the file could land in R2. The unsped file still
         # uploads to R2 below so the diagnostic + the partial result reach
         # the user.
+        # v925 — cap raised 90s → 300s. The 90s cap was a v692b OOM guard
+        # against buffering MBs of ffmpeg stderr under capture_output=True when
+        # a broken concat produced a 233s file. The real fix is to stop ffmpeg
+        # printing: `-loglevel error -nostats` below makes the captured stderr a
+        # few bytes, so length no longer decides. The old cap silently dropped
+        # the speed pass on every export over 90s — the operator's 97s and 101s
+        # exports shipped at 1.0x (and, pre-v925, with a 1.1x b-roll beside
+        # them). 300s stays as a sanity backstop for a genuinely broken concat.
+        _SPEED_MAX_DURATION_S = 300.0
         _final_dur_safe = float(stats.get("final_duration") or 0.0)
         _speed_safe = (
             settings.playback_speed and settings.playback_speed > 1.01
             and not settings.master_audio_filename
             and _final_dur_safe > 0
-            and _final_dur_safe <= 90.0
+            and _final_dur_safe <= _SPEED_MAX_DURATION_S
         )
         print(
             f"[Export] Speed check: playback_speed={settings.playback_speed}, "
@@ -11175,7 +10902,12 @@ async def _do_export_final(
                 # Also bumps setpts precision from 6 → 9 decimals to match
                 # v629 trim precision.
                 cmd_speed = [
-                    "ffmpeg", "-y", "-i", str(output_path),
+                    # v925 — silence ffmpeg's progress spam. capture_output=True
+                    # buffers stderr in this process; with the default loglevel
+                    # a long file writes MBs of `frame=` lines into RAM, which
+                    # is what the old 90s length cap was really guarding.
+                    "ffmpeg", "-y", "-loglevel", "error", "-nostats",
+                    "-i", str(output_path),
                     "-filter_complex",
                     f"[0:v]setpts={1/speed:.9f}*PTS,fps=24[v];[0:a]atempo={speed:.6f}[a]",
                     "-map", "[v]", "-map", "[a]",
@@ -11244,6 +10976,369 @@ async def _do_export_final(
                     print(f"[Export] Speed change failed: {result.stderr.decode()[:200]}", flush=True)
             except Exception as e:
                 print(f"[Export] Speed change error (non-fatal): {e}", flush=True)
+
+        # === v925 — B-ROLL PIPELINE (v698A Phase 4b-ii, relocated) ===
+        #
+        # WHY IT LIVES HERE NOW. Until v925 this ran immediately after the
+        # speaker concat — BEFORE audio enhancement and BEFORE the speed pass —
+        # so it had to PREDICT what the speaker file would become. It predicted
+        # the speed by re-deriving the same condition the speed pass uses
+        # (v773.10.18: pre-apply `atempo=playback_speed` to the extracted master
+        # audio and scale every target by 1/speed), and it predicted the master
+        # timeline by SUMMING the per-clip pre-normalize durations.
+        #
+        # Both predictions were wrong in production:
+        #   1. The speaker's speed gate carries TWO extra conditions the b-roll
+        #      copy did not: the v692b `final_duration <= 90s` OOM guard, and
+        #      "the ffmpeg speed command actually succeeded" (its failure is
+        #      swallowed as non-fatal). Any export over the cap → speaker stays
+        #      1.0x while the b-roll already went 1.1x.
+        #      Measured on the operator's own downloads (2026-08-08):
+        #        d8051bf6 — broll 88.511s vs speaker 97.291s (ratio 1.0992)
+        #        0bd0acf8 — broll 91.962s vs speaker 101.161s (ratio 1.1000)
+        #      Audio-envelope correlation between the two files of a pair peaks
+        #      at time-scale 1.100 (corr 0.976) and is 0.004 at scale 1.000 —
+        #      i.e. the same audio 1.1x faster, out of sync from second 0.
+        #      5 of 8 downloaded pairs carry that signature; the 2 clean pairs
+        #      were exports under the 90s cap.
+        #   2. Sum-of-per-clip-durations != the real concat timeline. The clips
+        #      are probed BEFORE concat_videos re-encodes each one to fps=24 +
+        #      48k AAC; the normalized files are slightly longer. Measured with
+        #      ffmpeg on an 8-clip / 40s case: +67ms by the last clip, monotonic,
+        #      and it scales with clip count.
+        #
+        # v925 replaces prediction with measurement:
+        #   - the master audio is extracted from the FINISHED speaker file, so
+        #     whatever enhancement/speed did to it is already baked in;
+        #   - targets are scaled by the MEASURED ratio (final speaker duration /
+        #     sum of the per-clip durations the targets were built from), which
+        #     absorbs the speed pass AND the concat drift in one number;
+        #   - both outputs are ffprobed at the end and a mismatch is reported
+        #     loudly instead of shipping a silently desynced pair.
+        #
+        # Each broll visual is placed at the timestamp where ITS dialogue line
+        # plays in the master audio:
+        #   - 'visual_pair' → dialogue = clip.voiceover_line
+        #   - 'single' (HOOK/CTA) → not in broll; that window renders BLACK
+        #   - 'audio_pair'  → SKIP (face-anchor visual, not in broll)
+        #   - 'text_card'   → SKIP (no dialogue to align; gap → black)
+        # Visuals get speed-adjusted (up to 2x cap) to fit each line's span.
+        if _has_v698a_pairs:
+            try:
+                # explicit malloc_trim before the b-roll's ffmpeg work — the
+                # speaker's Whisper-tiny (v701y) was disposed at the end of its
+                # per-clip loop but glibc may still hold the freed pages.
+                try:
+                    import ctypes as _ct
+                    _ct.CDLL("libc.so.6").malloc_trim(0)
+                    print(
+                        "[Export/v698A/broll] malloc_trim applied "
+                        "before master-audio pipeline",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+
+                from video_processor import export_with_master_audio
+                from video_processor import (
+                    ffprobe_json as _fpj_b,
+                    get_duration as _gd_b,
+                )
+                import tempfile as _tmp
+
+                def _rehydrate_path(c):
+                    p = Path(c.get("path") or "")
+                    if not p or p.exists():
+                        return
+                    if (c.get("scene_type") or "").lower() == "text_card":
+                        return
+                    if storage is None:
+                        return
+                    try:
+                        r2_key = f"jobs/{job_id}/outputs/{p.name}"
+                        if storage.exists(r2_key):
+                            print(
+                                f"[Export/v698A/broll] rehydrating from R2: {p.name}",
+                                flush=True,
+                            )
+                            storage.download_file(r2_key, str(p))
+                    except Exception as _rh_err:
+                        print(
+                            f"[Export/v698A/broll] rehydrate failed for "
+                            f"{p.name}: {_rh_err}",
+                            flush=True,
+                        )
+
+                # v701zf — broll includes ONLY visual_pair clips. HOOK + CTA
+                # (singles) are persona on-camera → those windows on the master
+                # timeline render as black in broll (audio plays, no replacement
+                # visual). audio_pair + text_card stay skipped. visual_pair
+                # without a resolvable paired_clip_id (no audio_pair sibling in
+                # speaker) is also skipped.
+                broll_clip_info: List[Dict[str, Any]] = []
+                broll_dialogue_lines: List[str] = []
+                for c in clip_info:
+                    role = (c.get("clip_role") or "single").lower()
+                    if role != "visual_pair":
+                        continue  # singles + audio_pair + everything else
+                    paired_id = c.get("paired_clip_id")
+                    if not paired_id:
+                        print(
+                            f"[Export/v698A/broll] visual_pair clip "
+                            f"{c.get('clip_index')} has no paired_clip_id; "
+                            f"skipping (master window stays black)",
+                            flush=True,
+                        )
+                        continue
+                    line = (c.get("voiceover_line") or "").strip()
+                    if not line:
+                        print(
+                            f"[Export/v698A/broll] visual_pair clip "
+                            f"{c.get('clip_index')} missing voiceover_line; "
+                            f"skipping",
+                            flush=True,
+                        )
+                        continue
+                    _rehydrate_path(c)
+                    broll_clip_info.append(dict(c))
+                    broll_dialogue_lines.append(line)
+
+                if not broll_clip_info:
+                    raise RuntimeError(
+                        "no visual_pair clips resolved for the b-roll output"
+                    )
+
+                # v925 — MEASURE the finished speaker file. No atempo
+                # simulation: the speed pass (if any) already ran above, so the
+                # audio we extract here IS the audio of the delivered speaker
+                # video, sample for sample.
+                broll_temp_dir = Path(_tmp.mkdtemp(prefix="v698a_broll_"))
+                speaker_master_audio = broll_temp_dir / "speaker_master.mp3"
+                import subprocess as _sp
+                _audio_cmd = [
+                    "ffmpeg", "-y", "-i", str(output_path),
+                    "-vn", "-acodec", "libmp3lame", "-q:a", "2",
+                    str(speaker_master_audio),
+                ]
+                _audio_res = await asyncio.to_thread(
+                    _sp.run, _audio_cmd, capture_output=True, text=True,
+                )
+                if _audio_res.returncode != 0 or not speaker_master_audio.exists():
+                    raise RuntimeError(
+                        f"speaker audio extraction failed: rc="
+                        f"{_audio_res.returncode} stderr={_audio_res.stderr[:300]}"
+                    )
+                try:
+                    _speaker_final_dur = float(_gd_b(_fpj_b(output_path)))
+                except Exception as _sd_err:
+                    print(
+                        f"[Export/v698A/broll] speaker probe failed: {_sd_err}",
+                        flush=True,
+                    )
+                    _speaker_final_dur = 0.0
+                print(
+                    f"[Export/v698A/broll] extracted speaker master audio: "
+                    f"{speaker_master_audio.name} "
+                    f"({speaker_master_audio.stat().st_size // 1024}KB) from a "
+                    f"FINISHED speaker of {_speaker_final_dur:.3f}s "
+                    f"(speed_applied={stats.get('playback_speed') or 'none'}, "
+                    f"audio_enhanced={stats.get('audio_enhanced')})",
+                    flush=True,
+                )
+
+                broll_filename = output_filename.replace(
+                    "final_export_", "final_broll_"
+                )
+                if broll_filename == output_filename:
+                    broll_filename = f"final_broll_{output_filename}"
+                broll_output_path = output_dir / broll_filename
+
+                # v701zd — build targets from the speaker's per-clip post-VAD
+                # durations. The speaker pipeline already trimmed each clip via
+                # Whisper-VAD; those durations ARE the pre-normalize master
+                # timeline. No second Whisper master transcription needed (that
+                # legacy path repeatedly under-transcribed to ~half the script
+                # words and bricked alignment).
+                _pre_targets = None
+                _speaker_durs = stats.get("per_clip_post_vad_durations") or []
+                _speaker_db_ids = stats.get("per_clip_post_vad_clip_db_ids") or []
+                if _speaker_durs and _speaker_db_ids:
+                    # Build map: speaker clip's db_id → (master_start, master_end)
+                    _pos_by_db_id = {}
+                    _cursor = 0.0
+                    for _i, _d in enumerate(_speaker_durs):
+                        _start = _cursor
+                        _end = _cursor + _d
+                        _cursor = _end
+                        _db_id = _speaker_db_ids[_i] if _i < len(_speaker_db_ids) else None
+                        if _db_id is not None:
+                            _pos_by_db_id[_db_id] = (_start, _end)
+
+                    # For each broll clip, find its position:
+                    #   - single (HOOK/CTA): match by own clip_db_id
+                    #   - visual_pair: match by paired_clip_id (the audio_pair
+                    #     sibling held that position in the speaker concat)
+                    _pre_targets = []
+                    _all_mapped = True
+                    for _bc in broll_clip_info:
+                        _role = (_bc.get("clip_role") or "single").lower()
+                        if _role == "visual_pair":
+                            _lookup_id = _bc.get("paired_clip_id")
+                        else:
+                            _lookup_id = _bc.get("_clip_db_id")
+                        _pos = _pos_by_db_id.get(_lookup_id)
+                        if _pos is None:
+                            _all_mapped = False
+                            print(
+                                f"[Export/v698A/broll] ⚠ no speaker position "
+                                f"for broll clip clip_index={_bc.get('clip_index')} "
+                                f"role={_role} lookup_id={_lookup_id} — falling back "
+                                f"to the Whisper-master path (known-weak alignment)",
+                                flush=True,
+                            )
+                            break
+                        _start, _end = _pos
+                        _pre_targets.append({
+                            "start": _start,
+                            "end": _end,
+                            "target_duration": _end - _start,
+                            "confidence": 1.0,
+                        })
+                    if not _all_mapped:
+                        _pre_targets = None
+                    else:
+                        # v925 — ONE measured ratio maps the pre-normalize
+                        # per-clip timeline onto the delivered speaker file.
+                        # Covers the speed pass (k≈1/1.1 when it ran, ≈1.0 when
+                        # it did not) AND the concat's normalize drift. No
+                        # condition is re-derived here — the ratio is observed.
+                        _sum_durs = sum(float(_d or 0.0) for _d in _speaker_durs)
+                        _k = 1.0
+                        if _sum_durs > 0.1 and _speaker_final_dur > 0.1:
+                            _k = _speaker_final_dur / _sum_durs
+                        if _k <= 0.4 or _k >= 1.6:
+                            print(
+                                f"[Export/v698A/broll] ⚠ measured ratio {_k:.4f} "
+                                f"outside sane range (sum_clips={_sum_durs:.3f}s, "
+                                f"speaker={_speaker_final_dur:.3f}s) — using 1.0. "
+                                f"Something upstream changed the timeline length.",
+                                flush=True,
+                            )
+                            _k = 1.0
+                        if abs(_k - 1.0) > 1e-4:
+                            for _t in _pre_targets:
+                                _t["start"] = _t["start"] * _k
+                                _t["end"] = _t["end"] * _k
+                                _t["target_duration"] = _t["end"] - _t["start"]
+                        stats["v698a_broll_time_scale"] = round(_k, 6)
+                        print(
+                            f"[Export/v698A/broll] targets built from speaker "
+                            f"per-clip durations ({len(_pre_targets)} clips), "
+                            f"scaled by MEASURED ratio {_k:.4f} "
+                            f"(sum_clips={_sum_durs:.3f}s → speaker "
+                            f"{_speaker_final_dur:.3f}s)",
+                            flush=True,
+                        )
+
+                print(
+                    f"[Export/v698A/broll] master-audio alignment: "
+                    f"{len(broll_clip_info)} visuals against speaker master → "
+                    f"{broll_filename}"
+                    + (" (pre-computed targets)" if _pre_targets else " (Whisper master)"),
+                    flush=True,
+                )
+
+                broll_stats = await asyncio.to_thread(
+                    export_with_master_audio,
+                    clip_info=broll_clip_info,
+                    dialogue_lines=broll_dialogue_lines,
+                    master_audio_path=speaker_master_audio,
+                    output_path=broll_output_path,
+                    frames_to_cut_start=0,
+                    frames_to_cut_end=0,
+                    transition=settings.transition,
+                    transition_duration=settings.transition_duration,
+                    max_clip_speed=2.0,         # visual_pair clips need ≤2x
+                    min_gap_for_black=1.0,      # gaps ≥1s → black; smaller → extend prev clip
+                    sequential_alignment=True,  # v701t — fallback path uses sequential matching
+                    pre_computed_targets=_pre_targets,  # v701zd
+                )
+                stats["v698a_broll_filename"] = broll_filename
+                stats["v698a_broll_clips"] = len(broll_clip_info)
+                stats["v698a_broll_mode"] = "master_audio_alignment_v925"
+                stats["v698a_broll_stats"] = broll_stats
+
+                # v925 — CLOSE THE LOOP. A predicted pair is how this desynced
+                # for months without anyone being told. Measure both delivered
+                # files and say it out loud when they disagree.
+                try:
+                    _broll_dur = float(_gd_b(_fpj_b(broll_output_path)))
+                except Exception:
+                    _broll_dur = 0.0
+                _len_delta = _broll_dur - _speaker_final_dur
+                stats["v698a_broll_duration"] = round(_broll_dur, 3)
+                stats["v698a_speaker_duration"] = round(_speaker_final_dur, 3)
+                stats["v698a_broll_length_delta"] = round(_len_delta, 3)
+                if abs(_len_delta) > 0.15:
+                    stats["v698a_broll_length_mismatch"] = True
+                    _ratio = (
+                        _speaker_final_dur / _broll_dur if _broll_dur > 0.01 else 0.0
+                    )
+                    print(
+                        f"[Export/v698A/broll] ❌ LENGTH MISMATCH: broll "
+                        f"{_broll_dur:.3f}s vs speaker {_speaker_final_dur:.3f}s "
+                        f"(delta {_len_delta:+.3f}s, speaker/broll ratio "
+                        f"{_ratio:.4f}). The two files will NOT line up on the "
+                        f"editor timeline — treat this b-roll as unusable and "
+                        f"read the [Export] Speed check line above.",
+                        flush=True,
+                    )
+                else:
+                    stats["v698a_broll_length_mismatch"] = False
+                    print(
+                        f"[Export/v698A/broll] length check OK: broll "
+                        f"{_broll_dur:.3f}s vs speaker {_speaker_final_dur:.3f}s "
+                        f"(delta {_len_delta:+.3f}s)",
+                        flush=True,
+                    )
+
+                print(
+                    f"[Export/v698A/broll] broll pipeline complete. "
+                    f"final_broll → {broll_output_path}",
+                    flush=True,
+                )
+
+                # Upload broll to R2 (if configured)
+                try:
+                    from backends.storage import is_storage_configured, get_storage as _gs2
+                    if is_storage_configured():
+                        _storage = _gs2()
+                        _r2_key = f"jobs/{job_id}/outputs/{broll_filename}"
+                        await asyncio.to_thread(
+                            _storage.upload_file,
+                            str(broll_output_path),
+                            _r2_key,
+                            'video/mp4',
+                        )
+                        print(
+                            f"[Export/v698A/broll] Uploaded to R2: {_r2_key}",
+                            flush=True,
+                        )
+                except Exception as _r2_err:
+                    print(
+                        f"[Export/v698A/broll] R2 upload failed (non-fatal): "
+                        f"{_r2_err}",
+                        flush=True,
+                    )
+            except Exception as _broll_err:
+                print(
+                    f"[Export/v698A/broll] broll pipeline FAILED (non-fatal): "
+                    f"{_broll_err}",
+                    flush=True,
+                )
+                import traceback as _tb_broll
+                _tb_broll.print_exc()
+                stats["v698a_broll_error"] = str(_broll_err)[:500]
 
         # Upload to R2 for persistence (voice swap needs this as input after Render restarts)
         try:
